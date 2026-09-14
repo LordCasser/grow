@@ -16,7 +16,6 @@
 use std::cell::Cell;
 
 use agent_client_protocol::schema::v1 as acp;
-use workspace::permission::is_enable_always_approve_option;
 
 /// Which row the approval-menu cursor preselects (the highlighted row).
 ///
@@ -223,22 +222,27 @@ pub fn set_last_used_permission(kind: DefaultSelectedPermission) {
 ///
 /// 1. the sticky last-used kind (once the user has confirmed any prompt),
 /// 2. the configured `[ui].default_selected_permission`,
-/// 3. the global "Always allow on all sessions" (enable-always-approve) row,
-///    matched by identity via `is_enable_always_approve_option` — not by list
-///    position, so the intent lives in the code rather than the option order,
+/// 3. the global "Always allow on all sessions" row, identified by the
+///    caller-provided special-row index rather than by option ordering,
 /// 4. index 0 (clients that don't get the always-approve row prepended).
 ///
 /// The always-approve row is skipped while a concrete target kind is in play, so a
 /// configured / sticky preselection never lands on it.
-pub fn resolve_initial_cursor(options: &[acp::PermissionOption]) -> usize {
+pub fn resolve_initial_cursor(
+    options: &[acp::PermissionOption],
+    enable_always_approve_index: Option<usize>,
+) -> usize {
     let target = match last_used_permission() {
         DefaultSelectedPermission::AlwaysAllowAllSessions => load_default_selected_permission(),
         sticky => sticky,
     };
     options
         .iter()
-        .position(|o| target.matches_kind(&o.kind) && !is_enable_always_approve_option(o))
-        .or_else(|| options.iter().position(is_enable_always_approve_option))
+        .enumerate()
+        .position(|(index, o)| {
+            Some(index) != enable_always_approve_index && target.matches_kind(&o.kind)
+        })
+        .or(enable_always_approve_index)
         .unwrap_or(0)
 }
 
@@ -257,7 +261,6 @@ fn load_string_from_effective_config(key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use workspace::permission::ENABLE_ALWAYS_APPROVE_OPTION_ID;
 
     fn opt(id: &str, kind: acp::PermissionOptionKind) -> acp::PermissionOption {
         acp::PermissionOption::new(acp::PermissionOptionId::new(id), id.to_owned(), kind)
@@ -382,15 +385,12 @@ mod tests {
             set_default_selected_permission(DefaultSelectedPermission::AlwaysAllowAllSessions);
             let options = [
                 opt("allow-once", acp::PermissionOptionKind::AllowOnce),
-                opt(
-                    ENABLE_ALWAYS_APPROVE_OPTION_ID,
-                    acp::PermissionOptionKind::AllowOnce,
-                ),
+                opt("always-row", acp::PermissionOptionKind::AllowOnce),
                 opt("reject-once", acp::PermissionOptionKind::RejectOnce),
             ];
             // No sticky + default config → the enable-always-approve row,
             // matched by identity (index 1), not the first AllowOnce (index 0).
-            assert_eq!(resolve_initial_cursor(&options), 1);
+            assert_eq!(resolve_initial_cursor(&options, Some(1)), 1);
         })
         .join()
         .unwrap();
@@ -402,16 +402,13 @@ mod tests {
             set_default_selected_permission(DefaultSelectedPermission::AlwaysAllowAllSessions);
             set_last_used_permission(DefaultSelectedPermission::AllowOnce);
             let options = [
-                opt(
-                    ENABLE_ALWAYS_APPROVE_OPTION_ID,
-                    acp::PermissionOptionKind::AllowOnce,
-                ),
+                opt("always-row", acp::PermissionOptionKind::AllowOnce),
                 opt("allow-once", acp::PermissionOptionKind::AllowOnce),
                 opt("reject-once", acp::PermissionOptionKind::RejectOnce),
             ];
             // Sticky AllowOnce must skip the always-approve row (also AllowOnce kind) and
             // land on the plain allow-once row (index 1).
-            assert_eq!(resolve_initial_cursor(&options), 1);
+            assert_eq!(resolve_initial_cursor(&options, Some(0)), 1);
         })
         .join()
         .unwrap();
@@ -423,16 +420,13 @@ mod tests {
             set_default_selected_permission(DefaultSelectedPermission::AlwaysAllowAllSessions);
             set_last_used_permission(DefaultSelectedPermission::Reject);
             let options = [
-                opt(
-                    ENABLE_ALWAYS_APPROVE_OPTION_ID,
-                    acp::PermissionOptionKind::AllowOnce,
-                ),
+                opt("always-row", acp::PermissionOptionKind::AllowOnce),
                 opt("allow-once", acp::PermissionOptionKind::AllowOnce),
                 opt("reject-always", acp::PermissionOptionKind::RejectAlways),
             ];
             // The prompt offers only `RejectAlways`; a sticky reject must still
             // find it (index 2) rather than falling back to the always-approve row.
-            assert_eq!(resolve_initial_cursor(&options), 2);
+            assert_eq!(resolve_initial_cursor(&options, Some(0)), 2);
         })
         .join()
         .unwrap();
@@ -447,7 +441,7 @@ mod tests {
                 opt("reject-once", acp::PermissionOptionKind::RejectOnce),
             ];
             // No sticky, default config, no always-approve row (non-TUI client) → index 0.
-            assert_eq!(resolve_initial_cursor(&options), 0);
+            assert_eq!(resolve_initial_cursor(&options, None), 0);
         })
         .join()
         .unwrap();

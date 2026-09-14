@@ -991,6 +991,7 @@ impl ScrollbackState {
         let entry_area_width = self.entry_area_width(width);
         let cwd = self.cwd.as_deref();
         let inline_edit_height = self.inline_edit_height;
+        let estimate_only = self.batch_depth > 0;
         let Some(cache) = self.layout_cache.as_mut() else {
             return Vec::new();
         };
@@ -1018,22 +1019,26 @@ impl ScrollbackState {
             let renderer = EntryRenderer::new(entry, &theme)
                 .with_appearance_ref(&self.appearance)
                 .with_cwd(cwd);
-            let new_height = match inline_edit_height {
-                Some((edit_id, h)) if edit_id == id => h,
-                _ => renderer.desired_height(entry_area_width),
+            let (new_height, measured) = match inline_edit_height {
+                Some((edit_id, h)) if edit_id == id => (h, true),
+                _ if estimate_only => (renderer.estimate_height(entry_area_width), false),
+                _ => (renderer.desired_height(entry_area_width), true),
             };
             let old_height = cache.entries[idx].height;
-            // This entry now has an exact (re)measured height, so it no longer
-            // needs the lazy viewport measurement pass.
-            cache.measured[idx] = true;
+            // Replay may dirty many entries between frames. Exact rendering
+            // remains bounded to the viewport while a batch is open.
+            cache.measured[idx] = measured;
 
             // A measured prompt's exact truncated height feeds sticky min_height;
             // refresh it unconditionally (the height can be unchanged while the
             // seed is still the conservative MAX) — matching the sibling measure
             // paths. Cheap: prompts are rarely re-dirtied.
             if entry.block.is_user_prompt() {
-                cache.entry_truncated_heights[idx] =
-                    renderer.compute_truncated_height(entry_area_width);
+                cache.entry_truncated_heights[idx] = if measured {
+                    renderer.compute_truncated_height(entry_area_width)
+                } else {
+                    MAX_TRUNCATED_HEADER_HEIGHT
+                };
             }
 
             if new_height != old_height {
@@ -1221,6 +1226,19 @@ impl ScrollbackState {
         let Some(width) = self.layout_cache.as_ref().map(|c| c.width) else {
             return false;
         };
+        // Hidden thinking changes the gap of a non-adjacent visible neighbor.
+        // The pairwise append path cannot patch that boundary during replay.
+        let estimate_only = self.batch_depth > 0;
+        let show_thinking = crate::appearance::cache::load_show_thinking_blocks();
+        if estimate_only
+            && [new_idx.saturating_sub(1), new_idx].into_iter().any(|idx| {
+                self.entries
+                    .get_index(idx)
+                    .is_some_and(|(_, entry)| entry.is_hidden_thinking(show_thinking))
+            })
+        {
+            return false;
+        }
         let entry_area_width = self.entry_area_width(width);
         let cwd = self.cwd.as_deref();
         let Some(cache) = self.layout_cache.as_mut() else {
@@ -1249,11 +1267,15 @@ impl ScrollbackState {
         let renderer = EntryRenderer::new(new_entry, &theme)
             .with_appearance_ref(&self.appearance)
             .with_cwd(cwd);
-        let height = renderer.desired_height(entry_area_width);
+        let height = if estimate_only {
+            renderer.estimate_height(entry_area_width)
+        } else {
+            renderer.desired_height(entry_area_width)
+        };
         let is_prompt = new_entry.block.is_user_prompt();
         // Truncated height only feeds prompt sticky-header min_height; only
         // prompts pay for the extra Truncated-mode render (others seed the MAX).
-        let truncated_height = if is_prompt {
+        let truncated_height = if is_prompt && !estimate_only {
             renderer.compute_truncated_height(entry_area_width)
         } else {
             MAX_TRUNCATED_HEADER_HEIGHT
@@ -1299,9 +1321,9 @@ impl ScrollbackState {
             verb_group_header: false,
         });
         cache.entry_truncated_heights.push(truncated_height);
-        // New entries append at the bottom (visible/streaming) and are measured
-        // exactly above via `desired_height`, so mark them measured.
-        cache.measured.push(true);
+        // Replay can append many off-screen entries between frames. Leave
+        // those estimated until viewport settling actually needs them.
+        cache.measured.push(!estimate_only);
         cache.virtual_y.push(new_y);
 
         if is_prompt {

@@ -597,6 +597,33 @@ fn command_notice_keeps_compact_metadata_when_stamped_and_committed() {
 }
 
 #[test]
+fn parent_receipt_commits_once_while_child_runs_and_keeps_details() {
+    let receipt = || {
+        RenderBlock::Notice(
+            pager::scrollback::blocks::NoticeBlock::terminal(
+                "parent-message:receipt-1",
+                NoticeTone::Info,
+                NoticeCategory::Coordination,
+                "Received message from parent agent",
+                Some("Source: parent agent\nMessage: 继续检查接收路径".into()),
+            )
+            .with_communication_preview("继续检查接收路径"),
+        )
+    };
+    let mut state = ScrollbackState::new();
+    let id = state.push_block(receipt());
+    stamp_live_tail_display_modes(&mut state, &default_appearance());
+    assert_eq!(commit_leading_run(&mut state, true, |_, _| true), 1);
+    assert_eq!(state.push_block(receipt()), id);
+    assert_eq!(commit_leading_run(&mut state, true, |_, _| true), 0);
+    assert_eq!(state.len(), 1);
+    let RenderBlock::Notice(notice) = &state.get(0).unwrap().block else {
+        panic!()
+    };
+    assert!(notice.detail_text().contains("继续检查接收路径"));
+}
+
+#[test]
 fn terminal_notice_commits_once_during_a_running_turn() {
     let mut state = ScrollbackState::new();
     state.push(ScrollbackEntry::new(RenderBlock::terminal_notice(

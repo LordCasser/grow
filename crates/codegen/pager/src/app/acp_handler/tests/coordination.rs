@@ -2,13 +2,17 @@ use super::*;
 use crate::scrollback::block::BlockContent;
 use crate::scrollback::blocks::{OtherToolCallBlock, ToolCallBlock};
 use crate::scrollback::types::DisplayMode;
-use shell::extensions::notification::{UiNotice, UiNoticeCategory, UiNoticeTone};
+use shell::extensions::notification::{
+    ParentMessageNotice, UiNotice, UiNoticeCategory, UiNoticeTone,
+};
 
 fn notice(id: &str, subject: &str, message: &str, tone: UiNoticeTone) -> GrowSessionUpdate {
     let audit = shell::coordination::IncomingInquiryAudit {
+        direction: shell::coordination::InquiryDirection::Peer,
         source_peer_id: "peer-process".into(),
         source_session_id: "peer".into(),
         source_cwd: "/tmp/work".into(),
+        delegated_subagent_task_name: None,
         question: "Status?".into(),
         approval: (subject == "inquiry approval").then(|| "approved".into()),
         outcome: (subject == "inquiry completed")
@@ -22,6 +26,32 @@ fn notice(id: &str, subject: &str, message: &str, tone: UiNoticeTone) -> GrowSes
         message: message.into(),
         tone,
         details: Some(serde_json::to_string(&audit).unwrap()),
+    })
+}
+
+fn parent_message_notice(receipt_id: &str, message: Option<&str>) -> GrowSessionUpdate {
+    let data = ParentMessageNotice {
+        parent_session_id: "parent-session".into(),
+        message_id: "message-1".into(),
+        interrupt: true,
+        message: message.map(str::to_owned),
+    };
+    GrowSessionUpdate::UiNotice(UiNotice {
+        correlation_id: receipt_id.into(),
+        category: UiNoticeCategory::Coordination,
+        subject: Some(ParentMessageNotice::SUBJECT.into()),
+        description: None,
+        message: if data.message.is_some() {
+            "Parent guidance received".into()
+        } else {
+            "Parent guidance received · Message body could not be recovered".into()
+        },
+        tone: if data.message.is_some() {
+            UiNoticeTone::Info
+        } else {
+            UiNoticeTone::Warning
+        },
+        details: Some(serde_json::to_string(&data).unwrap()),
     })
 }
 
@@ -156,6 +186,8 @@ fn coordination_source_tools_keep_normal_running_rows_and_full_return_values() {
                     status: "answered".into(),
                     answer: Some("Use the existing interface".into()),
                     error: None,
+                    subagent_task_name: None,
+                    target_session_id: None,
                 },
             ),
         ),
@@ -326,6 +358,65 @@ fn coordination_target_start_approval_and_end_update_one_row_in_place() {
 }
 
 #[test]
+fn coordination_target_uses_persisted_subagent_task_title() {
+    let mut app = make_app_with_agent("target");
+    let GrowSessionUpdate::UiNotice(mut update) = notice(
+        "inquiry-1",
+        "inquiry completed",
+        "Answered subagent TS registry workload presentation",
+        UiNoticeTone::Success,
+    ) else {
+        panic!()
+    };
+    let mut audit: shell::coordination::IncomingInquiryAudit =
+        serde_json::from_str(update.details.as_deref().unwrap()).unwrap();
+    audit.delegated_subagent_task_name = Some("TS registry workload presentation".into());
+    audit.direction = shell::coordination::InquiryDirection::ChildToParent;
+    update.details = Some(serde_json::to_string(&audit).unwrap());
+
+    assert!(handle(
+        make_ext_session_notification("target", GrowSessionUpdate::UiNotice(update)),
+        &mut app
+    ));
+    let block = tool_row(&app, 0);
+    assert_eq!(
+        block.name,
+        "Answered subagent TS registry workload presentation"
+    );
+    assert!(block.output.as_deref().is_some_and(|details| {
+        details.contains("Subagent task: TS registry workload presentation")
+    }));
+}
+
+#[test]
+fn coordination_child_receiving_parent_inquiry_names_parent() {
+    let mut app = make_app_with_agent("child");
+    let GrowSessionUpdate::UiNotice(mut update) = notice(
+        "inquiry-1",
+        "inquiry completed",
+        "Answered parent agent",
+        UiNoticeTone::Success,
+    ) else {
+        panic!()
+    };
+    let mut audit: shell::coordination::IncomingInquiryAudit =
+        serde_json::from_str(update.details.as_deref().unwrap()).unwrap();
+    audit.direction = shell::coordination::InquiryDirection::ParentToChild;
+    audit.delegated_subagent_task_name = Some("TS registry workload presentation".into());
+    update.details = Some(serde_json::to_string(&audit).unwrap());
+
+    assert!(handle(
+        make_ext_session_notification("child", GrowSessionUpdate::UiNotice(update)),
+        &mut app
+    ));
+    let block = tool_row(&app, 0);
+    assert_eq!(block.name, "Answered parent agent");
+    let details = block.output.as_deref().unwrap();
+    assert!(details.contains("Direction: parent_to_child"));
+    assert!(details.contains("Subagent task: TS registry workload presentation"));
+}
+
+#[test]
 fn coordination_replay_and_late_events_do_not_duplicate_or_resurrect_finished_rows() {
     let mut app = make_app_with_agent("target");
     app.agents
@@ -451,8 +542,15 @@ fn delegated_question_updates_one_primary_view_row() {
         };
         let mut audit: shell::coordination::IncomingInquiryAudit =
             serde_json::from_str(update.details.as_ref().unwrap()).unwrap();
+        audit.direction = shell::coordination::InquiryDirection::ChildToParent;
         audit.source_peer_id = "local-delegation".into();
         audit.source_session_id = "child".into();
+        audit.delegated_subagent_task_name = Some("TS registry workload presentation".into());
+        update.message = if subject == "inquiry completed" {
+            "Answered subagent TS registry workload presentation".into()
+        } else {
+            "Answering subagent TS registry workload presentation".into()
+        };
         update.details = Some(serde_json::to_string(&audit).unwrap());
         handle(
             make_ext_session_notification("parent", GrowSessionUpdate::UiNotice(update)),
@@ -474,5 +572,133 @@ fn delegated_question_updates_one_primary_view_row() {
             .as_ref()
             .unwrap()
             .contains("Working on tests")
+    );
+    assert_eq!(
+        tool_row(&app, 0).name,
+        "Answered subagent TS registry workload presentation"
+    );
+}
+
+#[test]
+fn parent_message_live_and_replay_share_receipt_identity() {
+    let mut app = make_app_with_agent("child");
+    let update = parent_message_notice("receipt-1", Some("first line\nsecond line\nthird line"));
+    assert!(handle(
+        make_ext_session_notification("child", update.clone()),
+        &mut app,
+    ));
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .session
+        .loading_replay = true;
+    assert!(handle(
+        make_replayed_ext_session_notification("child", "transport-event-9", update),
+        &mut app,
+    ));
+
+    let agent = &app.agents[&AgentId(0)];
+    assert_eq!(agent.scrollback.len(), 1);
+    let RenderBlock::Notice(notice) = &agent.scrollback.entry(0).unwrap().block else {
+        panic!("expected parent message NoticeBlock");
+    };
+    assert_eq!(notice.event_id.as_deref(), Some("parent-message:receipt-1"));
+    assert!(
+        notice
+            .details
+            .as_deref()
+            .unwrap()
+            .contains("Receipt ID: receipt-1")
+    );
+    assert!(!notice.details.as_deref().unwrap().contains("Inquiry ID:"));
+}
+
+#[test]
+fn parent_message_full_and_cursor_reload_keep_one_finite_notice() {
+    for full_replay in [false, true] {
+        let mut app = make_app_with_agent("child");
+        let update = parent_message_notice("receipt-reload", Some("Keep the original interface"));
+        handle(
+            make_ext_session_notification("child", update.clone()),
+            &mut app,
+        );
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .begin_session_reload(43);
+        if full_replay {
+            handle(
+                make_replayed_ext_session_notification("child", "child-10", update.clone()),
+                &mut app,
+            );
+        }
+        handle(make_ext_session_notification("child", update), &mut app);
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        assert!(agent.finalize_reload_and_maybe_adopt(43, true, None));
+        assert_eq!(agent.scrollback.len(), 1);
+        assert!(!agent.scrollback.has_running_entries());
+        assert!(
+            matches!(&agent.scrollback.entry(0).unwrap().block, RenderBlock::Notice(notice)
+            if notice.event_id.as_deref() == Some("parent-message:receipt-reload"))
+        );
+        assert!(agent.session.tracker.activity().is_none());
+    }
+}
+
+#[test]
+fn parent_message_routes_to_nested_child_without_switching_view() {
+    let mut app = make_app_with_agent("root-session");
+    for (parent, child) in [
+        ("root-session", "child-session"),
+        ("child-session", "grandchild-session"),
+    ] {
+        handle(
+            make_ext_session_notification(parent, test_subagent_spawned(parent, child)),
+            &mut app,
+        );
+    }
+    let GrowSessionUpdate::UiNotice(mut notice) =
+        parent_message_notice("nested-receipt", Some("Nested guidance"))
+    else {
+        unreachable!()
+    };
+    let mut data = ParentMessageNotice::from_notice(&notice).unwrap();
+    data.parent_session_id = "child-session".into();
+    notice.details = Some(serde_json::to_string(&data).unwrap());
+    handle(
+        make_ext_session_notification("grandchild-session", GrowSessionUpdate::UiNotice(notice)),
+        &mut app,
+    );
+    let root = &app.agents[&AgentId(0)];
+    let child = &root.subagent_views["grandchild-session"];
+    assert!(root.active_subagent.is_none());
+    assert!((0..child.scrollback.len()).any(|index| matches!(&child.scrollback.entry(index).unwrap().block,
+        RenderBlock::Notice(notice) if notice.event_id.as_deref() == Some("parent-message:nested-receipt"))));
+    assert!(!(0..root.scrollback.len()).any(|index| matches!(&root.scrollback.entry(index).unwrap().block,
+        RenderBlock::Notice(notice) if notice.event_id.as_deref() == Some("parent-message:nested-receipt"))));
+}
+
+#[test]
+fn parent_message_routes_to_existing_child_view_and_handles_missing_body() {
+    let mut app = make_app_with_parent_and_child("parent", "child");
+    assert!(handle(
+        make_ext_session_notification("child", parent_message_notice("receipt-2", None),),
+        &mut app,
+    ));
+
+    let parent = &app.agents[&AgentId(0)];
+    assert_eq!(parent.scrollback.len(), 0);
+    let child = parent.subagent_views.get("child").expect("child view");
+    assert_eq!(child.scrollback.len(), 1);
+    let RenderBlock::Notice(notice) = &child.scrollback.entry(0).unwrap().block else {
+        panic!("expected missing-body NoticeBlock");
+    };
+    assert_eq!(notice.event_id.as_deref(), Some("parent-message:receipt-2"));
+    assert!(
+        notice
+            .details
+            .as_deref()
+            .unwrap()
+            .contains("Message body could not be recovered")
     );
 }

@@ -1,0 +1,30 @@
+   Compiling pager v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/pager)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `pager` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.16s
+     Running unittests src/lib.rs (target/debug/deps/pager-33b1baf6f767e177)
+
+running 17 tests
+test app::csi_filter::tests::csi_filter_cross_batch_esc_then_fragment ... ok
+test app::csi_filter::tests::csi_filter_cross_batch_focus_not_retracted ... ok
+test app::csi_filter::tests::csi_filter_cross_batch_multiple_scroll_events ... ok
+test app::csi_filter::tests::csi_filter_cross_batch_one_event_at_a_time ... ok
+test app::csi_filter::tests::csi_filter_cross_batch_partial_then_reject ... ok
+test app::csi_filter::tests::csi_filter_cross_batch_partial_then_rest ... ok
+test app::root::dispatch::tests::notes::manual_recap_during_batch_load_with_prompts_still_requests ... ok
+test app::root::event_loop::tests::delayed_scroll_batch_preserves_arrival_spacing_and_reversal ... ok
+test app::root::event_loop::tests::pending_paste_preserves_control_key_at_next_batch_boundary ... ok
+test app::root::event_loop::tests::tty_suspend_arm_stops_same_batch_before_later_ownership_changes ... ok
+test scrollback::state::tests::batch_append_preserves_measured_history_and_defers_new_measurement ... ok
+test scrollback::state::tests::batch_dirty_history_is_measured_only_when_visible ... ok
+test scrollback::state::tests::batch_layout_matches_full_rebuild_for_mixed_history ... ok
+test scrollback::state::tests::batch_streaming_append_keeps_bottom_and_total_height_in_sync ... ok
+test tracing::tests::model_large_batch_eviction ... ok
+test unified_log::tests::unified_log_flush_releases_unacknowledged_batch_at_deadline ... ok
+test unified_log::tests::unified_log_plain_thread_batch_uses_initialization_runtime ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 7195 filtered out; finished in 2.11s
+

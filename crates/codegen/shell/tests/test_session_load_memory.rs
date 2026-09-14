@@ -642,7 +642,11 @@ mod rss {
         }
     }
 
-    async fn count_replayed_notifications(session_id: acp::SessionId, cwd: PathBuf) -> u64 {
+    async fn count_replayed_notifications(
+        session_id: acp::SessionId,
+        cwd: PathBuf,
+        model_base_url: &str,
+    ) -> u64 {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async move {
@@ -651,7 +655,11 @@ mod rss {
                     count: count.clone(),
                 };
                 let loaded = shell::session::testkit::e2e::load_session_via_agent(
-                    client, "mem-soak", session_id, cwd,
+                    client,
+                    "mem-soak",
+                    session_id,
+                    cwd,
+                    shell::session::testkit::e2e::mock_agent_config(model_base_url),
                 )
                 .await;
                 drop(loaded);
@@ -687,7 +695,8 @@ mod rss {
         let sampler = RssSampler::start();
 
         let replay_count =
-            count_replayed_notifications(info.id.clone(), cwd.path().to_path_buf()).await;
+            count_replayed_notifications(info.id.clone(), cwd.path().to_path_buf(), &server.url())
+                .await;
 
         // The agent load already dropped the loaded state, so the peak here comes
         // from the background sampler; the final read is only a backstop.

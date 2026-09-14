@@ -1,0 +1,8 @@
+   Compiling shell v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/shell)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `shell` (test "session_load_perf") generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 20s
+  Executable tests/session_load_perf.rs (target/debug/deps/session_load_perf-d8c0cb025ba61654)

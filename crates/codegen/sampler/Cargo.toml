@@ -8,6 +8,7 @@ description = "Provider-neutral sampling/inference layer for Grow (HTTP streamin
 [dependencies]
 # Internal
 sampling-types = { path = "../sampling-types" }
+config-types = { workspace = true }
 version = { workspace = true }
 
 # External

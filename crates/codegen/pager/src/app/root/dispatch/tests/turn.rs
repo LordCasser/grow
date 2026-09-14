@@ -811,6 +811,151 @@ fn stalled_unacknowledged_submission_queries_exact_prompt_status() {
 }
 
 #[test]
+fn cancelling_turn_queries_exact_prompt_after_short_window() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnCancelling;
+        agent.session.current_prompt_id = Some("pid-cancelling".into());
+        agent.session.last_status_observed_at = Some(
+            std::time::Instant::now()
+                - PROMPT_STATUS_CANCEL_WATCHDOG_DELAY
+                - std::time::Duration::from_millis(1),
+        );
+    }
+
+    let effects = poll_stalled_prompt_submissions(&mut app, std::time::Instant::now())
+        .expect("cancellation reconciliation must fire");
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::QueryPromptStatus {
+            agent_id,
+            prompt_id,
+            ..
+        }] if *agent_id == id && prompt_id == "pid-cancelling"
+    ));
+    assert!(
+        app.agents[&id]
+            .session
+            .prompt_status_query_matches("pid-cancelling")
+    );
+}
+
+#[test]
+fn cancelling_running_status_rearms_without_unlocking() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnCancelling;
+        agent.session.current_prompt_id = Some("pid-cancelling".into());
+        agent.session.begin_prompt_status_query("pid-cancelling");
+        agent.session.last_status_observed_at = Some(
+            std::time::Instant::now()
+                - PROMPT_STATUS_CANCEL_WATCHDOG_DELAY
+                - std::time::Duration::from_secs(1),
+        );
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptStatusResolved {
+            agent_id: id,
+            prompt_id: "pid-cancelling".into(),
+            status: Ok(crate::app::actions::PromptStatusWire::Running { turn_start_ms: 1 }),
+        }),
+        &mut app,
+    );
+
+    assert!(effects.is_empty());
+    assert!(matches!(
+        app.agents[&id].session.state,
+        AgentState::TurnCancelling
+    ));
+    assert!(
+        !app.agents[&id]
+            .session
+            .prompt_status_query_matches("pid-cancelling")
+    );
+    assert!(
+        next_prompt_watchdog_deadline(&app)
+            .is_some_and(|deadline| deadline > std::time::Instant::now())
+    );
+}
+
+#[test]
+fn cancelling_unknown_or_error_unlocks_composer() {
+    for status in [
+        Ok(crate::app::actions::PromptStatusWire::Unknown),
+        Err("session unavailable".to_string()),
+    ] {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnCancelling;
+            agent.session.current_prompt_id = Some("pid-cancelling".into());
+            agent.session.begin_prompt_status_query("pid-cancelling");
+        }
+
+        let _ = dispatch(
+            Action::TaskComplete(TaskResult::PromptStatusResolved {
+                agent_id: id,
+                prompt_id: "pid-cancelling".into(),
+                status,
+            }),
+            &mut app,
+        );
+
+        assert!(app.agents[&id].session.state.is_idle());
+        assert!(app.agents[&id].session.current_prompt_id.is_none());
+        assert!(
+            !app.agents[&id]
+                .session
+                .prompt_status_query_matches("pid-cancelling")
+        );
+    }
+}
+
+#[test]
+fn cancelling_terminal_status_uses_first_wins_finalizer() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnCancelling;
+        agent.session.current_prompt_id = Some("pid-cancelling".into());
+        agent.session.begin_prompt_status_query("pid-cancelling");
+    }
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::PromptStatusResolved {
+            agent_id: id,
+            prompt_id: "pid-cancelling".into(),
+            status: Ok(crate::app::actions::PromptStatusWire::Terminal {
+                stop_reason: "cancelled".into(),
+                agent_result: None,
+            }),
+        }),
+        &mut app,
+    );
+
+    assert!(effects.is_empty());
+    let agent = &app.agents[&id];
+    assert!(agent.session.state.is_idle());
+    let markers = (0..agent.scrollback.len())
+        .filter(|&index| {
+            matches!(
+                agent.scrollback.entry(index).map(|entry| &entry.block),
+                Some(RenderBlock::SessionEvent(event))
+                    if matches!(event.event, SessionEvent::TurnCancelled { .. })
+            )
+        })
+        .count();
+    assert_eq!(markers, 1);
+}
+
+#[test]
 fn running_turn_stalled_without_activity_queries_prompt_status() {
     // C1: a turn that is already Running (admitted) but whose lifecycle
     // signals went missing must be re-queried once the running watchdog

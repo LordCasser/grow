@@ -1,0 +1,1022 @@
+{
+  "scope": "Only incremental top-level directories born after this batch first build log; no source, pre-existing cache, dependency artifacts, CLI or test executables removed. No active cargo/rustc during cleanup.",
+  "cutoff": "2026-09-12T21:24:59.870685",
+  "preserved_prior_directories": [
+    "acp_transport-1gsvqngfctbqu",
+    "build_script_build-00cmfv98hk5us",
+    "build_script_build-0olsbmq8e1w4i",
+    "build_script_build-1kk3qpveznul0",
+    "build_script_build-1wlarnv1gd046",
+    "chat_state-0bsoald57dvbz",
+    "chat_state-306fq6li5t5py",
+    "compaction-16utivhe0jf3e",
+    "compaction-3uu9m9yzffdfc",
+    "config-1p7fi4z6ijwzq",
+    "config-1wp2ss5kbv16m",
+    "diagnostics-3mpt43dnfucbq",
+    "nono-0piyb4tbpyipx",
+    "nono-14cnds8tfeyxs",
+    "sampler-01dzqipsu7ngo",
+    "sampling_types-0uf5e4rzown5t",
+    "sampling_types-1hl3u7s04uwpc",
+    "sampling_types-1l004dnjs7dzs",
+    "sandbox-0ccxbsq7xp3wm",
+    "sandbox-3lmi9v5krwiij",
+    "test_support-1ywufo4o4nbc6",
+    "token_estimation-0f8cn4d7p438z",
+    "token_estimation-3tn81e6mo00z8",
+    "tool_protocol-0pmedf3ratwvw",
+    "tool_protocol-1qsmur5pvpslx",
+    "tool_runtime-0efcs67p2ejfa",
+    "tool_runtime-18616g9o9sawt",
+    "tool_types-0s1peunpjeq9e",
+    "tool_types-19df294xkj2wj",
+    "tools-2tz8iep8fvl56",
+    "tools-3b140wv8uyuwq",
+    "tty_utils-034ye0834zc41",
+    "tty_utils-0u29s2jwlpuei",
+    "version-0pghd0xgmg4eh",
+    "version-1qvyqgh8c1c1p",
+    "workflow-3apz5xzrzy4rq"
+  ],
+  "removed": [
+    {
+      "path": "target/debug/incremental/acp_transport-070c744vz6yec",
+      "created": "2026-09-12T22:10:01.180336"
+    },
+    {
+      "path": "target/debug/incremental/acp_transport-1e3phkpi9qc6b",
+      "created": "2026-09-12T22:15:56.310570"
+    },
+    {
+      "path": "target/debug/incremental/acp_transport-2kr1outwpubrv",
+      "created": "2026-09-12T22:20:27.182876"
+    },
+    {
+      "path": "target/debug/incremental/acp_transport-2xvsgh1ct6qfz",
+      "created": "2026-09-12T21:28:06.584808"
+    },
+    {
+      "path": "target/debug/incremental/acp_transport-37pxof4y6xs1y",
+      "created": "2026-09-12T21:28:24.117481"
+    },
+    {
+      "path": "target/debug/incremental/agent-0sgjtvxj9sf3a",
+      "created": "2026-09-12T22:15:40.514325"
+    },
+    {
+      "path": "target/debug/incremental/agent-1m5gmnd7pkufl",
+      "created": "2026-09-12T22:10:03.193151"
+    },
+    {
+      "path": "target/debug/incremental/agent-2acpk56p07d7r",
+      "created": "2026-09-12T21:27:46.593171"
+    },
+    {
+      "path": "target/debug/incremental/agent-2d9abc9soh153",
+      "created": "2026-09-12T22:20:17.104772"
+    },
+    {
+      "path": "target/debug/incremental/agent-3kfp1ccqdkoq9",
+      "created": "2026-09-12T21:28:13.893318"
+    },
+    {
+      "path": "target/debug/incremental/announcements-066y7qh8nl07o",
+      "created": "2026-09-12T21:28:59.145272"
+    },
+    {
+      "path": "target/debug/incremental/announcements-0f6dkho0ish8i",
+      "created": "2026-09-12T22:20:52.315093"
+    },
+    {
+      "path": "target/debug/incremental/announcements-1qqb1y6x6s2nr",
+      "created": "2026-09-12T21:29:28.443584"
+    },
+    {
+      "path": "target/debug/incremental/announcements-1yhiai6cmgii9",
+      "created": "2026-09-12T22:16:40.203024"
+    },
+    {
+      "path": "target/debug/incremental/announcements-3v7ix2utapb5p",
+      "created": "2026-09-12T22:10:48.333295"
+    },
+    {
+      "path": "target/debug/incremental/auth-0fin9tmm1xkr6",
+      "created": "2026-09-12T21:28:47.576289"
+    },
+    {
+      "path": "target/debug/incremental/auth-0hhbn7ymhhcrd",
+      "created": "2026-09-12T22:10:28.013305"
+    },
+    {
+      "path": "target/debug/incremental/auth-0tbho6qlenaf0",
+      "created": "2026-09-12T22:16:08.340527"
+    },
+    {
+      "path": "target/debug/incremental/auth-1apyxnab8lv3o",
+      "created": "2026-09-12T22:20:31.592625"
+    },
+    {
+      "path": "target/debug/incremental/auth-1c6iyvrpla8fe",
+      "created": "2026-09-12T21:28:20.927820"
+    },
+    {
+      "path": "target/debug/incremental/build_script_build-09rq59pfkzvsk",
+      "created": "2026-09-12T22:11:01.782257"
+    },
+    {
+      "path": "target/debug/incremental/build_script_build-0r4x50iruum2j",
+      "created": "2026-09-12T22:17:18.925986"
+    },
+    {
+      "path": "target/debug/incremental/build_script_build-1f3cs76g5ewn8",
+      "created": "2026-09-12T21:27:30.929141"
+    },
+    {
+      "path": "target/debug/incremental/build_script_build-3c8omplx6fl17",
+      "created": "2026-09-12T21:25:23.097633"
+    },
+    {
+      "path": "target/debug/incremental/build_script_build-3nqq2uy3te93u",
+      "created": "2026-09-12T21:25:19.025928"
+    },
+    {
+      "path": "target/debug/incremental/chat_state-0hdm7ibwdxlnr",
+      "created": "2026-09-12T21:28:57.678026"
+    },
+    {
+      "path": "target/debug/incremental/chat_state-0zxgg220yfrrb",
+      "created": "2026-09-12T22:10:47.327780"
+    },
+    {
+      "path": "target/debug/incremental/chat_state-14r22rvmyrd2m",
+      "created": "2026-09-12T22:16:34.440518"
+    },
+    {
+      "path": "target/debug/incremental/chat_state-19nfg3ux34sgx",
+      "created": "2026-09-12T21:29:22.800221"
+    },
+    {
+      "path": "target/debug/incremental/chat_state-1viei5ho8vr68",
+      "created": "2026-09-12T22:20:50.746176"
+    },
+    {
+      "path": "target/debug/incremental/chat_state-2duneqoyq4thf",
+      "created": "2026-09-12T21:34:26.599232"
+    },
+    {
+      "path": "target/debug/incremental/client_support-05pmusymslod3",
+      "created": "2026-09-12T22:16:08.655326"
+    },
+    {
+      "path": "target/debug/incremental/client_support-09xq7m341tny0",
+      "created": "2026-09-12T21:28:38.400221"
+    },
+    {
+      "path": "target/debug/incremental/client_support-0p246yayg1nzl",
+      "created": "2026-09-12T22:20:31.926477"
+    },
+    {
+      "path": "target/debug/incremental/client_support-1s6ire4ryabw0",
+      "created": "2026-09-12T21:29:11.578148"
+    },
+    {
+      "path": "target/debug/incremental/client_support-25t4yn8je8i0q",
+      "created": "2026-09-12T22:10:28.283669"
+    },
+    {
+      "path": "target/debug/incremental/codebase_graph-084cw9lzhnm0k",
+      "created": "2026-09-12T21:27:56.805893"
+    },
+    {
+      "path": "target/debug/incremental/codebase_graph-1vnn3ez6vs7ye",
+      "created": "2026-09-12T22:20:21.044580"
+    },
+    {
+      "path": "target/debug/incremental/codebase_graph-25z4bcr9b16ub",
+      "created": "2026-09-12T22:10:11.309236"
+    },
+    {
+      "path": "target/debug/incremental/codebase_graph-2cwl9ozuhk4ei",
+      "created": "2026-09-12T21:28:30.951034"
+    },
+    {
+      "path": "target/debug/incremental/codebase_graph-3r1246i9o155u",
+      "created": "2026-09-12T22:15:50.103285"
+    },
+    {
+      "path": "target/debug/incremental/compaction-084970e2qp3xk",
+      "created": "2026-09-12T21:27:41.180270"
+    },
+    {
+      "path": "target/debug/incremental/compaction-08drouspipxdu",
+      "created": "2026-09-12T22:20:20.669944"
+    },
+    {
+      "path": "target/debug/incremental/compaction-0utfwzriw30xu",
+      "created": "2026-09-12T21:28:09.540042"
+    },
+    {
+      "path": "target/debug/incremental/compaction-3df1g1920fmkj",
+      "created": "2026-09-12T22:10:10.938326"
+    },
+    {
+      "path": "target/debug/incremental/compaction-3k9eh9ehzwov5",
+      "created": "2026-09-12T21:34:19.939455"
+    },
+    {
+      "path": "target/debug/incremental/compaction-3tcedtvli8hxl",
+      "created": "2026-09-12T22:15:48.884291"
+    },
+    {
+      "path": "target/debug/incremental/config-0pz8ons483akj",
+      "created": "2026-09-12T21:25:46.012095"
+    },
+    {
+      "path": "target/debug/incremental/config-2mpa49flxlp2r",
+      "created": "2026-09-12T21:25:51.121929"
+    },
+    {
+      "path": "target/debug/incremental/config-2vhkto22acjv8",
+      "created": "2026-09-12T22:09:18.715401"
+    },
+    {
+      "path": "target/debug/incremental/config-339ich9xtp077",
+      "created": "2026-09-12T22:14:54.630458"
+    },
+    {
+      "path": "target/debug/incremental/config-3mkl31ox5bjtd",
+      "created": "2026-09-12T21:33:55.995528"
+    },
+    {
+      "path": "target/debug/incremental/config-3pyikg5x6hyej",
+      "created": "2026-09-12T22:19:24.420756"
+    },
+    {
+      "path": "target/debug/incremental/config_types-0ecwwrtx2e4qr",
+      "created": "2026-09-12T21:27:38.454324"
+    },
+    {
+      "path": "target/debug/incremental/config_types-0ndnm2rsyfi5y",
+      "created": "2026-09-12T22:15:38.754097"
+    },
+    {
+      "path": "target/debug/incremental/config_types-0sznkpxohxf0b",
+      "created": "2026-09-12T22:20:08.642819"
+    },
+    {
+      "path": "target/debug/incremental/config_types-256kapdwuy0s4",
+      "created": "2026-09-12T22:10:01.424736"
+    },
+    {
+      "path": "target/debug/incremental/config_types-2gxmez6xz005x",
+      "created": "2026-09-12T21:28:05.597761"
+    },
+    {
+      "path": "target/debug/incremental/crash_handler-0rvvb5eaz8bb0",
+      "created": "2026-09-12T22:17:17.889934"
+    },
+    {
+      "path": "target/debug/incremental/crash_handler-2qmr9pxo7y8ua",
+      "created": "2026-09-12T22:21:03.826244"
+    },
+    {
+      "path": "target/debug/incremental/crash_handler-33vhwi98p669a",
+      "created": "2026-09-12T22:11:13.202950"
+    },
+    {
+      "path": "target/debug/incremental/dagre_rust-0tjh4410xgwed",
+      "created": "2026-09-12T22:10:45.976603"
+    },
+    {
+      "path": "target/debug/incremental/dagre_rust-1m0puq7tnmnp6",
+      "created": "2026-09-12T22:16:31.725033"
+    },
+    {
+      "path": "target/debug/incremental/diagnostics-04jh96c9djbt9",
+      "created": "2026-09-12T22:15:47.398065"
+    },
+    {
+      "path": "target/debug/incremental/diagnostics-1fu0is9ztb3rt",
+      "created": "2026-09-12T22:20:19.811537"
+    },
+    {
+      "path": "target/debug/incremental/diagnostics-1w84898mzzoyn",
+      "created": "2026-09-12T22:10:09.624121"
+    },
+    {
+      "path": "target/debug/incremental/diagnostics-36php0srytypk",
+      "created": "2026-09-12T21:27:48.921405"
+    },
+    {
+      "path": "target/debug/incremental/diagnostics-3tobtca6s9wrj",
+      "created": "2026-09-12T21:28:22.634849"
+    },
+    {
+      "path": "target/debug/incremental/extension_types-0g2w154ryruem",
+      "created": "2026-09-12T21:28:42.732126"
+    },
+    {
+      "path": "target/debug/incremental/extension_types-2diry9r248493",
+      "created": "2026-09-12T21:29:12.990183"
+    },
+    {
+      "path": "target/debug/incremental/fast_worktree-1fx7a33ywtkj5",
+      "created": "2026-09-12T22:20:22.093405"
+    },
+    {
+      "path": "target/debug/incremental/fast_worktree-25mpj0fb7n3vh",
+      "created": "2026-09-12T21:27:57.793907"
+    },
+    {
+      "path": "target/debug/incremental/fast_worktree-263zdgjgd3aw8",
+      "created": "2026-09-12T22:10:11.510540"
+    },
+    {
+      "path": "target/debug/incremental/fast_worktree-33l4sbn2hiz4g",
+      "created": "2026-09-12T22:15:50.118175"
+    },
+    {
+      "path": "target/debug/incremental/fast_worktree-34b8wh712cthz",
+      "created": "2026-09-12T21:28:32.730513"
+    },
+    {
+      "path": "target/debug/incremental/fsnotify-11f5d99r6kj9v",
+      "created": "2026-09-12T21:28:04.603295"
+    },
+    {
+      "path": "target/debug/incremental/fsnotify-1qckyjqzcfd25",
+      "created": "2026-09-12T22:15:55.256650"
+    },
+    {
+      "path": "target/debug/incremental/fsnotify-20o8w3o8ti33c",
+      "created": "2026-09-12T22:10:16.031380"
+    },
+    {
+      "path": "target/debug/incremental/fsnotify-2dqvdbe6r8uir",
+      "created": "2026-09-12T21:28:38.340960"
+    },
+    {
+      "path": "target/debug/incremental/fsnotify-2tpif3xg8pgo0",
+      "created": "2026-09-12T22:20:26.069951"
+    },
+    {
+      "path": "target/debug/incremental/grow-1kavvl9ujjl3q",
+      "created": "2026-09-12T22:17:54.627832"
+    },
+    {
+      "path": "target/debug/incremental/grow_gix_status-09gavj578w5qx",
+      "created": "2026-09-12T22:15:37.524957"
+    },
+    {
+      "path": "target/debug/incremental/grow_gix_status-0e7tncs9ima6k",
+      "created": "2026-09-12T21:27:37.765790"
+    },
+    {
+      "path": "target/debug/incremental/grow_gix_status-0wb53n1xbgyl2",
+      "created": "2026-09-12T22:09:59.315072"
+    },
+    {
+      "path": "target/debug/incremental/grow_gix_status-12sqmbuhye9i8",
+      "created": "2026-09-12T21:28:04.189584"
+    },
+    {
+      "path": "target/debug/incremental/grow_gix_status-3h6jjco01othh",
+      "created": "2026-09-12T22:20:07.266575"
+    },
+    {
+      "path": "target/debug/incremental/grow_http-0asyn9bgsqkuq",
+      "created": "2026-09-12T22:10:35.626274"
+    },
+    {
+      "path": "target/debug/incremental/grow_http-11vv2zvno5idm",
+      "created": "2026-09-12T22:16:16.863772"
+    },
+    {
+      "path": "target/debug/incremental/grow_http-2qgitjmks939g",
+      "created": "2026-09-12T21:29:10.703092"
+    },
+    {
+      "path": "target/debug/incremental/grow_http-2vj3cuenjiy33",
+      "created": "2026-09-12T22:20:42.244529"
+    },
+    {
+      "path": "target/debug/incremental/grow_http-3cdr38ye304wn",
+      "created": "2026-09-12T21:28:37.670641"
+    },
+    {
+      "path": "target/debug/incremental/hooks-0b93h62gzqtrb",
+      "created": "2026-09-12T21:27:39.839386"
+    },
+    {
+      "path": "target/debug/incremental/hooks-15sy9dgesj4lv",
+      "created": "2026-09-12T21:28:08.776846"
+    },
+    {
+      "path": "target/debug/incremental/hooks-18z2su1iom39e",
+      "created": "2026-09-12T22:10:02.399162"
+    },
+    {
+      "path": "target/debug/incremental/hooks-1jd6n3w5lpg6s",
+      "created": "2026-09-12T22:20:09.802877"
+    },
+    {
+      "path": "target/debug/incremental/hooks-2ptv535h9w84j",
+      "created": "2026-09-12T22:15:39.097958"
+    },
+    {
+      "path": "target/debug/incremental/hunk_tracker-10bydpmw5a8qm",
+      "created": "2026-09-12T22:15:56.001186"
+    },
+    {
+      "path": "target/debug/incremental/hunk_tracker-1pzwqvqk1t0f3",
+      "created": "2026-09-12T22:10:16.397353"
+    },
+    {
+      "path": "target/debug/incremental/hunk_tracker-1smon99sarflo",
+      "created": "2026-09-12T22:20:26.347983"
+    },
+    {
+      "path": "target/debug/incremental/hunk_tracker-2m163ijyrr94a",
+      "created": "2026-09-12T21:28:04.708766"
+    },
+    {
+      "path": "target/debug/incremental/hunk_tracker-2ycxs7agqhg2x",
+      "created": "2026-09-12T21:28:39.248696"
+    },
+    {
+      "path": "target/debug/incremental/markdown-1clctuqfpv6rm",
+      "created": "2026-09-12T22:16:43.209784"
+    },
+    {
+      "path": "target/debug/incremental/markdown-34lo6ptwcc8la",
+      "created": "2026-09-12T22:10:52.649738"
+    },
+    {
+      "path": "target/debug/incremental/markdown-3on76xnnxapb1",
+      "created": "2026-09-12T22:20:56.244920"
+    },
+    {
+      "path": "target/debug/incremental/mcp-0f8vlo6c6mmek",
+      "created": "2026-09-12T22:15:52.020528"
+    },
+    {
+      "path": "target/debug/incremental/mcp-0hje8bodg469m",
+      "created": "2026-09-12T22:10:13.746055"
+    },
+    {
+      "path": "target/debug/incremental/mcp-1f3qr7h0naio4",
+      "created": "2026-09-12T21:28:35.350114"
+    },
+    {
+      "path": "target/debug/incremental/mcp-27qc5j9g9ldgs",
+      "created": "2026-09-12T21:27:58.470485"
+    },
+    {
+      "path": "target/debug/incremental/mcp-2yvmk6ax40aus",
+      "created": "2026-09-12T22:20:24.038685"
+    },
+    {
+      "path": "target/debug/incremental/memory-03hr2h591q4hf",
+      "created": "2026-09-12T22:16:27.650030"
+    },
+    {
+      "path": "target/debug/incremental/memory-10josray9nyja",
+      "created": "2026-09-12T21:28:48.236278"
+    },
+    {
+      "path": "target/debug/incremental/memory-1gifxb27n2p72",
+      "created": "2026-09-12T22:20:47.961066"
+    },
+    {
+      "path": "target/debug/incremental/memory-2b8sbtsfz0y54",
+      "created": "2026-09-12T22:10:44.231284"
+    },
+    {
+      "path": "target/debug/incremental/memory-2mimsmvcbrm4q",
+      "created": "2026-09-12T21:29:17.950304"
+    },
+    {
+      "path": "target/debug/incremental/mermaid-0be7iicx5baox",
+      "created": "2026-09-12T22:17:17.003864"
+    },
+    {
+      "path": "target/debug/incremental/mermaid-1vfijtsd12bke",
+      "created": "2026-09-12T22:11:11.790787"
+    },
+    {
+      "path": "target/debug/incremental/mermaid-2wjsqk9qbbdfq",
+      "created": "2026-09-12T22:21:03.346929"
+    },
+    {
+      "path": "target/debug/incremental/mermaid_playground-2yxpz3tukjoa0",
+      "created": "2026-09-12T22:22:09.255583"
+    },
+    {
+      "path": "target/debug/incremental/mermaid_to_svg-05q4t2mo5myep",
+      "created": "2026-09-12T22:17:10.139945"
+    },
+    {
+      "path": "target/debug/incremental/mermaid_to_svg-0x72ehyrxb5ml",
+      "created": "2026-09-12T22:10:56.888325"
+    },
+    {
+      "path": "target/debug/incremental/mouse_events_playground-1ohm5lhzjgd2n",
+      "created": "2026-09-12T22:22:08.862988"
+    },
+    {
+      "path": "target/debug/incremental/nix-0us6gnq5yfenc",
+      "created": "2026-09-12T22:16:11.031639"
+    },
+    {
+      "path": "target/debug/incremental/nix-1iz22k2irybxt",
+      "created": "2026-09-12T21:28:27.188382"
+    },
+    {
+      "path": "target/debug/incremental/nix-1us9jbm87dr0v",
+      "created": "2026-09-12T21:28:59.649464"
+    },
+    {
+      "path": "target/debug/incremental/nono-0fg50t5c1mdzl",
+      "created": "2026-09-12T21:33:57.488287"
+    },
+    {
+      "path": "target/debug/incremental/nono-0ivu8luzke82k",
+      "created": "2026-09-12T22:09:24.661225"
+    },
+    {
+      "path": "target/debug/incremental/nono-0yvl9umw3gehm",
+      "created": "2026-09-12T22:14:59.877841"
+    },
+    {
+      "path": "target/debug/incremental/nono-19etz5kyek84o",
+      "created": "2026-09-12T21:26:25.253458"
+    },
+    {
+      "path": "target/debug/incremental/nono-286mhpdmi59no",
+      "created": "2026-09-12T22:19:30.384677"
+    },
+    {
+      "path": "target/debug/incremental/nono-3dhczf8510xvd",
+      "created": "2026-09-12T21:25:58.224185"
+    },
+    {
+      "path": "target/debug/incremental/pager-018xkah74vm6s",
+      "created": "2026-09-12T22:21:39.959571"
+    },
+    {
+      "path": "target/debug/incremental/pager-1ahob7hjknhiv",
+      "created": "2026-09-12T22:17:26.525111"
+    },
+    {
+      "path": "target/debug/incremental/pager-1nnjbs9dnralb",
+      "created": "2026-09-12T22:21:04.453677"
+    },
+    {
+      "path": "target/debug/incremental/pager-1uuky4fazrrzv",
+      "created": "2026-09-12T22:11:42.678558"
+    },
+    {
+      "path": "target/debug/incremental/pager_minimal-326mbziw73hdy",
+      "created": "2026-09-12T22:17:51.896312"
+    },
+    {
+      "path": "target/debug/incremental/pager_pty_harness-2oeepyef5mxqm",
+      "created": "2026-09-12T22:11:04.757555"
+    },
+    {
+      "path": "target/debug/incremental/pager_render-0vhx66k03n2t5",
+      "created": "2026-09-12T22:11:08.833632"
+    },
+    {
+      "path": "target/debug/incremental/pager_render-114d2d52jhx35",
+      "created": "2026-09-12T22:21:00.355395"
+    },
+    {
+      "path": "target/debug/incremental/pager_render-3ut4qx3lx8w4e",
+      "created": "2026-09-12T22:17:14.080929"
+    },
+    {
+      "path": "target/debug/incremental/paths-0547o3ew486i7",
+      "created": "2026-09-12T21:28:22.044718"
+    },
+    {
+      "path": "target/debug/incremental/paths-1tg5nwv7vrcrd",
+      "created": "2026-09-12T21:27:48.546928"
+    },
+    {
+      "path": "target/debug/incremental/plugin_marketplace-0svirrv1hx2k4",
+      "created": "2026-09-12T22:10:43.489006"
+    },
+    {
+      "path": "target/debug/incremental/plugin_marketplace-0tsm89s89d5lu",
+      "created": "2026-09-12T21:29:16.217797"
+    },
+    {
+      "path": "target/debug/incremental/plugin_marketplace-1g7m5ybsbrhb5",
+      "created": "2026-09-12T21:28:45.251529"
+    },
+    {
+      "path": "target/debug/incremental/plugin_marketplace-1i7drnydmbvp8",
+      "created": "2026-09-12T22:16:25.889349"
+    },
+    {
+      "path": "target/debug/incremental/plugin_marketplace-1thwnn3ywbind",
+      "created": "2026-09-12T22:20:46.682840"
+    },
+    {
+      "path": "target/debug/incremental/prompt_queue-0pqk6xj25fdi7",
+      "created": "2026-09-12T21:29:30.615510"
+    },
+    {
+      "path": "target/debug/incremental/prompt_queue-19w21wfb0sl1n",
+      "created": "2026-09-12T21:29:01.281303"
+    },
+    {
+      "path": "target/debug/incremental/pty_e2e_persistence-0obfagjtyb1if",
+      "created": "2026-09-12T22:22:10.451811"
+    },
+    {
+      "path": "target/debug/incremental/ptyctl-0u3k55vxscpwy",
+      "created": "2026-09-12T22:10:54.260015"
+    },
+    {
+      "path": "target/debug/incremental/question_view_playground-3fxjjc5b3r354",
+      "created": "2026-09-12T22:22:10.824329"
+    },
+    {
+      "path": "target/debug/incremental/ratatui_inline-1ml2icwa059ej",
+      "created": "2026-09-12T22:10:55.693690"
+    },
+    {
+      "path": "target/debug/incremental/ratatui_inline-1r7q6nbh0vkc5",
+      "created": "2026-09-12T22:17:08.745453"
+    },
+    {
+      "path": "target/debug/incremental/ratatui_inline-1wbapk8663348",
+      "created": "2026-09-12T22:20:58.428166"
+    },
+    {
+      "path": "target/debug/incremental/ratatui_textarea-09ochim95g60o",
+      "created": "2026-09-12T22:10:56.307120"
+    },
+    {
+      "path": "target/debug/incremental/ratatui_textarea-1v0atab626txg",
+      "created": "2026-09-12T22:17:09.465202"
+    },
+    {
+      "path": "target/debug/incremental/ratatui_textarea-3vdigggjbdw01",
+      "created": "2026-09-12T22:20:59.185436"
+    },
+    {
+      "path": "target/debug/incremental/sampler-04z0eo6qtzhyd",
+      "created": "2026-09-12T21:28:23.704989"
+    },
+    {
+      "path": "target/debug/incremental/sampler-0q2rlsb92x0cz",
+      "created": "2026-09-12T21:28:51.996731"
+    },
+    {
+      "path": "target/debug/incremental/sampler-1nuy3emt2i6pz",
+      "created": "2026-09-12T22:16:10.908320"
+    },
+    {
+      "path": "target/debug/incremental/sampler-1trk543r8p60d",
+      "created": "2026-09-12T22:20:33.065420"
+    },
+    {
+      "path": "target/debug/incremental/sampler-2shq1s0b5xdgf",
+      "created": "2026-09-12T22:10:29.668519"
+    },
+    {
+      "path": "target/debug/incremental/sampling_types-04yhzkvgjrc7f",
+      "created": "2026-09-12T22:10:13.213979"
+    },
+    {
+      "path": "target/debug/incremental/sampling_types-13wucyd6kuz8i",
+      "created": "2026-09-12T21:28:11.450535"
+    },
+    {
+      "path": "target/debug/incremental/sampling_types-1pfgej7obd6h2",
+      "created": "2026-09-12T22:15:52.836673"
+    },
+    {
+      "path": "target/debug/incremental/sampling_types-2l07hi06u26yd",
+      "created": "2026-09-12T22:20:22.805053"
+    },
+    {
+      "path": "target/debug/incremental/sampling_types-2phrcn6pnq58w",
+      "created": "2026-09-12T21:27:44.011792"
+    },
+    {
+      "path": "target/debug/incremental/sampling_types-3i8fz9agx6rcg",
+      "created": "2026-09-12T21:34:21.201602"
+    },
+    {
+      "path": "target/debug/incremental/sandbox-0qq16t2zhqbgw",
+      "created": "2026-09-12T21:26:52.990008"
+    },
+    {
+      "path": "target/debug/incremental/sandbox-0yktd0m5avv2m",
+      "created": "2026-09-12T21:26:19.624957"
+    },
+    {
+      "path": "target/debug/incremental/sandbox-16med3wetenqq",
+      "created": "2026-09-12T22:09:33.848562"
+    },
+    {
+      "path": "target/debug/incremental/sandbox-1xbb2ssqc7kxy",
+      "created": "2026-09-12T22:15:11.240570"
+    },
+    {
+      "path": "target/debug/incremental/sandbox-3jol3l8tp3rvt",
+      "created": "2026-09-12T21:34:10.856975"
+    },
+    {
+      "path": "target/debug/incremental/sandbox-3ka4hxsn0j4q1",
+      "created": "2026-09-12T22:19:41.971086"
+    },
+    {
+      "path": "target/debug/incremental/scrollback_search_playground-1ro96xzu8jful",
+      "created": "2026-09-12T22:22:06.102099"
+    },
+    {
+      "path": "target/debug/incremental/scrollback_selection_playground-0fhdrmao02v10",
+      "created": "2026-09-12T22:22:06.102339"
+    },
+    {
+      "path": "target/debug/incremental/session_load_perf-3mv2eomh76akz",
+      "created": "2026-09-12T21:30:33.611084"
+    },
+    {
+      "path": "target/debug/incremental/shell-1epxcrn8bqrkn",
+      "created": "2026-09-12T21:29:32.728709"
+    },
+    {
+      "path": "target/debug/incremental/shell-1phqeymcgt7cn",
+      "created": "2026-09-12T21:29:02.938994"
+    },
+    {
+      "path": "target/debug/incremental/shell-1zesty6c7h5od",
+      "created": "2026-09-12T22:10:50.862205"
+    },
+    {
+      "path": "target/debug/incremental/shell-2o6rfpj4lh64y",
+      "created": "2026-09-12T22:16:45.012034"
+    },
+    {
+      "path": "target/debug/incremental/shell-2w3cq3u1qcfi3",
+      "created": "2026-09-12T22:20:54.862249"
+    },
+    {
+      "path": "target/debug/incremental/shell-31rfnh77wlnbx",
+      "created": "2026-09-12T22:04:19.114313"
+    },
+    {
+      "path": "target/debug/incremental/shell_base-197cy7wbtks5t",
+      "created": "2026-09-12T22:20:49.948663"
+    },
+    {
+      "path": "target/debug/incremental/shell_base-1d7i9cmkidjma",
+      "created": "2026-09-12T22:16:29.962140"
+    },
+    {
+      "path": "target/debug/incremental/shell_base-2b7wmm80x2phi",
+      "created": "2026-09-12T22:10:45.218286"
+    },
+    {
+      "path": "target/debug/incremental/shell_base-30pvoz4tyxwei",
+      "created": "2026-09-12T21:29:19.984807"
+    },
+    {
+      "path": "target/debug/incremental/shell_base-3b7zi9joykxd1",
+      "created": "2026-09-12T21:28:50.127329"
+    },
+    {
+      "path": "target/debug/incremental/sqlite_journal-0369p4p75mfla",
+      "created": "2026-09-12T21:28:23.374415"
+    },
+    {
+      "path": "target/debug/incremental/sqlite_journal-040nsplf41cju",
+      "created": "2026-09-12T22:15:48.602746"
+    },
+    {
+      "path": "target/debug/incremental/sqlite_journal-1zlbt8r4ttknc",
+      "created": "2026-09-12T22:10:10.672590"
+    },
+    {
+      "path": "target/debug/incremental/sqlite_journal-2ceoz2fonivxn",
+      "created": "2026-09-12T22:20:20.328356"
+    },
+    {
+      "path": "target/debug/incremental/sqlite_journal-2ivinn1lhw4yh",
+      "created": "2026-09-12T21:27:50.027163"
+    },
+    {
+      "path": "target/debug/incremental/sqlite_vec-09o1m6l803ukx",
+      "created": "2026-09-12T21:28:39.494049"
+    },
+    {
+      "path": "target/debug/incremental/sqlite_vec-0zw4e4kgaso89",
+      "created": "2026-09-12T21:29:12.612283"
+    },
+    {
+      "path": "target/debug/incremental/test_sampling_server-36mhkhpb5k7xx",
+      "created": "2026-09-12T21:30:16.841843"
+    },
+    {
+      "path": "target/debug/incremental/test_session_load_memory-1ac5j31oqzmfi",
+      "created": "2026-09-12T22:25:25.610323"
+    },
+    {
+      "path": "target/debug/incremental/test_support-00vm8famh6ms8",
+      "created": "2026-09-12T22:10:59.924601"
+    },
+    {
+      "path": "target/debug/incremental/test_support-3gy3c8zu4xyg2",
+      "created": "2026-09-12T21:30:11.946964"
+    },
+    {
+      "path": "target/debug/incremental/test_utils-0h8r4licxqkj2",
+      "created": "2026-09-12T21:30:13.942345"
+    },
+    {
+      "path": "target/debug/incremental/todo_pane_playground-0hkefcskuir70",
+      "created": "2026-09-12T22:22:08.846624"
+    },
+    {
+      "path": "target/debug/incremental/tool_protocol-059tm2gv7ej6v",
+      "created": "2026-09-12T21:25:55.007594"
+    },
+    {
+      "path": "target/debug/incremental/tool_protocol-0ri6oj0ksl43v",
+      "created": "2026-09-12T22:14:58.936093"
+    },
+    {
+      "path": "target/debug/incremental/tool_protocol-1ey4ou2xnzz44",
+      "created": "2026-09-12T21:26:21.744415"
+    },
+    {
+      "path": "target/debug/incremental/tool_protocol-2rdod0q4z270e",
+      "created": "2026-09-12T21:34:02.901209"
+    },
+    {
+      "path": "target/debug/incremental/tool_runtime-0rqz7pcjukik3",
+      "created": "2026-09-12T21:26:20.647249"
+    },
+    {
+      "path": "target/debug/incremental/tool_runtime-104lrwcqjdf5w",
+      "created": "2026-09-12T21:34:09.911583"
+    },
+    {
+      "path": "target/debug/incremental/tool_runtime-1wtudtslz4d20",
+      "created": "2026-09-12T22:09:35.116052"
+    },
+    {
+      "path": "target/debug/incremental/tool_runtime-273si9q7ub002",
+      "created": "2026-09-12T21:26:53.528371"
+    },
+    {
+      "path": "target/debug/incremental/tool_runtime-39rlcujpktzxs",
+      "created": "2026-09-12T22:19:43.035751"
+    },
+    {
+      "path": "target/debug/incremental/tool_runtime-3m22kxeyf2551",
+      "created": "2026-09-12T22:15:12.322628"
+    },
+    {
+      "path": "target/debug/incremental/tool_types-0lh2nojxpndq3",
+      "created": "2026-09-12T21:25:54.910601"
+    },
+    {
+      "path": "target/debug/incremental/tool_types-16uvsvgj6p96i",
+      "created": "2026-09-12T21:34:02.197865"
+    },
+    {
+      "path": "target/debug/incremental/tool_types-2shpyd3uhz0jj",
+      "created": "2026-09-12T21:26:22.020498"
+    },
+    {
+      "path": "target/debug/incremental/tools-078kmr0saye5l",
+      "created": "2026-09-12T21:26:55.471457"
+    },
+    {
+      "path": "target/debug/incremental/tools-0h0ifuu71hiv6",
+      "created": "2026-09-12T22:09:36.657969"
+    },
+    {
+      "path": "target/debug/incremental/tools-1cnc5f2jft4wt",
+      "created": "2026-09-12T22:19:44.900703"
+    },
+    {
+      "path": "target/debug/incremental/tools-1pxoth227f19e",
+      "created": "2026-09-12T22:15:14.801067"
+    },
+    {
+      "path": "target/debug/incremental/tools-29jx820c4tnpi",
+      "created": "2026-09-12T21:34:11.680275"
+    },
+    {
+      "path": "target/debug/incremental/tools-37sq2ddzppn9c",
+      "created": "2026-09-12T21:26:22.880461"
+    },
+    {
+      "path": "target/debug/incremental/trace_classify-1tuzbm0hcg2jr",
+      "created": "2026-09-12T21:30:14.301801"
+    },
+    {
+      "path": "target/debug/incremental/tracing_macros-024j5bqp0ya2n",
+      "created": "2026-09-12T21:29:02.252402"
+    },
+    {
+      "path": "target/debug/incremental/tracing_macros-35rf71qwz2r9v",
+      "created": "2026-09-12T21:29:32.064993"
+    },
+    {
+      "path": "target/debug/incremental/tty_utils-178rs5xqct854",
+      "created": "2026-09-12T21:25:41.401338"
+    },
+    {
+      "path": "target/debug/incremental/tty_utils-1fn5xkoe7446q",
+      "created": "2026-09-12T22:19:21.369696"
+    },
+    {
+      "path": "target/debug/incremental/tty_utils-1sshuwdtz0spj",
+      "created": "2026-09-12T22:09:14.208367"
+    },
+    {
+      "path": "target/debug/incremental/tty_utils-2eq8gnneksh3t",
+      "created": "2026-09-12T22:14:51.818666"
+    },
+    {
+      "path": "target/debug/incremental/tty_utils-2i4m9nvjw98f9",
+      "created": "2026-09-12T21:25:44.673895"
+    },
+    {
+      "path": "target/debug/incremental/tty_utils-37th8a6ltw3jm",
+      "created": "2026-09-12T21:33:55.655491"
+    },
+    {
+      "path": "target/debug/incremental/update-2k73n8lkd2ec9",
+      "created": "2026-09-12T22:21:38.002278"
+    },
+    {
+      "path": "target/debug/incremental/update-2w3mr2jl5jqem",
+      "created": "2026-09-12T22:11:25.440602"
+    },
+    {
+      "path": "target/debug/incremental/update-3e8meq3k01zhl",
+      "created": "2026-09-12T22:17:24.545149"
+    },
+    {
+      "path": "target/debug/incremental/workflow-03jw16hkpoul4",
+      "created": "2026-09-12T22:10:45.815458"
+    },
+    {
+      "path": "target/debug/incremental/workflow-12zv4ti0sdbq6",
+      "created": "2026-09-12T22:16:30.631358"
+    },
+    {
+      "path": "target/debug/incremental/workflow-14mww3l2exyzk",
+      "created": "2026-09-12T21:29:21.635651"
+    },
+    {
+      "path": "target/debug/incremental/workflow-1sfzllaihxpv7",
+      "created": "2026-09-12T22:20:48.478662"
+    },
+    {
+      "path": "target/debug/incremental/workflow-312rtnkbs3cju",
+      "created": "2026-09-12T21:28:50.848467"
+    },
+    {
+      "path": "target/debug/incremental/workspace-02i8uqsrny7tc",
+      "created": "2026-09-12T21:28:44.551322"
+    },
+    {
+      "path": "target/debug/incremental/workspace-161wd0plrum4v",
+      "created": "2026-09-12T21:28:11.037782"
+    },
+    {
+      "path": "target/debug/incremental/workspace-1kccs3rqs7d23",
+      "created": "2026-09-12T22:20:28.380954"
+    },
+    {
+      "path": "target/debug/incremental/workspace-1u8yxl3vexrk7",
+      "created": "2026-09-12T22:10:18.045327"
+    },
+    {
+      "path": "target/debug/incremental/workspace-3oc2sy1zg3k8m",
+      "created": "2026-09-12T22:15:58.099306"
+    },
+    {
+      "path": "target/debug/incremental/workspace_types-06wmzzzzvpcq1",
+      "created": "2026-09-12T21:28:27.754870"
+    },
+    {
+      "path": "target/debug/incremental/workspace_types-3sz09wvajzby0",
+      "created": "2026-09-12T21:27:52.296295"
+    }
+  ],
+  "free_before_bytes": 46396530688,
+  "free_after_bytes": 65514622976
+}

@@ -67,8 +67,9 @@ impl ChatStateActor {
         let mut items = self.state.timeline.surface().to_vec();
         items = sampling_types::project_conversation_for_goal_scope(items, active_goal.as_ref());
         if use_image_descriptions {
-            sampling_types::conversation::select_image_descriptions(&mut items)
-                .map_err(|error| crate::TimelineWriteError::ImageDescriptionUnavailable(error.into()))?;
+            sampling_types::conversation::select_image_descriptions(&mut items).map_err(
+                |error| crate::TimelineWriteError::ImageDescriptionUnavailable(error.into()),
+            )?;
         }
 
         // Measure the internal conversation body and evict as it approaches
@@ -123,6 +124,10 @@ impl ChatStateActor {
             sampling_types::NativeContinuationProjection {
                 portable_prefix_len: items.len(),
                 spans: Vec::new(),
+                replay_portable_responses_reasoning: self
+                    .state
+                    .continuation
+                    .replays_portable_responses_reasoning(),
             }
         });
         let epoch_nonce = self.state.continuation.epoch_nonce().to_owned();
@@ -143,6 +148,8 @@ impl ChatStateActor {
                 },
                 "continuation_epoch": epoch_nonce,
                 "portable_prefix_len": native_continuation.as_ref().and_then(|value| value.portable_prefix_end(&items)),
+                "replay_portable_responses_reasoning": native_continuation.as_ref()
+                    .is_some_and(|value| value.replay_portable_responses_reasoning),
                 "native_spans": native_continuation.as_ref().map(|value| value.spans.iter()
                     .map(|span| [span.start, span.end]).collect::<Vec<_>>()),
             })),

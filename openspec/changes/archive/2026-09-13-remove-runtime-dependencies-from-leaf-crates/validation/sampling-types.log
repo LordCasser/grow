@@ -1,0 +1,93 @@
+   Compiling libc v0.2.189
+   Compiling serde_core v1.0.229
+   Compiling parking_lot_core v0.9.12
+   Compiling stable_deref_trait v1.2.1
+   Compiling yoke v0.8.3
+   Compiling parking_lot v0.12.5
+   Compiling errno v0.3.14
+   Compiling serde v1.0.229
+   Compiling signal-hook-registry v1.4.8
+   Compiling zerovec v0.11.6
+   Compiling mio v1.2.2
+   Compiling socket2 v0.6.5
+   Compiling indexmap v2.14.1
+   Compiling tokio v1.53.1
+   Compiling tinystr v0.8.3
+   Compiling icu_locale_core v2.2.0
+   Compiling zerocopy v0.8.55
+   Compiling zerotrie v0.2.4
+   Compiling potential_utf v0.1.5
+   Compiling futures-io v0.3.34
+   Compiling futures-util v0.3.34
+   Compiling tokio-util v0.7.19
+   Compiling icu_collections v2.2.0
+   Compiling icu_provider v2.2.0
+   Compiling getrandom v0.3.4
+   Compiling serde_json v1.0.151
+   Compiling icu_normalizer v2.2.0
+   Compiling icu_properties v2.2.0
+   Compiling h2 v0.4.15
+   Compiling idna_adapter v1.2.2
+   Compiling bitflags v2.13.1
+   Compiling idna v1.1.0
+   Compiling hyper v1.11.0
+   Compiling core-foundation v0.10.1
+   Compiling security-framework-sys v2.17.0
+   Compiling aho-corasick v1.1.5
+   Compiling hyper-util v0.1.20
+   Compiling regex-automata v0.4.16
+   Compiling tower v0.5.3
+   Compiling security-framework v3.7.0
+   Compiling url v2.5.8
+   Compiling ahash v0.8.12
+   Compiling tokio-rustls v0.26.4
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_core v0.9.5
+   Compiling log v0.4.34
+   Compiling serde_urlencoded v0.7.1
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling fluent-uri v0.4.1
+   Compiling rand_chacha v0.9.0
+   Compiling hyper-rustls v0.27.9
+   Compiling tower-http v0.6.11
+   Compiling futures-executor v0.3.34
+   Compiling jsonschema-value v0.52.1
+   Compiling futures v0.3.34
+   Compiling referencing v0.52.1
+   Compiling schemars v1.2.2
+   Compiling reqwest v0.13.4
+   Compiling fancy-regex v0.19.0
+   Compiling rand v0.9.5
+   Compiling regex v1.13.1
+   Compiling tokio-stream v0.1.19
+   Compiling secrecy v0.10.3
+   Compiling email_address v0.2.9
+   Compiling compaction v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/common/compaction)
+   Compiling jsonschema v0.52.1
+   Compiling async-openai v0.41.3 (https://github.com/LordCasser/async-openai.git?rev=a2bae9966f435bc343aa095065d96700bfb81aed#a2bae996)
+   Compiling tool-types v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/common/tool-types)
+   Compiling sampling-types v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/sampling-types)
+error[E0658]: use of unstable library feature `str_as_str`
+    --> crates/codegen/sampling-types/src/conversation.rs:4076:95
+     |
+4076 | ...                   neutral_ids.extend(assistant.tool_calls.iter().map(|call| call.id.as_str()));
+     |                                                                                         ^^^^^^
+     |
+     = note: see issue #130366 <https://github.com/rust-lang/rust/issues/130366> for more information
+
+error[E0308]: mismatched types
+    --> crates/codegen/sampling-types/src/conversation.rs:5607:21
+     |
+5607 |                 id: id.clone(), name: "inspect".into(),
+     |                     ^^^^^^^^^^ expected `Arc<str>`, found `String`
+     |
+     = note: expected struct `std::sync::Arc<str>`
+                found struct `std::string::String`
+help: call `Into::into` on this expression to convert `std::string::String` into `std::sync::Arc<str>`
+     |
+5607 |                 id: id.clone().into(), name: "inspect".into(),
+     |                               +++++++
+
+Some errors have detailed explanations: E0308, E0658.
+For more information about an error, try `rustc --explain E0308`.
+error: could not compile `sampling-types` (lib test) due to 2 previous errors

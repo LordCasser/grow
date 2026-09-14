@@ -105,6 +105,9 @@ pub struct NoticeBlock {
     pub category: NoticeCategory,
     pub text: String,
     pub details: Option<String>,
+    /// Optional bounded body shown below the title while collapsed. The full
+    /// body belongs in `details` so expansion and copying retain the source.
+    communication_preview: Option<String>,
 }
 
 impl NoticeBlock {
@@ -136,6 +139,7 @@ impl NoticeBlock {
             category: NoticeCategory::Ui,
             text,
             details: None,
+            communication_preview: None,
         }
     }
 
@@ -155,6 +159,7 @@ impl NoticeBlock {
             category,
             text: text.into(),
             details,
+            communication_preview: None,
         }
     }
 
@@ -172,14 +177,31 @@ impl NoticeBlock {
             category,
             text: text.into(),
             details,
+            communication_preview: None,
         }
+    }
+
+    /// Attach a bounded communication body preview without changing the
+    /// title or the full detail text used by expanded/copy views.
+    pub fn with_communication_preview(mut self, preview: impl Into<String>) -> Self {
+        let preview = preview.into();
+        self.communication_preview = (!preview.is_empty()).then_some(preview);
+        self
+    }
+
+    pub fn set_communication_preview(&mut self, preview: Option<String>) {
+        self.communication_preview = preview.filter(|preview| !preview.is_empty());
     }
 }
 
 impl BlockContent for NoticeBlock {
     fn output(&self, ctx: &BlockContext) -> BlockOutput {
         let theme = Theme::current();
-        let body_style = theme.muted();
+        let body_style = if self.communication_preview.is_some() {
+            theme.primary()
+        } else {
+            theme.muted()
+        };
         let label_style = Style::default()
             .fg(self.tone.color(&theme))
             .add_modifier(Modifier::BOLD);
@@ -202,10 +224,22 @@ impl BlockContent for NoticeBlock {
             );
         }
         let wrapped = word_wrap_lines(styled_lines, ctx.width as usize);
-        let all_lines: Vec<BlockLine> = wrapped
+        let mut all_lines: Vec<BlockLine> = wrapped
             .into_iter()
             .map(|line| BlockLine::styled(line).with_selection_range(Some(0)))
             .collect();
+        if ctx.mode == DisplayMode::Collapsed
+            && let Some(preview) = self.communication_preview.as_deref()
+        {
+            all_lines.extend(
+                crate::scrollback::blocks::tool::OtherToolCallBlock::communication_preview_lines(
+                    preview,
+                    ctx.content_width(),
+                    body_style,
+                    body_style,
+                ),
+            );
+        }
 
         // Apply max_lines budget if set
         let lines = if let Some(max) = ctx.max_lines {
@@ -356,5 +390,95 @@ mod tests {
         assert!(text.contains("Use /goal set"));
         assert!(!text.contains("Catalog metadata"));
         assert!(notice.detail_text().contains("Catalog metadata"));
+    }
+
+    #[test]
+    fn communication_receipt_is_readable_in_light_and_dark_themes() {
+        let _guard = crate::theme::cache::pin_theme();
+        for kind in [
+            crate::theme::ThemeKind::GrowNight,
+            crate::theme::ThemeKind::GrowDay,
+        ] {
+            crate::theme::cache::set(kind);
+            let notice = NoticeBlock::terminal(
+                "parent-message:theme",
+                NoticeTone::Info,
+                NoticeCategory::Coordination,
+                "Received message from parent agent",
+                Some("Message:\n继续检查接收路径 /tmp/image.png".into()),
+            )
+            .with_communication_preview("继续检查接收路径 /tmp/image.png");
+            for width in [24, 40, 80] {
+                let output = notice.output(&BlockContext {
+                    width,
+                    mode: DisplayMode::Collapsed,
+                    is_running: false,
+                    raw: false,
+                    max_lines: None,
+                    appearance: AppearanceConfig::default(),
+                    is_selected: false,
+                    cwd: None,
+                });
+                assert!(
+                    output
+                        .lines
+                        .iter()
+                        .all(|line| line.content.width() <= width as usize)
+                );
+                let text = output
+                    .lines
+                    .iter()
+                    .map(|line| line.content.to_string())
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                assert!(text.contains("Received"));
+                assert!(text.contains("继续检查"));
+            }
+        }
+        crate::theme::cache::set(crate::theme::ThemeKind::GrowNight);
+    }
+
+    #[test]
+    fn communication_preview_is_bounded_and_full_body_only_appears_expanded() {
+        let notice = NoticeBlock::terminal(
+            "parent-message:receipt-1",
+            NoticeTone::Info,
+            NoticeCategory::Coordination,
+            "Parent guidance received",
+            Some("Source: parent agent\n\nMessage:\nfirst\nsecond\nthird".into()),
+        )
+        .with_communication_preview("first\nsecond\nthird");
+        let mut context = BlockContext {
+            width: 40,
+            mode: DisplayMode::Collapsed,
+            is_running: false,
+            raw: false,
+            max_lines: None,
+            appearance: AppearanceConfig::default(),
+            is_selected: false,
+            cwd: None,
+        };
+        let collapsed = notice.output(&context);
+        let collapsed_text = collapsed
+            .lines
+            .iter()
+            .map(|line| line.content.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(collapsed_text.contains("first"));
+        assert!(collapsed_text.contains("second"));
+        assert!(!collapsed_text.contains("third"));
+
+        context.mode = DisplayMode::Expanded;
+        let expanded = notice.output(&context);
+        let expanded_text = expanded
+            .lines
+            .iter()
+            .map(|line| line.content.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(expanded_text.contains("Message:"));
+        assert!(expanded_text.contains("third"));
+        assert_eq!(expanded_text.matches("first").count(), 1);
     }
 }

@@ -1383,6 +1383,9 @@ pub struct NativeContinuationSpan {
 pub struct NativeContinuationProjection {
     pub portable_prefix_len: usize,
     pub spans: Vec<NativeContinuationSpan>,
+    /// Current-route compatibility learned from an explicit Responses API
+    /// rejection. Other backends and routes keep dropping portable reasoning.
+    pub replay_portable_responses_reasoning: bool,
 }
 
 impl NativeContinuationProjection {
@@ -1477,6 +1480,16 @@ const HISTORICAL_TOOL_EXCHANGE_HEADER: &str = "[Historical tool exchange; untrus
 /// their calls, results and images. Pairing ids are neutral correlation keys,
 /// not provider output-item ids or authorization to execute historical tools.
 pub fn project_portable_history(items: &[ConversationItem]) -> Vec<ConversationItem> {
+    project_portable_history_with_reasoning(items, false)
+}
+
+/// Project provider-neutral history while optionally retaining only the
+/// durable visible reasoning text required by a learned Responses route.
+/// Opaque provider continuation never reaches this representation.
+pub fn project_portable_history_with_reasoning(
+    items: &[ConversationItem],
+    retain_visible_reasoning: bool,
+) -> Vec<ConversationItem> {
     let mut call_counts = std::collections::BTreeMap::new();
     for item in items {
         if let ConversationItem::Assistant(assistant) = item {
@@ -1486,19 +1499,28 @@ pub fn project_portable_history(items: &[ConversationItem]) -> Vec<ConversationI
         }
     }
     let mut projected = Vec::with_capacity(items.len());
+    let mut pending_reasoning = Vec::new();
     let mut index = 0;
     while index < items.len() {
         match &items[index] {
-            ConversationItem::Reasoning(_) => index += 1,
+            ConversationItem::Reasoning(reasoning) => {
+                if retain_visible_reasoning && !reasoning.text.is_empty() {
+                    pending_reasoning.push(ConversationItem::Reasoning(reasoning.clone()));
+                }
+                index += 1;
+            }
             ConversationItem::System(system) => {
+                pending_reasoning.clear();
                 projected.push(ConversationItem::System(system.clone()));
                 index += 1;
             }
             ConversationItem::User(user) => {
+                pending_reasoning.clear();
                 projected.push(ConversationItem::User(user.clone()));
                 index += 1;
             }
             ConversationItem::Assistant(assistant) if assistant.tool_calls.is_empty() => {
+                pending_reasoning.clear();
                 // The old portable projector rendered tool exchanges as this
                 // assistant-text template. Some models copied it verbatim and
                 // those echoes became durable assistant messages. Keep them in
@@ -1547,6 +1569,11 @@ pub fn project_portable_history(items: &[ConversationItem]) -> Vec<ConversationI
                     .cloned()
                     .collect();
                 let retained_ids: BTreeSet<_> = calls.iter().map(|call| call.id.clone()).collect();
+                if !calls.is_empty() {
+                    projected.append(&mut pending_reasoning);
+                } else {
+                    pending_reasoning.clear();
+                }
 
                 let content = if assistant
                     .content
@@ -1576,11 +1603,13 @@ pub fn project_portable_history(items: &[ConversationItem]) -> Vec<ConversationI
                 index = next;
             }
             ConversationItem::ToolResult(_) => {
+                pending_reasoning.clear();
                 // An unpaired historical result cannot be represented safely
                 // in any of the three endpoint protocols.
                 index += 1;
             }
             ConversationItem::BackendToolCall(call) => {
+                pending_reasoning.clear();
                 projected.push(ConversationItem::assistant(call.text_summary()));
                 index += 1;
             }
@@ -1591,41 +1620,57 @@ pub fn project_portable_history(items: &[ConversationItem]) -> Vec<ConversationI
 
 #[derive(Debug, Clone)]
 enum RequestSegment {
-    Items(Vec<ConversationItem>),
+    Items {
+        items: Vec<ConversationItem>,
+        replay_portable_responses_reasoning: bool,
+    },
     Native(NativeContinuationFragment),
 }
 
 fn request_segments(req: &ConversationRequest, backend: ApiBackend) -> Vec<RequestSegment> {
     let Some(native) = &req.native_continuation else {
-        return vec![RequestSegment::Items(req.items.clone())];
+        return vec![RequestSegment::Items {
+            items: req.items.clone(),
+            replay_portable_responses_reasoning: false,
+        }];
+    };
+    let replay_portable_responses_reasoning =
+        backend == ApiBackend::Responses && native.replay_portable_responses_reasoning;
+    let portable_segment = |items: &[ConversationItem]| RequestSegment::Items {
+        items: project_portable_history_with_reasoning(items, replay_portable_responses_reasoning),
+        replay_portable_responses_reasoning,
     };
     let Some(portable_end) = native.portable_prefix_end(&req.items) else {
-        return vec![RequestSegment::Items(project_portable_history(&req.items))];
+        return vec![portable_segment(&req.items)];
     };
 
     for span in &native.spans {
         if span.fragment.backend() != backend {
-            return vec![RequestSegment::Items(project_portable_history(&req.items))];
+            return vec![portable_segment(&req.items)];
         }
     }
 
     let mut segments = Vec::new();
-    let portable = project_portable_history(&req.items[..portable_end]);
-    if !portable.is_empty() {
-        segments.push(RequestSegment::Items(portable));
+    let portable = portable_segment(&req.items[..portable_end]);
+    if !matches!(&portable, RequestSegment::Items { items, .. } if items.is_empty()) {
+        segments.push(portable);
     }
     let mut cursor = portable_end;
     for span in &native.spans {
         if cursor < span.start {
-            segments.push(RequestSegment::Items(
-                req.items[cursor..span.start].to_vec(),
-            ));
+            segments.push(RequestSegment::Items {
+                items: req.items[cursor..span.start].to_vec(),
+                replay_portable_responses_reasoning: false,
+            });
         }
         segments.push(RequestSegment::Native(span.fragment.clone()));
         cursor = span.end;
     }
     if cursor < req.items.len() {
-        segments.push(RequestSegment::Items(req.items[cursor..].to_vec()));
+        segments.push(RequestSegment::Items {
+            items: req.items[cursor..].to_vec(),
+            replay_portable_responses_reasoning: false,
+        });
     }
     segments
 }
@@ -3063,7 +3108,7 @@ impl From<ConversationRequest> for ChatCompletionRequest {
         let messages: Vec<ChatRequestMessage> = request_segments(&req, ApiBackend::ChatCompletions)
             .into_iter()
             .flat_map(|segment| match segment {
-                RequestSegment::Items(items) => conversation_to_chat_messages(items),
+                RequestSegment::Items { items, .. } => conversation_to_chat_messages(items),
                 RequestSegment::Native(NativeContinuationFragment::ChatCompletions(message)) => {
                     vec![message]
                 }
@@ -3204,14 +3249,21 @@ impl From<&ConversationRequest> for rs::CreateResponse {
 ///
 /// Portable surface facts are allowlisted into Responses input items. Spans
 /// admitted for the current route are replaced with their typed native
-/// fragments; durable visible reasoning itself is never sent.
+/// fragments. Portable reasoning remains omitted unless the current route has
+/// learned that visible reasoning attached to a complete tool exchange is
+/// required.
 fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
     let items: Vec<rs::InputItem> = request_segments(req, ApiBackend::Responses)
         .into_iter()
         .flat_map(|segment| match segment {
-            RequestSegment::Items(items) => items
+            RequestSegment::Items {
+                items,
+                replay_portable_responses_reasoning,
+            } => items
                 .iter()
-                .flat_map(conversation_item_to_input_items)
+                .flat_map(|item| {
+                    conversation_item_to_input_items(item, replay_portable_responses_reasoning)
+                })
                 .collect(),
             RequestSegment::Native(NativeContinuationFragment::Responses(items)) => items,
             RequestSegment::Native(_) => Vec::new(),
@@ -3255,7 +3307,10 @@ pub fn patch_reasoning_text_types(body: &mut serde_json::Value) {
 }
 
 /// Convert a ConversationItem to Responses API InputItem(s)
-fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputItem> {
+fn conversation_item_to_input_items(
+    item: &ConversationItem,
+    replay_visible_reasoning: bool,
+) -> Vec<rs::InputItem> {
     match item {
         ConversationItem::System(s) => {
             // System messages become an EasyMessage with system role
@@ -3274,6 +3329,21 @@ fn conversation_item_to_input_items(item: &ConversationItem) -> Vec<rs::InputIte
                 content,
                 phase: None,
             })]
+        }
+        ConversationItem::Reasoning(reasoning) if replay_visible_reasoning => {
+            vec![rs::InputItem::Item(rs::Item::Reasoning(
+                rs::ReasoningItem {
+                    id: None,
+                    summary: Vec::new(),
+                    content: Some(vec![rs::ReasoningItemContent::ReasoningText(
+                        rs::ReasoningTextContent {
+                            text: reasoning.text.to_string(),
+                        },
+                    )]),
+                    encrypted_content: None,
+                    status: None,
+                },
+            ))]
         }
         ConversationItem::Reasoning(_) => Vec::new(),
         ConversationItem::Assistant(a) => {
@@ -3989,6 +4059,85 @@ fn apply_cache_breakpoints(
     }
 }
 
+/// Encode only neutral IDs that cannot pass through the Messages wire.
+/// Reserve the complete request first, including native IDs and IDs that occur
+/// later, so generated candidates cannot steal another exchange's identity.
+fn messages_tool_id_map(segments: &[RequestSegment]) -> std::collections::BTreeMap<String, String> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let mut neutral_ids = Vec::new();
+    let mut native_ids = BTreeSet::new();
+    for segment in segments {
+        match segment {
+            RequestSegment::Items { items, .. } => {
+                for item in items {
+                    match item {
+                        ConversationItem::Assistant(assistant) => {
+                            neutral_ids
+                                .extend(assistant.tool_calls.iter().map(|call| call.id.as_ref()));
+                        }
+                        ConversationItem::ToolResult(result) => {
+                            neutral_ids.push(result.tool_call_id.as_str())
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            RequestSegment::Native(NativeContinuationFragment::Messages(blocks)) => {
+                for block in blocks {
+                    match block {
+                        crate::messages::ContentBlock::ToolUse { id, .. } => {
+                            native_ids.insert(id.as_str());
+                        }
+                        crate::messages::ContentBlock::ToolResult { tool_use_id, .. } => {
+                            native_ids.insert(tool_use_id.as_str());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            RequestSegment::Native(_) => {}
+        }
+    }
+    let needs_encoding = |id: &str| {
+        !native_ids.contains(id)
+            && (id.is_empty()
+                || id.len() > 64
+                || !id
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
+    };
+    // Ordinary provider IDs pass through: avoid building a full reservation
+    // tree on every request when there is nothing to encode.
+    if !neutral_ids.iter().any(|id| needs_encoding(id)) {
+        return BTreeMap::new();
+    }
+    let reserved: BTreeSet<_> = neutral_ids
+        .iter()
+        .copied()
+        .chain(native_ids.iter().copied())
+        .collect();
+    let mut encoded = BTreeSet::new();
+    let mut mapping = BTreeMap::new();
+    for id in neutral_ids {
+        // Native tool uses must keep their exact ID on a subsequent neutral
+        // result too. 64 bytes is Grow's neutral wire budget.
+        if !needs_encoding(id) || mapping.contains_key(id) {
+            continue;
+        }
+        let hash = blake3::hash(id.as_bytes()).to_hex();
+        let base = format!("grow_{}", &hash[..32]);
+        let mut candidate = base.clone();
+        let mut suffix = 0usize;
+        while reserved.contains(candidate.as_str()) || !encoded.insert(candidate.clone()) {
+            suffix += 1;
+            candidate = format!("{base}_{suffix}");
+        }
+        mapping.insert(id.to_owned(), candidate);
+    }
+    mapping
+}
+
 /// Convert a ConversationRequest to Anthropic MessagesRequest.
 pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::MessagesRequest {
     use crate::messages::{
@@ -4001,18 +4150,9 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
     let mut pending_assistant: Vec<ContentBlock> = Vec::new();
     let mut pending_tool_results: Vec<ContentBlock> = Vec::new();
 
-    // Helper to sanitize tool call IDs (replace [^a-zA-Z0-9_-] with _)
-    let sanitize_tool_call_id = |id: &str| -> String {
-        id.chars()
-            .map(|c| {
-                if c.is_alphanumeric() || c == '_' || c == '-' {
-                    c
-                } else {
-                    '_'
-                }
-            })
-            .collect()
-    };
+    let segments = request_segments(req, ApiBackend::Messages);
+    let tool_ids = messages_tool_id_map(&segments);
+    let wire_tool_id = |id: &str| tool_ids.get(id).map_or(id, String::as_str).to_owned();
 
     // Helper to convert ContentPart to Anthropic ContentBlock
     let content_parts_to_anthropic_blocks = |parts: &[ContentPart]| -> Vec<ContentBlock> {
@@ -4091,9 +4231,9 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
 
     // Process portable/current neutral facts and exact same-route native
     // assistant blocks in one chronological stream.
-    for segment in request_segments(req, ApiBackend::Messages) {
+    for segment in segments {
         match segment {
-            RequestSegment::Items(items) => {
+            RequestSegment::Items { items, .. } => {
                 for item in &items {
                     match item {
                         ConversationItem::System(s) => {
@@ -4134,7 +4274,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                                 let input = serde_json::from_str(&tc.arguments)
                                     .unwrap_or(serde_json::json!({}));
                                 pending_assistant.push(ContentBlock::ToolUse {
-                                    id: sanitize_tool_call_id(&tc.id),
+                                    id: wire_tool_id(&tc.id),
                                     name: tc.name.clone(),
                                     input,
                                     cache_control: None,
@@ -4154,7 +4294,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                                 ToolResultContent::Blocks(blocks)
                             };
                             pending_tool_results.push(ContentBlock::ToolResult {
-                                tool_use_id: sanitize_tool_call_id(&t.tool_call_id),
+                                tool_use_id: wire_tool_id(&t.tool_call_id),
                                 content,
                                 cache_control: None,
                             });
@@ -5480,6 +5620,162 @@ mod tests {
     }
 
     #[test]
+    fn messages_tool_ids_remain_distinct_and_paired_at_every_portable_cut() {
+        let raw_ids = [
+            "a.b".to_owned(),
+            "a/b".into(),
+            "a_b".into(),
+            "a-b".into(),
+            "调用_一".into(),
+            "x".repeat(4096),
+        ];
+        let mut items = vec![
+            ConversationItem::user("inspect"),
+            ConversationItem::assistant_tool_calls(
+                raw_ids
+                    .iter()
+                    .map(|id| ToolCall {
+                        id: id.clone().into(),
+                        name: "inspect".into(),
+                        arguments: serde_json::json!({"identity": id}).to_string().into(),
+                    })
+                    .collect(),
+            ),
+        ];
+        items.extend(
+            raw_ids
+                .iter()
+                .rev()
+                .map(|id| ConversationItem::tool_result(id.clone(), id.clone())),
+        );
+        let original = serde_json::to_value(&items).unwrap();
+        let mut previous_wire = None;
+        for prefix in 0..=items.len() {
+            let mut request = ConversationRequest::from_items(items.clone());
+            request.native_continuation = Some(NativeContinuationProjection {
+                portable_prefix_len: prefix,
+                spans: Vec::new(),
+                replay_portable_responses_reasoning: false,
+            });
+            let wire = portable_wire(&request, ApiBackend::Messages);
+            let blocks = wire["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|message| message["content"].as_array().unwrap())
+                .collect::<Vec<_>>();
+            let calls = blocks
+                .iter()
+                .filter(|block| block["type"] == "tool_use")
+                .collect::<Vec<_>>();
+            assert_eq!(calls.len(), raw_ids.len());
+            let mut unique = std::collections::BTreeSet::new();
+            for call in calls {
+                let id = call["id"].as_str().unwrap();
+                assert!(!id.is_empty() && id.len() <= 64);
+                assert!(
+                    id.bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                );
+                assert!(unique.insert(id));
+                let raw = call["input"]["identity"].as_str().unwrap();
+                let result = blocks
+                    .iter()
+                    .find(|block| block["type"] == "tool_result" && block["tool_use_id"] == id)
+                    .unwrap();
+                assert_eq!(
+                    result["content"], raw,
+                    "encoding must preserve the result's original owner"
+                );
+                if raw == "a_b" || raw == "a-b" {
+                    assert_eq!(id, raw);
+                }
+            }
+            assert_wire_tool_pairs(&wire, &unique.into_iter().collect::<Vec<_>>());
+            assert_eq!(portable_wire(&request, ApiBackend::Messages), wire);
+            if let Some(previous) = &previous_wire {
+                assert_eq!(previous, &wire);
+            }
+            previous_wire = Some(wire);
+            assert_eq!(serde_json::to_value(&request.items).unwrap(), original);
+            let expected = raw_ids.iter().map(String::as_str).collect::<Vec<_>>();
+            for backend in [ApiBackend::ChatCompletions, ApiBackend::Responses] {
+                assert_wire_tool_pairs(&portable_wire(&request, backend), &expected);
+            }
+        }
+    }
+
+    #[test]
+    fn messages_encoded_ids_avoid_later_native_and_neutral_identities() {
+        use crate::messages::ContentBlock;
+        let call = |id: &str| {
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: id.into(),
+                name: "inspect".into(),
+                arguments: "{}".into(),
+            }])
+        };
+        let first = ConversationRequest::from_items(vec![
+            ConversationItem::user("inspect"),
+            call("a.b"),
+            ConversationItem::tool_result("a.b", "old result"),
+        ]);
+        let first_wire = portable_wire(&first, ApiBackend::Messages);
+        let candidate = first_wire["messages"][1]["content"][0]["id"]
+            .as_str()
+            .unwrap();
+        for native in [false, true] {
+            let mut request = first.clone();
+            request
+                .items
+                .push(ConversationItem::Reasoning(synthesized_reasoning_item(
+                    "native thought",
+                )));
+            request.items.push(call(candidate));
+            request
+                .items
+                .push(ConversationItem::tool_result(candidate, "reserved result"));
+            let native_blocks = vec![
+                ContentBlock::Thinking { thinking: "native thought".into(), signature: "signed-secret".into() },
+                serde_json::from_value(serde_json::json!({"type":"tool_use", "id":candidate, "name":"inspect", "input":{}})).unwrap(),
+            ];
+            request.native_continuation = Some(NativeContinuationProjection {
+                portable_prefix_len: 3,
+                spans: if native {
+                    vec![NativeContinuationSpan {
+                        start: 3,
+                        end: 5,
+                        fragment: NativeContinuationFragment::Messages(native_blocks.clone()),
+                    }]
+                } else {
+                    Vec::new()
+                },
+                replay_portable_responses_reasoning: false,
+            });
+            let wire = portable_wire(&request, ApiBackend::Messages);
+            let old_id = wire["messages"][1]["content"][0]["id"].as_str().unwrap();
+            assert_ne!(
+                old_id, candidate,
+                "the generated candidate is already owned by a later exchange"
+            );
+            assert_wire_tool_pairs(&wire, &[old_id, candidate]);
+            let blocks = wire["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .flat_map(|message| message["content"].as_array().unwrap())
+                .collect::<Vec<_>>();
+            assert!(blocks.iter().any(|block| block["type"] == "tool_result"
+                && block["tool_use_id"] == candidate
+                && block["content"] == "reserved result"));
+            if native {
+                assert!(blocks.contains(&&serde_json::to_value(&native_blocks[0]).unwrap()));
+                assert_eq!(wire.to_string().matches("signed-secret").count(), 1);
+            }
+        }
+    }
+
+    #[test]
     fn portable_boundary_preserves_multi_tool_pairs_at_every_cut() {
         let items = vec![
             ConversationItem::user("inspect"),
@@ -5510,6 +5806,7 @@ mod tests {
                 request.native_continuation = Some(NativeContinuationProjection {
                     portable_prefix_len: prefix,
                     spans: Vec::new(),
+                    replay_portable_responses_reasoning: false,
                 });
                 assert_wire_tool_pairs(&portable_wire(&request, backend), &["call_a", "call_b"]);
             }
@@ -5564,6 +5861,7 @@ mod tests {
             request.native_continuation = Some(NativeContinuationProjection {
                 portable_prefix_len: request.items.len(),
                 spans: Vec::new(),
+                replay_portable_responses_reasoning: false,
             });
             for backend in [
                 ApiBackend::ChatCompletions,
@@ -5601,6 +5899,7 @@ mod tests {
                     serde_json::from_value(serde_json::json!({"type":"tool_use", "id":"native_call", "name":"read_file", "input":{}})).unwrap(),
                 ]),
             }],
+            replay_portable_responses_reasoning: false,
         });
         let wire = portable_wire(&request, ApiBackend::Messages);
         assert_wire_tool_pairs(&wire, &["old_call", "native_call"]);
@@ -5645,6 +5944,7 @@ mod tests {
         request.native_continuation = Some(NativeContinuationProjection {
             portable_prefix_len: request.items.len(),
             spans: Vec::new(),
+            replay_portable_responses_reasoning: false,
         });
         let projected = project_portable_history(&request.items);
         assert!(
@@ -5705,6 +6005,63 @@ mod tests {
     }
 
     #[test]
+    fn learned_responses_route_replays_only_visible_portable_reasoning() {
+        let mut request = ConversationRequest::from_items(vec![
+            ConversationItem::user("earlier question"),
+            ConversationItem::Reasoning(synthesized_reasoning_item(
+                "standalone reasoning must stay omitted",
+            )),
+            ConversationItem::assistant("earlier final answer"),
+            ConversationItem::user("inspect"),
+            ConversationItem::Reasoning(synthesized_reasoning_item(
+                "portable reasoning required by target",
+            )),
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: "call_reasoning_replay".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"a"}"#.into(),
+            }]),
+            ConversationItem::tool_result("call_reasoning_replay", "done"),
+        ]);
+        request.native_continuation = Some(NativeContinuationProjection {
+            portable_prefix_len: request.items.len(),
+            spans: Vec::new(),
+            replay_portable_responses_reasoning: true,
+        });
+
+        let responses = portable_wire(&request, ApiBackend::Responses);
+        let reasoning = responses["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["type"] == "reasoning")
+            .expect("learned Responses route must replay visible reasoning");
+        assert_eq!(reasoning["id"], serde_json::Value::Null);
+        assert_eq!(reasoning["status"], serde_json::Value::Null);
+        assert_eq!(reasoning["encrypted_content"], serde_json::Value::Null);
+        assert_eq!(reasoning["content"][0]["type"], "reasoning_text");
+        assert_eq!(
+            reasoning["content"][0]["text"],
+            "portable reasoning required by target"
+        );
+        assert_wire_tool_pairs(&responses, &["call_reasoning_replay"]);
+        assert!(
+            !responses
+                .to_string()
+                .contains("standalone reasoning must stay omitted")
+        );
+
+        for backend in [ApiBackend::ChatCompletions, ApiBackend::Messages] {
+            assert!(
+                !portable_wire(&request, backend)
+                    .to_string()
+                    .contains("portable reasoning required by target"),
+                "compatibility replay must remain Responses-only"
+            );
+        }
+    }
+
+    #[test]
     fn tool_attachment_text_survives_live_and_portable_requests_without_images() {
         let items = vec![
             ConversationItem::assistant_tool_calls(vec![ToolCall {
@@ -5726,6 +6083,7 @@ mod tests {
                 request.native_continuation = Some(NativeContinuationProjection {
                     portable_prefix_len: items.len(),
                     spans: Vec::new(),
+                    replay_portable_responses_reasoning: false,
                 });
             }
             for backend in [
@@ -5820,6 +6178,7 @@ mod tests {
                     }),
                 )]),
             }],
+            replay_portable_responses_reasoning: false,
         });
 
         let responses_req: rs::CreateResponse = (&req).into();
@@ -6657,6 +7016,7 @@ mod tests {
                     },
                 ]),
             }],
+            replay_portable_responses_reasoning: false,
         });
 
         let json = serde_json::to_value(build_messages_request(&req)).unwrap();

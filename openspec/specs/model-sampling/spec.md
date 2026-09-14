@@ -273,7 +273,7 @@ Chat Completions、Responses 和 Messages 中结构及身份有效且完整结�
 
 ### Requirement: Portable history preserves complete local tool exchanges
 
-Portable 请求投影 SHALL 保留完整、无歧义的本地工具调用和匹配结果，并通过目标 backend 的结构化工具协议表达名称、合法 JSON 对象参数、关联 ID、结果正文及预算允许的图片。它 SHALL 移除旧 provider reasoning、签名、加密数据、输出 item identity/status 和模型诊断；SHALL NOT 将历史调用作为新的执行请求。原始 Timeline 和既有隔离事实保持不变。
+Portable 请求投影 SHALL 保留完整、无歧义的本地工具调用和匹配结果，并通过目标 backend 的结构化工具协议表达名称、合法 JSON 对象参数、关联 ID、结果正文及预算允许的图片。默认投影 SHALL 移除旧 provider reasoning、签名、加密数据、输出 item identity/status 和模型诊断；若当前 Responses 路由以明确的协议错误要求回传 `reasoning_text`，则该路由 MAY 仅回放 Surface 中既有的可见 reasoning 文本，仍 SHALL 移除 opaque identity、签名、加密内容及状态。投影 SHALL NOT 将历史调用作为新的执行请求。原始 Timeline 和既有隔离事实保持不变。
 
 #### Scenario: Tool attachments include eviction text
 - **WHEN** 工具结果附件同时含图片与图片预算产生的文本，或只剩替换文本
@@ -281,7 +281,7 @@ Portable 请求投影 SHALL 保留完整、无歧义的本地工具调用和匹�
 
 #### Scenario: Restore or switch provider
 - **WHEN** 会话恢复或切换模型/backend 后中性历史包含完整工具往返
-- **THEN** Chat Completions、Responses、Messages 请求分别保留配对的工具协议和内容，不包含被撤销的 native reasoning，切回原模型也不复活 native。
+- **THEN** Chat Completions、Responses、Messages 请求分别保留配对的工具协议和内容，默认不包含被撤销的 native reasoning，切回原模型也不复活 native；仅当前 Responses 路由明确要求时可回放无 opaque 字段的可见 reasoning。
 
 #### Scenario: Ambiguous or incomplete history
 - **WHEN** portable 区域包含未配对、重复或无效工具记录
@@ -290,6 +290,14 @@ Portable 请求投影 SHALL 保留完整、无歧义的本地工具调用和匹�
 #### Scenario: Valid same-route native continuation
 - **WHEN** 请求仍有当前 epoch 的有效 native span
 - **THEN** 该 span 继续使用完整原生内容，portable 处理不删掉其 thinking 或重复生成工具调用。
+
+#### Scenario: Target route requires reasoning text replay
+- **WHEN** Responses 路由对含 portable 工具历史的请求返回明确 400，声明 thinking mode 必须回传 `reasoning_text`
+- **THEN** 系统在当前路由内启用可见 reasoning 回放，确认投影状态后按同一 logical sampling 余额重建请求，reasoning、function call 与结果各保留一次。
+
+#### Scenario: Replayed portable reasoning remains narrow
+- **WHEN** 兼容回放已为当前 Responses 路由启用，随后发生 native reset、相同路由参数更新或真正的 route 替换
+- **THEN** 前两者保留当前路由兼容状态，真正 route 替换清除它；Chat Completions、Messages 和未学习的 Responses 路由不接收该 portable reasoning。
 
 ### Requirement: Portable boundaries keep tool exchanges together
 
@@ -334,3 +342,32 @@ Portable prefix 与 live suffix 的切点 SHALL NOT 将同一完整工具往返�
 #### Scenario: Provider switch after a response
 - **WHEN** 响应 A 结束后切换到端点或模型 B
 - **THEN** A 的 terminal 仍绑定 A 的 request/attempt 和原始 backend，后续宿主终态不能用 B 的配置覆盖它。
+
+### Requirement: Provider-required portable reasoning recovery is bounded
+
+系统 SHALL 将明确的 Responses reasoning 回传拒绝表示为类型化 attempt 事实。兼容状态只有在当前 Surface 含可回放的非空 reasoning 且当前路由尚未启用时才可改变；自动重提交 SHALL 使用同一 logical sampling 的剩余 attempt 上限与绝对期限。
+
+#### Scenario: First explicit rejection enables replay
+- **WHEN** 当前请求因缺少要求的 `reasoning_text` 首次被明确拒绝，且存在可回放 reasoning 与恢复余额
+- **THEN** ChatState 确认启用当前路由投影模式后静默重提交，不把失败候选加入 Surface。
+
+#### Scenario: Repeated rejection does not loop
+- **WHEN** 回放模式已经启用后端点仍返回相同拒绝，或 Surface 没有可回放 reasoning
+- **THEN** 系统不再次声明状态已改变，不重置 logical sampling 预算，并按既有其他恢复或终态路径处理。
+
+### Requirement: Messages tool identity encoding preserves distinct exchanges
+Messages 请求 SHALL 将中性工具调用 ID 与结果关联 ID 一致转换为 ASCII 字母、数字、下划线或连字符组成的非空有界 ID。请求中不同原始身份 SHALL NOT 因编码而碰撞。有效 native continuation 的原生内容和 ID SHALL 保持不变，生成 ID SHALL 避免与其冲突。编码 SHALL NOT 改写原始 Timeline 或执行身份。
+
+#### Scenario: Portable IDs contain punctuation Unicode or excessive length
+- **WHEN** 完整工具往返包含替换标点后会同名的 ID、Unicode 或超出本地编码预算的 ID
+- **THEN** wire 保留每个独立调用及对应结果，ID 合法且一一配对，重复构造相同请求产生相同映射。
+
+#### Scenario: Existing IDs overlap generated candidates
+- **WHEN** 一个合法或 native ID 与另一个身份的初始编码候选相同
+- **THEN** 保留已有身份，为被编码身份选择未占用 ID，并保持调用结果配对。
+
+#### Scenario: Native tool use precedes a neutral result
+- **WHEN** 同路由有效 native tool use 后续由中性历史提供结果
+- **THEN** 结果引用原生 ID，thinking 签名及原生块保持原样。
+
+证据：crates/codegen/sampling-types/src/conversation.rs 的 build_messages_request 与 portable/native tests。

@@ -6,7 +6,8 @@ use crate::app::actions::Effect;
 use crate::app::agent_view::AgentView;
 use crate::app::root::AppView;
 use crate::app::root::dispatch::ctx::{
-    SwitchCause, get_active_agent, get_active_agent_mut, switch_to_agent, with_active_agent,
+    SwitchCause, get_active_agent, get_active_agent_mut, show_welcome, switch_to_agent,
+    with_active_agent,
 };
 use crate::app::root::dispatch::modes::inherit_permission_mode;
 use crate::app::root::dispatch::prompt::defer_to_open_reload_window;
@@ -163,6 +164,7 @@ fn dispatch_load_session_ungated(
     session_id: String,
     session_cwd: Option<std::path::PathBuf>,
 ) -> Vec<Effect> {
+    let load_return_view = app.active_view;
     invalidate_picker_fetch_on_dismiss(app);
     if focus_if_session_already_open(app, &session_id).is_some() {
         return vec![];
@@ -201,6 +203,7 @@ fn dispatch_load_session_ungated(
     );
     app.agents.insert(agent_id, agent);
     let agent_mut = app.agents.get_mut(&agent_id).unwrap();
+    agent_mut.load_return_view = Some(load_return_view);
     agent_mut.session.attached_as_viewer = true;
     agent_mut.begin_replay_window();
     agent_mut.session.set_live_feedback(
@@ -570,6 +573,7 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
         if defer_to_open_reload_window(agent, agent_id, "SessionLoaded") {
             return vec![];
         }
+        agent.load_return_view = None;
         let hydrate_sid = session_id.clone();
         agent.bind_session_id(session_id);
         agent.session.clear_live_feedback("session-load");
@@ -685,6 +689,7 @@ pub(in crate::app::root::dispatch) fn handle_session_load_failed(
     error: String,
 ) -> Vec<Effect> {
     tracing::error!(agent = ?agent_id, session = ?session_id, error = %error, "Session load failed");
+    let mut load_return_view = None;
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         if defer_to_open_reload_window(agent, agent_id, "SessionLoadFailed") {
             return vec![];
@@ -699,16 +704,35 @@ pub(in crate::app::root::dispatch) fn handle_session_load_failed(
         agent.session.replay_live_cursor_seen = false;
         agent.pending_first_prompt = None;
         agent.pending_fork_banner = None;
-        // A failed load is not an open session. Release the eager identity so
-        // selecting the same session retries instead of focusing this error
-        // surface; the failure Notice remains attached to this view.
-        agent.unbind_session_id();
-        agent
-            .scrollback
-            .push_block(RenderBlock::session_event(SessionEvent::TurnFailed {
-                error: format!("Couldn't load session: {error}"),
-                elapsed: None,
-            }));
+        load_return_view = agent.load_return_view.take();
+        if load_return_view.is_some() {
+            agent.unbind_session_id();
+        } else {
+            // A failed load is not an open session. Release the eager identity so
+            // selecting the same session retries instead of focusing this error
+            // surface; the failure Notice remains attached to this view.
+            agent.unbind_session_id();
+            agent
+                .scrollback
+                .push_block(RenderBlock::session_event(SessionEvent::TurnFailed {
+                    error: format!("Couldn't load session: {error}"),
+                    elapsed: None,
+                }));
+        }
+    }
+    if let Some(return_view) = load_return_view {
+        app.agents.shift_remove(&agent_id);
+        match return_view {
+            crate::app::root::ActiveView::Welcome => show_welcome(app),
+            crate::app::root::ActiveView::Agent(origin) if app.agents.contains_key(&origin) => {
+                switch_to_agent(app, origin, SwitchCause::Load);
+            }
+            crate::app::root::ActiveView::AgentDashboard if app.dashboard.is_some() => {
+                app.active_view = crate::app::root::ActiveView::AgentDashboard;
+            }
+            _ => show_welcome(app),
+        }
+        app.show_toast(&format!("Couldn't load session: {error}"));
     }
     vec![]
 }

@@ -19,6 +19,7 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
         &self,
         request: tools::implementations::grow_build::task::interaction::AgentInteractionRequest,
         target_id: String,
+        subagent_task_name: String,
     ) {
         let agent = self.agent_ref.get();
         let lookup = |id: &str| {
@@ -38,7 +39,7 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
                     .send(Err("Agent endpoint is no longer running".into()));
                 return;
             };
-            interaction::run(request, source, target).await;
+            interaction::run(request, source, target, subagent_task_name).await;
         });
     }
     fn run(

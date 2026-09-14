@@ -174,6 +174,10 @@ pub struct SamplingErrorInfo {
     /// context for external diagnostics; it is never inferred from `message`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<ApiBackend>,
+    /// The provider explicitly requires visible reasoning text to accompany
+    /// portable Responses tool history on resubmission.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub portable_responses_reasoning_required: bool,
     /// The in-process typed cause. This is deliberately omitted from the DTO
     /// wire representation; deserialized DTOs use the legacy fallback below.
     #[serde(skip)]
@@ -290,6 +294,7 @@ impl From<&SamplingError> for SamplingErrorInfo {
             SamplingError::IncompleteStream { backend, .. } => Some(backend.clone()),
             _ => None,
         };
+        let portable_responses_reasoning_required = err.requires_portable_responses_reasoning();
 
         Self {
             kind,
@@ -305,6 +310,7 @@ impl From<&SamplingError> for SamplingErrorInfo {
             usage: None,
             cost_usd_ticks: None,
             backend,
+            portable_responses_reasoning_required,
             source: Some(err.clone()),
         }
     }
@@ -492,6 +498,34 @@ mod tests {
         assert!(!info.is_retryable, "4xx (non-429) should not be retryable");
         let metadata = info.model_metadata.expect("metadata preserved");
         assert_eq!(metadata.context_window, Some(8000));
+    }
+
+    #[test]
+    fn explicit_reasoning_replay_requirement_survives_dto_round_trip() {
+        let original = SamplingError::Api {
+            status: StatusCode::BAD_REQUEST,
+            message: "The `reasoning_text` in the thinking mode must be passed back to the API."
+                .into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: Some(false),
+        };
+        let info: SamplingErrorInfo = serde_json::from_value(
+            serde_json::to_value(SamplingErrorInfo::from(&original)).unwrap(),
+        )
+        .unwrap();
+        assert!(info.portable_responses_reasoning_required);
+
+        let legacy: SamplingErrorInfo = serde_json::from_value(serde_json::json!({
+            "kind": "Api",
+            "status_code": 400,
+            "message": "other invalid request",
+            "is_retryable": false,
+            "retry_after_secs": null,
+            "model_metadata": null
+        }))
+        .unwrap();
+        assert!(!legacy.portable_responses_reasoning_required);
     }
 
     #[test]

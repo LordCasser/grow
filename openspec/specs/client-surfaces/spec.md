@@ -1598,11 +1598,11 @@ Usage 与 Goal 详情中的完整 token 数字 SHALL 使用每三位逗号分隔
 - **THEN** 例如 100000000 显示为 100,000,000，≥ 和分类含义不变。
 
 ### Requirement: Ordinary agent status shows session usage
-没有 Goal 的普通主会话 Agent 视图 SHALL 在原 Goal 插槽显示本会话账本累计 token 与输入缓存命中率，并在点击时打开 Usage 页。数据 SHALL 来自既有 session ledger 的变化投影及当前连接快照，不使用定时轮询、context 窗口压力或 prompt 总额累加替代账本。子 Agent 内嵌视图不增加一个指向父会话用量的入口。
+没有 Goal 的普通主会话 Agent 视图 SHALL 在原 Goal 插槽显示本 session 跨 resume 的 lifetime 累计 token 与输入缓存命中率，并在点击时打开 Usage 页。数据 SHALL 来自可恢复 session ledger 的变化投影，不使用定时轮询、context 窗口压力或 prompt 总额累加替代账本。子 Agent 内嵌视图不增加一个指向父会话用量的入口。
 
 #### Scenario: Calls and late child settlement
 - **WHEN** 普通会话产生主调用、已归属的子任务消费或不完整标记
-- **THEN** 状态栏按账本的累计 input + output（含 cache hit）更新，重复累计快照不会重复加账，缓存率按总 cached input / 总 input 计算。
+- **THEN** 状态栏按账本的 lifetime 累计 input + output（含 cache hit）更新，重复累计快照不会重复加账，缓存率按总 cached input / 总 input 计算。
 
 #### Scenario: Empty or incomplete usage
 - **WHEN** 没有输入、缓存数超过输入或账本不完整
@@ -1613,10 +1613,14 @@ Usage 与 Goal 详情中的完整 token 数字 SHALL 使用每三位逗号分隔
 - **THEN** 普通用量打开既有 Usage 面板的 Usage 页，Goal 继续打开 Goal 详情；窄屏下点击区域不能超出可见区域。
 
 #### Scenario: Resume or reconnect
-- **WHEN** 客户端重新连接存活进程或在新进程恢复会话
-- **THEN** 投影当前进程账本，与 Usage 的 since start or last resume 窗口一致，不从历史通知恢复旧进程总额。
+- **WHEN** 客户端重新连接存活进程或在新 actor incarnation 从持久 Timeline 恢复会话
+- **THEN** normal 状态栏显示此前与当前 incarnation 的 lifetime 总计，不重置为零或只显示 resume 后新增用量；resident reconnect 不重复累计。
 
-证据入口：`chat-state/src/actor/mutations.rs`、`shell/src/extensions/usage.rs`、`pager/src/views/agent_status.rs`、`pager/src/app/agent_view/render.rs` 和 `mouse.rs`（均位于 `crates/codegen/`）。
+#### Scenario: Usage details across resumes
+- **WHEN** session 至少经历一次有新增模型消费的冷 resume
+- **THEN** Usage 页顶部显示 lifetime 总计，并按 Initial run、Resume #1… 展示各 incarnation 的新增消费；各段之和与 lifetime 已知总量一致。
+
+证据入口：`crates/codegen/chat-state/src/actor/state.rs`、`shell/src/extensions/usage.rs`、`pager/src/views/usage_modal.rs`、`pager/src/app/status_blocks.rs`。
 
 ### Requirement: Sampling previews are isolated by attempt and delivery capability
 
@@ -1649,3 +1653,145 @@ Usage 与 Goal 详情中的完整 token 数字 SHALL 使用每三位逗号分隔
 #### Scenario: Interaction or replay overlaps a sampling candidate
 - **WHEN** 候选仍待接纳时到达文件/终端等驱动客户端请求、权限请求或定向历史回放
 - **THEN** 原交互与定向路由继续生效，不把请求缓冲到接纳之后或广播给附加观察者；普通交织通知与候选在最终交付时保持原 eventId 顺序。
+
+### Requirement: Generic tool failures render their terminal content once
+
+Pager SHALL assign the terminal content of a generic successful tool call to its output presentation and the terminal content of a generic failed tool call to its error presentation. It SHALL NOT place the same failed content in both fields or render it twice.
+
+#### Scenario: Failed generic tool has diagnostic content
+- **WHEN** a generic tool call completes as Failed with nonempty text content
+- **THEN** the expanded row shows that text once as the error and has no duplicate output copy.
+
+#### Scenario: Successful generic tool has output
+- **WHEN** a generic tool call completes successfully with nonempty text content
+- **THEN** the expanded row retains the text as output without manufacturing an error.
+
+### Requirement: Session usage retains agent attribution behind aggregate surfaces
+
+会话用量账本 SHALL 将本会话主 Agent 与每个已结算子 Agent 的已知 token 消费分别归属，同时 SHALL 使总体等于这些消费的累计结果。当前 `/usage`、headless usage 与没有 Goal 的 normal 状态栏 SHALL 只展示既有总体及 provider/model 投影，不公开 Agent 分项。
+
+#### Scenario: Main and child agents consume tokens
+- **WHEN** 主 Agent 产生模型消费，两个具有不同 `subagent_id` 的子 Agent 完成并回传各自累计消费
+- **THEN** 会话总体包含三者消费各一次，Agent 分项能分别识别主 Agent 与两个子 Agent，并保留每项已知 token 数。
+
+#### Scenario: One child uses multiple models
+- **WHEN** 同一子 Agent 的终态累计快照包含多个 provider/model 分项
+- **THEN** provider/model 分项继续按模型累计，该子 Agent 分项累计这些模型消费，且会话总体不遗漏或重复任何一项。
+
+#### Scenario: Existing aggregate displays
+- **WHEN** 包含子 Agent 消费的会话账本投影到 `/usage`、headless usage 或 normal 状态栏
+- **THEN** 当前界面和公共 usage 形状显示包含子 Agent 的总体，但不增加 Agent 分项字段或逐 Agent UI。
+
+#### Scenario: Incomplete child settlement
+- **WHEN** 子 Agent 回传已知下界并标记用量不完整，或其用量无法可靠应用
+- **THEN** 已知消费仍按原 `subagent_id` 归属，既有 incomplete 规则继续阻止总体被表示成精确完整值。
+
+证据入口：`crates/codegen/chat-state/src/usage.rs`、`crates/codegen/shell/src/session/actor/updates.rs`、`crates/codegen/shell/src/extensions/notification.rs`、`crates/codegen/pager/src/app/status_blocks.rs`。
+
+### Requirement: Cancelling turns reconcile against authoritative prompt state
+
+Pager SHALL 在发送取消后用短时、单请求在途的 prompt-status 对账窗口覆盖 `TurnCancelling`。只有 shell 返回 terminal、unknown 或查询错误时才收敛本地状态；时间本身 SHALL NOT 伪造成功终态。
+
+#### Scenario: Cancel targets a vanished session
+- **WHEN** Pager 已进入 `TurnCancelling`，但 shell 不再拥有该 session，因而不会发送取消终态
+- **THEN** Pager 在短窗口后查询该 prompt，依据 unknown/error 退出 cancelling、恢复输入，并提示 session/prompt 已不可用。
+
+#### Scenario: Cancel is still being processed
+- **WHEN** 权威查询仍返回 running
+- **THEN** Pager 保持 `TurnCancelling`，刷新下一次对账窗口，且同一 prompt 同时最多一个查询在途。
+
+#### Scenario: Cancel terminal notification was missed
+- **WHEN** 权威查询返回该 prompt 的 terminal 状态
+- **THEN** Pager 通过既有 single-finalizer 路径结束原 turn，不重复添加终态或重复推进队列。
+
+证据入口：`crates/codegen/pager/src/app/root/dispatch/turn.rs`、`task_result.rs` 及其 tests。
+
+### Requirement: Failed initial session load returns to its origin
+
+Pager SHALL 把首次 resume 创建的 Agent 视为加载期临时实体。加载失败时 SHALL 删除该临时实体，恢复发起前的 Welcome、Agent 或 Dashboard，并显示可操作的失败信息；不得留下没有 session identity 的可见输入页。
+
+#### Scenario: Resume from welcome fails
+- **WHEN** Welcome 中选择的 session 加载失败
+- **THEN** 临时 Agent 被删除，界面回到 Welcome，用户可以再次选择并重试。
+
+#### Scenario: Resume from an existing agent or dashboard fails
+- **WHEN** 用户从既有 Agent 或 Dashboard 发起 resume 且加载失败
+- **THEN** 界面恢复到该发起 surface，既有 Agent 状态不被临时失败页替换。
+
+#### Scenario: In-place reload fails
+- **WHEN** 失败结果属于已有 Agent 的原地 reconnect/reload window，而不是首次加载临时 Agent
+- **THEN** 继续由既有 reload-window 回滚语义处理，不删除真实 Agent。
+
+证据入口：`crates/codegen/pager/src/app/root/dispatch/session/load.rs` 与 `tests/session/load.rs`。
+
+### Requirement: Context info results are bound to their requesting session view
+The client SHALL apply an asynchronous context-info result only when its
+session identity and session-binding epoch still match the requesting
+AgentView; the check SHALL happen before updating live context state or any
+scrollback/modal projection. A zero nonce SHALL retain scrollback intent, and
+a nonzero nonce SHALL additionally match the open usage modal epoch as part of
+that same pre-mutation validity check.
+
+#### Scenario: Late result after rebinding is ignored
+- **WHEN** a context-info request completes after the AgentView is rebound or unbound and rebound
+- **THEN** neither live context state nor scrollback or modal state is changed
+
+#### Scenario: Current success and failure retain their surface routing
+- **WHEN** a result matches the session identity and binding epoch, and any nonzero nonce matches the open usage modal
+- **THEN** success updates live context before routing to zero-nonce scrollback or matching modal, while failure routes only to that same surface
+
+#### Scenario: Same-session reopen rejects the old modal result
+- **WHEN** a nonzero-nonce context-info request completes after the usage modal is closed and reopened for the same session with a new modal nonce, even if the session binding is unchanged
+- **THEN** neither live context state nor the reopened modal or scrollback state is changed
+
+### Requirement: Agent communication tools expose their intent and result
+
+通信工具的发送侧 SHALL 从开始到终态显示具体工具身份、实际目标、消息或问题预览及结果语义。展开 SHALL 保留完整正文、相关身份、投递模式与错误。工具行 SHALL 使用其原始调用身份原位更新，不能另加重复发送通知。
+
+#### Scenario: Parent sends queued guidance
+- **WHEN** 父 agent 调用非中断 `send_subagent_message`，随后收到 durable receipt
+- **THEN** 同一行从发送中更新为已接收，并展示工具名、目标子任务、原文预览及下个安全步骤加入上下文的模式，不显示已读或任务完成。
+
+#### Scenario: Immediate guidance and uncertain acknowledgement
+- **WHEN** 父消息请求安全中断，或者等待回执超时而消息可能已持久接收
+- **THEN** 展示分别说明请求安全中断或投递状态未知，不推断非中断工具已停止，不自动重发消息。
+
+#### Scenario: Parent child or peer inquiry
+- **WHEN** `ask_parent`、`ask_subagent` 或 `ask_session` 开始并结束
+- **THEN** 同一发送工具行展示实际对端、问题预览和回答或失败，细阶段缺失时只显示等待回答，展开保留原问题与完整结果。
+
+#### Scenario: Inquiry state lookup
+- **WHEN** `get_inquiry` 查询成功且返回一个失败的 inquiry
+- **THEN** UI 区分查询完成和 inquiry 失败，不把已查询到的失败结果冒充查询工具调用失败。
+
+### Requirement: Parent message receipt appears in its child view
+
+子 agent SHALL 在父消息持久接收后显示一条具有稳定事件身份的系统接收通知，包含父 agent 来源、投递模式与原始消息。通知 SHALL 属于实际接收 session，且不得作为人类输入、子 agent 自己的工具调用或额外模型上下文。接收通知 SHALL 不依赖消息被消费或当前视图是否选中。
+
+#### Scenario: Receipt while the child is busy
+- **WHEN** child 持久接收父消息而仍在执行当前步骤
+- **THEN** child TUI 可见一条接收通知和正文预览；当前工作继续遵循原投递模式，UI 不抢焦点。
+
+#### Scenario: Duplicate or replayed receipt
+- **WHEN** 同一收件事实重试、重连回放或已消费后冷恢复
+- **THEN** 接收视图保留恰好一条可读收件通知，不重新消费消息或重新触发通知副作用。
+
+#### Scenario: Receipt projection fails after commit
+- **WHEN** inbox 已持久接收而 UI 投影未成功发布
+- **THEN** 投递回执仍反映真实接收，重载可从持久事实重建通知，不因此重复发送消息。
+
+#### Scenario: Normal and minimal history
+- **WHEN** 父消息送往未选中的子视图，随后在 normal 或 minimal 模式查看或恢复
+- **THEN** 接收记录在所属子视图可见，minimal 原生历史追加该不可变收件事实一次，主 turn 结束不影响独立问答接收行的生命周期。
+
+### Requirement: Communication presentation preserves readable text
+
+通信记录 SHALL 默认提供有界正文预览，保留可展开、选择和复制的完整文本。工具、参与方、状态与消息正文 SHALL 能在窄终端中辨认，状态不得仅通过颜色区分。
+
+#### Scenario: Long Unicode message containing an image path
+- **WHEN** 消息含中文、多行内容、长任务名或本地图片路径
+- **THEN** 预览按终端显示宽度换行和明确截断，展开保留原文，图片引用不会替代整条消息文本。
+
+#### Scenario: Keyboard access to communication details
+- **WHEN** 用户只使用键盘选择通信记录并进入现有详情入口
+- **THEN** 可以阅读和复制完整消息、方向及结果，无需鼠标操作。

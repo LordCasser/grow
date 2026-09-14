@@ -36,11 +36,51 @@ pub struct OtherToolCallBlock {
     pub elapsed_ms: Option<i64>,
     /// Present only on the receiving side's passive inquiry presentation.
     pub coordination: Option<CoordinationRow>,
+    /// Bounded, readable input preview for an outgoing communication tool.
+    /// The complete message/question remains in `output` for expansion and
+    /// copy, while this field keeps the collapsed row useful at a glance.
+    communication_preview: Option<String>,
     /// Image references detected in the tool output.
     image_refs: Vec<crate::prompt_images::ScrollbackImageRef>,
 }
 
 impl OtherToolCallBlock {
+    /// Wrap a communication body to at most two display lines, preserving
+    /// Unicode cell widths and adding an ellipsis when more content follows.
+    /// Notice blocks call this associated helper through the re-exported
+    /// `OtherToolCallBlock`, so both surfaces share the same projector.
+    pub(crate) fn communication_preview_lines(
+        preview: &str,
+        width: usize,
+        text_style: ratatui::style::Style,
+        ellipsis_style: ratatui::style::Style,
+    ) -> Vec<BlockLine> {
+        let wrap_width = width.saturating_sub(2).max(1);
+        let mut wrapped = word_wrap_lines(
+            preview
+                .lines()
+                .map(|line| Line::from(Span::styled(line.to_owned(), text_style))),
+            wrap_width,
+        );
+        let truncated = wrapped.len() > 2;
+        wrapped.truncate(2);
+        if truncated && let Some(last) = wrapped.last_mut() {
+            last.spans.push(Span::styled("…", ellipsis_style));
+            *last = crate::render::line_utils::truncate_line(last.clone(), wrap_width);
+        }
+        wrapped
+            .into_iter()
+            .map(|line| {
+                let mut spans = vec![Span::raw("  ")];
+                spans.extend(line.spans);
+                BlockLine::styled(crate::render::line_utils::truncate_line(
+                    Line::from(spans),
+                    width,
+                ))
+            })
+            .collect()
+    }
+
     /// Create a new other tool block.
     ///
     /// Pre-completed blocks have no meaningful local timing — `started_at`
@@ -55,6 +95,7 @@ impl OtherToolCallBlock {
             started_at: None,
             elapsed_ms: None,
             coordination: None,
+            communication_preview: None,
             image_refs: Vec::new(),
         }
     }
@@ -68,6 +109,18 @@ impl OtherToolCallBlock {
     /// Set output (builder).
     pub fn with_output(mut self, output: impl Into<String>) -> Self {
         self.set_output_text(output.into());
+        self
+    }
+
+    /// Attach the original message/question used by a communication tool.
+    /// It is intentionally separate from `summary`: the latter belongs in
+    /// the one-line tool header, while this value is rendered as two bounded
+    /// lines below it and the full text stays available in `output`.
+    pub(crate) fn with_communication_preview(mut self, preview: impl Into<String>) -> Self {
+        let preview = preview.into();
+        if !preview.is_empty() {
+            self.communication_preview = Some(preview);
+        }
         self
     }
 
@@ -94,11 +147,21 @@ impl OtherToolCallBlock {
     /// Coordination carries structured text, sometimes quoting an image path.
     /// Such a reference is an attachment, not a replacement for the result.
     fn prefers_text_output(&self) -> bool {
-        self.coordination.is_some()
+        self.is_communication()
+            || self.coordination.is_some()
             || matches!(
                 self.name.as_str(),
                 "list_active_sessions" | "ask_session" | "get_inquiry"
             )
+    }
+
+    fn is_communication(&self) -> bool {
+        self.communication_preview.is_some()
+            || self.name.starts_with("ask_session → ")
+            || self.name.starts_with("get_inquiry → ")
+            || self.name.starts_with("ask_parent → ")
+            || self.name.starts_with("ask_subagent → ")
+            || self.name.starts_with("send_subagent_message → ")
     }
 
     /// Set error (mutable) — compute elapsed time if not already set (Phase 2).
@@ -134,7 +197,7 @@ impl OtherToolCallBlock {
         }
     }
 
-    /// Render collapsed line: **`Label`** `content` or **`Name`**.
+    /// Build the styled title: **`Label`** `content` or **`Name`**.
     ///
     /// If the name contains `: `, splits into bold label + muted/primary content
     /// (e.g. "Ask: What is your favorite language?"). Otherwise renders
@@ -142,7 +205,7 @@ impl OtherToolCallBlock {
     ///
     /// When `muted` is true (collapsed state), all text uses dim styles to
     /// match other collapsed blocks. The label ("Ask") stays bold.
-    fn collapsed_line(&self, theme: &Theme, muted: bool, width: Option<usize>) -> Line<'static> {
+    fn title_spans(&self, theme: &Theme, muted: bool) -> Vec<Span<'static>> {
         let text_style = if muted {
             theme.muted()
         } else {
@@ -150,14 +213,18 @@ impl OtherToolCallBlock {
         };
         let bold_style = text_style.add_modifier(ratatui::style::Modifier::BOLD);
 
-        let mut spans = if let Some((label, content)) = self.name.split_once(": ") {
+        if let Some((label, content)) = self.name.split_once(": ") {
             vec![
                 Span::styled(format!("{} ", label), bold_style),
                 Span::styled(content.to_string(), text_style),
             ]
         } else {
             vec![Span::styled(self.name.clone(), bold_style)]
-        };
+        }
+    }
+
+    fn collapsed_line(&self, theme: &Theme, muted: bool, width: Option<usize>) -> Line<'static> {
+        let mut spans = self.title_spans(theme, muted);
 
         if !self.summary.is_empty() {
             if let Some(w) = width {
@@ -167,7 +234,7 @@ impl OtherToolCallBlock {
                     .map(|s| unicode_width::UnicodeWidthStr::width(s.content.as_ref()))
                     .sum();
                 let summary = format!("  {}", self.summary);
-                if used + summary.len() <= w {
+                if used + unicode_width::UnicodeWidthStr::width(summary.as_str()) <= w {
                     spans.push(Span::styled(summary, theme.muted()));
                 }
             } else {
@@ -180,6 +247,76 @@ impl OtherToolCallBlock {
             crate::render::line_utils::truncate_line(line, w)
         } else {
             line
+        }
+    }
+
+    /// Render a communication title and status as separate wrapped rows when
+    /// they cannot fit together. The title and status each get at most two
+    /// rows; narrow rows retain an explicit ellipsis rather than hiding one
+    /// of the two pieces behind the other.
+    fn communication_header_lines(
+        &self,
+        theme: &Theme,
+        muted: bool,
+        width: usize,
+    ) -> Vec<BlockLine> {
+        let width = width.max(1);
+        let title = Line::from(self.title_spans(theme, muted));
+        let summary = (!self.summary.is_empty())
+            .then(|| Line::from(Span::styled(format!("  {}", self.summary), theme.muted())));
+        let total_width = title
+            .spans
+            .iter()
+            .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
+            .sum::<usize>()
+            + summary.as_ref().map_or(0, |summary| {
+                summary
+                    .spans
+                    .iter()
+                    .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
+                    .sum::<usize>()
+            });
+        if total_width <= width {
+            let mut spans = title.spans;
+            if let Some(summary) = summary {
+                spans.extend(summary.spans);
+            }
+            return vec![BlockLine::styled(crate::render::line_utils::truncate_line(
+                Line::from(spans),
+                width,
+            ))];
+        }
+
+        let mut title_lines = word_wrap_lines(std::iter::once(title), width);
+        let title_truncated = title_lines.len() > 2;
+        title_lines.truncate(2);
+        if title_truncated && let Some(last) = title_lines.last_mut() {
+            last.spans.push(Span::styled("…", theme.muted()));
+            *last = crate::render::line_utils::truncate_line(last.clone(), width);
+        }
+
+        if let Some(summary) = summary {
+            let mut status_lines = word_wrap_lines(std::iter::once(summary), width);
+            let status_truncated = status_lines.len() > 2;
+            status_lines.truncate(2);
+            if status_truncated && let Some(last) = status_lines.last_mut() {
+                last.spans.push(Span::styled("…", theme.muted()));
+                *last = crate::render::line_utils::truncate_line(last.clone(), width);
+            }
+            title_lines
+                .into_iter()
+                .chain(status_lines)
+                .map(|line| {
+                    BlockLine::styled(crate::render::line_utils::truncate_line(line, width))
+                })
+                .collect()
+        } else {
+            title_lines
+                .into_iter()
+                .map(|line| {
+                    BlockLine::styled(crate::render::line_utils::truncate_line(line, width))
+                })
+                .collect()
         }
     }
 }
@@ -242,12 +379,26 @@ impl BlockContent for OtherToolCallBlock {
         }
 
         match ctx.mode {
-            DisplayMode::Collapsed => BlockOutput {
-                lines: vec![
-                    self.collapsed_line(&theme, muted_collapsed, Some(ctx.content_width()))
-                        .into(),
-                ],
-            },
+            DisplayMode::Collapsed => {
+                let content_width = ctx.content_width();
+                let mut lines = if self.is_communication() {
+                    self.communication_header_lines(&theme, muted_collapsed, content_width)
+                } else {
+                    vec![
+                        self.collapsed_line(&theme, muted_collapsed, Some(content_width))
+                            .into(),
+                    ]
+                };
+                if let Some(preview) = &self.communication_preview {
+                    lines.extend(Self::communication_preview_lines(
+                        preview,
+                        content_width,
+                        theme.primary(),
+                        theme.muted(),
+                    ));
+                }
+                BlockOutput { lines }
+            }
             DisplayMode::Truncated | DisplayMode::Expanded => {
                 let mut lines: Vec<BlockLine> =
                     vec![self.collapsed_line(&theme, false, None).into()];
@@ -368,7 +519,7 @@ impl BlockContent for OtherToolCallBlock {
     }
 
     fn next_fold_mode(&self, current: DisplayMode, is_running: bool) -> DisplayMode {
-        if is_running && self.coordination.is_none() {
+        if is_running && self.coordination.is_none() && !self.is_communication() {
             match current {
                 DisplayMode::Truncated => DisplayMode::Expanded,
                 _ => DisplayMode::Truncated,
@@ -382,7 +533,7 @@ impl BlockContent for OtherToolCallBlock {
     }
 
     fn collapse_mode(&self, is_running: bool) -> DisplayMode {
-        if is_running && self.coordination.is_none() {
+        if is_running && self.coordination.is_none() && !self.is_communication() {
             DisplayMode::Truncated
         } else {
             DisplayMode::Collapsed
@@ -491,6 +642,85 @@ mod coordination_tests {
             ordinary.next_fold_mode(DisplayMode::Collapsed, true),
             DisplayMode::Truncated
         );
+    }
+
+    #[test]
+    fn communication_preview_wraps_unicode_to_two_lines() {
+        let lines = OtherToolCallBlock::communication_preview_lines(
+            "请保留消息正文和来源\n第二行内容\n第三行必须截断",
+            16,
+            ratatui::style::Style::default(),
+            ratatui::style::Style::default(),
+        );
+        assert_eq!(lines.len(), 2);
+        let rendered = format!("{lines:?}");
+        assert!(rendered.contains("请保留"), "{rendered}");
+        assert!(rendered.contains('…'), "truncated preview: {rendered}");
+    }
+
+    #[test]
+    fn communication_header_wraps_tool_status_and_preview_at_real_widths() {
+        for width in [24, 40, 80, 8] {
+            let block = OtherToolCallBlock::new(
+                "send_subagent_message → subagent「child-with-a-long-id」",
+                "Delivery status unknown · may have been received",
+            )
+            .with_communication_preview("请保留消息正文和来源\n第二行内容");
+            let mut state = ScrollbackState::new();
+            state.push_block(RenderBlock::ToolCall(ToolCallBlock::Other(block)));
+            let entry = state.entry(0).unwrap();
+            let ctx = entry.context(width, &AppearanceConfig::default(), None);
+            let content_width = ctx.content_width();
+            let output = entry.block.output(&ctx);
+            let lines: Vec<String> = output
+                .lines
+                .iter()
+                .map(|line| {
+                    line.content
+                        .spans
+                        .iter()
+                        .map(|span| span.content.as_ref())
+                        .collect::<Vec<_>>()
+                        .concat()
+                })
+                .collect();
+            let rendered = lines.join("\n");
+            assert!(!lines.is_empty(), "width={width}");
+            assert!(
+                lines.len() <= 6,
+                "communication header and preview grew beyond their row budgets at width={width}: {lines:?}"
+            );
+            for line in &output.lines {
+                let line_width = line
+                    .content
+                    .spans
+                    .iter()
+                    .map(|span| unicode_width::UnicodeWidthStr::width(span.content.as_ref()))
+                    .sum::<usize>();
+                assert!(
+                    line_width <= width as usize,
+                    "width={width}, content_width={content_width}, line={line:?}"
+                );
+            }
+            if width >= 24 {
+                assert!(
+                    rendered.contains("send_subagent_message"),
+                    "tool name missing at width={width}: {rendered}"
+                );
+                assert!(
+                    rendered.contains("subagent"),
+                    "target prefix missing at width={width}: {rendered}"
+                );
+                assert!(
+                    rendered.contains("Delivery") && rendered.contains("unknown"),
+                    "status missing at width={width}: {rendered}"
+                );
+                assert!(
+                    rendered.contains("请保留"),
+                    "preview missing at width={width}: {rendered}"
+                );
+            }
+        }
     }
 }
 

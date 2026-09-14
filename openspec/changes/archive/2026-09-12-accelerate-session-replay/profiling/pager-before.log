@@ -1,0 +1,16 @@
+   Compiling pager v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/pager)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `pager` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 49.04s
+     Running unittests src/lib.rs (target/debug/deps/pager-33b1baf6f767e177)
+
+running 1 test
+test app::acp_handler::tests::reconnect::bounded_replay_text_blocks_and_prompt_measurement ... [replay-bench] turns=128 notifications=1152 handle_total_ms=84.82 handle_max_ms=33.37 frame_total_ms=153.88 frame_max_ms=10.80 input_max_ms=0.61 load_finish_ms=12.64 final_layout_ms=1.15
+[replay-bench] turns=256 notifications=2304 handle_total_ms=100.86 handle_max_ms=0.48 frame_total_ms=297.64 frame_max_ms=4.76 input_max_ms=0.07 load_finish_ms=0.96 final_layout_ms=1.26
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7208 filtered out; finished in 0.72s
+

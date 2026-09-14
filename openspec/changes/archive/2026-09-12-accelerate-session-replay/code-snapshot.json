@@ -1,0 +1,11 @@
+{
+  "note": "Final source snapshot. Shell files match the previous archived batch; pre-existing Git changes are preserved.",
+  "head": "8489761bda66848484c58d059f91dfa9bfbf98ed",
+  "sha256": {
+    "crates/codegen/pager/src/scrollback/state/mod.rs": "b626737b1a5b9d6dfca6fed5f3b4c2dabd02a644142becaaced0dde9a1c784f0",
+    "crates/codegen/pager/src/scrollback/state/layout.rs": "4922c811dbb604228253b3d3ca3e61b8edd724065e8d3bdd96005276740d4f56",
+    "crates/codegen/pager/src/app/acp_handler/tests/reconnect.rs": "57ae008ecafc79ea0abed651ebd5e6243b7c3d9cf41db5d6c796e7c1a8507d30",
+    "crates/codegen/shell/src/session/storage/mod.rs": "78183cf871688a0c373cf74080f572cbde8b3cbedb10330a2475a2d44801e1f6",
+    "crates/codegen/shell/src/agent/mvp_agent/mod.rs": "a952cc3eb1beb3e54333aa6ca9856b3d4df8317b1666b7ae1141ee6ae4a329c0"
+  }
+}

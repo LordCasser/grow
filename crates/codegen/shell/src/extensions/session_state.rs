@@ -57,7 +57,6 @@ fn read_entity_state(
 ) -> std::io::Result<std::collections::HashMap<String, Value>> {
     let session_id = opened.summary().info.id.to_string();
     let validated = opened.validated_timeline(&session_id)?;
-    let timeline_events = validated.events;
     let timeline = validated.timeline;
     let sidebands = validated.sidebands;
     let blobs = read_entity_blobs(opened.directory(), &timeline)?;
@@ -70,7 +69,7 @@ fn read_entity_state(
         ),
         (
             TIMELINE_COLUMN.to_string(),
-            serde_json::to_value(timeline_events)
+            serde_json::to_value(timeline.events())
                 .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?,
         ),
         (

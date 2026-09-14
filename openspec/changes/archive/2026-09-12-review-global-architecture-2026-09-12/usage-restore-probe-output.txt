@@ -1,0 +1,5 @@
+live-first: Ok(true)
+live-conflict: Err(SubagentUsageConflict)
+exact-duplicate: restore=accepted input_tokens=3 output_tokens=2 incomplete=false
+conflicting-duplicate: restore=accepted input_tokens=3 output_tokens=2 incomplete=false
+malformed-settlement: restore=accepted input_tokens=0 output_tokens=0 incomplete=false

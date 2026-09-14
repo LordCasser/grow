@@ -1,0 +1,33 @@
+{
+  "note": "Final integrated working tree, including pre-existing uncommitted source changes. This is a verification snapshot, not a claim that the whole Git diff belongs to this batch.",
+  "head": "8489761bda66848484c58d059f91dfa9bfbf98ed",
+  "sha256": {
+    "crates/codegen/chat-state/src/actor/mod.rs": "3a3e2f5838a2cbb387a2e79c5bbfdec270e91cc5959f93a16588bb2431aa377b",
+    "crates/codegen/chat-state/src/actor/mutations.rs": "2b844b6f4141acf4bcbef2285cd2d7c1bc3752e8bd5cdd54a36cd8acd08cbb5b",
+    "crates/codegen/chat-state/src/actor/state.rs": "b797956b25c0277d50d9ad31e0e05691305991f38b9d30368856e4419b243746",
+    "crates/codegen/chat-state/src/actor/tests.rs": "27a1bad6f15622e3c4c55b6bbc9f21d5ea6a7409a2133e62080a3e74e16c1aed",
+    "crates/codegen/chat-state/src/commands.rs": "1ff98f3b474ad1c99fb417b6ed2056d7d3860bde9b7813933e355d5b7814d1a1",
+    "crates/codegen/pager/src/app/actions.rs": "9aaced8f056e087bf2fb528a5794a737a97a1814d5916e6e9605efff1be8085c",
+    "crates/codegen/pager/src/app/root/dispatch/status.rs": "66ceb02f32ec881cd2ea26ca4bb06b0e86e2a39ef8779c76845a2e34c6b6084c",
+    "crates/codegen/pager/src/app/root/dispatch/task_result.rs": "789c8d15ba691640c427cec5059706a494d582091f7d499a29876dddd0093569",
+    "crates/codegen/pager/src/app/root/dispatch/tests/status.rs": "daf9a4bcd5035f6199333b6efede07fc076def761ff3b1a2f49c22225a4c113b",
+    "crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs": "5cc91966ad23c7fafa8748bd7d5abc91756b7215f60875b2a452ce90a2fe4865",
+    "crates/codegen/pager/src/app/root/effects/mod.rs": "08698ef75a21ef621f56d9a6079555f231e1cbca5212df30cdee21c511f31878",
+    "crates/codegen/pager/tests/pty_e2e/continue_resumes_session_with_history.rs": "c962985c4ceb75f6fe98dd6623fb45908bf592922efc7b274b665ed23b7030a6",
+    "crates/codegen/shell/src/agent/mvp_agent/mod.rs": "a952cc3eb1beb3e54333aa6ca9856b3d4df8317b1666b7ae1141ee6ae4a329c0",
+    "crates/codegen/shell/src/agent/mvp_agent/acp_agent.rs": "4bc40d0e484ecd37483e6a7e60b0da808825ef1df2056680b25ed43742fef946",
+    "crates/codegen/shell/src/agent/subagent/handle_request.rs": "66197d734881a3fc474f026707681b3e9d38bceb54f645127b8129f167865d72",
+    "crates/codegen/shell/src/extensions/repair.rs": "3baf500187741d28e140aceeef76574ff0a5827c49e7afbd9d39996b1205433e",
+    "crates/codegen/shell/src/extensions/session_state.rs": "13a5b43930b02d7c0d231b8d8ada615f294c5adacea8119c387c34ea37405b36",
+    "crates/codegen/shell/src/session/actor/spawn.rs": "e6d4fb8da345db6c2d7119ed2b2d3e0dd0129b9a39219a4e675c2d79c4e5c5f0",
+    "crates/codegen/shell/src/session/actor/tests/subagent_usage_fold_tests.rs": "52aef21ce5e9528acaa245fcbcaeef34f7259908e72710f108779f90f3c06ae1",
+    "crates/codegen/shell/src/session/persistence.rs": "6b7a20a1911aed094d3f538b9091db7ccc07def1312bd41a0163b53c6c8984ac",
+    "crates/codegen/shell/src/session/storage/mod.rs": "78183cf871688a0c373cf74080f572cbde8b3cbedb10330a2475a2d44801e1f6",
+    "crates/codegen/shell/src/session/storage/jsonl/mod.rs": "deb3b195e1c4816eddc579990cbdbc51ecc51982a72207965d4b79bb7da9ecb3",
+    "crates/codegen/shell/src/session/storage/jsonl/tests.rs": "94d3300a3865c56f6ee297bc3ac22388a425117b50c1f961d50eb34a001458c4",
+    "crates/codegen/shell/src/session/testkit/e2e.rs": "2090a5a02c9d46e47b2b566ec35c60b83e2977c6f305700588550e37cbbf0d8f",
+    "crates/codegen/shell/src/session/workflow/store.rs": "c934c9f3c8b42ad67f7d2a3bd09b576d064ba61b9e0bae2b70253dc63594153f",
+    "crates/codegen/shell/tests/session_load_perf.rs": "511767dd515daa31ecaa174796d0c6a1a28a372522545bd8eb01833ba4bb2155",
+    "crates/codegen/shell/tests/test_session_load_memory.rs": "9ce9652d0e7f5900154614739f12e69a8442bce824a46e7d89ccf20a2d3c048f"
+  }
+}

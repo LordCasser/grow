@@ -34,13 +34,29 @@
 
 来源还需要完整的 ACP 结果转换：`ListActiveSessions`、`CoordinationInquiry`、`CoordinationInquiryState` 都输出带 `content` 和 `rawOutput` 的 `ToolCallUpdate`。询问失败时状态为 `Failed`，结果查询成功则仍是 `Completed`，即使查询出来的是一个失败的 inquiry。漏掉这个转换时，模型能读到工具结果，但 TUI 只能看到没有正文的占位工具，不能靠修复双击事件解决。
 
-接收侧按 `(sourcePeerId, InquiryId)` 把开始、审批、结束事件投影到同一条工具样式记录，与运行时的去重范围一致。来源身份和结果以 Timeline 为准，并投影到 `UiNotice.details` 的结构化 JSON 中，TUI 再生成可读正文，不从标题猜测身份。开始是 `Answering session <sourceSessionId>`，成功后原位变成 `Answered session <sourceSessionId>`；失败、拒绝、取消和超时使用各自的终态标题。展开后保留来源、工作目录、问题和回答/错误。这个显示行不进入主 turn 的工具 tracker，也不接收主 turn 的工具 hook，所以主 turn 结束不能顺带结束 sideband 的展示。重载时不重复插入同一个 inquiry，旧开始事件不能覆盖终态；只有历史开始记录时，不把它当作仍在线执行的证明。
+接收侧按 `(sourcePeerId, InquiryId)` 把开始、审批、结束事件投影到同一条工具样式记录，与运行时的去重范围一致。来源身份和结果以 Timeline 为准，并投影到 `UiNotice.details` 的结构化 JSON 中，TUI 再生成可读正文，不从标题猜测身份。跨 Session 协调以 `session <sourceSessionId>` 标识参与方，例如开始是 `Answering session <sourceSessionId>`，成功后原位变成 `Answered session <sourceSessionId>`；直接委派 audit 持久保存 `direction`（`parent_to_child | child_to_parent | peer`）。父 Agent 收到子 Agent 询问时，用 coordinator 核定的子任务名标识参与方，例如 `Answering subagent <taskName>`；子 Agent 收到父 Agent 询问时，显示 `Answering parent agent`，自身任务名保留在详情。任务描述为空时使用子 Agent ID。失败、拒绝、取消和超时复用同一参与方标识。展开后保留来源、工作目录、subagent 任务名（如有）、问题和回答/错误。这个显示行不进入主 turn 的工具 tracker，也不接收主 turn 的工具 hook，所以主 turn 结束不能顺带结束 sideband 的展示。重载时不重复插入同一个 inquiry，旧开始事件不能覆盖终态；只有历史开始记录时，不把它当作仍在线执行的证明。
 
-Minimal 模式的原生终端历史只能追加，不能修改已经打印的行。因此接收侧默认也只展示单行，并且必须等 inquiry 自己的终态再提交到原生历史，不能用“主 Agent 已空闲”推断它完成。执行中的同一行留在 live region，完成后只打印 `Answered` 一次。
+Minimal 模式的原生终端历史只能追加，不能修改已经打印的行。因此询问接收侧保留一条可更新记录，默认显示标题和最多两行问题预览，并且必须等 inquiry 自己的终态再提交到原生历史，不能用“主 Agent 已空闲”推断它完成。执行中的同一行留在 live region，完成后只打印 `Answered` 一次。
 
 Coordination capability、私有 IPC 和 peer manifest schema 现在为 **2**，ACP wire 仍是稳定 **v1**。本次不做旧协调协议兼容，更新后二进制对应的 Grow 进程需要全部重启。
 
 已有运行目录或清单的权限不符合要求时会显式失败，不会自动修改 ACL。需要先确认相关进程已停止，再检查并修复协调运行目录权限；不要把 `active_sessions.json` 当作在线发现数据删除或改写。
+
+## 父子消息与通信展示
+
+行为契约见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md)、[local-coordination](../../openspec/specs/local-coordination/spec.md) 和 [session-timeline](../../openspec/specs/session-timeline/spec.md)。
+
+直接委派的 parent/child 各有自己的 SessionActor。`ask_parent`、`ask_subagent`、`send_subagent_message` 的真实工具开始事件保留工具身份、目标 ID 和完整原始输入。Pager 根据 typed input 或工具身份元数据识别通信工具，在原工具行显示目标、状态、最多两行正文预览，展开保留全文及原始返回值。协调器返回实际参与子任务名和目标 Session ID；同名任务仍由完整身份区分。`ask_parent` 的参与子任务是来源，不能标成目标任务。
+
+`send_subagent_message` 的 `received` 只证明 child inbox 已持久接收。`interrupt=false` 表示下一个安全步骤纳入上下文；`interrupt=true` 表示请求安全中断，不保证不可中断操作已经停止。ACK 不可用或发送后取消时显示投递未知，不自动重发，也不显示已读或子任务完成。跨主 Session 仍只有已有询问协议，没有增加任意发指令入口。
+
+父消息的 `NotificationEvent::Received` 是唯一收件事实。artifact 保存原始正文，ParentMessage source version 为 **2**；模型消费时再加 delegating agent 与非人类授权的来源包装。旧表示版本明确拒绝，不能从自然语言包装猜正文。同一消息 ID 重试必须保持正文和 interrupt 一致。
+
+持久提交后，共用 receipt projector 生成 child 的系统通知。UI notice 不进入模型上下文，不触发第二次 Notification hook，也不抢焦点。NoticeBlock 使用 `parent-message:<receipt ID>` 去重；传输 `eventId` 继续只服务原有事件去重和重连 cursor，不能替换成 receipt ID。父消息是不可变收件事实，Minimal 可追加一次；询问仍等待自己的终态。
+
+消费仅移除 pending 状态。Timeline 的收件索引派生父消息历史引用，cleanup 和启动 sweep 都保留这些正文及共享 hash；无引用 orphan 继续清理。根 Session load 在已有协调状态重发阶段发布收件历史，child 首次打开通过只读、已验证 Timeline 重建通信记录，不依赖 `updates.jsonl`。先到的 Notice 不得让子视图跳过历史重放。正文缺失或 hash 不符时保留收件身份并显示无法恢复正文；该降级不改变未消费消息的严格模型输入校验。
+
+通信正文含图片路径时仍以文本展示，详情沿用现有键盘/双击入口并支持复制；预览按 Unicode 显示宽度截断，状态同时使用文字表达。
 
 ## Windows 特有处理
 

@@ -3987,6 +3987,27 @@ mod tests {
                     .lock()
                     .select_behavior(tool_types::BehaviorId::Goal);
                 super::super::tests::support::begin_test_active_causal_turn(&actor).await;
+                let replay_reasoning = "reasoning from the active step before queued switch";
+                actor.chat_state_handle.push_assistant_response(
+                    sampling_types::ConversationItem::Reasoning(
+                        sampling_types::synthesized_reasoning_item(replay_reasoning),
+                    ),
+                );
+                actor.chat_state_handle.push_assistant_response(
+                    sampling_types::ConversationItem::assistant_tool_calls(vec![
+                        sampling_types::ToolCall {
+                            id: "queued-switch-call".into(),
+                            name: "read_file".into(),
+                            arguments: r#"{"path":"a"}"#.into(),
+                        },
+                    ]),
+                );
+                actor.chat_state_handle.push_tool_result(
+                    sampling_types::ConversationItem::tool_result(
+                        "queued-switch-call",
+                        "done",
+                    ),
+                );
                 let previous = actor.model_route.snapshot();
                 let agent_role_count_before = actor
                     .chat_state_handle
@@ -4008,6 +4029,7 @@ mod tests {
                 let (responds_to, mut response) = tokio::sync::oneshot::channel();
                 let mut selected_entry =
                     crate::agent::config::ModelEntry::baseline("next-wire-model");
+                selected_entry.info.api_backend = sampling_types::ApiBackend::Responses;
                 selected_entry.info.context_window = std::num::NonZeroU64::new(64_000).unwrap();
                 selected_entry.info.inference_idle_timeout_secs = Some(77);
                 selected_entry.info.max_retries = Some(7);
@@ -4107,6 +4129,39 @@ mod tests {
                     "a later Agent rebuild must use the newly committed model window"
                 );
                 assert_eq!(actor.agent.borrow().name(), "step-reviewer");
+                let switched_request = actor
+                    .chat_state_handle
+                    .build_request("queued-switch", vec![], None, None, None)
+                    .await
+                    .unwrap();
+                let switched_wire = serde_json::to_value(
+                    sampling_types::rs::CreateResponse::from(&switched_request),
+                )
+                .unwrap();
+                assert!(
+                    !switched_wire.to_string().contains(replay_reasoning),
+                    "route replacement starts with the default portable projection"
+                );
+                assert_eq!(
+                    actor
+                        .chat_state_handle
+                        .enable_portable_responses_reasoning()
+                        .await,
+                    Some(true)
+                );
+                let recovered_request = actor
+                    .chat_state_handle
+                    .build_request("queued-switch", vec![], None, None, None)
+                    .await
+                    .unwrap();
+                let recovered_wire = serde_json::to_value(
+                    sampling_types::rs::CreateResponse::from(&recovered_request),
+                )
+                .unwrap();
+                assert!(
+                    recovered_wire.to_string().contains(replay_reasoning),
+                    "target-required reasoning must survive the queued switch boundary"
+                );
                 actor.events.emit(Event::LoopStarted {
                     loop_index: actor.events.next_step_index(),
                 });

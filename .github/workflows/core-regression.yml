@@ -33,6 +33,25 @@ jobs:
         with:
           shared-key: core-regression
           cache-on-failure: true
+      - name: Check foundational dependency boundaries
+        run: |
+          python3 - <<'PY'
+          import json
+          import subprocess
+          metadata = json.loads(subprocess.check_output([
+              "cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"
+          ]))
+          forbidden = {
+              "sampling-types": {"tools"},
+              "grow-http": {"workspace", "sampler"},
+              "pager-render": {"workspace"},
+              "update": {"shell"},
+          }
+          packages = {package["name"]: package for package in metadata["packages"]}
+          for name, blocked in forbidden.items():
+              actual = {dependency["name"] for dependency in packages[name]["dependencies"]}
+              assert not actual & blocked, f"{name} must not depend on {sorted(actual & blocked)}"
+          PY
       - name: Run core and presentation regressions
         run: >-
           cargo test --locked --lib

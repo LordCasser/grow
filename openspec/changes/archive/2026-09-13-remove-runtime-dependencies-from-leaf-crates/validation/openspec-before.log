@@ -1,0 +1,22 @@
+✓ spec/behavior-goal
+✓ spec/client-surfaces
+✓ spec/configuration-rules
+✓ spec/context-compaction
+✓ spec/development-workflow
+✓ change/encode-messages-tool-identities
+✓ spec/extension-runtime
+✓ spec/input-admission
+✓ change/inventory-all-crate-features
+✓ change/investigate-sips-process-eperm
+✓ change/keep-session-observation-read-only
+✓ spec/local-coordination
+✓ spec/memory-search
+✓ spec/model-sampling
+✓ change/remove-runtime-dependencies-from-leaf-crates
+✓ change/restore-latest-valid-workflow-runs
+✓ spec/sandbox-boundary
+✓ spec/session-timeline
+✓ spec/tool-authorization
+✓ change/verify-openspec-baseline
+✓ spec/workflow-execution
+Totals: 21 passed, 0 failed (21 items)

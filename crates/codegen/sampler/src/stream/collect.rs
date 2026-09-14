@@ -58,6 +58,7 @@ pub async fn collect_response(
         credential: sampling_types::SentCredential::Unknown,
         usage: None,
         cost_usd_ticks: None,
+        portable_responses_reasoning_required: false,
     })
 }
 

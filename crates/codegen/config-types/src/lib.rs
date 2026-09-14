@@ -7,6 +7,8 @@
 )]
 mod flags;
 pub use flags::*;
+mod client;
+pub use client::*;
 mod memory;
 pub use memory::*;
 mod mcp;

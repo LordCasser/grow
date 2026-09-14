@@ -299,6 +299,27 @@ impl SessionActor {
                 vec![],
                 vec![],
             ),
+            ToolInput::AskParent(_) => (
+                "ask_parent → parent agent".to_owned(),
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            ),
+            ToolInput::AskSubagent(ref inquiry) => (
+                format!("ask_subagent → subagent「{}」", inquiry.subagent_id),
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            ),
+            ToolInput::SendSubagentMessage(ref message) => (
+                format!(
+                    "send_subagent_message → subagent「{}」",
+                    message.subagent_id
+                ),
+                acp::ToolKind::Other,
+                vec![],
+                vec![],
+            ),
             ToolInput::AskSession(ref inquiry) => (
                 format!("ask_session: {}", inquiry.target_session_id),
                 acp::ToolKind::Other,
@@ -338,6 +359,7 @@ impl SessionActor {
         Ok((title, kind, raw_input))
     }
 }
+
 impl SessionActor {
     /// Phase 1: pre-flight (MCP, args, hooks, permission, PlanControl).
     pub(crate) async fn prepare_tool_call(
@@ -478,6 +500,27 @@ impl SessionActor {
         {
             Ok(input) => input,
             Err(err) => {
+                if err.kind == tool_runtime::ToolErrorKind::NotFound {
+                    tracing::error!(
+                        session_id = %self.session_info.id.0,
+                        tool_name = %call.function.name,
+                        model_id = %model_id_str,
+                        error_kind = "tool_not_found",
+                        "tool_error: tool_not_found"
+                    );
+                    self.signals_handle()
+                        .record_tool_failure(&call.function.name);
+                    self.handle_tool_not_executed(
+                        &call.id,
+                        &tool_call_id,
+                        format!(
+                            "Tool `{}` is not available in this request and was not executed. Use an exact tool name from the supplied tool list.",
+                            call.function.name
+                        ),
+                    )
+                    .await?;
+                    return Ok(ToolPreflight::resolved(ToolLoop::NonExistingTool));
+                }
                 self.handle_tool_parse_error(
                     &tool_call_id,
                     &call.id,
@@ -1393,5 +1436,110 @@ impl SessionActor {
             plan_exit_on_success,
         };
         Ok(ToolPreflight::Dispatch(prepared))
+    }
+}
+
+#[cfg(test)]
+mod coordination_tool_start_tests {
+    use super::*;
+
+    async fn assert_tool_start(
+        actor: &SessionActor,
+        call_id: &str,
+        wire_name: &str,
+        input: ToolInput,
+        expected_title_fragments: &[&str],
+        descriptor_access: tool_protocol::ToolAccess,
+        expected_fields: &[(&str, &str)],
+    ) {
+        let expected_raw_input = serde_json::to_value(&input).expect("tool input serializes");
+        let (title, kind, raw_input) = actor
+            .send_tool_call_start(
+                &acp::ToolCallId::new(call_id),
+                wire_name,
+                input,
+                descriptor_access,
+                descriptor_access,
+            )
+            .await
+            .expect("tool start update succeeds");
+
+        for fragment in expected_title_fragments {
+            assert!(
+                title.contains(fragment),
+                "tool title {title:?} should contain {fragment:?}"
+            );
+        }
+        assert!(matches!(kind, acp::ToolKind::Other));
+        assert_eq!(raw_input, expected_raw_input);
+        for (field, expected) in expected_fields {
+            assert_eq!(
+                raw_input[*field].as_str(),
+                Some(*expected),
+                "raw input field {field}"
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn parent_child_tool_starts_keep_real_titles_and_raw_inputs() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+
+                assert_tool_start(
+                    &actor,
+                    "ask-parent-call",
+                    "ask_parent",
+                    ToolInput::AskParent(
+                        tools::implementations::grow_build::task::interaction::AskParentInput {
+                            question: "Which boundary owns this update?".into(),
+                        },
+                    ),
+                    &["ask_parent", "parent"],
+                    tool_protocol::ToolAccess::Read,
+                    &[("question", "Which boundary owns this update?")],
+                )
+                .await;
+
+                assert_tool_start(
+                    &actor,
+                    "ask-subagent-call",
+                    "ask_subagent",
+                    ToolInput::AskSubagent(
+                        tools::implementations::grow_build::task::interaction::AskSubagentInput {
+                            subagent_id: "child-7".into(),
+                            question: "Which files did you inspect?".into(),
+                        },
+                    ),
+                    &["ask_subagent", "child-7"],
+                    tool_protocol::ToolAccess::Read,
+                    &[
+                        ("subagent_id", "child-7"),
+                        ("question", "Which files did you inspect?"),
+                    ],
+                )
+                .await;
+
+                assert_tool_start(
+                    &actor,
+                    "send-subagent-call",
+                    "send_subagent_message",
+                    ToolInput::SendSubagentMessage(
+                        tools::implementations::grow_build::task::interaction::
+                            SendSubagentMessageInput {
+                                subagent_id: "child-7".into(),
+                                message: "Continue at the next safe boundary.".into(),
+                                interrupt: true,
+                            },
+                    ),
+                    &["send_subagent_message", "child-7"],
+                    tool_protocol::ToolAccess::Write,
+                    &[("subagent_id", "child-7")],
+                )
+                .await;
+            })
+            .await;
     }
 }

@@ -1,0 +1,7 @@
+- [x] Add regressions for unknown-tool classification and single generic failure rendering.
+- [x] Preserve `NotFound` as `NonExistingTool` with one accurate failed result and no dispatch.
+- [x] Make generic success/output and failure/error projection mutually exclusive.
+- [x] Add delegation task identity to parent-child inquiry routing and durable audits.
+- [x] Update coordination regressions and developer architecture documentation for task-name titles and peer fallback.
+- [x] Run focused Rust formatting, checks, and tests; record results in `verification.md`.
+- [x] Run strict OpenSpec validation, archive the completed change, and validate current plus archived specs.

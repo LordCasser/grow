@@ -267,7 +267,7 @@ pub struct ScrollbackState {
     appearance: AppearanceConfig,
 
     // Batching
-    /// When > 0, `push()` skips `rebuild_turns()` and `invalidate_layout_cache()`.
+    /// When > 0, `push()` defers turn indexing and appends estimated layouts.
     /// Call `begin_batch()` before bulk insertions and `end_batch()` after.
     batch_depth: u32,
 
@@ -471,6 +471,28 @@ impl ScrollbackState {
             "append_entries_from requires a fresh_continuation sibling (shared id space)"
         );
         self.merge_coordination_rows_from_tail(&mut tail);
+        // Transient receipt snapshots may repeat durable notices already in
+        // the pre-reload transcript. Preserve the original row and native
+        // commit state when joining the cursor tail, just as push_block does.
+        let repeated_notices = tail
+            .entries
+            .iter()
+            .filter_map(|(id, entry)| {
+                let RenderBlock::Notice(notice) = &entry.block else {
+                    return None;
+                };
+                let original = self
+                    .immutable_event_entries
+                    .get(notice.event_id.as_deref()?)?;
+                Some((*id, *original))
+            })
+            .collect::<Vec<_>>();
+        for (tail_id, original_id) in repeated_notices {
+            if tail.is_committed(tail_id) {
+                self.minimal_commit.mark_committed(original_id);
+            }
+            tail.remove_entry(tail_id);
+        }
         let tail_permission_groups = tail
             .entries
             .iter()
@@ -647,9 +669,9 @@ impl ScrollbackState {
     }
     // Batching
 
-    /// Begin a batch of insertions. While batching, `push()` skips
-    /// `rebuild_turns()` and `invalidate_layout_cache()`. Call `end_batch()`
-    /// when done to run them once.
+    /// Begin a batch of insertions. While batching, `push()` defers turn
+    /// indexing and extends existing layouts with cheap height estimates.
+    /// Frames can still measure the visible viewport before `end_batch()`.
     pub fn begin_batch(&mut self) {
         self.batch_depth += 1;
     }
@@ -689,41 +711,31 @@ impl ScrollbackState {
         self.entries.insert(id, entry);
         if self.batch_depth == 0 {
             self.rebuild_turns();
-            // Try to extend the cache incrementally. The new entry's
-            // height/gap/virtual_y are computed and appended in O(1) (plus
-            // one cheap pairwise recompute for the previous entry's gap).
-            // If extension isn't possible (no cache yet, or cache out of
-            // sync), fall back to the full invalidation that the next
-            // prepare_layout would handle in Case 1.
-            let new_idx = self.entries.len() - 1;
-            if !self.extend_layout_cache_with_new_entry(new_idx) {
-                self.gaps_may_be_dirty = true;
-                self.invalidate_layout_cache();
-            } else if self.appearance.scrollback.display.group_max_visible > 0
-                || crate::appearance::cache::load_group_tool_verbs()
-            {
-                // Check if the new entry is groupable+collapsed — it may extend
-                // a group past the truncation threshold, or start or grow a
-                // foldable verb-group run (the verb fold is gated on
-                // `group_tool_verbs`, independent of the truncation threshold).
-                // Mark both dirty so prepare_layout Case 2 fires (Case 3
-                // doesn't check gaps_may_be_dirty).
-                if let Some((_, new_e)) = self.entries.get_index(new_idx)
-                    && new_e.block.is_groupable()
-                    && new_e.display_mode == DisplayMode::Collapsed
-                {
-                    self.gaps_may_be_dirty = true;
-                    self.dirty_heights.insert(id);
-                }
-            }
-            // Successful extend: gaps were updated inline, so we deliberately
-            // do NOT set gaps_may_be_dirty -- that would force the next
-            // streaming chunk's Case 2 path to do a full virtual_y rebuild.
-        } else {
-            // In batch mode: defer to end_batch's full rebuild for safety.
-            // (The cache is bulk-rebuilt once when the batch ends.)
+        }
+        // Keep already measured history across replay frames. During a batch,
+        // append only an estimate; viewport settling handles exact measurement.
+        let new_idx = self.entries.len() - 1;
+        if !self.extend_layout_cache_with_new_entry(new_idx) {
             self.gaps_may_be_dirty = true;
-            self.layout_cache = None;
+            if self.in_batch() {
+                // A missing cache will rebuild on the next frame. Avoid
+                // collecting every old entry into dirty_heights per insertion.
+                self.layout_cache = None;
+            } else {
+                self.invalidate_layout_cache();
+            }
+        } else if self.appearance.scrollback.display.group_max_visible > 0
+            || crate::appearance::cache::load_group_tool_verbs()
+        {
+            // A collapsed tool can extend a truncated or folded group. Mark
+            // heights as well so prepare_layout takes its structural path.
+            if let Some((_, new_e)) = self.entries.get_index(new_idx)
+                && new_e.block.is_groupable()
+                && new_e.display_mode == DisplayMode::Collapsed
+            {
+                self.gaps_may_be_dirty = true;
+                self.dirty_heights.insert(id);
+            }
         }
         self.bump_content_generation();
         id
@@ -1349,14 +1361,49 @@ impl ScrollbackState {
     pub(crate) fn reconcile_minimal_native_frontier_from(&mut self, previous: &Self) {
         let old_entries = previous.entries.values().collect::<Vec<_>>();
         let new_entries = self.entries.values().collect::<Vec<_>>();
+        // Parent receipts are retained independently of the model transcript.
+        // A cache-free load can publish them after ACP replay. Match already
+        // printed receipts by durable ID without treating that movement as a
+        // changed conversation branch; other durable notices keep prefix rules.
+        let committed_receipts = old_entries
+            .iter()
+            .filter_map(|entry| {
+                let RenderBlock::Notice(notice) = &entry.block else {
+                    return None;
+                };
+                let id = notice.event_id.as_deref()?;
+                (id.starts_with("parent-message:")
+                    && previous.minimal_commit.is_committed(entry.id)
+                    && self.immutable_event_entries.contains_key(id))
+                .then_some(id)
+            })
+            .collect::<std::collections::HashSet<_>>();
         let mut old_index = 0;
         let mut committed_prefix = 0;
-        while committed_prefix < new_entries.len() && old_index < old_entries.len() {
-            let old = old_entries[old_index];
+        while committed_prefix < new_entries.len() {
+            let new = new_entries[committed_prefix];
+            if new
+                .block
+                .immutable_event_id()
+                .is_some_and(|id| committed_receipts.contains(id))
+            {
+                committed_prefix += 1;
+                continue;
+            }
+            let Some(old) = old_entries.get(old_index) else {
+                break;
+            };
             if !previous.minimal_commit.is_committed(old.id) {
                 break;
             }
-            let new = new_entries[committed_prefix];
+            if old
+                .block
+                .immutable_event_id()
+                .is_some_and(|id| committed_receipts.contains(id))
+            {
+                old_index += 1;
+                continue;
+            }
             if old.block.replay_equivalent(&new.block) {
                 old_index += 1;
                 committed_prefix += 1;
@@ -1379,6 +1426,11 @@ impl ScrollbackState {
         self.minimal_commit
             .committed
             .extend(self.entries.keys().take(committed_prefix).copied());
+        self.minimal_commit.committed.extend(
+            committed_receipts
+                .iter()
+                .filter_map(|id| self.immutable_event_entries.get(*id).copied()),
+        );
         self.minimal_commit.failed_frontier = None;
         self.minimal_commit.commit_scan_cursor = committed_prefix;
     }
@@ -1869,6 +1921,11 @@ impl ScrollbackState {
 
         // Case 2: Some entries have dirty heights - incremental update
         if !self.dirty_heights.is_empty() {
+            if self.in_batch() {
+                // Batch appends may have extended the cache since the last
+                // frame. Include their estimates before applying height deltas.
+                self.compute_total_height_from_cache();
+            }
             let changes = self.update_dirty_entry_heights(width);
             self.dirty_heights.clear();
 
@@ -2259,6 +2316,58 @@ mod tests {
         assert!(state.is_empty());
         assert_eq!(state.len(), 0);
         assert_eq!(state.turn_count(), 0);
+    }
+
+    #[test]
+    fn parent_message_minimal_reloads_preserve_native_commit_and_new_receipts() {
+        use crate::scrollback::blocks::{NoticeCategory, NoticeTone};
+        let receipt = |id: &str| {
+            RenderBlock::terminal_notice(
+                format!("parent-message:{id}"),
+                NoticeTone::Info,
+                NoticeCategory::Coordination,
+                "Received message from parent agent",
+                Some(format!("Message: {id}")),
+            )
+        };
+        let mut original = ScrollbackState::new();
+        let first = original.push_block(receipt("one"));
+        original.mark_committed(0);
+        let mut full = original.fresh_continuation();
+        let replayed = full.push_block(receipt("one"));
+        let missed = full.push_block(receipt("two"));
+        full.reconcile_minimal_native_frontier_from(&original);
+        assert!(full.is_committed(replayed));
+        assert!(!full.is_committed(missed));
+
+        let mut tail = original.fresh_continuation();
+        tail.push_block(receipt("one"));
+        let new_receipt = tail.push_block(receipt("two"));
+        original.append_entries_from(tail);
+        assert_eq!(original.len(), 2);
+        assert!(original.is_committed(first));
+        assert!(!original.is_committed(new_receipt));
+
+        let mut before = ScrollbackState::new();
+        before.push_block(RenderBlock::agent_message("before receipt"));
+        before.push_block(receipt("moved"));
+        before.push_block(RenderBlock::agent_message("after receipt"));
+        for index in 0..before.len() {
+            before.mark_committed(index);
+        }
+        let mut recovered = before.fresh_continuation();
+        let first_message = recovered.push_block(RenderBlock::agent_message("before receipt"));
+        let last_message = recovered.push_block(RenderBlock::agent_message("after receipt"));
+        let restored_receipt = recovered.push_block(receipt("moved"));
+        let new_receipt = recovered.push_block(receipt("new"));
+        recovered.reconcile_minimal_native_frontier_from(&before);
+        for entry in [first_message, last_message, restored_receipt] {
+            assert!(
+                recovered.is_committed(entry),
+                "cache-free receipt projection must not reprint history"
+            );
+        }
+        assert!(!recovered.is_committed(new_receipt));
     }
 
     #[test]
@@ -3423,28 +3532,182 @@ mod tests {
         );
     }
 
-    /// In batch mode, the cache should still be nullified (existing behavior)
-    /// and the bulk rebuild should happen at end_batch. We're not regressing
-    /// the batch path.
     #[test]
-    fn test_push_in_batch_still_nullifies_cache() {
+    fn batch_append_preserves_measured_history_and_defers_new_measurement() {
         let mut state = ScrollbackState::new();
-        state.push_block(stub_block("a"));
+        state.push_block(RenderBlock::agent_message("existing **history**"));
         state.prepare_layout(80, 20);
-        assert!(state.layout_cache.is_some());
-
         state.begin_batch();
-        state.push_block(stub_block("b"));
+        state.begin_batch();
+        let id = state.push_block(RenderBlock::user_prompt("new prompt"));
+        let cache = state.layout_cache.as_ref().unwrap();
         assert!(
-            state.layout_cache.is_none(),
-            "batch mode should null the cache for safety"
+            cache.measured[0],
+            "prior measurements survive batch appends"
+        );
+        assert!(
+            !cache.measured[1],
+            "insertion must not render off-screen Markdown"
+        );
+        state.prepare_layout(80, 20);
+        assert!(state.layout_cache.as_ref().unwrap().measured[1]);
+        state.end_batch();
+        assert!(state.in_batch());
+        assert_eq!(
+            state.turn_count(),
+            0,
+            "nested batch must defer turn indexing"
         );
         state.end_batch();
-
-        // After end_batch, the next prepare_layout rebuilds the cache.
         state.prepare_layout(80, 20);
-        assert!(state.layout_cache.is_some());
-        assert_eq!(state.layout_cache.as_ref().unwrap().entries.len(), 2);
+        assert_eq!(state.turn_count(), 1);
+        assert_eq!(state.turns[0].prompt_index, state.index_of_id(id).unwrap());
+    }
+
+    #[test]
+    fn batch_dirty_history_is_measured_only_when_visible() {
+        let mut state = ScrollbackState::new();
+        state.begin_batch();
+        let first = state.start_streaming_agent();
+        state.push_chunk_to_agent(first, "first answer");
+        for _ in 0..8 {
+            state.push_block(RenderBlock::agent_message("later history\n\n".repeat(30)));
+        }
+        state.prepare_layout(80, 20);
+        state.push_chunk_to_agent(first, " plus late historical text");
+        state.prepare_layout(80, 20);
+        assert!(
+            !state.layout_cache.as_ref().unwrap().measured[0],
+            "off-screen historical updates must remain estimated during replay"
+        );
+        state.goto_top();
+        state.prepare_layout(80, 20);
+        assert!(
+            state.layout_cache.as_ref().unwrap().measured[0],
+            "scrolling into history must measure its current content"
+        );
+        state.end_batch();
+    }
+
+    #[test]
+    fn batch_streaming_append_keeps_bottom_and_total_height_in_sync() {
+        let mut state = ScrollbackState::new();
+        state.push_block(stub_block("previous history"));
+        state.prepare_layout(80, 20);
+        state.begin_batch();
+        let id = state.start_streaming_agent();
+        state.push_chunk_to_agent(id, &"a line of text\n\n".repeat(100));
+        state.prepare_layout(80, 20);
+        let cache = state.layout_cache.as_ref().unwrap();
+        let expected_height: usize = cache
+            .entries
+            .iter()
+            .map(|entry| entry.height as usize + entry.gap_after as usize)
+            .sum();
+        assert_eq!(state.total_height, expected_height);
+        assert_eq!(
+            state.scroll_offset,
+            expected_height.saturating_sub(20),
+            "history replay must remain pinned to the actual bottom"
+        );
+        state.end_batch();
+        state.prepare_layout(80, 20);
+        assert_eq!(state.total_height, expected_height);
+    }
+
+    /// Compare every frame with a fresh full rebuild, including a growing
+    /// collapsed tool group, hidden thinking, resize, and dirty streaming text.
+    #[test]
+    fn batch_layout_matches_full_rebuild_for_mixed_history() {
+        let _theme = crate::theme::cache::pin_theme();
+        for show_thinking in [false, true] {
+            for group_verbs in [false, true] {
+                crate::appearance::cache::set_show_thinking_blocks(show_thinking);
+                crate::appearance::cache::set_group_tool_verbs(group_verbs);
+                let mut state = ScrollbackState::new();
+                let mut reference = ScrollbackState::new();
+                for target in [&mut state, &mut reference] {
+                    let mut appearance = crate::appearance::AppearanceConfig::default();
+                    appearance.scrollback.display.group_max_visible = 2;
+                    target.set_appearance(appearance);
+                    target.begin_batch();
+                    target.prepare_layout(80, 400);
+                }
+                for step in 0..14 {
+                    for target in [&mut state, &mut reference] {
+                        let block = match step {
+                            0 | 9 => {
+                                RenderBlock::user_prompt("A prompt that wraps at a narrow width")
+                            }
+                            1 | 8 => RenderBlock::agent_message(
+                                "Some **Markdown**\n\nand another paragraph",
+                            ),
+                            6 | 7 => RenderBlock::thinking("thought"),
+                            10 => RenderBlock::agent_message_streaming(),
+                            11 => RenderBlock::stub("after streaming", ratatui::style::Color::Blue),
+                            _ => RenderBlock::read(format!("file-{step}.rs"), None),
+                        };
+                        target.push_block(block);
+                        if step == 11 {
+                            let id = target.entries.get_index(10).unwrap().0.to_owned();
+                            target.push_chunk_to_agent(id, "late streaming text\n\nnext paragraph");
+                        }
+                    }
+                    reference.invalidate_layout_cache();
+                    let width = if step % 4 == 0 { 40 } else { 80 };
+                    state.prepare_layout(width, 400);
+                    reference.prepare_layout(width, 400);
+                    let projection = |target: &ScrollbackState| {
+                        let cache = target.layout_cache.as_ref().unwrap();
+                        let rows: Vec<_> = cache
+                            .entries
+                            .iter()
+                            .map(|entry| {
+                                (
+                                    entry.height,
+                                    entry.gap_after,
+                                    entry.group_header_count,
+                                    entry.group_collapse_header,
+                                    entry.verb_group_header,
+                                )
+                            })
+                            .collect();
+                        let prompts: Vec<_> = cache
+                            .prompt_descriptors
+                            .iter()
+                            .map(|prompt| {
+                                (
+                                    prompt.entry_idx,
+                                    prompt.y_virtual,
+                                    prompt.full_height,
+                                    prompt.min_height,
+                                    prompt.sticky,
+                                )
+                            })
+                            .collect();
+                        (
+                            rows,
+                            cache.virtual_y.clone(),
+                            target.total_height,
+                            target.scroll_offset,
+                            prompts,
+                            format!("{:?}", cache.groups),
+                        )
+                    };
+                    assert_eq!(
+                        projection(&state),
+                        projection(&reference),
+                        "step={step}, show_thinking={show_thinking}, group_verbs={group_verbs}"
+                    );
+                }
+                state.end_batch();
+                reference.end_batch();
+                state.prepare_layout(80, 400);
+                reference.prepare_layout(80, 400);
+                assert_eq!(state.turn_count(), 2);
+                assert_eq!(state.total_height, reference.total_height);
+            }
+        }
     }
 
     /// Pushing into an empty state (no cache yet) should fall through to

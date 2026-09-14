@@ -53,13 +53,14 @@ fn ui_notice_block(
 
 /// Timeline audit identity and transcript presentation are different things:
 /// source tools own their UI; target events update one passive tool-style row.
-fn apply_ui_notice(
+pub(crate) fn apply_ui_notice(
     agent: &mut AgentView,
     mut notice: shell::extensions::notification::UiNotice,
     event_id: Option<String>,
     is_replay: bool,
 ) -> bool {
     use crate::scrollback::blocks::tool::{CoordinationRow, OtherToolCallBlock};
+    use shell::extensions::notification::ParentMessageNotice;
     if notice.tone == shell::extensions::notification::UiNoticeTone::Progress {
         if is_replay
             || agent.session.loading_replay
@@ -82,6 +83,21 @@ fn apply_ui_notice(
     }
     let scrollback = &mut agent.scrollback;
     if notice.category == shell::extensions::notification::UiNoticeCategory::Coordination {
+        if let Some(data) = ParentMessageNotice::from_notice(&notice) {
+            let receipt_id = notice.correlation_id.clone();
+            // The passive live projection intentionally has no transport
+            // eventId. Replays may carry a different cache eventId, so the
+            // Timeline receipt is the only identity shared by both paths.
+            let stable_event_id = format!("parent-message:{receipt_id}");
+            let mut render_block = ui_notice_block(notice, Some(stable_event_id));
+            let RenderBlock::Notice(block) = &mut render_block else {
+                unreachable!()
+            };
+            block.details = Some(data.display_details(&receipt_id));
+            block.set_communication_preview(data.message);
+            scrollback.push_block(render_block);
+            return true;
+        }
         match notice.subject.as_deref() {
             Some("outgoing inquiry" | "outgoing inquiry completed") => return false,
             Some("incoming inquiry" | "inquiry approval" | "inquiry completed") => {
@@ -105,7 +121,8 @@ fn apply_ui_notice(
                     unreachable!()
                 };
                 let mut block = OtherToolCallBlock::new(notice.text, "")
-                    .with_output(notice.details.unwrap_or_default());
+                    .with_output(notice.details.unwrap_or_default())
+                    .with_communication_preview(audit.question.clone());
                 if failed {
                     block.error = Some(block.name.clone());
                 }
@@ -1226,7 +1243,9 @@ fn handle_session_notification_inner(
                     // History restores display, not current request/away state.
                     agent.scrollback.push_block(recap_block);
                 } else {
-                    app.notification_service.focus_tracker.mark_recap_shown(&session_notif.session_id.0);
+                    app.notification_service
+                        .focus_tracker
+                        .mark_recap_shown(&session_notif.session_id.0);
                     apply_recap_block(agent, auto, recap_block);
                 }
                 true
@@ -1493,7 +1512,7 @@ pub(super) fn handle_child_session_notification(
                     .get_mut(child_sid)
                     .is_some_and(|child| {
                         child.dismiss_resolved_interaction(child_sid, &tool_call_id)
-                })
+                    })
         }
         GrowSessionUpdate::SamplingAttempt {
             request_id,

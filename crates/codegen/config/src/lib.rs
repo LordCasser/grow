@@ -12,6 +12,7 @@ pub mod managed_text;
 mod paths;
 pub mod shell;
 pub mod version_overrides;
+pub mod version_policy;
 
 // Only the cross-crate campaign surface is re-exported at the root; the rest stays
 // reachable via the `pub mod` paths for in-crate use without widening the API.
@@ -41,6 +42,7 @@ pub use paths::{
     grow_application_in, grow_home, sessions_cwd_dir, user_grow_home,
 };
 pub use version_overrides::{VersionOverrideError, apply_version_overrides};
+pub use version_policy::VersionPolicy;
 
 /// Parse an env var as a boolean. `None` if unset or unrecognized.
 pub fn env_bool(name: &str) -> Option<bool> {

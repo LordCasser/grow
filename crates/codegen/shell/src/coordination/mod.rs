@@ -2,13 +2,14 @@ mod inquiry;
 mod manifest;
 mod protocol;
 mod runtime;
-pub use inquiry::{InquiryAudit, InquiryEvent};
 pub(crate) use inquiry::InquiryAuthority;
+pub use inquiry::{InquiryAudit, InquiryEvent};
 
 pub use inquiry::{
     APPROVAL_TIMEOUT, CoordinationError, CoordinationErrorCode, INQUIRY_DEADLINE, InboundInquiry,
-    IncomingInquiryAudit, InquiryCancellation, InquiryCancellationReason, InquiryOutcome,
-    InquiryPhase, InquiryState, InquiryStatus, MAX_QUESTION_BYTES, MAX_QUEUED_INQUIRIES,
+    IncomingInquiryAudit, InquiryCancellation, InquiryCancellationReason, InquiryDirection,
+    InquiryOutcome, InquiryPhase, InquiryState, InquiryStatus, MAX_QUESTION_BYTES,
+    MAX_QUEUED_INQUIRIES,
 };
 pub use manifest::{DiscoveredSession, LocalSessionSnapshot, SubagentStats};
 pub(crate) use manifest::{HEARTBEAT_INTERVAL, canonical_cwd};

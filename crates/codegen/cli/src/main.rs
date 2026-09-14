@@ -677,6 +677,7 @@ async fn run_agent_command(
                 auto_update::UpdateRunMode::NonBlocking,
                 false,
                 update_config,
+                shell::util::config::load_config().await.cli.auto_update,
             )
             .await
             .ok();
@@ -759,6 +760,7 @@ async fn run_agent_command(
                 auto_update::UpdateRunMode::NonBlocking,
                 false,
                 &update_config,
+                shell::util::config::load_config().await.cli.auto_update,
             )
             .await
             .ok();
@@ -1613,7 +1615,11 @@ async fn async_main(args: PagerArgs) -> Result<()> {
             let wait_slot = bg_update_wait.clone();
             let (tx, rx) = tokio::sync::oneshot::channel();
             tokio::spawn(async move {
-                let check = auto_update::check_update_background(&update_config).await;
+                let check = auto_update::check_update_background(
+                    &update_config,
+                    shell::util::config::load_config().await.cli.auto_update,
+                )
+                .await;
                 if let Some(mut child) = check.download {
                     *wait_slot.lock().await = Some(tokio::spawn(async move { child.wait().await }));
                 }
@@ -1661,6 +1667,7 @@ async fn finish_update_on_exit(
             auto_update::UpdateRunMode::Blocking,
             false,
             update_config,
+            shell::util::config::load_config().await.cli.auto_update,
         )
         .await
         .is_ok()
@@ -1703,6 +1710,24 @@ fn build_update_config() -> UpdateConfig {
     }
     config
 }
+
+/// Persist an explicit update channel selection before running a check or
+/// installation. The shell config owner keeps the full read-modify-write
+/// semantics (strict section parsing, unknown-key preservation, and atomic
+/// replacement); update only consumes the resulting channel value.
+async fn apply_channel_switch(channel_switch: Option<&str>, update_config: &mut UpdateConfig) {
+    if let Some(channel) = channel_switch
+        && update_config.channel != channel
+    {
+        let _ = shell::util::config::update_config(|config| {
+            config.cli.channel = Some(channel.to_owned());
+        })
+        .await;
+        update_config.channel = channel.to_owned();
+        eprintln!("Switched to {} channel.", channel);
+    }
+}
+
 /// Central gate for auto-update checks; add new suppression rules here,
 /// not at call sites.
 fn should_check_for_updates(no_auto_update_flag: bool) -> bool {
@@ -1771,8 +1796,12 @@ async fn run_update_command(
         if version.is_some() {
             anyhow::bail!("--version cannot be used with --check");
         }
-        auto_update::apply_channel_switch(channel_switch, &mut update_config).await;
-        let status = auto_update::check_update_status(&update_config).await;
+        apply_channel_switch(channel_switch, &mut update_config).await;
+        let status = auto_update::check_update_status(
+            &update_config,
+            shell::util::config::load_config().await.cli.auto_update,
+        )
+        .await;
         auto_update::print_update_status(&status, json)?;
         return Ok(());
     }
@@ -1784,11 +1813,15 @@ async fn run_update_command(
             v
         );
     }
+    apply_channel_switch(channel_switch, &mut update_config).await;
     let installed = auto_update::run_update(
         force_reinstall,
         version.as_deref(),
-        channel_switch,
-        &mut update_config,
+        channel_switch.is_some(),
+        &update_config,
+        shell::util::config::update_config(|st| {
+            st.cli.auto_update = Some(false);
+        }),
     )
     .await?;
     if let Some(installed_version) = installed {

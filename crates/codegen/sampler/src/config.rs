@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::retry::{DEFAULT_MAX_RETRIES, RATE_LIMIT_RETRY_THRESHOLD};
 
+pub use config_types::OriginClientInfo;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum AuthScheme {
@@ -161,15 +163,6 @@ impl Default for RetryPolicy {
             output_delivery: crate::recovery::OutputDelivery::Irreversible,
         }
     }
-}
-
-/// Identity of the client that originated the request, used for
-/// User-Agent rendering. The shell layer composes this with platform
-/// info into a final UA string.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
-pub struct OriginClientInfo {
-    pub product: String,
-    pub version: Option<String>,
 }
 
 #[cfg(test)]

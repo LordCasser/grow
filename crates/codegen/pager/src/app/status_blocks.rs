@@ -178,8 +178,7 @@ pub(crate) fn tasks_block_text(agent: &AgentView) -> String {
     }
 }
 
-/// `/usage` body — per-session token and cost totals, scoped to the ledger's
-/// lifetime: since session start, or since the last `/resume`.
+/// Lifetime aggregate used by both `/usage` and its ordinary status preview.
 pub(crate) fn session_usage_block_text(
     usage: &shell::extensions::notification::PromptUsage,
 ) -> String {
@@ -240,10 +239,42 @@ pub(crate) fn session_usage_block_text(
         rows.push("  Note: usage is incomplete and may under-count; cache-hit rates cover recorded usage only.".to_string());
     }
 
-    join_header_rows(
-        "Session usage (since start or last resume):".to_string(),
-        rows,
-    )
+    join_header_rows("Session usage (lifetime):".to_string(), rows)
+}
+
+/// Detailed `/usage` projection: lifetime aggregate first, then actor
+/// incarnations split at durable cold-resume boundaries.
+pub(crate) fn session_usage_report_block_text(
+    response: &shell::extensions::usage::SessionUsageResponse,
+) -> String {
+    let mut text = session_usage_block_text(&response.usage);
+    if response.segments.len() <= 1 {
+        return text;
+    }
+
+    text.push_str("\n\nBy run:");
+    for segment in &response.segments {
+        let label = if segment.index == 0 {
+            "Initial run".to_string()
+        } else {
+            format!("Resume #{}", segment.index)
+        };
+        let totals = &segment.usage.totals;
+        let qualifier = if segment.usage.usage_is_incomplete {
+            "≥"
+        } else {
+            ""
+        };
+        text.push_str(&format!(
+            "\n  {label}: {qualifier}{} total · {} in / {} out · {} calls · {}",
+            group_thousands(totals.input_tokens.saturating_add(totals.output_tokens)),
+            group_thousands(totals.input_tokens),
+            group_thousands(totals.output_tokens),
+            group_thousands(totals.model_calls),
+            format_cost(totals),
+        ));
+    }
+    text
 }
 
 /// Cache reads are part of full input; output never belongs in this ratio.
@@ -348,6 +379,41 @@ mod tests {
         let text = session_usage_block_text(&usage);
         // Snapshot pins overall content and column alignment.
         insta::assert_snapshot!("session_usage_block_full", text);
+    }
+
+    #[test]
+    fn session_usage_report_lists_resume_segments_after_lifetime_total() {
+        let response = shell::extensions::usage::SessionUsageResponse {
+            usage: PromptUsage {
+                totals: model_row(150, 15, Some(30)),
+                ..Default::default()
+            },
+            segments: vec![
+                shell::extensions::usage::SessionUsageSegment {
+                    index: 0,
+                    started_at_ms: Some(1),
+                    usage: PromptUsage {
+                        totals: model_row(100, 10, Some(20)),
+                        ..Default::default()
+                    },
+                },
+                shell::extensions::usage::SessionUsageSegment {
+                    index: 1,
+                    started_at_ms: Some(2),
+                    usage: PromptUsage {
+                        totals: model_row(50, 5, Some(10)),
+                        usage_is_incomplete: true,
+                        ..Default::default()
+                    },
+                },
+            ],
+        };
+
+        let text = session_usage_report_block_text(&response);
+        assert!(text.starts_with("Session usage (lifetime):"), "{text}");
+        assert!(text.contains("By run:"), "{text}");
+        assert!(text.contains("Initial run: 110 total"), "{text}");
+        assert!(text.contains("Resume #1: ≥55 total"), "{text}");
     }
 
     #[test]

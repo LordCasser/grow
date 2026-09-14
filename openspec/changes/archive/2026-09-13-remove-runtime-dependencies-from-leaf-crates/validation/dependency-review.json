@@ -1,0 +1,41 @@
+{
+  "sampling-types": {
+    "removed": [
+      "tools"
+    ],
+    "added": [
+      "tool-types"
+    ],
+    "internal_reachable_before": 14,
+    "internal_reachable_after": 2
+  },
+  "grow-http": {
+    "removed": [
+      "sampler",
+      "workspace"
+    ],
+    "added": [
+      "config-types"
+    ],
+    "internal_reachable_before": 31,
+    "internal_reachable_after": 8
+  },
+  "pager-render": {
+    "removed": [
+      "workspace"
+    ],
+    "added": [],
+    "internal_reachable_before": 31,
+    "internal_reachable_after": 19
+  },
+  "update": {
+    "removed": [
+      "shell"
+    ],
+    "added": [
+      "config"
+    ],
+    "internal_reachable_before": 42,
+    "internal_reachable_after": 13
+  }
+}

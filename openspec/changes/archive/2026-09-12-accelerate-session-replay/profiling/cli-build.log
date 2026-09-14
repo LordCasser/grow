@@ -1,0 +1,11 @@
+   Compiling shell v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/shell)
+   Compiling pager v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/pager)
+   Compiling cli v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/cli)
+   Compiling update v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/update)
+   Compiling pager-minimal v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/pager-minimal)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `cli` (bin "grow") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 14s

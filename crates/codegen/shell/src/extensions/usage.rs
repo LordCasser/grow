@@ -1,8 +1,7 @@
-//! `grow/session/usage` — cumulative session token/cost as [`PromptUsage`].
+//! `grow/session/usage` — lifetime session usage plus cold-resume segments.
 //!
 //! Projects the in-memory [`chat_state::UsageLedger`] (main-loop + folded
-//! subagent spend). Partial costs are scrubbed (absence ≠ free). Totals reset
-//! when a session is resumed in a new agent process.
+//! subagent spend). Partial costs are scrubbed (absence ≠ free).
 
 use acp_transport::protocol as acp;
 use serde::{Deserialize, Serialize};
@@ -18,9 +17,19 @@ struct SessionUsageRequest {
 }
 
 /// Wire response for `grow/session/usage`.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionUsageResponse {
+    pub usage: PromptUsage,
+    pub segments: Vec<SessionUsageSegment>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionUsageSegment {
+    pub index: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub started_at_ms: Option<i64>,
     pub usage: PromptUsage,
 }
 
@@ -51,8 +60,19 @@ async fn handle_session_usage(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
         .await
         .map_err(|()| acp::Error::internal_error().data("failed to read session usage"))?;
 
+    let segments = ledger
+        .segments
+        .iter()
+        .enumerate()
+        .map(|(index, segment)| SessionUsageSegment {
+            index: index as u64,
+            started_at_ms: segment.started_at_ms,
+            usage: PromptUsage::from(segment),
+        })
+        .collect();
     to_raw_response(&SessionUsageResponse {
         usage: PromptUsage::from(&ledger),
+        segments,
     })
 }
 
@@ -77,17 +97,44 @@ mod tests {
     fn response_serializes_ledger_as_prompt_usage_wire_shape() {
         let mut ledger = UsageLedger::default();
         ledger.record_main_loop_call("grow-build", &usage(100, 10), Some(50), Some(20_000_000));
+        ledger.record_subagent(
+            "child-1",
+            &[(
+                "grow-build".into(),
+                chat_state::UsageTotals {
+                    input_tokens: 30,
+                    output_tokens: 5,
+                    model_calls: 1,
+                    cost_usd_ticks: Some(10_000_000),
+                    ..Default::default()
+                },
+            )],
+            false,
+        );
         let v = serde_json::to_value(&SessionUsageResponse {
             usage: PromptUsage::from(&ledger),
+            segments: ledger
+                .segments
+                .iter()
+                .enumerate()
+                .map(|(index, segment)| SessionUsageSegment {
+                    index: index as u64,
+                    started_at_ms: segment.started_at_ms,
+                    usage: PromptUsage::from(segment),
+                })
+                .collect(),
         })
         .unwrap();
-        assert_eq!(v["usage"]["inputTokens"], 100);
-        assert_eq!(v["usage"]["outputTokens"], 10);
+        assert_eq!(v["usage"]["inputTokens"], 130);
+        assert_eq!(v["usage"]["outputTokens"], 15);
         assert_eq!(v["usage"]["numTurns"], 1);
-        assert_eq!(v["usage"]["costUsdTicks"], 20_000_000);
-        assert_eq!(v["usage"]["modelUsage"]["grow-build"]["inputTokens"], 100);
+        assert_eq!(v["usage"]["costUsdTicks"], 30_000_000);
+        assert_eq!(v["usage"]["modelUsage"]["grow-build"]["inputTokens"], 130);
+        assert!(v["usage"].get("agentUsage").is_none());
+        assert_eq!(v["segments"][0]["usage"]["inputTokens"], 130);
+        assert!(v["segments"][0]["usage"].get("agentUsage").is_none());
         let rt: SessionUsageResponse = serde_json::from_value(v).unwrap();
-        assert_eq!(rt.usage.totals.cost_usd_ticks, Some(20_000_000));
+        assert_eq!(rt.usage.totals.cost_usd_ticks, Some(30_000_000));
     }
 
     #[test]
@@ -97,6 +144,16 @@ mod tests {
         ledger.record_main_loop_call("a", &usage(50, 5), None, None);
         let v = serde_json::to_value(&SessionUsageResponse {
             usage: PromptUsage::from(&ledger),
+            segments: ledger
+                .segments
+                .iter()
+                .enumerate()
+                .map(|(index, segment)| SessionUsageSegment {
+                    index: index as u64,
+                    started_at_ms: segment.started_at_ms,
+                    usage: PromptUsage::from(segment),
+                })
+                .collect(),
         })
         .unwrap();
         assert_eq!(v["usage"]["costUsdTicks"], serde_json::Value::Null);

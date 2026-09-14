@@ -620,6 +620,81 @@ fn session_loaded_drains_pending_first_prompt_to_front() {
         "drained prompt must be cleared"
     );
 }
+
+/// A prompt submitted while session history is replaying stays in the local
+/// FIFO until the authoritative load result closes the replay gate.
+#[test]
+fn loading_replay_preserves_typed_prompt_until_session_loaded() {
+    use crate::app::root::InputOutcome;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    let mut app = test_app();
+    dispatch(
+        Action::LoadSession("sess-loading-draft".into(), None),
+        &mut app,
+    );
+    let id = AgentId(0);
+    let draft = "unique loading draft";
+    assert!(app.agents[&id].session.loading_replay);
+    for ch in draft.chars() {
+        let outcome = app.handle_input(&Event::Key(KeyEvent::new(
+            KeyCode::Char(ch),
+            KeyModifiers::NONE,
+        )));
+        assert!(
+            matches!(outcome, InputOutcome::Changed),
+            "typed character must request a redraw: {outcome:?}"
+        );
+    }
+    assert_eq!(app.agents[&id].prompt.text(), draft);
+
+    let InputOutcome::Action(action) = app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Enter,
+        KeyModifiers::NONE,
+    ))) else {
+        panic!("Enter must submit the current composer");
+    };
+    let effects = dispatch(action, &mut app);
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::SendPrompt { .. })),
+        "loading replay must not send the prompt before SessionLoaded: {effects:?}"
+    );
+    assert_eq!(
+        app.agents[&id]
+            .session
+            .pending_prompts
+            .front()
+            .map(|p| p.text.as_str()),
+        Some(draft),
+        "submitted draft must remain in the pending FIFO during replay"
+    );
+
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            agent_id: id,
+            session_id: acp::SessionId::new("sess-loading-draft"),
+            models: None,
+            code_restored: false,
+            restore_summary: None,
+            foreground: None,
+        }),
+        &mut app,
+    );
+    assert!(!app.agents[&id].session.loading_replay);
+    assert!(
+        app.agents[&id].session.pending_prompts.is_empty(),
+        "drained prompt must leave the local queue"
+    );
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SendPrompt { text, .. } if text == draft
+        )),
+        "SessionLoaded must drain the preserved draft: {effects:?}"
+    );
+}
+
 #[test]
 fn session_loaded_with_no_pending_first_prompt_does_not_enqueue() {
     let mut app = fork_test_app();
@@ -958,12 +1033,8 @@ fn resume_after_load_failed_reissues_load() {
         }),
         &mut app,
     );
-    assert!(!app.agents[&agent_0].session.loading_replay);
-    assert!(app.agents[&agent_0].session.live_status(100).is_none());
-    assert!(
-        app.agents[&agent_0].session.session_id.is_none(),
-        "failed loads must release their eager identity so retry is possible"
-    );
+    assert!(!app.agents.contains_key(&agent_0));
+    assert_eq!(app.active_view, ActiveView::Welcome);
     let count_before = app.agents.len();
     let effects = dispatch(
         Action::LoadSession("fail-then-retry".into(), None),
@@ -976,11 +1047,68 @@ fn resume_after_load_failed_reissues_load() {
                 agent_id,
                 session_id,
                 ..
-            } if *agent_id != agent_0 && session_id == "fail-then-retry"
+            } if *agent_id == AgentId(1) && session_id == "fail-then-retry"
         )),
         "retry after failure must emit LoadSession for a new agent, got {effects:?}"
     );
     assert_eq!(app.agents.len(), count_before + 1);
+}
+
+#[test]
+fn session_load_failed_initial_returns_to_existing_agent() {
+    let mut app = test_app_with_agent();
+    let origin = AgentId(0);
+    let effects = dispatch(
+        Action::LoadSession("missing-session".into(), None),
+        &mut app,
+    );
+    let placeholder = AgentId(1);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::LoadSession { agent_id, .. } if *agent_id == placeholder
+    )));
+    assert_eq!(app.active_view, ActiveView::Agent(placeholder));
+
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionLoadFailed {
+            agent_id: placeholder,
+            session_id: acp::SessionId::new("missing-session"),
+            error: "actor vanished".into(),
+        }),
+        &mut app,
+    );
+
+    assert_eq!(app.active_view, ActiveView::Agent(origin));
+    assert!(app.agents.contains_key(&origin));
+    assert!(!app.agents.contains_key(&placeholder));
+}
+
+#[test]
+fn session_load_failed_initial_returns_to_dashboard() {
+    let mut app = test_app_with_agent();
+    ensure_dashboard_state(&mut app);
+    app.active_view = ActiveView::AgentDashboard;
+    let effects = dispatch(
+        Action::LoadSession("missing-session".into(), None),
+        &mut app,
+    );
+    let placeholder = AgentId(1);
+    assert!(effects.iter().any(|effect| matches!(
+        effect,
+        Effect::LoadSession { agent_id, .. } if *agent_id == placeholder
+    )));
+
+    dispatch(
+        Action::TaskComplete(TaskResult::SessionLoadFailed {
+            agent_id: placeholder,
+            session_id: acp::SessionId::new("missing-session"),
+            error: "actor vanished".into(),
+        }),
+        &mut app,
+    );
+
+    assert_eq!(app.active_view, ActiveView::AgentDashboard);
+    assert!(!app.agents.contains_key(&placeholder));
 }
 #[test]
 fn project_picker_skip_falls_back_to_original_cwd() {
@@ -1631,30 +1759,73 @@ fn build_mode_rapid_plain_fetches_keep_last_write_wins() {
 fn history_picker_queries_content_and_reopen_rejects_old_completions() {
     use crate::views::modal::ActiveModal;
     let mut app = test_app_with_agent();
-    let first = dispatch(Action::ShowSessionPicker { query: "deployment error".into() }, &mut app);
-    let first_seq = first.iter().find_map(|effect| match effect {
-        Effect::DeepSearchSessions { query, seq } if query == "deployment error" => Some(*seq),
-        _ => None,
-    }).expect("query immediately searches conversation content");
-    let second = dispatch(Action::ShowSessionPicker { query: "deployment error".into() }, &mut app);
-    let second_seq = second.iter().find_map(|effect| match effect {
-        Effect::DeepSearchSessions { seq, .. } => Some(*seq), _ => None,
-    }).unwrap();
+    let first = dispatch(
+        Action::ShowSessionPicker {
+            query: "deployment error".into(),
+        },
+        &mut app,
+    );
+    let first_seq = first
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::DeepSearchSessions { query, seq } if query == "deployment error" => Some(*seq),
+            _ => None,
+        })
+        .expect("query immediately searches conversation content");
+    let second = dispatch(
+        Action::ShowSessionPicker {
+            query: "deployment error".into(),
+        },
+        &mut app,
+    );
+    let second_seq = second
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::DeepSearchSessions { seq, .. } => Some(*seq),
+            _ => None,
+        })
+        .unwrap();
     assert!(second_seq > first_seq);
-    dispatch(Action::TaskComplete(TaskResult::DeepSearchResults {
-        results: vec![], seq: first_seq, error: Some("old request".into()),
-    }), &mut app);
+    dispatch(
+        Action::TaskComplete(TaskResult::DeepSearchResults {
+            results: vec![],
+            seq: first_seq,
+            error: Some("old request".into()),
+        }),
+        &mut app,
+    );
     let agent = get_active_agent_mut(&mut app).unwrap();
     assert!(agent.toast.is_none());
-    assert!(matches!(agent.active_modal.as_ref(), Some(ActiveModal::SessionPicker {
+    assert!(
+        matches!(agent.active_modal.as_ref(), Some(ActiveModal::SessionPicker {
         content_loading: true, content_results: None, state, ..
-    }) if state.query() == "deployment error" && state.search_active));
-    dispatch(Action::TaskComplete(TaskResult::DeepSearchResults {
-        results: vec![], seq: second_seq, error: Some("session search is off (config)".into()),
-    }), &mut app);
+    }) if state.query() == "deployment error" && state.search_active)
+    );
+    dispatch(
+        Action::TaskComplete(TaskResult::DeepSearchResults {
+            results: vec![],
+            seq: second_seq,
+            error: Some("session search is off (config)".into()),
+        }),
+        &mut app,
+    );
     let agent = get_active_agent_mut(&mut app).unwrap();
-    assert!(agent.toast.as_ref().unwrap().0.message.contains("session search is off"));
-    assert!(matches!(agent.active_modal.as_ref(), Some(ActiveModal::SessionPicker { content_loading: false, .. })));
+    assert!(
+        agent
+            .toast
+            .as_ref()
+            .unwrap()
+            .0
+            .message
+            .contains("session search is off")
+    );
+    assert!(matches!(
+        agent.active_modal.as_ref(),
+        Some(ActiveModal::SessionPicker {
+            content_loading: false,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -1662,9 +1833,23 @@ fn history_picker_without_query_focuses_search_without_empty_request() {
     use crate::views::modal::ActiveModal;
     let mut app = test_app_with_agent();
     get_active_agent_mut(&mut app).unwrap().active_pane = ActivePane::Scrollback;
-    let effects = dispatch(Action::ShowSessionPicker { query: String::new() }, &mut app);
-    assert_eq!(get_active_agent_mut(&mut app).unwrap().active_pane, ActivePane::Prompt);
-    assert!(!effects.iter().any(|effect| matches!(effect, Effect::DeepSearchSessions { .. })));
-    assert!(matches!(get_active_agent_mut(&mut app).unwrap().active_modal.as_ref(),
-        Some(ActiveModal::SessionPicker { state, .. }) if state.query().is_empty() && state.search_active));
+    let effects = dispatch(
+        Action::ShowSessionPicker {
+            query: String::new(),
+        },
+        &mut app,
+    );
+    assert_eq!(
+        get_active_agent_mut(&mut app).unwrap().active_pane,
+        ActivePane::Prompt
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::DeepSearchSessions { .. }))
+    );
+    assert!(
+        matches!(get_active_agent_mut(&mut app).unwrap().active_modal.as_ref(),
+        Some(ActiveModal::SessionPicker { state, .. }) if state.query().is_empty() && state.search_active)
+    );
 }

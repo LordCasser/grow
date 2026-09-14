@@ -1030,14 +1030,17 @@ impl MvpAgent {
             }
             Err(error) => return Err(crate::session::persistence::io_error_to_acp(&error)),
         };
-        let (raw_contents, end_offset, file_size) = match read_complete_jsonl_snapshot_from_file(
-            updates_file,
-            session_directory.display_path().join("updates.jsonl"),
-        ) {
-            Ok((contents, end_offset, file_size)) if !contents.is_empty() => {
-                (contents, end_offset, file_size)
+        let (raw_contents, end_offset, file_size) = {
+            let _timer = crate::instrumentation_timer!("session.replay.read_snapshot");
+            match read_complete_jsonl_snapshot_from_file(
+                updates_file,
+                session_directory.display_path().join("updates.jsonl"),
+            ) {
+                Ok((contents, end_offset, file_size)) if !contents.is_empty() => {
+                    (contents, end_offset, file_size)
+                }
+                _ => return Ok((0, Default::default())),
             }
-            _ => return Ok((0, Default::default())),
         };
         let mut prepared = {
             let _timer = crate::instrumentation_timer!("session.replay.read_and_filter");

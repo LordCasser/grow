@@ -1,0 +1,1577 @@
+{
+  "captured_at": "2026-09-12T12:37:16.440863+00:00",
+  "head": "8489761bda66848484c58d059f91dfa9bfbf98ed",
+  "baseline_note": "Actual working tree including existing uncommitted changes; file inventory is not a claim of complete behavioral audit. Atlas Focus offsets did not all match source; final locations were verified from disk.",
+  "git_status_excluding_this_audit": [
+    " M crates/codegen/chat-state/src/actor/mod.rs",
+    " M crates/codegen/chat-state/src/actor/mutations.rs",
+    " M crates/codegen/chat-state/src/actor/request_builder.rs",
+    " M crates/codegen/chat-state/src/actor/state.rs",
+    " M crates/codegen/chat-state/src/actor/tests.rs",
+    " M crates/codegen/chat-state/src/commands.rs",
+    " M crates/codegen/chat-state/src/handle.rs",
+    " M crates/codegen/chat-state/src/lib.rs",
+    " M crates/codegen/chat-state/src/usage.rs",
+    " M crates/codegen/pager/src/acp/tracker.rs",
+    " M crates/codegen/pager/src/app/acp_handler/tests/coordination.rs",
+    " M crates/codegen/pager/src/app/acp_handler/tests/session_events.rs",
+    " M crates/codegen/pager/src/app/actions.rs",
+    " M crates/codegen/pager/src/app/agent_view/mod.rs",
+    " M crates/codegen/pager/src/app/agent_view/session.rs",
+    " M crates/codegen/pager/src/app/root/dispatch/mod.rs",
+    " M crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+    " M crates/codegen/pager/src/app/root/dispatch/status.rs",
+    " M crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+    " M crates/codegen/pager/src/app/root/dispatch/tests/session/load.rs",
+    " M crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+    " M crates/codegen/pager/src/app/root/dispatch/tests/turn.rs",
+    " M crates/codegen/pager/src/app/root/dispatch/turn.rs",
+    " M crates/codegen/pager/src/app/root/effects/mod.rs",
+    " M crates/codegen/pager/src/app/session/mod.rs",
+    " M crates/codegen/pager/src/app/snapshots/pager__app__status_blocks__tests__session_usage_block_absent_cost.snap",
+    " M crates/codegen/pager/src/app/snapshots/pager__app__status_blocks__tests__session_usage_block_full.snap",
+    " M crates/codegen/pager/src/app/status_blocks.rs",
+    " M crates/codegen/pager/src/views/usage_modal.rs",
+    " M crates/codegen/sampler/src/events.rs",
+    " M crates/codegen/sampler/src/stream/collect.rs",
+    " M crates/codegen/sampling-types/src/conversation.rs",
+    " M crates/codegen/sampling-types/src/error.rs",
+    " M crates/codegen/shell/src/agent/mvp_agent/acp_agent.rs",
+    " M crates/codegen/shell/src/agent/mvp_agent/subagent_coordinator.rs",
+    " M crates/codegen/shell/src/agent/mvp_agent/subagent_coordinator/interaction.rs",
+    " M crates/codegen/shell/src/agent/mvp_agent/tests.rs",
+    " M crates/codegen/shell/src/coordination/inquiry.rs",
+    " M crates/codegen/shell/src/coordination/runtime.rs",
+    " M crates/codegen/shell/src/extensions/notification.rs",
+    " M crates/codegen/shell/src/extensions/usage.rs",
+    " M crates/codegen/shell/src/session/actor/compaction.rs",
+    " M crates/codegen/shell/src/session/actor/coordination.rs",
+    " M crates/codegen/shell/src/session/actor/model_switch.rs",
+    " M crates/codegen/shell/src/session/actor/tests/client_hooks_tests.rs",
+    " M crates/codegen/shell/src/session/actor/tests/subagent_usage_fold_tests.rs",
+    " M crates/codegen/shell/src/session/actor/tool/preparation.rs",
+    " M crates/codegen/shell/src/session/actor/turn/mod.rs",
+    " M crates/codegen/shell/src/session/actor/turn/sampling.rs",
+    " M crates/codegen/shell/src/session/actor/types.rs",
+    " M crates/codegen/shell/src/session/actor/updates.rs",
+    " M crates/codegen/tools/src/implementations/grow_build/task/coordinator.rs",
+    " M crates/codegen/tools/src/implementations/grow_build/task/coordinator_state.rs",
+    " M crates/codegen/tools/src/implementations/grow_build/task/coordinator_tests.rs",
+    " M docs/architecture/local-coordination.md",
+    " M docs/architecture/session-robustness-repair.md",
+    " M docs/development.md",
+    " M openspec/specs/client-surfaces/spec.md",
+    " M openspec/specs/local-coordination/spec.md",
+    " M openspec/specs/model-sampling/spec.md",
+    " M openspec/specs/session-timeline/spec.md",
+    "?? openspec/changes/archive/2026-09-11-attribute-session-usage-by-agent/",
+    "?? openspec/changes/archive/2026-09-11-fix-tool-and-coordination-presentation/",
+    "?? openspec/changes/archive/2026-09-11-recover-responses-reasoning-replay/",
+    "?? openspec/changes/archive/2026-09-11-repair-session-lifecycle-and-usage/"
+  ],
+  "metadata_command": "cargo metadata --no-deps --format-version 1 --locked",
+  "internal_graph_note": "Union of workspace normal dependencies from manifests, including optional edge; not the resolved crates.io closure or compiled code size. No internal build edges or target-conditioned edges.",
+  "workspace_members": 57,
+  "internal_edges": 197,
+  "crates": [
+    {
+      "crate": "ptyctl",
+      "rust_src_files": 8,
+      "physical_lines_including_tests": 2351,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "ptyctl-cli",
+      "rust_src_files": 6,
+      "physical_lines_including_tests": 849,
+      "internal_normal_dependencies": [
+        "diagnostics",
+        "ptyctl"
+      ],
+      "internal_transitive_dependencies": [
+        "config",
+        "diagnostics",
+        "ptyctl",
+        "tool-types",
+        "tty-utils",
+        "version"
+      ]
+    },
+    {
+      "crate": "diagnostics",
+      "rust_src_files": 16,
+      "physical_lines_including_tests": 5350,
+      "internal_normal_dependencies": [
+        "config",
+        "tool-types"
+      ],
+      "internal_transitive_dependencies": [
+        "config",
+        "tool-types",
+        "tty-utils",
+        "version"
+      ]
+    },
+    {
+      "crate": "config",
+      "rust_src_files": 16,
+      "physical_lines_including_tests": 6078,
+      "internal_normal_dependencies": [
+        "tty-utils",
+        "version"
+      ],
+      "internal_transitive_dependencies": [
+        "tty-utils",
+        "version"
+      ]
+    },
+    {
+      "crate": "tty-utils",
+      "rust_src_files": 3,
+      "physical_lines_including_tests": 1845,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "version",
+      "rust_src_files": 1,
+      "physical_lines_including_tests": 75,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "tool-types",
+      "rust_src_files": 7,
+      "physical_lines_including_tests": 3788,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "acp-transport",
+      "rust_src_files": 10,
+      "physical_lines_including_tests": 3318,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "chat-state",
+      "rust_src_files": 17,
+      "physical_lines_including_tests": 34092,
+      "internal_normal_dependencies": [
+        "compaction",
+        "sampling-types",
+        "token-estimation"
+      ],
+      "internal_transitive_dependencies": [
+        "compaction",
+        "config",
+        "sampling-types",
+        "sandbox",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tty-utils",
+        "version"
+      ]
+    },
+    {
+      "crate": "compaction",
+      "rust_src_files": 14,
+      "physical_lines_including_tests": 2318,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "sampling-types",
+      "rust_src_files": 8,
+      "physical_lines_including_tests": 14252,
+      "internal_normal_dependencies": [
+        "compaction",
+        "tools"
+      ],
+      "internal_transitive_dependencies": [
+        "compaction",
+        "config",
+        "sandbox",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tty-utils",
+        "version"
+      ]
+    },
+    {
+      "crate": "tools",
+      "rust_src_files": 190,
+      "physical_lines_including_tests": 106679,
+      "internal_normal_dependencies": [
+        "config",
+        "sandbox",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tty-utils",
+        "version"
+      ],
+      "internal_transitive_dependencies": [
+        "config",
+        "sandbox",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tty-utils",
+        "version"
+      ]
+    },
+    {
+      "crate": "sandbox",
+      "rust_src_files": 11,
+      "physical_lines_including_tests": 5292,
+      "internal_normal_dependencies": [
+        "config"
+      ],
+      "internal_transitive_dependencies": [
+        "config",
+        "tty-utils",
+        "version"
+      ]
+    },
+    {
+      "crate": "token-estimation",
+      "rust_src_files": 1,
+      "physical_lines_including_tests": 255,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "tool-protocol",
+      "rust_src_files": 4,
+      "physical_lines_including_tests": 813,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "tool-runtime",
+      "rust_src_files": 10,
+      "physical_lines_including_tests": 3004,
+      "internal_normal_dependencies": [
+        "tool-protocol",
+        "tool-types"
+      ],
+      "internal_transitive_dependencies": [
+        "tool-protocol",
+        "tool-types"
+      ]
+    },
+    {
+      "crate": "test-support",
+      "rust_src_files": 14,
+      "physical_lines_including_tests": 8844,
+      "internal_normal_dependencies": [
+        "acp-transport",
+        "tty-utils"
+      ],
+      "internal_transitive_dependencies": [
+        "acp-transport",
+        "tty-utils"
+      ]
+    },
+    {
+      "crate": "test-utils",
+      "rust_src_files": 6,
+      "physical_lines_including_tests": 400,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "codebase-graph",
+      "rust_src_files": 26,
+      "physical_lines_including_tests": 8909,
+      "internal_normal_dependencies": [
+        "paths"
+      ],
+      "internal_transitive_dependencies": [
+        "paths"
+      ]
+    },
+    {
+      "crate": "paths",
+      "rust_src_files": 1,
+      "physical_lines_including_tests": 575,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "crash-handler",
+      "rust_src_files": 5,
+      "physical_lines_including_tests": 1767,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "fast-worktree",
+      "rust_src_files": 36,
+      "physical_lines_including_tests": 22107,
+      "internal_normal_dependencies": [
+        "grow-gix-status",
+        "sqlite-journal",
+        "tty-utils"
+      ],
+      "internal_transitive_dependencies": [
+        "grow-gix-status",
+        "sqlite-journal",
+        "tty-utils"
+      ]
+    },
+    {
+      "crate": "grow-gix-status",
+      "rust_src_files": 1,
+      "physical_lines_including_tests": 588,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "sqlite-journal",
+      "rust_src_files": 1,
+      "physical_lines_including_tests": 779,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "fsnotify",
+      "rust_src_files": 7,
+      "physical_lines_including_tests": 5951,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "tracing-macros",
+      "rust_src_files": 3,
+      "physical_lines_including_tests": 214,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "agent",
+      "rust_src_files": 27,
+      "physical_lines_including_tests": 18645,
+      "internal_normal_dependencies": [
+        "config",
+        "hooks",
+        "token-estimation",
+        "tool-types",
+        "tools",
+        "tty-utils"
+      ],
+      "internal_transitive_dependencies": [
+        "config",
+        "hooks",
+        "sandbox",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tty-utils",
+        "version"
+      ]
+    },
+    {
+      "crate": "hooks",
+      "rust_src_files": 14,
+      "physical_lines_including_tests": 9226,
+      "internal_normal_dependencies": [
+        "config",
+        "tty-utils"
+      ],
+      "internal_transitive_dependencies": [
+        "config",
+        "tty-utils",
+        "version"
+      ]
+    },
+    {
+      "crate": "announcements",
+      "rust_src_files": 1,
+      "physical_lines_including_tests": 515,
+      "internal_normal_dependencies": [
+        "tools"
+      ],
+      "internal_transitive_dependencies": [
+        "config",
+        "sandbox",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tty-utils",
+        "version"
+      ]
+    },
+    {
+      "crate": "auth",
+      "rust_src_files": 4,
+      "physical_lines_including_tests": 200,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "config-types",
+      "rust_src_files": 6,
+      "physical_lines_including_tests": 2531,
+      "internal_normal_dependencies": [
+        "config",
+        "tool-protocol"
+      ],
+      "internal_transitive_dependencies": [
+        "config",
+        "tool-protocol",
+        "tty-utils",
+        "version"
+      ]
+    },
+    {
+      "crate": "grow-http",
+      "rust_src_files": 1,
+      "physical_lines_including_tests": 792,
+      "internal_normal_dependencies": [
+        "auth",
+        "diagnostics",
+        "sampler",
+        "version",
+        "workspace"
+      ],
+      "internal_transitive_dependencies": [
+        "acp-transport",
+        "agent",
+        "auth",
+        "codebase-graph",
+        "compaction",
+        "config",
+        "config-types",
+        "diagnostics",
+        "fast-worktree",
+        "fsnotify",
+        "grow-gix-status",
+        "hooks",
+        "hunk-tracker",
+        "mcp",
+        "paths",
+        "sampler",
+        "sampling-types",
+        "sandbox",
+        "sqlite-journal",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tty-utils",
+        "version",
+        "workspace",
+        "workspace-types"
+      ]
+    },
+    {
+      "crate": "sampler",
+      "rust_src_files": 24,
+      "physical_lines_including_tests": 15011,
+      "internal_normal_dependencies": [
+        "sampling-types",
+        "version"
+      ],
+      "internal_transitive_dependencies": [
+        "compaction",
+        "config",
+        "sampling-types",
+        "sandbox",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tty-utils",
+        "version"
+      ]
+    },
+    {
+      "crate": "workspace",
+      "rust_src_files": 55,
+      "physical_lines_including_tests": 52503,
+      "internal_normal_dependencies": [
+        "acp-transport",
+        "agent",
+        "codebase-graph",
+        "config",
+        "config-types",
+        "diagnostics",
+        "fast-worktree",
+        "fsnotify",
+        "hooks",
+        "hunk-tracker",
+        "mcp",
+        "paths",
+        "sandbox",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tty-utils",
+        "version",
+        "workspace-types"
+      ],
+      "internal_transitive_dependencies": [
+        "acp-transport",
+        "agent",
+        "codebase-graph",
+        "config",
+        "config-types",
+        "diagnostics",
+        "fast-worktree",
+        "fsnotify",
+        "grow-gix-status",
+        "hooks",
+        "hunk-tracker",
+        "mcp",
+        "paths",
+        "sandbox",
+        "sqlite-journal",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tty-utils",
+        "version",
+        "workspace-types"
+      ]
+    },
+    {
+      "crate": "hunk-tracker",
+      "rust_src_files": 17,
+      "physical_lines_including_tests": 12823,
+      "internal_normal_dependencies": [
+        "grow-gix-status"
+      ],
+      "internal_transitive_dependencies": [
+        "grow-gix-status"
+      ]
+    },
+    {
+      "crate": "mcp",
+      "rust_src_files": 6,
+      "physical_lines_including_tests": 9598,
+      "internal_normal_dependencies": [
+        "config",
+        "diagnostics",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tty-utils",
+        "version",
+        "workspace-types"
+      ],
+      "internal_transitive_dependencies": [
+        "config",
+        "diagnostics",
+        "sandbox",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tty-utils",
+        "version",
+        "workspace-types"
+      ]
+    },
+    {
+      "crate": "workspace-types",
+      "rust_src_files": 15,
+      "physical_lines_including_tests": 3562,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "markdown",
+      "rust_src_files": 24,
+      "physical_lines_including_tests": 21260,
+      "internal_normal_dependencies": [
+        "ratatui-textarea"
+      ],
+      "internal_transitive_dependencies": [
+        "ratatui-textarea"
+      ]
+    },
+    {
+      "crate": "ratatui-textarea",
+      "rust_src_files": 12,
+      "physical_lines_including_tests": 12715,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "memory",
+      "rust_src_files": 14,
+      "physical_lines_including_tests": 10639,
+      "internal_normal_dependencies": [
+        "auth",
+        "config-types",
+        "diagnostics",
+        "grow-http",
+        "sqlite-journal",
+        "tools",
+        "version"
+      ],
+      "internal_transitive_dependencies": [
+        "acp-transport",
+        "agent",
+        "auth",
+        "codebase-graph",
+        "compaction",
+        "config",
+        "config-types",
+        "diagnostics",
+        "fast-worktree",
+        "fsnotify",
+        "grow-gix-status",
+        "grow-http",
+        "hooks",
+        "hunk-tracker",
+        "mcp",
+        "paths",
+        "sampler",
+        "sampling-types",
+        "sandbox",
+        "sqlite-journal",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tty-utils",
+        "version",
+        "workspace",
+        "workspace-types"
+      ]
+    },
+    {
+      "crate": "mermaid",
+      "rust_src_files": 6,
+      "physical_lines_including_tests": 1992,
+      "internal_normal_dependencies": [
+        "mermaid-to-svg",
+        "tty-utils"
+      ],
+      "internal_transitive_dependencies": [
+        "dagre_rust",
+        "mermaid-to-svg",
+        "tty-utils"
+      ]
+    },
+    {
+      "crate": "mermaid-to-svg",
+      "rust_src_files": 35,
+      "physical_lines_including_tests": 20876,
+      "internal_normal_dependencies": [
+        "dagre_rust"
+      ],
+      "internal_transitive_dependencies": [
+        "dagre_rust"
+      ]
+    },
+    {
+      "crate": "dagre_rust",
+      "rust_src_files": 24,
+      "physical_lines_including_tests": 4182,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "pager",
+      "rust_src_files": 474,
+      "physical_lines_including_tests": 403452,
+      "internal_normal_dependencies": [
+        "acp-transport",
+        "agent",
+        "announcements",
+        "chat-state",
+        "config",
+        "crash-handler",
+        "diagnostics",
+        "extension-types",
+        "fast-worktree",
+        "markdown",
+        "memory",
+        "mermaid",
+        "pager-render",
+        "plugin-marketplace",
+        "prompt-queue",
+        "ratatui-inline",
+        "ratatui-textarea",
+        "sandbox",
+        "shell",
+        "token-estimation",
+        "tool-protocol",
+        "tool-types",
+        "tools",
+        "tty-utils",
+        "update",
+        "version",
+        "workspace",
+        "workspace-types"
+      ],
+      "internal_transitive_dependencies": [
+        "acp-transport",
+        "agent",
+        "announcements",
+        "auth",
+        "chat-state",
+        "client-support",
+        "codebase-graph",
+        "compaction",
+        "config",
+        "config-types",
+        "crash-handler",
+        "dagre_rust",
+        "diagnostics",
+        "extension-types",
+        "fast-worktree",
+        "fsnotify",
+        "grow-gix-status",
+        "grow-http",
+        "hooks",
+        "hunk-tracker",
+        "markdown",
+        "mcp",
+        "memory",
+        "mermaid",
+        "mermaid-to-svg",
+        "pager-render",
+        "paths",
+        "plugin-marketplace",
+        "prompt-queue",
+        "ratatui-inline",
+        "ratatui-textarea",
+        "sampler",
+        "sampling-types",
+        "sandbox",
+        "shell",
+        "shell-base",
+        "sqlite-journal",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tracing-macros",
+        "tty-utils",
+        "update",
+        "version",
+        "workflow",
+        "workspace",
+        "workspace-types"
+      ]
+    },
+    {
+      "crate": "extension-types",
+      "rust_src_files": 1,
+      "physical_lines_including_tests": 1146,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "pager-render",
+      "rust_src_files": 62,
+      "physical_lines_including_tests": 34126,
+      "internal_normal_dependencies": [
+        "client-support",
+        "config",
+        "diagnostics",
+        "markdown",
+        "paths",
+        "ratatui-inline",
+        "ratatui-textarea",
+        "tools",
+        "tty-utils",
+        "workspace"
+      ],
+      "internal_transitive_dependencies": [
+        "acp-transport",
+        "agent",
+        "client-support",
+        "codebase-graph",
+        "config",
+        "config-types",
+        "diagnostics",
+        "fast-worktree",
+        "fsnotify",
+        "grow-gix-status",
+        "hooks",
+        "hunk-tracker",
+        "markdown",
+        "mcp",
+        "paths",
+        "ratatui-inline",
+        "ratatui-textarea",
+        "sandbox",
+        "sqlite-journal",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tty-utils",
+        "version",
+        "workspace",
+        "workspace-types"
+      ]
+    },
+    {
+      "crate": "client-support",
+      "rust_src_files": 7,
+      "physical_lines_including_tests": 5787,
+      "internal_normal_dependencies": [
+        "config-types",
+        "tools",
+        "tty-utils"
+      ],
+      "internal_transitive_dependencies": [
+        "config",
+        "config-types",
+        "sandbox",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tty-utils",
+        "version"
+      ]
+    },
+    {
+      "crate": "ratatui-inline",
+      "rust_src_files": 7,
+      "physical_lines_including_tests": 3344,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "plugin-marketplace",
+      "rust_src_files": 11,
+      "physical_lines_including_tests": 4496,
+      "internal_normal_dependencies": [
+        "agent",
+        "config",
+        "extension-types",
+        "tty-utils"
+      ],
+      "internal_transitive_dependencies": [
+        "agent",
+        "config",
+        "extension-types",
+        "hooks",
+        "sandbox",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tty-utils",
+        "version"
+      ]
+    },
+    {
+      "crate": "prompt-queue",
+      "rust_src_files": 3,
+      "physical_lines_including_tests": 520,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "shell",
+      "rust_src_files": 347,
+      "physical_lines_including_tests": 275039,
+      "internal_normal_dependencies": [
+        "acp-transport",
+        "agent",
+        "announcements",
+        "chat-state",
+        "client-support",
+        "codebase-graph",
+        "compaction",
+        "config",
+        "config-types",
+        "diagnostics",
+        "extension-types",
+        "fast-worktree",
+        "fsnotify",
+        "grow-http",
+        "hooks",
+        "hunk-tracker",
+        "mcp",
+        "memory",
+        "paths",
+        "plugin-marketplace",
+        "prompt-queue",
+        "sampler",
+        "sampling-types",
+        "sandbox",
+        "shell-base",
+        "sqlite-journal",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tracing-macros",
+        "tty-utils",
+        "version",
+        "workflow",
+        "workspace",
+        "workspace-types"
+      ],
+      "internal_transitive_dependencies": [
+        "acp-transport",
+        "agent",
+        "announcements",
+        "auth",
+        "chat-state",
+        "client-support",
+        "codebase-graph",
+        "compaction",
+        "config",
+        "config-types",
+        "diagnostics",
+        "extension-types",
+        "fast-worktree",
+        "fsnotify",
+        "grow-gix-status",
+        "grow-http",
+        "hooks",
+        "hunk-tracker",
+        "mcp",
+        "memory",
+        "paths",
+        "plugin-marketplace",
+        "prompt-queue",
+        "sampler",
+        "sampling-types",
+        "sandbox",
+        "shell-base",
+        "sqlite-journal",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tracing-macros",
+        "tty-utils",
+        "version",
+        "workflow",
+        "workspace",
+        "workspace-types"
+      ]
+    },
+    {
+      "crate": "shell-base",
+      "rust_src_files": 10,
+      "physical_lines_including_tests": 2642,
+      "internal_normal_dependencies": [
+        "client-support",
+        "config",
+        "tty-utils",
+        "version"
+      ],
+      "internal_transitive_dependencies": [
+        "client-support",
+        "config",
+        "config-types",
+        "sandbox",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tty-utils",
+        "version"
+      ]
+    },
+    {
+      "crate": "workflow",
+      "rust_src_files": 7,
+      "physical_lines_including_tests": 3822,
+      "internal_normal_dependencies": [],
+      "internal_transitive_dependencies": []
+    },
+    {
+      "crate": "update",
+      "rust_src_files": 4,
+      "physical_lines_including_tests": 6324,
+      "internal_normal_dependencies": [
+        "shell",
+        "tools",
+        "tty-utils",
+        "version"
+      ],
+      "internal_transitive_dependencies": [
+        "acp-transport",
+        "agent",
+        "announcements",
+        "auth",
+        "chat-state",
+        "client-support",
+        "codebase-graph",
+        "compaction",
+        "config",
+        "config-types",
+        "diagnostics",
+        "extension-types",
+        "fast-worktree",
+        "fsnotify",
+        "grow-gix-status",
+        "grow-http",
+        "hooks",
+        "hunk-tracker",
+        "mcp",
+        "memory",
+        "paths",
+        "plugin-marketplace",
+        "prompt-queue",
+        "sampler",
+        "sampling-types",
+        "sandbox",
+        "shell",
+        "shell-base",
+        "sqlite-journal",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tracing-macros",
+        "tty-utils",
+        "version",
+        "workflow",
+        "workspace",
+        "workspace-types"
+      ]
+    },
+    {
+      "crate": "pager-pty-harness",
+      "rust_src_files": 30,
+      "physical_lines_including_tests": 10176,
+      "internal_normal_dependencies": [
+        "ptyctl",
+        "test-support",
+        "tty-utils"
+      ],
+      "internal_transitive_dependencies": [
+        "acp-transport",
+        "ptyctl",
+        "test-support",
+        "tty-utils"
+      ]
+    },
+    {
+      "crate": "cli",
+      "rust_src_files": 1,
+      "physical_lines_including_tests": 2791,
+      "internal_normal_dependencies": [
+        "acp-transport",
+        "config",
+        "crash-handler",
+        "diagnostics",
+        "pager",
+        "pager-minimal",
+        "sandbox",
+        "shell",
+        "tty-utils",
+        "update",
+        "version",
+        "workspace"
+      ],
+      "internal_transitive_dependencies": [
+        "acp-transport",
+        "agent",
+        "announcements",
+        "auth",
+        "chat-state",
+        "client-support",
+        "codebase-graph",
+        "compaction",
+        "config",
+        "config-types",
+        "crash-handler",
+        "dagre_rust",
+        "diagnostics",
+        "extension-types",
+        "fast-worktree",
+        "fsnotify",
+        "grow-gix-status",
+        "grow-http",
+        "hooks",
+        "hunk-tracker",
+        "markdown",
+        "mcp",
+        "memory",
+        "mermaid",
+        "mermaid-to-svg",
+        "pager",
+        "pager-minimal",
+        "pager-render",
+        "paths",
+        "plugin-marketplace",
+        "prompt-queue",
+        "ratatui-inline",
+        "ratatui-textarea",
+        "sampler",
+        "sampling-types",
+        "sandbox",
+        "shell",
+        "shell-base",
+        "sqlite-journal",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tracing-macros",
+        "tty-utils",
+        "update",
+        "version",
+        "workflow",
+        "workspace",
+        "workspace-types"
+      ]
+    },
+    {
+      "crate": "pager-minimal",
+      "rust_src_files": 12,
+      "physical_lines_including_tests": 6852,
+      "internal_normal_dependencies": [
+        "pager",
+        "ratatui-inline",
+        "shell",
+        "token-estimation",
+        "version"
+      ],
+      "internal_transitive_dependencies": [
+        "acp-transport",
+        "agent",
+        "announcements",
+        "auth",
+        "chat-state",
+        "client-support",
+        "codebase-graph",
+        "compaction",
+        "config",
+        "config-types",
+        "crash-handler",
+        "dagre_rust",
+        "diagnostics",
+        "extension-types",
+        "fast-worktree",
+        "fsnotify",
+        "grow-gix-status",
+        "grow-http",
+        "hooks",
+        "hunk-tracker",
+        "markdown",
+        "mcp",
+        "memory",
+        "mermaid",
+        "mermaid-to-svg",
+        "pager",
+        "pager-render",
+        "paths",
+        "plugin-marketplace",
+        "prompt-queue",
+        "ratatui-inline",
+        "ratatui-textarea",
+        "sampler",
+        "sampling-types",
+        "sandbox",
+        "shell",
+        "shell-base",
+        "sqlite-journal",
+        "token-estimation",
+        "tool-protocol",
+        "tool-runtime",
+        "tool-types",
+        "tools",
+        "tracing-macros",
+        "tty-utils",
+        "update",
+        "version",
+        "workflow",
+        "workspace",
+        "workspace-types"
+      ]
+    }
+  ],
+  "source_hashes": [
+    {
+      "path": "AGENTS.md",
+      "sha256": "31e4d9085a18042327d403d62de38385876a360521be3856eaca73d62f8f9f41"
+    },
+    {
+      "path": "Cargo.toml",
+      "sha256": "243f70fbfd2571d4cfa3916b153c419540f279a5fb99e39098299bd055af3b90"
+    },
+    {
+      "path": "Cargo.lock",
+      "sha256": "0d34066b76a4114e2e874cf7e078e8ba812772f58b125e3bd9a2bc0e02fb78bb"
+    },
+    {
+      "path": "docs/development.md",
+      "sha256": "b814cfbd264640ee255906c54d0688a233147aefde7dd0a0a05857073d89ec12"
+    },
+    {
+      "path": "docs/architecture/README.md",
+      "sha256": "3a47d4f6aa7eb77decd1fd7c8dffdec9cbcba66f99f59df5e494ca77b0defee7"
+    },
+    {
+      "path": "openspec/README.md",
+      "sha256": "47cee860dc80d3f7b21ed7906ae86bf5a847631d9ed3fa2d8c2c2278c72c5e66"
+    },
+    {
+      "path": "crates/codegen/chat-state/src/actor/state.rs",
+      "sha256": "e5c5f4f71ba8565d5999ea7d94d651267ebfabcab09512f5dae3d4de6099859d"
+    },
+    {
+      "path": "crates/codegen/chat-state/src/actor/mod.rs",
+      "sha256": "bcd1c04576a560a2f502d278829d559c44581fcdf481cd0fb13fd1e371bf3d20"
+    },
+    {
+      "path": "crates/codegen/chat-state/src/actor/mutations.rs",
+      "sha256": "63f4b2eae0b13eb2f7d02d616b97038a810aaf0e83f785f17c3df6011b4d18cb"
+    },
+    {
+      "path": "crates/codegen/chat-state/src/actor/request_builder.rs",
+      "sha256": "5c517e20c4762f31b8528cdb38ee46023566c806ff1d1db5a8f7521401bea86b"
+    },
+    {
+      "path": "crates/codegen/chat-state/src/actor/tests.rs",
+      "sha256": "0adf44ae4615fe3cd1dedce06d0018b5f5df5023f73d0e391634653a95608afc"
+    },
+    {
+      "path": "crates/codegen/chat-state/src/timeline.rs",
+      "sha256": "bea0640c5f711d4c0576c4485742cba70a39d43d7afc4094184c139ca056a852"
+    },
+    {
+      "path": "crates/codegen/chat-state/src/usage.rs",
+      "sha256": "bb2e620f18fce6faf9e8ae54523e52d6c57c57160b91316fb8452685acb8666b"
+    },
+    {
+      "path": "crates/codegen/sampling-types/src/conversation.rs",
+      "sha256": "129777a0f23b78bb49a1fb7626b8aacfa82ca21ac309f82e64d4b9f9d458e80d"
+    },
+    {
+      "path": "crates/codegen/sampling-types/src/types.rs",
+      "sha256": "37155fd9618b80cb761d03596995e596d789e3531b4e3a6ece9e3a5c9da957e6"
+    },
+    {
+      "path": "crates/codegen/sampling-types/Cargo.toml",
+      "sha256": "15b7e515573701b1175327b04cdfe2bf7e33b8f724f185b9d10df428ca28a56b"
+    },
+    {
+      "path": "crates/codegen/grow-http/src/lib.rs",
+      "sha256": "71b08ec05fa25d45febacb27c0bf44493d9c96219c654bb052530d70de96b8a0"
+    },
+    {
+      "path": "crates/codegen/grow-http/Cargo.toml",
+      "sha256": "9c560d2968b7f5a52f22da13f4deaaf5d0a70625271aaa42a4b237d2bc708d26"
+    },
+    {
+      "path": "crates/codegen/update/Cargo.toml",
+      "sha256": "caaf3fa1d0ec2fa94b8f7a008d2b8b9ce02c7aad1f6447a8cc6003bfe23e3e7c"
+    },
+    {
+      "path": "crates/codegen/update/src/auto_update.rs",
+      "sha256": "ecba4034ba5f8371321dae6578b1d2f22c11226792dd69cfba1a35804278e5f5"
+    },
+    {
+      "path": "crates/codegen/update/src/version_policy.rs",
+      "sha256": "885df7342ee543229ca495696d4a49154e26ca14b1888d0ba684698c66a50ec7"
+    },
+    {
+      "path": "crates/codegen/config/src/paths.rs",
+      "sha256": "a7c5fdaf83f4743c4af5f837c75f47a2b0991c793b90e4a0bce54857f6acb903"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/actor/mod.rs",
+      "sha256": "ed2032c46682a78903b05970a26d1faf9b7bd3069956f2e85faf926ba2a0a311"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/actor/turn/sampling.rs",
+      "sha256": "cca0f6343d2d11bd1a5fbfeb6dc9c77f3cbdbb3cb26f1dc84a79f41343de8504"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/actor/goal_support.rs",
+      "sha256": "ca61000102c269830d4b21a627bbb843e66e724a8cb7f0175065894180b0b542"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/storage/jsonl/mod.rs",
+      "sha256": "1cdbe48e533025c57ea3b67f41dec4d34d134bd1a24b953d5da41f7f4e914efc"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/storage/jsonl/tests.rs",
+      "sha256": "eea5c5cfcab07001190cea03d31484c2c1bd4b14e664e783e966c2b17f7e83b5"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/workflow/store.rs",
+      "sha256": "e1011bcfd1e6f88611322f0f8f9fc963ceab41f123bb88d004191fe94149ceb0"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/workflow/manager.rs",
+      "sha256": "2c69e0270cc984047178eadc400cdbb6f8226a2818a583d70dd76571540fd8c8"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/workflow/host_service.rs",
+      "sha256": "1bac46981bbc4e3294c2c7b31128df2fb50971e8ed451892dd4ebfdfc81b6140"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/subagent_capability.rs",
+      "sha256": "994b65d3873e3a93d5c224bdb56aa816f8d3bb76c621f8af6060545c24fc0f40"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/actor/tool/authorization.rs",
+      "sha256": "44dcb53bebedd7281dffcf5cd493fa398a71dc06032fd101966d443341fb6cc5"
+    },
+    {
+      "path": "crates/codegen/pager/src/app/root/mod.rs",
+      "sha256": "50db5f20b8525b7ccb756cb2e4a125910ea5afb9c5d0b3cef6687341d9ac8d04"
+    },
+    {
+      "path": "crates/codegen/pager/src/app/root/dispatch/status.rs",
+      "sha256": "97c8e3c2d52ed3f12035da263d9baeefd3602ba466f6f4b6e18f978013daeccf"
+    },
+    {
+      "path": "crates/codegen/pager/src/app/root/dispatch/ctx.rs",
+      "sha256": "f65f5a3dfc942e8c1637f2c9ab0572774c859d4b385dabed9e16fb2eb3ee2853"
+    },
+    {
+      "path": "crates/codegen/pager/src/app/root/dispatch/task_result.rs",
+      "sha256": "97af3706c8d79eb2c3d269de1d8b7ac88b89c553db87871fb165007f7eb60c71"
+    },
+    {
+      "path": "crates/codegen/pager/src/app/root/effects/mod.rs",
+      "sha256": "4da06b31dd1fdb84b45c30fc1aef920fabe8affc6399ce4da36d1557e1c96711"
+    },
+    {
+      "path": "crates/codegen/pager/src/app/root/dispatch/tests/status.rs",
+      "sha256": "4637208a84f37a6834e4d9731aef6d499867aafb01b0c9caaf809de6c2bdd55e"
+    },
+    {
+      "path": "crates/codegen/pager/src/app/actions.rs",
+      "sha256": "607e1253073b993722ede3eb4890b4f77001d2a6fd18a2dbcae95f99830d7541"
+    },
+    {
+      "path": "crates/codegen/pager-render/src/appearance/permission_cursor.rs",
+      "sha256": "b269d4e18c37261570be55b0fbce2d916dde9ac7dbc38b88286f5454cb03cc1a"
+    },
+    {
+      "path": "crates/codegen/pager-render/Cargo.toml",
+      "sha256": "1e1be4e589c74a845901d15e4ad0ab37536ba9d088d5373d5931bbb87d86761d"
+    },
+    {
+      "path": "crates/codegen/tools/src/types/definition.rs",
+      "sha256": "e144e2dbf6faa377f5c738ab522ef8d39c7f6f0a7951fd932fa4fbe5f0cf0ab2"
+    },
+    {
+      "path": "crates/codegen/tools/src/types/resources.rs",
+      "sha256": "1983af0956f29aee9a595807d616b32b8bdc228e0f85327a843bb3012d7e7e83"
+    },
+    {
+      "path": "crates/codegen/workspace/src/permission/prompter.rs",
+      "sha256": "43f9e067570cd9c41c1484cc881cd6607f049bd9f255f30150621d4e23e97f63"
+    },
+    {
+      "path": "crates/codegen/workspace/src/permission/types.rs",
+      "sha256": "881543ec00dcf95dcb74931c595ec0be14e67f50532a9e1a30c9aa0597b80380"
+    },
+    {
+      "path": "crates/codegen/workflow/src/journal.rs",
+      "sha256": "4455633c2a2378377f6154cbfc4365f22d1ed57a08ba80c686f1a2a63903518c"
+    },
+    {
+      "path": "crates/codegen/memory/src/search.rs",
+      "sha256": "0df663a2fbac7bad9e6852bfa35e8a90d50c6521498a3d0f667fef9d50473ddc"
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "sha256": "3dcba37a5dff94df8ad1b328619b9e25a7d2222c636c367e033fa66ab9ddf819"
+    },
+    {
+      "path": ".github/workflows/build-one.yml",
+      "sha256": "58b2cea3cad76bef7e3f3a222882ce51547295766905d68afbd12964b3522147"
+    },
+    {
+      "path": ".github/workflows/windows-session-storage.yml",
+      "sha256": "715775a70aab8a9527d42163a7b3b14123f3c400c048928282bd35abb2584025"
+    },
+    {
+      "path": ".github/workflows/openspec.yml",
+      "sha256": "34b944146be987d7b3ecc3910de112bf844f0db523f0bc4b871786a8197778cf"
+    },
+    {
+      "path": ".github/workflows/core-regression.yml",
+      "sha256": "031838c6d239f2ecf53c3470d1c32974e208237222648dab225dbd16abbb2081"
+    },
+    {
+      "path": ".github/workflows/local-coordination.yml",
+      "sha256": "ae82352e4684d9c759422dc36d42eeeba8f350858c7f1dea26a7a62ceedce92b"
+    },
+    {
+      "path": "openspec/specs/memory-search/spec.md",
+      "sha256": "42aebf3fed5e172fa5a66a79362849dda7258c25b33b60285f0bb3a40021dd99"
+    },
+    {
+      "path": "openspec/specs/sandbox-boundary/spec.md",
+      "sha256": "3c6050b78bf4b7d81062491be476eb36c909202d09ffb709c640bee9a97a1a05"
+    },
+    {
+      "path": "openspec/specs/configuration-rules/spec.md",
+      "sha256": "316468f4f600bcf5226c0b6fe1cf4b04869920af690db5667826bb8bb9c39c76"
+    },
+    {
+      "path": "openspec/specs/local-coordination/spec.md",
+      "sha256": "9a825293d8a4b428432d1cf7476ca648dca2bf4ce2b2811162b1f74b7626512c"
+    },
+    {
+      "path": "openspec/specs/workflow-execution/spec.md",
+      "sha256": "fce36d107db26755c61d88783a88d4a59a2d7196e733e28f132e8a0c6f95ffcf"
+    },
+    {
+      "path": "openspec/specs/extension-runtime/spec.md",
+      "sha256": "62ac7b7200ba109d6ee219ed763ad515ddbe571d905ad51fe087719fef0bf241"
+    },
+    {
+      "path": "openspec/specs/development-workflow/spec.md",
+      "sha256": "d150e7a001880ddb7be8dac503e93d7db8cc6c22a6997c9846ff6666e4d12cde"
+    },
+    {
+      "path": "openspec/specs/behavior-goal/spec.md",
+      "sha256": "b8dce89ff2d21667a5016520aafcd04740159f76b389f387259ef4cefb565e91"
+    },
+    {
+      "path": "openspec/specs/model-sampling/spec.md",
+      "sha256": "f2b3ae69249bdbfa6dc6755048f1803bed0f3aa0d5fae2f3a95a67282a4c4e4b"
+    },
+    {
+      "path": "openspec/specs/tool-authorization/spec.md",
+      "sha256": "0c877bb8fd02aaef4cf3b815035d27a0dd258da1a05a8cc7647f4c994466d9e8"
+    },
+    {
+      "path": "openspec/specs/input-admission/spec.md",
+      "sha256": "7bf53300245aee3221289fe8d13cb9eef9101869c3ba1164cf7ce1cf1c9ad9e4"
+    },
+    {
+      "path": "openspec/specs/context-compaction/spec.md",
+      "sha256": "7aaa1928c007ae7d4ef841e80d0fee2a02202d47b8cd6ecb11a5de0d9d9579a0"
+    },
+    {
+      "path": "openspec/specs/session-timeline/spec.md",
+      "sha256": "fc39d169d171ec3033e77accce3d4f856ab10b1bbcec5a498bf5da494c53772a"
+    },
+    {
+      "path": "openspec/specs/client-surfaces/spec.md",
+      "sha256": "035810016ac09ff20a1d61fc4fa532f7ce1168e58c92287393c91b0a52d940d2"
+    },
+    {
+      "path": "crates/codegen/pager/src/app/root/dispatch/queue.rs",
+      "sha256": "adf708ee65d852e4da51125b04ce6850d995bf08c69cb45500c16903eca5008c"
+    },
+    {
+      "path": "crates/codegen/pager/src/app/root/dispatch/session/load.rs",
+      "sha256": "63e4a91c1732faff1fa9ee8409e2f525cf0a04828cd1fab5e2d16788adf3c9cf"
+    },
+    {
+      "path": "crates/codegen/pager/src/app/root/event_loop.rs",
+      "sha256": "e5c06ca14c390d9c73bb08dddc97efb30d02f659be5c16ab029a64ecbd101a1d"
+    },
+    {
+      "path": "crates/codegen/pager/src/scrollback/state/mod.rs",
+      "sha256": "a1379a9660cd4cd04bb1accfce6b58266bb7779b1b00b50b433fb17364ab629f"
+    },
+    {
+      "path": "crates/codegen/shell/src/agent/mvp_agent/acp_agent.rs",
+      "sha256": "7897adae855025c891048a2abfd91ac270ae17f5c1e14d278063b8c5339cb4f8"
+    },
+    {
+      "path": "crates/codegen/shell/src/agent/mvp_agent/mod.rs",
+      "sha256": "a6780902ea620396dc985e22386f50351ec13305e67787f3c61c1d2de1d01e9e"
+    },
+    {
+      "path": "crates/codegen/shell/src/session/actor/spawn.rs",
+      "sha256": "0eca4469f47e52b39f88aa33c5bb405e1c1da76aa9f3a9974642837fb4c3566b"
+    },
+    {
+      "path": "crates/codegen/shell/tests/session_load_perf.rs",
+      "sha256": "002dfc26ecac1b99472bfc8eb8cfe112afaf5699a9c25d668d0df44c8c16be09"
+    }
+  ],
+  "tests": {
+    "chat_state": {
+      "passed": 480,
+      "ignored": 1
+    },
+    "sampler": {
+      "passed": 241,
+      "ignored": 0
+    },
+    "sampling_types": {
+      "passed": 276,
+      "ignored": 0
+    },
+    "workflow": {
+      "passed": 65,
+      "ignored": 0
+    }
+  },
+  "disk_observation": {
+    "available": "87 GiB",
+    "target_size": "6.2 GiB",
+    "note": "Measured after core validation, not a before/after growth measurement; no original caches removed."
+  },
+  "additional_evidence_note": "Added resume/UI/CI files after user clarified delayed interaction and delayed full loading. All pre-existing source hashes were unchanged at this verification.",
+  "usage_restore_probe": {
+    "source": "usage-restore-probe.rs",
+    "output": "usage-restore-probe-output.txt",
+    "exit_code": 0,
+    "calls_provider": false,
+    "storage": "in-memory Timeline, NullTimelinePersistence",
+    "finding": "Conflicting child settlements and malformed known settlement payloads are accepted by restore; live rejects conflicting child settlement."
+  },
+  "main_specs": {
+    "capabilities": 14,
+    "requirement_heading_count": 314,
+    "note": "Heading count is not scenario coverage."
+  },
+  "final_document_checks": {
+    "captured_at": "2026-09-12T12:58:48.636926+00:00",
+    "source_hashes_unchanged": 75,
+    "markdown_local_links_checked": 47,
+    "status_additions_over_baseline": [
+      " M openspec/backlog.md",
+      "?? openspec/changes/archive/2026-09-12-review-global-architecture-2026-09-12/"
+    ],
+    "validation_summaries": {
+      "before": "Totals: 18 passed, 0 failed (18 items)",
+      "after": "Totals: 17 passed, 0 failed (17 items)",
+      "archived": "Totals: 322 passed, 1 failed (323 items)",
+      "archived-final": "Totals: 323 passed, 0 failed (323 items)"
+    },
+    "product_implementation": "not started; awaits user approval"
+  }
+}

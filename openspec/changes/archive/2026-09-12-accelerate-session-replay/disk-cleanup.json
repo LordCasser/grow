@@ -1,0 +1,81 @@
+{
+  "baseline_time": 1789224963.265721,
+  "cleanup_time": 1789226387.879252,
+  "policy": "Only new top-level incremental directories for crates built/tested in this task; baseline directories and all binaries/rlibs preserved. No Cargo/rustc process running.",
+  "removed": [
+    {
+      "path": "target/debug/incremental/pager_minimal-326mbziw73hdy",
+      "allocated_kib": 24152,
+      "birthtime": 1789226313.5895534
+    },
+    {
+      "path": "target/debug/incremental/trace_classify-1tuzbm0hcg2jr",
+      "allocated_kib": 11916,
+      "birthtime": 1789225915.3024163
+    },
+    {
+      "path": "target/debug/incremental/shell-2o6rfpj4lh64y",
+      "allocated_kib": 1272992,
+      "birthtime": 1789226246.9676566
+    },
+    {
+      "path": "target/debug/incremental/shell-1phqeymcgt7cn",
+      "allocated_kib": 1278940,
+      "birthtime": 1789225844.3877335
+    },
+    {
+      "path": "target/debug/incremental/update-3e8meq3k01zhl",
+      "allocated_kib": 42760,
+      "birthtime": 1789226286.3128934
+    },
+    {
+      "path": "target/debug/incremental/pager-1uuky4fazrrzv",
+      "allocated_kib": 1884136,
+      "birthtime": 1789224964.6440146
+    },
+    {
+      "path": "target/debug/incremental/update-2w3mr2jl5jqem",
+      "allocated_kib": 79528,
+      "birthtime": 1789225307.4275868
+    },
+    {
+      "path": "target/debug/incremental/grow-1kavvl9ujjl3q",
+      "allocated_kib": 63236,
+      "birthtime": 1789226316.492454
+    },
+    {
+      "path": "target/debug/incremental/test_sampling_server-36mhkhpb5k7xx",
+      "allocated_kib": 23700,
+      "birthtime": 1789225912.5786452
+    },
+    {
+      "path": "target/debug/incremental/shell-1epxcrn8bqrkn",
+      "allocated_kib": 1329036,
+      "birthtime": 1789225844.3407526
+    },
+    {
+      "path": "target/debug/incremental/shell-1zesty6c7h5od",
+      "allocated_kib": 2385284,
+      "birthtime": 1789225267.717742
+    },
+    {
+      "path": "target/debug/incremental/pager-1ahob7hjknhiv",
+      "allocated_kib": 632748,
+      "birthtime": 1789226288.3654768
+    },
+    {
+      "path": "target/debug/incremental/shell-13603hiyxizn7",
+      "allocated_kib": 1951412,
+      "birthtime": 1789225641.6548994
+    },
+    {
+      "path": "target/debug/incremental/session_load_perf-3mv2eomh76akz",
+      "allocated_kib": 65712,
+      "birthtime": 1789225919.3803904
+    }
+  ],
+  "preserved_directory_count": 36,
+  "allocated_kib_removed": 11045552,
+  "completed": true,
+  "disk_free_bytes_after": 60569792512
+}

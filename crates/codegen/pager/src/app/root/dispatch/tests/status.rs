@@ -2,6 +2,13 @@
 
 use super::*;
 
+fn session_usage_response() -> shell::extensions::usage::SessionUsageResponse {
+    shell::extensions::usage::SessionUsageResponse {
+        usage: shell::extensions::notification::PromptUsage::default(),
+        segments: Vec::new(),
+    }
+}
+
 /// Regression (leader-mode turn-end race): when this client is briefly Idle
 /// (`is_turn_running() == false`, `current_prompt_id` cleared) but the server
 /// still has queued prompts — visible as a non-empty `shared_queue` mirror —
@@ -469,7 +476,7 @@ fn modal_fill_writes_nothing_to_scrollback() {
         TaskResult::SessionUsageComplete {
             agent_id: AgentId(0),
             session_id: acp::SessionId::new("test-session".to_string()),
-            usage: Box::new(shell::extensions::notification::PromptUsage::default()),
+            response: Box::new(session_usage_response()),
             nonce,
         },
         &mut app,
@@ -477,6 +484,8 @@ fn modal_fill_writes_nothing_to_scrollback() {
     dispatch_task_result(
         TaskResult::ContextInfoComplete {
             agent_id: AgentId(0),
+            session_id: acp::SessionId::new("test-session"),
+            session_binding_epoch: 0,
             info: Box::new(session_info_response()),
             nonce,
         },
@@ -540,6 +549,8 @@ fn minimal_mode_commits_scrollback_blocks() {
     dispatch_task_result(
         TaskResult::ContextInfoComplete {
             agent_id: AgentId(0),
+            session_id: acp::SessionId::new("test-session"),
+            session_binding_epoch: 0,
             info: Box::new(session_info_response()),
             nonce: 0,
         },
@@ -553,7 +564,7 @@ fn minimal_mode_commits_scrollback_blocks() {
         TaskResult::SessionUsageComplete {
             agent_id: AgentId(0),
             session_id: acp::SessionId::new("test-session".to_string()),
-            usage: Box::new(shell::extensions::notification::PromptUsage::default()),
+            response: Box::new(session_usage_response()),
             nonce: 0,
         },
         &mut app,
@@ -564,6 +575,191 @@ fn minimal_mode_commits_scrollback_blocks() {
         "got: {:?}",
         last_system_text(&app, AgentId(0))
     );
+}
+
+#[test]
+fn context_info_result_is_fenced_before_live_or_modal_projection() {
+    use crate::views::modal::ActiveModal;
+    use crate::views::usage_modal::UsageTabData;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let stale_epoch = app.agents[&id].session_binding_epoch;
+    let nonce = open_modal_nonce(&mut app, Action::ShowContextInfo);
+    let new_session = acp::SessionId::new("new-session");
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .bind_session_id(new_session.clone());
+    let before_live = serde_json::to_value(&app.agents[&id].session.context_state).unwrap();
+
+    // The old request arrives after the view is bound to another session.
+    let _ = dispatch_task_result(
+        TaskResult::ContextInfoComplete {
+            agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            session_binding_epoch: stale_epoch,
+            info: Box::new(session_info_response()),
+            nonce,
+        },
+        &mut app,
+    );
+    assert_eq!(
+        serde_json::to_value(&app.agents[&id].session.context_state).unwrap(),
+        before_live
+    );
+    match &app.agents[&id].active_modal {
+        Some(ActiveModal::Usage { state }) => {
+            assert!(matches!(state.context, UsageTabData::Loading));
+        }
+        _ => panic!("usage modal should remain open"),
+    }
+
+    // A current zero-nonce result updates live state and the scrollback route.
+    app.agents.get_mut(&id).unwrap().active_modal = None;
+    let current_epoch = app.agents[&id].session_binding_epoch;
+    let before_scrollback = agent_scrollback_len(&app);
+    let _ = dispatch_task_result(
+        TaskResult::ContextInfoComplete {
+            agent_id: id,
+            session_id: new_session,
+            session_binding_epoch: current_epoch,
+            info: Box::new(session_info_response()),
+            nonce: 0,
+        },
+        &mut app,
+    );
+    assert!(app.agents[&id].session.context_state.is_some());
+    assert_eq!(agent_scrollback_len(&app), before_scrollback + 1);
+}
+
+#[test]
+fn context_info_same_session_reopen_fences_old_success_and_failure() {
+    use crate::views::modal::ActiveModal;
+    use crate::views::usage_modal::UsageTabData;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let old_epoch = app.agents[&id].session_binding_epoch;
+    let old_nonce = open_modal_nonce(&mut app, Action::ShowContextInfo);
+    app.agents.get_mut(&id).unwrap().active_modal = None;
+    let new_nonce = open_modal_nonce(&mut app, Action::ShowContextInfo);
+    let current_epoch = app.agents[&id].session_binding_epoch;
+    assert_eq!(
+        old_epoch, current_epoch,
+        "modal reopen does not rebind the session"
+    );
+    assert_ne!(old_nonce, new_nonce);
+    let before_live = serde_json::to_value(&app.agents[&id].session.context_state).unwrap();
+    let before_scrollback = agent_scrollback_len(&app);
+
+    for result in [
+        TaskResult::ContextInfoComplete {
+            agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            session_binding_epoch: old_epoch,
+            info: Box::new(session_info_response()),
+            nonce: old_nonce,
+        },
+        TaskResult::ContextInfoFailed {
+            agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            session_binding_epoch: old_epoch,
+            error: "old request".to_string(),
+            nonce: old_nonce,
+        },
+    ] {
+        let _ = dispatch_task_result(result, &mut app);
+    }
+    assert_eq!(
+        serde_json::to_value(&app.agents[&id].session.context_state).unwrap(),
+        before_live
+    );
+    assert_eq!(agent_scrollback_len(&app), before_scrollback);
+    match &app.agents[&id].active_modal {
+        Some(ActiveModal::Usage { state }) => {
+            assert!(matches!(state.context, UsageTabData::Loading))
+        }
+        _ => panic!("reopened usage modal should remain open"),
+    }
+
+    // A current epoch and current nonce fill the reopened modal successfully.
+    let _ = dispatch_task_result(
+        TaskResult::ContextInfoComplete {
+            agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            session_binding_epoch: current_epoch,
+            info: Box::new(session_info_response()),
+            nonce: new_nonce,
+        },
+        &mut app,
+    );
+    assert!(app.agents[&id].session.context_state.is_some());
+    match &app.agents[&id].active_modal {
+        Some(ActiveModal::Usage { state }) => {
+            assert!(matches!(state.context, UsageTabData::Loaded(_)))
+        }
+        _ => panic!("reopened usage modal should remain open"),
+    }
+
+    let current_failure_nonce = open_modal_nonce(&mut app, Action::ShowContextInfo);
+    let _ = dispatch_task_result(
+        TaskResult::ContextInfoFailed {
+            agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            session_binding_epoch: current_epoch,
+            error: "current request failed".to_string(),
+            nonce: current_failure_nonce,
+        },
+        &mut app,
+    );
+    match &app.agents[&id].active_modal {
+        Some(ActiveModal::Usage { state }) => {
+            assert!(
+                matches!(&state.context, UsageTabData::Failed(error) if error == "current request failed")
+            );
+        }
+        _ => panic!("current usage modal should remain open"),
+    }
+}
+
+#[test]
+fn context_info_same_session_rebind_fences_zero_nonce_results() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let old_epoch = app.agents[&id].session_binding_epoch;
+    let session_id = app.agents[&id].session.session_id.clone().unwrap();
+    app.agents.get_mut(&id).unwrap().unbind_session_id();
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .bind_session_id(session_id.clone());
+    assert_ne!(app.agents[&id].session_binding_epoch, old_epoch);
+    let before_scrollback = agent_scrollback_len(&app);
+    let before_live = serde_json::to_value(&app.agents[&id].session.context_state).unwrap();
+    for result in [
+        TaskResult::ContextInfoComplete {
+            agent_id: id,
+            session_id: session_id.clone(),
+            session_binding_epoch: old_epoch,
+            info: Box::new(session_info_response()),
+            nonce: 0,
+        },
+        TaskResult::ContextInfoFailed {
+            agent_id: id,
+            session_id,
+            session_binding_epoch: old_epoch,
+            error: "old binding".into(),
+            nonce: 0,
+        },
+    ] {
+        dispatch_task_result(result, &mut app);
+    }
+    assert_eq!(
+        serde_json::to_value(&app.agents[&id].session.context_state).unwrap(),
+        before_live
+    );
+    assert_eq!(agent_scrollback_len(&app), before_scrollback);
 }
 
 /// Usage results are dropped when the session moved on (both routes).
@@ -579,7 +775,7 @@ fn usage_result_guards_on_session_id() {
         TaskResult::SessionUsageComplete {
             agent_id: AgentId(0),
             session_id: acp::SessionId::new("different-session".to_string()),
-            usage: Box::new(shell::extensions::notification::PromptUsage::default()),
+            response: Box::new(session_usage_response()),
             nonce,
         },
         &mut app,

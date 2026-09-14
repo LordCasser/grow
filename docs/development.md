@@ -89,7 +89,11 @@ Windows 协调清单用句柄级原子替换保留已有读者；独立会话加
 
 跨会话协调与 Windows 存储还应检查对应 `.github/workflows/` 的平台回归。OpenSpec CI 只做文档格式与归档完成状态检查，语义由场景、源码、测试和 review 共同核对。
 
-用量状态栏由 `ChatStateEvent::SessionUsageUpdated` 投影到账本变化时的 transient `SessionInfoUpdate.meta["grow/sessionUsage"]`，复用 `PromptUsage`，不增加周期查询、Timeline 消息或模型输入。新建/重新连接时的状态 advertisement 补发当前账本；Pager 按累计值替换、丢弃同窗口倒退及历史 replay，用 reload 清空旧窗口。计费窗口和点击行为见 [会话用量契约](../openspec/specs/client-surfaces/spec.md#requirement-ordinary-agent-status-shows-session-usage)。
+用量状态栏由 `ChatStateEvent::SessionUsageUpdated` 投影到账本变化时的 transient `SessionInfoUpdate.meta["grow/sessionUsage"]`，复用 `PromptUsage`，不增加周期查询或模型输入。主模型 attempt、子 Agent 终态结算、session incomplete 与冷恢复边界写入 Timeline；新 actor 按结算身份恢复 lifetime aggregate，resident reconnect 不新增分段。Pager 按累计值替换、丢弃倒退及历史 replay；normal 状态栏只显示 lifetime 总体，`/usage` 另外按 Initial run、Resume #N 展示分段。计费窗口和点击行为见 [会话用量契约](../openspec/specs/client-surfaces/spec.md#requirement-ordinary-agent-status-shows-session-usage)。
+
+`UsageLedger` 同时保留账本所属 Agent 与每个已完成子 Agent 的身份分项；子 Agent 以稳定 `subagent_id` 沿既有终态 ACK fold 进入父账本并持久结算。`PromptUsage` 当前只投影包含全部 Agent 的总体和 provider/model 分项，不把 Agent 分项暴露到 `/usage`、headless 或 normal 状态栏。
+
+Pager 的 cancel notification 没有响应体；`TurnCancelling` 因此在短窗口后复用 exact-prompt status 查询，以 terminal/unknown/error 收敛，Running 只重新起算窗口。首次 session load 使用带来源 surface 的临时 Agent：失败会删除临时页并返回 Welcome、原 Agent 或 Dashboard，原地 reload 仍走既有事务回滚。
 
 ## 债务与历史
 
@@ -188,3 +192,36 @@ Pager读取recap扩展响应中的接纳结果；disabled、拒绝或无效响�
 `grow trace` 的 CLI 分发直接进入会话快照导出，不要求模型配置能够成功解析。会话缺失和输出失败仍按原路径报告，见 [Trace 配置独立性契约](../openspec/specs/client-surfaces/spec.md#requirement-trace-export-does-not-require-valid-model-configuration)。
 
 已批准的闲置接口清理边界以 [配置规则](../openspec/specs/configuration-rules/spec.md)、[工具协议](../openspec/specs/tool-authorization/spec.md)、[技能运行时](../openspec/specs/extension-runtime/spec.md) 和 [客户端设置持久化](../openspec/specs/client-surfaces/spec.md) 为准。技能列表由 SkillManager 管理；配置整份写入入口仍保留。
+
+
+## 会话恢复与异步 Context 回归
+
+light load 在 pinned storage 边界完成 Timeline、prompt blob 与 sideband 校验后，将同一份 Timeline 转移给 actor bootstrap；提交输入、控制回执、稳定 System 和用量校验仍在 actor 发布前完成。Workflow 恢复只保留所需 run 的生命周期快照，其修复持久化仍晚于 ChatState 验证。Grow-only UI 事实扫描跳过 ACP payload 的 typed decode，回放顺序、cursor 和最终 load 完成屏障保持。
+
+已知用量 Observation 在恢复时必须能够解码；同一 attempt/child 结算只接受完全相同的重复，冲突或损坏在 actor 发布前拒绝。未知诊断 Observation 保留扩展性。行为见 [用量恢复契约](../openspec/specs/session-timeline/spec.md#requirement-session-usage-is-a-durable-lifetime-projection)。
+
+异步 Context 请求随结果携带 session id、session binding epoch 与 modal nonce。任何状态更新前同时核对归属；同会话弹窗关闭重开也会使旧结果失效。nonce 为 0 的显式命令仍写入 scrollback，见 [Context 结果归属](../openspec/specs/client-surfaces/spec.md#requirement-context-info-results-are-bound-to-their-requesting-session-view)。
+
+恢复性能入口使用隔离 loopback 配置与合法 Timeline，合成 fixture 在生成前检查 256 MiB 预算。先串行编译，再在没有并行构建的情况下运行；同名 instrumentation 阶段汇总，`session.replay.read_snapshot` 单独记录文件读取。示例：
+
+```sh
+CARGO_BUILD_JOBS=2 cargo test --locked -p shell --features test-support --test session_load_perf --no-run
+GROW_PERF_TURNS=128 GROW_PERF_AGENT_CHUNKS_PER_TURN=8 GROW_PERF_AGENT_CHUNK_LEN=4096 cargo test --locked -p shell --features test-support --test session_load_perf full_session_load_e2e -- --ignored --nocapture
+GROW_PERF_ASSERT_HISTORY=1 cargo test --locked -p shell --features test-support --test session_load_perf full_session_load_e2e -- --ignored --nocapture
+```
+
+`GROW_PERF_ASSERT_HISTORY` 单独验证 load response 前历史文本的完整顺序，不用于性能对照。shell 的第一条通知可能是控制通知，不能当作第一条可见历史；完整 ACP load 时间也不能代替真实终端输入回显。normal Pager 加载期间的按键与提交队列由 `loading_replay_preserves_typed_prompt_until_session_loaded` 检查，终端恢复与后续提交由 ignored PTY `continue_resumes_session_with_history` 检查。
+
+Pager 在恢复 batch 中保留已有布局，新增条目和 dirty 文本先使用估计高度，再由可见区域完成精确测量；隐藏 thinking 的跨条目间距回退到完整重建。turn 索引在最外层 batch 结束时重建，完整加载后的布局仍预热上方页面。加载中的导出与 transcript 保护继续以 [客户端契约](../openspec/specs/client-surfaces/spec.md) 为准。
+
+JSONL full/light observation 仅从已验证 Timeline 派生内存 title/model；显式 writer restore 获得 lease 后才修复持久投影。观察不会因 Summary 滞后而争抢 writer lease，冲突和损坏仍拒绝，见 [只读观察契约](../openspec/specs/session-timeline/spec.md#requirement-session-observation-does-not-repair-durable-projections)。Workflow 从最新候选向前验证，最多保留 128 个有效 run，返回时保持 Timeline 顺序；无效候选不占名额。单文件读取预算保持，但最坏情况下会检查所有 Timeline 候选，见 [Workflow 恢复契约](../openspec/specs/workflow-execution/spec.md#requirement-workflow-restore-retains-the-latest-valid-runs)。
+
+Messages 在单次请求内为中性工具 ID 建立映射，预留已有合法和 native ID，并同步编码调用与结果。原生 continuation 的 ID/签名保持，Timeline 不改写，见 [工具身份编码契约](../openspec/specs/model-sampling/spec.md#requirement-messages-tool-identity-encoding-preserves-distinct-exchanges)。64 字节是 Grow 的中性 ID 编码预算。
+
+工具定义及模型图片资格 key 由 `tool-types` 持有，客户端身份值由 `config-types` 持有；HTTP 不引用 sampler/workspace 运行时。Pager 负责识别权限特殊行，renderer 只接收对应位置。版本策略由 `config::VersionPolicy` 持有，更新器的配置值和持久化操作由 CLI 组合层传入，仍复用 shell 的完整配置读写规则。Core regression 对这五条直接依赖边设有检查，不因此推断二进制或构建耗时的改善。
+
+`bounded_replay_text_blocks_and_prompt_measurement` 使用 128/256 轮、每轮 8 个 512-byte chunk，经过真实 ACP handler 和 TextBlock，每 32 条通知准备布局并穿插输入。它分别报告通知、布局、输入处理、load 收尾和最终布局耗时，并检查历史完整性及输入队列；这是进程内阶段测量，不包含终端绘制、输入排队和设备回显。
+
+```sh
+CARGO_BUILD_JOBS=2 RUST_MIN_STACK=16777216 cargo test --locked -p pager --lib bounded_replay_text_blocks_and_prompt_measurement -- --ignored --nocapture --test-threads=1
+```

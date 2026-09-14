@@ -100,6 +100,7 @@ pub trait ChildRunner: 'static {
         &self,
         request: super::interaction::AgentInteractionRequest,
         _target_session_id: String,
+        _subagent_task_name: String,
     ) {
         let _ = request.respond_to.send(Err(
             "Parent-child communication is unavailable in this host".into(),

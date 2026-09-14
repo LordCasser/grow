@@ -77,6 +77,7 @@ pub(super) fn dispatch_show_context_info(app: &mut AppView) -> Vec<Effect> {
         vec![Effect::ShowContextInfo {
             agent_id: id,
             session_id,
+            session_binding_epoch: agent.session_binding_epoch,
             nonce: 0,
         }]
     } else {
@@ -137,6 +138,11 @@ fn open_usage_modal(
         .get_mut(&agent_id)
         .map(|agent| agent.session.begin_agent_metadata_read())
         .unwrap_or_default();
+    let session_binding_epoch = app
+        .agents
+        .get(&agent_id)
+        .map(|agent| agent.session_binding_epoch)
+        .unwrap_or_default();
     if let Some(agent) = app.agents.get_mut(&agent_id) {
         agent.active_modal = Some(ActiveModal::Usage {
             state: UsageModalState::open(tab, nonce),
@@ -151,6 +157,7 @@ fn open_usage_modal(
         Effect::ShowContextInfo {
             agent_id,
             session_id: session_id.clone(),
+            session_binding_epoch,
             nonce,
         },
         Effect::ShowSessionInfo {
@@ -176,7 +183,7 @@ pub(super) fn apply_session_usage_result(
     app: &mut AppView,
     agent_id: AgentId,
     session_id: &acp::SessionId,
-    result: Result<Box<shell::extensions::notification::PromptUsage>, String>,
+    result: Result<Box<shell::extensions::usage::SessionUsageResponse>, String>,
     nonce: u64,
 ) -> Vec<Effect> {
     let Some(agent) = app.agents.get_mut(&agent_id) else {
@@ -187,7 +194,7 @@ pub(super) fn apply_session_usage_result(
     }
     if nonce == 0 {
         let text = match &result {
-            Ok(usage) => crate::app::status_blocks::session_usage_block_text(usage),
+            Ok(response) => crate::app::status_blocks::session_usage_report_block_text(response),
             Err(error) => format!("Couldn't load session usage: {error}"),
         };
         agent.scrollback.push_block(RenderBlock::notice(text));
@@ -336,12 +343,20 @@ pub(super) fn handle_session_info_failed(
 pub(super) fn handle_context_info_complete(
     app: &mut AppView,
     agent_id: AgentId,
+    session_id: &acp::SessionId,
+    session_binding_epoch: u32,
     info: Box<shell::session::SessionInfoResponse>,
     nonce: u64,
 ) -> Vec<Effect> {
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return vec![];
     };
+    let request_is_current = agent.session.session_id.as_ref() == Some(session_id)
+        && agent.session_binding_epoch == session_binding_epoch
+        && (nonce == 0 || usage_modal_matches(agent, nonce));
+    if !request_is_current {
+        return vec![];
+    }
     let model = info.data.model.as_deref().unwrap_or("unknown").to_string();
     // Take ownership of the snapshot once, hand a clone to the agent's
     // running counters, then move the original into the display payload
@@ -352,7 +367,7 @@ pub(super) fn handle_context_info_complete(
         agent
             .scrollback
             .push_block(RenderBlock::context_info(snapshot, model));
-    } else if usage_modal_matches(agent, nonce) {
+    } else {
         if let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut() {
             state.context = UsageTabData::Loaded(crate::views::usage_modal::ContextSnapshot {
                 snapshot,
@@ -367,17 +382,25 @@ pub(super) fn handle_context_info_complete(
 pub(super) fn handle_context_info_failed(
     app: &mut AppView,
     agent_id: AgentId,
+    session_id: &acp::SessionId,
+    session_binding_epoch: u32,
     error: String,
     nonce: u64,
 ) -> Vec<Effect> {
     let Some(agent) = app.agents.get_mut(&agent_id) else {
         return vec![];
     };
+    let request_is_current = agent.session.session_id.as_ref() == Some(session_id)
+        && agent.session_binding_epoch == session_binding_epoch
+        && (nonce == 0 || usage_modal_matches(agent, nonce));
+    if !request_is_current {
+        return vec![];
+    }
     if nonce == 0 {
         agent.scrollback.push_block(RenderBlock::notice(format!(
             "Couldn't load context info: {error}"
         )));
-    } else if usage_modal_matches(agent, nonce) {
+    } else {
         if let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut() {
             state.context = UsageTabData::Failed(error);
         }

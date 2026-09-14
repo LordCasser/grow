@@ -1672,7 +1672,11 @@ pub(super) async fn run_session(
                         let _ = respond_to.send(());
                     }
                     SessionCommand::PublishCoordinationState { respond_to } => {
-                        let _ = respond_to.send(session.publish_coordination_state().await);
+                        let result = async {
+                            session.publish_coordination_state().await?;
+                            session.publish_parent_message_receipts().await
+                        }.await;
+                        let _ = respond_to.send(result);
                     }
                     SessionCommand::GetCurrentModel { responds_to } => {
                         let model = session.current_catalog_model_id();

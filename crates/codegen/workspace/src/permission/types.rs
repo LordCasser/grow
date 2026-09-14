@@ -2,6 +2,8 @@ use acp_transport::protocol as acp;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
+
+pub use config_types::ClientType;
 /// A permission event capturing the decision made for a tool call.
 /// Used for diagnostics to track permission patterns and user behavior.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,66 +101,6 @@ pub struct PermissionEvent {
     /// `user_prompted=true` events in the turn, not this field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub queue_depth: Option<u32>,
-}
-/// Identifies the type of client connecting to the agent.
-/// Used to determine which permission UI features to enable
-/// and which feedback/experiment client type to report.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
-pub enum ClientType {
-    /// Generic client - show simple permission options with full command text
-    #[default]
-    #[serde(rename = "generic")]
-    Generic,
-    /// Grow TUI client - show fancy options with interactive bash term selection
-    #[serde(rename = "grow-tui")]
-    GrowTUI,
-    /// Grow Web client - identified by clientIdentifier "grow-web"
-    #[serde(rename = "grow-web")]
-    GrowWeb,
-    /// Named client (`"nebula"`) — uses the generic permission UI
-    #[serde(rename = "nebula")]
-    Nebula,
-    /// IDE extension client (VS Code and similar) - identified by clientIdentifier "grow-code-extension"
-    #[serde(rename = "extension")]
-    Extension,
-    /// Grow Pager client - TUI-like terminal pager with interactive permission UI.
-    /// Treated identically to GrowTUI for permission options (gets bash highlights +
-    /// interactive selection). Reports as "grow-pager" for diagnostics attribution.
-    #[serde(rename = "grow-pager")]
-    GrowPager,
-}
-impl ClientType {
-    /// Product token for the `User-Agent` header (e.g. `grow-pager`).
-    pub fn user_agent_label(&self) -> &'static str {
-        match self {
-            Self::Generic => "grow-shell",
-            Self::GrowTUI => "grow-tui",
-            Self::GrowWeb => "grow-web",
-            Self::Nebula => "nebula",
-            Self::Extension => "grow-code-extension",
-            Self::GrowPager => "grow-pager",
-        }
-    }
-    /// Resolve from an ACP `clientIdentifier` string.
-    pub fn from_client_identifier(id: Option<&str>) -> Self {
-        match id {
-            Some("grow-web") => Self::GrowWeb,
-            Some("nebula") => Self::Nebula,
-            Some("grow-code-extension") => Self::Extension,
-            Some("grow-pager") => Self::GrowPager,
-            _ => Self::Generic,
-        }
-    }
-    /// Label for feedback reporting and experiment filtering.
-    pub fn feedback_label(&self) -> &'static str {
-        match self {
-            Self::GrowTUI | Self::GrowPager => "tui",
-            Self::GrowWeb => "web",
-            Self::Nebula => "nebula",
-            Self::Extension => "extension",
-            Self::Generic => "agent",
-        }
-    }
 }
 #[derive(Clone, Debug)]
 pub enum AccessKind {

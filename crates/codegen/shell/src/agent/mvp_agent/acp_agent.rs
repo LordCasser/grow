@@ -809,7 +809,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         drop(persistence_timer);
         let crate::session::persistence::PersistedInfoLight {
             mut summary,
-            timeline_events,
+            timeline,
             mut control_snapshot,
             session_directory,
             rewind_points_source,
@@ -1104,7 +1104,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                         persistence,
                         session_title_route,
                         timeline_bootstrap: crate::session::TimelineBootstrap::Existing(
-                            timeline_events,
+                            timeline,
                         ),
                         rewind_points_source,
                         origin_client: origin_client.clone(),
@@ -1355,14 +1355,30 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         // The resident actor may terminate during any of the asynchronous
         // restore work above. Never acknowledge a reconnect that has no live
         // command endpoint at the response boundary.
-        if self
-            .sessions
-            .borrow()
-            .get(&session_id)
-            .is_none_or(|handle| handle.cmd_tx.is_closed())
-        {
+        let chat_state_handle = self.sessions.borrow().get(&session_id).and_then(|handle| {
+            (!handle.cmd_tx.is_closed()).then(|| handle.chat_state_handle.clone())
+        });
+        let Some(chat_state_handle) = chat_state_handle else {
             return Err(acp::Error::internal_error()
                 .data("Session ended while loading; retry the session load."));
+        };
+        if spawn_new_actor {
+            chat_state_handle
+                .begin_usage_resume_segment()
+                .await
+                .map_err(|error| {
+                    acp::Error::internal_error()
+                        .data(format!("Could not persist resume usage boundary: {error}"))
+                })?;
+            if self
+                .sessions
+                .borrow()
+                .get(&session_id)
+                .is_none_or(|handle| handle.cmd_tx.is_closed())
+            {
+                return Err(acp::Error::internal_error()
+                    .data("Session ended while loading; retry the session load."));
+            }
         }
         let response_meta = serde_json::Value::Object(response_meta_map);
         ::diagnostics::unified_log::info(

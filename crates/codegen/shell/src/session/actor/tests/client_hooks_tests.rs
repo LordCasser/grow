@@ -46,6 +46,137 @@ fn spawn_deny_responder(
     });
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn unknown_tool_is_not_misreported_as_an_argument_parse_failure() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            *actor.agent.borrow_mut() =
+                test_agent_with_tools(vec![tools::registry::types::ToolConfig::for_tool::<
+                    tools::implementations::use_tool::UseTool,
+                >()])
+                .await;
+
+            begin_test_causal_turn(&actor).await;
+            let call = ToolCallResponse {
+                id: "unknown-call".to_owned(),
+                kind: "function".to_owned(),
+                function: crate::sampling::types::ToolCallFunction::new(
+                    "run_command_or_subagent",
+                    r#"{"output":"","task_ids":[]}"#,
+                ),
+            };
+            actor
+                .events
+                .tool_started(
+                    call.function.name.clone(),
+                    call.id.clone(),
+                    serde_json::from_str(&call.function.arguments).ok(),
+                )
+                .await
+                .unwrap();
+
+            let result = actor
+                .prepare_tool_call(call, &mut Vec::new())
+                .await
+                .unwrap();
+            assert!(matches!(
+                result,
+                ToolPreflight::Resolved {
+                    loop_result: ToolLoop::NonExistingTool,
+                    ..
+                }
+            ));
+
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            let results = conversation
+                .iter()
+                .filter_map(|item| match item {
+                    ConversationItem::ToolResult(result)
+                        if result.tool_call_id == "unknown-call" =>
+                    {
+                        Some(result.content.to_string())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(results.len(), 1);
+            assert!(results[0].contains("is not available in this request"));
+            assert!(results[0].contains("was not executed"));
+            assert!(!results[0].contains("Failed to parse arguments"));
+            assert!(!results[0].contains("Your original arguments"));
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn known_tool_with_invalid_arguments_keeps_parse_failure_semantics() {
+    let local = tokio::task::LocalSet::new();
+    local
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) =
+                tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+            let (persistence_tx, _persistence_rx) =
+                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            *actor.agent.borrow_mut() =
+                test_agent_with_tools(vec![tools::registry::types::ToolConfig::for_tool::<
+                    tools::implementations::use_tool::UseTool,
+                >()])
+                .await;
+
+            begin_test_causal_turn(&actor).await;
+            let call = ToolCallResponse {
+                id: "invalid-arguments".to_owned(),
+                kind: "function".to_owned(),
+                function: crate::sampling::types::ToolCallFunction::new("use_tool", "{}"),
+            };
+            actor
+                .events
+                .tool_started(
+                    call.function.name.clone(),
+                    call.id.clone(),
+                    serde_json::from_str(&call.function.arguments).ok(),
+                )
+                .await
+                .unwrap();
+
+            let result = actor
+                .prepare_tool_call(call, &mut Vec::new())
+                .await
+                .unwrap();
+            assert!(matches!(
+                result,
+                ToolPreflight::Resolved {
+                    loop_result: ToolLoop::ToolParsingError,
+                    ..
+                }
+            ));
+
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            let results = conversation
+                .iter()
+                .filter_map(|item| match item {
+                    ConversationItem::ToolResult(result)
+                        if result.tool_call_id == "invalid-arguments" =>
+                    {
+                        Some(result.content.to_string())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(results.len(), 1);
+            assert!(results[0].contains("Failed to parse arguments for tool `use_tool`"));
+            assert!(results[0].contains("Your original arguments"));
+        })
+        .await;
+}
+
 /// Client hooks fire even with no on-disk hook registry: `notify_client_hooks`
 /// reads `client_hooks` (never `hook_registry`) and its call sites sit outside the
 /// file-registry guard.

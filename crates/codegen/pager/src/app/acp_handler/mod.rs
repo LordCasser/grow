@@ -43,6 +43,7 @@ pub(crate) use prompt_origin::viewer_turn_anchor;
 mod queue;
 mod routing;
 mod session_notification;
+pub(crate) use session_notification::apply_ui_notice;
 mod settings;
 mod subagent_activity;
 

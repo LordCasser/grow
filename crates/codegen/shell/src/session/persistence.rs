@@ -2605,7 +2605,7 @@ pub(crate) async fn new_child(
     initial_prompt_blobs: ImmutablePromptBlobs,
 ) -> io::Result<(
     PersistenceHandle,
-    Vec<chat_state::TimelineEvent>,
+    chat_state::Timeline,
     Arc<crate::session::storage::ContainedDirectory>,
 )> {
     let storage = JsonlStorageAdapter::new();
@@ -2622,7 +2622,7 @@ pub(crate) async fn new_child(
             )],
         )
         .await?;
-    let mut timeline = chat_state::Timeline::from_events(timeline_events)
+    let timeline = chat_state::Timeline::from_events(timeline_events)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     touch_worktree_for_session(info).await;
 
@@ -2653,13 +2653,13 @@ pub(crate) async fn new_child(
     });
     handle.task = Some(task.abort_handle());
 
-    Ok((handle, timeline.events().to_vec(), session_directory))
+    Ok((handle, timeline, session_directory))
 }
 
 /// Canonical resume payload. Client updates and rewind snapshots remain lazy.
 pub(crate) struct PersistedInfoLight {
     pub summary: Summary,
-    pub timeline_events: Vec<chat_state::TimelineEvent>,
+    pub timeline: chat_state::Timeline,
     pub control_snapshot: Option<crate::session::control::SessionControlSnapshot>,
     /// The one identity-checked entity used by replay and every lazy projection.
     pub session_directory: Arc<crate::session::storage::ContainedDirectory>,
@@ -2711,7 +2711,7 @@ pub(crate) async fn load_light(
 
     let persisted_info = PersistedInfoLight {
         summary: persisted.summary,
-        timeline_events: persisted.timeline_events,
+        timeline: persisted.timeline,
         control_snapshot: persisted.control_snapshot,
         session_directory: session_directory.clone(),
         rewind_points_source,

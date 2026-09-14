@@ -1,0 +1,74 @@
+{
+  "before": {
+    "128": {
+      "notifications": 1152.0,
+      "handle_total_ms": 78.54,
+      "handle_max_ms": 29.24,
+      "frame_total_ms": 148.4,
+      "frame_max_ms": 8.57,
+      "input_max_ms": 0.11,
+      "load_finish_ms": 5.85,
+      "final_layout_ms": 1.19,
+      "work_total_ms": 234.06
+    },
+    "256": {
+      "notifications": 2304.0,
+      "handle_total_ms": 99.15,
+      "handle_max_ms": 0.52,
+      "frame_total_ms": 292.94,
+      "frame_max_ms": 4.92,
+      "input_max_ms": 0.09,
+      "load_finish_ms": 0.98,
+      "final_layout_ms": 1.24,
+      "work_total_ms": 394.64
+    }
+  },
+  "after": {
+    "128": {
+      "notifications": 1152.0,
+      "handle_total_ms": 75.78,
+      "handle_max_ms": 28.72,
+      "frame_total_ms": 66.49,
+      "frame_max_ms": 8.48,
+      "input_max_ms": 0.12,
+      "load_finish_ms": 5.69,
+      "final_layout_ms": 2.71,
+      "work_total_ms": 151.11
+    },
+    "256": {
+      "notifications": 2304.0,
+      "handle_total_ms": 98.25,
+      "handle_max_ms": 0.63,
+      "frame_total_ms": 130.23,
+      "frame_max_ms": 3.91,
+      "input_max_ms": 0.07,
+      "load_finish_ms": 1.08,
+      "final_layout_ms": 2.85,
+      "work_total_ms": 232.39
+    }
+  },
+  "confirmed": {
+    "128": {
+      "notifications": 1152.0,
+      "handle_total_ms": 78.77,
+      "handle_max_ms": 29.53,
+      "frame_total_ms": 69.67,
+      "frame_max_ms": 8.77,
+      "input_max_ms": 0.12,
+      "load_finish_ms": 5.85,
+      "final_layout_ms": 2.82,
+      "work_total_ms": 157.99
+    },
+    "256": {
+      "notifications": 2304.0,
+      "handle_total_ms": 99.07,
+      "handle_max_ms": 0.61,
+      "frame_total_ms": 132.07,
+      "frame_max_ms": 3.72,
+      "input_max_ms": 0.06,
+      "load_finish_ms": 1.0,
+      "final_layout_ms": 2.96,
+      "work_total_ms": 234.06
+    }
+  }
+}

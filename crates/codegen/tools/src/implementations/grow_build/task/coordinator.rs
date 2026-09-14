@@ -184,7 +184,17 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                                 && !child.cancellation.is_cancelled()
                                 && !child.request.owner.is_workflow()
                         })
-                        .map(|child| child.child_session_id.clone()),
+                        .map(|child| {
+                            let task_name = child.request.description.trim();
+                            (
+                                child.child_session_id.clone(),
+                                if task_name.is_empty() {
+                                    child.request.id.clone()
+                                } else {
+                                    task_name.to_owned()
+                                },
+                            )
+                        }),
                     None if matches!(
                         &request.action,
                         super::interaction::AgentInteraction::Ask { .. }
@@ -196,13 +206,23 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                                 child.child_session_id == request.source_session_id
                                     && !child.cancellation.is_cancelled()
                             })
-                            .map(|child| child.immediate_parent_session_id.clone())
+                            .map(|child| {
+                                let task_name = child.request.description.trim();
+                                (
+                                    child.immediate_parent_session_id.clone(),
+                                    if task_name.is_empty() {
+                                        child.request.id.clone()
+                                    } else {
+                                        task_name.to_owned()
+                                    },
+                                )
+                            })
                     }
                     None => None,
                 };
                 match target {
-                    Some(target) if !request.cancellation.is_cancelled() => {
-                        self.runner.interact(request, target)
+                    Some((target, task_name)) if !request.cancellation.is_cancelled() => {
+                        self.runner.interact(request, target, task_name)
                     }
                     _ => {
                         let _ = request.respond_to.send(Err(

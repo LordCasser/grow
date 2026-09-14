@@ -1,0 +1,60 @@
+chat-state full
+/tmp/grow-first-batch-chat-state.log
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 50.51s
+test result: ok. 483 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 13.79s
+
+shell full (one fixture failure, retained)
+/tmp/grow-first-batch-shell-tests.log
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1m 27s
+test session::actor::tests::subagent_usage_fold_tests::subagent_usage_fold_attribution_gate ... FAILED
+test session::storage::tests::grow_projection_matches_typed_replay_and_preserves_notification_identity ... ok
+---- session::actor::tests::subagent_usage_fold_tests::subagent_usage_fold_attribution_gate stdout ----
+thread 'session::actor::tests::subagent_usage_fold_tests::subagent_usage_fold_attribution_gate' (511642) panicked at crates/codegen/shell/src/session/actor/tests/subagent_usage_fold_tests.rs:79:13:
+  left: 40
+ right: 160
+    session::actor::tests::subagent_usage_fold_tests::subagent_usage_fold_attribution_gate
+test result: FAILED. 3802 passed; 1 failed; 3 ignored; 0 measured; 0 filtered out; finished in 86.80s
+
+shell usage fixture correction
+/tmp/grow-first-batch-shell-usage-retest.log
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 37.89s
+test session::actor::tests::subagent_usage_fold_tests::subagent_usage_fold_attribution_gate ... ok
+test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 3790 filtered out; finished in 0.19s
+
+pager full
+/tmp/grow-first-batch-pager-tests.log
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 20s
+test app::root::dispatch::tests::session::load::loading_replay_preserves_typed_prompt_until_session_loaded ... ok
+test app::root::dispatch::tests::status::context_info_same_session_rebind_fences_zero_nonce_results ... ok
+test app::root::dispatch::tests::status::context_info_same_session_reopen_fences_old_success_and_failure ... ok
+test result: ok. 7198 passed; 0 failed; 10 ignored; 0 measured; 0 filtered out; finished in 21.17s
+
+CLI build
+/tmp/grow-first-batch-cli-build.log
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3m 20s
+
+PTY initial fixture failure
+/tmp/grow-first-batch-pty-resume.log
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 06s
+No LLM is configured: no LLM is configured; add at least one [provider.<id>.models.<model>] entry
+FAILED
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 8 filtered out; finished in 20.08s
+
+PTY corrected fixture
+/tmp/grow-first-batch-pty-resume-fixed.log
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 14.08s
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 7.14s
+
+perf and memory harness compile
+/tmp/grow-first-batch-final-harness-build.log
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 27.57s
+  Executable tests/session_load_perf.rs (target/debug/deps/session_load_perf-d8c0cb025ba61654)
+  Executable tests/test_session_load_memory.rs (target/debug/deps/test_session_load_memory-3d40b0b6d8dd1281)
+
+history order: small defaults
+/tmp/grow-first-batch-history-12.log
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.98s
+
+history order: 128 turns
+/tmp/grow-first-batch-history-128.log
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 4.82s

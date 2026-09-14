@@ -3,8 +3,8 @@
 
 #[cfg(not(feature = "distro-pm"))]
 use crate::version::get_installed_version;
+use config::VersionPolicy;
 use semver::Version;
-use shell::util::config::VersionPolicy;
 use tracing::warn;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

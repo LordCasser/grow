@@ -186,6 +186,7 @@ impl AgentView {
             catalog: SubagentCatalogPane::new(),
             queue: QueuePane::new(),
             session_reload: None,
+            load_return_view: None,
             active_pane: ActivePane::Prompt,
             prompt_mode: PromptMode::Normal,
             prompt_input_mode: PromptInputMode::Normal,

@@ -175,7 +175,13 @@ fn enqueue_permission(
 
     // 7. Cursor preselection (sticky last-used → configured default → the
     //    enable-always-approve row → index 0). See `permission_cursor`.
-    let active_idx = crate::appearance::permission_cursor::resolve_initial_cursor(&options);
+    let always_approve_index = options
+        .iter()
+        .position(workspace::permission::is_enable_always_approve_option);
+    let active_idx = crate::appearance::permission_cursor::resolve_initial_cursor(
+        &options,
+        always_approve_index,
+    );
 
     // 8. Queue the request FIFO (do NOT replace/cancel existing requests).
     agent.push_permission(PermissionViewState {

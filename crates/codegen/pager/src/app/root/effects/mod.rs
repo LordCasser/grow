@@ -2981,7 +2981,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::ShowContextInfo { agent_id, session_id, nonce } => {
+        Effect::ShowContextInfo { agent_id, session_id, session_binding_epoch, nonce } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -2989,6 +2989,8 @@ pub(crate) fn execute(
                         Ok(info) => {
                             TaskResult::ContextInfoComplete {
                                 agent_id,
+                                session_id,
+                                session_binding_epoch,
                                 info: Box::new(info),
                                 nonce,
                             }
@@ -2996,6 +2998,8 @@ pub(crate) fn execute(
                         Err(error) => {
                             TaskResult::ContextInfoFailed {
                                 agent_id,
+                                session_id,
+                                session_binding_epoch,
                                 error,
                                 nonce,
                             }
@@ -3008,11 +3012,11 @@ pub(crate) fn execute(
             tasks
                 .spawn(async move {
                     match fetch_session_usage(&session_id, &tx).await {
-                        Ok(usage) => {
+                        Ok(response) => {
                             TaskResult::SessionUsageComplete {
                                 agent_id,
                                 session_id,
-                                usage: Box::new(usage),
+                                response: Box::new(response),
                                 nonce,
                             }
                         }
@@ -3929,11 +3933,11 @@ async fn fetch_session_info(
     }
     envelope.result.ok_or_else(|| "session info response missing result".to_string())
 }
-/// `grow/session/usage` → [`PromptUsage`] (bare response, no envelope).
+/// `grow/session/usage` → lifetime aggregate plus resume segments.
 async fn fetch_session_usage(
     session_id: &acp::SessionId,
     tx: &AcpAgentTx,
-) -> Result<shell::extensions::notification::PromptUsage, String> {
+) -> Result<shell::extensions::usage::SessionUsageResponse, String> {
     let request = acp::ExtRequest::new(
         "grow/session/usage",
         serde_json::value::to_raw_value(
@@ -3960,7 +3964,7 @@ async fn fetch_session_usage(
             tracing::debug!("session usage deser failed: {e}");
             "invalid session usage response".to_string()
         })?;
-    Ok(parsed.usage)
+    Ok(parsed)
 }
 /// Look up the session title/summary from local persistence.
 async fn lookup_session_title(session_id: &acp::SessionId) -> Option<String> {

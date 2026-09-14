@@ -2347,7 +2347,8 @@ pub(crate) fn validate_sideband_ledgers(
             continue;
         };
         for shadow in &projection.shadows {
-            let chat_state::ImageShadowSource::Description { result_ref } = &shadow.provenance else {
+            let chat_state::ImageShadowSource::Description { result_ref } = &shadow.provenance
+            else {
                 // Local OCR has no provider Sideband; Timeline validates its
                 // engine, source identity, image fingerprint and description.
                 continue;
@@ -2842,7 +2843,8 @@ pub struct PersistedData {
 #[derive(Debug, Clone)]
 pub struct PersistedDataLight {
     pub summary: Summary,
-    pub timeline_events: Vec<chat_state::TimelineEvent>,
+    /// Validated once at the pinned storage boundary, then moved into bootstrap.
+    pub timeline: chat_state::Timeline,
     pub control_snapshot: Option<crate::session::control::SessionControlSnapshot>,
     // No `rewind_points` field: the resume path defers them (loaded lazily by
     // `FileStateTracker`). Use `load_session` for the eager set.
@@ -3635,24 +3637,41 @@ pub fn stream_replay_grow_notifications_at<
 >(
     session_id: &str,
     grow_home: &std::path::Path,
-    mut f: F,
+    f: F,
 ) -> std::io::Result<ReplayEmission> {
     let Some(reader) = open_replay_updates_reader(session_id, grow_home)? else {
         return Ok(ReplayEmission::Empty);
     };
-    let lines = read_committed_jsonl_text_lines_from_reader(reader)?;
-    let live = filter_rewind_lines(lines.iter().map(String::as_str).collect());
+    for_each_replay_grow_notification(reader, f)
+}
+
+/// Restore communication independently of the disposable updates cache.
+/// Pin and validate one session; stream bodies individually rather than
+/// collecting all historical messages into a second transcript.
+pub fn stream_coordination_notices_at<F: FnMut(crate::extensions::notification::UiNotice)>(
+    session_id: &str,
+    grow_home: &std::path::Path,
+    mut emit: F,
+) -> io::Result<ReplayEmission> {
+    let storage = JsonlStorageAdapter::with_root(grow_home.to_path_buf());
+    let Some(opened) = storage.open_session_by_id_shared_read(session_id)? else {
+        return Ok(ReplayEmission::Empty);
+    };
+    let validated = opened.validated_timeline(session_id)?;
     let mut emitted = false;
-    for line in live {
-        match SessionUpdateEnvelope::from_str(line) {
-            Ok(SessionUpdate::Grow(notification)) => {
-                emitted = true;
-                f(*notification);
-            }
-            Ok(SessionUpdate::Acp(_)) => {}
-            Err(error) => {
-                tracing::debug!(?error, "skipping unparseable Grow replay line");
-            }
+    for event in validated.timeline.events() {
+        if let Some(notice) = crate::session::notification_inbox::read_parent_message_notice(
+            opened.directory(),
+            event,
+        ) {
+            emit(notice);
+            emitted = true;
+        } else if let Some(inquiry @ crate::coordination::InquiryEvent::Incoming { .. }) =
+            crate::coordination::InquiryEvent::from_timeline(event)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
+        {
+            emit(inquiry.notice());
+            emitted = true;
         }
     }
     Ok(if emitted {
@@ -3669,21 +3688,37 @@ pub(crate) fn stream_replay_grow_notifications_in<
     F: FnMut(crate::extensions::notification::SessionNotification),
 >(
     directory: &ContainedDirectory,
-    mut f: F,
+    f: F,
 ) -> std::io::Result<ReplayEmission> {
     let Some(reader) = open_replay_updates_reader_in(directory)? else {
         return Ok(ReplayEmission::Empty);
     };
+    for_each_replay_grow_notification(reader, f)
+}
+
+fn for_each_replay_grow_notification<F: FnMut(SessionNotification)>(
+    reader: CommittedJsonlLines,
+    mut f: F,
+) -> std::io::Result<ReplayEmission> {
     let lines = read_committed_jsonl_text_lines_from_reader(reader)?;
     let live = filter_rewind_lines(lines.iter().map(String::as_str).collect());
     let mut emitted = false;
     for line in live {
-        match SessionUpdateEnvelope::from_str(line) {
-            Ok(SessionUpdate::Grow(notification)) => {
-                emitted = true;
-                f(*notification);
+        // ACP payloads can contain large transcripts and tool output. This
+        // projection only needs Grow facts, so do not allocate typed ACP data.
+        let notification = serde_json::from_str::<RawLinePeek<'_>>(line).and_then(|envelope| {
+            if envelope.method == GROW_SESSION_UPDATE_METHOD {
+                serde_json::from_str::<SessionNotification>(envelope.params.get()).map(Some)
+            } else {
+                Ok(None)
             }
-            Ok(SessionUpdate::Acp(_)) => {}
+        });
+        match notification {
+            Ok(Some(notification)) => {
+                emitted = true;
+                f(notification);
+            }
+            Ok(None) => {}
             Err(error) => {
                 tracing::debug!(?error, "skipping unparseable Grow replay line");
             }
@@ -4092,18 +4127,29 @@ mod tests {
     #[test]
     fn publication_preserves_exact_names_across_buffer_alignments() {
         let root = tempfile::tempdir().unwrap();
-        let parent = ContainedDirectory::open(root.path(), Path::new(""), "name fixture", false).unwrap();
+        let parent =
+            ContainedDirectory::open(root.path(), Path::new(""), "name fixture", false).unwrap();
         for length in 1..=8 {
             let file_name = format!("file{}", "x".repeat(length));
             let name = std::ffi::OsStr::new(&file_name);
             parent.write_atomic(name, b"original", true, false).unwrap();
             assert_eq!(std::fs::read(root.path().join(name)).unwrap(), b"original");
-            assert_eq!(parent.write_atomic(name, b"replacement", true, false).unwrap_err().kind(), io::ErrorKind::AlreadyExists);
+            assert_eq!(
+                parent
+                    .write_atomic(name, b"replacement", true, false)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::AlreadyExists
+            );
             assert_eq!(std::fs::read(root.path().join(name)).unwrap(), b"original");
 
-            let staging = parent.create_child(std::ffi::OsStr::new("staging"), "name staging").unwrap();
+            let staging = parent
+                .create_child(std::ffi::OsStr::new("staging"), "name staging")
+                .unwrap();
             let directory_name = format!("directory{}", "x".repeat(length));
-            let published = staging.publish_child_no_replace(&parent, std::ffi::OsStr::new(&directory_name)).unwrap();
+            let published = staging
+                .publish_child_no_replace(&parent, std::ffi::OsStr::new(&directory_name))
+                .unwrap();
             assert!(root.path().join(&directory_name).is_dir());
             assert_eq!(parent.list_names().unwrap().len(), length * 2);
             drop(published);
@@ -4148,7 +4194,9 @@ mod tests {
             .open_relative(Path::new("session"), "next writer capability", false)
             .unwrap();
         assert_eq!(
-            next_writer.read_bounded(std::ffi::OsStr::new("marker"), "reopened marker", 32).unwrap(),
+            next_writer
+                .read_bounded(std::ffi::OsStr::new("marker"), "reopened marker", 32)
+                .unwrap(),
             b"published"
         );
     }
@@ -5412,6 +5460,68 @@ mod tests {
     fn from_str_unknown_grow_variant_is_rejected() {
         let line = grow_envelope(r#"{"sessionUpdate":"git_branch_update","branch":"main"}"#);
         assert!(SessionUpdateEnvelope::from_str(&line).is_err());
+    }
+
+    #[test]
+    fn grow_projection_matches_typed_replay_and_preserves_notification_identity() {
+        let user0 = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"P0"},"_meta":{"promptIndex":0}}"#,
+        );
+        let user1 = acp_envelope(
+            r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"P1"},"_meta":{"promptIndex":1}}"#,
+        );
+        let grow = |id| {
+            serde_json::json!({
+                "method": GROW_SESSION_UPDATE_METHOD,
+                "params": {"sessionId": "source-session", "update": {"sessionUpdate": "memory_flush_started"},
+                    "_meta": {"eventId": id, "extra": [1, "preserved"]}}
+            }).to_string()
+        };
+        let base = vec![
+            user0,
+            grow("kept"),
+            acp_envelope(&format!(
+                r#"{{"sessionUpdate":"agent_message_chunk","content":{{"type":"text","text":"{}"}}}}"#,
+                "x".repeat(64 * 1024)
+            )),
+            "{bad-json}".into(),
+            grow_envelope(r#"{"sessionUpdate":"unknown_variant"}"#),
+            r#"{"method":"session/update","params":null}"#.into(),
+            user1,
+            grow("old-branch"),
+        ];
+        for rewind in [false, true] {
+            let mut lines = base.clone();
+            if rewind {
+                lines.push(grow_envelope(
+                    r#"{"sessionUpdate":"rewind_marker","target_prompt_index":1,"created_at":"2024-01-01"}"#,
+                ));
+                lines.push(grow("after-rewind"));
+            }
+            let expected: Vec<_> = filter_rewind_lines(lines.iter().map(String::as_str).collect())
+                .into_iter()
+                .filter_map(|line| match SessionUpdateEnvelope::from_str(line) {
+                    Ok(SessionUpdate::Grow(notification)) => Some(*notification),
+                    _ => None,
+                })
+                .collect();
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("updates.jsonl");
+            std::fs::write(&path, format!("{}\n{{\"partial\":", lines.join("\n"))).unwrap();
+            let reader = CommittedJsonlLines::open(&path, "test replay")
+                .unwrap()
+                .unwrap();
+            let mut actual = Vec::new();
+            assert_eq!(
+                for_each_replay_grow_notification(reader, |n| actual.push(n)).unwrap(),
+                ReplayEmission::Emitted
+            );
+            assert!(!expected.is_empty());
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+        }
     }
 
     #[test]

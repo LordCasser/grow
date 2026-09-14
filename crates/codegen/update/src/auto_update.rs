@@ -14,8 +14,7 @@ use crate::version::{
     UpdateConfig, fetch_latest_version, get_installed_version, get_latest_version,
     is_version_cache_fresh, try_fetch_stable_pointer, write_version_cache,
 };
-use shell::util::config;
-use shell::util::grow_home::{grow_application, grow_home};
+use config::{self, grow_application, grow_home};
 
 #[derive(Clone, Copy, Debug)]
 pub enum UpdateRunMode {
@@ -90,11 +89,12 @@ pub fn print_update_status(status: &UpdateStatus, json: bool) -> anyhow::Result<
     Ok(())
 }
 
-pub async fn check_update_status(update_config: &UpdateConfig) -> UpdateStatus {
+pub async fn check_update_status(
+    update_config: &UpdateConfig,
+    auto_update: Option<bool>,
+) -> UpdateStatus {
     let installer = get_installer().await.map(|value| value.to_string());
     let current_version = get_installed_version();
-    let current_config = config::load_config().await;
-    let auto_update = current_config.cli.auto_update;
     let channel = update_config.channel.clone();
 
     let Some(ref _inst) = installer else {
@@ -698,7 +698,10 @@ impl BackgroundUpdateCheck {
 /// ready when the user quits and relaunches. When another process (an earlier
 /// TUI, the leader's hourly checker) already put the target version on disk,
 /// no download is started — only the restart hint is surfaced.
-pub async fn check_update_background(update_config: &UpdateConfig) -> BackgroundUpdateCheck {
+pub async fn check_update_background(
+    update_config: &UpdateConfig,
+    auto_update: Option<bool>,
+) -> BackgroundUpdateCheck {
     let Some(installer) = get_installer().await else {
         return BackgroundUpdateCheck::none();
     };
@@ -709,8 +712,7 @@ pub async fn check_update_background(update_config: &UpdateConfig) -> Background
         return BackgroundUpdateCheck::none();
     }
 
-    let current_config = config::load_config().await;
-    if current_config.cli.auto_update != Some(true) {
+    if auto_update != Some(true) {
         return BackgroundUpdateCheck::none();
     }
 
@@ -785,6 +787,7 @@ pub async fn run_update_if_available(
     run_mode: UpdateRunMode,
     interactive: bool,
     update_config: &UpdateConfig,
+    auto_update: Option<bool>,
 ) -> Result<bool> {
     let Some(inst) = get_installer().await else {
         // Skip update check if no known installer.
@@ -797,10 +800,8 @@ pub async fn run_update_if_available(
         return Ok(false);
     }
 
-    let current_config = config::load_config().await;
-
     // Background networking is opt-in.
-    if current_config.cli.auto_update != Some(true) {
+    if auto_update != Some(true) {
         return Ok(false);
     }
 
@@ -2651,19 +2652,6 @@ pub async fn install_gh_release_from(
     Ok(landed)
 }
 
-pub async fn apply_channel_switch(channel_switch: Option<&str>, update_config: &mut UpdateConfig) {
-    if let Some(ch) = channel_switch
-        && update_config.channel != ch
-    {
-        let _ = config::update_config(|st| {
-            st.cli.channel = Some(ch.to_string());
-        })
-        .await;
-        update_config.channel = ch.to_string();
-        eprintln!("Switched to {} channel.", ch);
-    }
-}
-
 /// Run the `grow update` command. Returns `Ok(Some(version))` when the target
 /// version is present on disk afterwards — either installed by this call or
 /// found already installed (e.g. by a concurrent background download); returns
@@ -2675,10 +2663,10 @@ pub async fn apply_channel_switch(channel_switch: Option<&str>, update_config: &
 pub async fn run_update(
     force: bool,
     pinned_version: Option<&str>,
-    channel_switch: Option<&str>,
-    update_config: &mut UpdateConfig,
+    channel_switch_requested: bool,
+    update_config: &UpdateConfig,
+    disable_auto_update: impl std::future::Future<Output = Result<()>>,
 ) -> Result<Option<String>> {
-    apply_channel_switch(channel_switch, update_config).await;
     let installer = match get_installer().await {
         Some(i) => i,
         None => {
@@ -2703,11 +2691,7 @@ pub async fn run_update(
         );
         eprintln!();
         let landed = run_install_script(installer, Some(version), update_config).await?;
-        if let Err(e) = config::update_config(|st| {
-            st.cli.auto_update = Some(false);
-        })
-        .await
-        {
+        if let Err(e) = disable_auto_update.await {
             tracing::warn!("Failed to persist auto_update=false for pinned install: {e}");
         }
         eprintln!(
@@ -2778,7 +2762,7 @@ pub async fn run_update(
                 // different target version: install even though the current
                 // version is "newer" by semver. This handles switching from
                 // alpha 0.2.X back to stable 0.1.220 where 0.2.X > 0.1.220.
-                if channel_switch.is_some() && effective_current != install_target {
+                if channel_switch_requested && effective_current != install_target {
                     // Fall through to install
                 } else {
                     let stable_ptr = try_fetch_stable_pointer().await;

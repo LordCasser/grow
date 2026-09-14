@@ -54,6 +54,8 @@ pub(crate) use ctx::{SwitchCause, switch_to_agent};
 #[cfg(test)]
 pub(crate) use settings::ui::{ROLLBACK_NO_ARM_TOAST, build_pager_snapshot};
 #[cfg(test)]
+pub(crate) use turn::PROMPT_STATUS_CANCEL_WATCHDOG_DELAY;
+#[cfg(test)]
 pub(crate) use turn::PROMPT_STATUS_RUNNING_WATCHDOG_DELAY;
 #[cfg(test)]
 pub(crate) use turn::PROMPT_STATUS_WATCHDOG_DELAY;

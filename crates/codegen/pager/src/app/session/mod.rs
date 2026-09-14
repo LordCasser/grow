@@ -2612,6 +2612,7 @@ impl AgentSession {
     pub fn cancel_turn(&mut self, _scrollback: &mut ScrollbackState) {
         if self.state.is_turn_running() {
             self.state = AgentState::TurnCancelling;
+            self.last_status_observed_at = Some(Instant::now());
         }
     }
     /// Current activity within a running turn (for turn status line display).

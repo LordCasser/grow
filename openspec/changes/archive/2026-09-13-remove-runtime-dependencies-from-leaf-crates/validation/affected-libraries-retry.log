@@ -1,0 +1,76 @@
+ Downloading crates ...
+  Downloaded deadpool v0.12.3 (registry `ustc`)
+  Downloaded assert-json-diff v2.0.2 (registry `ustc`)
+  Downloaded deadpool-runtime v0.1.4 (registry `ustc`)
+  Downloaded wiremock v0.6.5 (registry `ustc`)
+   Compiling tokio v1.53.1
+   Compiling tool-types v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/common/tool-types)
+   Compiling deadpool-runtime v0.1.4
+   Compiling assert-json-diff v2.0.2
+   Compiling pager v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/pager)
+   Compiling test-utils v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/common/test-utils)
+   Compiling tokio-util v0.7.19
+   Compiling h2 v0.4.15
+   Compiling tower v0.5.3
+   Compiling async-compression v0.4.43
+   Compiling tower-http v0.6.11
+   Compiling tokio-rustls v0.26.4
+   Compiling hyper v1.11.0
+   Compiling tty-utils v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/tty-utils)
+   Compiling hyper-util v0.1.20
+   Compiling config v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/config)
+   Compiling hyper-rustls v0.27.9
+   Compiling sandbox v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/sandbox)
+   Compiling reqwest v0.13.4
+   Compiling tool-runtime v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/common/tool-runtime)
+   Compiling command-fds v0.3.3
+   Compiling async-lsp v0.2.4
+   Compiling config-types v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/config-types)
+   Compiling tools v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/tools)
+   Compiling tokio-stream v0.1.19
+   Compiling diagnostics v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/diagnostics)
+   Compiling tokio-tungstenite v0.29.0
+   Compiling axum v0.8.9
+   Compiling async-openai v0.41.3 (https://github.com/LordCasser/async-openai.git?rev=a2bae9966f435bc343aa095065d96700bfb81aed#a2bae996)
+   Compiling compaction v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/common/compaction)
+   Compiling sampling-types v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/sampling-types)
+   Compiling reqwest-middleware v0.5.2
+   Compiling acp-transport v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/acp-transport)
+   Compiling auth v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/auth)
+   Compiling client-support v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/client-support)
+   Compiling hooks v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/hooks)
+   Compiling agent v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/agent)
+   Compiling rmcp v2.2.0
+   Compiling grow-http v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/grow-http)
+   Compiling test-support v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/test-support)
+   Compiling mcp v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/mcp)
+   Compiling fast-worktree v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/fast-worktree)
+   Compiling hunk-tracker v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/hunk-tracker)
+   Compiling fsnotify v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/fsnotify)
+   Compiling codebase-graph v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/codebase-graph)
+   Compiling memory v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/memory)
+   Compiling workspace v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/workspace)
+   Compiling plugin-marketplace v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/plugin-marketplace)
+   Compiling shell-base v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/shell-base)
+   Compiling chat-state v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/chat-state)
+   Compiling sampler v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/sampler)
+   Compiling announcements v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/announcements)
+   Compiling workflow v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/workflow)
+   Compiling process-wrap v9.1.0
+   Compiling backon v1.6.0
+   Compiling ptyctl v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/ptyctl)
+   Compiling deadpool v0.12.3
+   Compiling wiremock v0.6.5
+   Compiling pager-pty-harness v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/pager-pty-harness)
+   Compiling shell v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/shell)
+   Compiling pager-render v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/pager-render)
+   Compiling update v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/update)
+error[E0425]: cannot find value `channel_switch` in this scope
+    --> crates/codegen/update/src/auto_update.rs:2764:20
+     |
+2764 |                 if channel_switch.is_some() && effective_current != install_target {
+     |                    ^^^^^^^^^^^^^^ not found in this scope
+
+For more information about this error, try `rustc --explain E0425`.
+error: could not compile `update` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...

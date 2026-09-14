@@ -1,11 +1,13 @@
 //! Mutation handlers for the ChatStateActor.
 
-use sampling_types::{ConversationItem, DanglingToolCallReason, NativeContinuationFragment, TokenUsage};
+use sampling_types::{
+    ConversationItem, DanglingToolCallReason, NativeContinuationFragment, TokenUsage,
+};
 
 use super::ChatStateActor;
 use crate::MessageCause;
+use crate::actor::state::{AttemptUsageSettlement, SubagentUsageSettlement};
 use crate::events::ChatStateEvent;
-use crate::actor::state::AttemptUsageSettlement;
 
 /// Static string label for tracing on `ConversationItem` (avoids pulling
 /// the `Role` enum into the format string).
@@ -514,19 +516,6 @@ impl ChatStateActor {
         cost_usd_ticks: Option<i64>,
         api_duration_ms: Option<u64>,
     ) -> Result<bool, crate::commands::TimelineWriteError> {
-        if let Some(existing) = self.state.settled_model_attempts.get(&attempt_key) {
-            if existing.matches(
-                &model_id,
-                captured_prompt_index,
-                usage.as_ref(),
-                cost_usd_ticks,
-                api_duration_ms,
-            ) {
-                return Ok(false);
-            }
-            return Err(crate::commands::TimelineWriteError::AttemptUsageConflict);
-        }
-
         let settlement = AttemptUsageSettlement {
             attempt_key,
             model_id,
@@ -535,20 +524,30 @@ impl ChatStateActor {
             cost_usd_ticks,
             api_duration_ms,
         };
+        if settlement.check_duplicate(
+            self.state
+                .settled_model_attempts
+                .get(&settlement.attempt_key),
+        )? {
+            return Ok(false);
+        }
         let data = serde_json::to_value(&settlement).expect("attempt usage is serializable");
-        let event = self.state.timeline.prepare(crate::TimelineEventKind::Observation(
-            crate::ObservationEvent {
-                scope: "sampling_usage".into(),
-                name: "attempt_settled".into(),
-                turn: None,
-                step: None,
-                data: Some(data),
-            },
-        ))?;
+        let event = self
+            .state
+            .timeline
+            .prepare(crate::TimelineEventKind::Observation(
+                crate::ObservationEvent {
+                    scope: "sampling_usage".into(),
+                    name: "attempt_settled".into(),
+                    turn: None,
+                    step: None,
+                    data: Some(data),
+                },
+            ))?;
         self.commit_timeline_event(event).await?;
 
-        let current_prompt = self.state.timeline.current_prompt_index()
-            == Some(settlement.captured_prompt_index);
+        let current_prompt =
+            self.state.timeline.current_prompt_index() == Some(settlement.captured_prompt_index);
         if let Some(usage) = settlement.usage.as_ref() {
             let model_key = if settlement.model_id.is_empty() {
                 self.state.sampling_config.model.clone()
@@ -576,7 +575,10 @@ impl ChatStateActor {
         } else {
             self.state.session_usage.mark_incomplete();
             if current_prompt {
-                self.state.prompt_usage.get_or_insert_default().mark_incomplete();
+                self.state
+                    .prompt_usage
+                    .get_or_insert_default()
+                    .mark_incomplete();
             }
         }
         self.state
@@ -586,20 +588,45 @@ impl ChatStateActor {
         Ok(true)
     }
 
-    pub(super) fn record_subagent_usage(
+    pub(super) async fn record_subagent_usage(
         &mut self,
+        subagent_id: &str,
         by_model: &[(String, crate::usage::UsageTotals)],
         attribute_to_prompt: bool,
         incomplete: bool,
-    ) {
+    ) -> Result<bool, crate::commands::TimelineWriteError> {
         if by_model.is_empty() && !incomplete {
-            return;
+            return Ok(false);
         }
+        let settlement = SubagentUsageSettlement {
+            subagent_id: subagent_id.to_owned(),
+            by_model: by_model.to_vec(),
+            incomplete,
+        };
+        if settlement.check_duplicate(self.state.settled_subagent_usage.get(subagent_id))? {
+            return Ok(false);
+        }
+
+        let data = serde_json::to_value(&settlement).expect("subagent usage is serializable");
+        let event = self
+            .state
+            .timeline
+            .prepare(crate::TimelineEventKind::Observation(
+                crate::ObservationEvent {
+                    scope: "session_usage".into(),
+                    name: "subagent_settled".into(),
+                    turn: None,
+                    step: None,
+                    data: Some(data),
+                },
+            ))?;
+        self.commit_timeline_event(event).await?;
+
         if attribute_to_prompt {
             self.state
                 .prompt_usage
                 .get_or_insert_default()
-                .record_subagent(by_model, incomplete);
+                .record_subagent(subagent_id, by_model, incomplete);
         }
         // The session ledger always folds, even when the usage is not
         // attributable to the open prompt (its pin may belong to an earlier
@@ -607,11 +634,34 @@ impl ChatStateActor {
         // never mark a different live prompt's ledger.
         self.state
             .session_usage
-            .record_subagent(by_model, incomplete);
+            .record_subagent(subagent_id, by_model, incomplete);
+        self.state
+            .settled_subagent_usage
+            .insert(subagent_id.to_owned(), settlement);
         self.publish_session_usage();
+        Ok(true)
     }
 
-    pub(super) fn mark_usage_incomplete(&mut self, prompt: bool, session: bool) {
+    pub(super) async fn mark_usage_incomplete(
+        &mut self,
+        prompt: bool,
+        session: bool,
+    ) -> Result<(), crate::commands::TimelineWriteError> {
+        if session && !self.state.session_usage.incomplete {
+            let event = self
+                .state
+                .timeline
+                .prepare(crate::TimelineEventKind::Observation(
+                    crate::ObservationEvent {
+                        scope: "session_usage".into(),
+                        name: "incomplete".into(),
+                        turn: None,
+                        step: None,
+                        data: None,
+                    },
+                ))?;
+            self.commit_timeline_event(event).await?;
+        }
         if prompt {
             self.state
                 .prompt_usage
@@ -622,6 +672,30 @@ impl ChatStateActor {
             self.state.session_usage.mark_incomplete();
             self.publish_session_usage();
         }
+        Ok(())
+    }
+
+    pub(super) async fn begin_usage_resume_segment(
+        &mut self,
+    ) -> Result<(), crate::commands::TimelineWriteError> {
+        let event = self
+            .state
+            .timeline
+            .prepare(crate::TimelineEventKind::Observation(
+                crate::ObservationEvent {
+                    scope: "session_usage".into(),
+                    name: "resume_started".into(),
+                    turn: None,
+                    step: None,
+                    data: None,
+                },
+            ))?;
+        let committed = self.commit_timeline_event(event).await?;
+        self.state
+            .session_usage
+            .begin_resume_segment(committed.seq, committed.at_ms);
+        self.publish_session_usage();
+        Ok(())
     }
 
     fn publish_session_usage(&self) {

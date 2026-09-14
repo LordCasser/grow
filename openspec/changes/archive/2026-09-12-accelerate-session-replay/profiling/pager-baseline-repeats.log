@@ -1,0 +1,27 @@
+run=1
+
+running 1 test
+test app::acp_handler::tests::reconnect::bounded_replay_text_blocks_and_prompt_measurement ... [replay-bench] turns=128 notifications=1152 handle_total_ms=78.27 handle_max_ms=29.57 frame_total_ms=147.95 frame_max_ms=8.57 input_max_ms=0.11 load_finish_ms=5.86 final_layout_ms=1.10
+[replay-bench] turns=256 notifications=2304 handle_total_ms=99.48 handle_max_ms=0.57 frame_total_ms=292.94 frame_max_ms=4.63 input_max_ms=0.09 load_finish_ms=0.98 final_layout_ms=1.24
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7208 filtered out; finished in 0.67s
+
+run=2
+
+running 1 test
+test app::acp_handler::tests::reconnect::bounded_replay_text_blocks_and_prompt_measurement ... [replay-bench] turns=128 notifications=1152 handle_total_ms=78.54 handle_max_ms=29.00 frame_total_ms=148.40 frame_max_ms=8.61 input_max_ms=0.11 load_finish_ms=5.85 final_layout_ms=1.27
+[replay-bench] turns=256 notifications=2304 handle_total_ms=99.15 handle_max_ms=0.52 frame_total_ms=295.89 frame_max_ms=4.92 input_max_ms=0.12 load_finish_ms=0.98 final_layout_ms=1.25
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7208 filtered out; finished in 0.68s
+
+run=3
+
+running 1 test
+test app::acp_handler::tests::reconnect::bounded_replay_text_blocks_and_prompt_measurement ... [replay-bench] turns=128 notifications=1152 handle_total_ms=79.42 handle_max_ms=29.24 frame_total_ms=148.79 frame_max_ms=8.44 input_max_ms=0.16 load_finish_ms=5.55 final_layout_ms=1.19
+[replay-bench] turns=256 notifications=2304 handle_total_ms=97.07 handle_max_ms=0.51 frame_total_ms=290.49 frame_max_ms=4.97 input_max_ms=0.06 load_finish_ms=1.14 final_layout_ms=1.24
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7208 filtered out; finished in 0.67s
+

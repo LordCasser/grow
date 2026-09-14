@@ -9,6 +9,9 @@ use super::common::*;
 #[ignore]
 async fn continue_resumes_session_with_history() {
     let content = ContentController::start().await.expect("start content");
+    content
+        .seed_llm_config()
+        .expect("seed isolated mock provider");
     content.set_response(format!("{} first session payload.", turn_sentinel(1)));
 
     // Sessions are keyed by cwd: both runs must share a stable project dir.

@@ -930,6 +930,9 @@ pub enum NotificationSourceVersion {
     Opaque { value: String },
 }
 
+/// Parent-message artifacts contain the original message, without model prose.
+pub const PARENT_MESSAGE_SOURCE_VERSION: u64 = 2;
+
 /// Immutable, content-addressed model-facing notification payload.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1817,6 +1820,44 @@ impl Timeline {
             .collect::<Vec<_>>();
         pending.sort_by_key(|notification| notification.received_seq);
         pending
+    }
+
+    /// Immutable parent receipts, including consumed messages, in receive order.
+    /// Reuse the receipt index; callers never need to clone the whole Timeline.
+    pub fn parent_message_receipts(&self) -> Vec<TimelineEvent> {
+        let mut receipts = self
+            .received_notifications
+            .iter()
+            .filter(|((source, _), _)| {
+                matches!(source, NotificationSourceIdentity::ParentMessage { .. })
+            })
+            .filter_map(|(_, seq)| self.events.get(seq.get() as usize).cloned())
+            .collect::<Vec<_>>();
+        receipts.sort_by_key(|event| event.seq);
+        receipts
+    }
+
+    /// Pending inbox data and retained parent-message history share blob ownership.
+    pub fn retained_notification_payload_hashes(&self) -> BTreeSet<String> {
+        let mut hashes = self
+            .pending_notifications
+            .values()
+            .map(|notification| notification.payload_ref.blake3.clone())
+            .collect::<BTreeSet<_>>();
+        for ((source, _), seq) in &self.received_notifications {
+            if matches!(source, NotificationSourceIdentity::ParentMessage { .. })
+                && let Some(TimelineEvent {
+                    kind:
+                        TimelineEventKind::Notification(NotificationEvent::Received {
+                            payload_ref, ..
+                        }),
+                    ..
+                }) = self.events.get(seq.get() as usize)
+            {
+                hashes.insert(payload_ref.blake3.clone());
+            }
+        }
+        hashes
     }
 
     /// Find the immutable receipt for an at-least-once source delivery.
@@ -3411,19 +3452,19 @@ impl Timeline {
                 }
                 let valid_ref = match &shadow.provenance {
                     ImageShadowSource::Description { result_ref } => result_ref.validate().is_ok()
-                    && result_ref.first_seq == result_ref.last_seq
-                    && self.events.iter().any(|event| {
-                        matches!(
-                            &event.kind,
-                            TimelineEventKind::Sideband(spawn)
-                                if spawn.sideband_id == result_ref.timeline_id
-                                    && spawn.purpose == crate::SidebandPurpose::ImageDescription
-                                    && spawn.source_refs.iter().any(|source| {
-                                        source.first_seq <= shadow.source.event.get()
-                                            && shadow.source.event.get() <= source.last_seq
-                                    })
-                        )
-                    }),
+                        && result_ref.first_seq == result_ref.last_seq
+                        && self.events.iter().any(|event| {
+                            matches!(
+                                &event.kind,
+                                TimelineEventKind::Sideband(spawn)
+                                    if spawn.sideband_id == result_ref.timeline_id
+                                        && spawn.purpose == crate::SidebandPurpose::ImageDescription
+                                        && spawn.source_refs.iter().any(|source| {
+                                            source.first_seq <= shadow.source.event.get()
+                                                && shadow.source.event.get() <= source.last_seq
+                                        })
+                            )
+                        }),
                     ImageShadowSource::LocalOcr { engine } => engine == "tesseract",
                 };
                 if !valid_ref {
@@ -5767,7 +5808,7 @@ fn valid_notification_source_version(
             },
             NotificationSourceVersion::Ordinal { value },
         ) => {
-            *value == 1
+            *value == PARENT_MESSAGE_SOURCE_VERSION
                 && valid_notification_identifier(parent_session_id)
                 && valid_notification_identifier(message_id)
         }
@@ -10697,11 +10738,14 @@ mod tests {
 
     #[test]
     fn local_ocr_description_replays_with_original_images_and_valid_engine() {
-        let original = ConversationItem::user_with_parts(vec![sampling_types::ContentPart::Image {
-            url: "data:image/png;base64,original".into(), description: None,
-        }]);
+        let original =
+            ConversationItem::user_with_parts(vec![sampling_types::ContentPart::Image {
+                url: "data:image/png;base64,original".into(),
+                description: None,
+            }]);
         let mut timeline = Timeline::from_seed(vec![original]).unwrap();
-        let group = sampling_types::conversation::conversation_image_groups(timeline.surface()).remove(0);
+        let group =
+            sampling_types::conversation::conversation_image_groups(timeline.surface()).remove(0);
         let mut projection = ImageProjectionEvent {
             trigger_runtime: sampling_types::ModelImageInputKey::new(
                 "model", "messages", "endpoint",
@@ -10730,10 +10774,20 @@ mod tests {
             .record(TimelineEventKind::ImageProjection(projection))
             .unwrap();
         let replay = Timeline::from_events(timeline.events().to_vec()).unwrap();
-        assert_eq!(sampling_types::conversation::item_image_description(&replay.surface()[0]), Some("local OCR text"));
-        assert_eq!(sampling_types::conversation::conversation_image_groups(replay.surface())[0].image_urls[0].as_ref(),
-            "data:image/png;base64,original");
-        assert_eq!(serde_json::to_value(replay.surface()).unwrap(), serde_json::to_value(timeline.surface()).unwrap());
+        assert_eq!(
+            sampling_types::conversation::item_image_description(&replay.surface()[0]),
+            Some("local OCR text")
+        );
+        assert_eq!(
+            sampling_types::conversation::conversation_image_groups(replay.surface())[0].image_urls
+                [0]
+            .as_ref(),
+            "data:image/png;base64,original"
+        );
+        assert_eq!(
+            serde_json::to_value(replay.surface()).unwrap(),
+            serde_json::to_value(timeline.surface()).unwrap()
+        );
     }
 
     fn image_text_request(items: &[ConversationItem]) -> Vec<ConversationItem> {
@@ -10805,7 +10859,8 @@ mod tests {
         let rewound = timeline.rewind_surface(1).unwrap();
         image_text_request(&rewound);
         assert!(
-            sampling_types::conversation::item_image_description(&rewound[0]).unwrap()
+            sampling_types::conversation::item_image_description(&rewound[0])
+                .unwrap()
                 .contains("durable image description")
         );
         assert!(matches!(
@@ -11174,7 +11229,8 @@ mod tests {
             assert!(!surface.contains(asset));
             assert!(surface.contains(&format!("durable description {index}")));
         }
-        let branch = serde_json::to_string(&image_text_request(&timeline.branch_transcript())).unwrap();
+        let branch =
+            serde_json::to_string(&image_text_request(&timeline.branch_transcript())).unwrap();
         assert!(assets.iter().all(|asset| !branch.contains(asset)));
         image_text_request(&timeline.branch_transcript());
 
@@ -11274,7 +11330,8 @@ mod tests {
         assert!(!surface.contains(carrier_path));
         assert!(!surface.contains(tool_path));
         assert!(surface.contains("response carrier projected to durable text"));
-        let branch = serde_json::to_string(&image_text_request(&timeline.branch_transcript())).unwrap();
+        let branch =
+            serde_json::to_string(&image_text_request(&timeline.branch_transcript())).unwrap();
         assert!(!branch.contains(carrier_path));
         assert!(!branch.contains(tool_path));
 
@@ -11366,7 +11423,8 @@ mod tests {
         let rewound = timeline.rewind_surface(1).unwrap();
         image_text_request(&rewound);
         assert!(
-            sampling_types::conversation::item_image_description(&rewound[0]).unwrap()
+            sampling_types::conversation::item_image_description(&rewound[0])
+                .unwrap()
                 .contains("durable image description")
         );
     }
@@ -11434,7 +11492,8 @@ mod tests {
         assert_ne!(branch_ids[0], original_source);
         image_text_request(&branch);
         assert!(
-            sampling_types::conversation::item_image_description(&branch[0]).unwrap()
+            sampling_types::conversation::item_image_description(&branch[0])
+                .unwrap()
                 .contains("durable image description")
         );
         assert_eq!(
@@ -12564,6 +12623,64 @@ mod tests {
                 redirect_kind: None,
             }))
             .unwrap();
+    }
+
+    #[test]
+    fn parent_receipt_history_retains_consumed_payload_without_model_input() {
+        let mut timeline = Timeline::default();
+        let source = NotificationSource::ParentMessage {
+            parent_session_id: "parent".into(),
+            message_id: "message-1".into(),
+            interrupt: false,
+        };
+        assert!(
+            notification_id(
+                "session-1",
+                &source,
+                &NotificationSourceVersion::Ordinal { value: 1 }
+            )
+            .is_err()
+        );
+        let id = receive_notification(
+            &mut timeline,
+            source,
+            NotificationSourceVersion::Ordinal {
+                value: PARENT_MESSAGE_SOURCE_VERSION,
+            },
+            "shared body",
+        );
+        let other = receive_notification(
+            &mut timeline,
+            NotificationSource::TaskCompleted {
+                task_id: "task-1".into(),
+                task_kind: NotificationTaskKind::Task,
+                owner: NotificationOwner::Session,
+            },
+            NotificationSourceVersion::Ordinal { value: 1 },
+            "shared body",
+        );
+        let turn = TurnId(1);
+        start_notification_turn(&mut timeline, turn);
+        timeline
+            .record(TimelineEventKind::Notification(
+                NotificationEvent::Consumed {
+                    notification_ids: vec![id, other],
+                    turn,
+                    input: None,
+                },
+            ))
+            .unwrap();
+        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert!(replayed.pending_notifications().is_empty());
+        assert!(
+            replayed.surface().is_empty(),
+            "receipt history is not another model input"
+        );
+        assert_eq!(replayed.parent_message_receipts().len(), 1);
+        assert_eq!(
+            replayed.retained_notification_payload_hashes(),
+            BTreeSet::from([notification_payload("shared body").blake3,])
+        );
     }
 
     #[test]

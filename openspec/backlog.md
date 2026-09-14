@@ -2,10 +2,21 @@
 
 > **定位**：本文件只记录长期计划，不是当前版本待办或实现授权。任何条目都不会自动进入实现；即使成熟度或验收条件已经满足，也必须由用户另行明确启动。
 
+- **内置工具展示覆盖约束**：2026-09-14 的 [通信展示排查](changes/improve-agent-communication-presentation/design.md) 确认 `send_tool_call_start` 的通配分支会把已注册父子工具降为 `Tool call`，而 `acp_tool_update` 仍有 `_ => None`，新类型漏接不能由编译器发现。本次提案只覆盖 agent 通信；其余工具尚未穷举审计。后续独立核对注册工具的开始/终态/原始输入与渲染覆盖，以生产开始事件贯穿测试证明实际工具身份可见，不能用手工正确标题掩盖漏接，也不预设要新建通用展示框架。
+
 Grow 的配置保持本地化：全局配置位于 `$GROW_HOME/config.toml`，项目配置位于项目内的
 `.grow/config.toml`。项目配置只影响当前项目，并按现有解析策略覆盖全局配置。
 
 远程配置管理、deployment-config 服务、签名策略同步及其专用 CLI 不在规划范围内。
+
+## 2026-09-12 全局架构审查（分批落地，体验目标继续跟踪）
+
+审查覆盖当前工作树的会话恢复、用量校验、客户端投影、Workflow 和内部依赖。原始证据、批次与验收条件见 [审查方案](changes/archive/2026-09-12-review-global-architecture-2026-09-12/review.md)。用户随后批准首批实施：已完成已知用量事实的恢复冲突校验、Context 异步结果的 session/epoch/nonce 归属检查，并去掉 Timeline 冷恢复的重复 fold 与 Grow-only 扫描中的 ACP typed decode。具体结果见 [首批实施复核](changes/archive/2026-09-12-reuse-validated-resume-timeline/implementation-review.md)。后续债务保持独立，不由本条自动授权。
+
+- **resume 完整加载与可交互时间（P1，继续跟踪）**：actor 阶段在受限合成样本上约减少 19%；128 turns 完整 load 中位数仅约 2% 变化，512 turns 单次无改善，不能认定用户体感问题已解决。分批 drain 方案使总耗时变差，已撤回。需要真实长会话的首屏历史、按键回显、Pager handler/布局/终端写入与最终响应分阶段 trace；覆盖长文本、密集工具、多子会话、resident/cursor，验证输入回显 p95 ≤ 100 ms。保留已有输入公平性、虚拟化和加载屏障，不以提前清除 loading 状态伪造完成。当前 normal 按键/队列 reducer 与实际 --continue PTY 已通过，但不代表延迟目标达成。
+- **第二轮恢复布局（已完成局部优化）**：Pager batch 保留既有布局，并将新增/dirty 历史文本的精确渲染限制在可见区。128/256 turns 的进程内总工作中位数约减少 33%/41%，256 turns 布局约减少 55%；最终 7,201 项 Pager 回归和真实 --continue PTY 通过。Shell 两个局部优化候选未证实全链路收益，已撤回。数据、限制与磁盘记录见 [第二轮验证](changes/archive/2026-09-12-accelerate-session-replay/verification.md)。真实长会话的终端输入 p95、密集工具和多子会话性能仍由上一条跟踪，不把阶段测量当作体验目标已达成。
+- **第三轮恢复边界与依赖（已实施）**：普通观察与 writer repair 分离；Messages 对不同原始工具 ID 作无碰撞编码；Workflow cap 按有效恢复项计数；移除 sampling-types/grow-http/pager-render/update 的五条反向直接依赖，并在现有 CI 中守住边界。分为四个独立 change，复用已有类型和配置所有者。见 [整体验证](changes/archive/2026-09-13-remove-runtime-dependencies-from-leaf-crates/verification.md)。
+- **保留独立设计的事项（P2）**：Workflow Forgotten 事实与进度 checkpoint、跨编码/估算/证据的请求投影共同遍历，以及有测量依据的在线 Timeline append/领域封装。既有 portable_prefix_end 和恢复 fold 已共享/优化，不重复建立新框架；这些事项先确认持久化语义或性能证据。
 
 ## 行动预告后任务提前结束（尊重原生终止，来源分离）
 
@@ -36,6 +47,10 @@ Grow 的配置保持本地化：全局配置位于 `$GROW_HOME/config.toml`，�
 2026-09-10 发布审查核对 `sampling-types/src/conversation.rs::build_messages_request`：既有 ID 清洗器把非字母数字/下划线/连字符替换成 `_`，因此中性历史中不同的 `a.b` 与 `a/b` 会得到相同目标 ID。此次真实会话的 ID 没有触发该情况，当前配对修复不扩展到 ID 编码重构。后续单独定义无碰撞的目标映射，并同时验证 live、portable 与完整 native span 的调用/结果身份，避免单改结果 ID 破坏原生 continuation。
 
 `review-turn-completion-state-machine` 的真实请求编码器探针已确认调用和结果都变为重复的 `a_b`。这是切换到 Messages 的明确风险；修复仍按独立身份映射 change 处理。
+
+2026-09-13 由 [encode-messages-tool-identities](changes/archive/2026-09-13-encode-messages-tool-identities/verification.md) 完成不同原始 ID 的目标编码，覆盖所有 portable 切点、native 预留、Unicode、长 ID 与结果归属；原生签名和原始 Timeline 不改写。
+
+独立债务：相同原始 ID 被两个独立 neutral/native exchange 复用时，现有投影只在 neutral 区域统计歧义，native span 不参与；源码允许该既有歧义进入 wire。需在请求投影所有者明确全局拒绝或按 exchange 区分身份，覆盖 native 调用后的合法中性结果，不能在编码器里无差别重写原生 ID。当前编码修复只保证不同原始 ID 不被编码合并，不声称治理了相同原始身份的历史歧义。
 
 ## 长期：MCP Elicitation 与交互式 MCP
 
@@ -699,4 +714,4 @@ Worktree 生命周期、复用与安全边界继续等待上游稳定。它不�
 
 - **断线中的活跃候选前缀补传**：`unify-sampling-attempt-recovery` 隔离并清理未接纳预览，`updates.jsonl` 只包含已接纳内容。现有 root load 与子视图按需回放不能据此保证完整补传断线期间仍在生成的候选前缀。若需要不中断地恢复完整实时展示，应独立核对 leader 的 load cutoff、当前候选快照和子会话历史水位，在同一 session/attempt 归属下补传并去重；不得把临时预览重新写成接纳历史，也不能把该 UI 能力等同于重新执行 provider。
 
-- **会话读取与 Summary 投影修复的边界**：`JsonlStorageAdapter::load_session` / `load_light_data` 在读取后仍调用 `reconcile_session_title_projection` 和 `reconcile_model_projection`；投影滞后时会尝试持久化修复及写者准入。因此，即使 Windows 观察句柄已支持与运行中写者共存，也不能据此宣称所有滞后 Summary 都能纯只读加载。本次发布修复已一致投影下的共享冲突；后续独立定义只读投影与显式修复边界，验证运行中写者、滞后 title/model Summary、无写权限观察者及写者接管，不改变现有错误场景来隐藏差异。
+- **会话读取与 Summary 投影修复的边界（已完成）**：由 [keep-session-observation-read-only](changes/archive/2026-09-13-keep-session-observation-read-only/verification.md) 分离。普通 full/light 读取只派生内存 Summary，显式 writer load 才持久修复；live writer 持锁、滞后 title/model、sideband 不变、接管修复及冲突拒绝均通过。macOS 已验证，Windows runner 尚未在本机执行。

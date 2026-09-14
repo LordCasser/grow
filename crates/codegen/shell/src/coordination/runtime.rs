@@ -14,8 +14,8 @@ use crate::local_ipc::transport::{LocalListener, LocalStream, PrivateEndpoint};
 
 use super::inquiry::{
     CoordinationError, CoordinationErrorCode, INQUIRY_DEADLINE, InboundInquiry,
-    InquiryCancellation, InquiryCancellationReason, InquiryOutcome, InquiryPhase, InquiryState,
-    InquiryStatus, MAX_QUESTION_BYTES, TERMINAL_CACHE_TTL,
+    InquiryCancellation, InquiryCancellationReason, InquiryDirection, InquiryOutcome, InquiryPhase,
+    InquiryState, InquiryStatus, MAX_QUESTION_BYTES, TERMINAL_CACHE_TTL,
 };
 use super::manifest::{
     DiscoveredSession, HEARTBEAT_INTERVAL, LEASE_DURATION, LocalSessionSnapshot, PeerDescription,
@@ -1172,10 +1172,12 @@ async fn run_inquiry(
     let (respond_to, response) = tokio::sync::oneshot::channel();
     let inbound = InboundInquiry {
         authority: crate::coordination::InquiryAuthority::Peer,
+        direction: InquiryDirection::Peer,
         inquiry_id: inquiry_id.clone(),
         source_peer_id,
         source_session_id: record.payload.source_session_id.clone(),
         source_cwd: record.payload.source_cwd.clone(),
+        delegated_subagent_task_name: None,
         target_session_id: record.payload.target_session_id.clone(),
         question: record.payload.question.clone(),
         cancellation: record.cancellation.clone(),

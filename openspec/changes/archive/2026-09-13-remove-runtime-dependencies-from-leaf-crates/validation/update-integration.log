@@ -1,0 +1,141 @@
+   Compiling serde_core v1.0.229
+   Compiling serde v1.0.229
+   Compiling hashbrown v0.17.1
+   Compiling tokio v1.53.1
+   Compiling indexmap v2.14.1
+   Compiling serde_json v1.0.151
+   Compiling tracing-core v0.1.36
+   Compiling regex-automata v0.4.16
+   Compiling tracing v0.1.44
+   Compiling num-traits v0.2.19
+   Compiling string_cache v0.9.0
+   Compiling web_atoms v0.2.5
+   Compiling tokio-util v0.7.19
+   Compiling deranged v0.5.8
+   Compiling form_urlencoded v1.2.2
+   Compiling uuid v1.26.0
+   Compiling time v0.3.55
+   Compiling url v2.5.8
+   Compiling rustls v0.23.43
+   Compiling h2 v0.4.15
+   Compiling chrono v0.4.45
+   Compiling regex v1.13.1
+   Compiling hyper v1.11.0
+   Compiling schemars v1.2.2
+   Compiling markup5ever v0.38.0
+   Compiling toml_datetime v1.1.1+spec-1.1.0
+   Compiling serde_spanned v1.1.1
+   Compiling hyper-util v0.1.20
+   Compiling toml v1.1.4+spec-1.1.0
+   Compiling globset v0.4.19
+   Compiling env_filter v2.0.0
+   Compiling tty-utils v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/codegen/tty-utils)
+   Compiling cfb v0.14.0
+   Compiling config v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/config)
+   Compiling lopdf v0.42.0
+   Compiling tower v0.5.3
+   Compiling ignore v0.4.32
+   Compiling env_logger v0.11.11
+   Compiling async-compression v0.4.43
+   Compiling xml5ever v0.38.0
+   Compiling html5ever v0.38.0
+   Compiling tool-types v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/common/tool-types)
+   Compiling tokio-rustls v0.26.4
+   Compiling markup5ever v0.39.0
+   Compiling matchers v0.2.0
+   Compiling tracing-log v0.2.0
+   Compiling tracing-serde v0.2.0
+   Compiling lsp-types v0.95.1
+   Compiling tracing-subscriber v0.3.23
+   Compiling moxcms v0.8.1
+   Compiling zip v8.6.0
+   Compiling csv v1.4.0
+   Compiling html5ever v0.39.0
+   Compiling nono v0.53.0 (/Users/lordcasser/workspace/projects/grow/third_party/nono)
+   Compiling hyper-rustls v0.27.9
+   Compiling pdf-inspector v1.17.0
+   Compiling markup5ever_rcdom v0.38.0+unofficial
+   Compiling tower-http v0.6.11
+   Compiling rustls-platform-verifier v0.7.0
+   Compiling tool-protocol v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/common/tool-protocol)
+   Compiling pdf v0.10.0
+   Compiling scraper v0.27.0
+   Compiling anydoc v0.2.4
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling image v0.25.10
+   Compiling minijinja v2.24.0
+   Compiling tool-runtime v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/common/tool-runtime)
+   Compiling async-lsp v0.2.4
+   Compiling reqwest v0.13.4
+   Compiling htmd v0.5.5
+   Compiling sandbox v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/sandbox)
+   Compiling infer v0.22.0
+   Compiling command-fds v0.3.3
+   Compiling xattr v1.6.1
+   Compiling serde_path_to_error v0.1.20
+   Compiling tracing-appender v0.2.5
+   Compiling deadpool v0.12.3
+   Compiling tools v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/tools)
+   Compiling tar v0.4.46
+   Compiling tracing-chrome v0.7.2
+   Compiling assert-json-diff v2.0.2
+   Compiling serial_test_derive v4.0.1
+   Compiling serial_test v4.0.1
+   Compiling wiremock v0.6.5
+   Compiling diagnostics v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/diagnostics)
+   Compiling update v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/update)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 58.00s
+     Running tests/test_io.rs (target/debug/deps/test_io-703a774a62e40e7e)
+
+running 25 tests
+test get_installed_version_does_not_validate_env_var_format ... ok
+test get_installed_version_uses_env_var_override ... ok
+test get_installed_version_falls_back_to_cargo_pkg_version_when_env_unset ... ok
+test get_installed_version_handles_alpha_prerelease_in_env ... ok
+test get_installed_version_with_env_var_takes_precedence ... ok
+test install_pipeline::install_refuses_non_grow_target_and_leaves_bytes ... ok
+test install_pipeline::install_rejects_checksum_mismatch_before_replacing_target ... ok
+test install_pipeline::install_replaces_managed_symlink_layout ... ok
+test install_pipeline::install_replaces_plain_file_on_path ... ok
+test install_pipeline::install_swaps_external_symlink_target ... ok
+test install_pipeline::land_replaces_running_executable ... ok
+test install_pipeline::land_swaps_dangling_symlink ... ok
+test install_pipeline::resolve_falls_back_to_current_exe_when_not_on_path ... ok
+test install_pipeline::second_pass_skips_download_when_disk_current ... ok
+test version_cache_file_is_round_trippable ... ok
+test version_cache_is_fresh_after_write ... ok
+test version_cache_is_stale_when_old ... ok
+test version_cache_missing_file_is_not_fresh ... ok
+test write_version_cache_creates_file_at_grow_home ... ok
+test write_version_cache_does_not_leave_tmp_file_behind ... ok
+test write_version_cache_handles_long_prerelease_string ... ok
+test write_version_cache_idempotent_for_same_version ... ok
+test write_version_cache_overwrites_existing_atomically ... ok
+test write_version_cache_records_recent_timestamp ... ok
+test write_version_cache_writes_valid_json_object ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.48s
+
+     Running tests/test_network.rs (target/debug/deps/test_network-13eda82107079eb2)
+
+running 17 tests
+test download_silent_fails_on_5xx ... ok
+test download_silent_fails_on_4xx ... ok
+test download_silent_handles_empty_body ... ok
+test download_silent_atomically_renames_via_tmp_file ... ok
+test download_silent_overwrites_existing_dest ... ok
+test download_silent_publishes_executable ... ok
+test download_silent_preserves_binary_bytes_unchanged ... ok
+test download_silent_to_nonexistent_parent_dir_fails ... ok
+test download_silent_writes_body_to_dest ... ok
+test download_with_progress_atomic_rename ... ok
+test download_with_progress_fails_on_http_error ... ok
+test download_with_progress_rejects_oversized_release_before_creating_a_temp_file ... ok
+test download_with_progress_writes_body_with_content_length ... ok
+test github_release_alpha_selects_highest_published_semver ... ok
+test github_release_stable_ignores_drafts_and_prereleases ... ok
+test download_silent_streams_large_body ... ok
+test download_silent_parallel_path_reassembles_bytes ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s
+

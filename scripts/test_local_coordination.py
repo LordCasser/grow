@@ -364,6 +364,15 @@ context_window = 200000
             tool_id = calls[0]["toolCallId"]
             changes = [u for u in updates if u.get("sessionUpdate") == "tool_call_update"
                        and u["toolCallId"] == tool_id]
+            if name == "ask_session":
+                starts = [u for u in changes
+                          if "ask_session" in u.get("title", "")
+                          and isinstance(u.get("rawInput"), dict)]
+                assert starts, (name, changes)
+                start = starts[-1]
+                assert model.tool_target in start["title"], start
+                assert start["rawInput"].get("target_session_id") == model.tool_target, start
+                assert start["rawInput"].get("question") == "UI tool flow status?", start
             # Fast tools may go straight from Pending to Completed. Ask must
             # additionally expose its asynchronous wait via standard updates.
             if name == "ask_session":
@@ -383,10 +392,30 @@ context_window = 200000
         # The source's ordinary tool call owns the live UI. Audit-only source
         # records remain durable, but do not inject extra system notifications.
         assert not any(qid in json.dumps(n) and "outgoing inquiry" in json.dumps(n) for n in a.notices)
+        def receiver_notices(client, id, start=0):
+            return [n for n in client.notices[start:]
+                    if n.get("params", {}).get("update", {}).get("sessionUpdate") == "ui_notice"
+                    and n["params"]["update"].get("correlationId") == id]
+
         for subject, title in (("incoming inquiry", f"Answering session {sa}"),
                                ("inquiry completed", f"Answered session {sa}")):
             eventually(lambda: any(qid in json.dumps(n) and subject in json.dumps(n)
                                    and title in json.dumps(n) for n in b.notices))
+        live_incoming = eventually(
+            lambda: next(
+                (n for n in receiver_notices(b, qid)
+                 if n["params"]["update"].get("subject") == "incoming inquiry"),
+                None,
+            )
+        )
+        live_audit = json.loads(live_incoming["params"]["update"]["details"])
+        assert live_incoming["params"]["update"]["correlationId"] == qid
+        assert live_audit["direction"] == "peer", live_audit
+        assert live_audit["question"] == ask["question"], live_audit
+        live_identity = {
+            field: live_audit[field]
+            for field in ("direction", "sourcePeerId", "sourceSessionId", "sourceCwd", "question")
+        }
         count = len(model.inquiries())
         a.close()
         a = spawn("a-reloaded")
@@ -403,13 +432,21 @@ context_window = 200000
         eventually(lambda: not coord(a, "list", sourceSessionId=sa)["sessions"], seconds=18)
         print("PASS crashed target leaves no usable ghost session after lease expiry", flush=True)
 
-        def receiver_notices(client, id, start=0):
-            return [n for n in client.notices[start:]
-                    if n.get("params", {}).get("update", {}).get("sessionUpdate") == "ui_notice"
-                    and n["params"]["update"].get("correlationId") == id]
-
         b = spawn("b-ui-recovery")
         b.call("session/load", {"sessionId": sb, "cwd": str(cwd), "mcpServers": []})
+        reloaded_incoming = eventually(
+            lambda: next(
+                (n for n in receiver_notices(b, qid)
+                 if n["params"]["update"].get("subject") == "incoming inquiry"),
+                None,
+            )
+        )
+        reloaded_audit = json.loads(reloaded_incoming["params"]["update"]["details"])
+        assert reloaded_incoming["params"]["update"]["correlationId"] == qid
+        assert {
+            field: reloaded_audit[field]
+            for field in ("direction", "sourcePeerId", "sourceSessionId", "sourceCwd", "question")
+        } == live_identity, reloaded_audit
         c = spawn("c")
         sc = c.new(cwd)
         shared_id = inquiry_id()

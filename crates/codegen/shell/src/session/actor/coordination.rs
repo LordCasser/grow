@@ -644,10 +644,12 @@ mod tests {
         (
             crate::coordination::InboundInquiry {
                 authority: crate::coordination::InquiryAuthority::Peer,
+                direction: crate::coordination::InquiryDirection::Peer,
                 inquiry_id: uuid::Uuid::now_v7().to_string(),
                 source_peer_id: "peer".to_owned(),
                 source_session_id: format!("source-{id}"),
                 source_cwd: "/repo".to_owned(),
+                delegated_subagent_task_name: None,
                 target_session_id: "test-session".to_owned(),
                 question: format!("question-{id}"),
                 cancellation: crate::coordination::InquiryCancellation::new(),

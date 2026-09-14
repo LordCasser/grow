@@ -2,6 +2,8 @@
 
 当前行为契约见 [client-surfaces](../../../openspec/specs/client-surfaces/spec.md)。
 
+版本范围和路径由 `config` 提供；CLI 组合层负责解析 `auto_update`、持久化 channel，并传入 pinned 安装成功后才执行的设置更新 future。配置读写继续使用原 shell 实现的校验、共享锁和原子替换，更新器本身不依赖 shell。显式 channel 切换意图另行传入安装决策，以保留从较新 alpha 回到 stable 的行为。
+
 `auto_update.rs` 在替换前探测目标版本，并在发布候选二进制后执行冒烟检查。这两类 `--version` 进程是短期校验：等待受超时限制，直接子进程随等待取消或超时终止。终端隔离由 `tty_utils::detach_command` 处理，生命周期由 Command 的 `kill_on_drop` 处理，两者职责不同。
 
 后台 `run_update_subcommand` 刻意独立于调用方运行，不使用短期校验进程的终止策略。下载、替换和补全生成由各自路径负责。

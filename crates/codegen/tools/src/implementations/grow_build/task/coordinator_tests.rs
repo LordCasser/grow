@@ -55,13 +55,19 @@ impl ChildRunner for TestRunner {
         &self,
         request: super::super::interaction::AgentInteractionRequest,
         target: String,
+        subagent_task_name: String,
     ) {
         let _ = request
             .respond_to
             .send(Ok(super::super::interaction::AgentInteractionOutput {
+                subagent_task_name: None,
+                target_session_id: None,
                 id: request.id,
                 status: "answered".into(),
-                answer: Some(format!("{}->{target}", request.source_session_id)),
+                answer: Some(format!(
+                    "{}->{target}:{subagent_task_name}",
+                    request.source_session_id
+                )),
                 error: None,
             }));
     }
@@ -1818,14 +1824,16 @@ async fn interactions_use_direct_lineage_and_do_not_block_foreground_spawns() {
     assert_eq!(h.started.recv().await.as_deref(), Some("child"));
     let child = ChannelBackend::for_session(h.backend.sender(), "child");
     let nested_backend = child.clone();
-    let nested = tokio::spawn(async move { nested_backend.spawn(request("nested", true)).await });
+    let mut nested_request = request("nested", true);
+    nested_request.description.clear();
+    let nested = tokio::spawn(async move { nested_backend.spawn(nested_request).await });
     assert_eq!(h.started.recv().await.as_deref(), Some("nested"));
     let nested_agent = ChannelBackend::for_session(h.backend.sender(), "nested");
     for (sender, target, expected) in [
-        (&parent, Some("child"), "parent->child"),
-        (&child, None, "child->parent"),
-        (&nested_agent, None, "nested->child"),
-        (&child, Some("nested"), "child->nested"),
+        (&parent, Some("child"), "parent->child:test child"),
+        (&child, None, "child->parent:test child"),
+        (&nested_agent, None, "nested->child:nested"),
+        (&child, Some("nested"), "child->nested:nested"),
     ] {
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(1),

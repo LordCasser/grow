@@ -79,7 +79,7 @@ impl SessionActor {
     /// Apply subagent usage. `Ok` after chat-state acked; `Err` if apply failed.
     pub(super) async fn record_subagent_usage(
         &self,
-        _subagent_id: &str,
+        subagent_id: &str,
         by_model: &[(String, chat_state::UsageTotals)],
         parent_prompt_id: Option<&str>,
         incomplete: bool,
@@ -91,10 +91,16 @@ impl SessionActor {
             .clone();
         let attributable = parent_prompt_id.is_some() && parent_prompt_id == current.as_deref();
         if (!by_model.is_empty() || incomplete)
-            && !self
+            && self
                 .chat_state_handle
-                .record_subagent_usage(by_model.to_vec(), attributable, incomplete)
+                .record_subagent_usage(
+                    subagent_id.to_owned(),
+                    by_model.to_vec(),
+                    attributable,
+                    incomplete,
+                )
                 .await
+                .is_err()
         {
             return Err(());
         }

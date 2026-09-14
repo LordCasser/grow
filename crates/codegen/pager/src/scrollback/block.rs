@@ -1165,16 +1165,17 @@ impl RenderBlock {
 
     /// Whether this block supports copy-to-clipboard.
     pub fn supports_copy(&self) -> bool {
-        matches!(
-            self,
+        match self {
+            RenderBlock::Notice(notice) => notice.has_details(),
             RenderBlock::UserPrompt(_)
-                | RenderBlock::AgentMessage(_)
-                | RenderBlock::Thinking(_)
-                | RenderBlock::ToolCall(ToolCallBlock::Execute(_))
-                | RenderBlock::ToolCall(ToolCallBlock::Read(_))
-                | RenderBlock::ToolCall(ToolCallBlock::Edit(_))
-                | RenderBlock::ToolCall(ToolCallBlock::WebFetch(_))
-        )
+            | RenderBlock::AgentMessage(_)
+            | RenderBlock::Thinking(_)
+            | RenderBlock::ToolCall(ToolCallBlock::Execute(_))
+            | RenderBlock::ToolCall(ToolCallBlock::Read(_))
+            | RenderBlock::ToolCall(ToolCallBlock::Edit(_))
+            | RenderBlock::ToolCall(ToolCallBlock::WebFetch(_)) => true,
+            _ => false,
+        }
     }
 
     /// Whether this block can participate in whole-block drag selection.
@@ -1203,6 +1204,7 @@ impl RenderBlock {
             RenderBlock::ToolCall(ToolCallBlock::WebFetch(b)) => Some(b.copy_text()),
             RenderBlock::ToolCall(ToolCallBlock::IntegrationSearch(b)) => Some(b.copy_text()),
             RenderBlock::ToolCall(ToolCallBlock::UseTool(b)) => Some(b.copy_text()),
+            RenderBlock::Notice(notice) if notice.has_details() => Some(notice.detail_text()),
             _ => None,
         }
     }
@@ -1563,6 +1565,22 @@ mod tests {
         assert_eq!(line.selection_range, Some(3));
         assert_eq!(line.selection_text.as_deref(), Some("body"));
         assert!(matches!(line.selectable, Selectable::Spans(ref r) if *r == (1..2)));
+    }
+
+    #[test]
+    fn notice_with_details_supports_copying_full_detail_text() {
+        let block = RenderBlock::terminal_notice(
+            "parent-message:receipt-1",
+            NoticeTone::Info,
+            NoticeCategory::Coordination,
+            "Parent guidance received",
+            Some("Receipt ID: receipt-1\n\nMessage:\nfull body".into()),
+        );
+        assert!(block.supports_copy());
+        assert_eq!(
+            block.copy_text(false).as_deref(),
+            Some("Parent guidance received\n\nReceipt ID: receipt-1\n\nMessage:\nfull body")
+        );
     }
 }
 

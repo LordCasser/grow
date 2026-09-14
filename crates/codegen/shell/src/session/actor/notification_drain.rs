@@ -3,6 +3,38 @@
 use super::*;
 
 impl SessionActor {
+    /// Replay receipt projections without another delivery, hook or cursor.
+    pub(super) async fn publish_parent_message_receipts(&self) -> Result<(), String> {
+        let receipts = self
+            .chat_state_handle
+            .parent_message_receipts()
+            .await
+            .ok_or_else(|| "Parent message history is unavailable".to_string())?;
+        for batch in receipts.chunks(32) {
+            let events = batch.to_vec();
+            let directory = self
+                .session_directory
+                .try_clone()
+                .map_err(|error| error.to_string())?;
+            let notices = tokio::task::spawn_blocking(move || {
+                events
+                    .iter()
+                    .filter_map(|event| {
+                        crate::session::notification_inbox::read_parent_message_notice(
+                            &directory, event,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await
+            .map_err(|error| error.to_string())?;
+            for notice in notices {
+                self.send_transient_passive_notification(GrowSessionUpdate::UiNotice(notice));
+            }
+        }
+        Ok(())
+    }
+
     pub(super) async fn receive_parent_message(
         &self,
         parent_session_id: String,
@@ -30,14 +62,13 @@ impl SessionActor {
             message_id: message_id.clone(),
             interrupt,
         };
-        let body = format!(
-            "Message from delegating agent {parent_session_id} (message {message_id}). This is agent guidance, not new human authorization.\n\n{message}"
-        );
         let id = self
             .receive_notification(
                 source,
-                chat_state::NotificationSourceVersion::Ordinal { value: 1 },
-                body,
+                chat_state::NotificationSourceVersion::Ordinal {
+                    value: chat_state::PARENT_MESSAGE_SOURCE_VERSION,
+                },
+                message,
             )
             .await?;
         if interrupt
@@ -94,16 +125,16 @@ impl SessionActor {
                 }
             };
             let _artifact_guard = self.notification_artifact_gate.lock().await;
-            let Some(pending) = self.chat_state_handle.pending_notifications().await else {
+            let Some(retained_hashes) = self
+                .chat_state_handle
+                .retained_notification_payload_hashes()
+                .await
+            else {
                 tracing::warn!(
                     "notification payload reconciliation stopped because Timeline is unavailable"
                 );
                 break;
             };
-            let retained_hashes = pending
-                .into_iter()
-                .map(|notification| notification.payload_ref.blake3)
-                .collect::<std::collections::BTreeSet<_>>();
             hashes.retain(|hash| !retained_hashes.contains(hash));
             if hashes.is_empty() {
                 continue;
@@ -159,14 +190,14 @@ impl SessionActor {
         if candidates.is_empty() {
             return;
         }
-        let Some(pending) = self.chat_state_handle.pending_notifications().await else {
+        let Some(retained_hashes) = self
+            .chat_state_handle
+            .retained_notification_payload_hashes()
+            .await
+        else {
             tracing::warn!("notification payload cleanup skipped because Timeline is unavailable");
             return;
         };
-        let retained_hashes = pending
-            .into_iter()
-            .map(|notification| notification.payload_ref.blake3)
-            .collect::<std::collections::BTreeSet<_>>();
         candidates.retain(|payload| !retained_hashes.contains(&payload.blake3));
         candidates.sort_by(|left, right| left.blake3.cmp(&right.blake3));
         candidates.dedup_by(|left, right| left.blake3 == right.blake3);
@@ -408,6 +439,8 @@ impl SessionActor {
             .session_directory
             .try_clone()
             .map_err(|error| error.to_string())?;
+        let parent_body = matches!(source, chat_state::NotificationSource::ParentMessage { .. })
+            .then(|| body.clone());
         let payload_ref = tokio::task::spawn_blocking(move || {
             crate::session::notification_inbox::write_payload(&directory, &body)
         })
@@ -461,6 +494,14 @@ impl SessionActor {
         }
         self.cleanup_notification_payloads_under_gate(&artifact_guard, superseded)
             .await;
+        if let Some(body) = parent_body
+            && let Some(notice) =
+                crate::session::notification_inbox::parent_message_notice(&event, Some(body))
+        {
+            // Timeline owns the receipt and can recreate this projection.
+            // Publishing UI must neither change delivery nor advance a cursor.
+            self.send_transient_passive_notification(GrowSessionUpdate::UiNotice(notice));
+        }
         match event.kind {
             chat_state::TimelineEventKind::Notification(
                 chat_state::NotificationEvent::Received { id, .. },
@@ -1142,11 +1183,19 @@ impl SessionActor {
                 | chat_state::NotificationSource::TaskStillRunning { .. }
                 | chat_state::NotificationSource::SubagentCompleted { .. }
                 | chat_state::NotificationSource::PlanHandoff { .. }
-                | chat_state::NotificationSource::ParentMessage { .. }
                 | chat_state::NotificationSource::WorkflowHandoff { .. } => {
                     sections.push(vec![acp::ContentBlock::Text(acp::TextContent::new(
                         payload.clone(),
                     ))]);
+                }
+                chat_state::NotificationSource::ParentMessage {
+                    parent_session_id,
+                    message_id,
+                    ..
+                } => {
+                    sections.push(vec![acp::ContentBlock::Text(acp::TextContent::new(format!(
+                        "Message from delegating agent {parent_session_id} (message {message_id}). This is agent guidance, not new human authorization.\n\n{payload}"
+                    )))]);
                 }
             }
         }
@@ -1310,6 +1359,91 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn parent_receipt_publication_is_transient_and_recovers_after_ui_disconnect() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, mut gateway) =
+                    crate::session::actor::tests::support::build_actor().await;
+                crate::session::actor::tests::support::begin_test_active_causal_turn(&actor).await;
+                let id = actor
+                    .receive_parent_message(
+                        "parent".into(),
+                        "message-live".into(),
+                        "original body".into(),
+                        false,
+                    )
+                    .await
+                    .unwrap();
+                let notices = |gateway: &mut tokio::sync::mpsc::UnboundedReceiver<
+                    acp_transport::AcpClientMessage,
+                >| {
+                    let mut notices = Vec::new();
+                    while let Ok(message) = gateway.try_recv() {
+                        if let acp_transport::AcpClientMessage::ExtNotification(args) = message
+                            && args.request.method.as_ref() == "grow/session_notification"
+                            && let Ok(notification) =
+                                serde_json::from_str::<
+                                    crate::extensions::notification::SessionNotification,
+                                >(args.request.params.get())
+                            && matches!(notification.update, GrowSessionUpdate::UiNotice(_))
+                        {
+                            notices.push(notification);
+                        }
+                    }
+                    notices
+                };
+                let live = notices(&mut gateway);
+                assert_eq!(live.len(), 1);
+                let GrowSessionUpdate::UiNotice(notice) = &live[0].update else {
+                    unreachable!()
+                };
+                assert_eq!(notice.correlation_id, id);
+                assert_eq!(live[0].meta.as_ref().unwrap()["transient"], true);
+                assert!(live[0].meta.as_ref().unwrap().get("eventId").is_none());
+                assert!(actor.drain_active_notifications().await);
+                let before = actor.chat_state_handle.timeline_events().await.unwrap();
+                let _ = notices(&mut gateway);
+                actor.publish_parent_message_receipts().await.unwrap();
+                let replay = notices(&mut gateway);
+                assert_eq!(replay.len(), 1);
+                assert_eq!(
+                    serde_json::to_value(&replay[0].update).unwrap(),
+                    serde_json::to_value(&live[0].update).unwrap()
+                );
+                assert_eq!(
+                    actor
+                        .chat_state_handle
+                        .timeline_events()
+                        .await
+                        .unwrap()
+                        .len(),
+                    before.len(),
+                    "UI publication must not write model input or hook facts"
+                );
+                drop(gateway);
+                actor
+                    .receive_parent_message(
+                        "parent".into(),
+                        "message-offline".into(),
+                        "offline body".into(),
+                        false,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    actor
+                        .chat_state_handle
+                        .parent_message_receipts()
+                        .await
+                        .unwrap()
+                        .len(),
+                    2
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn parent_intervention_is_durable_attributed_and_has_explicit_timing() {
         tokio::task::LocalSet::new()
             .run_until(async {
@@ -1325,15 +1459,26 @@ mod tests {
                     .await
                     .unwrap();
                 assert!(!*actor.parent_message_interrupt.borrow());
+                let pending = actor
+                    .chat_state_handle
+                    .pending_notifications()
+                    .await
+                    .unwrap();
+                assert_eq!(pending.len(), 1);
+                let payload_ref = pending[0].payload_ref.clone();
+                let payload_path = actor
+                    .session_dir
+                    .join("artifacts/notifications")
+                    .join(format!("{}.txt", payload_ref.blake3));
                 assert_eq!(
-                    actor
-                        .chat_state_handle
-                        .pending_notifications()
-                        .await
-                        .unwrap()
-                        .len(),
-                    1
+                    crate::session::notification_inbox::read_payload(
+                        &actor.session_directory,
+                        &payload_ref,
+                    )
+                    .unwrap(),
+                    "use the shared interface"
                 );
+                assert!(payload_path.exists(), "parent body artifact is durable");
                 assert!(
                     !actor
                         .chat_state_handle
@@ -1341,6 +1486,22 @@ mod tests {
                         .await
                         .iter()
                         .any(|item| item.text_content().contains("shared interface"))
+                );
+                let changed_interrupt = actor
+                    .receive_parent_message(
+                        "parent".into(),
+                        "queued".into(),
+                        "use the shared interface".into(),
+                        true,
+                    )
+                    .await;
+                assert!(
+                    changed_interrupt.is_err(),
+                    "one message ID must not change its interrupt semantics"
+                );
+                assert!(
+                    payload_path.exists(),
+                    "conflicting retry keeps the receipt body"
                 );
                 let retry = actor
                     .receive_parent_message(
@@ -1353,6 +1514,63 @@ mod tests {
                     .unwrap();
                 assert_eq!(retry, id);
                 let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                let receipt = events
+                    .iter()
+                    .find(|event| {
+                        matches!(
+                            &event.kind,
+                            chat_state::TimelineEventKind::Notification(
+                                chat_state::NotificationEvent::Received {
+                                    id: received_id,
+                                    source: chat_state::NotificationSource::ParentMessage { .. },
+                                    ..
+                                }
+                            ) if received_id == &id
+                        )
+                    })
+                    .cloned()
+                    .expect("parent receipt");
+                let chat_state::TimelineEventKind::Notification(
+                    chat_state::NotificationEvent::Received {
+                        source_version,
+                        payload_ref: recorded_payload,
+                        ..
+                    },
+                ) = &receipt.kind
+                else {
+                    panic!("expected parent receipt");
+                };
+                assert_eq!(recorded_payload, &payload_ref);
+                assert_eq!(
+                    source_version,
+                    &chat_state::NotificationSourceVersion::Ordinal {
+                        value: chat_state::PARENT_MESSAGE_SOURCE_VERSION,
+                    }
+                );
+                let live_notice = crate::session::notification_inbox::parent_message_notice(
+                    &receipt,
+                    Some("use the shared interface".into()),
+                )
+                .expect("live parent notice");
+                let restored_notice =
+                    crate::session::notification_inbox::read_parent_message_notice(
+                        &actor.session_directory,
+                        &receipt,
+                    )
+                    .expect("parent notice restores its artifact body");
+                let live_details =
+                    crate::extensions::notification::ParentMessageNotice::from_notice(&live_notice)
+                        .expect("live parent notice details");
+                let restored_details =
+                    crate::extensions::notification::ParentMessageNotice::from_notice(
+                        &restored_notice,
+                    )
+                    .expect("restored parent notice details");
+                assert_eq!(live_details, restored_details);
+                assert_eq!(
+                    restored_details.message.as_deref(),
+                    Some("use the shared interface")
+                );
                 let restored = chat_state::Timeline::from_events(events).unwrap();
                 assert_eq!(restored.pending_notifications().len(), 1);
                 assert!(actor.drain_active_notifications().await);
@@ -1374,6 +1592,40 @@ mod tests {
                         .unwrap()
                         .is_empty()
                 );
+                let retained = actor
+                    .chat_state_handle
+                    .retained_notification_payload_hashes()
+                    .await
+                    .unwrap();
+                assert!(retained.contains(&payload_ref.blake3));
+                assert!(
+                    payload_path.exists(),
+                    "consumption keeps parent history artifact"
+                );
+                let orphan = crate::session::notification_inbox::write_payload(
+                    &actor.session_directory,
+                    "orphaned after parent consumption",
+                )
+                .unwrap();
+                actor
+                    .reconcile_notification_payloads(&tokio_util::sync::CancellationToken::new())
+                    .await;
+                assert!(payload_path.exists(), "orphan sweep keeps parent history");
+                assert_eq!(
+                    crate::session::notification_inbox::read_payload(
+                        &actor.session_directory,
+                        &payload_ref,
+                    )
+                    .unwrap(),
+                    "use the shared interface"
+                );
+                assert!(matches!(
+                    crate::session::notification_inbox::read_payload(
+                        &actor.session_directory,
+                        &orphan,
+                    ),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound
+                ));
                 actor
                     .receive_parent_message(
                         "parent".into(),
@@ -1390,6 +1642,17 @@ mod tests {
                         .await
                         .unwrap()
                         .is_empty()
+                );
+                assert_eq!(
+                    actor
+                        .chat_state_handle
+                        .get_conversation()
+                        .await
+                        .iter()
+                        .filter(|item| item.text_content().contains("use the shared interface"))
+                        .count(),
+                    1,
+                    "an idempotent parent retry must not duplicate model input"
                 );
                 actor
                     .receive_parent_message(
@@ -1422,6 +1685,20 @@ mod tests {
                         .await
                         .is_err()
                 );
+                std::fs::remove_file(&payload_path).unwrap();
+                let missing_notice =
+                    crate::session::notification_inbox::read_parent_message_notice(
+                        &actor.session_directory,
+                        &receipt,
+                    )
+                    .expect("missing artifact still produces a degraded notice");
+                let missing_details =
+                    crate::extensions::notification::ParentMessageNotice::from_notice(
+                        &missing_notice,
+                    )
+                    .expect("missing parent notice details");
+                assert_eq!(missing_details.message, None);
+                assert!(missing_notice.message.contains("could not be recovered"));
                 let events = actor.chat_state_handle.timeline_events().await.unwrap();
                 assert!(
                     chat_state::Timeline::from_events(events)

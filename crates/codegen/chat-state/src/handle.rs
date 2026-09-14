@@ -292,15 +292,17 @@ impl ChatStateHandle {
         .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
     }
 
-    /// Apply subagent usage; returns false if the actor did not acknowledge.
+    /// Durably apply one child bill exactly once.
     pub async fn record_subagent_usage(
         &self,
+        subagent_id: String,
         by_model: Vec<(String, crate::usage::UsageTotals)>,
         attribute_to_prompt: bool,
         incomplete: bool,
-    ) -> bool {
+    ) -> Result<bool, TimelineWriteError> {
         self.query("RecordSubagentUsage", |reply| {
             ChatStateCommand::RecordSubagentUsage {
+                subagent_id,
                 by_model,
                 attribute_to_prompt,
                 incomplete,
@@ -308,7 +310,7 @@ impl ChatStateHandle {
             }
         })
         .await
-        .is_some()
+        .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
     }
 
     /// Mark open prompt and/or session ledgers incomplete.
@@ -321,7 +323,16 @@ impl ChatStateHandle {
             }
         })
         .await
-        .is_some()
+        .is_some_and(|result| result.is_ok())
+    }
+
+    /// Durably begin a new lifetime-usage segment for one cold resume.
+    pub async fn begin_usage_resume_segment(&self) -> Result<(), TimelineWriteError> {
+        self.query("BeginUsageResumeSegment", |reply| {
+            ChatStateCommand::BeginUsageResumeSegment { reply }
+        })
+        .await
+        .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
     }
 
     /// Replace the active provider route and start a fresh continuation epoch.
@@ -345,6 +356,15 @@ impl ChatStateHandle {
         })
         .await
         .is_some()
+    }
+
+    /// Acknowledged current-route compatibility update. `None` means the
+    /// actor was unavailable; `Some(false)` means no state changed.
+    pub async fn enable_portable_responses_reasoning(&self) -> Option<bool> {
+        self.query("EnablePortableResponsesReasoning", |reply| {
+            ChatStateCommand::EnablePortableResponsesReasoning { reply }
+        })
+        .await
     }
 
     /// Track that the agent edited a file path.
@@ -538,8 +558,15 @@ impl ChatStateHandle {
         active_goal: Option<GoalDirectiveTag>,
         json_output: Option<JsonOutputFormat>,
     ) -> Result<ConversationRequest, TimelineWriteError> {
-        self.build_request_for_image_mode(timeline_id, tool_definitions,
-            memory_reminder, active_goal, json_output, false).await
+        self.build_request_for_image_mode(
+            timeline_id,
+            tool_definitions,
+            memory_reminder,
+            active_goal,
+            json_output,
+            false,
+        )
+        .await
     }
 
     pub async fn build_request_for_image_mode(
@@ -630,6 +657,20 @@ impl ChatStateHandle {
         .await
     }
 
+    pub async fn parent_message_receipts(&self) -> Option<Vec<crate::TimelineEvent>> {
+        self.query("GetParentMessageReceipts", |reply| {
+            ChatStateCommand::GetParentMessageReceipts { reply }
+        })
+        .await
+    }
+
+    pub async fn retained_notification_payload_hashes(&self) -> Option<BTreeSet<String>> {
+        self.query("GetRetainedNotificationPayloadHashes", |reply| {
+            ChatStateCommand::GetRetainedNotificationPayloadHashes { reply }
+        })
+        .await
+    }
+
     pub async fn get_pending_allowed_inputs(&self) -> Option<Vec<crate::PendingAllowedInput>> {
         self.query("GetPendingAllowedInputs", |reply| {
             ChatStateCommand::GetPendingAllowedInputs { reply }
@@ -692,8 +733,11 @@ impl ChatStateHandle {
     /// The selected branch's latest prompt coordinate. Callers settling a
     /// model attempt capture this after TurnStarted and retain it across retries.
     pub async fn current_prompt_index(&self) -> Option<usize> {
-        self.query("CurrentPromptIndex", |reply| ChatStateCommand::CurrentPromptIndex { reply })
-            .await.flatten()
+        self.query("CurrentPromptIndex", |reply| {
+            ChatStateCommand::CurrentPromptIndex { reply }
+        })
+        .await
+        .flatten()
     }
 
     /// Get the next free prompt index.

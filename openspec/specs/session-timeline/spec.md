@@ -260,3 +260,106 @@ Windows contained storage SHALL publish immutable artifacts and session entities
 #### Scenario: List sessions while a publication handle is alive
 - **WHEN** an independent adapter enumerates summaries while a session writer retains its publication handle
 - **THEN** the live session remains visible through observation handles, which do not enter the writer cache; later mutations still acquire their normal writer capability and lease.
+
+### Requirement: Tool preflight failures retain their actual category
+
+Tool preflight SHALL distinguish an unregistered tool name from arguments that cannot be parsed for a registered tool. An unregistered name SHALL NOT be dispatched and SHALL produce exactly one failed tool result that states the tool was unavailable and not executed. Invalid arguments for a registered tool SHALL retain the argument-parse diagnostic and original-argument recovery context.
+
+#### Scenario: Unknown name with valid JSON
+- **WHEN** an admitted model response calls an unregistered tool name with syntactically valid JSON
+- **THEN** preflight records the call as a non-existing invalid tool, emits one failed result, and performs no tool dispatch.
+
+#### Scenario: Registered tool has invalid arguments
+- **WHEN** an admitted model response calls a registered tool with arguments its parser rejects
+- **THEN** the existing argument-parse result remains available and is not relabeled as an unknown tool.
+
+### Requirement: Session usage is a durable lifetime projection
+
+Session Timeline SHALL 持久记录每个主模型 attempt 的已知/未知 Usage、每个子 Agent 的最终 Usage 结算，以及 session-level incomplete 事实。冷恢复 SHALL 按结算身份去重重建 lifetime aggregate、provider/model 分项和 Agent 归属；不得把已有消费重置为零或重复计费。已知用量事件 SHALL 在 actor 发布及恢复事件持久化前完成载荷校验；格式损坏或同身份冲突 SHALL 使恢复失败并保留原始记录。
+
+#### Scenario: Restore settled main attempts
+- **WHEN** Timeline 含多个已持久化主模型 attempt 结算并创建新的 actor incarnation
+- **THEN** 新 actor 在接受后续调用前恢复这些 attempt 的累计 token、model、cost、duration 与 incomplete 状态，每个 attempt 至多计入一次。
+
+#### Scenario: Restore settled child usage
+- **WHEN** 父 session 已持久结算一个子 Agent 的多模型 Usage 后冷恢复
+- **THEN** lifetime 总计、provider/model 分项与该 `subagent_id` 的 Agent 分项均恢复；相同结算重放不重复累计，冲突结算失败关闭而非覆盖。
+
+#### Scenario: Restore incomplete accounting
+- **WHEN** session-level incomplete 事实已持久化
+- **THEN** 后续 resume 仍将 lifetime Usage 表示为已知下界并隐藏不可信 cost，不因进程重启恢复为精确账本。
+
+#### Scenario: Exact duplicates and conflicting attempt payloads
+- **WHEN** 同一主模型 attempt 或子 Agent 身份有多份用量结算
+- **THEN** 完全相同载荷只计一次；任一载荷冲突使恢复失败，不选择第一份、不覆盖，并采用与实时结算相同的冲突规则。
+
+#### Scenario: Malformed known usage facts fail before publication
+- **WHEN** 已知 attempt/child 结算无法按既有 typed schema 解码，或 incomplete/resume 标记包含不属于其格式的 data
+- **THEN** 恢复返回带事件位置的错误，不发布可用 actor、不写入恢复事件，原持久化记录保持不变。
+
+#### Scenario: Unrelated diagnostic observations remain extensible
+- **WHEN** Timeline 包含不属于已知用量 scope/name 的合法 Observation
+- **THEN** 用量恢复忽略该诊断事实，不将其当成损坏的结算；其他 Timeline 校验仍执行。
+
+### Requirement: Cold resume creates a durable usage segment boundary
+
+成功发布新的冷恢复 actor incarnation 前，session SHALL 持久提交一个 Usage resume boundary。恢复投影 SHALL 以初始运行和这些边界切分结算，aggregate SHALL 等于所有 segment 的累计结果；resident client reconnect 不创建新的 actor segment。
+
+#### Scenario: First cold resume
+- **WHEN** 已有 session 在新 actor incarnation 中成功恢复
+- **THEN** 后续结算进入 Resume #1 segment，此前结算保留在 Initial run，lifetime aggregate 同时包含两段。
+
+#### Scenario: Repeated cold resumes
+- **WHEN** session 多次关闭并冷恢复
+- **THEN** 每个成功发布的 incarnation 形成有序的新 segment，后续结算只进入当前段，历史段保持不可变。
+
+#### Scenario: Resident reconnect
+- **WHEN** 客户端重新连接仍存活的同一 actor incarnation
+- **THEN** 不创建新的 Usage segment，既有当前段继续累计。
+
+证据入口：`crates/codegen/chat-state/src/usage.rs`、`actor/mutations.rs`、`actor/state.rs` 与 `crates/codegen/shell/src/agent/mvp_agent/acp_agent.rs`。
+
+### Requirement: Session observation does not repair durable projections
+普通会话 full/light observation SHALL 从有效 Timeline 派生 title/model 的内存投影，不写 Summary、不获取 writer lease，也不执行 sideband crash repair。显式 replacement-writer load SHALL 在取得独占 lease 后修复滞后的持久投影。观察 SHALL 保留 canonical 数据校验和投影冲突拒绝。
+
+#### Scenario: Observe lagging projections beside a live writer
+- **WHEN** 当前 writer 仍存活而 Summary 的 title/model 落后于有效 Timeline
+- **THEN** 独立 full/light observation 成功返回 canonical 内存值，Summary 和 sideband 文件不变，观察 adapter 不获得 writer capability。
+
+#### Scenario: Replacement writer repairs the lag
+- **WHEN** 原 writer 退出后新 writer 获得 lease 并加载相同会话
+- **THEN** 落后的 Summary 被修复为 Timeline 的 canonical title/model。
+
+#### Scenario: Conflicting or malformed canonical data
+- **WHEN** Summary title 在相同或更高序号与 canonical title 冲突，或 model change 数据损坏
+- **THEN** 观察与 writer load 都拒绝恢复，不以只读模式绕过校验。
+
+证据：crates/codegen/shell/src/session/storage/jsonl/mod.rs 与 tests.rs。
+
+### Requirement: Parent message receipts retain replayable presentation evidence
+
+持久接收的父消息 SHALL 在所属会话保留期间保留可重建接收 UI 的来源、身份、投递模式和原始正文。正文的展示证据 SHALL 在消息消费后继续有效，UI 投影丢失不得删除收件事实。UI 恢复 SHALL 不重新接纳或消费消息，并保留现有模型输入的 agent guidance 来源语义。
+
+#### Scenario: Consume then restore without UI cache
+- **WHEN** 父消息已消费且会话的可丢失 UI 投影不可用，随后加载会话
+- **THEN** 从持久收件事实恢复唯一的来源明确、正文完整的接收展示，同时该消息仍保持已消费。
+
+#### Scenario: Cleanup and shared payloads
+- **WHEN** 即时 payload 清理或启动 sweep 处理已消费通知，且其正文仍被父消息历史引用
+- **THEN** 保留该正文引用及可读内容，包括与其他通知共享的内容；无引用 orphan 继续沿原规则清理。
+
+#### Scenario: Durable commit and presentation publication are separated
+- **WHEN** 持久接收完成而 UI 发布失败，或者同一父消息重试
+- **THEN** 保留原接收身份和投递结果，后续恢复补全 UI；不写第二个接收事实或生成第二份模型输入。
+
+#### Scenario: Historical body is unavailable
+- **WHEN** 历史父消息正文缺失或校验失败
+- **THEN** 展示保留可验证的收件身份并明确正文不可恢复，不伪造原文；未消费通知的模型上下文恢复仍执行原有严格校验。
+
+#### Scenario: Retry changes delivery mode
+- **WHEN** 同一父消息身份和正文被重试，但 interrupt 模式发生变化
+- **THEN** 拒绝冲突请求，保留原接收事实与投递模式，不让 UI 或执行路径把重试参数当成已接收状态。
+
+#### Scenario: Unsupported parent message representation
+- **WHEN** 父消息使用不支持的 payload 表示版本
+- **THEN** 明确拒绝该格式，不从自然语言包装猜测原始正文或静默改变模型输入。

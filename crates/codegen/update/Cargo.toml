@@ -20,7 +20,7 @@ time = { workspace = true, features = ["serde"] }
 tokio = { workspace = true, features = ["fs", "process", "io-util", "macros", "time"] }
 tracing = { workspace = true }
 tty-utils = { workspace = true }
-shell = { workspace = true }
+config = { workspace = true }
 tar = { workspace = true }
 tools = { workspace = true }
 version = { workspace = true }

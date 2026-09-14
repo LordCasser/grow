@@ -28,6 +28,19 @@ pub struct LoadedAgent {
     pub load_elapsed: Duration,
 }
 
+/// Explicit loopback model configuration for in-process load measurements.
+/// This keeps the harness independent of the user's persisted config.
+pub fn mock_agent_config(base_url: &str) -> AgentConfig {
+    let raw: toml::Value = toml::from_str(&format!(
+        "[models]\ndefault = \"test/test-model\"\n\n[provider.test]\napi_backend = \"chat_completions\"\n\n[provider.test.options]\nbase_url = \"{base_url}\"\n\n[provider.test.models.test-model]\nname = \"Test Model\"\ncontext_window = 128000\n"
+    ))
+    .expect("valid explicit test model TOML");
+    let mut config = AgentConfig::new_from_toml_cfg(&raw).expect("valid explicit test config");
+    config.default_model_override = None;
+    config.remote_settings = Some(crate::util::config::RemoteSettings::default());
+    config
+}
+
 /// Stand up a real `MvpAgent` over in-process ACP pipes wired to `client`, run
 /// the initialize and authenticate handshake, then time one `session/load`
 /// round-trip. Must run inside a `LocalSet`, since it spawns local tasks.
@@ -36,8 +49,8 @@ pub async fn load_session_via_agent<C: acp_transport::AcpClientHandler + 'static
     client_type: &str,
     session_id: acp::SessionId,
     cwd: PathBuf,
+    agent_config: AgentConfig,
 ) -> LoadedAgent {
-    let agent_config = AgentConfig::default();
     let (gw_tx, gw_rx) = tokio::sync::mpsc::unbounded_channel();
     let gateway = GatewaySender::new(gw_tx);
     let agent = MvpAgent::new(gateway, &agent_config).expect("valid config");

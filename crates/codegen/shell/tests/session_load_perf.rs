@@ -41,18 +41,22 @@ use shell::session::testkit::synth::{self, SessionSpec};
 
 // ───────────────────────── session spec ─────────────────────────
 
-/// Perf-tool defaults over the shared [`SessionSpec`], tuned to the pathological
-/// real session; scale/override via `GROW_PERF_*` (e.g. `GROW_PERF_TURNS`,
+/// Small defaults over the shared [`SessionSpec`]; scale/override via
+/// `GROW_PERF_*` (e.g. `GROW_PERF_TURNS`,
 /// `GROW_PERF_SCALE`), or point `GROW_PERF_SESSION_SRC` at a real session dir.
 fn perf_spec() -> SessionSpec {
     SessionSpec::from_env_prefixed(
         "GROW_PERF",
         SessionSpec {
-            turns: 80,
-            rewind_points: 60,
-            files_per_rewind: 40,
-            file_content_len: 8000,
-            ..SessionSpec::default()
+            turns: 12,
+            acu_per_turn: 2,
+            catalog_commands: 8,
+            catalog_desc_len: 128,
+            agent_chunks_per_turn: 2,
+            agent_chunk_len: 512,
+            rewind_points: 2,
+            files_per_rewind: 2,
+            file_content_len: 512,
         },
     )
 }
@@ -65,7 +69,50 @@ fn perf_spec() -> SessionSpec {
 /// [`synth::prepare_session`].
 async fn prepare_session(root: &Path, cwd: &Path, spec: &SessionSpec) -> (Info, PathBuf) {
     let Ok(src) = std::env::var("GROW_PERF_SESSION_SRC") else {
-        return synth::prepare_session(root, cwd, spec).await;
+        // Conservative ASCII JSON bounds for this fixture, checked before the
+        // shared generator allocates its whole output. Keep performance runs
+        // from accidentally producing multi-GB rewind/catalog snapshots.
+        const BUDGET: u128 = 256 * 1024 * 1024;
+        let fields = [
+            spec.turns,
+            spec.acu_per_turn,
+            spec.catalog_commands,
+            spec.catalog_desc_len,
+            spec.agent_chunks_per_turn,
+            spec.agent_chunk_len,
+            spec.rewind_points,
+            spec.files_per_rewind,
+            spec.file_content_len,
+        ];
+        assert!(
+            fields.iter().all(|&value| value as u128 <= BUDGET),
+            "fixture parameter exceeds 256 MiB budget"
+        );
+        let updates = spec.turns as u128
+            * (4096
+                + spec.acu_per_turn as u128
+                    * (1024
+                        + spec.catalog_commands as u128 * (spec.catalog_desc_len as u128 + 1024))
+                + spec.agent_chunks_per_turn as u128 * (spec.agent_chunk_len as u128 + 1024));
+        let rewind = spec.rewind_points as u128
+            * (1024 + spec.files_per_rewind as u128 * (spec.file_content_len as u128 * 2 + 2048));
+        let timeline = spec.turns as u128 * (spec.agent_chunk_len as u128 + 8192) + 8192;
+        assert!(
+            updates + rewind + timeline <= BUDGET,
+            "synthetic fixture exceeds 256 MiB budget"
+        );
+        let result = synth::prepare_session(root, cwd, spec).await;
+        JsonlStorageAdapter::with_root(root.to_path_buf())
+            .update_current_model_and_agent(
+                &result.0,
+                &shell::agent::models::ModelId::new("test/test-model"),
+                None,
+                None,
+            )
+            .await
+            .expect("set explicit fixture model");
+        append_perf_timeline(root, &result.0, spec).await;
+        return result;
     };
 
     let adapter = JsonlStorageAdapter::with_root(root.to_path_buf());
@@ -87,6 +134,95 @@ async fn prepare_session(root: &Path, cwd: &Path, spec: &SessionSpec) -> (Info, 
     }
     eprintln!("[perf] using REAL session copied from {src}");
     (info, dir)
+}
+
+/// Add a small, valid canonical history to the synthetic fixture only. The
+/// shared synthesizer intentionally remains an updates/rewind generator.
+async fn append_perf_timeline(root: &Path, info: &Info, spec: &SessionSpec) {
+    use sampling_types::ConversationItem;
+    let adapter = JsonlStorageAdapter::with_root(root.to_path_buf());
+    let mut timeline = chat_state::Timeline::from_seed(vec![ConversationItem::system(
+        "stable synthetic system context",
+    )])
+    .expect("valid system head");
+    for event in timeline.events() {
+        adapter
+            .append_timeline_event_durable(info, event)
+            .await
+            .unwrap();
+    }
+    for turn_no in 0..spec.turns {
+        let turn = chat_state::TurnId(turn_no as u64);
+        let prompt = format!("synthetic historical prompt {turn_no}");
+        let started = timeline
+            .record(chat_state::TimelineEventKind::Turn(
+                chat_state::TurnEvent::Started {
+                    id: turn,
+                    input_ids: Vec::new(),
+                    identity: chat_state::TurnIdentity {
+                        goal_definition_revision: None,
+                        origin: "user".into(),
+                        turn_kind: "internal".into(),
+                        goal_id: None,
+                        stage_id: None,
+                    },
+                    model_id: "test/test-model".into(),
+                    input_message_count: timeline.surface().len(),
+                    prompt_index: turn_no,
+                    prompt_text: prompt.clone(),
+                    input_kind: chat_state::TurnInputKind::Prompt,
+                    redirect_kind: None,
+                },
+            ))
+            .unwrap();
+        adapter
+            .append_timeline_event_durable(info, &started)
+            .await
+            .unwrap();
+        let mut user = ConversationItem::user(prompt);
+        user.set_prompt_index(turn_no);
+        let message = timeline
+            .append(user, chat_state::MessageCause::User)
+            .unwrap();
+        adapter
+            .append_timeline_event_durable(info, &message)
+            .await
+            .unwrap();
+        let answer = timeline
+            .append(
+                ConversationItem::assistant(format!(
+                    "synthetic historical answer {turn_no}: {}",
+                    "x".repeat(spec.agent_chunk_len)
+                )),
+                chat_state::MessageCause::Assistant,
+            )
+            .unwrap();
+        adapter
+            .append_timeline_event_durable(info, &answer)
+            .await
+            .unwrap();
+        let ended = timeline
+            .record(chat_state::TimelineEventKind::Turn(
+                chat_state::TurnEvent::Ended {
+                    id: turn,
+                    outcome: "completed".into(),
+                    duration_ms: 1,
+                    tool_count: 0,
+                    terminal: chat_state::TurnTerminal {
+                        source: chat_state::TurnTerminalSource::Host,
+                        stop_reason: "end_turn".into(),
+                        completion_kind: "completed".into(),
+                    },
+                    cancellation_category: None,
+                    details: None,
+                },
+            ))
+            .unwrap();
+        adapter
+            .append_timeline_event_durable(info, &ended)
+            .await
+            .unwrap();
+    }
 }
 
 /// Re-create the rewind file after the isolation step deletes it (synthetic
@@ -323,6 +459,8 @@ struct LoadCounters {
     acu_count: u64,
     first_at: Option<Instant>,
     last_at: Option<Instant>,
+    /// Optional correctness run, disabled for timing comparisons.
+    history: Option<Vec<acp::SessionUpdate>>,
 }
 
 struct CountingClient {
@@ -356,6 +494,14 @@ impl acp_transport::AcpClientHandler for CountingClient {
         }
         c.first_at.get_or_insert(now);
         c.last_at = Some(now);
+        if let Some(history) = &mut c.history {
+            if matches!(
+                args.update,
+                acp::SessionUpdate::UserMessageChunk(_) | acp::SessionUpdate::AgentMessageChunk(_)
+            ) {
+                history.push(args.update);
+            }
+        }
         Ok(())
     }
 }
@@ -365,7 +511,7 @@ fn parse_instrumentation_log(path: &Path) -> Vec<(String, f64)> {
     let Ok(contents) = std::fs::read_to_string(path) else {
         return Vec::new();
     };
-    let mut out = Vec::new();
+    let mut out = BTreeMap::<String, f64>::new();
     for line in contents.lines() {
         let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
             continue;
@@ -387,9 +533,9 @@ fn parse_instrumentation_log(path: &Path) -> Vec<(String, f64)> {
                     .map(|m| m * 1000)
             })
             .unwrap_or(0);
-        out.push((name.to_string(), us as f64 / 1000.0));
+        *out.entry(name.to_string()).or_default() += us as f64 / 1000.0;
     }
-    out
+    out.into_iter().collect()
 }
 
 /// True end-to-end: real `MvpAgent` over real ACP pipes. Times `session/load`
@@ -445,10 +591,28 @@ async fn full_session_load_e2e() {
     let rewind_path_guard = rewind_path.clone();
     let rewind_fp_before = file_fingerprint(&rewind_path_guard);
 
+    let expected_history = std::env::var_os("GROW_PERF_ASSERT_HISTORY").map(|_| {
+        load_updates_for_replay_at(info.id.0.as_ref(), grow_home.path())
+            .unwrap()
+            .unwrap()
+            .into_iter()
+            .filter(|update| {
+                matches!(
+                    update,
+                    acp::SessionUpdate::UserMessageChunk(_)
+                        | acp::SessionUpdate::AgentMessageChunk(_)
+                )
+            })
+            .collect::<Vec<_>>()
+    });
+
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async move {
-            let counters = Rc::new(RefCell::new(LoadCounters::default()));
+            let counters = Rc::new(RefCell::new(LoadCounters {
+                history: expected_history.as_ref().map(|_| Vec::new()),
+                ..Default::default()
+            }));
             let client = CountingClient {
                 counters: counters.clone(),
             };
@@ -457,16 +621,20 @@ async fn full_session_load_e2e() {
                 "perf-test",
                 info.id.clone(),
                 cwd.path().to_path_buf(),
+                shell::session::testkit::e2e::mock_agent_config(&server.url()),
             )
             .await;
             let load_started = loaded.load_started;
             let load_elapsed = loaded.load_elapsed;
-            // Keep the connection alive so the post-load re-advertise still arrives.
+            if let Some(expected) = &expected_history {
+                assert_eq!(counters.borrow().history.as_ref().unwrap(), expected,
+                    "all historical text must arrive once and in order before the load response");
+            }
+            // Keep the connection alive for asynchronous live advertisements.
             let _client_conn = loaded.client_conn;
 
-            // Snapshot replay results immediately, before the post-load
-            // AdvertiseCommands re-advertise can arrive, so `acu_replayed` counts
-            // the ACUs forwarded during history replay (the skip count).
+            // Snapshot at the response barrier. Counts include administrative
+            // notifications; a live catalog may already have arrived here.
             let (replay_count, acu_replayed, ttfn, ttln) = {
                 let c = counters.borrow();
                 (
@@ -481,10 +649,8 @@ async fn full_session_load_e2e() {
                 )
             };
 
-            // The post-load `AdvertiseCommands` re-advertise (the safety basis for
-            // dropping historical ACUs on replay) must reach the client. It's
-            // enqueued at the end of `load_session` and forwarded async, so poll.
-            // Replay forwards 0 ACUs, so any received ACU is the re-advertise.
+            // Skipping persisted catalogs is safe only if a live catalog reaches
+            // the client. It may arrive before or after the response barrier.
             let readvertised = tokio::time::timeout(Duration::from_secs(10), async {
                 while counters.borrow().acu_count == 0 {
                     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -508,7 +674,7 @@ async fn full_session_load_e2e() {
             eprintln!("  total session/load round-trip : {:>9.1} ms", load_elapsed.as_secs_f64() * 1e3);
             eprintln!("  notifications replayed         : {:>9}", replay_count);
             eprintln!("  available_commands_update      : {acu_replayed:>9} replayed / {acu_persisted} on disk");
-            eprintln!("  post-load re-advertise reached : {readvertised:>9}");
+            eprintln!("  live catalog reached          : {readvertised:>9}");
             eprintln!("  time-to-first notification     : {ttfn:>9.1} ms");
             eprintln!("  time-to-last notification      : {ttln:>9.1} ms");
             eprintln!("  ---- shell-side per-phase instrumentation (elapsed) ----");
@@ -528,20 +694,17 @@ async fn full_session_load_e2e() {
                 rewind_fp_before,
                 "rewind_points.jsonl must be unchanged after a load (zero data loss)"
             );
-            // The thousands of persisted ACUs must be skipped on replay...
+            // Historical ACUs are skipped even for the small default fixture;
+            // one live catalog advertisement can arrive before the response.
             assert!(
-                acu_persisted > 100,
-                "fixture should have many persisted ACUs to exercise the skip"
-            );
-            assert!(
-                acu_replayed < 100,
+                acu_replayed <= 1,
                 "historical available_commands_update must be skipped on replay \
                  (replayed {acu_replayed} of {acu_persisted} persisted)"
             );
             // ...but the catalog IS re-advertised to the client after load.
             assert!(
                 readvertised,
-                "post-load available_commands_update re-advertise must reach the client"
+                "live available_commands_update must reach the client"
             );
         })
         .await;

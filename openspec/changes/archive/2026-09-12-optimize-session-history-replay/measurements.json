@@ -1,0 +1,193 @@
+{
+  "units": "milliseconds, decimal MB from fixture",
+  "limits": "debug builds; OS cache not flushed; first notification may be administrative; no PTY p95; 512 turns exploratory n=1 per stage",
+  "rows": [
+    {
+      "stage": "before",
+      "turns": 128,
+      "run": 1,
+      "total_ms": 522.7,
+      "passed": true,
+      "first_notification_ms": 147.2,
+      "actor_ms": 115.5,
+      "light_ms": 25.7,
+      "updates_mb": 4.9
+    },
+    {
+      "stage": "before",
+      "turns": 128,
+      "run": 2,
+      "total_ms": 503.8,
+      "passed": true,
+      "first_notification_ms": 148.9,
+      "actor_ms": 115.2,
+      "light_ms": 25.8,
+      "updates_mb": 4.9
+    },
+    {
+      "stage": "before",
+      "turns": 128,
+      "run": 3,
+      "total_ms": 501.1,
+      "passed": true,
+      "first_notification_ms": 149.7,
+      "actor_ms": 112.7,
+      "light_ms": 25.4,
+      "updates_mb": 4.9
+    },
+    {
+      "stage": "before",
+      "turns": 512,
+      "run": 1,
+      "total_ms": 1465.7,
+      "passed": true,
+      "first_notification_ms": 439.3,
+      "actor_ms": 412.5,
+      "light_ms": 82.5,
+      "updates_mb": 19.6
+    },
+    {
+      "stage": "timeline",
+      "turns": 128,
+      "run": 1,
+      "total_ms": 504.9,
+      "passed": true,
+      "first_notification_ms": 147.7,
+      "actor_ms": 119.2,
+      "light_ms": 25.2,
+      "updates_mb": 4.9
+    },
+    {
+      "stage": "timeline",
+      "turns": 128,
+      "run": 2,
+      "total_ms": 485.5,
+      "passed": true,
+      "first_notification_ms": 142.9,
+      "actor_ms": 110.2,
+      "light_ms": 25.6,
+      "updates_mb": 4.9
+    },
+    {
+      "stage": "timeline",
+      "turns": 128,
+      "run": 3,
+      "total_ms": 491.3,
+      "passed": true,
+      "first_notification_ms": 146.7,
+      "actor_ms": 109.1,
+      "light_ms": 25.8,
+      "updates_mb": 4.9
+    },
+    {
+      "stage": "timeline",
+      "turns": 512,
+      "run": 1,
+      "total_ms": 1423.4,
+      "passed": true,
+      "first_notification_ms": 427.6,
+      "actor_ms": 394.9,
+      "light_ms": 79.2,
+      "updates_mb": 19.6
+    },
+    {
+      "stage": "replay",
+      "turns": 128,
+      "run": 1,
+      "total_ms": 576.7,
+      "passed": true,
+      "first_notification_ms": 126.5,
+      "actor_ms": 114.1,
+      "light_ms": 25.4,
+      "updates_mb": 4.9
+    },
+    {
+      "stage": "replay",
+      "turns": 128,
+      "run": 2,
+      "total_ms": 533.4,
+      "passed": true,
+      "first_notification_ms": 123.1,
+      "actor_ms": 89.0,
+      "light_ms": 25.2,
+      "updates_mb": 4.9
+    },
+    {
+      "stage": "replay",
+      "turns": 128,
+      "run": 3,
+      "total_ms": 529.2,
+      "passed": true,
+      "first_notification_ms": 123.3,
+      "actor_ms": 87.4,
+      "light_ms": 24.4,
+      "updates_mb": 4.9
+    },
+    {
+      "stage": "replay",
+      "turns": 512,
+      "run": 1,
+      "total_ms": 1692.2,
+      "passed": true,
+      "first_notification_ms": 382.1,
+      "actor_ms": 313.0,
+      "light_ms": 85.9,
+      "updates_mb": 19.6
+    },
+    {
+      "stage": "final",
+      "turns": 128,
+      "run": 1,
+      "total_ms": 504.7,
+      "passed": true,
+      "first_notification_ms": 149.7,
+      "actor_ms": 104.8,
+      "light_ms": 23.6,
+      "updates_mb": 4.9
+    },
+    {
+      "stage": "final",
+      "turns": 128,
+      "run": 2,
+      "total_ms": 493.7,
+      "passed": true,
+      "first_notification_ms": 152.4,
+      "actor_ms": 92.3,
+      "light_ms": 25.9,
+      "updates_mb": 4.9
+    },
+    {
+      "stage": "final",
+      "turns": 128,
+      "run": 3,
+      "total_ms": 490.8,
+      "passed": true,
+      "first_notification_ms": 151.5,
+      "actor_ms": 93.1,
+      "light_ms": 26.1,
+      "updates_mb": 4.9
+    },
+    {
+      "stage": "final",
+      "turns": 32,
+      "run": 1,
+      "total_ms": 284.8,
+      "passed": false,
+      "first_notification_ms": 76.3,
+      "actor_ms": 46.0,
+      "light_ms": 8.2,
+      "updates_mb": 1.2
+    },
+    {
+      "stage": "final",
+      "turns": 512,
+      "run": 1,
+      "total_ms": 1481.1,
+      "passed": true,
+      "first_notification_ms": 449.0,
+      "actor_ms": 333.7,
+      "light_ms": 84.5,
+      "updates_mb": 19.6
+    }
+  ]
+}

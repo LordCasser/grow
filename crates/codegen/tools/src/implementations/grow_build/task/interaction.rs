@@ -23,6 +23,11 @@ pub struct AgentInteractionRequest {
 pub struct AgentInteractionOutput {
     pub id: String,
     pub status: String,
+    /// Coordinator-owned display identity, independent of caller-supplied text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subagent_task_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub answer: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]

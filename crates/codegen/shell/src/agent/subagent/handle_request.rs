@@ -980,7 +980,7 @@ pub(crate) async fn run_shell_child(
         return child_run_output(result, completion_data);
     }
 
-    let (persistence, child_timeline_events, child_session_directory) =
+    let (persistence, child_timeline, child_session_directory) =
         match session::persistence::new_child(
             &child_session_info,
             effective_model_id.clone(),
@@ -1248,7 +1248,7 @@ pub(crate) async fn run_shell_child(
             reasoning_effort: Some(effective_sampling_config.reasoning_effort),
         });
     let recovery_persistence = persistence.clone();
-    let recovery_timeline_events = child_timeline_events.clone();
+    let recovery_timeline_events = child_timeline.events().to_vec();
     let spawn_result = session::spawn_session_on_thread(
         child_session_info,
         child_session_dir.clone(),
@@ -1266,7 +1266,7 @@ pub(crate) async fn run_shell_child(
         None,
         persistence,
         None,
-        crate::session::TimelineBootstrap::Existing(child_timeline_events),
+        crate::session::TimelineBootstrap::Existing(child_timeline),
         None,
         None,
         crate::session::StartupHints {

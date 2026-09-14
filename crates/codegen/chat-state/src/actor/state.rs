@@ -7,8 +7,8 @@ use serde::{Deserialize, Serialize};
 use sampling_types::{
     ConversationItem, ConversationRequest, DanglingToolCallReason, JsonOutputFormat,
     NativeContinuationFragment, NativeContinuationProjection, NativeContinuationSpan,
-    SamplingConfig, TokenUsage, dedup_duplicate_tool_results, project_portable_history,
-    repair_dangling_tool_calls,
+    SamplingConfig, TokenUsage, dedup_duplicate_tool_results,
+    project_portable_history_with_reasoning, repair_dangling_tool_calls,
 };
 
 use crate::types::Credentials;
@@ -69,30 +69,40 @@ pub fn estimate_request_input_tokens(request: &ConversationRequest) -> u64 {
         .saturating_add(output_schema_tokens)
 }
 
-fn estimate_wire_items(items: &[ConversationItem]) -> u64 {
+fn estimate_wire_items(items: &[ConversationItem], include_reasoning: bool) -> u64 {
     items
         .iter()
-        .filter(|item| !matches!(item, ConversationItem::Reasoning(_)))
+        .filter(|item| include_reasoning || !matches!(item, ConversationItem::Reasoning(_)))
         .map(estimate_item_tokens)
         .sum()
 }
 
 fn estimate_effective_conversation_tokens(request: &ConversationRequest) -> u64 {
     let Some(native) = &request.native_continuation else {
-        return estimate_wire_items(&request.items);
+        return estimate_wire_items(&request.items, false);
     };
+    let replay_reasoning = native.replay_portable_responses_reasoning;
     let Some(portable_end) = native.portable_prefix_end(&request.items) else {
-        return estimate_wire_items(&project_portable_history(&request.items));
+        return estimate_wire_items(
+            &project_portable_history_with_reasoning(&request.items, replay_reasoning),
+            replay_reasoning,
+        );
     };
-    let mut total = estimate_wire_items(&project_portable_history(&request.items[..portable_end]));
+    let mut total = estimate_wire_items(
+        &project_portable_history_with_reasoning(&request.items[..portable_end], replay_reasoning),
+        replay_reasoning,
+    );
     let mut cursor = portable_end;
     for span in &native.spans {
         total = total
-            .saturating_add(estimate_wire_items(&request.items[cursor..span.start]))
+            .saturating_add(estimate_wire_items(
+                &request.items[cursor..span.start],
+                false,
+            ))
             .saturating_add(span.fragment.estimated_tokens());
         cursor = span.end;
     }
-    total.saturating_add(estimate_wire_items(&request.items[cursor..]))
+    total.saturating_add(estimate_wire_items(&request.items[cursor..], false))
 }
 
 fn estimate_tool_tokens(
@@ -226,12 +236,14 @@ pub(crate) struct ChatState {
     pub last_turn_usage: Option<TokenUsage>,
     /// Usage for the open prompt (cleared on next prompt; not persisted).
     pub prompt_usage: Option<UsageLedger>,
-    /// Lifetime session usage (not persisted).
+    /// Lifetime session usage rebuilt from durable Timeline settlement facts.
     pub session_usage: UsageLedger,
     /// Durable attempt facts already applied in this actor epoch. This is
     /// reconstructed from Timeline observations so a replay cannot charge a
     /// settled attempt a second time.
     pub(crate) settled_model_attempts: BTreeMap<String, AttemptUsageSettlement>,
+    /// Durable child bills already folded into the parent lifetime ledger.
+    pub(crate) settled_subagent_usage: BTreeMap<String, SubagentUsageSettlement>,
     /// Event-sequence turn capture state. `Some` = capture active, `None` = inactive.
     /// Cleared on `TakeTurnMessages` (consumed), `BeginTurnCapture` (new turn),
     /// and the durable rewind transaction (which abandons the turn capture).
@@ -250,7 +262,36 @@ pub(crate) struct AttemptUsageSettlement {
     pub(crate) api_duration_ms: Option<u64>,
 }
 
+/// Immutable terminal bill folded from one child into its parent session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SubagentUsageSettlement {
+    pub(crate) subagent_id: String,
+    pub(crate) by_model: Vec<(String, crate::usage::UsageTotals)>,
+    pub(crate) incomplete: bool,
+}
+
 impl AttemptUsageSettlement {
+    pub(crate) fn check_duplicate(
+        &self,
+        existing: Option<&Self>,
+    ) -> Result<bool, crate::TimelineWriteError> {
+        let Some(existing) = existing else {
+            return Ok(false);
+        };
+        if existing.matches(
+            &self.model_id,
+            self.captured_prompt_index,
+            self.usage.as_ref(),
+            self.cost_usd_ticks,
+            self.api_duration_ms,
+        ) {
+            Ok(true)
+        } else {
+            Err(crate::TimelineWriteError::AttemptUsageConflict)
+        }
+    }
+
     pub(crate) fn matches(
         &self,
         model_id: &str,
@@ -264,6 +305,19 @@ impl AttemptUsageSettlement {
             && token_usage_matches(self.usage.as_ref(), usage)
             && self.cost_usd_ticks == cost_usd_ticks
             && self.api_duration_ms == api_duration_ms
+    }
+}
+
+impl SubagentUsageSettlement {
+    pub(crate) fn check_duplicate(
+        &self,
+        existing: Option<&Self>,
+    ) -> Result<bool, crate::TimelineWriteError> {
+        match existing {
+            None => Ok(false),
+            Some(existing) if existing == self => Ok(true),
+            Some(_) => Err(crate::TimelineWriteError::SubagentUsageConflict),
+        }
     }
 }
 
@@ -282,25 +336,82 @@ fn token_usage_matches(left: Option<&TokenUsage>, right: Option<&TokenUsage>) ->
     }
 }
 
-fn settled_model_attempts_from_timeline(
+fn usage_from_timeline(
     timeline: &Timeline,
-) -> BTreeMap<String, AttemptUsageSettlement> {
-    timeline
-        .events()
-        .iter()
-        .filter_map(|event| match &event.kind {
-            crate::TimelineEventKind::Observation(observation)
-                if observation.scope == "sampling_usage"
-                    && observation.name == "attempt_settled" => observation
-                        .data
-                        .as_ref()
-                        .and_then(|data| serde_json::from_value(data.clone()).ok()),
-            _ => None,
-        })
-        .fold(BTreeMap::new(), |mut settled, payload: AttemptUsageSettlement| {
-            settled.entry(payload.attempt_key.clone()).or_insert(payload);
-            settled
-        })
+) -> Result<
+    (
+        BTreeMap<String, AttemptUsageSettlement>,
+        BTreeMap<String, SubagentUsageSettlement>,
+        UsageLedger,
+    ),
+    crate::TimelineWriteError,
+> {
+    let mut attempts = BTreeMap::new();
+    let mut subagents = BTreeMap::new();
+    let mut ledger = UsageLedger::default();
+    ledger.initialize_segment(timeline.events().first().map(|event| event.at_ms));
+
+    for event in timeline.events() {
+        let crate::TimelineEventKind::Observation(observation) = &event.kind else {
+            continue;
+        };
+        let invalid = |reason: String| crate::TimelineWriteError::InvalidUsageObservation {
+            seq: event.seq.get(),
+            scope: observation.scope.clone(),
+            name: observation.name.clone(),
+            reason,
+        };
+        match (observation.scope.as_str(), observation.name.as_str()) {
+            ("session_usage", "resume_started" | "incomplete") => {
+                if observation.data.is_some() {
+                    return Err(invalid("marker must not contain data".into()));
+                }
+                if observation.name == "resume_started" {
+                    ledger.begin_resume_segment(event.seq, event.at_ms);
+                } else {
+                    ledger.mark_incomplete();
+                }
+            }
+            ("sampling_usage", "attempt_settled") => {
+                let data = observation
+                    .data
+                    .as_ref()
+                    .ok_or_else(|| invalid("missing settlement data".into()))?;
+                let payload = AttemptUsageSettlement::deserialize(data)
+                    .map_err(|error| invalid(error.to_string()))?;
+                if payload.check_duplicate(attempts.get(&payload.attempt_key))? {
+                    continue;
+                }
+                if let Some(usage) = payload.usage.as_ref() {
+                    ledger.record_main_loop_call(
+                        &payload.model_id,
+                        usage,
+                        payload.api_duration_ms,
+                        payload.cost_usd_ticks,
+                    );
+                } else {
+                    ledger.mark_incomplete();
+                }
+                attempts.insert(payload.attempt_key.clone(), payload);
+            }
+            ("session_usage", "subagent_settled") => {
+                let data = observation
+                    .data
+                    .as_ref()
+                    .ok_or_else(|| invalid("missing settlement data".into()))?;
+                let payload = SubagentUsageSettlement::deserialize(data)
+                    .map_err(|error| invalid(error.to_string()))?;
+                if payload.check_duplicate(subagents.get(&payload.subagent_id))? {
+                    continue;
+                }
+                ledger.record_subagent(&payload.subagent_id, &payload.by_model, payload.incomplete);
+                subagents.insert(payload.subagent_id.clone(), payload);
+            }
+            _ => {}
+        }
+    }
+
+    Ok((attempts, subagents, ledger))
 }
 
 #[derive(Debug, Clone)]
@@ -316,6 +427,7 @@ pub(crate) struct ContinuationLane {
     portable_prefix_len: usize,
     observed_projection: Vec<(SurfaceId, blake3::Hash)>,
     spans: Vec<NativeSpanRecord>,
+    replay_portable_responses_reasoning: bool,
 }
 
 impl ContinuationLane {
@@ -326,6 +438,7 @@ impl ContinuationLane {
             portable_prefix_len,
             observed_projection: Vec::new(),
             spans: Vec::new(),
+            replay_portable_responses_reasoning: false,
         }
     }
 
@@ -335,6 +448,7 @@ impl ContinuationLane {
         portable_prefix_len: usize,
         reason: &'static str,
     ) {
+        let replay_portable_responses_reasoning = self.replay_portable_responses_reasoning;
         tracing::info!(
             reason,
             ?backend,
@@ -342,6 +456,35 @@ impl ContinuationLane {
             "reset native continuation epoch"
         );
         *self = Self::new(backend, portable_prefix_len);
+        self.replay_portable_responses_reasoning = replay_portable_responses_reasoning;
+    }
+
+    pub(super) fn replace_route(
+        &mut self,
+        backend: sampling_types::ApiBackend,
+        portable_prefix_len: usize,
+    ) {
+        tracing::info!(
+            ?backend,
+            native_spans = self.spans.len(),
+            "replace native continuation route"
+        );
+        *self = Self::new(backend, portable_prefix_len);
+    }
+
+    pub(super) fn enable_portable_responses_reasoning(&mut self, has_reasoning: bool) -> bool {
+        if self.backend != sampling_types::ApiBackend::Responses
+            || !has_reasoning
+            || self.replay_portable_responses_reasoning
+        {
+            return false;
+        }
+        self.replay_portable_responses_reasoning = true;
+        true
+    }
+
+    pub(super) fn replays_portable_responses_reasoning(&self) -> bool {
+        self.replay_portable_responses_reasoning
     }
 
     pub(super) fn epoch_nonce(&self) -> &str {
@@ -422,6 +565,7 @@ impl ContinuationLane {
         NativeContinuationProjection {
             portable_prefix_len: self.portable_prefix_len.min(current_ids.len()),
             spans,
+            replay_portable_responses_reasoning: self.replay_portable_responses_reasoning,
         }
     }
 }
@@ -468,14 +612,19 @@ impl ChatState {
             .expect("an in-memory seed conversation must form a valid timeline");
 
         Self::from_timeline(timeline, sampling_config)
+            .expect("an in-memory seed has no persisted usage observations")
     }
 
     /// Restore state from an already validated durable timeline.
-    pub fn from_timeline(timeline: Timeline, sampling_config: SamplingConfig) -> Self {
+    pub fn from_timeline(
+        timeline: Timeline,
+        sampling_config: SamplingConfig,
+    ) -> Result<Self, crate::TimelineWriteError> {
         let initial_tokens = estimate_conversation_tokens(timeline.surface());
-        let settled_model_attempts = settled_model_attempts_from_timeline(&timeline);
+        let (settled_model_attempts, settled_subagent_usage, session_usage) =
+            usage_from_timeline(&timeline)?;
 
-        Self {
+        Ok(Self {
             continuation: ContinuationLane::new(
                 sampling_config.api_backend.clone(),
                 timeline.surface_len(),
@@ -491,10 +640,11 @@ impl ChatState {
             credentials: Credentials::default(),
             last_turn_usage: None,
             prompt_usage: None,
-            session_usage: UsageLedger::default(),
+            session_usage,
             settled_model_attempts,
+            settled_subagent_usage,
             turn_capture: None,
-        }
+        })
     }
 }
 

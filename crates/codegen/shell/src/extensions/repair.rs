@@ -125,10 +125,7 @@ async fn repair_on_disk(grow_root: &std::path::Path, session_id: &str, dry_run: 
         .map_err(|e| {
             acp::Error::internal_error().data(format!("failed to load session history: {e}"))
         })?;
-    let mut timeline =
-        chat_state::Timeline::from_events(persisted.timeline_events).map_err(|error| {
-            acp::Error::internal_error().data(format!("invalid session Timeline: {error}"))
-        })?;
+    let mut timeline = persisted.timeline;
     let (report, repair_events) = timeline.repair_surface_history().map_err(|error| {
         acp::Error::internal_error().data(format!("failed to build Timeline repair: {error}"))
     })?;
@@ -235,10 +232,7 @@ mod tests {
             .load_session_without_updates(&info)
             .await
             .expect("reload");
-        let reloaded = chat_state::Timeline::from_events(reloaded.timeline_events)
-            .expect("valid repaired Timeline")
-            .surface()
-            .to_vec();
+        let reloaded = reloaded.timeline.surface().to_vec();
         assert_eq!(reloaded.len(), 4);
         assert!(!reloaded.iter().any(|i| matches!(
             i,
@@ -273,10 +267,7 @@ mod tests {
             .load_session_without_updates(&info)
             .await
             .expect("reload");
-        let reloaded = chat_state::Timeline::from_events(reloaded.timeline_events)
-            .expect("valid original Timeline")
-            .surface()
-            .to_vec();
+        let reloaded = reloaded.timeline.surface().to_vec();
         assert_eq!(reloaded.len(), 5);
     }
 

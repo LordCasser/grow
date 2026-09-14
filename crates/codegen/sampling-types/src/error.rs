@@ -347,6 +347,24 @@ impl SamplingError {
         )
     }
 
+    /// Whether a Responses-compatible endpoint explicitly rejected a
+    /// stateless thinking request because prior visible reasoning text was
+    /// omitted. Downstream recovery consumes this as a typed attempt fact.
+    pub fn requires_portable_responses_reasoning(&self) -> bool {
+        let SamplingError::Api {
+            status: StatusCode::BAD_REQUEST,
+            message,
+            ..
+        } = self
+        else {
+            return false;
+        };
+        let message = message.to_ascii_lowercase();
+        message.contains("reasoning_text")
+            && message.contains("thinking mode")
+            && (message.contains("passed back") || message.contains("pass back"))
+    }
+
     pub fn is_retryable(&self) -> bool {
         match self {
             SamplingError::Auth { .. } => false,
@@ -1123,6 +1141,43 @@ mod tests {
 
         let timeout = SamplingError::IdleTimeout { elapsed_secs: 30 };
         assert!(!timeout.is_rate_limited());
+    }
+
+    #[test]
+    fn recognizes_only_explicit_responses_reasoning_replay_rejections() {
+        let exact = SamplingError::Api {
+            status: StatusCode::BAD_REQUEST,
+            message: "The `reasoning_text` in the thinking mode must be passed back to the API."
+                .into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: Some(false),
+        };
+        assert!(exact.requires_portable_responses_reasoning());
+
+        for (status, message) in [
+            (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "The reasoning_text in the thinking mode must be passed back to the API.",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                "reasoning_content is required for this tool call",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                "reasoning_text is invalid in thinking mode",
+            ),
+        ] {
+            let other = SamplingError::Api {
+                status,
+                message: message.into(),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry: Some(false),
+            };
+            assert!(!other.requires_portable_responses_reasoning(), "{message}");
+        }
     }
 
     #[test]

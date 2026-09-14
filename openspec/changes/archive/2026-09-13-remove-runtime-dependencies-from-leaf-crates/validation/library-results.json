@@ -1,0 +1,68 @@
+[
+  {
+    "crate": "chat_state",
+    "passed": 483,
+    "failed": 0,
+    "ignored": 1
+  },
+  {
+    "crate": "config",
+    "passed": 94,
+    "failed": 0,
+    "ignored": 0
+  },
+  {
+    "crate": "config_types",
+    "passed": 48,
+    "failed": 0,
+    "ignored": 0
+  },
+  {
+    "crate": "grow_http",
+    "passed": 10,
+    "failed": 0,
+    "ignored": 0
+  },
+  {
+    "crate": "pager",
+    "passed": 7201,
+    "failed": 0,
+    "ignored": 11
+  },
+  {
+    "crate": "pager_render",
+    "passed": 1002,
+    "failed": 0,
+    "ignored": 1
+  },
+  {
+    "crate": "sampler",
+    "passed": 241,
+    "failed": 0,
+    "ignored": 0
+  },
+  {
+    "crate": "sampling_types",
+    "passed": 278,
+    "failed": 0,
+    "ignored": 0
+  },
+  {
+    "crate": "shell",
+    "passed": 3795,
+    "failed": 0,
+    "ignored": 3
+  },
+  {
+    "crate": "tool_types",
+    "passed": 101,
+    "failed": 0,
+    "ignored": 0
+  },
+  {
+    "crate": "update",
+    "passed": 133,
+    "failed": 0,
+    "ignored": 0
+  }
+]

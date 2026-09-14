@@ -497,7 +497,7 @@ mod runtime_containment_tests {
 /// passive audit bridge.
 pub(crate) enum TimelineBootstrap {
     Fresh { session_rules: Option<String> },
-    Existing(Vec<chat_state::TimelineEvent>),
+    Existing(chat_state::Timeline),
 }
 
 impl TimelineBootstrap {
@@ -797,38 +797,33 @@ pub(crate) async fn spawn_session_actor(
             }
         }
     };
-    let (
-        resumed_timeline,
-        validated_timeline,
-        mut conversation,
-        fresh_session_rules,
-        mut restored_control_intents,
-    ) = match timeline_bootstrap {
-        TimelineBootstrap::Fresh { session_rules } => (
-            None,
-            None,
-            Vec::new(),
-            Some(session_rules),
-            std::collections::HashMap::new(),
-        ),
-        TimelineBootstrap::Existing(events) => {
-            crate::session::input_inbox::validate_submitted_payloads(
-                session_directory.as_ref(),
-                &events,
-            )
-            .map_err(|error| {
-                agent::AgentBuildError::InvalidConfig(format!(
-                    "invalid persisted input payload: {error}"
-                ))
-            })?;
-            let mut receipts = std::collections::HashMap::new();
-            let durable_receipts =
+    let (validated_timeline, mut conversation, fresh_session_rules, mut restored_control_intents) =
+        match timeline_bootstrap {
+            TimelineBootstrap::Fresh { session_rules } => (
+                None,
+                Vec::new(),
+                Some(session_rules),
+                std::collections::HashMap::new(),
+            ),
+            TimelineBootstrap::Existing(timeline) => {
+                let events = timeline.events();
+                crate::session::input_inbox::validate_submitted_payloads(
+                    session_directory.as_ref(),
+                    events,
+                )
+                .map_err(|error| {
+                    agent::AgentBuildError::InvalidConfig(format!(
+                        "invalid persisted input payload: {error}"
+                    ))
+                })?;
+                let mut receipts = std::collections::HashMap::new();
+                let durable_receipts =
                 crate::session::control::SessionControlSnapshot::durable_receipts_from_timeline(
-                    &events,
+                    events,
                 )
                 .and_then(|mut receipts| {
                     receipts.extend(crate::session::persistence::durable_model_control_receipts(
-                        &events,
+                        events,
                     )?);
                     Ok(receipts)
                 })
@@ -837,41 +832,46 @@ pub(crate) async fn spawn_session_actor(
                         "invalid persisted control receipt: {error}"
                     ))
                 })?;
-            for receipt in durable_receipts {
-                AdmissionState::restore_terminal_control_intent(
-                    &mut receipts,
-                    receipt.domain,
-                    &receipt.intent,
-                    ControlIntentTerminal {
-                        phase: crate::extensions::notification::ControlPhase::Applied,
-                        target: receipt.target,
-                        message: None,
-                        ui_terminal_durable: false,
-                    },
-                )
-                .map_err(|error| agent::AgentBuildError::InvalidConfig(error))?;
+                for receipt in durable_receipts {
+                    AdmissionState::restore_terminal_control_intent(
+                        &mut receipts,
+                        receipt.domain,
+                        &receipt.intent,
+                        ControlIntentTerminal {
+                            phase: crate::extensions::notification::ControlPhase::Applied,
+                            target: receipt.target,
+                            message: None,
+                            ui_terminal_durable: false,
+                        },
+                    )
+                    .map_err(|error| agent::AgentBuildError::InvalidConfig(error))?;
+                }
+                let surface = timeline.surface().to_vec();
+                (Some(timeline), surface, None, receipts)
             }
-            let timeline = chat_state::Timeline::from_events(events).map_err(|error| {
-                agent::AgentBuildError::InvalidConfig(format!(
-                    "invalid persisted conversation timeline: {error}"
-                ))
-            })?;
-            let surface = timeline.surface().to_vec();
-            (
-                Some(timeline.clone()),
-                Some(timeline),
-                surface,
-                None,
-                receipts,
-            )
-        }
-    };
-    let initial_hook_config_generation =
-        super::hooks::next_hook_config_generation(resumed_timeline.as_ref()).ok_or_else(|| {
-            agent::AgentBuildError::InvalidConfig(
-                "persisted Hook config generation is exhausted".to_string(),
-            )
-        })?;
+        };
+    let is_resumed = validated_timeline.is_some();
+    // Later Workflow restoration needs only the bounded set of run lifecycle
+    // facts, not another copy of the full conversation Timeline. Capture the
+    // facts now; keep projection repair at its original post-ChatState point.
+    let restored_workflow_lifecycles = persisted_workflow_runs
+        .iter()
+        .filter_map(|run| {
+            let run_id = &run.manifest.state.run_id;
+            validated_timeline
+                .as_ref()
+                .and_then(|timeline| timeline.workflow_lifecycle(run_id))
+                .map(|lifecycle| (run_id.clone(), lifecycle))
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    let initial_hook_config_generation = super::hooks::next_hook_config_generation(
+        validated_timeline.as_ref(),
+    )
+    .ok_or_else(|| {
+        agent::AgentBuildError::InvalidConfig(
+            "persisted Hook config generation is exhausted".to_string(),
+        )
+    })?;
     let mut control_receipt_error = None;
     let _ = crate::session::storage::stream_replay_grow_notifications_in(
         session_directory.as_ref(),
@@ -1590,7 +1590,7 @@ pub(crate) async fn spawn_session_actor(
     }
     let system_prompt = agent.system_prompt().to_string();
     let mut initial_context_changed = false;
-    if resumed_timeline.is_some()
+    if is_resumed
         && !startup_hints.preserve_inherited_system
         && !conversation_has_project_instructions(&conversation)
         && let Some(agents_md_reminder) = agent.agents_md_user_reminder()
@@ -1711,7 +1711,7 @@ pub(crate) async fn spawn_session_actor(
             Some(workflow_session_directory.clone()),
             persistence.tx.clone(),
             persisted_workflow_runs,
-            resumed_timeline.as_ref(),
+            &restored_workflow_lifecycles,
         );
     let restored_behavior = behavior.lock().behavior();
     let public_workflow_active = workflow_snapshots
@@ -2632,7 +2632,7 @@ pub(crate) async fn spawn_session_actor(
     } else {
         false
     };
-    if persisted_control_revision == 0 || resumed_timeline.is_some() {
+    if persisted_control_revision == 0 || is_resumed {
         let (agent_name, role_prompt, capability_catalog) = {
             let agent = session.agent.borrow();
             (

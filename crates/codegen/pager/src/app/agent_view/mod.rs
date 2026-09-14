@@ -650,6 +650,9 @@ pub struct AgentView {
     pub queue: QueuePane,
     /// Open reconnect reload window, if any. See [`SessionReload`].
     pub(crate) session_reload: Option<SessionReload>,
+    /// Surface to restore if this initial-load placeholder fails. Real,
+    /// already-loaded agents leave this unset.
+    pub(crate) load_return_view: Option<crate::app::root::ActiveView>,
     /// Wake prompt id whose failure marker already rendered — a re-delivered
     /// errored wake terminal must not stack a second "Turn failed" row (the
     /// output-epoch dedupe only covers chatty closes; failures bypass it).

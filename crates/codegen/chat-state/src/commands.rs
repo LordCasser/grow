@@ -35,6 +35,15 @@ pub enum TimelineWriteError {
     ImageDescriptionUnavailable(String),
     #[error("model attempt usage was submitted with a conflicting payload")]
     AttemptUsageConflict,
+    #[error("subagent usage was submitted with a conflicting payload")]
+    SubagentUsageConflict,
+    #[error("invalid persisted usage observation at event {seq} ({scope}/{name}): {reason}")]
+    InvalidUsageObservation {
+        seq: u64,
+        scope: String,
+        name: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Default)]
@@ -229,18 +238,24 @@ pub enum ChatStateCommand {
 
     /// Subagent usage into session (and prompt when attributable). Replies when applied.
     RecordSubagentUsage {
+        subagent_id: String,
         by_model: Vec<(String, crate::usage::UsageTotals)>,
         attribute_to_prompt: bool,
         /// Nested subagent bill may under-count.
         incomplete: bool,
-        reply: oneshot::Sender<()>,
+        reply: oneshot::Sender<Result<bool, TimelineWriteError>>,
     },
 
     /// Mark open prompt and/or session ledgers incomplete.
     MarkUsageIncomplete {
         prompt: bool,
         session: bool,
-        reply: oneshot::Sender<()>,
+        reply: oneshot::Sender<Result<(), TimelineWriteError>>,
+    },
+
+    /// Durably begin the usage segment for one cold actor resume.
+    BeginUsageResumeSegment {
+        reply: oneshot::Sender<Result<(), TimelineWriteError>>,
     },
 
     /// Replace the active provider route and start a fresh continuation epoch.
@@ -252,6 +267,11 @@ pub enum ChatStateCommand {
     /// Drop provider-native continuation and acknowledge the new epoch before
     /// a portable fallback request is rebuilt.
     ResetContinuation { reply: oneshot::Sender<()> },
+
+    /// Enable the current Responses route's narrow portable reasoning replay
+    /// after the provider explicitly requires it. Replies true only when the
+    /// route projection changed.
+    EnablePortableResponsesReasoning { reply: oneshot::Sender<bool> },
 
     /// Track that the agent edited a file path.
     RecordAgentEditedPath { path: String },
@@ -389,6 +409,14 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<Vec<crate::PendingNotification>>,
     },
 
+    GetParentMessageReceipts {
+        reply: oneshot::Sender<Vec<crate::TimelineEvent>>,
+    },
+
+    GetRetainedNotificationPayloadHashes {
+        reply: oneshot::Sender<BTreeSet<String>>,
+    },
+
     GetPendingAllowedInputs {
         reply: oneshot::Sender<Vec<crate::PendingAllowedInput>>,
     },
@@ -422,7 +450,9 @@ pub enum ChatStateCommand {
     /// Get current prompt index.
     GetPromptIndex { reply: oneshot::Sender<usize> },
     /// Coordinate of the active/latest branch prompt, not the next free index.
-    CurrentPromptIndex { reply: oneshot::Sender<Option<usize>> },
+    CurrentPromptIndex {
+        reply: oneshot::Sender<Option<usize>>,
+    },
 
     /// Get the current model-visible Surface revision without cloning it.
     GetSurfaceRevision { reply: oneshot::Sender<u64> },

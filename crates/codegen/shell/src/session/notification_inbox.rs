@@ -10,6 +10,79 @@ use std::path::Path;
 const ARTIFACT_DIRECTORY: &str = "artifacts/notifications";
 const ORPHAN_SWEEP_BATCH_SIZE: usize = 256;
 
+/// Project only a verified receipt; transport metadata never owns its identity.
+pub(crate) fn parent_message_notice(
+    event: &chat_state::TimelineEvent,
+    body: Option<String>,
+) -> Option<crate::extensions::notification::UiNotice> {
+    use crate::extensions::notification::{
+        ParentMessageNotice, UiNotice, UiNoticeCategory, UiNoticeTone,
+    };
+    let chat_state::TimelineEventKind::Notification(chat_state::NotificationEvent::Received {
+        id,
+        source:
+            chat_state::NotificationSource::ParentMessage {
+                parent_session_id,
+                message_id,
+                interrupt,
+            },
+        ..
+    }) = &event.kind
+    else {
+        return None;
+    };
+    let details = ParentMessageNotice {
+        parent_session_id: parent_session_id.clone(),
+        message_id: message_id.clone(),
+        interrupt: *interrupt,
+        message: body,
+    };
+    let missing = details.message.is_none();
+    Some(UiNotice {
+        correlation_id: id.clone(),
+        category: UiNoticeCategory::Coordination,
+        subject: Some(ParentMessageNotice::SUBJECT.into()),
+        description: None,
+        message: format!(
+            "Received message from parent agent · {}{}",
+            details.delivery_mode(),
+            if missing {
+                " · Message body could not be recovered"
+            } else {
+                ""
+            }
+        ),
+        tone: if missing {
+            UiNoticeTone::Warning
+        } else {
+            UiNoticeTone::Info
+        },
+        details: Some(serde_json::to_string(&details).expect("parent receipt serializes")),
+    })
+}
+
+pub(crate) fn read_parent_message_notice(
+    session: &crate::session::storage::ContainedDirectory,
+    event: &chat_state::TimelineEvent,
+) -> Option<crate::extensions::notification::UiNotice> {
+    let chat_state::TimelineEventKind::Notification(chat_state::NotificationEvent::Received {
+        source: chat_state::NotificationSource::ParentMessage { .. },
+        payload_ref,
+        ..
+    }) = &event.kind
+    else {
+        return None;
+    };
+    let body = match read_payload(session, payload_ref) {
+        Ok(body) => Some(body),
+        Err(error) => {
+            tracing::warn!(%error, receipt_seq = event.seq.get(), "parent message history body unavailable");
+            None
+        }
+    };
+    parent_message_notice(event, body)
+}
+
 pub(crate) fn write_payload(
     session: &crate::session::storage::ContainedDirectory,
     text: &str,

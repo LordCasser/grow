@@ -17,6 +17,7 @@ use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Widget, Wrap};
 
+#[cfg(test)]
 use shell::extensions::notification::PromptUsage;
 use shell::session::{ContextInfo, SessionInfoResponse};
 
@@ -113,7 +114,7 @@ pub struct UsageModalState {
     pub active_tab: UsageModalTab,
     /// Epoch stamped at open; TaskResults carry it and are dropped on mismatch.
     pub fetch_nonce: u64,
-    pub usage: UsageTabData<Box<PromptUsage>>,
+    pub usage: UsageTabData<Box<shell::extensions::usage::SessionUsageResponse>>,
     pub context: UsageTabData<ContextSnapshot>,
     pub session_info: UsageTabData<Vec<SessionInfoRow>>,
     /// Vertical scroll offset in content lines.
@@ -478,8 +479,8 @@ pub fn render_usage_modal(
             UsageTabData::Failed(error) => {
                 vec![format!("Couldn't load session usage: {error}")]
             }
-            UsageTabData::Loaded(usage) => {
-                crate::app::status_blocks::session_usage_block_text(usage)
+            UsageTabData::Loaded(response) => {
+                crate::app::status_blocks::session_usage_report_block_text(response)
                     .lines()
                     .map(str::to_owned)
                     .collect()
@@ -781,7 +782,11 @@ mod tests {
     fn render_usage_modal_draws_tabs_and_content() {
         let mut state = UsageModalState::open(UsageModalTab::Usage, 1);
         let usage = PromptUsage::default();
-        state.usage = UsageTabData::Loaded(Box::new(usage));
+        state.usage =
+            UsageTabData::Loaded(Box::new(shell::extensions::usage::SessionUsageResponse {
+                usage,
+                segments: Vec::new(),
+            }));
         let area = Rect {
             x: 0,
             y: 0,

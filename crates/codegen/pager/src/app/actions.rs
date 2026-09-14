@@ -72,7 +72,9 @@ pub enum Action {
         session_id: String,
     },
     /// Open the existing session picker with an optional initial content query.
-    ShowSessionPicker { query: String },
+    ShowSessionPicker {
+        query: String,
+    },
     /// The session picker overlay was dismissed without a pick: invalidate any
     /// in-flight list/search request so a late response can't fall
     /// through to the welcome picker fields.
@@ -1715,6 +1717,7 @@ pub enum Effect {
     ShowContextInfo {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        session_binding_epoch: u32,
         nonce: u64,
     },
     /// Fetch current bundle cache status via `grow/bundle/status`.
@@ -2387,6 +2390,8 @@ pub enum TaskResult {
     /// Context info fetched successfully.
     ContextInfoComplete {
         agent_id: AgentId,
+        session_id: acp::SessionId,
+        session_binding_epoch: u32,
         info: Box<shell::session::SessionInfoResponse>,
         /// Usage-modal fetch epoch; `0` = scrollback intent.
         nonce: u64,
@@ -2394,6 +2399,8 @@ pub enum TaskResult {
     /// Context info fetch failed.
     ContextInfoFailed {
         agent_id: AgentId,
+        session_id: acp::SessionId,
+        session_binding_epoch: u32,
         error: String,
         /// Usage-modal fetch epoch; `0` = scrollback intent.
         nonce: u64,
@@ -2402,7 +2409,7 @@ pub enum TaskResult {
     SessionUsageComplete {
         agent_id: AgentId,
         session_id: acp::SessionId,
-        usage: Box<shell::extensions::notification::PromptUsage>,
+        response: Box<shell::extensions::usage::SessionUsageResponse>,
         /// Usage-modal fetch epoch; `0` = scrollback intent.
         nonce: u64,
     },

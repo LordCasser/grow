@@ -3350,6 +3350,15 @@ reasoning_efforts = [{value = "max", default = true}, {value = "high"}]
                     cwd: cwd.to_str().unwrap().to_owned(),
                 })
                 .unwrap();
+            let prior_resume_boundaries = events
+                .iter()
+                .filter(|event| matches!(
+                    &event.kind,
+                    chat_state::TimelineEventKind::Observation(observation)
+                        if observation.scope == "session_usage"
+                            && observation.name == "resume_started"
+                ))
+                .count();
             crate::session::persistence::latest_model_selection(&events)
                 .unwrap_or_else(|error| panic!("before cold resume {phase}: {error}"));
             drop(storage);
@@ -3365,6 +3374,22 @@ reasoning_efforts = [{value = "max", default = true}, {value = "high"}]
                 return;
             }
             load.unwrap();
+            let cold_resume_boundaries = agent
+                .control_session_handle(&sid)
+                .unwrap()
+                .chat_state_handle
+                .timeline_events()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|event| matches!(
+                    &event.kind,
+                    chat_state::TimelineEventKind::Observation(observation)
+                        if observation.scope == "session_usage"
+                            && observation.name == "resume_started"
+                ))
+                .count();
+            assert_eq!(cold_resume_boundaries, prior_resume_boundaries + 1);
             let expected = if case == "none" {
                 None
             } else if phase == 3 {
@@ -3387,6 +3412,22 @@ reasoning_efforts = [{value = "max", default = true}, {value = "high"}]
                 .load_session(acp::LoadSessionRequest::new(sid.clone(), cwd.clone()))
                 .await
                 .unwrap();
+            let resident_resume_boundaries = agent
+                .control_session_handle(&sid)
+                .unwrap()
+                .chat_state_handle
+                .timeline_events()
+                .await
+                .unwrap()
+                .into_iter()
+                .filter(|event| matches!(
+                    &event.kind,
+                    chat_state::TimelineEventKind::Observation(observation)
+                        if observation.scope == "session_usage"
+                            && observation.name == "resume_started"
+                ))
+                .count();
+            assert_eq!(resident_resume_boundaries, cold_resume_boundaries);
             assert_eq!(
                 agent
                     .control_session_handle(&sid)

@@ -1712,12 +1712,407 @@ fn execute_command_from_tool_call(tc: &acp::ToolCall) -> String {
     }
     String::new()
 }
+
+/// Communication tools use `ToolKind::Other`, but their typed input/output
+/// carries enough structure to make a useful, stable row. Keep this decoder
+/// private to the tracker so ordinary tools continue to use their existing
+/// title/content paths.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommunicationTool {
+    AskParent,
+    AskSubagent,
+    SendSubagentMessage,
+    AskSession,
+    GetInquiry,
+}
+
+#[derive(Debug, Clone)]
+struct CommunicationInput {
+    tool: CommunicationTool,
+    target_id: Option<String>,
+    body: Option<String>,
+    interrupt: Option<bool>,
+}
+
+#[derive(Debug, Default, Clone)]
+struct CommunicationResult {
+    status: Option<String>,
+    phase: Option<String>,
+    answer: Option<String>,
+    error: Option<String>,
+    target_task_name: Option<String>,
+    target_session_id: Option<String>,
+}
+
+fn canonical_tool_name(tc: &acp::ToolCall) -> Option<&str> {
+    tc.meta
+        .as_ref()
+        .and_then(|meta| meta.get("grow/tool"))
+        .and_then(|value| value.get("name"))
+        .and_then(serde_json::Value::as_str)
+}
+
+fn communication_tool(tc: &acp::ToolCall) -> Option<CommunicationTool> {
+    match extract_variant(tc) {
+        Some("AskParent") => return Some(CommunicationTool::AskParent),
+        Some("AskSubagent") => return Some(CommunicationTool::AskSubagent),
+        Some("SendSubagentMessage") => return Some(CommunicationTool::SendSubagentMessage),
+        Some("AskSession") => return Some(CommunicationTool::AskSession),
+        Some("GetInquiry") => return Some(CommunicationTool::GetInquiry),
+        _ => {}
+    }
+    // A title alone is not evidence of a Grow communication tool: older ACP
+    // fixtures and third-party tools may use the same human label. Production
+    // Grow calls carry either the typed variant or the verified identity
+    // envelope, so do not infer protocol semantics from title prose.
+    let Some(name) = canonical_tool_name(tc) else {
+        return None;
+    };
+    match name {
+        "ask_parent" => Some(CommunicationTool::AskParent),
+        "ask_subagent" => Some(CommunicationTool::AskSubagent),
+        "send_subagent_message" => Some(CommunicationTool::SendSubagentMessage),
+        "ask_session" => Some(CommunicationTool::AskSession),
+        "get_inquiry" => Some(CommunicationTool::GetInquiry),
+        _ => None,
+    }
+}
+
+fn communication_input(tc: &acp::ToolCall, tool: CommunicationTool) -> CommunicationInput {
+    let target_id = match tool {
+        CommunicationTool::AskParent => None,
+        CommunicationTool::AskSubagent | CommunicationTool::SendSubagentMessage => {
+            extract_raw_field(tc, "subagent_id")
+        }
+        CommunicationTool::AskSession => extract_raw_field(tc, "target_session_id"),
+        CommunicationTool::GetInquiry => extract_raw_field(tc, "inquiry_id"),
+    };
+    let body = match tool {
+        CommunicationTool::SendSubagentMessage => extract_raw_field(tc, "message"),
+        CommunicationTool::AskParent
+        | CommunicationTool::AskSubagent
+        | CommunicationTool::AskSession => extract_raw_field(tc, "question"),
+        CommunicationTool::GetInquiry => None,
+    };
+    CommunicationInput {
+        tool,
+        target_id,
+        body,
+        interrupt: (tool == CommunicationTool::SendSubagentMessage)
+            .then(|| tc.raw_input.as_ref()?.get("interrupt")?.as_bool())
+            .flatten(),
+    }
+}
+
+fn json_text(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(text) => Some(text.clone()),
+        serde_json::Value::Object(object) => object
+            .get("message")
+            .and_then(json_text)
+            .or_else(|| object.get("error").and_then(json_text))
+            .or_else(|| serde_json::to_string(value).ok()),
+        _ => serde_json::to_string(value).ok(),
+    }
+}
+
+fn communication_result(tc: &acp::ToolCall) -> CommunicationResult {
+    let Some(raw) = tc.raw_output.as_ref() else {
+        return CommunicationResult {
+            error: (!content_text(tc).is_empty()).then(|| content_text(tc)),
+            ..Default::default()
+        };
+    };
+    let Some(object) = raw.as_object() else {
+        return CommunicationResult {
+            answer: json_text(raw),
+            ..Default::default()
+        };
+    };
+    let mut result = CommunicationResult {
+        status: object
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        phase: object
+            .get("phase")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        answer: object.get("answer").and_then(json_text),
+        // Tool execution failures carry a stable machine error plus the
+        // coordinator's human-facing message. Preserve the latter so delivery
+        // ambiguity such as `timed out` can still select the right status.
+        error: object.get("error").and_then(|error| {
+            if error.is_null() {
+                None
+            } else {
+                object
+                    .get("message")
+                    .and_then(json_text)
+                    .or_else(|| json_text(error))
+            }
+        }),
+        target_task_name: object
+            .get("subagent_task_name")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        target_session_id: object
+            .get("target_session_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+    };
+    // get_inquiry wraps the business result in `outcome`; the lookup itself
+    // can succeed while that remembered inquiry failed.
+    if let Some(outcome) = object.get("outcome").and_then(serde_json::Value::as_object) {
+        let status = result.status.take();
+        let answer = result.answer.take();
+        let error = result.error.take();
+        result.status = outcome
+            .get("status")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned)
+            .or(status);
+        result.answer = outcome.get("answer").and_then(json_text).or(answer);
+        result.error = outcome.get("error").and_then(json_text).or(error);
+    }
+    result
+}
+
+fn title_target(input: &CommunicationInput, result: &CommunicationResult) -> String {
+    match input.tool {
+        CommunicationTool::AskParent => "parent agent".to_owned(),
+        CommunicationTool::AskSubagent | CommunicationTool::SendSubagentMessage => {
+            let id = input
+                .target_id
+                .as_deref()
+                .or(result.target_session_id.as_deref())
+                .unwrap_or("unknown");
+            match result
+                .target_task_name
+                .as_deref()
+                .filter(|name| !name.is_empty())
+            {
+                Some(task) => format!("subagent「{task}」 [{id}]"),
+                None => format!("subagent「{id}」"),
+            }
+        }
+        CommunicationTool::AskSession => format!(
+            "session {}",
+            input
+                .target_id
+                .as_deref()
+                .or(result.target_session_id.as_deref())
+                .unwrap_or("unknown")
+        ),
+        CommunicationTool::GetInquiry => format!(
+            "inquiry {}",
+            input.target_id.as_deref().unwrap_or("unknown")
+        ),
+    }
+}
+
+fn communication_tool_name(tool: CommunicationTool) -> &'static str {
+    match tool {
+        CommunicationTool::AskParent => "ask_parent",
+        CommunicationTool::AskSubagent => "ask_subagent",
+        CommunicationTool::SendSubagentMessage => "send_subagent_message",
+        CommunicationTool::AskSession => "ask_session",
+        CommunicationTool::GetInquiry => "get_inquiry",
+    }
+}
+
+fn communication_status(
+    tc: &acp::ToolCall,
+    input: &CommunicationInput,
+    result: &CommunicationResult,
+) -> String {
+    let pending = matches!(
+        tc.status,
+        acp::ToolCallStatus::Pending | acp::ToolCallStatus::InProgress
+    );
+    let status = result
+        .status
+        .as_deref()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    match input.tool {
+        CommunicationTool::SendSubagentMessage => {
+            if status == "received" {
+                if input.interrupt == Some(true) {
+                    "Received · safe interrupt requested".to_owned()
+                } else {
+                    "Received · queued for next step".to_owned()
+                }
+            } else if pending {
+                "Sending".to_owned()
+            } else if result
+                .error
+                .as_deref()
+                .is_some_and(is_unknown_delivery_error)
+            {
+                "Delivery status unknown · may have been received".to_owned()
+            } else {
+                "Delivery failed".to_owned()
+            }
+        }
+        CommunicationTool::GetInquiry => {
+            if pending {
+                "Looking up inquiry".to_owned()
+            } else if let Some(status) = result.status.as_deref().filter(|s| !s.is_empty()) {
+                format!("Lookup complete · inquiry {}", inquiry_status_label(status))
+            } else if let Some(phase) = result.phase.as_deref().filter(|s| !s.is_empty()) {
+                format!("Lookup complete · {}", inquiry_phase_label(phase))
+            } else if tc.status == acp::ToolCallStatus::Failed {
+                "Inquiry lookup failed".to_owned()
+            } else {
+                "Lookup complete".to_owned()
+            }
+        }
+        CommunicationTool::AskParent
+        | CommunicationTool::AskSubagent
+        | CommunicationTool::AskSession => {
+            if pending {
+                "Waiting for answer".to_owned()
+            } else if let Some(status) = result.status.as_deref().filter(|s| !s.is_empty()) {
+                inquiry_status_label(status)
+            } else if tc.status == acp::ToolCallStatus::Failed {
+                "Failed to answer".to_owned()
+            } else {
+                "Answer received".to_owned()
+            }
+        }
+    }
+}
+
+fn is_unknown_delivery_error(error: &str) -> bool {
+    let error = error.to_ascii_lowercase();
+    error.contains("timeout")
+        || error.contains("timed out")
+        || error.contains("delivery is unknown")
+        || error.contains("receipt may already")
+        || error.contains("may already be durable")
+}
+
+fn inquiry_phase_label(phase: &str) -> String {
+    match phase.to_ascii_lowercase().as_str() {
+        "discovering" => "Discovering".to_owned(),
+        "receiving" => "Receiving".to_owned(),
+        "awaiting_approval" => "Waiting for approval".to_owned(),
+        "queued" => "Queued".to_owned(),
+        "running" => "Running".to_owned(),
+        "reconnecting" => "Reconnecting".to_owned(),
+        "finished" => "Finished".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+fn inquiry_status_label(status: &str) -> String {
+    match status.to_ascii_lowercase().as_str() {
+        "answered" => "Answered".to_owned(),
+        "rejected" => "Rejected".to_owned(),
+        "cancelled" | "canceled" => "Cancelled".to_owned(),
+        "unavailable" => "Unavailable".to_owned(),
+        "timed_out" | "timeout" => "Timed out".to_owned(),
+        "failed" => "Failed".to_owned(),
+        "queued" => "Queued".to_owned(),
+        "approval" | "awaiting_approval" => "Waiting for approval".to_owned(),
+        "running" => "Answering".to_owned(),
+        other => other.to_owned(),
+    }
+}
+
+fn communication_details(
+    tc: &acp::ToolCall,
+    input: &CommunicationInput,
+    result: &CommunicationResult,
+    status: &str,
+) -> String {
+    let target = title_target(input, result);
+    let mut lines = vec![format!("Target: {target}"), format!("Status: {status}")];
+    if let Some(target_id) = &input.target_id {
+        lines.push(format!("Target ID: {target_id}"));
+    }
+    if let Some(interrupt) = input.interrupt {
+        lines.push(format!(
+            "Delivery: {}",
+            if interrupt {
+                "request safe interrupt"
+            } else {
+                "queue for the next step"
+            }
+        ));
+    }
+    if let Some(body) = &input.body {
+        lines.push(format!(
+            "{}: {body}",
+            if input.tool == CommunicationTool::SendSubagentMessage {
+                "Message"
+            } else {
+                "Question"
+            }
+        ));
+    }
+    if let Some(name) = &result.target_task_name {
+        let label = if input.tool == CommunicationTool::AskParent {
+            "Participating subagent task"
+        } else {
+            "Target task"
+        };
+        lines.push(format!("{label}: {name}"));
+    }
+    if let Some(id) = &result.target_session_id {
+        lines.push(format!("Target session ID: {id}"));
+    }
+    if let Some(phase) = &result.phase {
+        lines.push(format!("Phase: {phase}"));
+    }
+    if let Some(answer) = &result.answer {
+        lines.push(format!("Answer: {answer}"));
+    }
+    if let Some(error) = &result.error {
+        lines.push(format!("Error: {error}"));
+    }
+    if let Some(raw) = &tc.raw_output
+        && let Ok(raw) = serde_json::to_string_pretty(raw)
+    {
+        lines.push(format!("Result: {raw}"));
+    } else if !content_text(tc).is_empty() {
+        lines.push(format!("Result: {}", content_text(tc)));
+    }
+    lines.join("\n")
+}
+
+fn communication_tool_call_to_block(tc: &acp::ToolCall) -> Option<OtherToolCallBlock> {
+    let tool = communication_tool(tc)?;
+    let input = communication_input(tc, tool);
+    let result = communication_result(tc);
+    let target = title_target(&input, &result);
+    let status = communication_status(tc, &input, &result);
+    let title = format!("{} → {target}", communication_tool_name(tool));
+    let details = communication_details(tc, &input, &result, &status);
+    let mut block = OtherToolCallBlock::new(title, status.clone());
+    if let Some(body) = &input.body {
+        block = block.with_communication_preview(body.clone());
+    }
+    block.set_output_text(details);
+    if tc.status == acp::ToolCallStatus::Failed {
+        block.error = Some(result.error.unwrap_or_else(|| content_text(tc)));
+        if block.error.as_deref().is_some_and(str::is_empty) {
+            block.error = Some("Communication failed".to_owned());
+        }
+    }
+    Some(block)
+}
 /// Convert an ACP ToolCall to a RenderBlock.
 ///
 /// Parses `tool_call.kind` to create the appropriate block type,
 /// extracting fields from `raw_input` JSON when available. `session_cwd` sets
 /// execute `header_display` when a leading `cd <cwd>` is redundant.
 fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderBlock {
+    if let Some(block) = communication_tool_call_to_block(tc) {
+        return RenderBlock::ToolCall(ToolCallBlock::Other(block));
+    }
     let success = !matches!(tc.status, acp::ToolCallStatus::Failed);
     match tc.kind {
         acp::ToolKind::Execute => {
@@ -2019,13 +2414,8 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
             let mut block = OtherToolCallBlock::new(label, summary);
             let ct = content_text(tc);
             if !success {
-                block.error = Some(if ct.is_empty() {
-                    "Failed".into()
-                } else {
-                    ct.clone()
-                });
-            }
-            if !ct.is_empty() {
+                block.error = Some(if ct.is_empty() { "Failed".into() } else { ct });
+            } else if !ct.is_empty() {
                 block.set_output_text(ct);
             }
             RenderBlock::ToolCall(ctor(block))
@@ -6514,6 +6904,40 @@ mod tests {
         let _block = tool_call_to_block(&tc, None);
     }
     #[test]
+    fn generic_tool_content_has_one_role_for_success_or_failure() {
+        let text_content = || {
+            vec![acp::ToolCallContent::from(acp::ContentBlock::Text(
+                acp::TextContent::new("diagnostic"),
+            ))]
+        };
+        let failed = acp::ToolCall::new(acp::ToolCallId::new("failed"), "unknown_tool")
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::Failed)
+            .content(text_content());
+        let completed = acp::ToolCall::new(acp::ToolCallId::new("completed"), "known_tool")
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::Completed)
+            .content(text_content());
+
+        let RenderBlock::ToolCall(ToolCallBlock::Other(failed)) = tool_call_to_block(&failed, None)
+        else {
+            panic!("expected generic failed tool block");
+        };
+        assert_eq!(failed.error.as_deref(), Some("diagnostic"));
+        assert!(
+            failed.output.is_none(),
+            "failure text must not render twice"
+        );
+
+        let RenderBlock::ToolCall(ToolCallBlock::Other(completed)) =
+            tool_call_to_block(&completed, None)
+        else {
+            panic!("expected generic completed tool block");
+        };
+        assert!(completed.error.is_none());
+        assert_eq!(completed.output.as_deref(), Some("diagnostic"));
+    }
+    #[test]
     fn cursor_todo_write_suppressed_by_title() {
         assert!(is_todo_tool(&initial_tool_call("tc1", "TodoWrite")));
         assert!(is_todo_tool(&initial_tool_call("tc2", "Updating plan")));
@@ -6540,6 +6964,239 @@ mod tests {
                 sb.len(),
                 0,
                 "todo tool with title={title:?} must be suppressed"
+            );
+        }
+    }
+
+    #[test]
+    fn communication_rows_use_typed_input_and_full_agent_result() {
+        let call = acp::ToolCall::new(acp::ToolCallId::new("ask-child"), "ask_subagent")
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::Completed)
+            .raw_input(Some(serde_json::json!({
+                "variant": "AskSubagent",
+                "subagent_id": "child-123456789",
+                "question": "Which stage owns the receipt?"
+            })))
+            .raw_output(Some(serde_json::json!({
+                "type": "AgentInteraction",
+                "id": "ask-child",
+                "status": "answered",
+                "answer": "The child inbox owns it.",
+                "subagent_task_name": "receipt audit",
+                "target_session_id": "child-123456789"
+            })));
+        let RenderBlock::ToolCall(ToolCallBlock::Other(block)) = tool_call_to_block(&call, None)
+        else {
+            panic!("expected communication row");
+        };
+        assert_eq!(
+            block.name,
+            "ask_subagent → subagent「receipt audit」 [child-123456789]"
+        );
+        assert_eq!(block.summary, "Answered");
+        let details = block.output.as_deref().expect("full details");
+        for expected in [
+            "Target ID: child-123456789",
+            "Question: Which stage owns the receipt?",
+            "Answer: The child inbox owns it.",
+            "subagent_task_name",
+        ] {
+            assert!(details.contains(expected), "missing {expected}: {details}");
+        }
+    }
+
+    #[test]
+    fn ask_parent_details_keep_source_task_separate_from_parent_target() {
+        let call = acp::ToolCall::new(acp::ToolCallId::new("ask-parent"), "ask_parent")
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::Completed)
+            .raw_input(Some(serde_json::json!({
+                "variant": "AskParent",
+                "question": "Can the parent confirm the receipt?"
+            })))
+            .raw_output(Some(serde_json::json!({
+                "type": "AgentInteraction",
+                "id": "ask-parent",
+                "status": "answered",
+                "answer": "The receipt is durable.",
+                "subagent_task_name": "child source task",
+                "target_session_id": "parent-session"
+            })));
+        let RenderBlock::ToolCall(ToolCallBlock::Other(block)) = tool_call_to_block(&call, None)
+        else {
+            panic!("expected communication row");
+        };
+        assert_eq!(block.name, "ask_parent → parent agent");
+        let details = block.output.as_deref().expect("communication details");
+        assert!(details.contains("Participating subagent task: child source task"));
+        assert!(!details.contains("Target task: child source task"));
+        assert!(details.contains("Target session ID: parent-session"));
+    }
+
+    #[test]
+    fn get_inquiry_keeps_lookup_success_separate_from_failed_business_result() {
+        let call = acp::ToolCall::new(acp::ToolCallId::new("lookup"), "get_inquiry")
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::Completed)
+            .raw_input(Some(serde_json::json!({
+                "variant": "GetInquiry",
+                "inquiry_id": "inquiry-9"
+            })))
+            .raw_output(Some(serde_json::json!({
+                "type": "CoordinationInquiryState",
+                "inquiryId": "inquiry-9",
+                "phase": "finished",
+                "outcome": {
+                    "inquiryId": "inquiry-9",
+                    "status": "failed",
+                    "error": {"code": "peer_unavailable", "message": "peer closed"}
+                }
+            })));
+        let RenderBlock::ToolCall(ToolCallBlock::Other(block)) = tool_call_to_block(&call, None)
+        else {
+            panic!("expected communication row");
+        };
+        assert_eq!(block.summary, "Lookup complete · inquiry Failed");
+        assert!(block.error.is_none(), "lookup itself completed");
+        assert!(block.output.as_deref().is_some_and(|details| {
+            details.contains("Error: peer closed") && details.contains("inquiry-9")
+        }));
+    }
+
+    #[test]
+    fn send_message_ack_timeout_is_shown_as_unknown_delivery() {
+        for error in [
+            "Message receipt acknowledgement unavailable; delivery is unknown",
+            "Message receipt acknowledgement timed out; delivery may already be durable",
+        ] {
+            let call = acp::ToolCall::new(
+                acp::ToolCallId::new("send-timeout"),
+                "send_subagent_message",
+            )
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::Failed)
+            .content(vec![acp::ToolCallContent::from(acp::ContentBlock::Text(
+                acp::TextContent::new(error),
+            ))])
+            .raw_input(Some(serde_json::json!({
+                "variant": "SendSubagentMessage",
+                "subagent_id": "child-timeout",
+                "message": "Please keep the current work safe.",
+                "interrupt": false
+            })));
+            let RenderBlock::ToolCall(ToolCallBlock::Other(block)) =
+                tool_call_to_block(&call, None)
+            else {
+                panic!("expected communication row");
+            };
+            assert_eq!(
+                block.summary,
+                "Delivery status unknown · may have been received"
+            );
+            assert_eq!(block.error.as_deref(), Some(error));
+        }
+    }
+
+    #[test]
+    fn send_message_raw_tool_error_uses_coordinator_message() {
+        let error = "Message receipt acknowledgement timed out; delivery may already be durable";
+        let call = acp::ToolCall::new(
+            acp::ToolCallId::new("send-raw-timeout"),
+            "send_subagent_message",
+        )
+        .kind(acp::ToolKind::Other)
+        .status(acp::ToolCallStatus::Failed)
+        .raw_input(Some(serde_json::json!({
+            "variant": "SendSubagentMessage",
+            "subagent_id": "child-raw-timeout",
+            "message": "Please keep the current work safe.",
+            "interrupt": false
+        })))
+        .raw_output(Some(serde_json::json!({
+            "error": "tool_execution_failed",
+            "message": error
+        })));
+        let RenderBlock::ToolCall(ToolCallBlock::Other(block)) = tool_call_to_block(&call, None)
+        else {
+            panic!("expected communication row");
+        };
+        assert_eq!(
+            block.summary,
+            "Delivery status unknown · may have been received"
+        );
+        assert_eq!(block.error.as_deref(), Some(error));
+        assert!(
+            block
+                .output
+                .as_deref()
+                .is_some_and(|details| details.contains(&format!("Error: {error}")))
+        );
+    }
+
+    #[test]
+    fn null_optional_result_fields_do_not_become_visible_answers() {
+        let call = acp::ToolCall::new(acp::ToolCallId::new("ask-null"), "ask_parent")
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::Completed)
+            .raw_input(Some(serde_json::json!({
+                "variant": "AskParent",
+                "question": "Is the receipt durable?"
+            })))
+            .raw_output(Some(serde_json::json!({
+                "type": "AgentInteraction",
+                "id": "ask-null",
+                "status": "answered",
+                "answer": null,
+                "error": null
+            })));
+        let RenderBlock::ToolCall(ToolCallBlock::Other(block)) = tool_call_to_block(&call, None)
+        else {
+            panic!("expected communication row");
+        };
+        let details = block.output.as_deref().expect("communication details");
+        assert!(!details.contains("Answer: null"), "{details}");
+        assert!(!details.contains("Error: null"), "{details}");
+        assert!(
+            details.contains("\"answer\": null"),
+            "raw result is preserved: {details}"
+        );
+        assert!(
+            details.contains("\"error\": null"),
+            "raw result is preserved: {details}"
+        );
+    }
+
+    #[test]
+    fn get_inquiry_phase_is_visible_when_no_terminal_outcome_exists() {
+        for phase in ["queued", "running"] {
+            let call = acp::ToolCall::new(acp::ToolCallId::new("lookup-phase"), "get_inquiry")
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Completed)
+                .raw_input(Some(serde_json::json!({
+                    "variant": "GetInquiry",
+                    "inquiry_id": "inquiry-phase"
+                })))
+                .raw_output(Some(serde_json::json!({
+                    "type": "CoordinationInquiryState",
+                    "inquiryId": "inquiry-phase",
+                    "phase": phase
+                })));
+            let RenderBlock::ToolCall(ToolCallBlock::Other(block)) =
+                tool_call_to_block(&call, None)
+            else {
+                panic!("expected communication row");
+            };
+            assert!(
+                block.summary.to_ascii_lowercase().contains(phase),
+                "phase={phase}, summary={}",
+                block.summary
+            );
+            assert!(
+                block
+                    .output
+                    .as_deref()
+                    .is_some_and(|details| details.contains(&format!("Phase: {phase}")))
             );
         }
     }

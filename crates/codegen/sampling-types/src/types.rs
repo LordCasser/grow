@@ -282,17 +282,7 @@ pub fn chat_truncate_for_prompt(
     keep_count
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, Copy)]
-#[serde(rename_all = "lowercase")]
-pub enum ToolType {
-    Function,
-}
-
-// Re-export ToolDefinition and FunctionTool from tools.
-// The canonical definitions now live there; this re-export keeps
-// all existing `crate::sampling::types::ToolDefinition` imports working.
-pub use tools::types::definition::{FunctionTool, ToolDefinition};
-pub use tools::types::resources::ModelImageInputKey;
+pub use tool_types::{FunctionTool, ModelImageInputKey, ToolDefinition, ToolType};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(untagged)]

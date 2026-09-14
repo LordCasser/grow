@@ -433,6 +433,11 @@ pub(super) fn do_cancel_turn_with_pause(
 pub(crate) const PROMPT_STATUS_WATCHDOG_DELAY: std::time::Duration =
     std::time::Duration::from_secs(2);
 
+/// Cancellation is an ACP notification and has no direct acknowledgement.
+/// Reconcile quickly so a vanished shell/session cannot strand the composer.
+pub(crate) const PROMPT_STATUS_CANCEL_WATCHDOG_DELAY: std::time::Duration =
+    std::time::Duration::from_secs(2);
+
 /// A prompt that is already `Running` (admitted) but whose lifecycle
 /// signals (TurnCompleted / PromptResponse) went missing asks for
 /// authoritative status once this much time passes with no NEW activity.
@@ -462,6 +467,18 @@ pub(crate) fn poll_stalled_prompt_submissions(
                 agent.session.turn_started_at.is_some_and(|started| {
                     now.saturating_duration_since(started) >= PROMPT_STATUS_WATCHDOG_DELAY
                 })
+            } else if matches!(
+                agent.session.state,
+                crate::app::session::AgentState::TurnCancelling
+            ) {
+                agent
+                    .session
+                    .last_status_observed_at
+                    .or(agent.session.turn_started_at)
+                    .is_some_and(|observed| {
+                        now.saturating_duration_since(observed)
+                            >= PROMPT_STATUS_CANCEL_WATCHDOG_DELAY
+                    })
             } else if agent.session.state.is_turn_running() {
                 running_turn_stalled(agent, now)
             } else {
@@ -539,6 +556,16 @@ pub(crate) fn next_prompt_watchdog_deadline(app: &AppView) -> Option<std::time::
                     .session
                     .turn_started_at?
                     .checked_add(PROMPT_STATUS_WATCHDOG_DELAY);
+            }
+            if matches!(
+                agent.session.state,
+                crate::app::session::AgentState::TurnCancelling
+            ) {
+                return agent
+                    .session
+                    .last_status_observed_at
+                    .or(agent.session.turn_started_at)?
+                    .checked_add(PROMPT_STATUS_CANCEL_WATCHDOG_DELAY);
             }
             if !agent.session.state.is_turn_running() {
                 return None;

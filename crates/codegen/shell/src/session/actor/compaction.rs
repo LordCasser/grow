@@ -773,7 +773,8 @@ impl SessionActor {
             acp::Error::internal_error()
                 .data("compaction image rejection had no model capability identity")
         })?;
-        let first_rejection = self.record_unsupported_model_image_input(self.current_catalog_model_id())
+        let first_rejection = self
+            .record_unsupported_model_image_input(self.current_catalog_model_id())
             .await
             .map_err(|error| {
                 crate::session::commands::fatal_turn_boundary_error(
@@ -785,11 +786,17 @@ impl SessionActor {
             .project_conversation_images_for_text_model(&key)
             .await
             .map_err(|error| {
-                if matches!(error, chat_state::TimelineWriteError::ImageDescriptionUnavailable(_)) {
-                    acp::Error::internal_error().data(Self::image_projection_failure_message(&error))
+                if matches!(
+                    error,
+                    chat_state::TimelineWriteError::ImageDescriptionUnavailable(_)
+                ) {
+                    acp::Error::internal_error()
+                        .data(Self::image_projection_failure_message(&error))
                 } else {
                     crate::session::commands::fatal_turn_boundary_error(
-                        "compaction image projection", error.to_string())
+                        "compaction image projection",
+                        error.to_string(),
+                    )
                 }
             })?;
         Ok(first_rejection || projected.total_images() > 0)
@@ -1052,9 +1059,13 @@ impl SessionActor {
         })?];
         summary_source.extend(target_source);
         if self.model_image_input_is_unsupported(&model_id).await {
-            sampling_types::conversation::select_image_descriptions(&mut summary_source)
-                .map_err(|error| acp::Error::internal_error().data(Self::image_projection_failure_message(
-                    &chat_state::TimelineWriteError::ImageDescriptionUnavailable(error.into()))))?;
+            sampling_types::conversation::select_image_descriptions(&mut summary_source).map_err(
+                |error| {
+                    acp::Error::internal_error().data(Self::image_projection_failure_message(
+                        &chat_state::TimelineWriteError::ImageDescriptionUnavailable(error.into()),
+                    ))
+                },
+            )?;
         }
 
         let simplified_messages = if verbatim_input_enabled {
@@ -2319,7 +2330,9 @@ impl SessionActor {
             && result
                 .as_ref()
                 .is_err_and(is_compact_image_input_unsupported)
-            && self.background_compaction_source_is_current(&pending).await?
+            && self
+                .background_compaction_source_is_current(&pending)
+                .await?
             && self.recover_compaction_image_input().await?
         {
             // ImageShadows invalidate the old target, so the existing recovery
@@ -2941,7 +2954,13 @@ mod context_recall_tests {
                     .lock()
                     .select_behavior(tool_types::BehaviorId::Goal);
                 actor.sync_goal_usage_window();
-                actor.apply_captured_goal_usage("goal-1", crate::session::goal_tracker::GoalTokenUsage::new(90, 0, 0)).await.unwrap();
+                actor
+                    .apply_captured_goal_usage(
+                        "goal-1",
+                        crate::session::goal_tracker::GoalTokenUsage::new(90, 0, 0),
+                    )
+                    .await
+                    .unwrap();
                 actor
                     .chat_state_handle
                     .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
@@ -3063,6 +3082,7 @@ mod context_recall_tests {
             credential: sampling_types::SentCredential::Unknown,
             usage: None,
             cost_usd_ticks: None,
+            portable_responses_reasoning_required: false,
         }
     }
 

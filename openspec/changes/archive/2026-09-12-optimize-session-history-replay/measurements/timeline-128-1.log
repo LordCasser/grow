@@ -1,0 +1,41 @@
+
+running 1 test
+
+[perf] e2e session: updates=4.9 MB rewind=0.0 MB
+
+[perf] e2e: updates.jsonl composition (4.9 MB total):
+  sessionUpdate kind                  count         MB       %
+  agent_message_chunk                  1024        4.4   89.3%
+  available_commands_update             256        0.5   10.1%
+  user_message_chunk                    128        0.0    0.6%
+
+[perf] ===== END-TO-END session/load (what the pager waits on) =====
+  total session/load round-trip :     504.9 ms
+  notifications replayed         :      1155
+  available_commands_update      :         1 replayed / 256 on disk
+  post-load re-advertise reached :      true
+  time-to-first notification     :     147.7 ms
+  time-to-last notification      :     504.9 ms
+  ---- shell-side per-phase instrumentation (elapsed) ----
+  session.load_session                         502.4 ms
+  session.spawn_and_register_session           210.4 ms
+  session.spawn_and_register                   209.6 ms
+  session.load_session_replay                  159.5 ms
+  session.spawn_actor_call                     119.2 ms
+  session.replay.drain_completions              80.5 ms
+  session.replay.read_and_filter                53.5 ms
+  session.reconcile_stale_tasks                 41.4 ms
+  session.load_light                            25.2 ms
+  session.replay.forward_updates                23.3 ms
+  skill_discovery                                9.6 ms
+  skill_discovery                                4.9 ms
+  plugin_discovery                               0.4 ms
+  mcp_merge                                      0.2 ms
+  plugin_discovery                               0.0 ms
+  session.delta_flush_replay                     0.0 ms
+================================================================
+
+test full_session_load_e2e ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 4.61s
+

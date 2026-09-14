@@ -26,7 +26,7 @@
 
 use std::sync::OnceLock;
 
-use workspace::permission::ClientType;
+use config_types::ClientType;
 
 /// Per-attempt ceiling for a startup `/settings` or `/v1/models` fetch; raising
 /// it delays how soon the background refresh gives up and retries.
@@ -89,14 +89,9 @@ macro_rules! startup_timer {
 
 static CLIENT_TYPE: OnceLock<ClientType> = OnceLock::new();
 
-// `OriginClientInfo` is owned by `sampler` so `SamplerConfig` can use
-// it without taking a circular dependency on `shell`. Re-exported
-// under the same path (`crate::http::OriginClientInfo`) so existing call-sites
-// compile unchanged. The diagnostics engine in `diagnostics` consumes
-// the same type via `sampler::OriginClientInfo`. The shell-specific
-// constructors that depended on `ClientType` (a shell-only type) are free
-// functions below.
-pub use sampler::OriginClientInfo;
+// Shared configuration value type, re-exported here so existing HTTP
+// call-sites can keep using the crate-local path.
+pub use config_types::OriginClientInfo;
 
 /// Construct an [`OriginClientInfo`] from `GROW_CLIENT_NAME` /
 /// `GROW_CLIENT_VERSION` env vars. Returns `None` when

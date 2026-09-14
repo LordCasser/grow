@@ -116,7 +116,6 @@ pub(crate) struct OpenedSession {
 /// model-visible Surface, resume state, or copies must start here so Timeline,
 /// prompt blobs, and Sideband provenance cannot be validated independently.
 pub(crate) struct ValidatedTimeline {
-    pub(crate) events: Vec<chat_state::TimelineEvent>,
     pub(crate) timeline: chat_state::Timeline,
     pub(crate) sidebands: super::SidebandLedgers,
 }
@@ -206,8 +205,7 @@ impl OpenedSession {
     }
 
     pub(crate) fn validated_timeline(&self, timeline_id: &str) -> io::Result<ValidatedTimeline> {
-        let events = self.timeline_events()?;
-        let timeline = Timeline::from_events(events.clone())
+        let timeline = Timeline::from_events(self.timeline_events()?)
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         crate::session::persistence::verify_timeline_prompt_blobs_from_directory(
             &self.directory,
@@ -215,7 +213,6 @@ impl OpenedSession {
         )?;
         let sidebands = self.sideband_ledgers(timeline_id, &timeline)?;
         Ok(ValidatedTimeline {
-            events,
             timeline,
             sidebands,
         })
@@ -227,7 +224,8 @@ impl OpenedSession {
     ) -> io::Result<chat_state::TimelineMaterialization> {
         let validated = self.validated_timeline(timeline_id)?;
         let last_seq = validated
-            .events
+            .timeline
+            .events()
             .last()
             .map(|event| event.seq.get())
             .ok_or_else(|| {
@@ -272,29 +270,28 @@ impl JsonlStorageAdapter {
     async fn load_light_data(
         &self,
         info: &Info,
-        recover_sidebands: bool,
+        restore_for_write: bool,
     ) -> io::Result<super::PersistedDataLight> {
         tracing::info!("Loading session data (without updates) from JSONL");
-        let opened = if recover_sidebands {
+        let opened = if restore_for_write {
             self.open_session(info)?
         } else {
             self.open_session_for_observation(info)?
         };
         let summary = opened.summary().clone();
         let validated = opened.validated_timeline(&info.id.to_string())?;
-        let timeline_events = validated.events;
         let timeline = validated.timeline;
         // Only the explicit new-writer load owns crash reconciliation. Merely
         // reading a live Session cannot end its still-running sidebands.
-        if recover_sidebands {
+        if restore_for_write {
             self.recover_interrupted_sidebands(info, &validated.sidebands)
                 .await?;
         }
         let summary = self
-            .reconcile_session_title_projection(info, summary, &timeline)
+            .reconcile_session_title_projection(info, summary, &timeline, restore_for_write)
             .await?;
         let summary = self
-            .reconcile_model_projection(info, summary, &timeline)
+            .reconcile_model_projection(info, summary, &timeline, restore_for_write)
             .await?;
         let control_snapshot =
             crate::session::control::SessionControlSnapshot::latest_from_timeline(
@@ -309,7 +306,7 @@ impl JsonlStorageAdapter {
         let workflow_runs = self.load_workflow_runs_sync(info, &timeline, opened.directory())?;
         let result = super::PersistedDataLight {
             summary,
-            timeline_events,
+            timeline,
             control_snapshot,
             signals,
             announcement_state,
@@ -317,7 +314,7 @@ impl JsonlStorageAdapter {
         };
         tracing::info!(
             session_id = %info.id,
-            timeline_events = result.timeline_events.len(),
+            timeline_events = result.timeline.events().len(),
             has_signals = result.signals.is_some(),
             session_format_version = result.summary.session_format_version,
             "Session data loaded (without updates, rewind points deferred) from JSONL"
@@ -795,7 +792,11 @@ impl JsonlStorageAdapter {
                 let directory = if shared_read {
                     authority.open_relative_shared_read(&relative, "session storage directory")?
                 } else {
-                    authority.open_relative(&relative, "session storage directory", create_missing)?
+                    authority.open_relative(
+                        &relative,
+                        "session storage directory",
+                        create_missing,
+                    )?
                 };
                 if encoded != urlencoding::encode(&info.cwd).as_ref() {
                     if create_missing {
@@ -872,33 +873,40 @@ impl JsonlStorageAdapter {
     // Missing entries and invalid entities are established exclusions.
     // Operational errors cannot establish that a partial scan is complete.
     fn is_skippable_scan_error(error: &io::Error) -> bool {
-        matches!(error.kind(), io::ErrorKind::NotFound | io::ErrorKind::InvalidData)
+        matches!(
+            error.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::InvalidData
+        )
     }
 
     /// Enumerate identity-checked session entities from the pinned storage
     /// authority. Directory names, cwd markers, and Summary identity are one
     /// indivisible admission boundary; callers never receive an ambient path.
-    fn scan_opened_sessions<T>(&self, cwd: Option<&str>, mut project: impl FnMut(OpenedSession) -> T) -> io::Result<Vec<T>> {
+    fn scan_opened_sessions<T>(
+        &self,
+        cwd: Option<&str>,
+        mut project: impl FnMut(OpenedSession) -> T,
+    ) -> io::Result<Vec<T>> {
         if !matches!(&self.dir_mode, SessionDirMode::FromRoot(_)) {
             return Ok(Vec::new());
         }
         let authority = self.authority(false)?;
-        let sessions =
-            match authority.open_relative_shared_read(Path::new("sessions"), "sessions directory") {
-                Ok(sessions) => sessions,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
-                Err(error) => return Err(error),
-            };
+        let sessions = match authority
+            .open_relative_shared_read(Path::new("sessions"), "sessions directory")
+        {
+            Ok(sessions) => sessions,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+            Err(error) => return Err(error),
+        };
         let mut opened = Vec::new();
         let mut ids = std::collections::BTreeSet::new();
         for cwd_name in sessions.list_names()? {
             if cwd_name.to_string_lossy().starts_with('.') {
                 continue;
             }
-            let cwd_directory = match sessions.open_relative_shared_read(
-                Path::new(&cwd_name),
-                "session cwd directory",
-            ) {
+            let cwd_directory = match sessions
+                .open_relative_shared_read(Path::new(&cwd_name), "session cwd directory")
+            {
                 Ok(directory) => directory,
                 Err(error) if Self::is_skippable_scan_error(&error) => continue,
                 Err(error) => return Err(error),
@@ -907,10 +915,9 @@ impl JsonlStorageAdapter {
                 if session_name.to_string_lossy().starts_with('.') {
                     continue;
                 }
-                let directory = match cwd_directory.open_relative_shared_read(
-                    Path::new(&session_name),
-                    "session directory",
-                ) {
+                let directory = match cwd_directory
+                    .open_relative_shared_read(Path::new(&session_name), "session directory")
+                {
                     Ok(directory) => directory,
                     Err(error) if Self::is_skippable_scan_error(&error) => continue,
                     Err(error) => return Err(error),
@@ -962,8 +969,7 @@ impl JsonlStorageAdapter {
     }
 
     pub(crate) fn list_sessions_sync(&self, cwd: Option<&str>) -> io::Result<Vec<Summary>> {
-        let mut summaries = self
-            .scan_opened_sessions(cwd, |opened| opened.summary)?;
+        let mut summaries = self.scan_opened_sessions(cwd, |opened| opened.summary)?;
         summaries.sort_by_cached_key(|s| {
             (
                 std::cmp::Reverse(s.last_active_at.unwrap_or(s.updated_at)),
@@ -2147,7 +2153,8 @@ impl JsonlStorageAdapter {
         let name = path.file_name().ok_or_else(|| {
             io::Error::new(io::ErrorKind::InvalidInput, "session path has no file name")
         })?;
-        let directory = parent.open_relative_shared_read(Path::new(name), "session storage directory")?;
+        let directory =
+            parent.open_relative_shared_read(Path::new(name), "session storage directory")?;
         let summary = Self::read_summary_from_directory(&directory)?;
         Self::validate_session_identity(info, &summary)?;
         // Observation sharing must not become a capability for later writes.
@@ -2471,11 +2478,19 @@ impl JsonlStorageAdapter {
         mut on_deleted: impl FnMut(&Info),
     ) -> io::Result<(u32, u32)> {
         if ttl_days == 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "session cleanup TTL must be positive"));
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "session cleanup TTL must be positive",
+            ));
         }
         let cutoff = chrono::Utc::now()
             .checked_sub_signed(chrono::Duration::days(i64::from(ttl_days)))
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "session cleanup cutoff exceeds supported date range"))?;
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "session cleanup cutoff exceeds supported date range",
+                )
+            })?;
         let mut deleted = 0u32;
         let mut errors = 0u32;
         // Finish discovery before mutation, retaining summaries rather than
@@ -2498,7 +2513,8 @@ impl JsonlStorageAdapter {
                 timeline_prefixes: Default::default(),
                 ..self.clone()
             };
-            let result = candidate.open_session(&info)
+            let result = candidate
+                .open_session(&info)
                 .and_then(|opened| candidate.delete_if_still_stale(opened, cutoff));
             match result {
                 Ok(true) => {
@@ -2562,38 +2578,30 @@ impl JsonlStorageAdapter {
         use crate::session::workflow::store::{
             MAX_RESTORED_WORKFLOW_RUNS, MAX_WORKFLOW_ARGS_BYTES, MAX_WORKFLOW_MANIFEST_BYTES,
         };
-        let mut run_ids = timeline
+        let run_ids = timeline
             .events()
             .iter()
+            .rev()
             .filter_map(|event| match &event.kind {
                 chat_state::TimelineEventKind::Workflow(chat_state::WorkflowEvent::Spawned {
                     run_id,
                     ..
-                }) => Some(run_id.clone()),
+                }) => Some(run_id.as_str()),
                 _ => None,
-            })
-            .collect::<Vec<_>>();
-        if run_ids.len() > MAX_RESTORED_WORKFLOW_RUNS {
-            let excess = run_ids.len() - MAX_RESTORED_WORKFLOW_RUNS;
-            run_ids.drain(..excess);
-            tracing::warn!(
-                session_id = %info.id,
-                limit = MAX_RESTORED_WORKFLOW_RUNS,
-                "workflow restore cap reached; restoring the most recent Timeline-owned runs"
-            );
-        }
-        if run_ids.is_empty() {
-            return Ok(Vec::new());
-        }
+            });
         let mut restored = Vec::new();
+        // Validate newest candidates first, but count only successfully restored
+        // runs toward the cap. Invalid/cleared/missing sidecars must not crowd
+        // out an older valid run. Reverse again below so callers retain Timeline
+        // order.
         for run_id in run_ids {
-            let lifecycle = timeline.workflow_lifecycle(&run_id).ok_or_else(|| {
+            let lifecycle = timeline.workflow_lifecycle(run_id).ok_or_else(|| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
                     format!("Workflow Timeline spawn has no lifecycle projection: {run_id}"),
                 )
             })?;
-            let run_relative = Path::new("workflows").join(&run_id);
+            let run_relative = Path::new("workflows").join(run_id);
             let run_dir =
                 match session.open_relative_shared_read(&run_relative, "Workflow run directory") {
                     Ok(run_dir) => run_dir,
@@ -2705,7 +2713,16 @@ impl JsonlStorageAdapter {
                 script,
                 args,
             });
+            if restored.len() == MAX_RESTORED_WORKFLOW_RUNS {
+                tracing::warn!(
+                    session_id = %info.id,
+                    limit = MAX_RESTORED_WORKFLOW_RUNS,
+                    "workflow restore cap reached; restoring the most recent valid Timeline-owned runs"
+                );
+                break;
+            }
         }
+        restored.reverse();
         Ok(restored)
     }
     /// Apply a typed [`SummaryPatch`](super::summary_write::SummaryPatch) to
@@ -2790,6 +2807,7 @@ impl JsonlStorageAdapter {
         info: &Info,
         mut summary: Summary,
         timeline: &Timeline,
+        repair: bool,
     ) -> io::Result<Summary> {
         let Some((seq, title)) = timeline.session_title() else {
             if summary.title.is_some()
@@ -2818,19 +2836,23 @@ impl JsonlStorageAdapter {
                 "summary title projection conflicts with the canonical session/title event",
             ));
         }
-        let applied = self
-            .repair_session_title_projection(
-                info,
-                seq.get(),
-                title.title.clone(),
-                title.source.clone(),
-            )
-            .await?;
-        if !applied {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "canonical session/title projection did not advance summary",
-            ));
+        // Observation derives the same canonical projection without claiming
+        // a writer lease. Only an admitted replacement writer repairs disk.
+        if repair {
+            let applied = self
+                .repair_session_title_projection(
+                    info,
+                    seq.get(),
+                    title.title.clone(),
+                    title.source.clone(),
+                )
+                .await?;
+            if !applied {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "canonical session/title projection did not advance summary",
+                ));
+            }
         }
         summary.title = Some(title.title.clone());
         summary.title_source = Some(title.source.clone());
@@ -2843,6 +2865,7 @@ impl JsonlStorageAdapter {
         info: &Info,
         mut summary: Summary,
         timeline: &Timeline,
+        repair: bool,
     ) -> io::Result<Summary> {
         let Some((model_id, reasoning_effort)) =
             crate::session::persistence::latest_model_selection(timeline.events())?
@@ -2852,8 +2875,10 @@ impl JsonlStorageAdapter {
         if summary.current_model_id == model_id && summary.reasoning_effort == reasoning_effort {
             return Ok(summary);
         }
-        self.update_current_model_and_agent(info, &model_id, None, Some(reasoning_effort))
-            .await?;
+        if repair {
+            self.update_current_model_and_agent(info, &model_id, None, Some(reasoning_effort))
+                .await?;
+        }
         summary.current_model_id = model_id;
         summary.reasoning_effort = reasoning_effort;
         Ok(summary)
@@ -3338,13 +3363,12 @@ impl StorageAdapter for JsonlStorageAdapter {
         let opened = self.open_session_for_observation(info)?;
         let summary = opened.summary().clone();
         let validated = opened.validated_timeline(&info.id.to_string())?;
-        let timeline_events = validated.events;
         let timeline = validated.timeline;
         let summary = self
-            .reconcile_session_title_projection(info, summary, &timeline)
+            .reconcile_session_title_projection(info, summary, &timeline, false)
             .await?;
         let summary = self
-            .reconcile_model_projection(info, summary, &timeline)
+            .reconcile_model_projection(info, summary, &timeline, false)
             .await?;
         let control_snapshot =
             crate::session::control::SessionControlSnapshot::latest_from_timeline(
@@ -3365,7 +3389,7 @@ impl StorageAdapter for JsonlStorageAdapter {
         )?;
         let result = PersistedData {
             summary,
-            timeline_events,
+            timeline_events: timeline.events().to_vec(),
             updates,
             control_snapshot,
             rewind_points,

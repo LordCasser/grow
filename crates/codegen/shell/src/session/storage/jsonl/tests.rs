@@ -21,6 +21,45 @@ fn create_test_chat_messages() -> Vec<ConversationItem> {
 }
 
 #[tokio::test]
+async fn communication_receipt_replay_uses_timeline_without_updates_cache() {
+    use crate::extensions::notification::ParentMessageNotice;
+    let root = TempDir::new().unwrap();
+    let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let info = create_test_info();
+    writer.init_session(&info, default_model_id()).await.unwrap();
+    let opened = writer.open_session(&info).unwrap();
+    let body = "检查接收路径\n不要重复提交 /tmp/diagram.png";
+    let payload_ref = crate::session::notification_inbox::write_payload(opened.directory(), body).unwrap();
+    let source = chat_state::NotificationSource::ParentMessage {
+        parent_session_id: "parent-session".into(), message_id: "message-1".into(), interrupt: true,
+    };
+    let source_version = chat_state::NotificationSourceVersion::Ordinal { value: chat_state::PARENT_MESSAGE_SOURCE_VERSION };
+    let id = chat_state::notification_id(info.id.0.as_ref(), &source, &source_version).unwrap();
+    let mut timeline = chat_state::Timeline::default();
+    let event = timeline.record(chat_state::TimelineEventKind::Notification(chat_state::NotificationEvent::Received {
+        id: id.clone(), owner_session_id: info.id.0.to_string(), source, source_version, payload_ref: payload_ref.clone(),
+    })).unwrap();
+    writer.append_timeline_event_durable(&info, &event).await.unwrap();
+    // UI cache contents must never create a second receipt or override its body.
+    std::fs::write(writer.session_dir(&info).join("updates.jsonl"), "").unwrap();
+    let mut notices = Vec::new();
+    assert_eq!(crate::session::storage::stream_coordination_notices_at(info.id.0.as_ref(), root.path(), |notice| notices.push(notice)).unwrap(), crate::session::storage::ReplayEmission::Emitted);
+    assert_eq!(notices.len(), 1);
+    assert_eq!(notices[0].correlation_id, id);
+    let restored = ParentMessageNotice::from_notice(&notices[0]).unwrap();
+    assert_eq!(restored.message.as_deref(), Some(body));
+    assert!(restored.interrupt);
+    crate::session::notification_inbox::remove_payload(opened.directory(), &payload_ref).unwrap();
+    let before = std::fs::read(writer.session_dir(&info).join("timeline.jsonl")).unwrap();
+    let mut missing = Vec::new();
+    assert_eq!(crate::session::storage::stream_coordination_notices_at(info.id.0.as_ref(), root.path(), |notice| missing.push(notice)).unwrap(), crate::session::storage::ReplayEmission::Emitted);
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].correlation_id, id);
+    assert!(ParentMessageNotice::from_notice(&missing[0]).unwrap().message.is_none());
+    assert_eq!(std::fs::read(writer.session_dir(&info).join("timeline.jsonl")).unwrap(), before, "read-only recovery cannot rewrite delivery facts");
+}
+
+#[tokio::test]
 async fn shared_read_session_resolution_stays_out_of_the_writer_cache() {
     let root = TempDir::new().unwrap();
     let info = create_test_info();
@@ -166,9 +205,9 @@ async fn session_creation_round_trip_commits_and_reopens_the_timeline() {
         .load_session_for_write_without_updates(&info)
         .await
         .expect("reopen the published session as its next writer");
-    assert_eq!(restored.timeline_events.len(), timeline.events().len() + 1);
+    assert_eq!(restored.timeline.events().len(), timeline.events().len() + 1);
     assert!(matches!(
-        &restored.timeline_events.last().unwrap().kind,
+        &restored.timeline.events().last().unwrap().kind,
         chat_state::TimelineEventKind::Control(control)
             if control.revision == 1
     ));
@@ -267,7 +306,7 @@ async fn long_session_name_survives_staging_reload_and_fork() {
     for info in [&source, &target] {
         let loaded = reopened.load_session_for_write_without_updates(info).await.unwrap();
         assert_eq!(loaded.summary.info.id, info.id);
-        assert_eq!(loaded_surface(&loaded.timeline_events)[0].text_content(), "keep me");
+        assert_eq!(loaded.timeline.surface()[0].text_content(), "keep me");
     }
     assert_eq!(reopened.list_sessions(Some(&source.cwd)).await.unwrap().len(), 2);
     let parent = reopened.session_dir(&source).parent().unwrap().to_path_buf();
@@ -334,7 +373,7 @@ async fn long_windows_cwds_roundtrip_under_long_storage_root() {
         for info in [&source, &target] {
             let loaded = reader.load_session_for_write_without_updates(info).await.unwrap();
             assert_eq!(loaded.summary.info.cwd, info.cwd);
-            assert_eq!(loaded_surface(&loaded.timeline_events)[0].text_content(), "persisted");
+            assert_eq!(loaded.timeline.surface()[0].text_content(), "persisted");
             assert_eq!(reader.list_sessions(Some(&info.cwd)).await.unwrap().len(), 1);
             let by_id = reader.open_session_by_id(info.id.0.as_ref()).unwrap().unwrap();
             assert_eq!(by_id.summary().info.cwd, info.cwd);
@@ -842,8 +881,7 @@ async fn timeline_round_trip_folds_the_current_surface() {
         .load_session_without_updates(&info)
         .await
         .expect("summary-without-replacement must reach Timeline recovery");
-    let mut interrupted_timeline =
-        chat_state::Timeline::from_events(interrupted.timeline_events).unwrap();
+    let mut interrupted_timeline = interrupted.timeline;
     let repairs = interrupted_timeline.recover_interrupted().unwrap();
     assert!(repairs.iter().any(|event| matches!(
         &event.kind,
@@ -878,7 +916,7 @@ async fn timeline_round_trip_folds_the_current_surface() {
     }
 
     let loaded = adapter.load_session_without_updates(&info).await.unwrap();
-    let replayed = chat_state::Timeline::from_events(loaded.timeline_events).unwrap();
+    let replayed = loaded.timeline;
     assert_eq!(replayed.surface().len(), 1);
     assert_eq!(replayed.surface()[0].text_content(), replacement_content);
     assert_eq!(replayed.branch_transcript().len(), 2);
@@ -1544,7 +1582,9 @@ async fn workflow_restore_uses_timeline_ownership_and_caps_run_count() {
     let workflows = adapter.session_dir(&info).join("workflows");
     std::fs::create_dir_all(&workflows).unwrap();
     let mut timeline = chat_state::Timeline::default();
-    for index in 0..=MAX_RESTORED_WORKFLOW_RUNS {
+    // First establish the original all-valid cap boundary with three extra
+    // candidates. The later mutations exercise valid-run backfill separately.
+    for index in 0..(MAX_RESTORED_WORKFLOW_RUNS + 3) {
         let run_id = format!("wf_{index:03}");
         let run_dir = workflows.join(&run_id);
         std::fs::create_dir_all(run_dir.join("scripts")).unwrap();
@@ -1597,10 +1637,29 @@ async fn workflow_restore_uses_timeline_ownership_and_caps_run_count() {
     }
     let loaded = adapter.load_session_without_updates(&info).await.unwrap();
     assert_eq!(loaded.workflow_runs.len(), MAX_RESTORED_WORKFLOW_RUNS);
-    assert!(loaded.workflow_runs.iter().all(|run| {
-        let index = run.manifest.state.run_id[3..].parse::<usize>().unwrap();
-        index > 0
-    }));
+    let indexes = loaded.workflow_runs.iter()
+        .map(|run| run.manifest.state.run_id[3..].parse::<usize>().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(indexes, (3..MAX_RESTORED_WORKFLOW_RUNS + 3).collect::<Vec<_>>());
+
+    // Newer invalid candidates must not consume the cap or hide an older valid
+    // run: cleared, missing script, and script hash mismatch are all skipped,
+    // then the valid candidates are backfilled until the cap is reached.
+    let newest = workflows.join(format!("wf_{:03}", MAX_RESTORED_WORKFLOW_RUNS));
+    std::fs::write(newest.join("cleared"), b"").unwrap();
+    let missing = workflows.join(format!("wf_{:03}", MAX_RESTORED_WORKFLOW_RUNS + 1));
+    std::fs::remove_file(script_revision_path(&missing, 0)).unwrap();
+    let corrupt = workflows.join(format!("wf_{:03}", MAX_RESTORED_WORKFLOW_RUNS + 2));
+    std::fs::write(script_revision_path(&corrupt, 0), "tampered();").unwrap();
+
+    let loaded = adapter.load_session_without_updates(&info).await.unwrap();
+    assert_eq!(loaded.workflow_runs.len(), MAX_RESTORED_WORKFLOW_RUNS);
+    let indexes = loaded
+        .workflow_runs
+        .iter()
+        .map(|run| run.manifest.state.run_id[3..].parse::<usize>().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(indexes, (0..MAX_RESTORED_WORKFLOW_RUNS).collect::<Vec<_>>());
 }
 #[cfg(unix)]
 #[tokio::test]
@@ -2268,7 +2327,7 @@ async fn fork_copies_only_referenced_prompt_blobs_without_rewriting_identity() {
         .load_session_without_updates(&target_info)
         .await
         .unwrap();
-    let surface = loaded_surface(&loaded.timeline_events);
+    let surface = loaded.timeline.surface();
     let text = surface[0].text_content();
     assert!(text.contains(&prompt_ref));
     assert!(!text.contains(&target_prompts.to_string_lossy().to_string()));
@@ -2390,7 +2449,7 @@ async fn fork_keeps_user_text_but_resets_parent_permission_evidence() {
         .unwrap();
 
     let loaded = adapter.load_session_without_updates(&target_info).await.unwrap();
-    let surface = loaded_surface(&loaded.timeline_events);
+    let surface = loaded.timeline.surface();
     let ConversationItem::User(user) = &surface[0] else {
         panic!("forked authority fixture must remain a user item");
     };
@@ -3786,7 +3845,7 @@ async fn load_repairs_a_lagging_title_projection_from_timeline() {
     summary.title_event_seq = None;
     adapter.write_summary_sync(&info, &summary).unwrap();
 
-    let loaded = adapter.load_session(&info).await.unwrap();
+    let loaded = adapter.load_session_for_write_without_updates(&info).await.unwrap();
     assert_eq!(loaded.summary.display_title(), "Canonical title");
     assert_eq!(loaded.summary.title_event_seq, Some(0));
     assert_eq!(
@@ -3819,6 +3878,10 @@ async fn load_rejects_a_conflicting_title_projection_at_canonical_seq() {
     let error = adapter.load_session(&info).await.unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
     assert!(error.to_string().contains("conflicts"));
+    assert_eq!(adapter.load_session_without_updates(&info).await.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(adapter.load_session(&info).await.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(adapter.load_session_for_write_without_updates(&info).await.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+
 }
 #[test]
 fn scan_opened_sessions_returns_empty_when_no_sessions_dir() {
@@ -4145,7 +4208,7 @@ model_contexts: vec![],
 }
 
 #[tokio::test]
-async fn model_change_repairs_selection_summary_from_timeline() {
+async fn model_change_observation_is_read_only_and_replacement_writer_repairs_summary() {
     use sampling_types::ReasoningEffort;
 
     let temp_dir = TempDir::new().unwrap();
@@ -4180,13 +4243,23 @@ async fn model_change_repairs_selection_summary_from_timeline() {
         .unwrap();
     adapter.append_timeline_event(&info, &event).await.unwrap();
 
-    let loaded = adapter.load_session_without_updates(&info).await.unwrap();
-    assert_eq!(loaded.summary.current_model_id, new_model);
-    assert_eq!(
-        loaded.summary.reasoning_effort,
-        Some(ReasoningEffort::High)
-    );
-    let repaired = adapter.read_summary_sync(&info).unwrap();
+    let path = adapter.session_dir(&info).join("summary.json");
+    let before = std::fs::read(&path).unwrap();
+    let observer = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let light = observer.load_session_without_updates(&info).await.unwrap().summary;
+    let full = observer.load_session(&info).await.unwrap().summary;
+    for summary in [light, full] {
+        assert_eq!(summary.current_model_id, new_model);
+        assert_eq!(summary.reasoning_effort, Some(ReasoningEffort::High));
+    }
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    assert!(observer.opened_sessions.lock().unwrap().is_empty());
+    assert!(observer.writer_leases.lock().unwrap().is_empty());
+    assert!(observer.load_session_for_write_without_updates(&info).await.is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+    drop(adapter);
+    observer.load_session_for_write_without_updates(&info).await.unwrap();
+    let repaired = observer.read_summary_sync(&info).unwrap();
     assert_eq!(repaired.current_model_id, new_model);
     assert_eq!(repaired.reasoning_effort, Some(ReasoningEffort::High));
 }
@@ -4217,6 +4290,10 @@ async fn malformed_model_change_bricks_session_load() {
         .await
         .unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(adapter.load_session_without_updates(&info).await.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(adapter.load_session(&info).await.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(adapter.load_session_for_write_without_updates(&info).await.unwrap_err().kind(), std::io::ErrorKind::InvalidData);
+
 }
 
 #[test]
@@ -4565,11 +4642,24 @@ async fn coordination_observer_preserves_live_sideband_and_new_writer_recovers_o
         .await
         .unwrap();
 
+    // Crash-lagging Summary must not turn either observation path into a writer.
+    adapter.append_session_title_durable(&info, "Canonical title".into()).await.unwrap();
+    let mut lagging = adapter.read_summary_sync(&info).unwrap();
+    lagging.title = None;
+    lagging.title_source = None;
+    lagging.title_event_seq = None;
+    adapter.write_summary_sync(&info, &lagging).unwrap();
+    let summary_path = adapter.session_dir(&info).join("summary.json");
+    let summary_before = std::fs::read(&summary_path).unwrap();
     let path = adapter.sideband_timeline_file(&info, &id).unwrap();
     let before = std::fs::read(&path).unwrap();
     let observer = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
-    observer.load_session_without_updates(&info).await.unwrap();
-    observer.load_session(&info).await.unwrap();
+    let light = observer.load_session_without_updates(&info).await.unwrap();
+    let full = observer.load_session(&info).await.unwrap();
+    assert_eq!(light.summary.display_title(), "Canonical title");
+    assert_eq!(full.summary.display_title(), "Canonical title");
+    assert_eq!(std::fs::read(&summary_path).unwrap(), summary_before);
+    assert!(observer.writer_leases.lock().unwrap().is_empty());
     assert!(observer.opened_sessions.lock().unwrap().is_empty());
     assert_eq!(std::fs::read(&path).unwrap(), before, "observing a live session must not close its sideband");
     assert!(observer.load_session_for_write_without_updates(&info).await.is_err());
@@ -4578,6 +4668,7 @@ async fn coordination_observer_preserves_live_sideband_and_new_writer_recovers_o
     observer.load_session_for_write_without_updates(&info).await.unwrap();
     observer.load_session_for_write_without_updates(&info).await.unwrap();
 
+    assert_eq!(observer.read_summary_sync(&info).unwrap().display_title(), "Canonical title");
     let stored = std::fs::read_to_string(path)
         .unwrap()
         .lines()

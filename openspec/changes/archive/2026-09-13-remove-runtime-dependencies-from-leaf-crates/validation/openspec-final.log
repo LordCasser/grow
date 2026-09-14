@@ -1,0 +1,18 @@
+✓ spec/behavior-goal
+✓ spec/client-surfaces
+✓ spec/configuration-rules
+✓ spec/context-compaction
+✓ spec/development-workflow
+✓ spec/extension-runtime
+✓ spec/input-admission
+✓ change/inventory-all-crate-features
+✓ change/investigate-sips-process-eperm
+✓ spec/local-coordination
+✓ spec/memory-search
+✓ spec/model-sampling
+✓ spec/sandbox-boundary
+✓ spec/session-timeline
+✓ spec/tool-authorization
+✓ change/verify-openspec-baseline
+✓ spec/workflow-execution
+Totals: 17 passed, 0 failed (17 items)

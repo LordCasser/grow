@@ -35,29 +35,29 @@ async fn subagent_usage_fold_attribution_gate() {
                     .await,
                 Ok(super::updates::SubagentUsageApply::AttributedToPrompt)
             );
+            let prompt = actor
+                .chat_state_handle
+                .try_get_prompt_usage()
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(prompt.totals.input_tokens, 40);
             assert_eq!(
-                actor
-                    .chat_state_handle
-                    .try_get_prompt_usage()
-                    .await
-                    .unwrap()
-                    .unwrap()
-                    .totals
-                    .input_tokens,
+                prompt.by_agent[&chat_state::UsageAgent::Subagent("sub-1".into())].input_tokens,
                 40
             );
 
             super::support::record_test_prompt(&actor, "next prompt").await;
-            for (live, stamped) in [
-                (Some("p-2"), Some("p-1")),
-                (Some("p-1"), None),
-                (None, Some("p-1")),
+            for (child, live, stamped) in [
+                ("sub-2", Some("p-2"), Some("p-1")),
+                ("sub-3", Some("p-1"), None),
+                ("sub-4", None, Some("p-1")),
             ] {
                 *actor.current_prompt_id.lock().unwrap() = live.map(str::to_string);
                 // Session-only: ledger apply ok, not attributed to live prompt.
                 assert_eq!(
                     actor
-                        .record_subagent_usage("sub-1", &usage, stamped, false)
+                        .record_subagent_usage(child, &usage, stamped, false)
                         .await,
                     Ok(super::updates::SubagentUsageApply::SessionOnly)
                 );
@@ -71,16 +71,26 @@ async fn subagent_usage_fold_attribution_gate() {
                         .is_none()
                 );
             }
+            // A repeated terminal receipt is idempotent even after the live
+            // prompt changes; it must not add another child's worth of usage.
             assert_eq!(
                 actor
-                    .chat_state_handle
-                    .try_get_session_usage()
-                    .await
-                    .expect("chat-state actor alive")
-                    .totals
-                    .input_tokens,
-                160
+                    .record_subagent_usage("sub-1", &usage, Some("p-1"), false)
+                    .await,
+                Ok(super::updates::SubagentUsageApply::SessionOnly)
             );
+            let session = actor
+                .chat_state_handle
+                .try_get_session_usage()
+                .await
+                .expect("chat-state actor alive");
+            assert_eq!(session.totals.input_tokens, 160);
+            for child in ["sub-1", "sub-2", "sub-3", "sub-4"] {
+                assert_eq!(
+                    session.by_agent[&chat_state::UsageAgent::Subagent(child.into())].input_tokens,
+                    40
+                );
+            }
         })
         .await;
 }

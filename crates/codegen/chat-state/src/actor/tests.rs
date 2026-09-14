@@ -700,11 +700,16 @@ async fn host_completion_result_waits_for_durable_ack_and_reports_failure() {
         let write = {
             let handle = handle.clone();
             tokio::spawn(async move {
-                handle.push_tool_result_durably(ConversationItem::tool_result("finish", "accepted")).await
+                handle
+                    .push_tool_result_durably(ConversationItem::tool_result("finish", "accepted"))
+                    .await
             })
         };
         let ack = persistence_rx.next_timeline_ack().await.unwrap();
-        assert!(!write.is_finished(), "completion cannot be exposed before commit acknowledgement");
+        assert!(
+            !write.is_finished(),
+            "completion cannot be exposed before commit acknowledgement"
+        );
         ack.send(if fail {
             Err(std::io::Error::new(
                 std::io::ErrorKind::StorageFull,
@@ -1102,9 +1107,10 @@ async fn session_usage_events_replace_totals_and_include_late_children() {
     assert_eq!(usage.totals.cached_read_tokens, 75);
     assert!(!usage.incomplete);
 
-    assert!(
+    assert!(matches!(
         h.handle
             .record_subagent_usage(
+                "child-1".into(),
                 vec![(
                     "child".into(),
                     crate::usage::UsageTotals {
@@ -1118,8 +1124,9 @@ async fn session_usage_events_replace_totals_and_include_late_children() {
                 false,
                 false
             )
-            .await
-    );
+            .await,
+        Ok(true)
+    ));
     let ChatStateEvent::SessionUsageUpdated { usage } = h.next_event().await else {
         panic!("late child usage must publish even without prompt attribution");
     };
@@ -1127,6 +1134,14 @@ async fn session_usage_events_replace_totals_and_include_late_children() {
     assert_eq!(usage.totals.cached_read_tokens, 500);
     assert_eq!(usage.totals.input_tokens, 1000);
     assert_eq!(usage.by_model.len(), 2);
+    assert_eq!(
+        usage.by_agent[&crate::UsageAgent::Owner].total_tokens(),
+        120
+    );
+    assert_eq!(
+        usage.by_agent[&crate::UsageAgent::Subagent("child-1".into())].total_tokens(),
+        980
+    );
     assert_eq!(
         h.handle
             .try_get_prompt_usage()
@@ -1149,9 +1164,14 @@ async fn session_usage_events_replace_totals_and_include_late_children() {
         h.drain_events().is_empty(),
         "unchanged incomplete state must not emit again"
     );
-    assert!(
-        h.drain_persistence().is_empty(),
-        "usage projection is not Timeline content"
+    let usage_facts = h
+        .drain_persistence()
+        .into_iter()
+        .filter(|record| matches!(record, PersistenceRecord::Timeline(_)))
+        .count();
+    assert_eq!(
+        usage_facts, 2,
+        "child settlement and incomplete are durable"
     );
     let fresh = TestHarness::new();
     assert_eq!(
@@ -1547,8 +1567,8 @@ async fn model_attempt_usage_retries_exact_event_and_restores_dedup_index() {
             .unwrap()
             .totals
             .model_calls,
-        0,
-        "restored settlement must deduplicate without refolding live ledgers"
+        1,
+        "restored settlement must rebuild lifetime usage exactly once"
     );
 }
 
@@ -1622,8 +1642,8 @@ async fn restored_model_attempt_usage_is_deduplicated_and_late_prompt_is_session
         Ok(true)
     ));
     assert!(restored.try_get_prompt_usage().await.unwrap().is_none());
-    // Session usage remains live-only across restore; the historical fact is
-    // still present in the dedup index, so only the late new attempt applies.
+    // The historical fact is restored into the lifetime ledger and the late
+    // new attempt is added exactly once.
     assert_eq!(
         restored
             .try_get_session_usage()
@@ -1631,8 +1651,333 @@ async fn restored_model_attempt_usage_is_deduplicated_and_late_prompt_is_session
             .unwrap()
             .totals
             .model_calls,
-        1
+        2
     );
+}
+
+#[tokio::test]
+async fn lifetime_usage_restores_children_incomplete_and_resume_segments() {
+    let h = TestHarness::new();
+    let first = sampling_types::TokenUsage {
+        prompt_tokens: 10,
+        completion_tokens: 2,
+        total_tokens: 12,
+        ..Default::default()
+    };
+    h.handle
+        .settle_model_attempt_usage(
+            "attempt-initial".into(),
+            0,
+            "model-a".into(),
+            Some(first),
+            Some(5),
+            Some(7),
+        )
+        .await
+        .unwrap();
+    let child_bill = vec![(
+        "model-b".into(),
+        crate::UsageTotals {
+            input_tokens: 20,
+            output_tokens: 3,
+            model_calls: 1,
+            cost_usd_ticks: Some(6),
+            ..Default::default()
+        },
+    )];
+    assert!(matches!(
+        h.handle
+            .record_subagent_usage("child-1".into(), child_bill.clone(), false, false)
+            .await,
+        Ok(true)
+    ));
+    h.handle.begin_usage_resume_segment().await.unwrap();
+    h.handle
+        .settle_model_attempt_usage(
+            "attempt-resume".into(),
+            0,
+            "model-a".into(),
+            Some(sampling_types::TokenUsage {
+                prompt_tokens: 5,
+                completion_tokens: 1,
+                total_tokens: 6,
+                ..Default::default()
+            }),
+            Some(2),
+            Some(3),
+        )
+        .await
+        .unwrap();
+    assert!(h.handle.mark_usage_incomplete(false, true).await);
+
+    let events = h.handle.timeline_events().await.unwrap();
+    let (persistence, _records) = MockTimelinePersistence::new();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let restored = ChatStateActor::spawn_from_timeline(
+        events,
+        test_config(),
+        Box::new(persistence),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let usage = restored.try_get_session_usage().await.unwrap();
+    assert_eq!(usage.totals.input_tokens, 35);
+    assert_eq!(usage.totals.output_tokens, 6);
+    assert_eq!(usage.main_loop_model_calls, 2);
+    assert_eq!(usage.by_model.len(), 2);
+    assert_eq!(
+        usage.by_agent[&crate::UsageAgent::Subagent("child-1".into())].total_tokens(),
+        23
+    );
+    assert!(usage.incomplete);
+    assert_eq!(usage.segments.len(), 2);
+    assert_eq!(usage.segments[0].totals.total_tokens(), 35);
+    assert_eq!(usage.segments[1].totals.total_tokens(), 6);
+    assert!(usage.segments[1].incomplete);
+    assert_eq!(
+        usage
+            .segments
+            .iter()
+            .map(|segment| segment.totals.total_tokens())
+            .sum::<u64>(),
+        usage.totals.total_tokens()
+    );
+
+    assert!(matches!(
+        restored
+            .record_subagent_usage("child-1".into(), child_bill.clone(), false, false)
+            .await,
+        Ok(false)
+    ));
+    assert!(matches!(
+        restored
+            .record_subagent_usage("child-1".into(), Vec::new(), false, true)
+            .await,
+        Err(crate::TimelineWriteError::SubagentUsageConflict)
+    ));
+}
+
+async fn rejected_usage_restore(events: Vec<crate::TimelineEvent>) -> crate::TimelineWriteError {
+    let (persistence, mut records) = MockTimelinePersistence::new();
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let result = ChatStateActor::spawn_from_timeline(
+        events,
+        test_config(),
+        Box::new(persistence),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await;
+    let Err(error) = result else {
+        panic!("invalid usage must reject actor restoration");
+    };
+    assert!(
+        records.drain().is_empty(),
+        "failed restore must not persist recovery events"
+    );
+    assert!(
+        event_rx.try_recv().is_err(),
+        "failed restore must not publish actor updates"
+    );
+    error
+}
+
+#[tokio::test]
+async fn restored_usage_checks_duplicate_payloads_across_resume_segments() {
+    let h = TestHarness::new();
+    h.handle
+        .settle_model_attempt_usage(
+            "attempt-1".into(),
+            0,
+            "model-a".into(),
+            Some(sampling_types::TokenUsage {
+                prompt_tokens: 10,
+                completion_tokens: 2,
+                total_tokens: 12,
+                ..Default::default()
+            }),
+            Some(5),
+            Some(7),
+        )
+        .await
+        .unwrap();
+    h.handle
+        .record_subagent_usage(
+            "child-1".into(),
+            vec![(
+                "model-b".into(),
+                crate::UsageTotals {
+                    input_tokens: 20,
+                    output_tokens: 3,
+                    model_calls: 1,
+                    ..Default::default()
+                },
+            )],
+            false,
+            false,
+        )
+        .await
+        .unwrap();
+    let original = h.handle.timeline_events().await.unwrap();
+    let settlements: Vec<_> = original
+        .iter()
+        .filter_map(|event| match &event.kind {
+            crate::TimelineEventKind::Observation(o) if o.name.ends_with("_settled") => {
+                Some(o.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(settlements.len(), 2);
+    let mut timeline = crate::Timeline::from_events(original).unwrap();
+    timeline
+        .record(crate::TimelineEventKind::Observation(
+            crate::ObservationEvent {
+                scope: "session_usage".into(),
+                name: "resume_started".into(),
+                turn: None,
+                step: None,
+                data: None,
+            },
+        ))
+        .unwrap();
+    for settlement in &settlements {
+        timeline
+            .record(crate::TimelineEventKind::Observation(settlement.clone()))
+            .unwrap();
+    }
+    let (persistence, _records) = MockTimelinePersistence::new();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let restored = ChatStateActor::spawn_from_timeline(
+        timeline.events().to_vec(),
+        test_config(),
+        Box::new(persistence),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let usage = restored.try_get_session_usage().await.unwrap();
+    assert_eq!(usage.totals.total_tokens(), 35);
+    assert_eq!(usage.segments.len(), 2);
+    assert_eq!(usage.segments[0].totals.total_tokens(), 35);
+    assert_eq!(usage.segments[1].totals.total_tokens(), 0);
+    assert!(!usage.incomplete);
+
+    for mut settlement in settlements {
+        let is_attempt = settlement.name == "attempt_settled";
+        let data = settlement.data.as_mut().unwrap();
+        if is_attempt {
+            data["api_duration_ms"] = serde_json::json!(99);
+        } else {
+            data["incomplete"] = serde_json::json!(true);
+        }
+        let mut conflict = timeline.clone();
+        conflict
+            .record(crate::TimelineEventKind::Observation(settlement))
+            .unwrap();
+        let error = rejected_usage_restore(conflict.events().to_vec()).await;
+        assert!(matches!(
+            (is_attempt, error),
+            (true, crate::TimelineWriteError::AttemptUsageConflict)
+                | (false, crate::TimelineWriteError::SubagentUsageConflict)
+        ));
+    }
+}
+
+#[tokio::test]
+async fn restored_usage_rejects_malformed_known_facts() {
+    let attempt = serde_json::json!({
+        "attempt_key": "a", "model_id": "m", "captured_prompt_index": 0,
+        "usage": null, "cost_usd_ticks": null, "api_duration_ms": null,
+    });
+    let child = serde_json::json!({"subagent_id": "c", "by_model": [], "incomplete": true});
+    for (scope, name, valid) in [
+        ("sampling_usage", "attempt_settled", attempt),
+        ("session_usage", "subagent_settled", child),
+    ] {
+        let mut unknown_field = valid;
+        unknown_field["unexpected"] = serde_json::json!(true);
+        for data in [
+            None,
+            Some(serde_json::Value::Null),
+            Some(serde_json::json!({})),
+            Some(serde_json::json!(17)),
+            Some(unknown_field),
+        ] {
+            let mut timeline = crate::Timeline::default();
+            let event = timeline
+                .record(crate::TimelineEventKind::Observation(
+                    crate::ObservationEvent {
+                        scope: scope.into(),
+                        name: name.into(),
+                        turn: None,
+                        step: None,
+                        data,
+                    },
+                ))
+                .unwrap();
+            let error = rejected_usage_restore(timeline.events().to_vec()).await;
+            assert!(
+                matches!(error, crate::TimelineWriteError::InvalidUsageObservation { seq, .. } if seq == event.seq.get())
+            );
+        }
+    }
+    for name in ["incomplete", "resume_started"] {
+        let mut timeline = crate::Timeline::default();
+        timeline
+            .record(crate::TimelineEventKind::Observation(
+                crate::ObservationEvent {
+                    scope: "session_usage".into(),
+                    name: name.into(),
+                    turn: None,
+                    step: None,
+                    data: Some(serde_json::json!({"unexpected": true})),
+                },
+            ))
+            .unwrap();
+        assert!(matches!(
+            rejected_usage_restore(timeline.events().to_vec()).await,
+            crate::TimelineWriteError::InvalidUsageObservation { .. }
+        ));
+    }
+}
+
+#[tokio::test]
+async fn restored_usage_ignores_unrelated_diagnostic_observations() {
+    let mut timeline = crate::Timeline::default();
+    for (scope, name) in [
+        ("diagnostic", "attempt_settled"),
+        ("session_usage", "future_diagnostic"),
+    ] {
+        timeline
+            .record(crate::TimelineEventKind::Observation(
+                crate::ObservationEvent {
+                    scope: scope.into(),
+                    name: name.into(),
+                    turn: None,
+                    step: None,
+                    data: Some(serde_json::json!({"anything": 17})),
+                },
+            ))
+            .unwrap();
+    }
+    let (persistence, _records) = MockTimelinePersistence::new();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let restored = ChatStateActor::spawn_from_timeline(
+        timeline.events().to_vec(),
+        test_config(),
+        Box::new(persistence),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let usage = restored.try_get_session_usage().await.unwrap();
+    assert_eq!(usage.totals.total_tokens(), 0);
+    assert!(!usage.incomplete);
 }
 
 #[tokio::test]
@@ -1900,7 +2245,8 @@ async fn image_projection_pairs_descriptions_and_selects_images_per_request() {
 
     let conversation = h.handle.get_conversation().await;
     assert!(
-        sampling_types::conversation::item_image_description(&conversation[0]).unwrap()
+        sampling_types::conversation::item_image_description(&conversation[0])
+            .unwrap()
             .contains("converted user image")
     );
     let ConversationItem::User(user) = &conversation[0] else {
@@ -1908,11 +2254,13 @@ async fn image_projection_pairs_descriptions_and_selects_images_per_request() {
     };
     assert_eq!(user.synthetic_reason, None);
     assert_eq!(user.prompt_index, Some(7));
-    assert!(
-        user.content
-            .iter()
-            .any(|part| matches!(part, ContentPart::Image { description: Some(_), .. }))
-    );
+    assert!(user.content.iter().any(|part| matches!(
+        part,
+        ContentPart::Image {
+            description: Some(_),
+            ..
+        }
+    )));
     let ConversationItem::Assistant(assistant) = &conversation[1] else {
         panic!("expected assistant item");
     };
@@ -1928,7 +2276,10 @@ async fn image_projection_pairs_descriptions_and_selects_images_per_request() {
     assert_eq!(result.tool_call_id, "call_7");
     assert_eq!(result.images.len(), 3);
     assert!(matches!(&result.images[0], ContentPart::Text { text } if text.as_ref() == "keep-me"));
-    assert_eq!(sampling_types::conversation::item_image_description(&conversation[2]), Some("converted tool images"));
+    assert_eq!(
+        sampling_types::conversation::item_image_description(&conversation[2]),
+        Some("converted tool images")
+    );
     assert!(result.content.contains("Read image file"));
     let capture = h.handle.take_turn_messages().await.unwrap();
     assert_eq!(capture.messages.len(), conversation.len());
@@ -1967,9 +2318,13 @@ async fn image_projection_pairs_descriptions_and_selects_images_per_request() {
         .build_request("test-timeline", vec![], None, None, None)
         .await
         .unwrap();
-    assert_eq!(conversation_image_groups(&after_model_change.items).len(), 2);
+    assert_eq!(
+        conversation_image_groups(&after_model_change.items).len(),
+        2
+    );
     assert!(
-        sampling_types::conversation::item_image_description(&after_model_change.items[0]).unwrap()
+        sampling_types::conversation::item_image_description(&after_model_change.items[0])
+            .unwrap()
             .contains("converted user image")
     );
     let records = h.drain_persistence();
@@ -2042,14 +2397,20 @@ async fn image_projection_retries_an_uncertain_persistence_failure() {
     let retry = fail_once_then_ack_exact_retry(&mut h.persistence_rx);
     let (report, ()) = tokio::join!(projection_future, retry);
     assert_eq!(report.unwrap().described_images, 1);
-    assert_eq!(conversation_image_groups(&h.handle.get_conversation().await).len(), 1);
+    assert_eq!(
+        conversation_image_groups(&h.handle.get_conversation().await).len(),
+        1
+    );
     let materialized = h
         .handle
         .materialize_timeline("test-timeline".into())
         .await
         .unwrap();
     assert_eq!(conversation_image_groups(&materialized.surface).len(), 1);
-    assert_eq!(sampling_types::conversation::item_image_description(&materialized.surface[0]), Some("durable description"));
+    assert_eq!(
+        sampling_types::conversation::item_image_description(&materialized.surface[0]),
+        Some("durable description")
+    );
 }
 
 #[tokio::test]
@@ -6043,6 +6404,122 @@ async fn acknowledged_continuation_reset_keeps_session_usable() {
             .contains("native_secret")
     );
     assert!(!h.handle.is_closed());
+}
+
+#[tokio::test]
+async fn responses_reasoning_replay_is_route_local_and_acknowledged() {
+    use sampling_types::{ApiBackend, ToolCall};
+
+    let reasoning_text = "reasoning required after queued route switch";
+    let responses_config = SamplingConfig {
+        api_backend: ApiBackend::Responses,
+        model: "responses-a".into(),
+        ..test_config()
+    };
+    let h = TestHarness::with_config(
+        vec![
+            ConversationItem::system("sys"),
+            ConversationItem::user("inspect"),
+            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(reasoning_text)),
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: "queued-switch-call".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"a"}"#.into(),
+            }]),
+            ConversationItem::tool_result("queued-switch-call", "done"),
+        ],
+        responses_config.clone(),
+    );
+
+    let before = h
+        .handle
+        .build_request("reasoning-replay", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert!(
+        !wire_request_json(&before, &ApiBackend::Responses)
+            .to_string()
+            .contains(reasoning_text)
+    );
+
+    assert_eq!(
+        h.handle.enable_portable_responses_reasoning().await,
+        Some(true)
+    );
+    assert_eq!(
+        h.handle.enable_portable_responses_reasoning().await,
+        Some(false),
+        "the compatibility state may change only once per route"
+    );
+    let enabled = h
+        .handle
+        .build_request("reasoning-replay", vec![], None, None, None)
+        .await
+        .unwrap();
+    let enabled_wire = wire_request_json(&enabled, &ApiBackend::Responses);
+    let reasoning = enabled_wire["input"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|item| item["type"] == "reasoning")
+        .expect("enabled route must carry the visible reasoning item");
+    assert_eq!(reasoning["content"][0]["type"], "reasoning_text");
+    assert_eq!(reasoning["content"][0]["text"], reasoning_text);
+    assert_eq!(
+        enabled.source_projection.as_ref().unwrap()["replay_portable_responses_reasoning"],
+        true
+    );
+
+    assert!(h.handle.reset_continuation().await);
+    let after_reset = h
+        .handle
+        .build_request("reasoning-replay", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert!(
+        wire_request_json(&after_reset, &ApiBackend::Responses)
+            .to_string()
+            .contains(reasoning_text),
+        "same-route native reset must preserve the learned compatibility"
+    );
+
+    h.handle.replace_sampling_route(SamplingConfig {
+        model: "responses-b".into(),
+        ..responses_config
+    });
+    let replaced = h
+        .handle
+        .build_request("reasoning-replay", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert!(
+        !wire_request_json(&replaced, &ApiBackend::Responses)
+            .to_string()
+            .contains(reasoning_text),
+        "a real route replacement must not leak learned compatibility"
+    );
+}
+
+#[tokio::test]
+async fn responses_reasoning_replay_requires_a_complete_portable_tool_exchange() {
+    let h = TestHarness::with_config(
+        vec![
+            ConversationItem::user("question"),
+            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
+                "standalone final-answer reasoning",
+            )),
+            ConversationItem::assistant("answer"),
+        ],
+        SamplingConfig {
+            api_backend: sampling_types::ApiBackend::Responses,
+            ..test_config()
+        },
+    );
+
+    assert_eq!(
+        h.handle.enable_portable_responses_reasoning().await,
+        Some(false)
+    );
 }
 
 #[tokio::test]

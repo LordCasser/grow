@@ -1182,20 +1182,38 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::ContextInfoComplete {
             agent_id,
+            session_id,
+            session_binding_epoch,
             info,
             nonce,
-        } => handle_context_info_complete(app, agent_id, info, nonce),
+        } => handle_context_info_complete(
+            app,
+            agent_id,
+            &session_id,
+            session_binding_epoch,
+            info,
+            nonce,
+        ),
         TaskResult::ContextInfoFailed {
             agent_id,
+            session_id,
+            session_binding_epoch,
             error,
             nonce,
-        } => handle_context_info_failed(app, agent_id, error, nonce),
+        } => handle_context_info_failed(
+            app,
+            agent_id,
+            &session_id,
+            session_binding_epoch,
+            error,
+            nonce,
+        ),
         TaskResult::SessionUsageComplete {
             agent_id,
             session_id,
-            usage,
+            response,
             nonce,
-        } => apply_session_usage_result(app, agent_id, &session_id, Ok(usage), nonce),
+        } => apply_session_usage_result(app, agent_id, &session_id, Ok(response), nonce),
         TaskResult::SessionUsageFailed {
             agent_id,
             session_id,
@@ -1418,9 +1436,11 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
-        TaskResult::DeepSearchResults { results, seq, error } => {
-            handle_deep_search_results(app, results, seq, error)
-        }
+        TaskResult::DeepSearchResults {
+            results,
+            seq,
+            error,
+        } => handle_deep_search_results(app, results, seq, error),
         TaskResult::RewindPointsLoaded {
             agent_id, points, ..
         } => handle_rewind_points_loaded(app, agent_id, points),

@@ -62,7 +62,7 @@ impl WorkflowRunStore {
         session_directory: Option<Arc<crate::session::storage::ContainedDirectory>>,
         persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
         restored: Vec<RestoredWorkflowRun>,
-        timeline: Option<&chat_state::Timeline>,
+        lifecycles: &HashMap<String, chat_state::WorkflowLifecycle>,
     ) -> (Self, Vec<WorkflowRunState>) {
         let store = Self::new(session_directory, persistence_tx);
         let mut states = Vec::with_capacity(restored.len());
@@ -77,15 +77,13 @@ impl WorkflowRunStore {
                     args,
                 } = run;
                 let run_id = manifest.state.run_id.clone();
-                let Some(lifecycle) =
-                    timeline.and_then(|timeline| timeline.workflow_lifecycle(&run_id))
-                else {
+                let Some(lifecycle) = lifecycles.get(&run_id) else {
                     tracing::warn!(%run_id, "ignoring Workflow manifest without a Timeline spawn fact");
                     continue;
                 };
                 let resolution = match resolve_workflow_restore_manifest(
                     &run_id,
-                    &lifecycle,
+                    lifecycle,
                     Some(manifest),
                 ) {
                     Ok(resolution) => resolution,
@@ -96,7 +94,7 @@ impl WorkflowRunStore {
                 };
                 let source_revision = resolution.manifest.script_revision;
                 let mut state = resolution.manifest.state;
-                let was_repaired = reconcile_workflow_lifecycle(&mut state, &lifecycle);
+                let was_repaired = reconcile_workflow_lifecycle(&mut state, lifecycle);
                 debug_assert!(state.validate_restored_projection().is_ok());
                 sources.insert(
                     run_id.clone(),
@@ -709,6 +707,24 @@ mod tests {
     use super::*;
     use crate::session::workflow::tracker::WorkflowTracker;
 
+    fn lifecycle_snapshot(
+        timeline: &chat_state::Timeline,
+    ) -> HashMap<String, chat_state::WorkflowLifecycle> {
+        timeline
+            .events()
+            .iter()
+            .filter_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Workflow(chat_state::WorkflowEvent::Spawned {
+                    run_id,
+                    ..
+                }) => timeline
+                    .workflow_lifecycle(run_id)
+                    .map(|lifecycle| (run_id.clone(), lifecycle)),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn test_session(path: &Path) -> Arc<crate::session::storage::ContainedDirectory> {
         Arc::new(
             crate::session::storage::ContainedDirectory::open(
@@ -969,8 +985,12 @@ mod tests {
         };
 
         let timeline = timeline_with_workflow("wf_active", "deep-research", "objective");
-        let (_store, states) =
-            WorkflowRunStore::from_restored(None, tx, vec![restored], Some(&timeline));
+        let (_store, states) = WorkflowRunStore::from_restored(
+            None,
+            tx,
+            vec![restored],
+            &lifecycle_snapshot(&timeline),
+        );
         let state = &states[0];
         assert_eq!(
             state.status,
@@ -1026,8 +1046,12 @@ mod tests {
             ))
             .unwrap();
 
-        let (_store, states) =
-            WorkflowRunStore::from_restored(None, tx, vec![restored], Some(&timeline));
+        let (_store, states) = WorkflowRunStore::from_restored(
+            None,
+            tx,
+            vec![restored],
+            &lifecycle_snapshot(&timeline),
+        );
         assert_eq!(states.len(), 1);
         assert_eq!(
             states[0].status,
@@ -1083,8 +1107,12 @@ mod tests {
             ))
             .unwrap();
 
-        let (_store, states) =
-            WorkflowRunStore::from_restored(None, tx, vec![restored], Some(&timeline));
+        let (_store, states) = WorkflowRunStore::from_restored(
+            None,
+            tx,
+            vec![restored],
+            &lifecycle_snapshot(&timeline),
+        );
         assert_eq!(states[0].execution_epoch, 1);
         assert_eq!(
             states[0].status,
@@ -1126,8 +1154,12 @@ mod tests {
             ))
             .unwrap();
 
-        let (store, states) =
-            WorkflowRunStore::from_restored(None, tx, vec![invalid, valid], Some(&timeline));
+        let (store, states) = WorkflowRunStore::from_restored(
+            None,
+            tx,
+            vec![invalid, valid],
+            &lifecycle_snapshot(&timeline),
+        );
 
         assert_eq!(
             states
@@ -1176,8 +1208,12 @@ mod tests {
             ))
             .unwrap();
 
-        let (store, states) =
-            WorkflowRunStore::from_restored(None, tx, vec![restored], Some(&timeline));
+        let (store, states) = WorkflowRunStore::from_restored(
+            None,
+            tx,
+            vec![restored],
+            &lifecycle_snapshot(&timeline),
+        );
 
         assert_eq!(states.len(), 1);
         assert_eq!(states[0].run_id, "wf_rebuilt");
@@ -1281,7 +1317,8 @@ mod tests {
             args: serde_json::json!({}),
         };
 
-        let (_store, states) = WorkflowRunStore::from_restored(None, tx, vec![restored], None);
+        let (_store, states) =
+            WorkflowRunStore::from_restored(None, tx, vec![restored], &HashMap::new());
         assert!(states.is_empty());
     }
 

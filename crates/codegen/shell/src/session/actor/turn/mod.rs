@@ -456,7 +456,10 @@ impl SessionActor {
             }
             if matches!(
                 &result,
-                Ok(TurnOutcome::Completed { refusal: Some(_), .. })
+                Ok(TurnOutcome::Completed {
+                    refusal: Some(_),
+                    ..
+                })
             ) {
                 return result;
             }
@@ -1384,6 +1387,11 @@ impl SessionActor {
                         .await;
                         return Err(acp::Error::internal_error().data(message));
                     }
+                    context_overflow_recovery_pending = false;
+                    auth_retry_schedule.reset();
+                    continue;
+                }
+                Ok(SamplerTurnOutcome::EnablePortableResponsesReasoningAndResubmit) => {
                     context_overflow_recovery_pending = false;
                     auth_retry_schedule.reset();
                     continue;

@@ -11,10 +11,9 @@ reqwest-middleware = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
 auth = { workspace = true, features = ["middleware"] }
-sampler = { path = "../sampler" }
+config-types = { workspace = true }
 diagnostics = { workspace = true }
 version = { workspace = true }
-workspace = { workspace = true }
 
 [dev-dependencies]
 # `ctor` installs the rustls ring provider once before tests run (via

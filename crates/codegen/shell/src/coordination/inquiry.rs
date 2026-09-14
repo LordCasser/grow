@@ -38,6 +38,17 @@ pub enum InquiryStatus {
     Failed,
 }
 
+/// The authenticated route that delivered an inquiry to its receiving session.
+/// This is persisted with the receiving audit so presentation never has to
+/// infer parent/child direction from a task name or session id.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InquiryDirection {
+    ParentToChild,
+    ChildToParent,
+    Peer,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct InquiryOutcome {
@@ -210,9 +221,12 @@ impl InquiryEvent {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IncomingInquiryAudit {
+    pub direction: InquiryDirection,
     pub source_peer_id: String,
     pub source_session_id: String,
     pub source_cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegated_subagent_task_name: Option<String>,
     pub question: String,
     pub approval: Option<String>,
     pub outcome: Option<InquiryOutcome>,
@@ -221,9 +235,11 @@ pub struct IncomingInquiryAudit {
 impl IncomingInquiryAudit {
     pub(crate) fn received(inquiry: &InboundInquiry) -> Self {
         Self {
+            direction: inquiry.direction,
             source_peer_id: inquiry.source_peer_id.clone(),
             source_session_id: inquiry.source_session_id.clone(),
             source_cwd: inquiry.source_cwd.clone(),
+            delegated_subagent_task_name: inquiry.delegated_subagent_task_name.clone(),
             question: inquiry.question.clone(),
             approval: None,
             outcome: None,
@@ -256,9 +272,18 @@ impl IncomingInquiryAudit {
 
     pub fn display_details(&self) -> String {
         let mut details = format!(
-            "Source session: {}\nSource workspace: {}\n\nQuestion:\n{}",
-            self.source_session_id, self.source_cwd, self.question,
+            "Direction: {}\nSource session: {}\nSource workspace: {}",
+            serde_json::to_value(self.direction)
+                .expect("inquiry direction serializes")
+                .as_str()
+                .expect("inquiry direction is a string"),
+            self.source_session_id,
+            self.source_cwd,
         );
+        if let Some(task_name) = &self.delegated_subagent_task_name {
+            details.push_str(&format!("\n\nSubagent task: {task_name}"));
+        }
+        details.push_str(&format!("\n\nQuestion:\n{}", self.question));
         if let Some(approval) = &self.approval {
             details.push_str(&format!("\n\nDecision: {approval}"));
         }
@@ -281,12 +306,12 @@ impl IncomingInquiryAudit {
             Some(status) => (
                 "inquiry completed",
                 match status {
-                    InquiryStatus::Answered => "Answered session",
-                    InquiryStatus::Rejected => "Rejected inquiry from session",
-                    InquiryStatus::Cancelled => "Cancelled answer to session",
-                    InquiryStatus::Unavailable => "Unable to answer session",
-                    InquiryStatus::TimedOut => "Timed out answering session",
-                    InquiryStatus::Failed => "Failed to answer session",
+                    InquiryStatus::Answered => "Answered",
+                    InquiryStatus::Rejected => "Rejected inquiry from",
+                    InquiryStatus::Cancelled => "Cancelled answer to",
+                    InquiryStatus::Unavailable => "Unable to answer",
+                    InquiryStatus::TimedOut => "Timed out answering",
+                    InquiryStatus::Failed => "Failed to answer",
                 },
                 match status {
                     InquiryStatus::Answered => UiNoticeTone::Success,
@@ -300,7 +325,7 @@ impl IncomingInquiryAudit {
                 } else {
                     "incoming inquiry"
                 },
-                "Answering session",
+                "Answering",
                 match self.approval.as_deref() {
                     Some(approval) if approval.starts_with("approved") => UiNoticeTone::Success,
                     Some(_) => UiNoticeTone::Warning,
@@ -308,12 +333,21 @@ impl IncomingInquiryAudit {
                 },
             ),
         };
+        let participant = match self.direction {
+            InquiryDirection::ParentToChild => "parent agent".to_owned(),
+            InquiryDirection::ChildToParent => self
+                .delegated_subagent_task_name
+                .as_ref()
+                .map(|task_name| format!("subagent {task_name}"))
+                .unwrap_or_else(|| format!("subagent session {}", self.source_session_id)),
+            InquiryDirection::Peer => format!("session {}", self.source_session_id),
+        };
         UiNotice {
             correlation_id: inquiry_id.to_owned(),
             category: UiNoticeCategory::Coordination,
             subject: Some(subject.into()),
             description: Some("Local coordination inquiry".into()),
-            message: format!("{label} {}", self.source_session_id),
+            message: format!("{label} {participant}"),
             tone,
             details: Some(serde_json::to_string(self).expect("incoming inquiry audit serializes")),
         }
@@ -405,13 +439,81 @@ pub(crate) enum InquiryAuthority {
 #[derive(Debug)]
 pub struct InboundInquiry {
     pub(crate) authority: InquiryAuthority,
+    pub(crate) direction: InquiryDirection,
     pub inquiry_id: String,
     pub source_peer_id: String,
     pub source_session_id: String,
     pub source_cwd: String,
+    pub(crate) delegated_subagent_task_name: Option<String>,
     pub target_session_id: String,
     pub question: String,
     pub cancellation: InquiryCancellation,
     pub progress: watch::Sender<InquiryPhase>,
     pub respond_to: oneshot::Sender<InquiryOutcome>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn completed_audit(task_name: Option<&str>) -> IncomingInquiryAudit {
+        IncomingInquiryAudit {
+            direction: task_name
+                .map(|_| InquiryDirection::ChildToParent)
+                .unwrap_or(InquiryDirection::Peer),
+            source_peer_id: "peer".into(),
+            source_session_id: "session-1".into(),
+            source_cwd: "/repo".into(),
+            delegated_subagent_task_name: task_name.map(str::to_owned),
+            question: "Status?".into(),
+            approval: None,
+            outcome: Some(InquiryOutcome::answered("inquiry-1", "Done".into())),
+        }
+    }
+
+    #[test]
+    fn peer_inquiry_notice_keeps_session_identity() {
+        let notice = completed_audit(None).notice("inquiry-1");
+        assert_eq!(notice.message, "Answered session session-1");
+    }
+
+    #[test]
+    fn delegation_notice_uses_subagent_task_name_and_persists_it() {
+        let audit = completed_audit(Some("TS registry workload presentation"));
+        let notice = audit.notice("inquiry-1");
+        assert_eq!(
+            notice.message,
+            "Answered subagent TS registry workload presentation"
+        );
+        let restored = IncomingInquiryAudit::from_notice(&notice).unwrap();
+        assert_eq!(
+            restored.delegated_subagent_task_name.as_deref(),
+            Some("TS registry workload presentation")
+        );
+        assert!(
+            restored
+                .display_details()
+                .contains("Subagent task: TS registry workload presentation")
+        );
+    }
+
+    #[test]
+    fn parent_to_child_notice_keeps_parent_as_participant_for_approval_and_failure() {
+        let mut audit = completed_audit(Some("TS registry workload presentation"));
+        audit.direction = InquiryDirection::ParentToChild;
+        audit.outcome = None;
+        audit.approval = Some("approved".into());
+        assert_eq!(audit.notice("inquiry-1").message, "Answering parent agent");
+
+        audit.approval = None;
+        audit.outcome = Some(InquiryOutcome::terminal(
+            "inquiry-1",
+            InquiryStatus::Failed,
+            "target failed",
+        ));
+        assert_eq!(
+            audit.notice("inquiry-1").message,
+            "Failed to answer parent agent"
+        );
+    }
 }

@@ -1,0 +1,32 @@
+   Compiling config v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/config)
+   Compiling tool-types v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/common/tool-types)
+   Compiling sandbox v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/sandbox)
+   Compiling tool-runtime v0.1.0 (/Users/lordcasser/workspace/projects/grow/crates/common/tool-runtime)
+   Compiling tools v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/tools)
+   Compiling config-types v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/config-types)
+   Compiling diagnostics v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/diagnostics)
+   Compiling hooks v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/hooks)
+   Compiling sampling-types v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/sampling-types)
+   Compiling grow-http v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/grow-http)
+   Compiling sampler v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/sampler)
+   Compiling agent v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/agent)
+   Compiling client-support v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/client-support)
+   Compiling mcp v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/mcp)
+   Compiling shell-base v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/shell-base)
+   Compiling workspace v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/workspace)
+   Compiling plugin-marketplace v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/plugin-marketplace)
+   Compiling memory v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/memory)
+   Compiling announcements v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/announcements)
+   Compiling chat-state v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/chat-state)
+   Compiling pager v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/pager)
+   Compiling pager-render v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/pager-render)
+   Compiling shell v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/shell)
+   Compiling update v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/update)
+   Compiling cli v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/cli)
+   Compiling pager-minimal v2.1.6 (/Users/lordcasser/workspace/projects/grow/crates/codegen/pager-minimal)
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `cli` (bin "grow") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 50s

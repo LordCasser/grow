@@ -73,18 +73,19 @@ pub use timeline::{
     MAX_PENDING_MONITOR_PROGRESS_PER_TASK, MAX_TURN_INPUTS, MAX_WORKFLOW_INITIAL_MANIFEST_BYTES,
     MAX_WORKFLOW_RUN_ID_BYTES, MessageCause, MessageEvent, NotificationDismissReason,
     NotificationEvent, NotificationOwner, NotificationPayloadRef, NotificationSource,
-    NotificationSourceVersion, NotificationTaskKind, ObservationEvent, PendingAllowedInput,
-    PendingNotification, PlanHandoffKind, PromptRecord, RecoveryEvent, RequestEvent, RequestUsage,
-    SessionTitleEvent, SessionTitleSource, StepEvent, StepId, SubagentContextSource, SubagentEvent,
-    SubagentOutcome, SubagentResultEvent, SubagentSeedEvent, SubagentSpawnEvent,
-    SubagentTerminalEvent, SurfaceId, SurfaceOp, SurfaceRange, TIMELINE_SCHEMA_VERSION, Timeline,
-    TimelineError, TimelineEvent, TimelineEventKind, ToolEvent, TurnEvent, TurnId, TurnIdentity,
-    TurnInputKind, TurnTerminal, TurnTerminalSource, WorkflowEvent, WorkflowExecutionStatus,
-    WorkflowLifecycle, WorkflowTurnHandoff, notification_id,
+    NotificationSourceVersion, NotificationTaskKind, ObservationEvent,
+    PARENT_MESSAGE_SOURCE_VERSION, PendingAllowedInput, PendingNotification, PlanHandoffKind,
+    PromptRecord, RecoveryEvent, RequestEvent, RequestUsage, SessionTitleEvent, SessionTitleSource,
+    StepEvent, StepId, SubagentContextSource, SubagentEvent, SubagentOutcome, SubagentResultEvent,
+    SubagentSeedEvent, SubagentSpawnEvent, SubagentTerminalEvent, SurfaceId, SurfaceOp,
+    SurfaceRange, TIMELINE_SCHEMA_VERSION, Timeline, TimelineError, TimelineEvent,
+    TimelineEventKind, ToolEvent, TurnEvent, TurnId, TurnIdentity, TurnInputKind, TurnTerminal,
+    TurnTerminalSource, WorkflowEvent, WorkflowExecutionStatus, WorkflowLifecycle,
+    WorkflowTurnHandoff, notification_id,
 };
 pub use trajectory::{
     SurfaceVisibility, TRAJECTORY_SCHEMA_VERSION, TrajectoryIssueSeverity, TrajectoryProjector,
     TrajectoryRow, TrajectorySnapshot, trajectory_issue_severity,
 };
 pub use types::*;
-pub use usage::{UsageLedger, UsageTotals};
+pub use usage::{UsageAgent, UsageLedger, UsageSegment, UsageTotals};

@@ -254,10 +254,22 @@ pub(crate) fn replay_inherited_updates(
         Ok(outcome) => outcome,
         Err(e) => {
             tracing::warn!(session_id = %child_session_id, error = %e, "failed to read updates for replay");
-            return;
+            ReplayEmission::Empty
         }
     };
-    if outcome == ReplayEmission::Emitted {
+    let communication_outcome = shell::session::storage::stream_coordination_notices_at(
+        child_session_id,
+        &home,
+        |notice| {
+            crate::app::acp_handler::apply_ui_notice(child_view, notice, None, true);
+        },
+    );
+    if let Err(error) = &communication_outcome {
+        tracing::warn!(session_id = child_session_id, %error, "failed to restore child communication history");
+    }
+    if outcome == ReplayEmission::Emitted
+        || matches!(communication_outcome, Ok(ReplayEmission::Emitted))
+    {
         crate::memory_release::release_retained_memory_with("subagent-replay");
     }
 }
@@ -386,7 +398,8 @@ fn subagent_child_needs_replay(child_view: &crate::app::agent_view::AgentView) -
             continue;
         };
         match &entry.block {
-            crate::scrollback::block::RenderBlock::UserPrompt(_) => {}
+            crate::scrollback::block::RenderBlock::UserPrompt(_)
+            | crate::scrollback::block::RenderBlock::Notice(_) => {}
             _ => return false,
         }
     }
@@ -826,6 +839,131 @@ mod tests {
         assert!(parent.session.subagent_sessions[empty_sid].child_updates_replayed);
         set_replay_grow_home_for_tests(None);
     }
+
+    #[test]
+    fn child_replay_restores_timeline_parent_receipt_without_updates_cache() {
+        let home = tempfile::tempdir().unwrap();
+        let child_sid = "child-timeline-receipt";
+        let receipt_id = write_parent_receipt_session(home.path(), child_sid, "timeline body");
+        set_replay_grow_home_for_tests(Some(home.path().to_path_buf()));
+
+        let mut parent = make_min_child_view();
+        parent
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(make_min_child_view()));
+        let mut info = make_info();
+        info.child_session_id = child_sid.into();
+        parent
+            .session
+            .subagent_sessions
+            .insert(child_sid.to_string(), info);
+
+        ensure_subagent_child_replayed(&mut parent, child_sid);
+
+        let child = parent.subagent_views.get(child_sid).unwrap();
+        assert!(parent.session.subagent_sessions[child_sid].child_updates_replayed);
+        assert_eq!(
+            child.scrollback.len(),
+            1,
+            "Timeline receipt is projected once"
+        );
+        let RenderBlock::Notice(notice) = &child.scrollback.entry(0).unwrap().block else {
+            panic!("expected Timeline parent receipt notice");
+        };
+        let stable_id = format!("parent-message:{receipt_id}");
+        assert_eq!(notice.event_id.as_deref(), Some(stable_id.as_str()));
+        assert!(notice.detail_text().contains("timeline body"));
+        set_replay_grow_home_for_tests(None);
+    }
+
+    #[test]
+    fn first_parent_notice_does_not_block_child_updates_replay() {
+        let home = tempfile::tempdir().unwrap();
+        let child_sid = "child-notice-before-replay";
+        let session_dir =
+            setup_enrichment_dir(home.path(), std::path::Path::new("/tmp"), child_sid);
+        let tool_line = format!(
+            r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"tool_call","toolCallId":"tc1","title":"Read foo","kind":"read","locations":[{{"path":"/tmp/foo"}}]}}}}}}"#
+        );
+        std::fs::write(session_dir.join("updates.jsonl"), tool_line + "\n").unwrap();
+        set_replay_grow_home_for_tests(Some(home.path().to_path_buf()));
+
+        let mut parent = make_min_child_view();
+        let mut child = make_min_child_view();
+        crate::app::acp_handler::apply_ui_notice(
+            &mut child,
+            parent_message_notice("live-receipt", Some("live body")),
+            None,
+            false,
+        );
+        parent
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(child));
+        let mut info = make_info();
+        info.child_session_id = child_sid.into();
+        parent
+            .session
+            .subagent_sessions
+            .insert(child_sid.to_string(), info);
+
+        ensure_subagent_child_replayed(&mut parent, child_sid);
+
+        let child = parent.subagent_views.get(child_sid).unwrap();
+        assert!(parent.session.subagent_sessions[child_sid].child_updates_replayed);
+        assert!(
+            child.scrollback.len() >= 2,
+            "ACP replay must follow the notice"
+        );
+        assert!(matches!(
+            child.scrollback.entry(1).unwrap().block,
+            RenderBlock::ToolCall(_)
+        ));
+        set_replay_grow_home_for_tests(None);
+    }
+
+    #[test]
+    fn reopened_child_deduplicates_timeline_receipt_against_live_notice() {
+        let home = tempfile::tempdir().unwrap();
+        let child_sid = "child-reopen-receipt";
+        let receipt_id = write_parent_receipt_session(home.path(), child_sid, "same body");
+        set_replay_grow_home_for_tests(Some(home.path().to_path_buf()));
+
+        let mut parent = make_min_child_view();
+        let mut child = make_min_child_view();
+        crate::app::acp_handler::apply_ui_notice(
+            &mut child,
+            parent_message_notice(&receipt_id, Some("same body")),
+            None,
+            false,
+        );
+        assert_eq!(child.scrollback.len(), 1);
+        parent
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(child));
+        let mut info = make_info();
+        info.child_session_id = child_sid.into();
+        parent
+            .session
+            .subagent_sessions
+            .insert(child_sid.to_string(), info);
+
+        ensure_subagent_child_replayed(&mut parent, child_sid);
+        ensure_subagent_child_replayed(&mut parent, child_sid);
+
+        let child = parent.subagent_views.get(child_sid).unwrap();
+        assert_eq!(
+            child.scrollback.len(),
+            1,
+            "reopen must not duplicate the receipt"
+        );
+        let RenderBlock::Notice(notice) = &child.scrollback.entry(0).unwrap().block else {
+            panic!("expected parent receipt notice");
+        };
+        let stable_id = format!("parent-message:{receipt_id}");
+        assert_eq!(notice.event_id.as_deref(), Some(stable_id.as_str()));
+        set_replay_grow_home_for_tests(None);
+    }
+
     #[test]
     fn subagent_meta_empty() {
         assert_eq!(format_subagent_meta(None), "");
@@ -972,12 +1110,72 @@ mod tests {
                 }),
             ))
             .unwrap();
+        write_timeline_events(dir, &timeline);
+    }
+    fn write_timeline_events(dir: &std::path::Path, timeline: &chat_state::Timeline) {
         let mut bytes = Vec::new();
         for event in timeline.events() {
             serde_json::to_writer(&mut bytes, event).unwrap();
             bytes.push(b'\n');
         }
         std::fs::write(dir.join("timeline.jsonl"), bytes).unwrap();
+    }
+    fn write_parent_receipt_session(
+        grow_home: &std::path::Path,
+        session_id: &str,
+        body: &str,
+    ) -> String {
+        let session_dir = setup_enrichment_dir(grow_home, std::path::Path::new("/tmp"), session_id);
+        let payload_ref = chat_state::NotificationPayloadRef {
+            blake3: blake3::hash(body.as_bytes()).to_hex().to_string(),
+            bytes: body.len() as u64,
+        };
+        let artifacts = session_dir.join("artifacts").join("notifications");
+        std::fs::create_dir_all(&artifacts).unwrap();
+        std::fs::write(artifacts.join(format!("{}.txt", payload_ref.blake3)), body).unwrap();
+        let source = chat_state::NotificationSource::ParentMessage {
+            parent_session_id: "parent-session".into(),
+            message_id: "message-1".into(),
+            interrupt: true,
+        };
+        let source_version = chat_state::NotificationSourceVersion::Ordinal {
+            value: chat_state::PARENT_MESSAGE_SOURCE_VERSION,
+        };
+        let receipt_id = chat_state::notification_id(session_id, &source, &source_version).unwrap();
+        let mut timeline = chat_state::Timeline::default();
+        timeline
+            .record(chat_state::TimelineEventKind::Notification(
+                chat_state::NotificationEvent::Received {
+                    id: receipt_id.clone(),
+                    owner_session_id: session_id.into(),
+                    source,
+                    source_version,
+                    payload_ref,
+                },
+            ))
+            .unwrap();
+        write_timeline_events(&session_dir, &timeline);
+        receipt_id
+    }
+    fn parent_message_notice(
+        receipt_id: &str,
+        body: Option<&str>,
+    ) -> shell::extensions::notification::UiNotice {
+        let details = shell::extensions::notification::ParentMessageNotice {
+            parent_session_id: "parent-session".into(),
+            message_id: "message-1".into(),
+            interrupt: true,
+            message: body.map(str::to_owned),
+        };
+        shell::extensions::notification::UiNotice {
+            correlation_id: receipt_id.into(),
+            category: shell::extensions::notification::UiNoticeCategory::Coordination,
+            subject: Some(shell::extensions::notification::ParentMessageNotice::SUBJECT.into()),
+            description: None,
+            message: "Parent guidance received".into(),
+            tone: shell::extensions::notification::UiNoticeTone::Info,
+            details: Some(serde_json::to_string(&details).unwrap()),
+        }
     }
     /// Build a session dir matching the canonical session path formula.
     fn setup_enrichment_dir(

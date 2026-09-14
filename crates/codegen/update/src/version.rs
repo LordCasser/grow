@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde::Deserialize;
 use tokio::fs;
 
-use shell::util::grow_home::grow_home;
+use config::grow_home;
 
 const TTL_SECONDS_BEFORE_AUTO_UPDATE: Duration = Duration::from_secs(60 * 30);
 pub const GH_RELEASE_REPO: &str = "LordCasser/grow";
@@ -194,7 +194,7 @@ pub use version::installed as get_installed_version;
 pub fn installed_on_disk_version() -> Option<String> {
     #[cfg(unix)]
     {
-        let app = shell::util::grow_home::grow_application();
+        let app = config::grow_application();
         let target = std::fs::read_link(&app).ok()?;
         // metadata() follows the symlink: Err means the target is gone
         // (dangling link) and the version it names is not actually on disk.

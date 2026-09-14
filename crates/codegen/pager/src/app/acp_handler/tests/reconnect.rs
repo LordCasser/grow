@@ -20,6 +20,139 @@
         );
     }
 
+    fn make_user_chunk_meta(session_id: &str, text: &str, turn: usize, event_id: usize) -> AcpClientMessage {
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+        let request = acp::SessionNotification::new(
+            acp::SessionId::new(session_id),
+            acp::SessionUpdate::UserMessageChunk(acp::ContentChunk::new(
+                acp::ContentBlock::Text(acp::TextContent::new(text)),
+            )),
+        )
+        .meta(
+            serde_json::json!({
+                "promptId": format!("replay-{turn}"),
+                "isReplay": true,
+                "eventId": format!("replay-{event_id}"),
+            })
+            .as_object()
+            .cloned(),
+        );
+        AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
+            request,
+            response_tx,
+        })
+    }
+
+    /// In-process bounded replay measurement. This exercises real text blocks,
+    /// batch insertion, layout preparation, and the loading-time prompt route;
+    /// it is intentionally not a PTY latency assertion.
+    #[test]
+    #[ignore = "manual replay benchmark"]
+    fn bounded_replay_text_blocks_and_prompt_measurement() {
+        use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+        use std::time::{Duration, Instant};
+
+        for turns in [128, 256] {
+            const CHUNKS_PER_TURN: usize = 8;
+            const CHUNK_BYTES: usize = 512;
+            const FRAME_INTERVAL: usize = 32;
+            let mut app = make_app_with_agent("sess-replay-bench");
+            let id = AgentId(0);
+            app.agents.get_mut(&id).unwrap().session.loading_replay = true;
+            app.agents.get_mut(&id).unwrap().scrollback.begin_batch();
+
+            let mut handle_total = Duration::ZERO;
+            let mut handle_max = Duration::ZERO;
+            let mut frame_total = Duration::ZERO;
+            let mut frame_max = Duration::ZERO;
+            let mut input_max = Duration::ZERO;
+            let filler = "x".repeat(CHUNK_BYTES);
+            let draft = "REPLAY_BENCH_DRAFT";
+            let mut draft_chars = draft.chars();
+            let mut notification_count = 0usize;
+            for turn in 0..turns {
+                for part in 0..=CHUNKS_PER_TURN {
+                    // Keep fixture construction outside the handler measurement.
+                    let notification = if part == 0 {
+                        make_user_chunk_meta(
+                            "sess-replay-bench", &format!("replay-user-{turn}"),
+                            turn, notification_count,
+                        )
+                    } else {
+                        make_agent_chunk_meta(
+                            "sess-replay-bench", &filler, &format!("replay-{turn}"),
+                            Some(&format!("replay-{notification_count}")), true,
+                        )
+                    };
+                    let started = Instant::now();
+                    let _ = handle(notification, &mut app);
+                    let elapsed = started.elapsed();
+                    handle_total += elapsed;
+                    handle_max = handle_max.max(elapsed);
+                    notification_count += 1;
+                    if notification_count % FRAME_INTERVAL == 0 {
+                        let started = Instant::now();
+                        app.agents.get_mut(&id).unwrap().scrollback.prepare_layout(120, 40);
+                        let elapsed = started.elapsed();
+                        frame_total += elapsed;
+                        frame_max = frame_max.max(elapsed);
+                        if let Some(ch) = draft_chars.next() {
+                            let event = Event::Key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE));
+                            let started = Instant::now();
+                            let outcome = app.handle_input(&event);
+                            input_max = input_max.max(started.elapsed());
+                            assert!(matches!(outcome, crate::app::root::InputOutcome::Changed));
+                        }
+                    }
+                }
+            }
+            let (mut user_blocks, mut agent_bytes) = (0usize, 0usize);
+            for entry in app.agents.get_mut(&id).unwrap().scrollback.entries_mut() {
+                user_blocks += usize::from(entry.block.is_user_prompt());
+                agent_bytes += entry.block.as_agent_message().map_or(0, |message| message.text().len());
+            }
+            assert_eq!(user_blocks, turns, "every replayed user text must be handled");
+            assert_eq!(agent_bytes, turns * CHUNKS_PER_TURN * CHUNK_BYTES,
+                "every replayed assistant byte must be handled");
+            assert_eq!(app.agents[&id].prompt.text(), draft);
+            let crate::app::root::InputOutcome::Action(action) =
+                app.handle_input(&Event::Key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)))
+            else { panic!("Enter must produce a submit action"); };
+            let _ = crate::app::root::dispatch::dispatch(action, &mut app);
+            assert_eq!(app.agents[&id].session.pending_prompts.back().map(|p| p.text.as_str()), Some(draft));
+
+            let load_finish_started = Instant::now();
+            let load_effects = crate::app::root::dispatch::dispatch(
+                crate::app::actions::Action::TaskComplete(
+                    crate::app::actions::TaskResult::SessionLoaded {
+                        agent_id: id,
+                        session_id: acp::SessionId::new("sess-replay-bench"),
+                        models: None,
+                        code_restored: false,
+                        restore_summary: None,
+                        foreground: None,
+                    },
+                ),
+                &mut app,
+            );
+            let load_finish_elapsed = load_finish_started.elapsed();
+            assert!(!app.agents[&id].session.loading_replay);
+            let final_layout_started = Instant::now();
+            app.agents.get_mut(&id).unwrap().scrollback.prepare_layout(120, 40);
+            let final_layout_elapsed = final_layout_started.elapsed();
+            assert!(load_effects.iter().any(|effect| matches!(effect,
+                crate::app::actions::Effect::SendPrompt { text, .. } if text == draft)));
+
+            eprintln!(
+                "[replay-bench] turns={turns} notifications={notification_count} handle_total_ms={:.2} handle_max_ms={:.2} frame_total_ms={:.2} frame_max_ms={:.2} input_max_ms={:.2} load_finish_ms={:.2} final_layout_ms={:.2}",
+                handle_total.as_secs_f64() * 1000.0, handle_max.as_secs_f64() * 1000.0,
+                frame_total.as_secs_f64() * 1000.0, frame_max.as_secs_f64() * 1000.0,
+                input_max.as_secs_f64() * 1000.0,
+                load_finish_elapsed.as_secs_f64() * 1000.0, final_layout_elapsed.as_secs_f64() * 1000.0,
+            );
+        }
+    }
+
     #[test]
     fn handle_routes_tokens_to_root_when_session_id_not_yet_set() {
         // Regression: a notification racing ahead of TaskResult::SessionCreated

@@ -8,9 +8,12 @@ pub(super) async fn run(
     request: AgentInteractionRequest,
     source: SessionHandle,
     target: SessionHandle,
+    subagent_task_name: String,
 ) {
     let result = match &request.action {
-        AgentInteraction::Ask { question } => ask(&request, &source, &target, question).await,
+        AgentInteraction::Ask { question } => {
+            ask(&request, &source, &target, question, &subagent_task_name).await
+        }
         AgentInteraction::Send { message, interrupt } => {
             let (respond_to, response) = tokio::sync::oneshot::channel();
             if target
@@ -31,7 +34,7 @@ pub(super) async fn run(
                     _ = request.cancellation.cancelled() => Err("Message cancelled; receipt may already be durable".into()),
                     result = tokio::time::timeout(std::time::Duration::from_secs(30), response) => {
                         match result {
-                            Ok(Ok(Ok(_))) => Ok(AgentInteractionOutput { id: request.id.clone(), status: "received".into(), answer: None, error: None }),
+                            Ok(Ok(Ok(_))) => Ok(AgentInteractionOutput { id: request.id.clone(), status: "received".into(), subagent_task_name: None, target_session_id: None, answer: None, error: None }),
                             Ok(Ok(Err(error))) => Err(error),
                             _ => Err("Message receipt acknowledgement unavailable; delivery is unknown".into()),
                         }
@@ -40,6 +43,11 @@ pub(super) async fn run(
             }
         }
     };
+    let result = result.map(|mut output| {
+        output.subagent_task_name = Some(subagent_task_name);
+        output.target_session_id = Some(target.info.id.to_string());
+        output
+    });
     let _ = request.respond_to.send(result);
 }
 
@@ -48,6 +56,7 @@ async fn ask(
     source: &SessionHandle,
     target: &SessionHandle,
     question: &str,
+    subagent_task_name: &str,
 ) -> Result<AgentInteractionOutput, String> {
     let record = super::super::coordination::record_coordination_inquiry;
     let id = format!("{}:{}", request.source_session_id, request.id);
@@ -65,12 +74,19 @@ async fn ask(
     let cancellation = InquiryCancellation::new();
     let (progress, _phases) = tokio::sync::watch::channel(InquiryPhase::Receiving);
     let (respond_to, response) = tokio::sync::oneshot::channel();
+    let direction = if request.target_child_id.is_some() {
+        InquiryDirection::ParentToChild
+    } else {
+        InquiryDirection::ChildToParent
+    };
     let inquiry = InboundInquiry {
         authority: InquiryAuthority::Delegation,
+        direction,
         inquiry_id: id.clone(),
         source_peer_id: "local-delegation".into(),
         source_session_id: source.info.id.to_string(),
         source_cwd: source.info.cwd.clone(),
+        delegated_subagent_task_name: Some(subagent_task_name.to_owned()),
         target_session_id: target_id.clone(),
         question: question.into(),
         cancellation: cancellation.clone(),
@@ -119,6 +135,8 @@ async fn ask(
             .as_str()
             .unwrap()
             .into(),
+        subagent_task_name: None,
+        target_session_id: None,
         answer: outcome.answer,
         error: outcome.error.map(|error| error.to_string()),
     })

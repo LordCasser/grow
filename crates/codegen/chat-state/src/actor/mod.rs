@@ -210,7 +210,7 @@ impl ChatStateActor {
     ) -> Result<ChatStateHandle, crate::commands::TimelineWriteError> {
         let mut recovery_events = timeline.recover_interrupted()?;
         recovery_events.extend(timeline.recover_surface_integrity()?);
-        let state = ChatState::from_timeline(timeline, sampling_config);
+        let state = ChatState::from_timeline(timeline, sampling_config)?;
         Ok(Self::launch(
             state,
             persistence,
@@ -313,13 +313,18 @@ impl ChatStateActor {
                     .and_then(|event| match &event.kind {
                         TimelineEventKind::Notification(crate::NotificationEvent::Received {
                             owner_session_id: existing_owner,
-                            source: _,
+                            source: existing_source,
                             source_version: existing_version,
                             payload_ref: existing_payload,
                             ..
                         }) if existing_version == &source_version => Some((
                             event.clone(),
-                            existing_owner == &owner_session_id && existing_payload == &payload_ref,
+                            existing_owner == &owner_session_id
+                                && existing_payload == &payload_ref
+                                && (!matches!(
+                                    source,
+                                    crate::NotificationSource::ParentMessage { .. }
+                                ) || existing_source == &source),
                         )),
                         _ => None,
                     });
@@ -512,27 +517,33 @@ impl ChatStateActor {
                 let _ = reply.send(result);
             }
             ChatStateCommand::RecordSubagentUsage {
+                subagent_id,
                 by_model,
                 attribute_to_prompt,
                 incomplete,
                 reply,
             } => {
-                self.record_subagent_usage(&by_model, attribute_to_prompt, incomplete);
-                let _ = reply.send(());
+                let result = self
+                    .record_subagent_usage(&subagent_id, &by_model, attribute_to_prompt, incomplete)
+                    .await;
+                let _ = reply.send(result);
             }
             ChatStateCommand::MarkUsageIncomplete {
                 prompt,
                 session,
                 reply,
             } => {
-                self.mark_usage_incomplete(prompt, session);
-                let _ = reply.send(());
+                let result = self.mark_usage_incomplete(prompt, session).await;
+                let _ = reply.send(result);
+            }
+            ChatStateCommand::BeginUsageResumeSegment { reply } => {
+                let result = self.begin_usage_resume_segment().await;
+                let _ = reply.send(result);
             }
             ChatStateCommand::ReplaceSamplingRoute { config } => {
-                self.state.continuation.reset(
+                self.state.continuation.replace_route(
                     config.api_backend.clone(),
                     self.state.timeline.surface_len(),
-                    "sampling_route_changed",
                 );
                 self.state.sampling_config = config;
             }
@@ -546,6 +557,27 @@ impl ChatStateActor {
                     "provider_rejected_native_continuation",
                 );
                 let _ = reply.send(());
+            }
+            ChatStateCommand::EnablePortableResponsesReasoning { reply } => {
+                let surface = self.state.timeline.surface();
+                let projection = self
+                    .state
+                    .continuation
+                    .request_projection(self.state.timeline.surface_ids());
+                let portable_end = projection
+                    .portable_prefix_end(surface)
+                    .unwrap_or(surface.len());
+                let has_reasoning = sampling_types::project_portable_history_with_reasoning(
+                    &surface[..portable_end],
+                    true,
+                )
+                .iter()
+                .any(|item| matches!(item, ConversationItem::Reasoning(_)));
+                let changed = self
+                    .state
+                    .continuation
+                    .enable_portable_responses_reasoning(has_reasoning);
+                let _ = reply.send(changed);
             }
             ChatStateCommand::RecordAgentEditedPath { path } => {
                 self.state.agent_edited_paths.insert(path);
@@ -690,6 +722,12 @@ impl ChatStateActor {
             }
             ChatStateCommand::GetPendingNotifications { reply } => {
                 let _ = reply.send(self.state.timeline.pending_notifications());
+            }
+            ChatStateCommand::GetParentMessageReceipts { reply } => {
+                let _ = reply.send(self.state.timeline.parent_message_receipts());
+            }
+            ChatStateCommand::GetRetainedNotificationPayloadHashes { reply } => {
+                let _ = reply.send(self.state.timeline.retained_notification_payload_hashes());
             }
             ChatStateCommand::GetPendingAllowedInputs { reply } => {
                 let _ = reply.send(self.state.timeline.pending_allowed_inputs());

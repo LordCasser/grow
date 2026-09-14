@@ -1,0 +1,198 @@
+{
+  "before": {
+    "128": {
+      "runs": [
+        {
+          "total_ms": 606.4,
+          "session.load_session_replay": 155.5,
+          "session.replay.read_and_filter": 52.8,
+          "session.replay.forward_updates": 23.2,
+          "session.replay.drain_completions": 77.7,
+          "session.reconcile_stale_tasks": 40.4,
+          "session.spawn_actor_call": 124.2,
+          "session.spawn_and_register": 297.5,
+          "session.load_light": 21.9
+        },
+        {
+          "total_ms": 536.2,
+          "session.load_session_replay": 156.3,
+          "session.replay.read_and_filter": 53.9,
+          "session.replay.forward_updates": 23.2,
+          "session.replay.drain_completions": 77.2,
+          "session.reconcile_stale_tasks": 40.1,
+          "session.spawn_actor_call": 89.4,
+          "session.spawn_and_register": 251.7,
+          "session.load_light": 25.0
+        },
+        {
+          "total_ms": 535.6,
+          "session.load_session_replay": 155.9,
+          "session.replay.read_and_filter": 54.0,
+          "session.replay.forward_updates": 23.0,
+          "session.replay.drain_completions": 76.9,
+          "session.reconcile_stale_tasks": 39.6,
+          "session.spawn_actor_call": 90.9,
+          "session.spawn_and_register": 248.9,
+          "session.load_light": 25.3
+        }
+      ],
+      "medians": {
+        "total_ms": 536.2,
+        "session.load_session_replay": 155.9,
+        "session.replay.read_and_filter": 53.9,
+        "session.replay.forward_updates": 23.2,
+        "session.replay.drain_completions": 77.2,
+        "session.reconcile_stale_tasks": 40.1,
+        "session.spawn_actor_call": 90.9,
+        "session.spawn_and_register": 251.7,
+        "session.load_light": 25.0
+      }
+    },
+    "512": {
+      "runs": [
+        {
+          "total_ms": 1378.4,
+          "session.load_session_replay": 609.7,
+          "session.replay.read_and_filter": 207.3,
+          "session.replay.forward_updates": 90.5,
+          "session.replay.drain_completions": 305.7,
+          "session.reconcile_stale_tasks": 160.0,
+          "session.spawn_actor_call": 302.5,
+          "session.spawn_and_register": 462.5,
+          "session.load_light": 80.3
+        },
+        {
+          "total_ms": 1377.4,
+          "session.load_session_replay": 605.8,
+          "session.replay.read_and_filter": 208.0,
+          "session.replay.forward_updates": 90.4,
+          "session.replay.drain_completions": 301.1,
+          "session.reconcile_stale_tasks": 157.9,
+          "session.spawn_actor_call": 308.8,
+          "session.spawn_and_register": 469.4,
+          "session.load_light": 78.3
+        },
+        {
+          "total_ms": 1375.3,
+          "session.load_session_replay": 608.8,
+          "session.replay.read_and_filter": 206.1,
+          "session.replay.forward_updates": 92.0,
+          "session.replay.drain_completions": 304.2,
+          "session.reconcile_stale_tasks": 158.8,
+          "session.spawn_actor_call": 302.4,
+          "session.spawn_and_register": 462.9,
+          "session.load_light": 78.6
+        }
+      ],
+      "medians": {
+        "total_ms": 1377.4,
+        "session.load_session_replay": 608.8,
+        "session.replay.read_and_filter": 207.3,
+        "session.replay.forward_updates": 90.5,
+        "session.replay.drain_completions": 304.2,
+        "session.reconcile_stale_tasks": 158.8,
+        "session.spawn_actor_call": 302.5,
+        "session.spawn_and_register": 462.9,
+        "session.load_light": 78.6
+      }
+    }
+  },
+  "after": {
+    "128": {
+      "runs": [
+        {
+          "total_ms": 607.0,
+          "session.load_session_replay": 164.5,
+          "session.replay.read_and_filter": 53.5,
+          "session.replay.forward_updates": 24.5,
+          "session.replay.drain_completions": 84.1,
+          "session.reconcile_stale_tasks": 42.9,
+          "session.spawn_actor_call": 116.2,
+          "session.spawn_and_register": 304.9,
+          "session.load_light": 24.7
+        },
+        {
+          "total_ms": 575.0,
+          "session.load_session_replay": 165.2,
+          "session.replay.read_and_filter": 54.7,
+          "session.replay.forward_updates": 24.8,
+          "session.replay.drain_completions": 83.2,
+          "session.reconcile_stale_tasks": 42.5,
+          "session.spawn_actor_call": 92.2,
+          "session.spawn_and_register": 272.9,
+          "session.load_light": 25.9
+        },
+        {
+          "total_ms": 588.5,
+          "session.load_session_replay": 166.8,
+          "session.replay.read_and_filter": 54.9,
+          "session.replay.forward_updates": 25.2,
+          "session.replay.drain_completions": 84.4,
+          "session.reconcile_stale_tasks": 43.5,
+          "session.spawn_actor_call": 93.7,
+          "session.spawn_and_register": 277.1,
+          "session.load_light": 25.6
+        }
+      ],
+      "medians": {
+        "total_ms": 588.5,
+        "session.load_session_replay": 165.2,
+        "session.replay.read_and_filter": 54.7,
+        "session.replay.forward_updates": 24.8,
+        "session.replay.drain_completions": 84.1,
+        "session.reconcile_stale_tasks": 42.9,
+        "session.spawn_actor_call": 93.7,
+        "session.spawn_and_register": 277.1,
+        "session.load_light": 25.6
+      }
+    },
+    "512": {
+      "runs": [
+        {
+          "total_ms": 1496.6,
+          "session.load_session_replay": 655.5,
+          "session.replay.read_and_filter": 216.2,
+          "session.replay.forward_updates": 97.5,
+          "session.replay.drain_completions": 334.3,
+          "session.reconcile_stale_tasks": 169.5,
+          "session.spawn_actor_call": 323.7,
+          "session.spawn_and_register": 505.3,
+          "session.load_light": 85.6
+        },
+        {
+          "total_ms": 1477.2,
+          "session.load_session_replay": 645.0,
+          "session.replay.read_and_filter": 211.3,
+          "session.replay.forward_updates": 96.0,
+          "session.replay.drain_completions": 330.6,
+          "session.reconcile_stale_tasks": 168.5,
+          "session.spawn_actor_call": 324.8,
+          "session.spawn_and_register": 507.8,
+          "session.load_light": 84.4
+        },
+        {
+          "total_ms": 1462.3,
+          "session.load_session_replay": 637.7,
+          "session.replay.read_and_filter": 211.5,
+          "session.replay.forward_updates": 94.5,
+          "session.replay.drain_completions": 324.8,
+          "session.reconcile_stale_tasks": 167.9,
+          "session.spawn_actor_call": 321.1,
+          "session.spawn_and_register": 501.0,
+          "session.load_light": 83.5
+        }
+      ],
+      "medians": {
+        "total_ms": 1477.2,
+        "session.load_session_replay": 645.0,
+        "session.replay.read_and_filter": 211.5,
+        "session.replay.forward_updates": 96.0,
+        "session.replay.drain_completions": 330.6,
+        "session.reconcile_stale_tasks": 168.5,
+        "session.spawn_actor_call": 323.7,
+        "session.spawn_and_register": 505.3,
+        "session.load_light": 84.4
+      }
+    }
+  }
+}

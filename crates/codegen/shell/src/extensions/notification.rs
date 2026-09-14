@@ -249,15 +249,41 @@ impl From<&chat_state::UsageTotals> for PromptUsageModel {
 
 impl From<&chat_state::UsageLedger> for PromptUsage {
     fn from(ledger: &chat_state::UsageLedger) -> Self {
+        Self::from_parts(
+            &ledger.totals,
+            &ledger.by_model,
+            ledger.main_loop_model_calls,
+            ledger.incomplete,
+        )
+    }
+}
+
+impl From<&chat_state::UsageSegment> for PromptUsage {
+    fn from(segment: &chat_state::UsageSegment) -> Self {
+        Self::from_parts(
+            &segment.totals,
+            &segment.by_model,
+            segment.main_loop_model_calls,
+            segment.incomplete,
+        )
+    }
+}
+
+impl PromptUsage {
+    fn from_parts(
+        totals: &chat_state::UsageTotals,
+        by_model: &indexmap::IndexMap<String, chat_state::UsageTotals>,
+        num_turns: u64,
+        incomplete: bool,
+    ) -> Self {
         let mut usage = Self {
-            totals: PromptUsageModel::from(&ledger.totals),
-            model_usage: ledger
-                .by_model
+            totals: PromptUsageModel::from(totals),
+            model_usage: by_model
                 .iter()
-                .map(|(k, v)| (k.clone(), PromptUsageModel::from(v)))
+                .map(|(key, value)| (key.clone(), PromptUsageModel::from(value)))
                 .collect(),
-            num_turns: ledger.main_loop_model_calls,
-            usage_is_incomplete: ledger.incomplete,
+            num_turns,
+            usage_is_incomplete: incomplete,
         };
         usage.scrub_untrustworthy_costs();
         usage
@@ -476,6 +502,53 @@ pub struct UiNotice {
     pub tone: UiNoticeTone,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<String>,
+}
+
+/// Structured view of a committed parent receipt. Delivery remains in Timeline.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ParentMessageNotice {
+    pub parent_session_id: String,
+    pub message_id: String,
+    pub interrupt: bool,
+    /// Missing only when historical presentation data cannot be recovered.
+    pub message: Option<String>,
+}
+
+impl ParentMessageNotice {
+    pub const SUBJECT: &str = "parent message received";
+
+    pub fn from_notice(notice: &UiNotice) -> Option<Self> {
+        if notice.category != UiNoticeCategory::Coordination
+            || notice.subject.as_deref() != Some(Self::SUBJECT)
+            || notice.correlation_id.is_empty()
+        {
+            return None;
+        }
+        let data: Self = serde_json::from_str(notice.details.as_deref()?).ok()?;
+        (!data.parent_session_id.is_empty() && !data.message_id.is_empty()).then_some(data)
+    }
+
+    pub fn delivery_mode(&self) -> &'static str {
+        if self.interrupt {
+            "Safe interruption requested"
+        } else {
+            "Include at the next safe step"
+        }
+    }
+
+    pub fn display_details(&self, receipt_id: &str) -> String {
+        format!(
+            "Source: parent agent (session {})\nMessage ID: {}\nReceipt ID: {}\nDelivery: {}\n\nMessage:\n{}",
+            self.parent_session_id,
+            self.message_id,
+            receipt_id,
+            self.delivery_mode(),
+            self.message
+                .as_deref()
+                .unwrap_or("Message body could not be recovered")
+        )
+    }
 }
 
 /// Independent desired-state domains exposed by the Shell control plane.
