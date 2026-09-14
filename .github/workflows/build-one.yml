@@ -221,12 +221,13 @@ jobs:
 
       # OpenHarmony build: runs scripts/build-ohos.sh inside the Harmonybrew
       # ci-runner container (arm64 OHOS userland with ohos-sdk + brew rust).
-      # CI_RUNNER pins the current swr.cn-north-4.myhuaweicloud.com/harmonybrew/
-      # ci-runner:latest digest (2026-09-11 verification, cc0ca87c…). When the
-      # Harmonybrew project re-pushes the image, refresh this pin from
-      # `docker manifest inspect …/harmonybrew/ci-runner:latest`; the SWR
-      # registry garbage-collects superseded digests, so an outdated pin
-      # fails with "manifest unknown".
+      # CI_RUNNER intentionally follows the current
+      # swr.cn-north-4.myhuaweicloud.com/harmonybrew/ci-runner:latest tag.
+      # The SWR registry garbage-collects superseded digests, so a digest pin
+      # can fail with "manifest unknown" even while this tag is available.
+      # --pull always below also prevents a stale runner-local tag from being
+      # reused. The build script pins the Harmonybrew core commit and Rust
+      # version that must remain stable for the toolchain.
       # The script pins the official Harmonybrew core commit that owns the
       # verified Rust bottle, bootstraps the toolchain, and installs the
       # rsproxy cargo mirror (crates.io/USTC TLS is flaky), then builds with
@@ -241,10 +242,10 @@ jobs:
         shell: bash
         env:
           GROW_VERSION: ${{ inputs.grow_version }}
-          CI_RUNNER: swr.cn-north-4.myhuaweicloud.com/harmonybrew/ci-runner@sha256:cc0ca87c7bbb942a07fa0e774903064571af33400e5e4f5abce010551a272660
+          CI_RUNNER: swr.cn-north-4.myhuaweicloud.com/harmonybrew/ci-runner:latest
         run: |
           set -euo pipefail
-          docker run --rm \
+          docker run --pull always --rm \
             -v "${GITHUB_WORKSPACE}:/workspace/grow" -w /workspace/grow \
             -e "GROW_VERSION=${GROW_VERSION}" \
             -e "CARGO_PROFILE=release-dist" \
