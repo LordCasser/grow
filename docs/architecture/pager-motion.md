@@ -24,6 +24,11 @@ flowchart LR
 
 ## 相互独立的调度时钟
 
+前台等待工具或子 Agent 时的 parked 状态只收起运行显示，仍显示
+`AgentSession::live_status` 中的模型等控制反馈。实时反馈优先于后台任务提示，
+终态清除后恢复原提示及任务点击区；模型仍由 Shell 在 Step 边界提交。
+见 [等待期间的控制反馈契约](../../openspec/specs/client-surfaces/spec.md#requirement-parked-foreground-waits-preserve-live-control-feedback)。
+
 - `animation_deadline` 只把 Presenter 标记为 dirty，不修改业务状态。
 - `ui_state_deadline` 只处理绝对过期时间。toast、Todo
   badge、finish flash、Behavior banner 与延迟通知都有明确 deadline；静态展示只在

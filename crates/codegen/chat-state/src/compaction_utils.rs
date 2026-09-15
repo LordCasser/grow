@@ -497,11 +497,11 @@ pub fn plan_compaction_range(
         }
     }
 
-    // A single active turn can itself exceed the window. Keep its real user
-    // prompt and newest response groups verbatim, and summarize only older
-    // completed response groups. A valid boundary is the first item in a
-    // model response group, not merely any assistant-role item.
-    let start = last_prompt.saturating_add(1);
+    // Split the oldest prompt segment needed for the tail budget. Newer
+    // prompts may be too short to fill it on their own. Keep this prompt and
+    // the recent suffix verbatim, summarizing only older response groups.
+    // A valid boundary starts a model response group, not just any assistant.
+    let start = tail_start.saturating_add(1);
     if start >= surface.len() {
         return None;
     }
@@ -1188,6 +1188,43 @@ mod tests {
             surface[plan.end_index + 2],
             ConversationItem::Assistant(_)
         ));
+    }
+
+    #[test]
+    fn partial_compaction_splits_older_segment_when_recent_prompt_tail_is_short() {
+        let mut items = vec![
+            ConversationItem::system("system"),
+            ConversationItem::system_reminder("continue goal"),
+            ConversationItem::assistant_tool_calls(vec![tool_call("old", "read_file", "{}")]),
+            ConversationItem::tool_result("old", "x".repeat(40_000)),
+            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item("thinking")),
+            ConversationItem::assistant_tool_calls(vec![tool_call("recent", "read_file", "{}")]),
+            ConversationItem::tool_result("recent", "y".repeat(4_000)),
+            ConversationItem::system_reminder("notification drain"),
+            ConversationItem::assistant("z".repeat(4_000)),
+        ];
+        items[1].set_prompt_index(1);
+        items[7].set_prompt_index(2);
+        let (surface, ids) = surface_with_ids(items);
+        let retain_tokens = 1_500;
+        assert!(crate::estimate_conversation_tokens(&surface[7..]) < retain_tokens);
+
+        let plan = plan_compaction_range(&surface, &ids, retain_tokens, 5_000)
+            .expect("the older segment contains a complete response group to summarize");
+        assert_eq!((plan.start_index, plan.end_index), (2, 3));
+        assert_eq!(plan.target.shadowed, ids[2..=3]);
+        assert!(crate::estimate_conversation_tokens(&surface[4..]) >= retain_tokens);
+        assert!(matches!(surface[4], ConversationItem::Reasoning(_)));
+        assert!(
+            matches!(&surface[5], ConversationItem::Assistant(a) if a.tool_calls[0].id.as_ref() == "recent")
+        );
+        assert!(
+            matches!(&surface[6], ConversationItem::ToolResult(r) if r.tool_call_id == "recent")
+        );
+        assert!(matches!(&surface[7], ConversationItem::User(u) if u.prompt_index == Some(2)));
+
+        assert!(plan_compaction_range(&surface, &ids, retain_tokens, 20_000).is_none());
+        assert!(plan_compaction_range(&surface, &ids, 20_000, 5_000).is_none());
     }
 
     #[test]

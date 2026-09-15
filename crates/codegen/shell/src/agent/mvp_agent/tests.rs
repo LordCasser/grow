@@ -2078,6 +2078,63 @@ where
     let local = tokio::task::LocalSet::new();
     local.block_on(&rt, body())
 }
+
+#[test]
+fn compact_extension_preserves_actor_error_outcomes() {
+    use acp_transport::AcpAgentHandler as _;
+
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let (handle, mut commands) = make_test_handle_with_receiver("test/default", None);
+        let session_id = handle.info.id.clone();
+        agent
+            .sessions
+            .borrow_mut()
+            .insert(session_id.clone(), handle);
+        for expected in [
+            Some(crate::session::mark_control_terminal_published(
+                acp::Error::internal_error().data("no closed Surface range"),
+            )),
+            Some(acp::Error::invalid_params().data(serde_json::json!({"detail": "rejected"}))),
+            None,
+        ] {
+            let request = acp::ExtRequest::new(
+                "grow/compact_conversation",
+                std::sync::Arc::from(
+                    serde_json::value::to_raw_value(&serde_json::json!({
+                        "sessionId": session_id,
+                        "userContext": "retain the current task",
+                    }))
+                    .unwrap(),
+                ),
+            );
+            let (result, ()) = tokio::join!(agent.ext_method(request), async {
+                let crate::session::SessionCommand::CompactSession {
+                    user_context,
+                    respond_to,
+                } = commands.recv().await.unwrap()
+                else {
+                    panic!("expected compact command");
+                };
+                assert_eq!(user_context.as_deref(), Some("retain the current task"));
+                if let Some(error) = &expected {
+                    respond_to.send(Err(error.clone())).unwrap();
+                }
+            });
+            let error = result.expect_err("compaction failure must reach the caller");
+            if let Some(expected) = expected {
+                assert_eq!(error.code, expected.code);
+                assert_eq!(error.data, expected.data);
+            } else {
+                assert!(!crate::session::control_terminal_was_published(&error));
+                assert_eq!(
+                    error.data,
+                    Some(serde_json::json!("session failed to respond"))
+                );
+            }
+        }
+    });
+}
 /// `remove_session` releases the workspace binding and drains the
 /// per-session side maps. Test agents default to `workspace_ops = None`,
 /// so no other test reaches the release.

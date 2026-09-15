@@ -1,0 +1,18 @@
+before_event=2461 surface=259 ids=259 estimated_tokens=167705
+prompt index=7 coordinate=Some(1) suffix_tokens=157868
+prompt index=180 coordinate=Some(2) suffix_tokens=26964
+retain=40960 plan=Some((8, 136, 114940))
+tail_tokens=42249 tool_pairs=complete source_start=SurfaceId { event: EventSeq(29), item: 0 } source_end=SurfaceId { event: EventSeq(1294), item: 0 }
+retain=32000 plan=Some((8, 164, 123243))
+tail_tokens=33946 tool_pairs=complete source_start=SurfaceId { event: EventSeq(29), item: 0 } source_end=SurfaceId { event: EventSeq(1609), item: 0 }
+retain=16000 plan=Some((7, 179, 130904))
+tail_tokens=26964 tool_pairs=complete source_start=SurfaceId { event: EventSeq(28), item: 0 } source_end=SurfaceId { event: EventSeq(1760), item: 0 }
+before_event=2471 surface=260 ids=260 estimated_tokens=167101
+prompt index=7 coordinate=Some(1) suffix_tokens=157264
+prompt index=180 coordinate=Some(2) suffix_tokens=27029
+retain=40960 plan=Some((8, 136, 114940))
+tail_tokens=42314 tool_pairs=complete source_start=SurfaceId { event: EventSeq(29), item: 0 } source_end=SurfaceId { event: EventSeq(1294), item: 0 }
+retain=32000 plan=Some((8, 164, 123243))
+tail_tokens=34011 tool_pairs=complete source_start=SurfaceId { event: EventSeq(29), item: 0 } source_end=SurfaceId { event: EventSeq(1609), item: 0 }
+retain=16000 plan=Some((7, 179, 130235))
+tail_tokens=27029 tool_pairs=complete source_start=SurfaceId { event: EventSeq(28), item: 0 } source_end=SurfaceId { event: EventSeq(1760), item: 0 }

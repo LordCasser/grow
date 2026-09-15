@@ -210,6 +210,65 @@ fn compact_cancel_rpc_does_not_echo_the_backend_terminal() {
 }
 
 #[test]
+fn compact_failure_rpc_keeps_the_published_terminal_without_unknown_feedback() {
+    for track_foreground in [false, true] {
+        let mut app = test_app_with_agent();
+        let id = AgentId(0);
+        let sid = app.agents[&id].session.session_id.clone().unwrap();
+        let baseline = app.agents[&id].scrollback.len();
+        if track_foreground {
+            app.agents
+                .get_mut(&id)
+                .unwrap()
+                .session
+                .start_command(crate::app::session::AgentCommand::Compact);
+        }
+        apply_grow_session_update(
+            &mut app,
+            sid.0.as_ref(),
+            shell::extensions::notification::SessionUpdate::AutoCompactFailed {
+                error: "no closed Surface range".into(),
+            },
+        );
+        dispatch_task_result(
+            TaskResult::CompactComplete {
+                agent_id: id,
+                track_foreground,
+                result: Err(shell::session::mark_control_terminal_published(
+                    acp::Error::internal_error().data("no closed Surface range"),
+                )),
+            },
+            &mut app,
+        );
+        assert_eq!(app.agents[&id].scrollback.len(), baseline + 1);
+        assert!(app.agents[&id].session.live_status(200).is_none());
+
+        if track_foreground {
+            app.agents
+                .get_mut(&id)
+                .unwrap()
+                .session
+                .start_command(crate::app::session::AgentCommand::Compact);
+        }
+        dispatch_task_result(
+            TaskResult::CompactComplete {
+                agent_id: id,
+                track_foreground,
+                result: Err(acp::Error::internal_error().data("connection lost")),
+            },
+            &mut app,
+        );
+        assert!(
+            app.agents[&id]
+                .session
+                .live_status(200)
+                .unwrap()
+                .contains("outcome unknown")
+        );
+    }
+}
+
+#[test]
 fn behavior_transport_failure_keeps_first_prompt_local_and_retryable() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);

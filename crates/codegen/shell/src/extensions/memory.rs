@@ -40,8 +40,7 @@ async fn handle_compact(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     }
     let status = rx
         .await
-        .map_err(|_| acp::Error::internal_error().data("session failed to respond"))?
-        .map_err(|e| acp::Error::internal_error().data(format!("Internal error: {:?}", e)))?;
+        .map_err(|_| acp::Error::internal_error().data("session failed to respond"))??;
     to_raw_response(&CompactConversationResponse { status })
 }
 

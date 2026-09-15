@@ -28,6 +28,15 @@ Surface replacement 仍清空 native continuation epoch。Portable projector 清
 
 ## 2. Trigger and Ladder
 
+选区先按 prompt 边界寻找覆盖保留预算的 suffix。若不能替换足量完整旧回合，
+`plan_compaction_range` 从该 suffix 最早 prompt 后细分响应组；较新的通知或用户
+prompt 不足预算时，仍能使用更早长片段的完整边界。保留预算和最小来源阈值不变，
+见 [跨 prompt 选区契约](../../openspec/specs/context-compaction/spec.md#requirement-compaction-can-split-the-prompt-segment-retained-for-its-tail-budget)。
+
+手动压缩的 actor 负责发布失败通知并标记 ACP 错误；扩展接口原样透传错误的
+code/data，Pager 才能将已知失败与没有终态的传输故障区分开。
+见 [手动压缩终态契约](../../openspec/specs/context-compaction/spec.md#requirement-manual-compaction-rpc-preserves-authoritative-error-outcomes)。
+
 Insertion point: `run_compact_only` (shell `session/compaction.rs`), after the
 pre-compaction flush and **before** `run_compact_inner`. The ladder function is
 `maybe_pre_prune(&trigger_info) -> Result<bool, acp::Error>`:

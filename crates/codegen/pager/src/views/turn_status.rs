@@ -268,9 +268,9 @@ pub fn render_turn_status(
         return TurnStatusOutput::default();
     }
 
-    // Desired controls are live UI state, not transcript events. Idle
-    // sessions show them here until the authoritative terminal update arrives.
-    if state.is_idle()
+    // Desired controls are live UI state, not transcript events. Idle and
+    // parked sessions show them until the authoritative terminal update arrives.
+    if (state.is_idle() || parked)
         && let Some(status) = control_status
     {
         let frames = crate::glyphs::braille_spinner_frames();
@@ -1430,6 +1430,48 @@ mod tests {
             !text.contains("Waiting") && !text.contains("[stop]"),
             "parked must not render the running-turn chrome, got: {text:?}"
         );
+    }
+
+    #[test]
+    fn parked_wait_preserves_live_control_feedback_until_settled() {
+        for reason in [WaitingReason::Subagent, WaitingReason::task_output()] {
+            for subagents in [0, 1] {
+                for status in ["model old→new (high)", "applying model old→new (high)"] {
+                    for width in [18, 80] {
+                        let activity = Some(TurnActivity::Waiting(reason.clone()));
+                        let mut args = idle_args(Watchers {
+                            subagents,
+                            ..Watchers::default()
+                        });
+                        args.state = &AgentState::TurnRunning;
+                        args.activity = &activity;
+                        args.parked = true;
+                        args.control_status = Some(status);
+                        let (output, buf) = render_row(args, width);
+                        let text = buffer_text(&buf, buf.area);
+                        assert!(text.contains("model"), "feedback hidden: {text:?}");
+                        if width == 80 {
+                            assert!(text.contains(status), "feedback truncated: {text:?}");
+                        }
+                        assert!(output.cancel_button.is_none());
+                        assert!(output.watching_cue.is_none());
+                    }
+                }
+                let activity = Some(TurnActivity::Waiting(reason.clone()));
+                let mut args = idle_args(Watchers {
+                    subagents,
+                    ..Watchers::default()
+                });
+                args.state = &AgentState::TurnRunning;
+                args.activity = &activity;
+                args.parked = true;
+                let (output, buf) = render_row(args, 80);
+                let text = buffer_text(&buf, buf.area);
+                assert!(text.contains("Enter queues"));
+                assert!(!text.contains("model old"));
+                assert_eq!(output.watching_cue.is_some(), subagents > 0);
+            }
+        }
     }
 
     #[test]
