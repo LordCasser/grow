@@ -277,6 +277,159 @@ pub(super) fn advance_reconnect_cursor(agent: &mut AgentView, meta: &mut Notific
         agent.advance_reconnect_cursor(id, meta.is_replay);
     }
 }
+/// Apply both live Hook executions and observational Timeline snapshots to
+/// the owning root or child view. Snapshot semantics do not depend on whether
+/// the asynchronous session/load response has already reached the client.
+fn apply_hook_execution(agent: &mut AgentView, update: GrowSessionUpdate, is_replay: bool) -> bool {
+    let GrowSessionUpdate::HookExecution {
+        occurrence_id,
+        event_name,
+        tool_call_id,
+        is_snapshot,
+        prompt_id: batch_prompt_id,
+        runs,
+        annotations,
+        ..
+    } = update
+    else {
+        return false;
+    };
+    use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry, HookRunStatus};
+    if !agent.session.tracker.claim_hook_occurrence(&occurrence_id) {
+        return false;
+    }
+    let hook_entries: Vec<HookRunEntry> = runs
+        .into_iter()
+        .map(|r| {
+            let status = match r.status {
+                shell::extensions::notification::HookRunStatusDto::Success { elapsed_ms } => {
+                    HookRunStatus::Success {
+                        elapsed: std::time::Duration::from_millis(elapsed_ms),
+                    }
+                }
+                shell::extensions::notification::HookRunStatusDto::Skipped => {
+                    HookRunStatus::Skipped
+                }
+                shell::extensions::notification::HookRunStatusDto::Blocked {
+                    detail,
+                    elapsed_ms,
+                } => HookRunStatus::Blocked {
+                    detail,
+                    elapsed: std::time::Duration::from_millis(elapsed_ms),
+                },
+                shell::extensions::notification::HookRunStatusDto::Failed { error, elapsed_ms } => {
+                    HookRunStatus::Failed {
+                        error,
+                        elapsed: std::time::Duration::from_millis(elapsed_ms),
+                    }
+                }
+            };
+            HookRunEntry {
+                name: r.name,
+                status,
+                output: r.output,
+            }
+        })
+        .collect();
+    let is_tool_hook = event_name == "pre_tool_use" || event_name == "post_tool_use";
+    let is_stop_hook = event_name == "stop" || event_name == "stop_failure";
+    let historical = is_snapshot || is_replay;
+    let tool_entry = tool_call_id
+        .as_deref()
+        .and_then(|id| agent.session.tracker.tool_entry_id(id, &agent.scrollback));
+    if historical && (!is_tool_hook || tool_entry.is_none()) {
+        let label = match tool_call_id.as_deref() {
+            Some(id) => format!("{event_name} · {id} · {occurrence_id}"),
+            None => format!("{event_name} · {occurrence_id}"),
+        };
+        agent.session.tracker.restore_hook_history(
+            label,
+            hook_entries,
+            annotations,
+            &mut agent.scrollback,
+        );
+        return true;
+    }
+    if is_tool_hook {
+        let phase = if event_name == "pre_tool_use" {
+            HookPhase::Pre
+        } else {
+            HookPhase::Post
+        };
+        if let Some(tool_call_id) = tool_call_id.as_deref() {
+            agent.session.tracker.attach_tool_hooks(
+                tool_call_id,
+                phase,
+                hook_entries,
+                &mut agent.scrollback,
+            );
+        } else {
+            // Hidden or unavailable tools have no safe positional fallback.
+            agent
+                .scrollback
+                .push_lifecycle_hooks(event_name.clone(), hook_entries);
+        }
+    } else if is_stop_hook && !historical {
+        let local_turn_active =
+            agent.session.state.is_turn_running() || agent.session.state.is_cancelling();
+        let foreign_batch = batch_prompt_id.is_some()
+            && agent.session.current_prompt_id.is_some()
+            && batch_prompt_id != agent.session.current_prompt_id;
+        if foreign_batch {
+            agent
+                .scrollback
+                .push_lifecycle_hooks(event_name.clone(), hook_entries);
+        } else if local_turn_active {
+            let stash_pid = batch_prompt_id
+                .clone()
+                .or_else(|| agent.session.current_prompt_id.clone());
+            stash_live_stop_batch(
+                agent,
+                stash_pid,
+                event_name.clone(),
+                hook_entries,
+                batch_prompt_id.is_some(),
+            );
+        } else if let Some(entry_id) = agent
+            .scrollback
+            .latest_turn_marker_accepting(&event_name, batch_prompt_id.as_deref())
+        {
+            agent.scrollback.attach_stop_hooks_to_marker(
+                entry_id,
+                event_name.clone(),
+                hook_entries,
+                batch_prompt_id.as_deref(),
+            );
+        } else {
+            agent
+                .scrollback
+                .push_lifecycle_hooks(event_name.clone(), hook_entries);
+        }
+    } else {
+        agent
+            .scrollback
+            .push_lifecycle_hooks(event_name.clone(), hook_entries);
+    }
+    if historical && !annotations.is_empty() {
+        agent.session.tracker.restore_hook_history(
+            format!("{event_name} · {occurrence_id}"),
+            Vec::new(),
+            annotations,
+            &mut agent.scrollback,
+        );
+        return true;
+    }
+    for message in annotations {
+        agent
+            .scrollback
+            .push_block(RenderBlock::session_event(SessionEvent::HookAnnotation {
+                occurrence_id: occurrence_id.clone(),
+                message,
+            }));
+    }
+    true
+}
+
 /// Handle `grow/session_notification` and replay-path `grow/session/update`.
 ///
 /// Routes by `session_id` so events for an inactive agent still mutate that
@@ -382,6 +535,7 @@ fn handle_session_notification_inner(
                 | GrowSessionUpdate::AgentChanged { .. }
                 | GrowSessionUpdate::ControlStateUpdate(_)
                 | GrowSessionUpdate::UiNotice(_)
+                | GrowSessionUpdate::HookExecution { .. }
                 | GrowSessionUpdate::InteractionResolved { .. }
                 | GrowSessionUpdate::AutoCompactStarted { .. }
                 | GrowSessionUpdate::AutoCompactCompleted { .. }
@@ -1064,121 +1218,8 @@ fn handle_session_notification_inner(
             }
             true
         }
-        GrowSessionUpdate::HookExecution {
-            occurrence_id,
-            event_name,
-            tool_name: _tool_name,
-            prompt_id: batch_prompt_id,
-            runs,
-            annotations,
-        } => {
-            use crate::scrollback::blocks::tool::{HookPhase, HookRunEntry, HookRunStatus};
-            if !agent.session.tracker.claim_hook_occurrence(&occurrence_id) {
-                return false;
-            }
-            let hook_entries: Vec<HookRunEntry> = runs
-                .into_iter()
-                .map(|r| {
-                    let status = match r.status {
-                        shell::extensions::notification::HookRunStatusDto::Success {
-                            elapsed_ms,
-                        } => HookRunStatus::Success {
-                            elapsed: std::time::Duration::from_millis(elapsed_ms),
-                        },
-                        shell::extensions::notification::HookRunStatusDto::Skipped => {
-                            HookRunStatus::Skipped
-                        }
-                        shell::extensions::notification::HookRunStatusDto::Blocked {
-                            detail,
-                            elapsed_ms,
-                        } => HookRunStatus::Blocked {
-                            detail,
-                            elapsed: std::time::Duration::from_millis(elapsed_ms),
-                        },
-                        shell::extensions::notification::HookRunStatusDto::Failed {
-                            error,
-                            elapsed_ms,
-                        } => HookRunStatus::Failed {
-                            error,
-                            elapsed: std::time::Duration::from_millis(elapsed_ms),
-                        },
-                    };
-                    HookRunEntry {
-                        name: r.name,
-                        status,
-                        output: r.output,
-                    }
-                })
-                .collect();
-            let is_tool_hook = event_name == "pre_tool_use" || event_name == "post_tool_use";
-            let is_stop_hook = event_name == "stop" || event_name == "stop_failure";
-            if is_tool_hook && (meta.is_replay || agent.session.loading_replay) {
-                // Reconnect snapshots arrive after the ACP transcript replay.
-                // Without the original transport ordering, attaching to the
-                // last tool would corrupt an unrelated row; render an explicit
-                // lifecycle projection instead.
-                agent
-                    .scrollback
-                    .push_lifecycle_hooks(event_name.clone(), hook_entries);
-            } else if is_tool_hook {
-                let phase = if event_name == "pre_tool_use" {
-                    HookPhase::Pre
-                } else {
-                    HookPhase::Post
-                };
-                if let Some(entry_id) = agent.scrollback.last_tool_call_entry_id() {
-                    agent.scrollback.attach_hooks(entry_id, phase, hook_entries);
-                }
-            } else if is_stop_hook && !meta.is_replay && !agent.session.loading_replay {
-                let local_turn_active =
-                    agent.session.state.is_turn_running() || agent.session.state.is_cancelling();
-                let foreign_batch = batch_prompt_id.is_some()
-                    && agent.session.current_prompt_id.is_some()
-                    && batch_prompt_id != agent.session.current_prompt_id;
-                if foreign_batch {
-                    agent
-                        .scrollback
-                        .push_lifecycle_hooks(event_name, hook_entries);
-                } else if local_turn_active {
-                    let stash_pid = batch_prompt_id
-                        .clone()
-                        .or_else(|| agent.session.current_prompt_id.clone());
-                    stash_live_stop_batch(
-                        agent,
-                        stash_pid,
-                        event_name,
-                        hook_entries,
-                        batch_prompt_id.is_some(),
-                    );
-                } else if let Some(entry_id) = agent
-                    .scrollback
-                    .latest_turn_marker_accepting(&event_name, batch_prompt_id.as_deref())
-                {
-                    agent.scrollback.attach_stop_hooks_to_marker(
-                        entry_id,
-                        event_name,
-                        hook_entries,
-                        batch_prompt_id.as_deref(),
-                    );
-                } else {
-                    agent
-                        .scrollback
-                        .push_lifecycle_hooks(event_name, hook_entries);
-                }
-            } else {
-                agent
-                    .scrollback
-                    .push_lifecycle_hooks(event_name, hook_entries);
-            }
-            for message in annotations {
-                agent.scrollback.push_block(RenderBlock::session_event(
-                    SessionEvent::HookAnnotation {
-                        occurrence_id: occurrence_id.clone(),
-                        message,
-                    },
-                ));
-            }
-            true
+        update @ GrowSessionUpdate::HookExecution { .. } => {
+            apply_hook_execution(agent, update, meta.is_replay)
         }
         GrowSessionUpdate::HooksChanged {
             hooks,
@@ -1471,6 +1512,10 @@ pub(super) fn handle_child_session_notification(
     agent: &mut AgentView,
 ) -> bool {
     let changed = match update {
+        update @ GrowSessionUpdate::HookExecution { .. } => agent
+            .subagent_views
+            .get_mut(child_sid)
+            .is_some_and(|child| apply_hook_execution(child, update, is_replay)),
         GrowSessionUpdate::UiNotice(output) => agent
             .subagent_views
             .get_mut(child_sid)

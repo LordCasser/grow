@@ -467,17 +467,21 @@ impl SessionActor {
         }
     }
 
-    /// Send structured hook execution data for rich scrollback rendering.
+    /// Build structured hook execution data for rich scrollback rendering.
     ///
+    /// This projection is pure: it reads one completed Timeline occurrence and
+    /// carries its stable tool identity forward. Live and reconnect paths use
+    /// the same data so a snapshot cannot silently lose the join key.
     /// `prompt_id` is `None` for session-level dispatches (session_start /
     /// session-end stop).
-    pub(super) async fn send_hook_execution(
+    pub(super) fn project_hook_execution(
         &self,
         event_name: &str,
         tool_name: Option<&str>,
         prompt_id: Option<&str>,
         projection: &chat_state::HookLifecycleProjection,
-    ) {
+        is_snapshot: bool,
+    ) -> Option<GrowSessionUpdate> {
         use crate::extensions::notification::{HookRunEntryDto, HookRunStatusDto};
         let runs = projection
             .handlers
@@ -535,6 +539,12 @@ impl SessionActor {
                 })
             })
             .collect::<Vec<_>>();
+        let annotation_tool_name = tool_name
+            .or_else(|| match &projection.cause {
+                chat_state::HookCause::Tool { call_id } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .unwrap_or("Input");
         let annotations = projection
             .handlers
             .iter()
@@ -546,8 +556,7 @@ impl SessionActor {
                 match control {
                     chat_state::HookRunControl::Block { reason } => vec![format!(
                         "\u{26a0} `{}` blocked by hook `{}`: {reason}",
-                        tool_name.unwrap_or("Input"),
-                        handler.name
+                        annotation_tool_name, handler.name
                     )],
                     chat_state::HookRunControl::StopKeepWorking {
                         reason: Some(reason),
@@ -581,21 +590,42 @@ impl SessionActor {
             })
             .collect::<Vec<_>>();
         if runs.is_empty() && annotations.is_empty() {
-            return;
+            return None;
         }
 
-        // HookExecution is a live transport projection. The Timeline Hook
-        // occurrence is the only durable fact source and is queried again on
-        // reconnect/inspection instead of copying this projection to updates.jsonl.
-        self.send_transient_hook_notification(GrowSessionUpdate::HookExecution {
+        let tool_call_id = match &projection.cause {
+            chat_state::HookCause::Tool { call_id } => Some(call_id.clone()),
+            _ => None,
+        };
+        Some(GrowSessionUpdate::HookExecution {
             occurrence_id: projection.occurrence_id.clone(),
             event_name: event_name.to_string(),
+            tool_call_id,
+            is_snapshot,
             tool_name: tool_name.map(|s| s.to_string()),
             prompt_id: prompt_id.map(|s| s.to_string()),
             runs,
             annotations,
         })
-        .await;
+    }
+
+    /// Send structured hook execution data for rich scrollback rendering.
+    ///
+    /// Live HookExecution remains transient and retains the rewind boundary
+    /// used by ordinary hook results. Reconnect snapshots call the pure
+    /// projection above and use the passive path instead.
+    pub(super) async fn send_hook_execution(
+        &self,
+        event_name: &str,
+        tool_name: Option<&str>,
+        prompt_id: Option<&str>,
+        projection: &chat_state::HookLifecycleProjection,
+    ) {
+        if let Some(update) =
+            self.project_hook_execution(event_name, tool_name, prompt_id, projection, false)
+        {
+            self.send_transient_hook_notification(update).await;
+        }
     }
 
     /// Returns the resolved workspace root for hook envelopes.
@@ -1322,6 +1352,8 @@ mod notification_hook_filter_tests {
         let execution = GrowSessionUpdate::HookExecution {
             occurrence_id: "occurrence-1".into(),
             event_name: "pre_tool_use".into(),
+            tool_call_id: Some("call-1".into()),
+            is_snapshot: false,
             tool_name: Some("read_file".into()),
             prompt_id: None,
             runs: vec![HookRunEntryDto {

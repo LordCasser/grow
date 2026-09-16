@@ -17,11 +17,16 @@ use crate::theme::Theme;
 pub struct LifecycleEventBlock {
     /// Event name (e.g. `user_prompt_submit`).
     pub name: String,
+    /// Historical decision explanations, shown only when the row is opened.
+    pub annotations: Vec<String>,
 }
 
 impl LifecycleEventBlock {
     pub fn new(name: impl Into<String>) -> Self {
-        Self { name: name.into() }
+        Self {
+            name: name.into(),
+            annotations: Vec::new(),
+        }
     }
 }
 
@@ -37,9 +42,15 @@ impl BlockContent for LifecycleEventBlock {
         };
         let bold = style.add_modifier(ratatui::style::Modifier::BOLD);
 
-        BlockOutput {
-            lines: vec![Line::from(vec![Span::styled(self.name.clone(), bold)]).into()],
+        let mut lines = vec![Line::from(vec![Span::styled(self.name.clone(), bold)]).into()];
+        if !matches!(ctx.mode, DisplayMode::Collapsed) {
+            for annotation in &self.annotations {
+                lines.extend(annotation.lines().map(|line| {
+                    Line::from(Span::styled(format!("    {line}"), theme.muted())).into()
+                }));
+            }
         }
+        BlockOutput { lines }
     }
 
     fn has_vpad_for(&self, _appearance: &AppearanceConfig) -> bool {

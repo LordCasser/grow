@@ -732,6 +732,14 @@ pub enum SessionUpdate {
         occurrence_id: String,
         /// The hook event name ("pre_tool_use" or "post_tool_use").
         event_name: String,
+        /// Stable tool-call identity from the Timeline HookCause, when this
+        /// occurrence belongs to a tool lifecycle.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tool_call_id: Option<String>,
+        /// True when this is a read-only projection rebuilt from completed
+        /// Timeline facts after reconnect/session load.
+        #[serde(default)]
+        is_snapshot: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         tool_name: Option<String>,
         /// The prompt turn this batch belongs to, when known; lets the

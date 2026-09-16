@@ -597,15 +597,19 @@ impl ScrollbackEntry {
                     let pre = render_hooks_for_mode("pre_tool_use", &hd.pre_hooks, ctx.mode);
                     let post = render_hooks_for_mode("post_tool_use", &hd.post_hooks, ctx.mode);
                     let has_any = !pre.is_empty() || !post.is_empty() || !hd.lifecycle.is_empty();
-                    // Lifecycle blocks already show the event name as the block header,
-                    // so skip the separator (no tool output above) and the section header.
+                    // Lifecycle blocks have no tool output above. Only omit
+                    // a section header when the block already names it; a
+                    // restored history row contains distinct occurrences.
                     if has_any && !is_lifecycle {
                         output.lines.push(render_hook_separator());
                     }
                     output.lines.extend(pre);
                     output.lines.extend(post);
                     for (event_name, runs) in &hd.lifecycle {
-                        if is_lifecycle {
+                        if matches!(&self.block,
+                            RenderBlock::ToolCall(ToolCallBlock::Lifecycle(block))
+                                if block.name == *event_name)
+                        {
                             output.lines.extend(render_hooks_detail(runs, ctx.mode));
                         } else {
                             output

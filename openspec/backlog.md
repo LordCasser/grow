@@ -715,3 +715,5 @@ Worktree 生命周期、复用与安全边界继续等待上游稳定。它不�
 - **断线中的活跃候选前缀补传**：`unify-sampling-attempt-recovery` 隔离并清理未接纳预览，`updates.jsonl` 只包含已接纳内容。现有 root load 与子视图按需回放不能据此保证完整补传断线期间仍在生成的候选前缀。若需要不中断地恢复完整实时展示，应独立核对 leader 的 load cutoff、当前候选快照和子会话历史水位，在同一 session/attempt 归属下补传并去重；不得把临时预览重新写成接纳历史，也不能把该 UI 能力等同于重新执行 provider。
 
 - **会话读取与 Summary 投影修复的边界（已完成）**：由 [keep-session-observation-read-only](changes/archive/2026-09-13-keep-session-observation-read-only/verification.md) 分离。普通 full/light 读取只派生内存 Summary，显式 writer load 才持久修复；live writer 持锁、滞后 title/model、sideband 不变、接管修复及冲突拒绝均通过。macOS 已验证，Windows runner 尚未在本机执行。
+
+- **Hook 恢复快照的传输规模与历史顺序**：`fix-hook-resume-projection` 修复工具归属和尾部刷屏，但 `Timeline::completed_hook_projections` / `SessionActor::publish_completed_hook_projections` 仍在每次加载时复制并发送所有完成 Hook，成本随历史量增长；无工具锚点的事实也没有跨 Timeline/updates 的可证明 UI 全序。本次未测出性能故障，先保留为独立评估项。未来应先测量大历史加载的 CPU、字节数和延迟，再确定有界/增量查询及顺序契约，覆盖冷恢复、resident reconnect、多客户端、重复快照和 live overlap；不能把 UI transport 改成第二个 Hook 事实源。

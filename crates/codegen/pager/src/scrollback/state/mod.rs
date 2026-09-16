@@ -1017,8 +1017,8 @@ impl ScrollbackState {
         if let Some(entry) = self.entries.get_mut(&id) {
             let data = entry.hook_data.get_or_insert_with(Default::default);
             match phase {
-                super::blocks::tool::HookPhase::Pre => data.pre_hooks = hook_entries,
-                super::blocks::tool::HookPhase::Post => data.post_hooks = hook_entries,
+                super::blocks::tool::HookPhase::Pre => data.pre_hooks.extend(hook_entries),
+                super::blocks::tool::HookPhase::Post => data.post_hooks.extend(hook_entries),
             }
             entry.invalidate_cache();
             // Structural, not just a height change: hook chrome removes the
@@ -1047,6 +1047,41 @@ impl ScrollbackState {
             lifecycle: vec![(event_name, hook_entries)],
         });
         self.push(entry)
+    }
+
+    /// Accumulate unanchored snapshot facts in one collapsed, inspectable row.
+    /// These facts have no reliable position in the ACP transcript; retaining
+    /// their identities is preferable to pretending they just executed.
+    pub fn append_hook_history(
+        &mut self,
+        entry_id: Option<EntryId>,
+        label: String,
+        runs: Vec<super::blocks::tool::HookRunEntry>,
+        annotations: Vec<String>,
+    ) -> EntryId {
+        let id = entry_id
+            .filter(|id| self.entries.contains_key(id))
+            .unwrap_or_else(|| {
+                self.push_block(RenderBlock::ToolCall(ToolCallBlock::Lifecycle(
+                    super::blocks::tool::LifecycleEventBlock::new("Restored hooks"),
+                )))
+            });
+        let entry = self.entries.get_mut(&id).expect("history entry exists");
+        entry
+            .hook_data
+            .get_or_insert_with(Default::default)
+            .lifecycle
+            .push((label.clone(), runs));
+        if let RenderBlock::ToolCall(ToolCallBlock::Lifecycle(block)) = &mut entry.block {
+            block.annotations.extend(
+                annotations
+                    .into_iter()
+                    .map(|message| format!("{label}: {message}")),
+            );
+        }
+        entry.invalidate_cache();
+        self.mark_structurally_dirty(id);
+        id
     }
 
     /// The most recent turn-terminal marker ("Turn completed/cancelled/

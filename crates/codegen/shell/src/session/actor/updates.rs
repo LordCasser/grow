@@ -820,13 +820,17 @@ impl SessionActor {
     /// occurrences are queried again instead of copied to `updates.jsonl`.
     pub(super) async fn publish_completed_hook_projections(&self) {
         for projection in self.chat_state_handle.completed_hook_projections().await {
-            self.send_hook_execution(
+            if let Some(update) = self.project_hook_execution(
                 timeline_hook_event_name(projection.event),
                 None,
                 None,
                 &projection,
-            )
-            .await;
+                true,
+            ) {
+                // A snapshot is a read-only reconstruction. It must not close
+                // the rewind boundary or enter the durable notification log.
+                self.send_transient_passive_notification(update);
+            }
         }
     }
 
@@ -1046,7 +1050,7 @@ fn acking_persistence_channel() -> (
 
 #[cfg(test)]
 mod grow_event_id_stamping_tests {
-    use super::super::tests::support::create_test_actor;
+    use super::super::tests::support::{begin_test_causal_turn, create_test_actor};
     use super::*;
     #[tokio::test]
     async fn session_usage_projection_is_transient_and_matches_usage_query() {
@@ -1103,6 +1107,178 @@ mod grow_event_id_stamping_tests {
                             | PersistenceMsg::AppendUpdateDurablyAndAck { .. }
                     )
                 ));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn hook_snapshot_keeps_tool_identity_and_stays_passive() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+
+                // Build the same durable causal boundaries production uses before
+                // dispatching a tool hook. The hook facts are written directly so
+                // this test never executes a command or relies on a live hook RPC.
+                begin_test_causal_turn(&actor).await;
+                actor
+                    .events
+                    .tool_started(
+                        "run_terminal_command".into(),
+                        "call-snapshot-1".into(),
+                        Some(serde_json::json!({})),
+                    )
+                    .await
+                    .expect("the tool start must establish a valid HookCause::Tool");
+
+                let occurrence_id = "hook-snapshot-1".to_string();
+                let run_id = "run-snapshot-1".to_string();
+                let record = |event| {
+                    actor
+                        .chat_state_handle
+                        .record_timeline_event_durably(chat_state::TimelineEventKind::Hook(event))
+                };
+                record(chat_state::HookEvent::Triggered {
+                    occurrence_id: occurrence_id.clone(),
+                    event: chat_state::HookEventType::PreToolUse,
+                    gate: chat_state::HookGateKind::Tool,
+                    cause: chat_state::HookCause::Tool {
+                        call_id: "call-snapshot-1".into(),
+                    },
+                    config_generation: 1,
+                    handlers: vec![chat_state::HookHandlerPlan {
+                        index: 0,
+                        run_id: run_id.clone(),
+                        name: "handler:check".into(),
+                        provenance: chat_state::HookHandlerProvenance::ProjectFile,
+                        kind: chat_state::HookHandlerKind::Command,
+                        failure_policy: chat_state::HookFailurePolicy::Allow,
+                        action: chat_state::HookHandlerPlanAction::Execute,
+                    }],
+                })
+                .await
+                .expect("Triggered must be a legal tool Hook fact");
+                record(chat_state::HookEvent::RunStarted {
+                    occurrence_id: occurrence_id.clone(),
+                    run_id: run_id.clone(),
+                    handler_index: 0,
+                })
+                .await
+                .expect("RunStarted must follow the durable plan");
+                record(chat_state::HookEvent::RunFinished {
+                    occurrence_id: occurrence_id.clone(),
+                    run_id,
+                    handler_index: 0,
+                    elapsed_ms: 3,
+                    outcome: chat_state::HookRunOutcome::Blocked,
+                    control: chat_state::HookRunControl::Block {
+                        reason: "snapshot block".into(),
+                    },
+                })
+                .await
+                .expect("RunFinished must close the started handler");
+                record(chat_state::HookEvent::Completed {
+                    occurrence_id,
+                    decision: chat_state::HookAggregateDecision::Tool {
+                        decision: chat_state::HookGateDecision::Block {
+                            reason: "snapshot block".into(),
+                        },
+                    },
+                })
+                .await
+                .expect("Completed must close the durable Hook occurrence");
+
+                let event_count_before = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("Timeline query must succeed")
+                    .len();
+                while persistence_rx.try_recv().is_ok() {}
+                actor.state.lock().await.rewindable = true;
+
+                // Exercise the production load/resume projection twice. Each
+                // call must be a read-only, passive reconstruction of the same
+                // durable occurrence.
+                actor.publish_completed_hook_projections().await;
+                actor.publish_completed_hook_projections().await;
+
+                let mut snapshots = Vec::new();
+                while let Ok(message) = gateway_rx.try_recv() {
+                    let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
+                        continue;
+                    };
+                    let Ok(notification) = serde_json::from_str::<
+                        crate::extensions::notification::SessionNotification,
+                    >(args.request.params.get()) else {
+                        continue;
+                    };
+                    if matches!(
+                        &notification.update,
+                        GrowSessionUpdate::HookExecution { .. }
+                    ) {
+                        snapshots.push(notification);
+                    }
+                }
+                assert_eq!(
+                    snapshots.len(),
+                    2,
+                    "each production snapshot call emits once"
+                );
+                for notification in &snapshots {
+                    let GrowSessionUpdate::HookExecution {
+                        occurrence_id,
+                        tool_call_id,
+                        is_snapshot,
+                        annotations,
+                        ..
+                    } = &notification.update
+                    else {
+                        unreachable!("filtered HookExecution notification");
+                    };
+                    assert_eq!(occurrence_id, "hook-snapshot-1");
+                    assert_eq!(tool_call_id.as_deref(), Some("call-snapshot-1"));
+                    assert!(*is_snapshot);
+                    assert!(
+                        annotations
+                            .iter()
+                            .any(|annotation| annotation.contains("call-snapshot-1"))
+                    );
+                    let meta = notification
+                        .meta
+                        .as_ref()
+                        .and_then(serde_json::Value::as_object)
+                        .expect("payload _meta must be present");
+                    assert_eq!(meta.get("transient"), Some(&serde_json::json!(true)));
+                    assert!(
+                        meta.get("eventId").is_none(),
+                        "snapshot must not become a replay cursor"
+                    );
+                }
+                assert_eq!(
+                    &snapshots[0].update, &snapshots[1].update,
+                    "replayed projections retain one durable occurrence identity"
+                );
+                assert_eq!(
+                    actor
+                        .chat_state_handle
+                        .timeline_events()
+                        .await
+                        .expect("Timeline query must succeed")
+                        .len(),
+                    event_count_before,
+                    "snapshot projection must not append Timeline facts"
+                );
+                assert!(
+                    persistence_rx.try_recv().is_err(),
+                    "snapshot must not write a durable notification"
+                );
+                assert!(
+                    actor.state.lock().await.rewindable,
+                    "snapshot must not close the active rewind window"
+                );
             })
             .await;
     }

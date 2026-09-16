@@ -198,6 +198,8 @@ Pager读取recap扩展响应中的接纳结果；disabled、拒绝或无效响�
 
 light load 在 pinned storage 边界完成 Timeline、prompt blob 与 sideband 校验后，将同一份 Timeline 转移给 actor bootstrap；提交输入、控制回执、稳定 System 和用量校验仍在 actor 发布前完成。Workflow 恢复只保留所需 run 的生命周期快照，其修复持久化仍晚于 ChatState 验证。Grow-only UI 事实扫描跳过 ACP payload 的 typed decode，回放顺序、cursor 和最终 load 完成屏障保持。
 
+Hook 的事实来自 Timeline，`HookExecution` 只是 transient 展示投影。恢复补发显式标记 `is_snapshot`，经 passive 路径发送，不执行 handler、不再写持久事件、不关闭 rewind 窗口。Pager 保留 ACP tool id 到展示行的归属，完成工具和合并 Edit 都可接收后到的 Hook；相同 occurrence 只接纳一次。没有可靠工具行的历史生命周期、隐藏工具和说明集中在可展开的 `Restored hooks` 中，历史 stop 不进入当前回合的 stash。该记录没有声称恢复两个日志间的原始全序，见 [Hook 归属契约](../openspec/specs/client-surfaces/spec.md#requirement-hook-projections-preserve-tool-ownership-across-resume) 与 [快照只读契约](../openspec/specs/extension-runtime/spec.md#requirement-hook-history-publication-is-observational)。
+
 已知用量 Observation 在恢复时必须能够解码；同一 attempt/child 结算只接受完全相同的重复，冲突或损坏在 actor 发布前拒绝。未知诊断 Observation 保留扩展性。行为见 [用量恢复契约](../openspec/specs/session-timeline/spec.md#requirement-session-usage-is-a-durable-lifetime-projection)。
 
 异步 Context 请求随结果携带 session id、session binding epoch 与 modal nonce。任何状态更新前同时核对归属；同会话弹窗关闭重开也会使旧结果失效。nonce 为 0 的显式命令仍写入 scrollback，见 [Context 结果归属](../openspec/specs/client-surfaces/spec.md#requirement-context-info-results-are-bound-to-their-requesting-session-view)。

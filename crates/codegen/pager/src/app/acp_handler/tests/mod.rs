@@ -1789,3 +1789,4 @@ mod models;
 mod mcp;
 mod git_head;
 mod workflows;
+mod hook_resume;

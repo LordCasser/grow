@@ -227,6 +227,14 @@ pub struct AcpUpdateTracker {
     /// Tool calls in flight, keyed by ACP tool call ID string.
     /// Stores the base ToolCall for field merging with ToolCallUpdate.
     pending_tools: HashMap<String, PendingTool>,
+    /// Display ownership survives tool completion and turn boundaries so a
+    /// Timeline Hook snapshot can find the original (possibly merged) row.
+    /// A known hidden tool maps to None, distinct from a not-yet-seen ToolCall.
+    tool_entries: HashMap<String, Option<EntryId>>,
+    /// Direct Hook notifications can overtake buffered ACP ToolCall events.
+    pending_tool_hooks: HashMap<String, crate::scrollback::blocks::tool::ToolCallHookData>,
+    /// One expandable row for historical hooks without a visible tool owner.
+    hook_history_entry: Option<EntryId>,
     /// Hook Timeline occurrences already projected into this view. Live and
     /// reconnect snapshots share the immutable occurrence id, so a renderer
     /// never attaches or announces the same completed occurrence twice.
@@ -509,6 +517,81 @@ impl AcpUpdateTracker {
     pub fn claim_hook_occurrence(&mut self, occurrence_id: &str) -> bool {
         self.seen_hook_occurrences.insert(occurrence_id.to_owned())
     }
+
+    pub fn tool_entry_id(
+        &self,
+        tool_call_id: &str,
+        scrollback: &ScrollbackState,
+    ) -> Option<EntryId> {
+        self.tool_entries
+            .get(tool_call_id)
+            .copied()
+            .flatten()
+            .filter(|id| {
+                scrollback
+                    .get_by_id(*id)
+                    .is_some_and(|entry| matches!(entry.block, RenderBlock::ToolCall(_)))
+            })
+    }
+
+    pub fn attach_tool_hooks(
+        &mut self,
+        tool_call_id: &str,
+        phase: crate::scrollback::blocks::tool::HookPhase,
+        runs: Vec<crate::scrollback::blocks::tool::HookRunEntry>,
+        scrollback: &mut ScrollbackState,
+    ) {
+        use crate::scrollback::blocks::tool::HookPhase;
+        if let Some(id) = self.tool_entry_id(tool_call_id, scrollback) {
+            scrollback.attach_hooks(id, phase, runs);
+        } else if self.tool_entries.contains_key(tool_call_id) {
+            let event = match phase {
+                HookPhase::Pre => "pre_tool_use",
+                HookPhase::Post => "post_tool_use",
+            };
+            scrollback.push_lifecycle_hooks(format!("{event} · {tool_call_id}"), runs);
+        } else {
+            let pending = self
+                .pending_tool_hooks
+                .entry(tool_call_id.to_owned())
+                .or_default();
+            match phase {
+                HookPhase::Pre => pending.pre_hooks.extend(runs),
+                HookPhase::Post => pending.post_hooks.extend(runs),
+            }
+        }
+    }
+
+    fn register_tool_entry(
+        &mut self,
+        tool_call_id: String,
+        entry: Option<EntryId>,
+        scrollback: &mut ScrollbackState,
+    ) {
+        use crate::scrollback::blocks::tool::HookPhase;
+        self.tool_entries.insert(tool_call_id.clone(), entry);
+        if let Some(pending) = self.pending_tool_hooks.remove(&tool_call_id) {
+            for (phase, runs) in [
+                (HookPhase::Pre, pending.pre_hooks),
+                (HookPhase::Post, pending.post_hooks),
+            ] {
+                if !runs.is_empty() {
+                    self.attach_tool_hooks(&tool_call_id, phase, runs, scrollback);
+                }
+            }
+        }
+    }
+
+    pub fn restore_hook_history(
+        &mut self,
+        label: String,
+        runs: Vec<crate::scrollback::blocks::tool::HookRunEntry>,
+        annotations: Vec<String>,
+        scrollback: &mut ScrollbackState,
+    ) {
+        self.hook_history_entry =
+            Some(scrollback.append_hook_history(self.hook_history_entry, label, runs, annotations));
+    }
     /// Remove a tool from pending_tools (for demotion swap).
     ///
     /// Called when an execute block is being swapped to a BgTask block.
@@ -620,12 +703,14 @@ impl AcpUpdateTracker {
     /// can coalesce into an adjacent earlier Edit of the same file.
     fn finish_completed_tool(
         &mut self,
+        tool_call_id: String,
         block: RenderBlock,
         scrollback: &mut ScrollbackState,
         is_replay: bool,
     ) -> EntryId {
         let wants_hl = Self::edit_wants_file_hl(&block);
         let id = scrollback.push_block(block);
+        self.register_tool_entry(tool_call_id, Some(id), scrollback);
         if !is_replay && wants_hl {
             self.pending_edit_hl.push(id);
         }
@@ -756,6 +841,11 @@ impl AcpUpdateTracker {
         }
         scrollback.mark_structurally_dirty(survivor);
         scrollback.remove_entry(removed);
+        for entry_id in self.tool_entries.values_mut() {
+            if *entry_id == Some(removed) {
+                *entry_id = Some(survivor);
+            }
+        }
         self.pending_edit_hl.retain(|id| *id != removed);
         if !is_replay && !self.pending_edit_hl.contains(&survivor) {
             self.pending_edit_hl.push(survivor);
@@ -1075,6 +1165,12 @@ impl AcpUpdateTracker {
     /// Called when PromptResponse is received (turn complete).
     pub fn finish_turn(&mut self, scrollback: &mut ScrollbackState) {
         self.finish_thinking(scrollback);
+        // A turn fence leaves no future tool owner for unresolved live hooks.
+        // Preserve their evidence without guessing a nearby tool row.
+        let unresolved = self.pending_tool_hooks.keys().cloned().collect::<Vec<_>>();
+        for tool_call_id in unresolved {
+            self.register_tool_entry(tool_call_id, None, scrollback);
+        }
         if let Some(agent_id) = self.current_agent_msg.take() {
             scrollback.finish_running(agent_id);
         }
@@ -1257,14 +1353,18 @@ impl AcpUpdateTracker {
                     },
                 );
             }
+            let had_pending_hooks = self
+                .pending_tool_hooks
+                .contains_key(tc.tool_call_id.0.as_ref());
+            self.register_tool_entry(tc.tool_call_id.0.to_string(), None, scrollback);
             self.suppressed_tools.insert(tc.tool_call_id.0.to_string());
-            return false;
+            return had_pending_hooks;
         }
         let tc_id = tc.tool_call_id.0.to_string();
         if let Some(orphan) = self.orphan_updates.remove(&tc_id) {
             let merged = merge_tool_call_update(tc, orphan);
             let block = tool_call_to_block(&merged, self.session_cwd.as_deref());
-            self.finish_completed_tool(block, scrollback, is_replay);
+            self.finish_completed_tool(tc_id, block, scrollback, is_replay);
             return true;
         }
         let is_completed = matches!(
@@ -1273,10 +1373,11 @@ impl AcpUpdateTracker {
         );
         if is_completed {
             let block = tool_call_to_block(&tc, self.session_cwd.as_deref());
-            self.finish_completed_tool(block, scrollback, is_replay);
+            self.finish_completed_tool(tc_id, block, scrollback, is_replay);
         } else {
             let block = tool_call_to_block(&tc, self.session_cwd.as_deref());
             let id = scrollback.push_block(block);
+            self.register_tool_entry(tc_id.clone(), Some(id), scrollback);
             scrollback.set_last_running(true);
             let started_at = Some(std::time::Instant::now());
             self.pending_tools.insert(
@@ -1444,7 +1545,7 @@ impl AcpUpdateTracker {
                 scrollback.finish_running(entry_id);
                 self.try_coalesce_edit(entry_id, scrollback, is_replay);
             } else {
-                self.finish_completed_tool(block, scrollback, is_replay);
+                self.finish_completed_tool(tc_id, block, scrollback, is_replay);
             }
             true
         } else {
