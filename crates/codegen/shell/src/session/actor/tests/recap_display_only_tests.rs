@@ -747,6 +747,288 @@ async fn side_question_model_stays_with_prepared_endpoint_after_switch() {
     assert_sideband_prepared_route(true).await;
 }
 
+/// Exercise the real SideQuestion assembly and provider emission, without a
+/// standalone assistant summary between the old plan and completed tool work.
+#[tokio::test(flavor = "current_thread")]
+async fn side_question_preserves_completed_tool_evidence_on_all_backends() {
+    use sampling_types::{ApiBackend, AssistantItem, ContentPart, ToolCall};
+    use test_support::MockInferenceServer;
+
+    const IMAGE_DATA: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aO1cAAAAASUVORK5CYII=";
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for backend in [
+                ApiBackend::ChatCompletions,
+                ApiBackend::Responses,
+                ApiBackend::Messages,
+            ] {
+                // 0: no result yet, 1: partial parallel batch, 2: complete tail.
+                for completed in [2, 1, 0] {
+                    let (gateway_tx, _grx) = tokio::sync::mpsc::unbounded_channel();
+                    let (persistence_tx, _prx, _events) = sideband_persistence_harness();
+                    let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                    let server = MockInferenceServer::start().await.unwrap();
+                    server.set_response("Answer from frozen deployment evidence.");
+                    let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                    config.base_url = server.url();
+                    config.api_backend = backend.clone();
+                    actor.chat_state_handle.replace_sampling_route(config);
+
+                    let call = |id: &str| ToolCall {
+                        id: id.into(),
+                        name: "run_terminal_command".into(),
+                        arguments: r#"{"command":"verify deployment"}"#.into(),
+                    };
+                    let mut history = vec![
+                        ConversationItem::user("Deploy the Fedora fix."),
+                        ConversationItem::assistant("The deployment has not started yet."),
+                        ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
+                            "private deployment reasoning",
+                        )),
+                        ConversationItem::assistant_tool_calls(vec![call("deploy")]),
+                        ConversationItem::tool_result("deploy", "Patched module installed."),
+                        ConversationItem::Assistant(AssistantItem {
+                            content: "Deployment is complete; checking reboot artifacts.".into(),
+                            tool_calls: vec![call("verify_a"), call("verify_b")],
+                            model_id: None,
+                            model_fingerprint: None,
+                            reasoning_effort: None,
+                        }),
+                    ];
+                    if completed >= 1 {
+                        history.push(ConversationItem::tool_result_with_images(
+                            "verify_a",
+                            "Initrd rebuild verified.",
+                            vec![
+                                ContentPart::Text {
+                                    text: "Verification attachment retained.".into(),
+                                },
+                                ContentPart::Image {
+                                    url: format!("data:image/png;base64,{IMAGE_DATA}").into(),
+                                    description: None,
+                                },
+                            ],
+                        ));
+                    }
+                    if completed == 2 {
+                        history.push(ConversationItem::tool_result(
+                            "verify_b",
+                            "Backup verified.",
+                        ));
+                    }
+                    replace_test_surface(&actor.chat_state_handle, history).await;
+                    let before = actor.chat_state_handle.get_conversation().await;
+
+                    assert_eq!(
+                        actor
+                            .handle_side_question("Can I reboot now?")
+                            .await
+                            .unwrap(),
+                        "Answer from frozen deployment evidence."
+                    );
+                    assert_eq!(
+                        serde_json::to_value(actor.chat_state_handle.get_conversation().await)
+                            .unwrap(),
+                        serde_json::to_value(&before).unwrap(),
+                        "side question must not change the main Surface"
+                    );
+                    let requests = server.requests();
+                    let body = requests.last().unwrap().body.as_ref().unwrap();
+                    let wire = body.to_string();
+                    assert!(
+                        wire.contains("Patched module installed."),
+                        "{backend:?}: lost deployment evidence with {completed} verification results"
+                    );
+                    assert!(wire.contains("Deployment is complete; checking reboot artifacts."));
+                    assert!(!wire.contains("private deployment reasoning"));
+                    assert!(wire.contains("Can I reboot now?"));
+                    assert!(
+                        body.get("tools")
+                            .is_none_or(|v| v.as_array().is_some_and(Vec::is_empty))
+                    );
+                    assert!(body.get("tool_choice").is_none());
+                    let mut expected = vec!["deploy"];
+                    if completed >= 1 {
+                        expected.push("verify_a");
+                        assert!(wire.contains("Initrd rebuild verified."));
+                        assert!(wire.contains("Verification attachment retained."));
+                        assert!(wire.contains(IMAGE_DATA));
+                    }
+                    if completed == 2 {
+                        expected.push("verify_b");
+                        assert!(wire.contains("Backup verified."));
+                    }
+                    assert_side_question_wire_pairs(body, &expected);
+                }
+            }
+        })
+        .await;
+}
+
+fn assert_side_question_wire_pairs(body: &serde_json::Value, expected: &[&str]) {
+    fn collect(value: &serde_json::Value, calls: &mut Vec<String>, results: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Object(object) => {
+                let call = match value["type"].as_str() {
+                    Some("tool_use") => value["id"].as_str(),
+                    Some("function_call") => value["call_id"].as_str(),
+                    _ => None,
+                };
+                calls.extend(call.map(str::to_owned));
+                if let Some(tools) = value["tool_calls"].as_array() {
+                    calls.extend(
+                        tools
+                            .iter()
+                            .map(|call| call["id"].as_str().unwrap().to_owned()),
+                    );
+                }
+                let result = match value["type"].as_str() {
+                    Some("tool_result") => value["tool_use_id"].as_str(),
+                    Some("function_call_output") => value["call_id"].as_str(),
+                    _ if value["role"] == "tool" => value["tool_call_id"].as_str(),
+                    _ => None,
+                };
+                results.extend(result.map(str::to_owned));
+                for value in object.values() {
+                    collect(value, calls, results);
+                }
+            }
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    collect(value, calls, results);
+                }
+            }
+            _ => {}
+        }
+    }
+    let (mut calls, mut results) = (Vec::new(), Vec::new());
+    collect(body, &mut calls, &mut results);
+    calls.sort();
+    results.sort();
+    let mut expected = expected.to_vec();
+    expected.sort();
+    assert_eq!(calls, expected, "provider tool calls");
+    assert_eq!(results, expected, "provider tool results");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn side_question_retry_retains_frozen_tool_evidence() {
+    use sampling_types::{ApiBackend, ToolCall};
+    use test_support::{
+        InferenceEndpoint, InferenceRequestMatcher, MockInferenceServer, ScriptedResponse,
+    };
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway_tx, _grx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _prx, events) = sideband_persistence_harness();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let server = MockInferenceServer::start().await.unwrap();
+            server.set_response("Frozen side answer.");
+            let mut overload = server.expect_response_blocked(
+                "side question overload",
+                InferenceRequestMatcher::auxiliary(InferenceEndpoint::Messages),
+                ScriptedResponse::json(
+                    529,
+                    serde_json::json!({
+                        "type": "error",
+                        "error": {"type": "overloaded_error", "message": "Overloaded"}
+                    }),
+                ),
+            );
+            let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            config.base_url = server.url();
+            config.api_backend = ApiBackend::Messages;
+            actor.chat_state_handle.replace_sampling_route(config);
+            replace_test_surface(
+                &actor.chat_state_handle,
+                vec![
+                    ConversationItem::user("Deploy the fix."),
+                    ConversationItem::assistant_tool_calls(vec![ToolCall {
+                        id: "deploy".into(),
+                        name: "run_terminal_command".into(),
+                        arguments: "{}".into(),
+                    }]),
+                    ConversationItem::tool_result("deploy", "Frozen deployment result."),
+                ],
+            )
+            .await;
+            let frozen = actor
+                .chat_state_handle
+                .materialize_timeline(actor.session_info.id.to_string())
+                .await
+                .unwrap();
+
+            let (answer, advanced) =
+                tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    tokio::join!(
+                        actor.handle_side_question("Is deployment finished?"),
+                        async {
+                            overload.wait_blocked().await;
+                            actor
+                                .chat_state_handle
+                                .push_user_message_durably(ConversationItem::user(
+                                    "New main context after sideband freeze.",
+                                ))
+                                .await
+                                .unwrap();
+                            let advanced = actor.chat_state_handle.get_conversation().await;
+                            overload.release();
+                            advanced
+                        }
+                    )
+                })
+                .await
+                .expect("side question retry must complete");
+            assert_eq!(answer.unwrap(), "Frozen side answer.");
+            overload.assert_satisfied();
+            assert_eq!(
+                serde_json::to_value(actor.chat_state_handle.get_conversation().await).unwrap(),
+                serde_json::to_value(advanced).unwrap(),
+                "sideband must not write its question or answer into the main Surface"
+            );
+            let requests = server.requests();
+            let bodies: Vec<_> = requests
+                .iter()
+                .filter(|request| request.path.ends_with("/messages"))
+                .map(|request| request.body.as_ref().unwrap())
+                .collect();
+            assert_eq!(bodies.len(), 2);
+            assert_eq!(bodies[0], bodies[1], "retry must reuse the frozen request");
+            assert!(bodies[0].to_string().contains("Frozen deployment result."));
+            assert!(
+                !bodies[0]
+                    .to_string()
+                    .contains("New main context after sideband freeze.")
+            );
+            assert_side_question_wire_pairs(bodies[0], &["deploy"]);
+            assert!(bodies[0].get("tools").is_none());
+            assert!(bodies[0].get("tool_choice").is_none());
+            let events = events.lock();
+            let source_refs = events
+                .iter()
+                .find_map(|event| match &event.kind {
+                    chat_state::SidebandEventKind::Request(request) => Some(&request.source_refs),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(source_refs, &vec![frozen.input_ref]);
+            let attempts: Vec<_> = events
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    chat_state::SidebandEventKind::Attempt(attempt) => Some(attempt),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(attempts.len(), 2);
+            for attempt in attempts {
+                assert_eq!(&attempt.input_refs, source_refs);
+            }
+        })
+        .await;
+}
+
 async fn assert_sideband_prepared_route(side_question: bool) {
     use test_support::MockInferenceServer;
     tokio::task::LocalSet::new()

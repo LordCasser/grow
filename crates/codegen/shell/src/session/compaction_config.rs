@@ -53,10 +53,10 @@ impl CompactionLease {
 
 /// Auto-compaction is gated whenever `auto_compact_suppressed` is not [`SUPPRESS_NONE`].
 pub(crate) const SUPPRESS_NONE: u8 = 0;
-/// Resolvable failure (`other`): suppressed for the current turn, then
+/// Resolvable failure (`size` or `other`): suppressed for the current turn, then
 /// cleared at the next turn start so compaction self-heals once the cause clears.
 pub(crate) const SUPPRESS_TURN: u8 = 1;
-/// Fatal failure (size/schema) retrying can never fix: survives turn boundaries,
+/// Structural schema failure unchanged input cannot fix: survives turn boundaries,
 /// cleared only when the context budget changes — a successful compaction, a
 /// rewind (context shrank), or a model switch (a larger window may now fit).
 pub(crate) const SUPPRESS_STICKY: u8 = 2;
@@ -176,7 +176,7 @@ pub struct CompactionConfig {
     /// change; consumed before the next sample for model-switch compaction.
     /// `Cell` because `SessionActor` is `!Send`.
     pub previous_model: Cell<Option<PreviousModelInfo>>,
-    /// When `true`, feed the summarizer the verbatim conversation instead of the lossy rewrite (the retry loop may still fall back).
+    /// Keep verbatim source when true; otherwise use the evidence-preserving portable projection.
     pub verbatim_input: bool,
     /// Pre-prune gate (`compaction.pre_prune`): when `true`, `run_compact_only`
     /// first tries model-free tool-result pruning; a successful prune that

@@ -47,9 +47,8 @@ pre-compaction flush and **before** `run_compact_inner`. The ladder function is
    **Suppress gate**: account-state suppression (`SUPPRESS_UNTIL_SUCCESS`,
    `SUPPRESS_AUTH`) and per-turn suppression (`SUPPRESS_TURN`) block the
    ladder — account state is unrelated to model-free pruning, and per-turn
-   failures self-heal at the next turn start. `SUPPRESS_STICKY` (deterministic
-   size failures) and `SUPPRESS_NONE` let it through: pruning is exactly the
-   model-free remedy for the size failures STICKY marks, and a prune whose
+   failures self-heal at the next turn start. `SUPPRESS_STICKY` (structural schema failures) and `SUPPRESS_NONE` let it
+   through; size failures now use `SUPPRESS_TURN`. A prune whose
    strict gate passes clears the sticky bit (§5) — the existing
    "context-budget change" STICKY clear condition. A gate that does not pass
    never touches the suppress state.
@@ -184,8 +183,8 @@ every path (previously fork-scenario-only): after
 the Timeline range replacement, if `get_projected_tokens()` still exceeds
 the context window itself, the outcome is:
 
-- `SUPPRESS_STICKY` on `auto_compact_suppressed` (reusing the existing state;
-  no new suppress value),
+- `SUPPRESS_TURN` on `auto_compact_suppressed`, cleared by the next durable
+  user turn so a failed recovery does not permanently disable automatic compaction,
 - a `warn` log,
 - `Err(acp::Error)` carrying `data.compact_error =
   "compact_converged_over_window"` plus the typed
@@ -205,8 +204,8 @@ resample as before.
 
 Pre-prune runs **before** this path: when a prune alone resolves the pressure
 (§2/§5), the summary — and therefore this convergence check — is skipped, and
-the successful prune clears `SUPPRESS_STICKY` (§5). The convergence check's
-own sticky-suppress behavior is unchanged.
+the successful prune clears `SUPPRESS_STICKY` (§5). The convergence failure remains bounded within the current turn; see the
+[recovery contract](../../openspec/specs/context-compaction/spec.md#requirement-size-failures-do-not-permanently-disable-session-recovery).
 
 ## 7. P2 Not Done (Deferred)
 

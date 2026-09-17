@@ -14,17 +14,44 @@ use crate::session::helpers::CompactionStateContext;
 use crate::session::helpers::compaction_context::CompactionInputs;
 use crate::session::helpers::compaction_context::to_system_reminder;
 use crate::session::helpers::session_compact::{
-    CompactionOutcome, build_compaction_request_surface, is_context_length_error,
+    CompactionOutcome, build_compaction_request_surface, compaction_output_limit,
+    is_context_length_error,
 };
 use acp_transport::protocol as acp;
 use chat_state::compaction_utils::{
-    is_degenerate_summary, plan_compaction_range, prepare_conversation_for_verbatim_summarization,
+    fit_compaction_range_to_budget, is_degenerate_summary, plan_compaction_range,
+    prepare_conversation_for_verbatim_summarization,
 };
 use sampling_types::{ApiBackend, ConversationItem};
 use std::sync::Arc;
 
 const COMPACTION_RETAIN_PERCENT: u64 = 16;
 const MIN_COMPACTION_SOURCE_TOKENS: u64 = 5_000;
+
+/// Assemble only the selected source. Budget reduction changes the range,
+/// never drops execution evidence while still replacing the original target.
+fn compaction_summary_source(
+    surface: &[ConversationItem],
+    plan: &chat_state::compaction_utils::CompactionRangePlan,
+    system: &ConversationItem,
+    verbatim: bool,
+    strip_reasoning: bool,
+    recall_tool: Option<&str>,
+) -> Vec<ConversationItem> {
+    let mut source = vec![system.clone()];
+    source.extend(
+        crate::session::actor::context_recall::strip_context_recall_derivatives(
+            surface[plan.start_index..=plan.end_index].to_vec(),
+            None,
+            recall_tool,
+        ),
+    );
+    if verbatim {
+        prepare_conversation_for_verbatim_summarization(source, strip_reasoning)
+    } else {
+        sampling_types::project_portable_history(&source)
+    }
+}
 
 pub(crate) const COMPACTION_HISTORY_SCOPE: &str = "The summary above describes only the earlier \
     history that was compacted. Messages after this summary are newer and retain their original \
@@ -325,8 +352,8 @@ fn compact_converged_over_window_error(context_window: u64) -> acp::Error {
         "message": format!(
             "compaction converged but the conversation still exceeds the \
              {context_window}-token context window; rewind to an earlier \
-             point, switch to a model with a larger window, or start a new \
-             session"
+             point or switch to a model with a larger window. You can retry \
+             /compact in this session; the remaining history is retained"
         ),
         "error_kind": ::hooks::event::StopFailureKind::ContextWindowExceeded.as_str(),
         "compact_error": COMPACT_CONVERGED_OVER_WINDOW,
@@ -361,16 +388,16 @@ impl SuppressReason {
         }
     }
     /// Suppression scope for this reason:
-    /// - `size | schema` → [`SUPPRESS_STICKY`]: cleared only on a context-budget change.
+    /// - `schema` → [`SUPPRESS_STICKY`]: cleared only on a context-budget change.
     /// - `provider_limit` → [`SUPPRESS_UNTIL_SUCCESS`]: wait for a model `200`.
     /// - `auth` → [`SUPPRESS_AUTH`]: clear on login/token refresh (not 200 — over-window deadlock).
-    /// - `other` → [`SUPPRESS_TURN`]: optimistic per-turn retry.
+    /// - `size | other` → [`SUPPRESS_TURN`]: optimistic per-turn retry.
     fn suppress_state(self) -> u8 {
         match self {
-            SuppressReason::Size | SuppressReason::Schema => SUPPRESS_STICKY,
+            SuppressReason::Schema => SUPPRESS_STICKY,
             SuppressReason::ProviderLimit => SUPPRESS_UNTIL_SUCCESS,
             SuppressReason::Auth => SUPPRESS_AUTH,
-            SuppressReason::Other => SUPPRESS_TURN,
+            SuppressReason::Size | SuppressReason::Other => SUPPRESS_TURN,
         }
     }
 }
@@ -558,7 +585,7 @@ impl SessionActor {
         Err(crate::session::helpers::session_compact::CompactFailure::cancelled_error())
     }
     /// Suppress AUTO compaction after a deterministic failure. Scope depends on
-    /// the reason (see [`SuppressReason::suppress_state`]): size/schema sticky,
+    /// the reason (see [`SuppressReason::suppress_state`]): schema sticky, size/other clear next turn,
     /// provider limits until 200, auth until credentials recover, other clears next turn.
     /// Diagnostic + one notification per transition; manual `/compact` exempt.
     async fn suppress_auto_compaction(
@@ -597,10 +624,12 @@ impl SessionActor {
                 SuppressReason::Auth => {
                     "the model provider rejected its credentials. Check the provider authentication and retry."
                 }
-                SuppressReason::Size => "this conversation is too large to compact.",
+                SuppressReason::Size => {
+                    "compaction could not fit this context. Retry /compact or send another message to retry in this session; the history is retained."
+                }
                 SuppressReason::Schema => "this conversation can't be summarized.",
                 SuppressReason::Other => {
-                    "it'll retry on the next turn, or start a new session using /new."
+                    "compaction failed for this turn. Retry /compact or send another message to retry in this session; the history is retained."
                 }
             };
             self.send_grow_notification(
@@ -1021,8 +1050,7 @@ impl SessionActor {
             .iter()
             .find(|item| matches!(item, ConversationItem::System(_)))
             .cloned();
-        let source_surface = full_conversation.clone();
-        let conv_len = source_surface.len();
+        let mut source_surface = full_conversation.clone();
         let retain_tokens = context_window.saturating_mul(COMPACTION_RETAIN_PERCENT) / 100;
         let range_plan = plan_compaction_range(
             &source_surface,
@@ -1046,20 +1074,22 @@ impl SessionActor {
                 .await
                 .filter(|name| !name.is_empty() && !name.contains("by_kind"))
         };
-        let target_source = crate::session::actor::context_recall::strip_context_recall_derivatives(
-            source_surface[range_plan.start_index..=range_plan.end_index].to_vec(),
-            None,
-            context_recall_tool_name.as_deref(),
-        );
-        const SUMMARY_BUDGET_RESERVE_TOKENS: u64 = 32_768;
-        let verbatim_input_enabled = self.compaction.verbatim_input;
-        let mut summary_source = vec![system_message.clone().ok_or_else(|| {
+        let sampling_config = self.reconstruct_full_config().await;
+        let output_limit = compaction_output_limit(&sampling_config);
+        let input_budget = context_window
+            .saturating_sub(u64::from(output_limit))
+            .saturating_sub(context_window / 20);
+        let system_message = system_message.ok_or_else(|| {
             acp::Error::internal_error()
                 .data("Compaction failed: no system message in conversation history")
-        })?];
-        summary_source.extend(target_source);
+        })?;
+        let overhead = chat_state::estimate_conversation_tokens(&build_compaction_request_surface(
+            vec![system_message.clone()],
+            user_context.as_deref(),
+        ));
+        let source_budget = input_budget.saturating_sub(overhead);
         if self.model_image_input_is_unsupported(&model_id).await {
-            sampling_types::conversation::select_image_descriptions(&mut summary_source).map_err(
+            sampling_types::conversation::select_image_descriptions(&mut source_surface).map_err(
                 |error| {
                     acp::Error::internal_error().data(Self::image_projection_failure_message(
                         &chat_state::TimelineWriteError::ImageDescriptionUnavailable(error.into()),
@@ -1067,49 +1097,30 @@ impl SessionActor {
                 },
             )?;
         }
-
-        let simplified_messages = if verbatim_input_enabled {
-            chat_state::compaction_utils::prepare_conversation_for_verbatim_summarization(
-                summary_source.clone(),
-                summary_strips_reasoning,
-            )
-        } else {
-            chat_state::compaction_utils::prepare_conversation_for_summarization(
-                summary_source.clone(),
-            )
-        };
-        if conv_len == 0 {
-            tracing::error!(
-                session_id = %self.session_info.id.0,
-                "Compaction failed: conversation is empty (ChatStateActor may have died)"
-            );
-            return Err(
-                acp::Error::internal_error().data("Compaction failed: conversation is empty")
-            );
-        }
-        if simplified_messages.is_empty() {
-            tracing::error!(
-                session_id = %self.session_info.id.0,
-                conversation_len = conv_len,
-                "Compaction failed: simplified conversation is empty"
-            );
-            return Err(acp::Error::internal_error()
-                .data("Compaction failed: simplified conversation is empty"));
-        }
-        if !simplified_messages
+        let mut range_plan = fit_compaction_range_to_budget(
+            &source_surface, &materialized.surface_ids, &range_plan,
+            source_budget, MIN_COMPACTION_SOURCE_TOKENS,
+        ).ok_or_else(|| acp::Error::internal_error().data(
+            "compaction current message exceeds budget: no complete source range fits while preserving tool evidence",
+        ))?;
+        let verbatim_input_enabled = self.compaction.verbatim_input;
+        let simplified_messages = compaction_summary_source(
+            &source_surface,
+            &range_plan,
+            &system_message,
+            verbatim_input_enabled,
+            summary_strips_reasoning,
+            context_recall_tool_name.as_deref(),
+        );
+        let context_surface_ids = materialized
+            .surface_ids
             .iter()
-            .any(|msg| matches!(msg, ConversationItem::System(_)))
-        {
-            tracing::error!(
-                session_id = %self.session_info.id.0,
-                conversation_len = conv_len,
-                simplified_len = simplified_messages.len(),
-                "Compaction failed: no system message in simplified conversation"
-            );
-            return Err(acp::Error::internal_error()
-                .data("Compaction failed: no system message in simplified conversation"));
-        }
-        let sampling_config = self.reconstruct_full_config().await;
+            .zip(&full_conversation)
+            .filter_map(|(id, item)| matches!(item, ConversationItem::System(_)).then_some(*id))
+            .take(1)
+            .collect();
+        let source_revision = materialized.surface_revision;
+        let source_ids = materialized.surface_ids;
         let sampling_client = self.prepare_chat_completion(false).await?;
         tracing::info!(
             "Running compact with model '{}' (user model: '{}')",
@@ -1130,8 +1141,8 @@ impl SessionActor {
                 ]),
                 chat_state::SidebandBudgetPolicy {
                     max_attempts: max_retries.saturating_mul(3),
-                    max_input_tokens_per_attempt: context_window,
-                    max_output_tokens_per_attempt: None,
+                    max_input_tokens_per_attempt: input_budget,
+                    max_output_tokens_per_attempt: Some(u64::from(output_limit)),
                 },
                 chat_state::SidebandRoute {
                     model: sampling_config.model.clone(),
@@ -1164,26 +1175,6 @@ impl SessionActor {
                 let sideband_feedback = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
                 let mut last_error: Option<acp::Error> = None;
                 let mut last_failure_outcome = CompactionOutcome::Failed;
-                #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-                enum InputStage {
-                    Verbatim,
-                    VerbatimFitted,
-                    Simplified,
-                }
-                impl InputStage {
-                    fn as_str(self) -> &'static str {
-                        match self {
-                            Self::Verbatim => "verbatim",
-                            Self::VerbatimFitted => "verbatim_fitted",
-                            Self::Simplified => "simplified",
-                        }
-                    }
-                }
-                let mut input_stage = if verbatim_input_enabled {
-                    InputStage::Verbatim
-                } else {
-                    InputStage::Simplified
-                };
                 let estimated_input_tokens =
                     chat_state::estimate_conversation_tokens(&simplified_messages);
                 let auto_trigger =
@@ -1198,6 +1189,9 @@ impl SessionActor {
                         cancel.clone(),
                         compaction_sideband.clone(),
                         sideband_feedback.clone(),
+                        compaction_input_ref.clone(),
+                        source_revision,
+                        context_surface_ids,
                     );
                 let observer =
                     crate::session::helpers::summary_compaction::ShellSummaryObserver::new(
@@ -1218,6 +1212,7 @@ impl SessionActor {
                 let mut input_overflow_rejections: u32 = 0;
                 let mut compact_summary: Option<String> = None;
                 while compact_summary.is_none() {
+                    sampler.select_range(&range_plan.target.shadowed);
                     let summary_result = compaction::generate_summary(
                         &sampler,
                         &request_turns,
@@ -1295,58 +1290,40 @@ impl SessionActor {
                                 break;
                             }
                             if context_overflow {
-                                let next_stage = match input_stage {
-                                    InputStage::Verbatim => Some(InputStage::VerbatimFitted),
-                                    InputStage::VerbatimFitted => Some(InputStage::Simplified),
-                                    InputStage::Simplified => None,
-                                };
-                                if let Some(stage) = next_stage {
+                                let next_plan = (input_overflow_rejections < 2)
+                                    .then(|| {
+                                        fit_compaction_range_to_budget(
+                                            &source_surface,
+                                            &source_ids,
+                                            &range_plan,
+                                            range_plan.source_tokens.saturating_mul(7) / 10,
+                                            MIN_COMPACTION_SOURCE_TOKENS,
+                                        )
+                                    })
+                                    .flatten();
+                                if let Some(next_plan) = next_plan {
                                     input_overflow_rejections += 1;
                                     ::diagnostics::session_ctx::log_event(
                                         ::diagnostics::events::CompactionRetryDegraded {
                                             trigger,
                                             reason: "input_overflow",
-                                            from_stage: Some(input_stage.as_str()),
-                                            to_stage: Some(stage.as_str()),
+                                            from_stage: Some("bounded_range"),
+                                            to_stage: Some("smaller_range"),
                                             summary_chars: None,
                                             attempt: observer.attempt_count(),
                                             context_window,
                                             compaction_id: compaction.compaction_id.clone(),
                                         },
                                     );
-                                    tracing::warn!(
-                                        session_id = %session.session_info.id.0,
-                                        ?stage,
-                                        error = %message,
-                                        "Compaction input overflowed deterministically; stepping down the input ladder to avoid an incompactable state"
-                                    );
-                                    request_turns = match stage {
-                                        InputStage::VerbatimFitted => {
-                                            let budget = context_window
-                                                .saturating_sub(SUMMARY_BUDGET_RESERVE_TOKENS);
-                                            let verbatim = chat_state::compaction_utils::prepare_conversation_for_verbatim_summarization(
-                                        summary_source.clone(),
+                                    range_plan = next_plan;
+                                    request_turns = compaction_summary_source(
+                                        &source_surface,
+                                        &range_plan,
+                                        &system_message,
+                                        verbatim_input_enabled,
                                         summary_strips_reasoning,
+                                        context_recall_tool_name.as_deref(),
                                     );
-                                            chat_state::compaction_utils::fit_conversation_to_budget(
-                                                verbatim, budget,
-                                            )
-                                        }
-                                        InputStage::Simplified => {
-                                            let simplified_budget =
-                                                context_window.saturating_mul(7) / 10;
-                                            chat_state::compaction_utils::fit_conversation_to_budget(
-                                        chat_state::compaction_utils::prepare_conversation_for_summarization(
-                                            summary_source.clone(),
-                                        ),
-                                        simplified_budget,
-                                    )
-                                        }
-                                        InputStage::Verbatim => {
-                                            unreachable!("ladder only steps forward")
-                                        }
-                                    };
-                                    input_stage = stage;
                                     continue;
                                 }
                                 last_failure_outcome = CompactionOutcome::Deterministic;
@@ -1855,7 +1832,7 @@ impl SessionActor {
             .store(SUPPRESS_NONE, std::sync::atomic::Ordering::Relaxed);
         // Unified convergence check (all paths): if the compacted history
         // still exceeds the context window itself, the next sample would
-        // overflow again. Fail-safe: sticky-suppress AUTO and report
+        // overflow again. Fail-safe: suppress AUTO for this turn and report
         // `CompactConvergedOverWindow` so the overflow branch fails the turn
         // instead of resampling in a loop. The fork threshold check above is
         // untouched (it gates the *trigger* dimension, this gates the
@@ -1864,12 +1841,12 @@ impl SessionActor {
         if converged_over_window {
             self.compaction
                 .auto_compact_suppressed
-                .store(SUPPRESS_STICKY, std::sync::atomic::Ordering::Relaxed);
+                .store(SUPPRESS_TURN, std::sync::atomic::Ordering::Relaxed);
             tracing::warn!(
                 session_id = %self.session_info.id.0,
                 post_replace_tokens,
                 context_window,
-                "compaction converged but the conversation still exceeds the context window; suppressing AUTO and failing the turn (no re-loop)"
+                "compaction converged but the conversation still exceeds the context window; suppressing AUTO for this turn and failing the turn (no re-loop)"
             );
             tracing::Span::current().record("detail", "converged_over_window");
         }
@@ -2600,9 +2577,9 @@ impl SessionActor {
     /// [`SUPPRESS_AUTH`]) and per-turn suppression ([`SUPPRESS_TURN`]) block
     /// the ladder — account state is unrelated to model-free pruning, and
     /// per-turn failures self-heal at the next turn start. [`SUPPRESS_STICKY`]
-    /// (deterministic size failures) is allowed through: pruning is exactly
-    /// the model-free remedy, and a prune whose strict gate passes clears the
-    /// sticky bit (the existing "context-budget change" clear condition).
+    /// (structural schema failures) still permits model-free pruning; a prune
+    /// whose strict gate passes clears it through the existing context-change
+    /// recovery path. Size failures now use [`SUPPRESS_TURN`].
     ///
     /// Pruning is an **optimization**, not a correctness requirement: every
     /// failure mode here fails open to the existing summary path and never
@@ -2632,12 +2609,9 @@ impl SessionActor {
         }
         // Suppress gate: account-state suppression (provider quota / auth) is
         // unrelated to model-free pruning, and per-turn suppression self-heals
-        // at the next turn start — both keep blocking. STICKY marks
-        // deterministic size failures; pruning is exactly the model-free
-        // remedy for those, so it is allowed through, and a prune whose strict
-        // gate passes clears the sticky bit below (a context-budget change is
-        // the existing STICKY clear condition). Unknown future suppression
-        // classes fail closed.
+        // at the next turn start — both keep blocking. Structural STICKY
+        // failures still permit the existing model-free context-change
+        // recovery path. Unknown future suppression classes fail closed.
         match self
             .compaction
             .auto_compact_suppressed

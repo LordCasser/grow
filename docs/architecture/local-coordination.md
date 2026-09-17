@@ -18,6 +18,10 @@
 4. 复用 `InfoRequest` sideband，只调用一次模型，不提供工具，不修改主 Surface。主 turn 忙不是拒绝理由。
 5. 同来源、同 ID、同 payload 复用运行或结果；payload 不同返回 `conflict`。IPC 断线重连到原 incarnation，发现目标更换进程身份则返回 `target_restarted`，不自动重新执行。
 
+询问从 ChatState 一次物化 Surface 与 input_ref，再复用 `sampling-types::project_portable_history` 生成独立请求。已配对的工具调用、参数、结果与附件都保留，包括连续工具尾部；未返回的调用不生成悬空协议，同批已完成的结果仍保留。不要按消息类型循环删除尾部，那会让回答丢掉已完成的 `ask_parent` 等执行事实。快照之后的进展不在本次回答中，未出现的记录也不能当作“从未发生”的证明。行为见 [询问工具证据契约](../../openspec/specs/local-coordination/spec.md#requirement-inquiry-snapshots-retain-completed-tool-evidence)。
+
+这与 `/btw`、recap 共用既有协议投影规则；来源范围和预算仍由各消费者负责，Sideband 不统一改写输入。自动工具权限判断通过共享 permission handle 进入 `PermissionJudgment`，使用专门的授权策略与真实用户输入证据，不经过 `ask_parent`。询问界面显示 `Answered` 表示独立回答已完成，不表示目标主对话收到新消息或授予了工具权限。
+
 来源清单短暂读失败不会立即取消任务，但也不能续租：只沿用最后一次验证过的 `expiresAt`。明确 Session 关闭、租约到期或取消仍终止询问。
 
 ## 工具和状态

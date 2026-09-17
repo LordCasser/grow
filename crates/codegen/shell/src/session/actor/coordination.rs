@@ -118,18 +118,9 @@ impl SessionActor {
             return failed(inquiry, "target session context is unavailable");
         };
         let input_ref = materialized.input_ref;
-        let mut items = chat_state::compaction_utils::strip_reasoning_blocks(materialized.surface);
-        while let Some(last) = items.last() {
-            match last {
-                ConversationItem::Assistant(assistant) if !assistant.tool_calls.is_empty() => {
-                    items.pop();
-                }
-                ConversationItem::ToolResult(_) => {
-                    items.pop();
-                }
-                _ => break,
-            }
-        }
+        // Independent inquiries need portable, paired tool history. Trimming
+        // by tail item type also erases completed calls and their real answers.
+        let mut items = sampling_types::project_portable_history(&materialized.surface);
 
         let delegated = inquiry.authority == crate::coordination::InquiryAuthority::Delegation;
         let same_cwd = match (
@@ -819,6 +810,156 @@ mod tests {
                 );
             })
             .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn inquiry_preserves_completed_tool_evidence_on_all_backends() {
+        use crate::coordination::{InquiryAuthority, InquiryDirection, InquiryStatus};
+        use crate::session::actor::tests::support::{create_test_actor, replace_test_surface};
+        use sampling_types::{ApiBackend, AssistantItem, ContentPart, ToolCall};
+        use test_support::MockInferenceServer;
+
+        const IMAGE: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aO1cAAAAASUVORK5CYII=";
+
+        tokio::task::LocalSet::new().run_until(async {
+            for backend in [ApiBackend::ChatCompletions, ApiBackend::Responses, ApiBackend::Messages] {
+                for direction in [InquiryDirection::ParentToChild, InquiryDirection::ChildToParent, InquiryDirection::Peer] {
+                    // Complete, partially completed, and entirely pending tail batches.
+                    for completed in [2, 1, 0] {
+                        let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                        let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                        tokio::task::spawn_local(async move {
+                            while let Some(message) = persistence_rx.recv().await {
+                                if let PersistenceMsg::SidebandDurablyAndAck { respond_to, .. } = message {
+                                    let _ = respond_to.send(Ok(()));
+                                }
+                            }
+                        });
+                        let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                        let server = MockInferenceServer::start().await.unwrap();
+                        server.set_response("Answer from the recorded inquiry.");
+                        let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                        config.base_url = server.url();
+                        config.api_backend = backend.clone();
+                        actor.chat_state_handle.replace_sampling_route(config);
+                        let call = |id: &str| ToolCall {
+                            id: id.into(),
+                            name: "read_file".into(),
+                            arguments: r#"{"path":"src/reader.rs"}"#.into(),
+                        };
+                        let mut history = vec![
+                            ConversationItem::user("Implement the delegated reader."),
+                            ConversationItem::assistant("I will confirm the interface."),
+                            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item("private inquiry reasoning")),
+                            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                                id: "parent_question".into(),
+                                name: "ask_parent".into(),
+                                arguments: r#"{"question":"Should the reader expose CpEntryFacts?"}"#.into(),
+                            }]),
+                            ConversationItem::tool_result("parent_question", r#"{"status":"answered","answer":"Use CpEntryFacts by value."}"#),
+                            ConversationItem::Assistant(AssistantItem {
+                                content: "The parent answered; inspecting the implementation.".into(),
+                                tool_calls: vec![call("read_a"), call("read_b")],
+                                model_id: None,
+                                model_fingerprint: None,
+                                reasoning_effort: None,
+                            }),
+                        ];
+                        if completed >= 1 {
+                            history.push(ConversationItem::tool_result_with_images(
+                                "read_a", "Reader implementation inspected.",
+                                vec![ContentPart::Text { text: "Reader attachment retained.".into() },
+                                    ContentPart::Image { url: format!("data:image/png;base64,{IMAGE}").into(), description: None }],
+                            ));
+                        }
+                        if completed == 2 {
+                            history.push(ConversationItem::tool_result("read_b", "Reader caller inspected."));
+                        }
+                        replace_test_surface(&actor.chat_state_handle, history).await;
+                        let before = serde_json::to_value(actor.chat_state_handle.get_conversation().await).unwrap();
+                        let (mut question, _) = inquiry(1);
+                        question.authority = if direction == InquiryDirection::Peer { InquiryAuthority::Peer } else { InquiryAuthority::Delegation };
+                        question.direction = direction;
+                        question.source_cwd = actor.session_info.cwd.clone();
+                        question.target_session_id = actor.session_info.id.to_string();
+                        question.question = "What did you ask the parent, and was it answered?".into();
+                        let outcome = tokio::time::timeout(Duration::from_secs(5), actor.handle_coordination_inquiry(&question)).await.unwrap();
+                        assert_eq!(outcome.status, InquiryStatus::Answered, "{outcome:?}");
+                        assert_eq!(serde_json::to_value(actor.chat_state_handle.get_conversation().await).unwrap(), before);
+                        let requests = server.requests();
+                        assert_eq!(requests.len(), 1, "inquiries allow one provider attempt");
+                        let body = requests[0].body.as_ref().unwrap();
+                        let wire = body.to_string();
+                        assert!(wire.contains("Should the reader expose CpEntryFacts?"), "{backend:?}/{direction:?}/{completed}: lost completed ask_parent arguments");
+                        assert!(wire.contains("Use CpEntryFacts by value."));
+                        assert!(wire.contains("The parent answered; inspecting the implementation."));
+                        assert!(wire.contains(&question.question));
+                        assert!(!wire.contains("private inquiry reasoning"));
+                        assert!(body.get("tools").is_none_or(|tools| tools.as_array().is_some_and(Vec::is_empty)));
+                        assert!(body.get("tool_choice").is_none());
+                        let mut expected = vec!["parent_question"];
+                        if completed >= 1 {
+                            expected.push("read_a");
+                            assert!(wire.contains("src/reader.rs"));
+                            assert!(wire.contains("Reader implementation inspected."));
+                            assert!(wire.contains("Reader attachment retained."));
+                            assert!(wire.contains(IMAGE));
+                        }
+                        if completed == 2 {
+                            expected.push("read_b");
+                            assert!(wire.contains("Reader caller inspected."));
+                        }
+                        assert_inquiry_wire_pairs(body, &expected);
+                    }
+                }
+            }
+        }).await;
+    }
+
+    fn assert_inquiry_wire_pairs(body: &serde_json::Value, expected: &[&str]) {
+        fn collect(value: &serde_json::Value, calls: &mut Vec<String>, results: &mut Vec<String>) {
+            match value {
+                serde_json::Value::Object(object) => {
+                    let call = match value["type"].as_str() {
+                        Some("tool_use") => value["id"].as_str(),
+                        Some("function_call") => value["call_id"].as_str(),
+                        _ => None,
+                    };
+                    calls.extend(call.map(str::to_owned));
+                    if let Some(tools) = value["tool_calls"].as_array() {
+                        calls.extend(
+                            tools
+                                .iter()
+                                .map(|call| call["id"].as_str().unwrap().to_owned()),
+                        );
+                    }
+                    let result = match value["type"].as_str() {
+                        Some("tool_result") => value["tool_use_id"].as_str(),
+                        Some("function_call_output") => value["call_id"].as_str(),
+                        _ if value["role"] == "tool" => value["tool_call_id"].as_str(),
+                        _ => None,
+                    };
+                    results.extend(result.map(str::to_owned));
+                    for value in object.values() {
+                        collect(value, calls, results);
+                    }
+                }
+                serde_json::Value::Array(values) => {
+                    for value in values {
+                        collect(value, calls, results);
+                    }
+                }
+                _ => {}
+            }
+        }
+        let (mut calls, mut results) = (Vec::new(), Vec::new());
+        collect(body, &mut calls, &mut results);
+        calls.sort();
+        results.sort();
+        let mut expected = expected.to_vec();
+        expected.sort();
+        assert_eq!(calls, expected, "provider tool calls");
+        assert_eq!(results, expected, "provider tool results");
     }
 
     #[tokio::test(flavor = "current_thread")]
