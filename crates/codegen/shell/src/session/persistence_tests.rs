@@ -364,7 +364,7 @@ async fn durable_append_drains_pending_update_in_fifo_order() {
 }
 
 #[tokio::test]
-async fn replay_keeps_only_the_accepted_retry() {
+async fn accepted_lifecycle_without_projection_discards_all_candidates() {
     use crate::extensions::notification::SamplingAttemptState;
 
     let dir = tempfile::tempdir().unwrap();
@@ -434,7 +434,10 @@ async fn replay_keeps_only_the_accepted_retry() {
         .unwrap();
     actor.stop_gracefully().await;
 
-    assert_eq!(replay_texts(dir.path(), info.id.0.as_ref()), ["accepted"]);
+    assert_eq!(
+        replay_texts(dir.path(), info.id.0.as_ref()),
+        Vec::<String>::new()
+    );
 }
 
 async fn commit_projection_request(
@@ -790,7 +793,7 @@ async fn untagged_interleaving_survives_channel_close() {
 }
 
 #[tokio::test]
-async fn accepted_sampling_and_untagged_interleaving_keep_event_order() {
+async fn accepted_lifecycle_without_projection_preserves_untagged_event_order() {
     use crate::extensions::notification::SamplingAttemptState;
 
     let dir = tempfile::tempdir().unwrap();
@@ -869,11 +872,8 @@ async fn accepted_sampling_and_untagged_interleaving_keep_event_order() {
                 .and_then(serde_json::Value::as_str)
         })
         .collect::<Vec<_>>();
-    assert_eq!(event_ids, ["event-1", "event-2", "event-3"]);
-    assert_eq!(
-        replay_texts(dir.path(), info.id.0.as_ref()),
-        ["first", "untagged", "second"]
-    );
+    assert_eq!(event_ids, ["event-2"]);
+    assert_eq!(replay_texts(dir.path(), info.id.0.as_ref()), ["untagged"]);
 }
 
 /// A `CurrentModel` mutation with omitted metadata replaces only the canonical

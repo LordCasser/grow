@@ -2038,19 +2038,9 @@ impl SessionPersistence {
                     self.terminal_sampling_attempt = Some((key, SamplingAttemptState::Discarded));
                 }
             }
+            // Public Accepted is notification-only; the projection commit owns durable closure.
             SamplingAttemptState::Accepted => {
                 self.flush_pending().await;
-                if self.sampling_attempt.as_ref() != Some(&key)
-                    || self.sampling_attempt_rejected(&key)
-                {
-                    return;
-                }
-                self.flush_sampling_candidate(&key, true).await;
-                self.terminal_sampling_attempt =
-                    Some((key.clone(), SamplingAttemptState::Accepted));
-                if self.sampling_attempt.as_ref() == Some(&key) {
-                    self.sampling_attempt = None;
-                }
             }
         }
     }
