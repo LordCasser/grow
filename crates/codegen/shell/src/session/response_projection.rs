@@ -352,6 +352,55 @@ mod tests {
     }
 
     #[test]
+    fn fallback_projection_emits_assistant_text_without_provider_chunks() {
+        let response = admitted(
+            vec![sampling_types::ConversationItem::assistant("canonical")],
+            0,
+        );
+        let projection =
+            project_admitted_response(&SessionId::new("session-1"), &response).unwrap();
+
+        assert_eq!(projection.disposition, ResponseReplayDisposition::Admitted);
+        assert_eq!(projection.updates.len(), 1);
+        let acp::SessionUpdate::AgentMessageChunk(chunk) = &projection.updates[0].update else {
+            panic!("expected canonical assistant message projection");
+        };
+        let acp::ContentBlock::Text(text) = &chunk.content else {
+            panic!("expected canonical assistant text projection");
+        };
+        assert_eq!(text.text, "canonical");
+    }
+
+    #[test]
+    fn tool_call_identity_and_order_are_part_of_projection_digest() {
+        let call = |id: &str, name: &str| sampling_types::ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: "{}".into(),
+        };
+        let projection = |calls| {
+            project_admitted_response(
+                &SessionId::new("session-1"),
+                &admitted(
+                    vec![sampling_types::ConversationItem::assistant_tool_calls(
+                        calls,
+                    )],
+                    0,
+                ),
+            )
+            .unwrap()
+        };
+        let first = projection(vec![call("call-1", "one"), call("call-2", "two")]);
+        let same = projection(vec![call("call-1", "one"), call("call-2", "two")]);
+        let reordered = projection(vec![call("call-2", "two"), call("call-1", "one")]);
+        let renamed = projection(vec![call("call-x", "one"), call("call-2", "two")]);
+
+        assert_eq!(first.digest, same.digest);
+        assert_ne!(first.digest, reordered.digest);
+        assert_ne!(first.digest, renamed.digest);
+    }
+
+    #[test]
     fn healthy_projection_is_deterministic_and_has_no_live_event_ids() {
         let response = admitted(
             vec![

@@ -2168,6 +2168,17 @@ impl SessionPersistence {
             .await
     }
 
+    fn retryable_projection_error(error: &crate::session::storage::AppendUpdateError) -> bool {
+        let error = match error {
+            crate::session::storage::AppendUpdateError::NotCommitted(error)
+            | crate::session::storage::AppendUpdateError::Committed(error) => error,
+        };
+        !matches!(
+            error.kind(),
+            io::ErrorKind::InvalidData | io::ErrorKind::Unsupported
+        )
+    }
+
     async fn commit_response_projection(
         &mut self,
         projection: crate::session::response_projection::ResponseReplayProjection,
@@ -2177,18 +2188,62 @@ impl SessionPersistence {
             request_id: projection.request_id.clone(),
             attempt: projection.attempt,
         };
-        if let Some((pending_key, notifications)) = self.pending_sampling.as_ref()
-            && pending_key == &key
-        {
-            for entry in notifications.iter().filter(|entry| !entry.candidate) {
+        let pending = self
+            .pending_sampling
+            .as_ref()
+            .filter(|(pending_key, _)| pending_key == &key)
+            .map(|(_, notifications)| {
+                notifications
+                    .iter()
+                    .map(|entry| (entry.notification.clone(), entry.candidate))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let first_candidate = pending.iter().position(|(_, candidate)| *candidate);
+
+        for attempt in 0..2 {
+            let result = async {
+                match first_candidate {
+                    Some(first_candidate) => {
+                        for (notification, candidate) in pending.iter().take(first_candidate) {
+                            if !candidate {
+                                self.storage
+                                    .append_acp_event_exact(&self.info, notification)
+                                    .await?;
+                            }
+                        }
+                    }
+                    None => {
+                        for (notification, candidate) in &pending {
+                            if !candidate {
+                                self.storage
+                                    .append_acp_event_exact(&self.info, notification)
+                                    .await?;
+                            }
+                        }
+                    }
+                }
                 self.storage
-                    .append_acp_event_exact(&self.info, &entry.notification)
+                    .commit_response_projection(&self.info, &projection)
                     .await?;
+                if let Some(first_candidate) = first_candidate {
+                    for (notification, candidate) in pending.iter().skip(first_candidate + 1) {
+                        if !candidate {
+                            self.storage
+                                .append_acp_event_exact(&self.info, notification)
+                                .await?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            .await;
+            match result {
+                Ok(()) => break,
+                Err(error) if attempt == 0 && Self::retryable_projection_error(&error) => continue,
+                Err(error) => return Err(error),
             }
         }
-        self.storage
-            .commit_response_projection(&self.info, &projection)
-            .await?;
         if self
             .pending_sampling
             .as_ref()
