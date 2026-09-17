@@ -272,6 +272,19 @@ async fn actor_with_sampler_delivery(
     mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
     mpsc::UnboundedReceiver<SessionEvent>,
 ) {
+    actor_with_sampler_delivery_with_projection_error(server, api_backend, delivery, None).await
+}
+
+async fn actor_with_sampler_delivery_with_projection_error(
+    server: &MockInferenceServer,
+    api_backend: sampling_types::ApiBackend,
+    delivery: sampler::OutputDelivery,
+    projection_error: Option<crate::session::storage::AppendUpdateError>,
+) -> (
+    std::sync::Arc<SessionActor>,
+    mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+    mpsc::UnboundedReceiver<SessionEvent>,
+) {
     let (gateway_tx, gateway_rx) = mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
     let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
     tokio::task::spawn_local(async move {
@@ -281,8 +294,32 @@ async fn actor_with_sampler_delivery(
             }
         }
     });
-    let (mut actor, events) =
+    let (mut actor, mut raw_events) =
         create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+    let (observer_tx, observer_rx) = mpsc::unbounded_channel::<SessionEvent>();
+    tokio::task::spawn_local(async move {
+        let mut projection_error = projection_error;
+        while let Some(event) = raw_events.recv().await {
+            match event {
+                SessionEvent::ResponseProjection { respond_to, .. } => {
+                    let result = projection_error
+                        .take()
+                        .map_or(Ok(()), Err);
+                    let _ = respond_to.send(result);
+                }
+                SessionEvent::FlushReplay { respond_to } => {
+                    if let Some(respond_to) = respond_to {
+                        let _ = respond_to.send(());
+                    }
+                }
+                event => {
+                    if observer_tx.send(event).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
     actor.tool_context.sampling_output_delivery = delivery;
     // Point the chat-state sampling config at the mock server so BOTH the
     // main turn requests and the compaction client (which rebuilds its
@@ -350,7 +387,7 @@ async fn actor_with_sampler_delivery(
             drainer.handle_sampling_event(event).await;
         }
     });
-    (actor, gateway_rx, events)
+    (actor, gateway_rx, observer_rx)
 }
 
 /// Drive one user turn through the real loop. Bounded by a generous timeout
@@ -832,6 +869,90 @@ fn retractable_stream_retry_accepts_only_the_second_candidate_and_bills_both() {
                 (2, SamplingAttemptState::Started), (2, SamplingAttemptState::Accepted),
             ]);
             assert!(boundaries.iter().all(|(id, _, _)| id == &boundaries[0].0));
+        }));
+    });
+}
+
+#[test]
+fn response_projection_fatal_boundary_blocks_tool_dispatch_and_recovery() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            use crate::extensions::notification::{SamplingAttemptState, SessionUpdate as GrowUpdate};
+            use crate::session::replay_events::SessionNotification;
+
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response(
+                "/v1/messages",
+                messages_turn(
+                    &[tool_use_block(
+                        "projection-boundary-call",
+                        "todo_write",
+                        r#"{"todos":[{"id":"projection-boundary-todo","content":"must not execute","status":"completed"}]}"#,
+                    )],
+                    "tool_use",
+                ),
+            );
+            // A second response makes any recovery or continuation request
+            // observable rather than allowing an accidental extra request.
+            server.enqueue_response(
+                "/v1/messages",
+                messages_turn(&[text_block("illegal continuation")], END_TURN),
+            );
+
+            let (actor, _, mut events) = actor_with_sampler_delivery_with_projection_error(
+                &server,
+                sampling_types::ApiBackend::Messages,
+                sampler::OutputDelivery::Irreversible,
+                Some(crate::session::storage::AppendUpdateError::NotCommitted(
+                    std::io::Error::other("injected response projection failure"),
+                )),
+            )
+            .await;
+            *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
+
+            let error = run_user_turn(&actor, "projection-boundary")
+                .await
+                .expect_err("projection failure must fail the turn");
+            assert!(crate::session::commands::is_fatal_turn_boundary_error(&error));
+            assert_eq!(
+                error
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("phase"))
+                    .and_then(serde_json::Value::as_str),
+                Some("response-projection")
+            );
+            assert_eq!(server.requests().len(), 1, "fatal projection boundary forbids recovery");
+
+            let mut attempts = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                if let SessionEvent::Notification(SessionNotification::Grow(notification)) = event
+                    && let GrowUpdate::SamplingAttempt { state, .. } = notification.update
+                {
+                    attempts.push(state);
+                }
+            }
+            assert!(!attempts.contains(&SamplingAttemptState::Accepted));
+
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            assert!(conversation.iter().any(|item| matches!(
+                item,
+                ConversationItem::Assistant(assistant)
+                    if assistant.tool_calls.iter().any(|call| call.id.as_ref() == "projection-boundary-call")
+            )));
+            assert!(!conversation
+                .iter()
+                .any(|item| matches!(item, ConversationItem::ToolResult(_))));
+
+            let timeline = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert!(!timeline.iter().any(|event| matches!(
+                &event.kind,
+                chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Completed { .. })
+            )));
         }));
     });
 }
