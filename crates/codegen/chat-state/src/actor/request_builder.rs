@@ -59,6 +59,7 @@ impl ChatStateActor {
                         cause: MessageCause::MemoryContext,
                         items: vec![item],
                         surface: crate::SurfaceOp::Append,
+                        response_admission: None,
                     }))?;
                 self.commit_timeline_event(event).await?;
                 self.apply_projected_token_delta(0, item_tokens);

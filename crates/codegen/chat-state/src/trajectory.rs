@@ -2363,6 +2363,7 @@ mod tests {
                 cause: crate::MessageCause::Assistant,
                 items: vec![ConversationItem::assistant("answer")],
                 surface: SurfaceOp::Append,
+                response_admission: None,
             }))
             .unwrap();
 
@@ -2841,6 +2842,7 @@ mod tests {
             cause: MessageCause::ToolResult,
             items: vec![ConversationItem::tool_result("call-pair", "done")],
             surface: SurfaceOp::Append,
+            response_admission: None,
         };
         assert_eq!(describe_message(&message).5.as_deref(), Some("call-pair"));
     }
@@ -2883,6 +2885,7 @@ mod tests {
                     },
                 ])],
                 surface: SurfaceOp::Append,
+                response_admission: None,
             }))
             .unwrap();
         timeline
@@ -2908,6 +2911,7 @@ mod tests {
                 cause: MessageCause::ToolResult,
                 items: vec![ConversationItem::tool_result("call-pair", "blocked")],
                 surface: SurfaceOp::Append,
+                response_admission: None,
             }))
             .unwrap();
 

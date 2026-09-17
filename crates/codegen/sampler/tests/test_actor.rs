@@ -325,6 +325,117 @@ async fn cancel_in_flight_request_terminates_task() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn owned_shutdown_waits_for_evidence_and_usage_acknowledgments() {
+    let app = Router::new().route(
+        "/v1/chat/completions",
+        post(|| async {
+            let events = sse::chat_completion_events("settle me", "test-model");
+            Sse::new(stream::iter(
+                events.into_iter().map(Ok::<_, std::convert::Infallible>),
+            ))
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let mut owner = SamplerActor::spawn_owned(
+        test_config(server.base_url(), "test-model"),
+        RetryPolicy::default(),
+        event_tx,
+    );
+    let handle = owner.handle();
+    let (evidence_release_tx, evidence_release_rx) = oneshot::channel();
+    let evidence_release = Arc::new(tokio::sync::Mutex::new(Some(evidence_release_rx)));
+    let evidence_calls = Arc::new(AtomicU32::new(0));
+    let evidence_sink: sampler::audit::EvidenceSink = {
+        let evidence_release = Arc::clone(&evidence_release);
+        let evidence_calls = Arc::clone(&evidence_calls);
+        Arc::new(move |evidence| {
+            let evidence_release = Arc::clone(&evidence_release);
+            let evidence_calls = Arc::clone(&evidence_calls);
+            Box::pin(async move {
+                evidence_calls.fetch_add(1, Ordering::SeqCst);
+                if evidence.kind == "response"
+                    && let Some(release) = evidence_release.lock().await.take()
+                {
+                    let _ = release.await;
+                }
+                Ok(())
+            })
+        })
+    };
+    let (usage_release_tx, usage_release_rx) = oneshot::channel();
+    let usage_release = Arc::new(tokio::sync::Mutex::new(Some(usage_release_rx)));
+    let usage_calls = Arc::new(AtomicU32::new(0));
+    let usage_sink: sampler::AttemptUsageSink = {
+        let usage_release = Arc::clone(&usage_release);
+        let usage_calls = Arc::clone(&usage_calls);
+        Arc::new(move |_usage| {
+            let usage_release = Arc::clone(&usage_release);
+            let usage_calls = Arc::clone(&usage_calls);
+            Box::pin(async move {
+                usage_calls.fetch_add(1, Ordering::SeqCst);
+                if let Some(release) = usage_release.lock().await.take() {
+                    let _ = release.await;
+                }
+                Ok(())
+            })
+        })
+    };
+    let request_handle = handle.clone();
+    let request = tokio::spawn(async move {
+        request_handle
+            .submit_and_collect_accounted(
+                RequestId::from("req-settlement"),
+                user_request("hi"),
+                None,
+                Some(usage_sink),
+                Some(evidence_sink),
+                sampler::RecoveryBudget::default(),
+            )
+            .await
+    });
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while evidence_calls.load(Ordering::SeqCst) < 2 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("response evidence barrier must be entered");
+
+    let shutdown = owner.shutdown_bounded(Duration::from_secs(1));
+    tokio::pin!(shutdown);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut shutdown)
+            .await
+            .is_err(),
+        "shutdown must wait for blocked evidence acknowledgment"
+    );
+    let _ = evidence_release_tx.send(());
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while usage_calls.load(Ordering::SeqCst) < 1 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("usage settlement barrier must be entered");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut shutdown)
+            .await
+            .is_err(),
+        "shutdown must wait for blocked usage acknowledgment"
+    );
+    let _ = usage_release_tx.send(());
+    shutdown
+        .await
+        .expect("settlement must complete graceful shutdown");
+    let _ = request.await.expect("request task must settle");
+    assert_eq!(evidence_calls.load(Ordering::SeqCst), 2);
+    assert_eq!(usage_calls.load(Ordering::SeqCst), 1);
+    while event_rx.recv().await.is_some() {}
+    server.shutdown();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn owned_shutdown_cancels_and_joins_in_flight_request() {
     let app = Router::new().route(
         "/v1/chat/completions",

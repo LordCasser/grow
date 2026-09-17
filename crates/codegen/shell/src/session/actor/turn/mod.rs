@@ -1571,18 +1571,90 @@ impl SessionActor {
             let persisted_items = response.items.len();
             let response_items = std::mem::take(&mut response.items);
             let native_continuation = response.native_continuation.take();
+            let admission_identity = chat_state::ResponseAdmissionIdentity {
+                request_id: response_request_id.clone(),
+                attempt: latency.attempts,
+            };
+            let quarantined = self
+                .chat_state_handle
+                .push_response_durably_with_identity(
+                    response_items.clone(),
+                    admission_identity.clone(),
+                    native_continuation.clone(),
+                )
+                .await
+                .map_err(crate::session::commands::response_admission_error)?;
             for item in &response_items {
                 if matches!(item, sampling_types::ConversationItem::Assistant(_)) {
                     self.signals_handle().record_assistant_message();
                 }
             }
-            let quarantined = self
-                .chat_state_handle
-                .push_response_durably(response_items, native_continuation)
+            if quarantined == 0
+                && let Some(text) = fallback_text.clone()
+            {
+                tracing::warn!(
+                    text_len = text.len(),
+                    "emitting fallback AgentMessageChunk — no text chunks were streamed"
+                );
+                self.send_update(
+                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                        acp::ContentBlock::Text(acp::TextContent::new(text)),
+                    )),
+                    None,
+                )
+                .await;
+            }
+            let timeline_events =
+                self.chat_state_handle
+                    .timeline_events()
+                    .await
+                    .ok_or_else(|| {
+                        crate::session::commands::response_projection_error(
+                            "Timeline query acknowledgement lost",
+                        )
+                    })?;
+            let timeline = chat_state::Timeline::from_events(timeline_events).map_err(|error| {
+                crate::session::commands::response_projection_error(format!(
+                    "invalid Timeline fold: {error}"
+                ))
+            })?;
+            let admitted = timeline
+                .admitted_responses()
+                .into_iter()
+                .find(|candidate| candidate.identity == admission_identity)
+                .ok_or_else(|| {
+                    crate::session::commands::response_projection_error(
+                        "admitted response is absent from active branch",
+                    )
+                })?;
+            let projection = crate::session::response_projection::project_admitted_response(
+                &self.session_info.id,
+                &admitted,
+            )
+            .map_err(|error| {
+                crate::session::commands::response_projection_error(format!(
+                    "projection failed: {error}"
+                ))
+            })?;
+            let (projection_tx, projection_rx) = tokio::sync::oneshot::channel();
+            self.event_tx
+                .send(SessionEvent::ResponseProjection {
+                    projection,
+                    respond_to: projection_tx,
+                })
+                .map_err(|_| {
+                    crate::session::commands::response_projection_error("session event FIFO closed")
+                })?;
+            projection_rx
                 .await
+                .map_err(|_| {
+                    crate::session::commands::response_projection_error(
+                        "durable acknowledgement lost",
+                    )
+                })?
                 .map_err(|error| {
-                    acp::Error::internal_error().data(format!(
-                        "model response could not be durably admitted: {error}"
+                    crate::session::commands::response_projection_error(format!(
+                        "durable commit failed: {error}"
                     ))
                 })?;
             self.finish_sampling_preview(quarantined == 0);
@@ -1620,19 +1692,6 @@ impl SessionActor {
                 ))
                 .await;
                 return Err(acp::Error::invalid_params().data(message));
-            }
-            if let Some(text) = fallback_text {
-                tracing::warn!(
-                    text_len = text.len(),
-                    "emitting fallback AgentMessageChunk — no text chunks were streamed"
-                );
-                self.send_update(
-                    acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
-                        acp::ContentBlock::Text(acp::TextContent::new(text)),
-                    )),
-                    None,
-                )
-                .await;
             }
             if turn_refused && response_is_empty {
                 tracing::warn!(

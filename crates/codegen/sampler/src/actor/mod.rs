@@ -161,12 +161,27 @@ impl SamplerActor {
             }
         }
 
-        // Cancel any still-running tasks before exiting so they don't
-        // leak. The cancellation token shutdown is best-effort.
+        // Stop provider work cooperatively, then keep the JoinSet alive until
+        // every admitted request has completed its evidence and usage
+        // settlement. `JoinSet::shutdown` aborts tasks, which would cut off
+        // those independent acknowledgment barriers; the owner deadline is
+        // the only forced-abort boundary.
         for (_, active) in self.state.active_requests.drain() {
             active.cancel_token.cancel();
         }
-        self.tasks.shutdown().await;
+        while let Some(joined) = self.tasks.join_next().await {
+            match joined {
+                Ok(request_id) => {
+                    self.state.remove(&request_id);
+                }
+                Err(join_err) => {
+                    tracing::warn!(
+                        error = %join_err,
+                        "request task panicked or was aborted during sampler shutdown"
+                    );
+                }
+            }
+        }
     }
 
     fn handle_command(&mut self, cmd: SamplerCommand) {

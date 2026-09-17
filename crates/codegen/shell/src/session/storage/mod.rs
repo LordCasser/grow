@@ -2262,6 +2262,7 @@ pub(crate) fn validate_sideband_ledgers(
                         end,
                         shadowed,
                     },
+                ..
             }) = &candidate.kind
             else {
                 continue;
@@ -2687,6 +2688,10 @@ pub enum SessionUpdate {
     Acp(Box<acp::SessionNotification>),
     /// Grow extension session notification (e.g., diff_review)
     Grow(Box<SessionNotification>),
+    /// Storage-only canonical response replay cache record. Replay readers
+    /// expand it to ACP notifications; it is never forwarded as a public
+    /// SamplingAttempt lifecycle notification.
+    ResponseReplayProjection(Box<crate::session::response_projection::ResponseReplayProjection>),
 }
 
 impl serde::Serialize for SessionUpdate {
@@ -2705,6 +2710,13 @@ impl serde::Serialize for SessionUpdate {
             SessionUpdate::Grow(notification) => {
                 map.serialize_entry("method", GROW_SESSION_UPDATE_METHOD)?;
                 map.serialize_entry("params", notification)?;
+            }
+            SessionUpdate::ResponseReplayProjection(projection) => {
+                map.serialize_entry(
+                    "method",
+                    crate::session::response_projection::RESPONSE_REPLAY_PROJECTION_METHOD,
+                )?;
+                map.serialize_entry("params", projection)?;
             }
         }
         map.end()
@@ -2759,6 +2771,12 @@ impl SessionUpdateEnvelope {
                 method: GROW_SESSION_UPDATE_METHOD.to_string(),
                 params: serde_json::to_value(notification)?,
             }),
+            SessionUpdate::ResponseReplayProjection(projection) => Ok(Self {
+                timestamp,
+                method: crate::session::response_projection::RESPONSE_REPLAY_PROJECTION_METHOD
+                    .to_string(),
+                params: serde_json::to_value(projection)?,
+            }),
         }
     }
 
@@ -2772,6 +2790,12 @@ impl SessionUpdateEnvelope {
             ACP_SESSION_UPDATE_METHOD => {
                 let notification: acp::SessionNotification = serde_json::from_value(self.params)?;
                 Ok(SessionUpdate::Acp(Box::new(notification)))
+            }
+            crate::session::response_projection::RESPONSE_REPLAY_PROJECTION_METHOD => {
+                let projection = serde_json::from_value(self.params)?;
+                Ok(SessionUpdate::ResponseReplayProjection(Box::new(
+                    projection,
+                )))
             }
             method => Err(invalid_update_envelope(format!(
                 "unsupported session update method {method:?}"
@@ -2808,6 +2832,12 @@ impl SessionUpdateEnvelope {
             ACP_SESSION_UPDATE_METHOD => {
                 let notification: acp::SessionNotification = serde_json::from_str(raw_params)?;
                 Ok(SessionUpdate::Acp(Box::new(notification)))
+            }
+            crate::session::response_projection::RESPONSE_REPLAY_PROJECTION_METHOD => {
+                let projection = serde_json::from_str(raw_params)?;
+                Ok(SessionUpdate::ResponseReplayProjection(Box::new(
+                    projection,
+                )))
             }
             method => Err(invalid_update_envelope(format!(
                 "unsupported session update method {method:?}"
@@ -3124,6 +3154,34 @@ pub trait StorageAdapter: Send + Sync {
         Err(AppendUpdateError::NotCommitted(io::Error::new(
             io::ErrorKind::Unsupported,
             "durable session update append is unsupported",
+        )))
+    }
+
+    /// Exact durable append for an ACP notification already carrying its
+    /// producer-assigned event identity. Backends must inspect their physical
+    /// replay ledger rather than a reconciled logical load.
+    async fn append_acp_event_exact(
+        &self,
+        _info: &Info,
+        _notification: &acp::SessionNotification,
+    ) -> Result<(), AppendUpdateError> {
+        Err(AppendUpdateError::NotCommitted(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "exact ACP event append is unsupported",
+        )))
+    }
+
+    /// Exact key+payload commit for a storage-only response projection.
+    /// Backends must inspect their physical replay ledger rather than a
+    /// reconciled logical load.
+    async fn commit_response_projection(
+        &self,
+        _info: &Info,
+        _projection: &crate::session::response_projection::ResponseReplayProjection,
+    ) -> Result<(), AppendUpdateError> {
+        Err(AppendUpdateError::NotCommitted(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "exact response projection append is unsupported",
         )))
     }
 
@@ -3502,12 +3560,7 @@ pub fn strip_context_wrappers(update: acp::SessionUpdate) -> acp::SessionUpdate 
 pub fn load_updates_for_replay(
     session_id: &str,
 ) -> std::io::Result<Option<Vec<acp::SessionUpdate>>> {
-    let Some(reader) =
-        open_replay_updates_reader(session_id, &crate::util::grow_home::grow_home())?
-    else {
-        return Ok(None);
-    };
-    Ok(Some(collect_replay_updates(reader)?))
+    load_reconciled_updates_for_replay(session_id, &crate::util::grow_home::grow_home())
 }
 
 /// Like [`load_updates_for_replay`], but resolves the session under a specific
@@ -3521,10 +3574,72 @@ pub fn load_updates_for_replay_at(
     session_id: &str,
     grow_home: &std::path::Path,
 ) -> std::io::Result<Option<Vec<acp::SessionUpdate>>> {
-    let Some(reader) = open_replay_updates_reader(session_id, grow_home)? else {
+    load_reconciled_updates_for_replay(session_id, grow_home)
+}
+
+fn load_reconciled_replay_snapshot(
+    session_id: &str,
+    grow_home: &std::path::Path,
+) -> std::io::Result<Option<String>> {
+    let storage = JsonlStorageAdapter::with_root(grow_home.to_path_buf());
+    let Some(opened) = storage.open_session_by_id(session_id)? else {
         return Ok(None);
     };
-    Ok(Some(collect_replay_updates(reader)?))
+    let timeline = chat_state::Timeline::from_events(opened.timeline_events()?)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let contents = match opened
+        .directory()
+        .open_regular(std::ffi::OsStr::new(UPDATES_FILE), "session updates ledger")
+    {
+        Ok(file) => read_committed_jsonl_text_lines_from_file(
+            file,
+            opened.directory().display_path().join(UPDATES_FILE),
+            "session updates ledger",
+        )?
+        .join("\n"),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        Err(error) => return Err(error),
+    };
+    Ok(Some(reconcile_replay_snapshot(
+        &opened.summary().info.id,
+        &timeline,
+        &contents,
+    )?))
+}
+
+fn load_reconciled_updates_for_replay(
+    session_id: &str,
+    grow_home: &std::path::Path,
+) -> std::io::Result<Option<Vec<acp::SessionUpdate>>> {
+    let Some(reconciled) = load_reconciled_replay_snapshot(session_id, grow_home)? else {
+        return Ok(None);
+    };
+    let mut result = Vec::new();
+    for_each_reconciled_replay_line(&reconciled, |update| result.push(update))?;
+    Ok(Some(result))
+}
+
+fn for_each_reconciled_replay_line<F: FnMut(acp::SessionUpdate)>(
+    reconciled: &str,
+    mut f: F,
+) -> io::Result<bool> {
+    let mut emitted = false;
+    for line in reconciled.lines().filter(|line| !line.trim().is_empty()) {
+        match SessionUpdateEnvelope::from_str(line)? {
+            SessionUpdate::Acp(notification) => {
+                emitted = true;
+                f(strip_context_wrappers(notification.update));
+            }
+            SessionUpdate::ResponseReplayProjection(projection) => {
+                for notification in projection.updates {
+                    emitted = true;
+                    f(strip_context_wrappers(notification.update));
+                }
+            }
+            SessionUpdate::Grow(_) => {}
+        }
+    }
+    Ok(emitted)
 }
 
 /// Collect every replay-ready ACP update from a pinned ledger into a `Vec`, the
@@ -3613,10 +3728,10 @@ pub fn stream_replay_updates_at<F: FnMut(acp::SessionUpdate)>(
     grow_home: &std::path::Path,
     f: F,
 ) -> std::io::Result<ReplayEmission> {
-    let Some(reader) = open_replay_updates_reader(session_id, grow_home)? else {
+    let Some(reconciled) = load_reconciled_replay_snapshot(session_id, grow_home)? else {
         return Ok(ReplayEmission::Empty);
     };
-    Ok(if for_each_replay_update(reader, f)? {
+    Ok(if for_each_reconciled_replay_line(&reconciled, f)? {
         ReplayEmission::Emitted
     } else {
         ReplayEmission::Empty
@@ -3752,6 +3867,12 @@ fn for_each_replay_update<F: FnMut(acp::SessionUpdate)>(
             // Grow extensions (rewind markers, compaction signals) are consumed
             // by the filter and intentionally dropped (matching the typed load).
             Ok(SessionUpdate::Grow(_)) => {}
+            Ok(SessionUpdate::ResponseReplayProjection(projection)) => {
+                for notification in projection.updates {
+                    forwarded = true;
+                    f(strip_context_wrappers(notification.update));
+                }
+            }
             // Best-effort: an unparseable line (e.g. a partially written trailing
             // line) is skipped rather than aborting replay; the typed load drops
             // it too. Logged for diagnostics.
@@ -3922,6 +4043,45 @@ fn line_event_id(line: &str) -> Option<std::borrow::Cow<'_, str>> {
 /// Does this line's `_meta.eventId` equal `cursor_id`?
 fn line_has_event_id(line: &str, cursor_id: &str) -> bool {
     line_event_id(line).as_deref() == Some(cursor_id)
+}
+
+/// Rewind-filter and reconcile the response-projection cache in memory.
+/// Storage-only projection records are synthesized from validated Timeline
+/// authority and candidate rows for the exact admitted attempt are removed.
+pub(crate) fn reconcile_replay_snapshot(
+    session_id: &acp::SessionId,
+    timeline: &chat_state::Timeline,
+    contents: &str,
+) -> io::Result<String> {
+    let filtered = filter_rewind_lines(
+        contents
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .collect(),
+    );
+    let mut updates = Vec::with_capacity(filtered.len());
+    for line in filtered {
+        match SessionUpdateEnvelope::from_str(line) {
+            Ok(update) => updates.push(update),
+            Err(error) => {
+                tracing::debug!(%error, "skipping unparseable replay line during projection reconciliation");
+            }
+        }
+    }
+    let updates = crate::session::response_projection::reconcile_response_projections(
+        session_id, timeline, updates,
+    )?;
+    let mut reconciled = String::new();
+    for update in updates {
+        let envelope = SessionUpdateEnvelope::from_update(&update)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        reconciled.push_str(
+            &serde_json::to_string(&envelope)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+        );
+        reconciled.push('\n');
+    }
+    Ok(reconciled)
 }
 
 /// Rewind-filter, resolve the reconnect cursor, and drop redundant command
@@ -4920,6 +5080,7 @@ mod tests {
             .filter_map(|u| match u {
                 SessionUpdate::Acp(notif) => Some(strip_context_wrappers(notif.update)),
                 SessionUpdate::Grow(_) => None,
+                SessionUpdate::ResponseReplayProjection(_) => None,
             })
             .collect();
 
@@ -5535,7 +5696,9 @@ mod tests {
                     crate::extensions::notification::SessionUpdate::MemoryFlushStarted
                 );
             }
-            SessionUpdate::Acp(_) => panic!("expected Grow variant"),
+            SessionUpdate::Acp(_) | SessionUpdate::ResponseReplayProjection(_) => {
+                panic!("expected Grow variant")
+            }
         }
     }
 }

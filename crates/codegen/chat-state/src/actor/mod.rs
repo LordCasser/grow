@@ -447,10 +447,13 @@ impl ChatStateActor {
             }
             ChatStateCommand::PushResponseDurably {
                 items,
+                response_admission,
                 native_continuation,
                 reply,
             } => {
-                let result = self.push_response_durably(items, native_continuation).await;
+                let result = self
+                    .push_response_durably(items, response_admission, native_continuation)
+                    .await;
                 let _ = reply.send(result);
             }
             ChatStateCommand::PushToolResult { item } => {

@@ -12,6 +12,11 @@ Timeline 的 `sampling_usage/attempt_settled`。`[DONE]` 或 body EOF 不能代�
 不会延长；精确预算或不可撤销输出可能更早关闭恢复。
 实现导航见 [采样恢复边界](architecture/session-robustness-repair.md)，
 行为以 [model-sampling](../openspec/specs/model-sampling/spec.md) 为准。
+Sampler graceful shutdown 会先停止准入并取消 provider 工作，再等待已准入 request task 完成 attempt evidence 与所有适用用量账本的确认结算；不能用 abort 或缺失 ACK 跨过该边界。若现有 `SamplerOwner::shutdown_bounded` 的明确 deadline 到期，owner 才会强制终止剩余任务并返回关闭失败，调用方不得把它当作成功的最终持久化 frontier。
+
+Assistant response admission 由 ChatState Timeline 持有 `request_id + final attempt` identity 和确定性的 quarantine 结果。Shell 将 identity/payload 交给当前 ChatState owner；owner acknowledgement/persistence/causal 错误直接以 `response-admission` turn-boundary fatal error 停止 completion recovery、Accepted 发布和工具执行，不通过失效 owner 重试。cold/replacement owner 可用后，exact identity/payload reissue 幂等返回原结果，不重启 sampler/provider、不重复安装 native continuation。历史 response 的可选 metadata 缺失时仍可读取，但不能用启发式确认新的不明 admission；native continuation 仍为瞬态状态。
+
+Identity-bearing response 在 Timeline admission 后还要经过 Shell 的 `response-replay-projection` durable gate。`updates.jsonl` 中的 versioned projection record 只是可重建 UI cache；流式 candidate 只用于可撤回 live preview，不能成为 accepted history authority。Projection commit 经过 session event FIFO，丢弃 exact attempt candidate、保留独立交织更新，且在 ACK 前禁止发布 Accepted、继续 provider/continuation 或执行工具；quarantine 记录 Discarded disposition 且不保存 raw malformed preview。Replay reader 展开 storage-only record，不将其作为公开 SamplingAttempt 通知。
 
 ## 环境
 

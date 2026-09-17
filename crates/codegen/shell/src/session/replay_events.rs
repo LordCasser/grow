@@ -121,6 +121,13 @@ pub(crate) enum SessionEvent {
     FlushReplay {
         respond_to: Option<oneshot::Sender<()>>,
     },
+    /// Ordered response-projection barrier. Because this crosses the same
+    /// event FIFO as candidate and interleaved notifications, persistence
+    /// cannot commit the canonical projection before prior preview traffic.
+    ResponseProjection {
+        projection: crate::session::response_projection::ResponseReplayProjection,
+        respond_to: oneshot::Sender<Result<(), crate::session::storage::AppendUpdateError>>,
+    },
     /// A detached control worker panicked or crossed a fatal persistence
     /// boundary. The main actor owns teardown; workers may only report the
     /// failure, never dismantle shared session authorities themselves.

@@ -171,12 +171,41 @@ pub enum SurfaceOp {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResponseAdmissionIdentity {
+    pub request_id: String,
+    pub attempt: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResponseAdmission {
+    pub identity: ResponseAdmissionIdentity,
+    pub quarantined_tool_exchanges: usize,
+}
+
+/// Canonical identity-bearing assistant response selected by the current branch.
+///
+/// This is a read-only Timeline projection. Surface compaction/replacement does
+/// not erase it, while rewind branch selection excludes responses no longer in
+/// the selected provenance fold.
+#[derive(Debug, Clone)]
+pub struct AdmittedResponse {
+    pub event_seq: EventSeq,
+    pub identity: ResponseAdmissionIdentity,
+    pub items: Vec<ConversationItem>,
+    pub quarantined_tool_exchanges: usize,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct MessageEvent {
     pub cause: MessageCause,
     pub items: Vec<ConversationItem>,
     pub surface: SurfaceOp,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub response_admission: Option<ResponseAdmission>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1619,6 +1648,14 @@ pub enum TimelineError {
     TooManyItems,
     #[error("message cause does not match its surface operation or item shape")]
     InvalidMessageShape,
+    #[error("response admission metadata is only valid on assistant append events")]
+    InvalidResponseAdmissionShape,
+    #[error("response admission identity does not match a completed request attempt")]
+    InvalidResponseAdmissionIdentity,
+    #[error("response admission identity is duplicated")]
+    DuplicateResponseAdmissionIdentity,
+    #[error("response admission quarantine result does not match the canonical candidate")]
+    InvalidResponseAdmissionResult,
     #[error("rewind target {0} has no branch-local user prompt marker")]
     MissingPromptMarker(usize),
     #[error("tool-result prune must replace exactly one tool result")]
@@ -1805,6 +1842,78 @@ impl Timeline {
 
     pub fn events(&self) -> &[TimelineEvent] {
         &self.events
+    }
+
+    pub fn response_admission(
+        &self,
+        identity: &ResponseAdmissionIdentity,
+    ) -> Option<&MessageEvent> {
+        self.events.iter().find_map(|event| match &event.kind {
+            TimelineEventKind::Messages(message)
+                if message
+                    .response_admission
+                    .as_ref()
+                    .is_some_and(|admission| admission.identity == *identity) =>
+            {
+                Some(message)
+            }
+            _ => None,
+        })
+    }
+
+    /// Identity-bearing assistant responses belonging to the currently
+    /// selected branch, in Timeline order.
+    pub fn admitted_responses(&self) -> Vec<AdmittedResponse> {
+        let selected_events = fold_branch_provenance(self).admitted_response_events;
+        self.events
+            .iter()
+            .filter_map(|event| {
+                let TimelineEventKind::Messages(message) = &event.kind else {
+                    return None;
+                };
+                let admission = message.response_admission.as_ref()?;
+                selected_events
+                    .contains(&event.seq)
+                    .then(|| AdmittedResponse {
+                        event_seq: event.seq,
+                        identity: admission.identity.clone(),
+                        items: message.items.clone(),
+                        quarantined_tool_exchanges: admission.quarantined_tool_exchanges,
+                    })
+            })
+            .collect()
+    }
+
+    /// Whether a missing replay projection can be appended at the cache tail
+    /// without crossing a later selected-branch model fact or provider/tool
+    /// side effect. This is intentionally conservative: uncertainty rejects
+    /// repair instead of heuristically reordering history.
+    pub fn response_projection_tail_safe(&self, response_event: EventSeq) -> bool {
+        let fold = fold_branch_provenance(self);
+        let selected_births = fold.leaf_birth.values().copied().collect::<BTreeSet<_>>();
+        !self.events.iter().any(|event| {
+            if event.seq <= response_event {
+                return false;
+            }
+            match &event.kind {
+                TimelineEventKind::Messages(message)
+                    if selected_births.contains(&event.seq)
+                        && matches!(
+                            message.cause,
+                            MessageCause::DirectUser
+                                | MessageCause::Interjection
+                                | MessageCause::User
+                                | MessageCause::Assistant
+                                | MessageCause::ToolResult
+                        ) =>
+                {
+                    true
+                }
+                TimelineEventKind::Request(RequestEvent::Started { .. })
+                | TimelineEventKind::Tool(_) => true,
+                _ => false,
+            }
+        })
     }
 
     /// Durable notification inbox projection in receive order.
@@ -2932,6 +3041,7 @@ impl Timeline {
             cause,
             items,
             surface: SurfaceOp::Append,
+            response_admission: None,
         }))
     }
 
@@ -3002,6 +3112,7 @@ impl Timeline {
                 end,
                 shadowed,
             },
+            response_admission: None,
         }))
     }
 
@@ -3020,6 +3131,7 @@ impl Timeline {
                 end: target.end,
                 shadowed: target.shadowed,
             },
+            response_admission: None,
         }))
     }
 
@@ -4019,6 +4131,46 @@ impl Timeline {
 
     fn validate_messages(&self, messages: &MessageEvent) -> Result<(), TimelineError> {
         let _ = u32::try_from(messages.items.len()).map_err(|_| TimelineError::TooManyItems)?;
+        if let Some(admission) = &messages.response_admission {
+            if messages.cause != MessageCause::Assistant
+                || !matches!(messages.surface, SurfaceOp::Append)
+                || messages.items.is_empty()
+                || admission.identity.attempt == 0
+                || admission.identity.request_id.is_empty()
+            {
+                return Err(TimelineError::InvalidResponseAdmissionShape);
+            }
+            let completed_attempt =
+                self.events
+                    .iter()
+                    .rev()
+                    .find_map(|event| match &event.kind {
+                        TimelineEventKind::Request(RequestEvent::Completed {
+                            id, attempt, ..
+                        }) if id == &admission.identity.request_id => Some(*attempt),
+                        _ => None,
+                    });
+            if completed_attempt != Some(admission.identity.attempt) {
+                return Err(TimelineError::InvalidResponseAdmissionIdentity);
+            }
+            if self.events.iter().any(|event| {
+                matches!(
+                    &event.kind,
+                    TimelineEventKind::Messages(MessageEvent {
+                        response_admission: Some(existing), ..
+                    }) if existing.identity == admission.identity
+                )
+            }) {
+                return Err(TimelineError::DuplicateResponseAdmissionIdentity);
+            }
+            let mut candidate = self.surface.clone();
+            candidate.extend(messages.items.iter().cloned());
+            let quarantined =
+                crate::compaction_utils::quarantine_malformed_tool_exchanges(&mut candidate);
+            if quarantined != admission.quarantined_tool_exchanges {
+                return Err(TimelineError::InvalidResponseAdmissionResult);
+            }
+        }
         match &messages.surface {
             SurfaceOp::Append => {
                 if messages.items.is_empty() {
@@ -6029,6 +6181,7 @@ struct BranchFold {
     leaf_birth: BTreeMap<SurfaceId, EventSeq>,
     leaf_is_message: BTreeMap<SurfaceId, bool>,
     unloaded: BTreeSet<SurfaceId>,
+    admitted_response_events: BTreeSet<EventSeq>,
 }
 
 fn fold_branch_provenance(timeline: &Timeline) -> BranchFold {
@@ -6050,6 +6203,15 @@ fn fold_branch_provenance(timeline: &Timeline) -> BranchFold {
     for event in &timeline.events {
         if let Some(items) = event.appended_message_items() {
             append_branch_leaves(&mut fold, event.seq, items, true);
+            if matches!(
+                &event.kind,
+                TimelineEventKind::Messages(MessageEvent {
+                    response_admission: Some(_),
+                    ..
+                })
+            ) {
+                fold.admitted_response_events.insert(event.seq);
+            }
             continue;
         }
         let activated = fold_control_context_activation(
@@ -6065,10 +6227,11 @@ fn fold_branch_provenance(timeline: &Timeline) -> BranchFold {
             TimelineEventKind::Messages(messages) => match &messages.surface {
                 SurfaceOp::Append => {}
                 SurfaceOp::Replace { start, end, .. } => {
-                    if matches!(
-                        messages.cause,
-                        MessageCause::Rewind | MessageCause::ContextRebuild
-                    ) {
+                    if messages.cause == MessageCause::Rewind {
+                        reset_rewind_branch(&mut fold, event.seq, &messages.items);
+                        continue;
+                    }
+                    if messages.cause == MessageCause::ContextRebuild {
                         reset_branch(&mut fold, event.seq, &messages.items);
                         continue;
                     }
@@ -6355,6 +6518,56 @@ fn append_branch_leaf(
 fn reset_branch(fold: &mut BranchFold, event: EventSeq, items: &[ConversationItem]) {
     *fold = BranchFold::default();
     append_branch_leaves(fold, event, items, true);
+}
+
+/// Rewind writes a fresh Surface replacement, but branch ownership must retain
+/// the births of canonical leaves included in that replacement. Match the
+/// rewind payload against the pre-rewind uncompressed branch in order; this is
+/// the same canonical transcript from which valid rewind replacements are
+/// constructed. Admission events absent from the retained births are cut away.
+fn reset_rewind_branch(fold: &mut BranchFold, event: EventSeq, items: &[ConversationItem]) {
+    let old_order = fold.leaf_order.clone();
+    let old_values = fold.leaf_values.clone();
+    let old_birth = fold.leaf_birth.clone();
+    let old_surface = fold.surface.clone();
+    let old_admissions = fold.admitted_response_events.clone();
+    let mut retained_births = BTreeSet::new();
+    let mut leaf_cursor = 0usize;
+    let mut surface_cursor = 0usize;
+    for item in items {
+        // Normal rewind payloads are built from the uncompressed branch. Also
+        // recognize a retained compacted/replaced Surface entry and expand all
+        // of its provenance leaves so a summary carrier cannot erase response
+        // ownership merely because its display identity changed.
+        if let Some(offset) = old_surface[surface_cursor..]
+            .iter()
+            .position(|entry| conversation_items_match(&entry.value, item))
+        {
+            let index = surface_cursor + offset;
+            for leaf in &old_surface[index].leaves {
+                if let Some(birth) = old_birth.get(leaf) {
+                    retained_births.insert(*birth);
+                }
+            }
+            surface_cursor = index + 1;
+        }
+        if let Some(offset) = old_order[leaf_cursor..].iter().position(|id| {
+            old_values
+                .get(id)
+                .is_some_and(|value| conversation_items_match(value, item))
+        }) {
+            let index = leaf_cursor + offset;
+            if let Some(birth) = old_birth.get(&old_order[index]) {
+                retained_births.insert(*birth);
+            }
+            leaf_cursor = index + 1;
+        }
+    }
+    reset_branch(fold, event, items);
+    fold.admitted_response_events = old_admissions
+        .into_iter()
+        .filter(|admission| retained_births.contains(admission))
+        .collect();
 }
 
 fn rebuild_integrity_branch(
@@ -13201,6 +13414,337 @@ mod tests {
         let pending = replayed.pending_notifications();
         assert_eq!(pending.len(), 1);
         assert_eq!(pending[0].id, terminal);
+    }
+
+    fn record_admitted_response(
+        timeline: &mut Timeline,
+        ordinal: u64,
+        items: Vec<ConversationItem>,
+        quarantined_tool_exchanges: usize,
+    ) -> EventSeq {
+        let turn = start_internal_turn(timeline, ordinal);
+        let step = StepId { turn, index: 0 };
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Started { id: step }))
+            .unwrap();
+        let request_id = format!("req-{ordinal}");
+        timeline
+            .record(TimelineEventKind::Request(RequestEvent::Started {
+                id: request_id.clone(),
+                turn,
+                step,
+                model_id: "model".into(),
+                input_message_count: timeline.surface_len(),
+                tool_count: 0,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Request(RequestEvent::Completed {
+                id: request_id.clone(),
+                duration_ms: 1,
+                time_to_first_token_ms: None,
+                usage: RequestUsage::default(),
+                response_message_count: items.len(),
+                attempt: 1,
+                provider_terminal: None,
+            }))
+            .unwrap();
+        let event = timeline
+            .record(TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::Assistant,
+                items,
+                surface: SurfaceOp::Append,
+                response_admission: Some(ResponseAdmission {
+                    identity: ResponseAdmissionIdentity {
+                        request_id,
+                        attempt: 1,
+                    },
+                    quarantined_tool_exchanges,
+                }),
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Ended {
+                id: step,
+                outcome: "completed".into(),
+                duration_ms: 1,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Ended {
+                id: turn,
+                outcome: "completed".into(),
+                duration_ms: 1,
+                tool_count: 0,
+                terminal: completed_terminal(),
+                cancellation_category: None,
+                details: None,
+            }))
+            .unwrap();
+        event.seq
+    }
+
+    #[test]
+    fn admitted_response_view_tracks_branch_ownership_across_repairs_compaction_and_rewind() {
+        let mut timeline = Timeline::default();
+        record_prompt(&mut timeline, 1, 0, "p0");
+        let first = record_admitted_response(
+            &mut timeline,
+            10,
+            vec![ConversationItem::assistant("first")],
+            0,
+        );
+        let malformed = ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+            id: "".into(),
+            name: "".into(),
+            arguments: "{}".into(),
+        }]);
+        let second = record_admitted_response(&mut timeline, 11, vec![malformed], 1);
+        let _ = timeline.repair_surface_history().unwrap();
+        assert_eq!(
+            timeline
+                .admitted_responses()
+                .iter()
+                .map(|response| response.event_seq)
+                .collect::<Vec<_>>(),
+            vec![first, second]
+        );
+
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
+                id: "admission-compact".into(),
+                source_items: timeline.surface_len(),
+                prompt_index: 1,
+            }))
+            .unwrap();
+        let target = record_compaction_summary(&mut timeline, "admission-compact");
+        timeline
+            .replace_compaction_range(target, vec![ConversationItem::user_meta("summary")])
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Completed {
+                id: "admission-compact".into(),
+                source_items: 3,
+                result_items: 1,
+                duration_ms: 1,
+            }))
+            .unwrap();
+        assert_eq!(timeline.admitted_responses().len(), 2);
+
+        let rewound = timeline.rewind_surface(0).unwrap();
+        timeline.replace_all(rewound, MessageCause::Rewind).unwrap();
+        assert!(timeline.admitted_responses().is_empty());
+    }
+
+    #[test]
+    fn admitted_response_view_rewind_retains_earlier_and_removes_later_response() {
+        let mut timeline = Timeline::default();
+        record_prompt(&mut timeline, 1, 0, "p0");
+        let first = record_admitted_response(
+            &mut timeline,
+            20,
+            vec![ConversationItem::assistant("first")],
+            0,
+        );
+        record_prompt(&mut timeline, 2, 1, "p1");
+        let _second = record_admitted_response(
+            &mut timeline,
+            21,
+            vec![ConversationItem::assistant("second")],
+            0,
+        );
+        let rewound = timeline.rewind_surface(1).unwrap();
+        timeline.replace_all(rewound, MessageCause::Rewind).unwrap();
+        assert_eq!(
+            timeline
+                .admitted_responses()
+                .iter()
+                .map(|response| response.event_seq)
+                .collect::<Vec<_>>(),
+            vec![first]
+        );
+    }
+
+    #[test]
+    fn admitted_response_view_rewind_after_compaction_retains_compacted_prefix_response() {
+        let mut timeline = Timeline::default();
+        record_prompt(&mut timeline, 1, 0, "p0");
+        let first = record_admitted_response(
+            &mut timeline,
+            30,
+            vec![ConversationItem::assistant("first")],
+            0,
+        );
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
+                id: "rewind-compact".into(),
+                source_items: timeline.surface_len(),
+                prompt_index: 1,
+            }))
+            .unwrap();
+        let target = record_compaction_summary(&mut timeline, "rewind-compact");
+        timeline
+            .replace_compaction_range(target, vec![ConversationItem::user_meta("summary")])
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Completed {
+                id: "rewind-compact".into(),
+                source_items: 2,
+                result_items: 1,
+                duration_ms: 1,
+            }))
+            .unwrap();
+        record_prompt(&mut timeline, 2, 1, "p1");
+        let _second = record_admitted_response(
+            &mut timeline,
+            31,
+            vec![ConversationItem::assistant("second")],
+            0,
+        );
+        let rewound = timeline.rewind_surface(1).unwrap();
+        timeline.replace_all(rewound, MessageCause::Rewind).unwrap();
+        assert_eq!(
+            timeline
+                .admitted_responses()
+                .iter()
+                .map(|response| response.event_seq)
+                .collect::<Vec<_>>(),
+            vec![first]
+        );
+    }
+
+    #[test]
+    fn admitted_response_view_ignores_legacy_identityless_assistant() {
+        let mut timeline = Timeline::default();
+        timeline
+            .append(
+                ConversationItem::assistant("legacy"),
+                MessageCause::Assistant,
+            )
+            .unwrap();
+        assert!(timeline.admitted_responses().is_empty());
+    }
+
+    #[test]
+    fn response_admission_metadata_requires_completed_attempt_and_rejects_duplicates() {
+        let mut legacy = Timeline::default();
+        legacy
+            .append(
+                ConversationItem::assistant("historical"),
+                MessageCause::Assistant,
+            )
+            .unwrap();
+        assert!(
+            legacy
+                .response_admission(&ResponseAdmissionIdentity {
+                    request_id: "req-99".into(),
+                    attempt: 2,
+                })
+                .is_none()
+        );
+
+        let mut timeline = Timeline::default();
+        let turn = start_internal_turn(&mut timeline, 99);
+        let step = StepId { turn, index: 0 };
+        timeline
+            .record(TimelineEventKind::Step(StepEvent::Started { id: step }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Request(RequestEvent::Started {
+                id: "req-99".into(),
+                turn,
+                step,
+                model_id: "model".into(),
+                input_message_count: 0,
+                tool_count: 0,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Request(RequestEvent::Completed {
+                id: "req-99".into(),
+                duration_ms: 1,
+                time_to_first_token_ms: None,
+                usage: RequestUsage::default(),
+                response_message_count: 1,
+                attempt: 2,
+                provider_terminal: None,
+            }))
+            .unwrap();
+        let items = vec![ConversationItem::assistant("answer")];
+        let wrong_attempt = ResponseAdmission {
+            identity: ResponseAdmissionIdentity {
+                request_id: "req-99".into(),
+                attempt: 1,
+            },
+            quarantined_tool_exchanges: 0,
+        };
+        assert!(matches!(
+            timeline.prepare(TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::Assistant,
+                items: items.clone(),
+                surface: SurfaceOp::Append,
+                response_admission: Some(wrong_attempt),
+            })),
+            Err(TimelineError::InvalidResponseAdmissionIdentity)
+        ));
+        assert!(matches!(
+            timeline.prepare(TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::User,
+                items: items.clone(),
+                surface: SurfaceOp::Append,
+                response_admission: Some(ResponseAdmission {
+                    identity: ResponseAdmissionIdentity {
+                        request_id: "req-99".into(),
+                        attempt: 2,
+                    },
+                    quarantined_tool_exchanges: 0,
+                }),
+            })),
+            Err(TimelineError::InvalidResponseAdmissionShape)
+        ));
+        let admission = ResponseAdmission {
+            identity: ResponseAdmissionIdentity {
+                request_id: "req-99".into(),
+                attempt: 2,
+            },
+            quarantined_tool_exchanges: 0,
+        };
+        assert!(matches!(
+            timeline.prepare(TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::Assistant,
+                items: items.clone(),
+                surface: SurfaceOp::Append,
+                response_admission: Some(ResponseAdmission {
+                    identity: ResponseAdmissionIdentity {
+                        request_id: "req-99".into(),
+                        attempt: 2,
+                    },
+                    quarantined_tool_exchanges: 1,
+                }),
+            })),
+            Err(TimelineError::InvalidResponseAdmissionResult)
+        ));
+        timeline
+            .record(TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::Assistant,
+                items: items.clone(),
+                surface: SurfaceOp::Append,
+                response_admission: Some(admission.clone()),
+            }))
+            .unwrap();
+        let duplicate = timeline.prepare(TimelineEventKind::Messages(MessageEvent {
+            cause: MessageCause::Assistant,
+            items,
+            surface: SurfaceOp::Append,
+            response_admission: Some(admission),
+        }));
+        assert!(matches!(
+            duplicate,
+            Err(TimelineError::DuplicateResponseAdmissionIdentity)
+        ));
+        assert_bulk_matches(&timeline);
     }
 
     #[test]

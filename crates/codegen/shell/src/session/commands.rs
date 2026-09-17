@@ -230,6 +230,14 @@ pub(crate) fn fatal_turn_boundary_error(phase: &str, detail: impl Into<String>) 
     }))
 }
 
+pub(crate) fn response_admission_error(error: chat_state::TimelineWriteError) -> acp::Error {
+    fatal_turn_boundary_error("response-admission", error.to_string())
+}
+
+pub(crate) fn response_projection_error(detail: impl Into<String>) -> acp::Error {
+    fatal_turn_boundary_error("response-projection", detail)
+}
+
 pub(crate) fn is_fatal_turn_boundary_error(error: &acp::Error) -> bool {
     error
         .data
@@ -270,6 +278,35 @@ mod tests {
         assert!(!is_fatal_turn_boundary_error(
             &acp::Error::internal_error().data("ordinary turn error")
         ));
+    }
+
+    #[test]
+    fn response_projection_errors_use_the_fatal_boundary_marker() {
+        let error = response_projection_error("projection acknowledgement lost");
+        assert!(is_fatal_turn_boundary_error(&error));
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("phase"))
+                .and_then(serde_json::Value::as_str),
+            Some("response-projection")
+        );
+    }
+
+    #[test]
+    fn response_admission_errors_use_the_fatal_boundary_marker() {
+        for source in [
+            chat_state::TimelineWriteError::AcknowledgementLost,
+            chat_state::TimelineWriteError::ResponseAdmissionConflict,
+        ] {
+            let error = response_admission_error(source);
+            assert!(is_fatal_turn_boundary_error(&error));
+            assert_eq!(
+                error.data.as_ref().and_then(|data| data.get("phase")),
+                Some(&serde_json::json!("response-admission"))
+            );
+        }
     }
 }
 pub enum SessionCommand {

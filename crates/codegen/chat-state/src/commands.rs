@@ -25,6 +25,8 @@ pub enum TimelineWriteError {
     AcknowledgementLost,
     #[error("timeline persistence was cancelled before the pending event became durable")]
     Cancelled,
+    #[error("response admission identity was already used with different items")]
+    ResponseAdmissionConflict,
     #[error("rewind target {target} is not before current prompt index {current}")]
     InvalidRewindTarget { target: usize, current: usize },
     #[error(
@@ -183,6 +185,7 @@ pub enum ChatStateCommand {
     /// exchanges before any reader or tool dispatcher can consume the Surface.
     PushResponseDurably {
         items: Vec<ConversationItem>,
+        response_admission: Option<crate::ResponseAdmissionIdentity>,
         native_continuation: Option<NativeContinuationFragment>,
         reply: oneshot::Sender<Result<usize, TimelineWriteError>>,
     },

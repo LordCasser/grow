@@ -33,6 +33,25 @@ fn timeline_event(name: &str, timeline: &mut chat_state::Timeline) -> chat_state
         .unwrap()
 }
 
+fn projection(
+    info: &Info,
+    text: &str,
+) -> crate::session::response_projection::ResponseReplayProjection {
+    crate::session::response_projection::project_admitted_response(
+        &info.id,
+        &chat_state::AdmittedResponse {
+            event_seq: chat_state::EventSeq::new(7),
+            identity: chat_state::ResponseAdmissionIdentity {
+                request_id: "request-1".into(),
+                attempt: 1,
+            },
+            items: vec![sampling_types::ConversationItem::assistant(text)],
+            quarantined_tool_exchanges: 0,
+        },
+    )
+    .unwrap()
+}
+
 fn append_timeline_with_prefix_state(
     directory: &crate::session::storage::ContainedDirectory,
     path: &Path,
@@ -460,6 +479,154 @@ fn file_barrier_error_propagates() {
     )
     .unwrap_err();
     assert_eq!(error.to_string(), "file barrier failed");
+}
+
+#[tokio::test]
+async fn exact_projection_is_physically_idempotent_and_conflicts_on_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = info();
+    let adapter = JsonlStorageAdapter::with_root(dir.path().to_path_buf());
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let first = projection(&info, "answer");
+
+    adapter
+        .commit_response_projection(&info, &first)
+        .await
+        .unwrap();
+    adapter
+        .commit_response_projection(&info, &first)
+        .await
+        .unwrap();
+    let path = adapter.session_dir(&info).join("updates.jsonl");
+    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
+
+    let mut conflict = first.clone();
+    conflict.timeline_event += 1;
+    let error = adapter
+        .commit_response_projection(&info, &conflict)
+        .await
+        .unwrap_err()
+        .into_io_error();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
+
+    let conflict = projection(&info, "different answer");
+    let error = adapter
+        .commit_response_projection(&info, &conflict)
+        .await
+        .unwrap_err()
+        .into_io_error();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 1);
+}
+
+#[tokio::test]
+async fn exact_projection_reconciles_a_post_commit_bookkeeping_failure() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = info();
+    let adapter = JsonlStorageAdapter::with_root(dir.path().to_path_buf());
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let expected = projection(&info, "answer");
+    let summary = adapter.session_dir(&info).join("summary.json");
+    std::fs::remove_file(&summary).unwrap();
+    std::fs::create_dir(&summary).unwrap();
+
+    adapter
+        .commit_response_projection(&info, &expected)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(adapter.session_dir(&info).join("updates.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+    adapter
+        .commit_response_projection(&info, &expected)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read_to_string(adapter.session_dir(&info).join("updates.jsonl"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn exact_projection_pre_commit_append_failure_is_not_committed() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = info();
+    let session_dir = dir.path().join("session");
+    let adapter = JsonlStorageAdapter::with_update_append_probe(session_dir, |_| {
+        Err(io::Error::other("append failed before commit"))
+    });
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+
+    let error = adapter
+        .commit_response_projection(&info, &projection(&info, "answer"))
+        .await
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        crate::session::storage::AppendUpdateError::NotCommitted(_)
+    ));
+    let path = adapter.session_dir(&info).join("updates.jsonl");
+    let physical_lines = match std::fs::read_to_string(path) {
+        Ok(contents) => contents.lines().count(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => 0,
+        Err(error) => panic!("failed to inspect updates ledger: {error}"),
+    };
+    assert_eq!(physical_lines, 0);
+}
+
+#[tokio::test]
+async fn exact_acp_event_is_physically_idempotent_and_conflicts_on_payload() {
+    let dir = tempfile::tempdir().unwrap();
+    let info = info();
+    let adapter = JsonlStorageAdapter::with_root(dir.path().to_path_buf());
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let mut first = match update(&info, "answer".into()) {
+        SessionUpdate::Acp(notification) => *notification,
+        _ => unreachable!(),
+    };
+    first.meta = Some(
+        serde_json::json!({"eventId": "event-1"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+
+    adapter.append_acp_event_exact(&info, &first).await.unwrap();
+    adapter.append_acp_event_exact(&info, &first).await.unwrap();
+    let path = adapter.session_dir(&info).join("updates.jsonl");
+    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
+
+    let mut conflict = first.clone();
+    conflict.update = acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+        acp::ContentBlock::Text(acp::TextContent::new("different")),
+    ));
+    let error = adapter
+        .append_acp_event_exact(&info, &conflict)
+        .await
+        .unwrap_err()
+        .into_io_error();
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 1);
 }
 
 #[cfg(target_os = "macos")]

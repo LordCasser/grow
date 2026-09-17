@@ -1,0 +1,24 @@
+## Why
+
+现有逐包 inventory 不能替代对当前 `main` 行为边界的架构审查：其登记证据已经发生大规模源码漂移，且格式、历史测试或 helper 级测试不能证明当前入口、状态所有权、持久化、授权和并发契约仍成立。用户要求按 Grow 特性逐项 review，并在每个阶段保留可复查证据。
+
+## What Changes
+
+- 以当前 `main` 的 OpenSpec 主规范为行为权威，按特性切片核对真实入口、调用链、状态与数据所有权、依赖方向、错误传播、持久化恢复、授权、安全、并发和取消。
+- 每个阶段在本 change 中记录已确认缺陷、非阻塞覆盖缺口、已验证强项、反证结果、动态验证和环境限制。
+- 本 change 只记录审查结论，不修改 Rust 行为，也不把发现直接视为修复授权；每个行为修复仍需独立 OpenSpec change。
+- 阶段完成后独立校验；提交或推送仅在用户明确要求时执行。全仓目标只有在所有相关特性都有当前权威证据后才能关闭。
+
+## Capabilities
+
+### New Capabilities
+
+无。
+
+### Modified Capabilities
+
+无；这是架构审查与验证记录，`skip_specs: true`。
+
+## Impact
+
+仅新增 `openspec/changes/review-grow-architecture/` 下的过程证据。主规范、运行时代码、公开接口和持久化格式均不在本 change 中修改。

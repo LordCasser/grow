@@ -250,6 +250,7 @@ pub mod mcp_restart;
 pub mod mcp_servers;
 pub mod memory;
 pub mod persistence;
+pub(crate) mod response_projection;
 pub use client_support::placeholder_images;
 pub mod behavior;
 pub(crate) mod diagnostics;

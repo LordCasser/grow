@@ -58,6 +58,13 @@ struct LedgerPrefix {
     hasher: blake3::Hasher,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RawExactStatus {
+    Missing,
+    Exact,
+    Conflict,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LedgerFileStamp {
     len: u64,
@@ -293,6 +300,34 @@ impl JsonlStorageAdapter {
         let summary = self
             .reconcile_model_projection(info, summary, &timeline, restore_for_write)
             .await?;
+        if restore_for_write {
+            let existing = Self::read_updates_from_directory(opened.directory())?;
+            let reconciled = crate::session::response_projection::reconcile_response_projections(
+                &info.id,
+                &timeline,
+                existing.clone(),
+            )?;
+            for update in reconciled {
+                let super::SessionUpdate::ResponseReplayProjection(projection) = update else {
+                    continue;
+                };
+                let already_present = existing.iter().any(|update| {
+                    matches!(
+                        update,
+                        super::SessionUpdate::ResponseReplayProjection(current)
+                            if current.exact_match(&projection)
+                    )
+                });
+                if !already_present {
+                    self.append_update_to_file(
+                        info,
+                        &super::SessionUpdate::ResponseReplayProjection(projection),
+                        AppendDurability::Durable,
+                    )
+                    .await?;
+                }
+            }
+        }
         let control_snapshot =
             crate::session::control::SessionControlSnapshot::latest_from_timeline(
                 timeline.events(),
@@ -2102,6 +2137,79 @@ impl JsonlStorageAdapter {
         }
         Ok(updates)
     }
+
+    fn raw_acp_event_status(
+        &self,
+        info: &Info,
+        expected: &acp::SessionNotification,
+    ) -> io::Result<RawExactStatus> {
+        let event_id = expected
+            .meta
+            .as_ref()
+            .and_then(|meta| meta.get("eventId"))
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "interleaved response update has no eventId",
+                )
+            })?;
+        let expected = serde_json::to_value(expected)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+        let directory = self.bound_session_directory(info)?;
+        let mut exact = false;
+        for update in Self::read_updates_from_directory(&directory)? {
+            let super::SessionUpdate::Acp(existing) = update else {
+                continue;
+            };
+            let existing_id = existing
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("eventId"))
+                .and_then(serde_json::Value::as_str);
+            if existing_id == Some(event_id) {
+                let actual = serde_json::to_value(&existing)
+                    .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+                if actual == expected {
+                    exact = true;
+                } else {
+                    return Ok(RawExactStatus::Conflict);
+                }
+            }
+        }
+        Ok(if exact {
+            RawExactStatus::Exact
+        } else {
+            RawExactStatus::Missing
+        })
+    }
+
+    fn raw_projection_status(
+        &self,
+        info: &Info,
+        expected: &crate::session::response_projection::ResponseReplayProjection,
+    ) -> io::Result<RawExactStatus> {
+        let directory = self.bound_session_directory(info)?;
+        let mut exact = false;
+        for update in Self::read_updates_from_directory(&directory)? {
+            let super::SessionUpdate::ResponseReplayProjection(existing) = update else {
+                continue;
+            };
+            if existing.request_id == expected.request_id && existing.attempt == expected.attempt {
+                if existing.exact_match(expected) {
+                    exact = true;
+                } else {
+                    return Ok(RawExactStatus::Conflict);
+                }
+            }
+        }
+        Ok(if exact {
+            RawExactStatus::Exact
+        } else {
+            RawExactStatus::Missing
+        })
+    }
+
     /// Write summary to disk atomically (sync version for `spawn_blocking`).
     ///
     /// A plain `std::fs::write` truncates before writing, so a concurrent reader
@@ -2900,6 +3008,13 @@ fn transform_session_id_in_update(
             inner.session_id = new_id.clone();
             super::SessionUpdate::Grow(Box::new(inner))
         }
+        super::SessionUpdate::ResponseReplayProjection(projection) => {
+            let mut inner = (*projection).clone();
+            for notification in &mut inner.updates {
+                notification.session_id = new_id.clone();
+            }
+            super::SessionUpdate::ResponseReplayProjection(Box::new(inner))
+        }
     }
 }
 fn is_source_bound_projection_update(update: &super::SessionUpdate) -> bool {
@@ -3271,6 +3386,110 @@ impl StorageAdapter for JsonlStorageAdapter {
         self.append_update_with_bookkeeping(info, update, AppendDurability::Durable)
             .await
     }
+    async fn append_acp_event_exact(
+        &self,
+        info: &Info,
+        notification: &acp::SessionNotification,
+    ) -> Result<(), super::AppendUpdateError> {
+        self.ensure_writer_lease(info)
+            .map_err(super::AppendUpdateError::NotCommitted)?;
+        let update = super::SessionUpdate::Acp(Box::new(notification.clone()));
+        match self
+            .raw_acp_event_status(info, notification)
+            .map_err(super::AppendUpdateError::NotCommitted)?
+        {
+            RawExactStatus::Exact => Ok(()),
+            RawExactStatus::Conflict => {
+                Err(super::AppendUpdateError::NotCommitted(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "ACP eventId conflicts with persisted event",
+                )))
+            }
+            RawExactStatus::Missing => {
+                let append = self.append_update_durable_commit_aware(info, &update).await;
+                match append {
+                    Ok(()) => match self.raw_acp_event_status(info, notification) {
+                        Ok(RawExactStatus::Exact) => Ok(()),
+                        Ok(RawExactStatus::Conflict) => {
+                            Err(super::AppendUpdateError::NotCommitted(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "ACP eventId conflicts with persisted event",
+                            )))
+                        }
+                        Ok(RawExactStatus::Missing) => {
+                            Err(super::AppendUpdateError::NotCommitted(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "durable ACP event append is not physically present",
+                            )))
+                        }
+                        Err(error) => Err(super::AppendUpdateError::NotCommitted(error)),
+                    },
+                    Err(error) => match self.raw_acp_event_status(info, notification) {
+                        Ok(RawExactStatus::Exact) => Ok(()),
+                        Ok(RawExactStatus::Conflict) => {
+                            Err(super::AppendUpdateError::NotCommitted(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "ACP eventId conflicts with persisted event",
+                            )))
+                        }
+                        Ok(RawExactStatus::Missing) | Err(_) => Err(error),
+                    },
+                }
+            }
+        }
+    }
+    async fn commit_response_projection(
+        &self,
+        info: &Info,
+        projection: &crate::session::response_projection::ResponseReplayProjection,
+    ) -> Result<(), super::AppendUpdateError> {
+        self.ensure_writer_lease(info)
+            .map_err(super::AppendUpdateError::NotCommitted)?;
+        let update = super::SessionUpdate::ResponseReplayProjection(Box::new(projection.clone()));
+        match self
+            .raw_projection_status(info, projection)
+            .map_err(super::AppendUpdateError::NotCommitted)?
+        {
+            RawExactStatus::Exact => Ok(()),
+            RawExactStatus::Conflict => {
+                Err(super::AppendUpdateError::NotCommitted(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "response projection identity conflicts with persisted projection",
+                )))
+            }
+            RawExactStatus::Missing => {
+                let append = self.append_update_durable_commit_aware(info, &update).await;
+                match append {
+                    Ok(()) => match self.raw_projection_status(info, projection) {
+                        Ok(RawExactStatus::Exact) => Ok(()),
+                        Ok(RawExactStatus::Conflict) => {
+                            Err(super::AppendUpdateError::NotCommitted(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "response projection identity conflicts with persisted projection",
+                            )))
+                        }
+                        Ok(RawExactStatus::Missing) => {
+                            Err(super::AppendUpdateError::NotCommitted(io::Error::new(
+                                io::ErrorKind::UnexpectedEof,
+                                "durable response projection append is not physically present",
+                            )))
+                        }
+                        Err(error) => Err(super::AppendUpdateError::NotCommitted(error)),
+                    },
+                    Err(error) => match self.raw_projection_status(info, projection) {
+                        Ok(RawExactStatus::Exact) => Ok(()),
+                        Ok(RawExactStatus::Conflict) => {
+                            Err(super::AppendUpdateError::NotCommitted(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "response projection identity conflicts with persisted projection",
+                            )))
+                        }
+                        Ok(RawExactStatus::Missing) | Err(_) => Err(error),
+                    },
+                }
+            }
+        }
+    }
     async fn append_timeline_event(
         &self,
         info: &Info,
@@ -3375,6 +3594,9 @@ impl StorageAdapter for JsonlStorageAdapter {
                 timeline.events(),
             )?;
         let updates = Self::read_updates_from_directory(opened.directory())?;
+        let updates = crate::session::response_projection::reconcile_response_projections(
+            &info.id, &timeline, updates,
+        )?;
         let signals =
             crate::session::signals::SessionSignals::latest_from_timeline(timeline.events())?;
         let announcement_state =

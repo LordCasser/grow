@@ -78,6 +78,7 @@ impl ChatStateActor {
                 cause,
                 items: vec![item],
                 surface: crate::SurfaceOp::Append,
+                response_admission: None,
             }))
             .expect("an assembled conversation item must append to the timeline");
         let committed = self.commit_buffered_timeline_event(event).await;
@@ -140,6 +141,7 @@ impl ChatStateActor {
     pub(super) async fn push_response_durably(
         &mut self,
         items: Vec<ConversationItem>,
+        response_admission: Option<crate::ResponseAdmissionIdentity>,
         native_continuation: Option<NativeContinuationFragment>,
     ) -> Result<usize, crate::commands::TimelineWriteError> {
         if items.is_empty() {
@@ -150,8 +152,37 @@ impl ChatStateActor {
             );
             return Ok(0);
         }
+
+        if let Some(response_admission) = response_admission.as_ref()
+            && let Some(existing) = self.state.timeline.response_admission(response_admission)
+        {
+            let same_items = serde_json::to_value(&existing.items)
+                .expect("response items must serialize")
+                == serde_json::to_value(&items).expect("response items must serialize");
+            if !same_items {
+                return Err(crate::commands::TimelineWriteError::ResponseAdmissionConflict);
+            }
+            let quarantined = existing
+                .response_admission
+                .as_ref()
+                .expect("response admission lookup always has metadata")
+                .quarantined_tool_exchanges;
+            let mut repaired = self.state.timeline.surface().to_vec();
+            let repaired_count =
+                crate::compaction_utils::quarantine_malformed_tool_exchanges(&mut repaired);
+            if repaired_count > 0 {
+                self.replace_conversation_durably(repaired, MessageCause::IntegrityRepair)
+                    .await?;
+            }
+            return Ok(quarantined);
+        }
+
         let first_new_index = self.state.timeline.surface_len();
         let tokens = super::state::estimate_conversation_tokens(&items);
+        let mut candidate = self.state.timeline.surface().to_vec();
+        candidate.extend(items.iter().cloned());
+        let quarantined =
+            crate::compaction_utils::quarantine_malformed_tool_exchanges(&mut candidate);
         let event = self
             .state
             .timeline
@@ -159,15 +190,16 @@ impl ChatStateActor {
                 cause: MessageCause::Assistant,
                 items,
                 surface: crate::SurfaceOp::Append,
+                response_admission: response_admission.map(|identity| crate::ResponseAdmission {
+                    identity,
+                    quarantined_tool_exchanges: quarantined,
+                }),
             }))?;
         self.commit_timeline_event(event).await?;
         self.apply_projected_token_delta(0, tokens);
 
-        let mut conversation = self.state.timeline.surface().to_vec();
-        let quarantined =
-            crate::compaction_utils::quarantine_malformed_tool_exchanges(&mut conversation);
         if quarantined > 0 {
-            self.replace_conversation_durably(conversation, MessageCause::IntegrityRepair)
+            self.replace_conversation_durably(candidate, MessageCause::IntegrityRepair)
                 .await?;
             return Ok(quarantined);
         }
@@ -246,6 +278,7 @@ impl ChatStateActor {
                 cause: MessageCause::ToolResult,
                 items: vec![item],
                 surface: crate::SurfaceOp::Append,
+                response_admission: None,
             }))?;
         self.commit_timeline_event(event).await?;
         self.apply_projected_token_delta(0, tokens);

@@ -110,6 +110,65 @@ async fn record_compaction_summary(
     target
 }
 
+async fn seed_completed_request(h: &mut TestHarness, id: &str) {
+    let turn = crate::TurnId(700);
+    let step = crate::StepId { turn, index: 0 };
+    let identity = crate::TurnIdentity {
+        origin: "user".into(),
+        turn_kind: "internal".into(),
+        goal_id: None,
+        goal_definition_revision: None,
+        stage_id: None,
+    };
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Turn(crate::TurnEvent::Started {
+            id: turn,
+            input_ids: Vec::new(),
+            identity,
+            model_id: "test-model".into(),
+            input_message_count: 0,
+            prompt_index: 0,
+            prompt_text: "test".into(),
+            input_kind: crate::TurnInputKind::Prompt,
+            redirect_kind: None,
+        }))
+        .await
+        .unwrap();
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Step(crate::StepEvent::Started {
+            id: step,
+        }))
+        .await
+        .unwrap();
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Request(
+            crate::RequestEvent::Started {
+                id: id.into(),
+                turn,
+                step,
+                model_id: "test-model".into(),
+                input_message_count: 0,
+                tool_count: 0,
+            },
+        ))
+        .await
+        .unwrap();
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Request(
+            crate::RequestEvent::Completed {
+                id: id.into(),
+                duration_ms: 1,
+                time_to_first_token_ms: None,
+                usage: crate::RequestUsage::default(),
+                response_message_count: 1,
+                attempt: 1,
+                provider_terminal: None,
+            },
+        ))
+        .await
+        .unwrap();
+}
+
 async fn record_prompt(handle: &crate::handle::ChatStateHandle, text: impl Into<String>) {
     static NEXT_TURN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let id = crate::TurnId(NEXT_TURN.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
@@ -828,6 +887,158 @@ async fn response_repair_retains_raw_fact_and_allows_the_next_request() {
         )
     );
     assert!(!h.handle.is_closed());
+}
+
+#[tokio::test]
+async fn response_admission_reconciles_after_caller_reply_is_lost() {
+    let mut h = TestHarness::with_manual_timeline_ack_after(vec![], 4);
+    seed_completed_request(&mut h, "req-reconcile").await;
+    let items = vec![ConversationItem::assistant("answer")];
+    let identity = crate::ResponseAdmissionIdentity {
+        request_id: "req-reconcile".into(),
+        attempt: 1,
+    };
+    let task = tokio::spawn({
+        let handle = h.handle.clone();
+        let items = items.clone();
+        let identity = identity.clone();
+        async move {
+            handle
+                .push_response_durably_with_identity(items, identity, None)
+                .await
+        }
+    });
+    let raw_ack = h.persistence_rx.next_timeline_ack().await.unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    raw_ack.send(Ok(())).unwrap();
+    let conversation = h.handle.get_conversation().await;
+    assert_eq!(
+        serde_json::to_value(&conversation[conversation.len() - items.len()..]).unwrap(),
+        serde_json::to_value(&items).unwrap()
+    );
+
+    assert_eq!(
+        h.handle
+            .push_response_durably_with_identity(items.clone(), identity, None)
+            .await
+            .unwrap(),
+        0
+    );
+    let records = h.drain_persistence();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|record| persisted_messages(record).is_some())
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn response_admission_conflict_preserves_timeline_and_surface() {
+    let mut h = TestHarness::with_manual_timeline_ack_after(vec![], 4);
+    seed_completed_request(&mut h, "req-conflict").await;
+    let identity = crate::ResponseAdmissionIdentity {
+        request_id: "req-conflict".into(),
+        attempt: 1,
+    };
+    let first = tokio::spawn({
+        let handle = h.handle.clone();
+        let identity = identity.clone();
+        async move {
+            handle
+                .push_response_durably_with_identity(
+                    vec![ConversationItem::assistant("first")],
+                    identity,
+                    None,
+                )
+                .await
+        }
+    });
+    h.persistence_rx
+        .next_timeline_ack()
+        .await
+        .unwrap()
+        .send(Ok(()))
+        .unwrap();
+    first.await.unwrap().unwrap();
+    let before = h.handle.timeline_events().await.unwrap();
+    let before_surface = h.handle.get_conversation().await;
+    assert!(matches!(
+        h.handle
+            .push_response_durably_with_identity(
+                vec![ConversationItem::assistant("different")],
+                identity,
+                None,
+            )
+            .await,
+        Err(crate::TimelineWriteError::ResponseAdmissionConflict)
+    ));
+    assert_eq!(
+        serde_json::to_value(h.handle.get_conversation().await).unwrap(),
+        serde_json::to_value(before_surface).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(h.handle.timeline_events().await.unwrap()).unwrap(),
+        serde_json::to_value(before).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn malformed_response_repair_completes_before_reconciled_confirmation() {
+    let mut h = TestHarness::with_manual_timeline_ack_after(vec![], 4);
+    seed_completed_request(&mut h, "req-malformed").await;
+    let items = malformed_response();
+    let identity = crate::ResponseAdmissionIdentity {
+        request_id: "req-malformed".into(),
+        attempt: 1,
+    };
+    let task = tokio::spawn({
+        let handle = h.handle.clone();
+        let items = items.clone();
+        let identity = identity.clone();
+        async move {
+            handle
+                .push_response_durably_with_identity(items, identity, None)
+                .await
+        }
+    });
+    let raw_ack = h.persistence_rx.next_timeline_ack().await.unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    raw_ack.send(Ok(())).unwrap();
+    let repair_ack = h.persistence_rx.next_timeline_ack().await.unwrap();
+    let retry = {
+        let handle = h.handle.clone();
+        let items = items.clone();
+        let identity = identity.clone();
+        tokio::spawn(async move {
+            handle
+                .push_response_durably_with_identity(items, identity, None)
+                .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(!retry.is_finished());
+    repair_ack.send(Ok(())).unwrap();
+    assert_eq!(retry.await.unwrap().unwrap(), 1);
+    let records = h.drain_persistence();
+    assert_eq!(
+        records
+            .iter()
+            .filter(|r| persisted_messages(r).is_some())
+            .count(),
+        2
+    );
+    assert_eq!(
+        records
+            .iter()
+            .filter_map(persisted_messages)
+            .filter(|message| message.cause == crate::MessageCause::Assistant)
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]

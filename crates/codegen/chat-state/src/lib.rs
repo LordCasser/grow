@@ -60,7 +60,7 @@ pub use sideband::{
     validate_sideband_id,
 };
 pub use timeline::{
-    ActiveControlContext, CompactionEvent, CompactionMode, ControlContext,
+    ActiveControlContext, AdmittedResponse, CompactionEvent, CompactionMode, ControlContext,
     ControlContextActivation, ControlContextLayer, ControlEvent, EventSeq, HookAggregateDecision,
     HookCause, HookEvent, HookEventType, HookFailurePolicy, HookGateDecision, HookGateKind,
     HookHandlerKind, HookHandlerLifecycle, HookHandlerPlan, HookHandlerPlanAction,
@@ -75,13 +75,14 @@ pub use timeline::{
     NotificationEvent, NotificationOwner, NotificationPayloadRef, NotificationSource,
     NotificationSourceVersion, NotificationTaskKind, ObservationEvent,
     PARENT_MESSAGE_SOURCE_VERSION, PendingAllowedInput, PendingNotification, PlanHandoffKind,
-    PromptRecord, RecoveryEvent, RequestEvent, RequestUsage, SessionTitleEvent, SessionTitleSource,
-    StepEvent, StepId, SubagentContextSource, SubagentEvent, SubagentOutcome, SubagentResultEvent,
-    SubagentSeedEvent, SubagentSpawnEvent, SubagentTerminalEvent, SurfaceId, SurfaceOp,
-    SurfaceRange, TIMELINE_SCHEMA_VERSION, Timeline, TimelineError, TimelineEvent,
-    TimelineEventKind, ToolEvent, TurnEvent, TurnId, TurnIdentity, TurnInputKind, TurnTerminal,
-    TurnTerminalSource, WorkflowEvent, WorkflowExecutionStatus, WorkflowLifecycle,
-    WorkflowTurnHandoff, notification_id,
+    PromptRecord, RecoveryEvent, RequestEvent, RequestUsage, ResponseAdmission,
+    ResponseAdmissionIdentity, SessionTitleEvent, SessionTitleSource, StepEvent, StepId,
+    SubagentContextSource, SubagentEvent, SubagentOutcome, SubagentResultEvent, SubagentSeedEvent,
+    SubagentSpawnEvent, SubagentTerminalEvent, SurfaceId, SurfaceOp, SurfaceRange,
+    TIMELINE_SCHEMA_VERSION, Timeline, TimelineError, TimelineEvent, TimelineEventKind, ToolEvent,
+    TurnEvent, TurnId, TurnIdentity, TurnInputKind, TurnTerminal, TurnTerminalSource,
+    WorkflowEvent, WorkflowExecutionStatus, WorkflowLifecycle, WorkflowTurnHandoff,
+    notification_id,
 };
 pub use trajectory::{
     SurfaceVisibility, TRAJECTORY_SCHEMA_VERSION, TrajectoryIssueSeverity, TrajectoryProjector,

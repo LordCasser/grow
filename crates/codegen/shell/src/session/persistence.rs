@@ -355,6 +355,11 @@ pub enum PersistenceMsg {
         respond_to:
             tokio::sync::oneshot::Sender<Result<(), crate::session::storage::AppendUpdateError>>,
     },
+    CommitResponseProjection {
+        projection: crate::session::response_projection::ResponseReplayProjection,
+        respond_to:
+            tokio::sync::oneshot::Sender<Result<(), crate::session::storage::AppendUpdateError>>,
+    },
     TimelineDurablyAndAck {
         event: chat_state::TimelineEvent,
         respond_to: tokio::sync::oneshot::Sender<std::io::Result<()>>,
@@ -2163,6 +2168,49 @@ impl SessionPersistence {
             .await
     }
 
+    async fn commit_response_projection(
+        &mut self,
+        projection: crate::session::response_projection::ResponseReplayProjection,
+    ) -> Result<(), crate::session::storage::AppendUpdateError> {
+        self.drain_pending().await?;
+        let key = SamplingAttemptKey {
+            request_id: projection.request_id.clone(),
+            attempt: projection.attempt,
+        };
+        if let Some((pending_key, notifications)) = self.pending_sampling.as_ref()
+            && pending_key == &key
+        {
+            for entry in notifications.iter().filter(|entry| !entry.candidate) {
+                self.storage
+                    .append_acp_event_exact(&self.info, &entry.notification)
+                    .await?;
+            }
+        }
+        self.storage
+            .commit_response_projection(&self.info, &projection)
+            .await?;
+        if self
+            .pending_sampling
+            .as_ref()
+            .is_some_and(|(pending_key, _)| pending_key == &key)
+        {
+            self.pending_sampling = None;
+        }
+        let terminal = match projection.disposition {
+            crate::session::response_projection::ResponseReplayDisposition::Admitted => {
+                crate::extensions::notification::SamplingAttemptState::Accepted
+            }
+            crate::session::response_projection::ResponseReplayDisposition::Discarded => {
+                crate::extensions::notification::SamplingAttemptState::Discarded
+            }
+        };
+        self.terminal_sampling_attempt = Some((key.clone(), terminal));
+        if self.sampling_attempt.as_ref() == Some(&key) {
+            self.sampling_attempt = None;
+        }
+        Ok(())
+    }
+
     /// Flush any pending merged ACP notification to disk.
     async fn flush_pending(&mut self) {
         if let Err(error) = self.drain_pending().await {
@@ -2232,8 +2280,8 @@ impl SessionPersistence {
                                 }
                             }
                         }
-                        SessionUpdate::Grow(_) => {
-                            // Grow notifications are written directly without merging
+                        SessionUpdate::Grow(_) | SessionUpdate::ResponseReplayProjection(_) => {
+                            // Non-ACP records are written directly without merging.
                             if let Err(error) = self.write_update(&update).await {
                                 tracing::warn!(%error, "failed to write update");
                             }
@@ -2250,6 +2298,13 @@ impl SessionPersistence {
                 }
                 PersistenceMsg::AppendUpdateDurablyAndAck { update, respond_to } => {
                     let result = self.handle_durable_append(update).await;
+                    let _ = respond_to.send(result);
+                }
+                PersistenceMsg::CommitResponseProjection {
+                    projection,
+                    respond_to,
+                } => {
+                    let result = self.commit_response_projection(projection).await;
                     let _ = respond_to.send(result);
                 }
                 PersistenceMsg::TimelineDurablyAndAck { event, respond_to } => {

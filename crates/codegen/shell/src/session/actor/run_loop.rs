@@ -1087,6 +1087,36 @@ pub(super) async fn run_session(
                                 let _ = tx.send(());
                             }
                         }
+                        SessionEvent::ResponseProjection { projection, respond_to } => {
+                            if let Some(notification) = replay_buffer.flush() {
+                                session.emit_buffered(notification).await;
+                            }
+                            let (tx, rx) = tokio::sync::oneshot::channel();
+                            let send_result = session.notifications.persistence_tx.send(
+                                PersistenceMsg::CommitResponseProjection {
+                                    projection,
+                                    respond_to: tx,
+                                },
+                            );
+                            let result = if send_result.is_err() {
+                                Err(crate::session::storage::AppendUpdateError::NotCommitted(
+                                    std::io::Error::new(
+                                        std::io::ErrorKind::BrokenPipe,
+                                        "response projection persistence channel closed",
+                                    ),
+                                ))
+                            } else {
+                                rx.await.unwrap_or_else(|_| {
+                                    Err(crate::session::storage::AppendUpdateError::NotCommitted(
+                                        std::io::Error::new(
+                                            std::io::ErrorKind::BrokenPipe,
+                                            "response projection acknowledgement lost",
+                                        ),
+                                    ))
+                                })
+                            };
+                            let _ = respond_to.send(result);
+                        }
                         SessionEvent::ControlWorkerFailed { message } => {
                             tracing::error!(%message, "closing session after control worker failure");
                             cmd_rx.close();

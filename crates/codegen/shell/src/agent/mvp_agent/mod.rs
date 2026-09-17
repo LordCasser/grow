@@ -895,6 +895,31 @@ impl MvpAgent {
             }
         };
         let method = env.method;
+        if method == crate::session::response_projection::RESPONSE_REPLAY_PROJECTION_METHOD {
+            let Ok(projection) = serde_json::from_str::<
+                crate::session::response_projection::ResponseReplayProjection,
+            >(env.params.get()) else {
+                tracing::debug!("replay: skipping malformed response projection record");
+                return;
+            };
+            for notification in projection.updates {
+                let Ok(line) = serde_json::to_string(&serde_json::json!({
+                    "method": "session/update",
+                    "params": notification,
+                })) else {
+                    continue;
+                };
+                self.forward_raw_replay_line(
+                    &line,
+                    persist_data,
+                    target_client_id,
+                    completions,
+                    mark_replay,
+                    pending_tool_calls,
+                );
+            }
+            return;
+        }
         if !matches!(method, "session/update" | "_grow/session/update") {
             tracing::debug!(method, "replay: skipping unknown update method");
             return;
@@ -1020,28 +1045,41 @@ impl MvpAgent {
         let mut replay_timer = crate::instrumentation_timer!("session.load_session_replay");
         replay_timer.with_field("session_id", session_id.0.as_ref());
         replay_timer.with_field("cwd", cwd.as_str());
+        let timeline_events = crate::session::storage::read_timeline_file(
+            &session_directory.display_path().join(crate::session::storage::TIMELINE_FILE),
+        )
+        .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
+        let timeline = chat_state::Timeline::from_events(timeline_events).map_err(|error| {
+            acp::Error::internal_error().data(format!("invalid Timeline during replay: {error}"))
+        })?;
         let updates_file = match session_directory.open_regular(
             std::ffi::OsStr::new("updates.jsonl"),
             "session updates ledger",
         ) {
-            Ok(file) => file,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Ok((0, Default::default()));
-            }
+            Ok(file) => Some(file),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
             Err(error) => return Err(crate::session::persistence::io_error_to_acp(&error)),
         };
         let (raw_contents, end_offset, file_size) = {
             let _timer = crate::instrumentation_timer!("session.replay.read_snapshot");
-            match read_complete_jsonl_snapshot_from_file(
-                updates_file,
-                session_directory.display_path().join("updates.jsonl"),
-            ) {
-                Ok((contents, end_offset, file_size)) if !contents.is_empty() => {
-                    (contents, end_offset, file_size)
-                }
-                _ => return Ok((0, Default::default())),
+            match updates_file {
+                Some(file) => read_complete_jsonl_snapshot_from_file(
+                    file,
+                    session_directory.display_path().join("updates.jsonl"),
+                )
+                .unwrap_or_default(),
+                None => (String::new(), 0, 0),
             }
         };
+        let raw_contents = crate::session::storage::reconcile_replay_snapshot(
+            session_id,
+            &timeline,
+            &raw_contents,
+        )
+        .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
+        if raw_contents.is_empty() {
+            return Ok((end_offset, Default::default()));
+        }
         let mut prepared = {
             let _timer = crate::instrumentation_timer!("session.replay.read_and_filter");
             crate::session::storage::prepare_replay_lines(&raw_contents, cursor)

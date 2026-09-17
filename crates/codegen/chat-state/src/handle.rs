@@ -183,9 +183,34 @@ impl ChatStateHandle {
         items: Vec<ConversationItem>,
         native_continuation: Option<sampling_types::NativeContinuationFragment>,
     ) -> Result<usize, TimelineWriteError> {
+        self.push_response_durably_with_identity_option(items, None, native_continuation)
+            .await
+    }
+
+    pub async fn push_response_durably_with_identity(
+        &self,
+        items: Vec<ConversationItem>,
+        response_admission: crate::ResponseAdmissionIdentity,
+        native_continuation: Option<sampling_types::NativeContinuationFragment>,
+    ) -> Result<usize, TimelineWriteError> {
+        self.push_response_durably_with_identity_option(
+            items,
+            Some(response_admission),
+            native_continuation,
+        )
+        .await
+    }
+
+    async fn push_response_durably_with_identity_option(
+        &self,
+        items: Vec<ConversationItem>,
+        response_admission: Option<crate::ResponseAdmissionIdentity>,
+        native_continuation: Option<sampling_types::NativeContinuationFragment>,
+    ) -> Result<usize, TimelineWriteError> {
         self.query("PushResponseDurably", |reply| {
             ChatStateCommand::PushResponseDurably {
                 items,
+                response_admission,
                 native_continuation,
                 reply,
             }
