@@ -3577,17 +3577,18 @@ pub fn load_updates_for_replay_at(
     load_reconciled_updates_for_replay(session_id, grow_home)
 }
 
-fn load_reconciled_replay_snapshot(
+fn with_reconciled_replay_lines<R>(
     session_id: &str,
     grow_home: &std::path::Path,
-) -> std::io::Result<Option<String>> {
+    f: impl for<'a> FnOnce(&[ReconciledReplayLine<'a>]) -> io::Result<R>,
+) -> std::io::Result<Option<R>> {
     let storage = JsonlStorageAdapter::with_root(grow_home.to_path_buf());
     let Some(opened) = storage.open_session_by_id(session_id)? else {
         return Ok(None);
     };
     let timeline = chat_state::Timeline::from_events(opened.timeline_events()?)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-    let contents = match opened
+    let lines = match opened
         .directory()
         .open_regular(std::ffi::OsStr::new(UPDATES_FILE), "session updates ledger")
     {
@@ -3595,37 +3596,42 @@ fn load_reconciled_replay_snapshot(
             file,
             opened.directory().display_path().join(UPDATES_FILE),
             "session updates ledger",
-        )?
-        .join("\n"),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
+        )?,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
         Err(error) => return Err(error),
     };
-    Ok(Some(reconcile_replay_snapshot(
-        &opened.summary().info.id,
-        &timeline,
-        &contents,
-    )?))
+    let filtered = filter_rewind_lines(lines.iter().map(String::as_str).collect());
+    let reconciled = reconcile_raw_replay_lines(&opened.summary().info.id, &timeline, filtered)?;
+    Ok(Some(f(&reconciled.lines)?))
 }
 
 fn load_reconciled_updates_for_replay(
     session_id: &str,
     grow_home: &std::path::Path,
 ) -> std::io::Result<Option<Vec<acp::SessionUpdate>>> {
-    let Some(reconciled) = load_reconciled_replay_snapshot(session_id, grow_home)? else {
-        return Ok(None);
-    };
-    let mut result = Vec::new();
-    for_each_reconciled_replay_line(&reconciled, |update| result.push(update))?;
-    Ok(Some(result))
+    with_reconciled_replay_lines(session_id, grow_home, |lines| {
+        let mut result = Vec::new();
+        for line in lines {
+            for_each_reconciled_replay_line(line.as_str(), &mut |update| result.push(update))?;
+        }
+        Ok(result)
+    })
 }
 
 fn for_each_reconciled_replay_line<F: FnMut(acp::SessionUpdate)>(
     reconciled: &str,
-    mut f: F,
+    f: &mut F,
 ) -> io::Result<bool> {
     let mut emitted = false;
     for line in reconciled.lines().filter(|line| !line.trim().is_empty()) {
-        match SessionUpdateEnvelope::from_str(line)? {
+        let update = match SessionUpdateEnvelope::from_str(line) {
+            Ok(update) => update,
+            Err(error) => {
+                tracing::debug!(%error, "skipping unparseable replay line during projection reconciliation");
+                continue;
+            }
+        };
+        match update {
             SessionUpdate::Acp(notification) => {
                 emitted = true;
                 f(strip_context_wrappers(notification.update));
@@ -3726,12 +3732,19 @@ pub enum ReplayEmission {
 pub fn stream_replay_updates_at<F: FnMut(acp::SessionUpdate)>(
     session_id: &str,
     grow_home: &std::path::Path,
-    f: F,
+    mut f: F,
 ) -> std::io::Result<ReplayEmission> {
-    let Some(reconciled) = load_reconciled_replay_snapshot(session_id, grow_home)? else {
+    let Some(emitted) = with_reconciled_replay_lines(session_id, grow_home, |lines| {
+        let mut emitted = false;
+        for line in lines {
+            emitted |= for_each_reconciled_replay_line(line.as_str(), &mut f)?;
+        }
+        Ok(emitted)
+    })?
+    else {
         return Ok(ReplayEmission::Empty);
     };
-    Ok(if for_each_reconciled_replay_line(&reconciled, f)? {
+    Ok(if emitted {
         ReplayEmission::Emitted
     } else {
         ReplayEmission::Empty
@@ -4045,6 +4058,139 @@ fn line_has_event_id(line: &str, cursor_id: &str) -> bool {
     line_event_id(line).as_deref() == Some(cursor_id)
 }
 
+#[derive(Debug, Clone)]
+pub(crate) enum ReconciledReplayLine<'a> {
+    Borrowed(&'a str),
+    Owned(String),
+}
+
+impl ReconciledReplayLine<'_> {
+    pub(crate) fn as_str(&self) -> &str {
+        match self {
+            Self::Borrowed(line) => line,
+            Self::Owned(line) => line,
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct RawReconciliation<'a> {
+    pub(crate) lines: Vec<ReconciledReplayLine<'a>>,
+    pub(crate) changed: bool,
+}
+
+fn projection_envelope(
+    projection: &crate::session::response_projection::ResponseReplayProjection,
+) -> io::Result<String> {
+    let update = SessionUpdate::ResponseReplayProjection(Box::new(projection.clone()));
+    let envelope = SessionUpdateEnvelope::from_update(&update)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    serde_json::to_string(&envelope)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+}
+
+/// Rewind-filtered raw JSONL reconciliation. Ordinary ACP/Grow payloads are
+/// only classified by peeks; projection records are the sole typed decode.
+pub(crate) fn reconcile_raw_replay_lines<'a>(
+    session_id: &acp::SessionId,
+    timeline: &chat_state::Timeline,
+    lines: Vec<&'a str>,
+) -> io::Result<RawReconciliation<'a>> {
+    use crate::session::response_projection::{
+        PlannedProjection, ProjectionObservation, plan_response_projections,
+        project_admitted_response,
+    };
+    let canonicals = timeline
+        .admitted_responses()
+        .iter()
+        .map(|response| {
+            project_admitted_response(session_id, response)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let mut candidate_ids = Vec::with_capacity(lines.len());
+    let mut projections = Vec::new();
+    let mut kinds = Vec::with_capacity(lines.len());
+    for line in &lines {
+        let Some((kind, candidate)) = raw_projection_observation(line, &mut projections) else {
+            kinds.push(RawObservationKind::Other);
+            candidate_ids.push(None);
+            continue;
+        };
+        kinds.push(kind);
+        candidate_ids.push(candidate);
+    }
+    let observations = kinds
+        .iter()
+        .enumerate()
+        .map(|(index, kind)| match kind {
+            RawObservationKind::Candidate => ProjectionObservation::Candidate(
+                candidate_ids[index]
+                    .as_ref()
+                    .expect("candidate observation identity"),
+            ),
+            RawObservationKind::Projection(projection) => {
+                ProjectionObservation::Projection(&projections[*projection])
+            }
+            RawObservationKind::Other => ProjectionObservation::Other,
+        })
+        .collect::<Vec<_>>();
+    let plan = plan_response_projections(timeline, &canonicals, &observations)?;
+    let mut result = Vec::with_capacity(plan.entries.len());
+    for entry in plan.entries {
+        match entry {
+            PlannedProjection::Existing(index) => {
+                result.push(ReconciledReplayLine::Borrowed(lines[index]))
+            }
+            PlannedProjection::Canonical(index) => result.push(ReconciledReplayLine::Owned(
+                projection_envelope(&canonicals[index])?,
+            )),
+        }
+    }
+    Ok(RawReconciliation {
+        lines: result,
+        changed: plan.changed,
+    })
+}
+
+enum RawObservationKind {
+    Candidate,
+    Projection(usize),
+    Other,
+}
+
+fn raw_projection_observation(
+    line: &str,
+    projections: &mut Vec<crate::session::response_projection::ResponseReplayProjection>,
+) -> Option<(RawObservationKind, Option<(String, u32)>)> {
+    let env = serde_json::from_str::<RawLinePeek<'_>>(line).ok()?;
+    if env.method == crate::session::response_projection::RESPONSE_REPLAY_PROJECTION_METHOD {
+        let projection = serde_json::from_str(env.params.get()).ok()?;
+        projections.push(projection);
+        return Some((RawObservationKind::Projection(projections.len() - 1), None));
+    }
+    if env.method != ACP_SESSION_UPDATE_METHOD {
+        return None;
+    }
+    let params = serde_json::from_str::<RawParamsPeek<'_>>(env.params.get()).ok()?;
+    let meta = params.meta?;
+    #[derive(serde::Deserialize)]
+    struct CandidateMeta<'a> {
+        #[serde(rename = "samplingRequestId", borrow)]
+        request_id: Option<&'a str>,
+        #[serde(rename = "samplingAttempt")]
+        attempt: Option<u64>,
+    }
+    let meta = serde_json::from_str::<CandidateMeta<'_>>(meta.get()).ok()?;
+    Some((
+        RawObservationKind::Candidate,
+        Some((
+            meta.request_id?.to_owned(),
+            u32::try_from(meta.attempt?).ok()?,
+        )),
+    ))
+}
+
 /// Rewind-filter and reconcile the response-projection cache in memory.
 /// Storage-only projection records are synthesized from validated Timeline
 /// authority and candidate rows for the exact admitted attempt are removed.
@@ -4059,29 +4205,13 @@ pub(crate) fn reconcile_replay_snapshot(
             .filter(|line| !line.trim().is_empty())
             .collect(),
     );
-    let mut updates = Vec::with_capacity(filtered.len());
-    for line in filtered {
-        match SessionUpdateEnvelope::from_str(line) {
-            Ok(update) => updates.push(update),
-            Err(error) => {
-                tracing::debug!(%error, "skipping unparseable replay line during projection reconciliation");
-            }
-        }
+    let reconciled = reconcile_raw_replay_lines(session_id, timeline, filtered)?;
+    let mut output = String::new();
+    for line in reconciled.lines {
+        output.push_str(line.as_str());
+        output.push('\n');
     }
-    let updates = crate::session::response_projection::reconcile_response_projections(
-        session_id, timeline, updates,
-    )?;
-    let mut reconciled = String::new();
-    for update in updates {
-        let envelope = SessionUpdateEnvelope::from_update(&update)
-            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
-        reconciled.push_str(
-            &serde_json::to_string(&envelope)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
-        );
-        reconciled.push('\n');
-    }
-    Ok(reconciled)
+    Ok(output)
 }
 
 /// Rewind-filter, resolve the reconnect cursor, and drop redundant command
@@ -5036,6 +5166,21 @@ mod tests {
     /// `stream_replay_updates_at` wraps) applies rewind over a real file and
     /// yields the same survivors as the typed parse-all path.
     #[test]
+    fn reconciled_stream_skips_malformed_retained_lines() {
+        let malformed = "{not-json";
+        let valid = acp_envelope(
+            r#"{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"kept"}}"#,
+        );
+        let reconciled = format!("{malformed}\n{valid}\n");
+        let mut updates = Vec::new();
+        let emitted =
+            for_each_reconciled_replay_line(&reconciled, &mut |update| updates.push(update))
+                .unwrap();
+        assert!(emitted);
+        assert_eq!(updates.len(), 1);
+    }
+
+    #[test]
     fn streaming_replay_applies_rewind_like_the_typed_path() {
         let u1 = acp_envelope(
             r#"{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"p1"}}"#,
@@ -5077,10 +5222,14 @@ mod tests {
             .collect();
         let reference: Vec<acp::SessionUpdate> = filter_rewind_updates(typed)
             .into_iter()
-            .filter_map(|u| match u {
-                SessionUpdate::Acp(notif) => Some(strip_context_wrappers(notif.update)),
-                SessionUpdate::Grow(_) => None,
-                SessionUpdate::ResponseReplayProjection(_) => None,
+            .flat_map(|u| match u {
+                SessionUpdate::Acp(notif) => vec![strip_context_wrappers(notif.update)],
+                SessionUpdate::Grow(_) => Vec::new(),
+                SessionUpdate::ResponseReplayProjection(projection) => projection
+                    .updates
+                    .into_iter()
+                    .map(|notification| strip_context_wrappers(notification.update))
+                    .collect(),
             })
             .collect();
 

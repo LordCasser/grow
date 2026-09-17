@@ -78,9 +78,14 @@ fn reference_load_all(updates_path: &Path) -> Vec<acp::SessionUpdate> {
     let filtered = filter_rewind_updates(all);
     filtered
         .into_iter()
-        .filter_map(|u| match u {
-            SessionUpdate::Acp(notif) => Some(strip_context_wrappers(notif.update)),
-            SessionUpdate::Grow(_) => None,
+        .flat_map(|u| match u {
+            SessionUpdate::Acp(notif) => vec![strip_context_wrappers(notif.update)],
+            SessionUpdate::Grow(_) => Vec::new(),
+            SessionUpdate::ResponseReplayProjection(projection) => projection
+                .updates
+                .into_iter()
+                .map(|notification| strip_context_wrappers(notification.update))
+                .collect(),
         })
         .collect()
 }

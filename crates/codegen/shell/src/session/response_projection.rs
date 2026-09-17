@@ -102,27 +102,38 @@ pub(crate) fn project_admitted_response(
     })
 }
 
-pub(crate) fn reconcile_response_projections(
-    session_id: &SessionId,
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ProjectionObservation<'a> {
+    Candidate(&'a (String, u32)),
+    Projection(&'a ResponseReplayProjection),
+    Other,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PlannedProjection {
+    Existing(usize),
+    Canonical(usize),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ProjectionPlan {
+    pub(crate) entries: Vec<PlannedProjection>,
+    pub(crate) changed: bool,
+}
+
+pub(crate) fn plan_response_projections(
     timeline: &chat_state::Timeline,
-    updates: Vec<crate::session::storage::SessionUpdate>,
-) -> std::io::Result<Vec<crate::session::storage::SessionUpdate>> {
-    use crate::session::storage::SessionUpdate;
+    canonicals: &[ResponseReplayProjection],
+    observations: &[ProjectionObservation<'_>],
+) -> std::io::Result<ProjectionPlan> {
     let admitted = timeline.admitted_responses();
-    let canonicals = admitted
-        .iter()
-        .map(|response| {
-            project_admitted_response(session_id, response)
-                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     let active_by_identity = admitted
         .iter()
         .enumerate()
         .map(|(index, response)| {
             (
                 (
-                    response.identity.request_id.clone(),
+                    response.identity.request_id.as_str(),
                     response.identity.attempt,
                 ),
                 index,
@@ -130,74 +141,127 @@ pub(crate) fn reconcile_response_projections(
         })
         .collect::<std::collections::BTreeMap<_, _>>();
     let mut candidate_anchor = vec![None; canonicals.len()];
-    let mut exact_anchor = vec![None; canonicals.len()];
-    let mut suppressed = vec![false; updates.len()];
+    let mut exact_indices = vec![Vec::new(); canonicals.len()];
+    let mut suppressed = vec![false; observations.len()];
+    let mut changed = false;
 
-    // Reconcile against the original physical order. Candidate rows are
-    // provisional cache only; every candidate is removed, while active rows
-    // provide an insertion anchor and active projection rows are validated
-    // before any dead-branch cache is suppressed.
-    for (physical_index, update) in updates.iter().enumerate() {
-        match update {
-            SessionUpdate::Acp(notification) => {
-                let Some(identity) = candidate_identity(notification) else {
-                    continue;
-                };
+    for (physical_index, observation) in observations.iter().enumerate() {
+        match observation {
+            ProjectionObservation::Candidate(identity) => {
                 suppressed[physical_index] = true;
-                if let Some(&canonical_index) = active_by_identity.get(&identity) {
+                changed = true;
+                if let Some(&canonical_index) =
+                    active_by_identity.get(&(identity.0.as_str(), identity.1))
+                {
                     candidate_anchor[canonical_index].get_or_insert(physical_index);
                 }
             }
-            SessionUpdate::ResponseReplayProjection(existing) => {
-                let identity = (existing.request_id.clone(), existing.attempt);
+            ProjectionObservation::Projection(existing) => {
+                let identity = (existing.request_id.as_str(), existing.attempt);
                 let Some(&canonical_index) = active_by_identity.get(&identity) else {
-                    // Projection rows not owned by the selected branch are
-                    // dead-branch cache and must not replay.
                     suppressed[physical_index] = true;
+                    changed = true;
                     continue;
                 };
-                let canonical = &canonicals[canonical_index];
-                if !existing.exact_match(canonical) {
+                if !existing.exact_match(&canonicals[canonical_index]) {
                     return Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidData,
                         "response replay projection conflict",
                     ));
                 }
-                exact_anchor[canonical_index].get_or_insert(physical_index);
+                exact_indices[canonical_index].push(physical_index);
                 suppressed[physical_index] = true;
             }
-            _ => {}
+            ProjectionObservation::Other => {}
         }
     }
 
-    let mut anchors = std::collections::BTreeMap::<usize, Vec<usize>>::new();
+    let mut insertions = std::collections::BTreeMap::<usize, Vec<PlannedProjection>>::new();
     for (canonical_index, response) in admitted.iter().enumerate() {
+        let exact = &exact_indices[canonical_index];
         let anchor = candidate_anchor[canonical_index]
-            .or(exact_anchor[canonical_index])
-            .unwrap_or(updates.len());
-        if anchor == updates.len() && !timeline.response_projection_tail_safe(response.event_seq) {
+            .or_else(|| exact.first().copied())
+            .unwrap_or(observations.len());
+        if anchor == observations.len()
+            && !timeline.response_projection_tail_safe(response.event_seq)
+        {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "missing response projection cannot be safely ordered at cache tail",
             ));
         }
-        anchors.entry(anchor).or_default().push(canonical_index);
+        let retain_physical = candidate_anchor[canonical_index].is_none() && exact.len() == 1;
+        if !retain_physical {
+            changed = true;
+        }
+        insertions
+            .entry(anchor)
+            .or_default()
+            .push(if retain_physical {
+                PlannedProjection::Existing(exact[0])
+            } else {
+                PlannedProjection::Canonical(canonical_index)
+            });
     }
 
-    let mut reconciled = Vec::with_capacity(updates.len() + canonicals.len());
-    for physical_index in 0..=updates.len() {
-        if let Some(canonical_indices) = anchors.get(&physical_index) {
-            for &canonical_index in canonical_indices {
-                reconciled.push(SessionUpdate::ResponseReplayProjection(Box::new(
-                    canonicals[canonical_index].clone(),
-                )));
-            }
+    let mut entries = Vec::with_capacity(observations.len() + canonicals.len());
+    for physical_index in 0..=observations.len() {
+        if let Some(items) = insertions.get(&physical_index) {
+            entries.extend(items.iter().copied());
         }
-        if physical_index < updates.len() && !suppressed[physical_index] {
-            reconciled.push(updates[physical_index].clone());
+        if physical_index < observations.len() && !suppressed[physical_index] {
+            entries.push(PlannedProjection::Existing(physical_index));
         }
     }
-    Ok(reconciled)
+    Ok(ProjectionPlan { entries, changed })
+}
+
+pub(crate) fn reconcile_response_projections(
+    session_id: &SessionId,
+    timeline: &chat_state::Timeline,
+    updates: Vec<crate::session::storage::SessionUpdate>,
+) -> std::io::Result<Vec<crate::session::storage::SessionUpdate>> {
+    use crate::session::storage::SessionUpdate;
+    let canonicals = timeline
+        .admitted_responses()
+        .iter()
+        .map(|response| {
+            project_admitted_response(session_id, response)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let identities = updates
+        .iter()
+        .map(|update| match update {
+            SessionUpdate::Acp(notification) => candidate_identity(notification),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let observations = updates
+        .iter()
+        .enumerate()
+        .map(|(index, update)| match update {
+            SessionUpdate::Acp(_) => identities[index].as_ref().map_or(
+                ProjectionObservation::Other,
+                ProjectionObservation::Candidate,
+            ),
+            SessionUpdate::ResponseReplayProjection(projection) => {
+                ProjectionObservation::Projection(projection)
+            }
+            _ => ProjectionObservation::Other,
+        })
+        .collect::<Vec<_>>();
+    let plan = plan_response_projections(timeline, &canonicals, &observations)?;
+    Ok(plan
+        .entries
+        .into_iter()
+        .map(|entry| match entry {
+            PlannedProjection::Existing(index) => updates[index].clone(),
+            PlannedProjection::Canonical(index) => {
+                SessionUpdate::ResponseReplayProjection(Box::new(canonicals[index].clone()))
+            }
+        })
+        .collect())
 }
 
 fn candidate_identity(notification: &acp::SessionNotification) -> Option<(String, u32)> {
@@ -578,5 +642,152 @@ mod tests {
             project_admitted_response(&SessionId::new("session-1"), &response).unwrap();
         assert_eq!(projection.disposition, ResponseReplayDisposition::Discarded);
         assert!(projection.updates.is_empty());
+    }
+
+    fn raw_line(update: &crate::session::storage::SessionUpdate) -> String {
+        serde_json::to_string(update).unwrap()
+    }
+
+    fn serialized_updates(updates: Vec<crate::session::storage::SessionUpdate>) -> Vec<String> {
+        updates
+            .iter()
+            .map(|update| serde_json::to_string(update).unwrap())
+            .collect()
+    }
+
+    fn raw_typed_parity(
+        session_id: &SessionId,
+        timeline: &chat_state::Timeline,
+        updates: &[crate::session::storage::SessionUpdate],
+    ) -> (Vec<String>, Vec<String>) {
+        let typed = reconcile_response_projections(session_id, timeline, updates.to_vec()).unwrap();
+        let lines = updates.iter().map(raw_line).collect::<Vec<_>>();
+        let raw = crate::session::storage::reconcile_raw_replay_lines(
+            session_id,
+            timeline,
+            lines.iter().map(String::as_str).collect(),
+        )
+        .unwrap();
+        let raw_typed = raw
+            .lines
+            .iter()
+            .map(|line| {
+                crate::session::storage::SessionUpdateEnvelope::from_str(line.as_str()).unwrap()
+            })
+            .collect::<Vec<_>>();
+        (
+            serialized_updates(typed),
+            raw_typed.into_iter().map(|u| raw_line(&u)).collect(),
+        )
+    }
+
+    #[test]
+    fn raw_and_typed_reconciliation_have_identical_projection_semantics() {
+        let session_id = SessionId::new("session-1");
+        let timeline = validated_timeline(
+            "request-1",
+            2,
+            vec![sampling_types::ConversationItem::assistant("answer")],
+            0,
+        );
+        let response = timeline.admitted_responses().pop().unwrap();
+        let projection = project_admitted_response(&session_id, &response).unwrap();
+
+        let scenarios = [
+            Vec::new(),
+            vec![
+                candidate_update(&session_id, "request-1", 2, "preview"),
+                independent_update(&session_id, "independent"),
+                tool_update(&session_id),
+                response_projection_update(projection.clone()),
+            ],
+            vec![
+                response_projection_update(projection.clone()),
+                response_projection_update(projection.clone()),
+            ],
+            vec![candidate_update(&session_id, "request-1", 1, "discarded")],
+        ];
+
+        for updates in scenarios {
+            let (typed, raw) = raw_typed_parity(&session_id, &timeline, &updates);
+            assert_eq!(raw, typed);
+        }
+    }
+
+    #[test]
+    fn raw_and_typed_reconciliation_both_fail_closed_on_projection_conflict() {
+        let session_id = SessionId::new("session-1");
+        let timeline = validated_timeline(
+            "request-1",
+            2,
+            vec![sampling_types::ConversationItem::assistant("answer")],
+            0,
+        );
+        let response = timeline.admitted_responses().pop().unwrap();
+        let mut conflict = project_admitted_response(&session_id, &response).unwrap();
+        conflict.digest = "conflict".into();
+        let update = response_projection_update(conflict);
+        assert!(
+            reconcile_response_projections(&session_id, &timeline, vec![update.clone()]).is_err()
+        );
+        let line = raw_line(&update);
+        assert!(
+            crate::session::storage::reconcile_raw_replay_lines(
+                &session_id,
+                &timeline,
+                vec![line.as_str()],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn raw_reconciliation_marks_only_healthy_exact_projection_unchanged() {
+        let session_id = SessionId::new("session-1");
+        let timeline = validated_timeline(
+            "request-1",
+            2,
+            vec![sampling_types::ConversationItem::assistant("answer")],
+            0,
+        );
+        let response = timeline.admitted_responses().pop().unwrap();
+        let projection = project_admitted_response(&session_id, &response).unwrap();
+        let line = raw_line(&response_projection_update(projection));
+        let result = crate::session::storage::reconcile_raw_replay_lines(
+            &session_id,
+            &timeline,
+            vec![line.as_str()],
+        )
+        .unwrap();
+        assert!(!result.changed);
+        assert!(matches!(
+            result.lines[0],
+            crate::session::storage::ReconciledReplayLine::Borrowed(_)
+        ));
+    }
+
+    #[test]
+    fn raw_candidate_peek_does_not_decode_unknown_update_body() {
+        let session_id = SessionId::new("session-1");
+        let timeline = validated_timeline(
+            "request-1",
+            2,
+            vec![sampling_types::ConversationItem::assistant("answer")],
+            0,
+        );
+        let line = format!(
+            r#"{{"method":"session/update","params":{{"sessionId":"session-1","update":{{"sessionUpdate":"agent_message_chunk","content":{{"type":"unknown","payload":{{"not":"acp"}}}}}},"_meta":{{"samplingRequestId":"request-1","samplingAttempt":2}}}}}}"#
+        );
+        let result = crate::session::storage::reconcile_raw_replay_lines(
+            &session_id,
+            &timeline,
+            vec![line.as_str()],
+        )
+        .unwrap();
+        assert!(result.changed);
+        assert!(result.lines.iter().any(|line| matches!(
+            line,
+            crate::session::storage::ReconciledReplayLine::Owned(_)
+        )));
     }
 }
