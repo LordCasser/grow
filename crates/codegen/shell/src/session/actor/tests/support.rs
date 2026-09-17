@@ -349,6 +349,29 @@ pub(crate) async fn create_test_actor_ex(
     SessionActor,
     tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
 ) {
+    create_test_actor_ex_with_projection_error(
+        total_tokens,
+        context_window,
+        threshold_percent,
+        gateway_tx,
+        persistence_tx,
+        None,
+    )
+    .await
+}
+
+#[cfg(test)]
+pub(crate) async fn create_test_actor_ex_with_projection_error(
+    total_tokens: u64,
+    context_window: u64,
+    threshold_percent: u8,
+    gateway_tx: tokio::sync::mpsc::UnboundedSender<acp_transport::AcpClientMessage>,
+    persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
+    projection_error: Option<crate::session::storage::AppendUpdateError>,
+) -> (
+    SessionActor,
+    tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
+) {
     // Production owns a persistence actor that acknowledges durable terminal
     // appends. Unit tests pass an observation channel instead, so bridge the
     // durable envelope to the historical `Update` shape while completing the
@@ -425,7 +448,26 @@ pub(crate) async fn create_test_actor_ex(
         recent_terminals: VecDeque::new(),
     });
     let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
-    let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
+    let (event_tx, mut raw_event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
+    let (observed_event_tx, observed_event_rx) =
+        tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
+    tokio::spawn(async move {
+        let mut projection_error = projection_error;
+        while let Some(event) = raw_event_rx.recv().await {
+            match event {
+                SessionEvent::ResponseProjection { respond_to, .. } => {
+                    let result = projection_error.take().map_or(Ok(()), Err);
+                    let _ = respond_to.send(result);
+                }
+                SessionEvent::FlushReplay { respond_to: Some(respond_to) } => {
+                    let _ = respond_to.send(());
+                }
+                event => {
+                    let _ = observed_event_tx.send(event);
+                }
+            }
+        }
+    });
     let chat_state_handle = chat_state::ChatStateActor::spawn(
         vec![sampling_types::ConversationItem::system(
             "test system prompt",
@@ -688,7 +730,7 @@ pub(crate) async fn create_test_actor_ex(
         .activate_resource_domain(&actor.rebuild_spec.resource_domain)
         .await
         .expect("test actor resource domain must be active before Agent rebuilds");
-    (actor, event_rx)
+    (actor, observed_event_rx)
 }
 #[cfg(test)]
 pub(crate) async fn create_test_actor(

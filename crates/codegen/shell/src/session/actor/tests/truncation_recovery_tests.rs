@@ -272,19 +272,6 @@ async fn actor_with_sampler_delivery(
     mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
     mpsc::UnboundedReceiver<SessionEvent>,
 ) {
-    actor_with_sampler_delivery_with_projection_error(server, api_backend, delivery, None).await
-}
-
-async fn actor_with_sampler_delivery_with_projection_error(
-    server: &MockInferenceServer,
-    api_backend: sampling_types::ApiBackend,
-    delivery: sampler::OutputDelivery,
-    projection_error: Option<crate::session::storage::AppendUpdateError>,
-) -> (
-    std::sync::Arc<SessionActor>,
-    mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
-    mpsc::UnboundedReceiver<SessionEvent>,
-) {
     let (gateway_tx, gateway_rx) = mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
     let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
     tokio::task::spawn_local(async move {
@@ -294,32 +281,22 @@ async fn actor_with_sampler_delivery_with_projection_error(
             }
         }
     });
-    let (mut actor, mut raw_events) =
-        create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
-    let (observer_tx, observer_rx) = mpsc::unbounded_channel::<SessionEvent>();
-    tokio::task::spawn_local(async move {
-        let mut projection_error = projection_error;
-        while let Some(event) = raw_events.recv().await {
-            match event {
-                SessionEvent::ResponseProjection { respond_to, .. } => {
-                    let result = projection_error
-                        .take()
-                        .map_or(Ok(()), Err);
-                    let _ = respond_to.send(result);
-                }
-                SessionEvent::FlushReplay { respond_to } => {
-                    if let Some(respond_to) = respond_to {
-                        let _ = respond_to.send(());
-                    }
-                }
-                event => {
-                    if observer_tx.send(event).is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    });
+    let (actor, events) = create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+    configure_actor_with_sampler(server, api_backend, delivery, actor, gateway_rx, events).await
+}
+
+async fn configure_actor_with_sampler(
+    server: &MockInferenceServer,
+    api_backend: sampling_types::ApiBackend,
+    delivery: sampler::OutputDelivery,
+    mut actor: SessionActor,
+    gateway_rx: mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+    observer_rx: mpsc::UnboundedReceiver<SessionEvent>,
+) -> (
+    std::sync::Arc<SessionActor>,
+    mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+    mpsc::UnboundedReceiver<SessionEvent>,
+) {
     actor.tool_context.sampling_output_delivery = delivery;
     // Point the chat-state sampling config at the mock server so BOTH the
     // main turn requests and the compaction client (which rebuilds its
@@ -903,13 +880,35 @@ fn response_projection_fatal_boundary_blocks_tool_dispatch_and_recovery() {
                 messages_turn(&[text_block("illegal continuation")], END_TURN),
             );
 
-            let (actor, _, mut events) = actor_with_sampler_delivery_with_projection_error(
-                &server,
-                sampling_types::ApiBackend::Messages,
-                sampler::OutputDelivery::Irreversible,
+            let (gateway_tx, gateway_rx) =
+                mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+            let (persistence_tx, mut persistence_rx) =
+                mpsc::unbounded_channel::<PersistenceMsg>();
+            tokio::task::spawn_local(async move {
+                while let Some(message) = persistence_rx.recv().await {
+                    if let PersistenceMsg::SidebandDurablyAndAck { respond_to, .. } = message {
+                        let _ = respond_to.send(Ok(()));
+                    }
+                }
+            });
+            let (actor, events) = create_test_actor_ex_with_projection_error(
+                0,
+                256_000,
+                85,
+                gateway_tx,
+                persistence_tx,
                 Some(crate::session::storage::AppendUpdateError::NotCommitted(
                     std::io::Error::other("injected response projection failure"),
                 )),
+            )
+            .await;
+            let (actor, _, mut events) = configure_actor_with_sampler(
+                &server,
+                sampling_types::ApiBackend::Messages,
+                sampler::OutputDelivery::Irreversible,
+                actor,
+                gateway_rx,
+                events,
             )
             .await;
             *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
