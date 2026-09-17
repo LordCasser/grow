@@ -5,11 +5,10 @@
 //! compaction, a recap never mutates the conversation: it is generated from a
 //! read-only snapshot and surfaced to the client for display only.
 //!
-//! Generation reuses the parent session's conversation prefix verbatim (so the
-//! provider prompt cache stays warm) and appends a single instruction turn that
-//! asks for the recap. The pure helpers here build that request and tidy the
-//! model's output; the actual model call lives on the `SessionActor`
-//! (`handle_recap`).
+//! Generation snapshots the parent session's conversation, projects it into
+//! portable history, and appends a single instruction turn that asks for the
+//! recap. The pure helpers here build that request and tidy the model's output;
+//! the actual model call lives on the `SessionActor` (`handle_recap`).
 
 use crate::sampling::ConversationItem;
 use crate::session::helpers::text::floor_char_boundary;
@@ -61,30 +60,20 @@ pub(crate) fn recap_instruction(tag: &str) -> String {
 
 /// Prepare the conversation snapshot for a recap request.
 ///
-/// 1. Optionally strips reasoning/thinking blocks (`strip_reasoning`). This is
-///    only needed on the Anthropic Messages backend, which rejects thinking
-///    blocks sent without a top-level `thinking` config. Every other backend
-///    (grow/SGLang via ChatCompletions/Responses) keeps reasoning VERBATIM so
-///    the conversation prefix is byte-identical to the last turn and the
-///    provider's prefix KV cache stays warm — which is the whole reason we
-///    append the instruction after the prefix. Mirrors compaction's
-///    `summary_strips_reasoning`.
-/// 2. Truncates a trailing incomplete assistant/tool-result run — a recap can
-///    fire mid-turn, and the Anthropic Messages API rejects `tool_use` ids without a
-///    matching `tool_result`.
-/// 3. Appends the recap instruction as a final user turn.
+/// 1. Projects the snapshot into portable history. The projector retains
+///    complete local tool exchanges (including result attachments), drops
+///    incomplete or ambiguous calls, and optionally keeps visible reasoning.
+/// 2. Appends the recap instruction as a final user turn.
 pub(crate) fn build_recap_items(
     conversation: Vec<ConversationItem>,
     tag: &str,
     strip_reasoning: bool,
 ) -> Vec<ConversationItem> {
-    let mut items = if strip_reasoning {
-        chat_state::compaction_utils::strip_reasoning_blocks(conversation)
-    } else {
-        conversation
-    };
-
-    pop_trailing_tool_run(&mut items);
+    // Messages cannot accept durable reasoning without a top-level thinking
+    // configuration. Chat filters this display-only item at wire conversion;
+    // Responses can retain visible reasoning when its route supports it.
+    let mut items =
+        sampling_types::project_portable_history_with_reasoning(&conversation, !strip_reasoning);
 
     items.push(ConversationItem::user(recap_instruction(tag)));
     items
@@ -116,12 +105,11 @@ const RECAP_BUDGET_HEADROOM_TOKENS: u64 = 4_000;
 /// that unlikely for normal grow-build sessions).
 ///
 /// * Fast path — if the whole snapshot already fits, returns
-///   `build_recap_items(...)` verbatim (keeps the grow prefix KV cache warm;
-///   honors the caller's `strip_reasoning`).
-/// * Over budget — strip reasoning (the prefix cache is lost once we trim),
-///   normalize the trailing boundary ([`pop_trailing_tool_run`]),
-///   front-trim to fit via `fit_conversation_to_budget` (System kept, most-recent
-///   turn truncated in place, never emptied), then append the instruction.
+///   `build_recap_items(...)` (honors the caller's `strip_reasoning`).
+/// * Over budget — project the snapshot into portable history, front-trim to fit via
+///   `fit_conversation_to_budget` (System kept, most-recent turn truncated in
+///   place, never emptied), then project once more to close any tool boundary
+///   the trim may have split before appending the instruction.
 ///
 /// `context_window` MUST be the window of the model the recap is actually sent to
 /// (today the session model).
@@ -138,18 +126,23 @@ pub(crate) fn budget_recap_items(
     let instruction = ConversationItem::user(recap_instruction(tag));
     let snapshot_budget = prompt_budget.saturating_sub(estimate_item_tokens(&instruction));
 
-    // Un-stripped estimate is a safe upper bound (stripping only shrinks); the
-    // verbatim path keeps the grow prefix cache warm.
+    // Use the original snapshot for the fast/trimmed branch decision. Portable
+    // projection can normalize an item into different text, so this estimate
+    // is not treated as a strict post-projection bound.
     let pre_tokens = estimate_conversation_tokens(&conversation);
     if pre_tokens <= snapshot_budget {
         return build_recap_items(conversation, tag, strip_reasoning);
     }
 
-    // Normalize the trailing boundary BEFORE trimming (ordering matters — see doc).
-    let mut snapshot =
-        compaction_utils::prepare_conversation_for_verbatim_summarization(conversation, true);
-    pop_trailing_tool_run(&mut snapshot);
-    let mut items = compaction_utils::fit_conversation_to_budget(snapshot, snapshot_budget);
+    // Project before trimming so completed calls/results (and their images) are
+    // eligible evidence. The second projection below is required because a
+    // front trim can otherwise retain one half of an otherwise valid exchange.
+    // Once trimming is required, preserve the previous budget-path behavior:
+    // remove durable reasoning while projecting tool evidence. The fast path
+    // above still honors the backend-specific `strip_reasoning` setting.
+    let snapshot = sampling_types::project_portable_history(&conversation);
+    let trimmed = compaction_utils::fit_conversation_to_budget(snapshot, snapshot_budget);
+    let mut items = sampling_types::project_portable_history(&trimmed);
     let post_tokens = estimate_conversation_tokens(&items);
     tracing::debug!(
         context_window,
@@ -162,25 +155,6 @@ pub(crate) fn budget_recap_items(
     );
     items.push(instruction);
     items
-}
-
-/// Trailing normalization shared by [`build_recap_items`] and
-/// [`budget_recap_items`]: pop a trailing tool run — trailing `ToolResult`s and
-/// any trailing `Assistant` with `tool_calls` (complete runs included) — so it ends on
-/// a clean boundary and the appended `User` instruction never follows a
-/// `tool_use`/`tool_result`.
-fn pop_trailing_tool_run(items: &mut Vec<ConversationItem>) {
-    while let Some(last) = items.last() {
-        match last {
-            ConversationItem::Assistant(a) if !a.tool_calls.is_empty() => {
-                items.pop();
-            }
-            ConversationItem::ToolResult(_) => {
-                items.pop();
-            }
-            _ => break,
-        }
-    }
 }
 
 /// Minimum main turns before an automatic return-from-away recap (manual exempt).
@@ -372,6 +346,76 @@ mod tests {
                 .iter()
                 .any(|i| matches!(i, ConversationItem::ToolResult(_)))
         );
+    }
+
+    #[test]
+    fn build_preserves_complete_tool_evidence_and_drops_partial_calls() {
+        use sampling_types::ContentPart;
+
+        let conv = vec![
+            ConversationItem::system("sys"),
+            ConversationItem::user("inspect the deployment"),
+            ConversationItem::assistant("I checked the deployment state."),
+            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
+                "deciding which evidence to inspect",
+            )),
+            ConversationItem::Assistant(sampling_types::AssistantItem {
+                content: "The verification is in progress.".into(),
+                tool_calls: vec![
+                    mk_tool_call("complete", "{}"),
+                    mk_tool_call("partial", "{}"),
+                ],
+                model_id: None,
+                model_fingerprint: None,
+                reasoning_effort: None,
+            }),
+            ConversationItem::tool_result_with_images(
+                "complete",
+                "verified",
+                vec![
+                    ContentPart::Text {
+                        text: "attachment text".into(),
+                    },
+                    ContentPart::Image {
+                        url: "data:image/png;base64,fixture".into(),
+                        description: None,
+                    },
+                ],
+            ),
+        ];
+
+        let items = build_recap_items(conv, "system-reminder", false);
+        let tool_assistant = items.iter().find_map(|item| match item {
+            ConversationItem::Assistant(assistant) if !assistant.tool_calls.is_empty() => {
+                Some(assistant)
+            }
+            _ => None,
+        });
+        let tool_assistant = tool_assistant.expect("complete tool exchange must be retained");
+        assert_eq!(
+            tool_assistant.content.as_ref(),
+            "The verification is in progress."
+        );
+        assert_eq!(tool_assistant.tool_calls.len(), 1);
+        assert_eq!(tool_assistant.tool_calls[0].id.as_ref(), "complete");
+
+        let result = items.iter().find_map(|item| match item {
+            ConversationItem::ToolResult(result) if result.tool_call_id == "complete" => {
+                Some(result)
+            }
+            _ => None,
+        });
+        let result = result.expect("complete tool result must be retained");
+        assert_eq!(result.content.as_ref(), "verified");
+        assert_eq!(
+            result.images.len(),
+            2,
+            "result attachments must survive projection"
+        );
+        assert!(!items.iter().any(|item| {
+            matches!(item, ConversationItem::Assistant(assistant)
+                if assistant.tool_calls.iter().any(|call| call.id.as_ref() == "partial"))
+        }));
     }
 
     #[test]
@@ -624,46 +668,42 @@ mod tests {
     }
 
     #[test]
-    fn budget_over_budget_no_trailing_tool_run_and_keeps_recent_user() {
-        // Regression guard locking the "normalize trailing boundary BEFORE
-        // fit_conversation_to_budget" ordering. The trailing ToolResult is sized
-        // LARGER than the budget on purpose: with the WRONG order (fit-then-pop),
-        // `fit` sees the lone giant tool tail, truncates it in place, and drops
-        // the most-recent real user turn — so assertion (a) fails. With the
-        // correct order (pop-then-fit) the trailing tool run is removed first, so
-        // the recent user turn is what survives the front-trim.
+    fn budget_over_budget_retains_bounded_complete_tool_evidence() {
+        // The result is larger than the budget on purpose. The budget fitter
+        // truncates the result in place while retaining its owning call; the
+        // second portable projection then verifies that the pair remains valid.
         let conv = vec![
             ConversationItem::system("sys"),
-            ConversationItem::user("c".repeat(40_000)), // oldest real user, dropped
-            ConversationItem::user("what changed in the parser?"), // most-recent real user
+            ConversationItem::user("c".repeat(40_000)), // oldest history, dropped
             ConversationItem::assistant_tool_calls(vec![mk_tool_call("c9", "{}")]),
-            ConversationItem::tool_result("c9", "t".repeat(40_000)), // trailing run, > budget
+            ConversationItem::tool_result("c9", "t".repeat(40_000)), // result, > budget
         ];
         let out = budget_recap_items(conv, "system-reminder", false, 8_000);
 
-        // (b) No trailing tool run before the appended instruction.
         assert!(matches!(out.last(), Some(ConversationItem::User(_))));
-        let before = &out[out.len() - 2];
+        let call = out.iter().find_map(|item| match item {
+            ConversationItem::Assistant(assistant)
+                if assistant
+                    .tool_calls
+                    .iter()
+                    .any(|call| call.id.as_ref() == "c9") =>
+            {
+                Some(assistant)
+            }
+            _ => None,
+        });
         assert!(
-            !matches!(before, ConversationItem::ToolResult(_)),
-            "no tool_result immediately before the appended instruction"
+            call.is_some(),
+            "the complete call must survive budget trimming"
         );
+        let result = out.iter().find_map(|item| match item {
+            ConversationItem::ToolResult(result) if result.tool_call_id == "c9" => Some(result),
+            _ => None,
+        });
+        let result = result.expect("the paired result must survive budget trimming");
         assert!(
-            !matches!(before, ConversationItem::Assistant(a) if !a.tool_calls.is_empty()),
-            "no dangling assistant tool_use immediately before the appended instruction"
-        );
-        // (a) The most-recent real user turn survives (FAILS under fit-then-pop,
-        // which would instead keep a truncated lone tool tail).
-        assert!(
-            out.iter().any(|i| matches!(
-                i,
-                ConversationItem::User(u) if u.content.iter().any(|p| matches!(
-                    p,
-                    sampling_types::ContentPart::Text { text }
-                        if text.contains("what changed in the parser?")
-                ))
-            )),
-            "most-recent real user turn must survive the trim (locks normalize-before-fit)"
+            result.content.contains("truncated"),
+            "oversized result must be bounded in place"
         );
     }
 
@@ -687,36 +727,39 @@ mod tests {
     }
 
     #[test]
-    fn budget_over_budget_strips_reasoning_even_on_grow() {
+    fn budget_over_budget_drops_unpaired_reasoning_even_on_grow() {
         let conv = vec![
             mk_reasoning("r1"),
             ConversationItem::assistant("did stuff"),
             ConversationItem::user("z".repeat(40_000)),
         ];
-        // grow backend => strip_reasoning=false, but the over-budget branch must
-        // strip reasoning anyway (the prefix cache is already lost once trimmed).
+        // Reasoning attached only to plain assistant prose is not portable
+        // evidence, even though grow/Responses may retain supported reasoning
+        // attached to a complete tool exchange.
         let out = budget_recap_items(conv, "system-reminder", false, 8_000);
         assert!(
             !out.iter()
                 .any(|i| matches!(i, ConversationItem::Reasoning(_))),
-            "over-budget branch must strip reasoning even when strip_reasoning=false"
+            "unpaired reasoning must not enter the portable recap"
         );
     }
 
     #[test]
-    fn budget_fast_path_keeps_reasoning_on_grow() {
+    fn budget_fast_path_keeps_supported_reasoning_on_grow() {
         let conv = vec![
             mk_reasoning("r1"),
-            ConversationItem::assistant("did stuff"),
+            ConversationItem::assistant_tool_calls(vec![mk_tool_call("c1", "{}")]),
+            ConversationItem::tool_result("c1", "done"),
             ConversationItem::user("small"),
         ];
-        // Fits under a large window on grow (strip_reasoning=false) => verbatim,
-        // reasoning kept so the prefix KV cache stays warm.
+        // Fits under a large window on grow (strip_reasoning=false): the
+        // projector retains visible reasoning needed by supported Responses
+        // routes when it belongs to a complete tool exchange.
         let out = budget_recap_items(conv, "system-reminder", false, 256_000);
         assert!(
             out.iter()
                 .any(|i| matches!(i, ConversationItem::Reasoning(_))),
-            "fits path on grow must keep reasoning verbatim"
+            "fits path on grow must keep supported reasoning"
         );
     }
 
@@ -751,25 +794,6 @@ mod tests {
     }
 
     #[test]
-    fn pop_trailing_removes_tool_run_keeps_clean_tail() {
-        let mut items = vec![
-            ConversationItem::user("hi"),
-            ConversationItem::assistant_tool_calls(vec![mk_tool_call("c1", "{}")]),
-            ConversationItem::tool_result("c1", "out"),
-        ];
-        pop_trailing_tool_run(&mut items);
-        assert_eq!(items.len(), 1);
-        assert!(matches!(items[0], ConversationItem::User(_)));
-
-        let mut clean = vec![
-            ConversationItem::user("hi"),
-            ConversationItem::assistant("done"),
-        ];
-        pop_trailing_tool_run(&mut clean);
-        assert_eq!(clean.len(), 2, "a clean (non-tool) tail is left untouched");
-    }
-
-    #[test]
     fn budget_empty_conversation_returns_only_instruction() {
         // The helper is directly reachable (the handler gates `vec![]` upstream);
         // an empty snapshot must return just the appended instruction, no panic.
@@ -781,22 +805,27 @@ mod tests {
     #[test]
     fn budget_threshold_boundary_selects_fast_vs_over_budget() {
         // Lock the `<=` fits-vs-over-budget comparison. At exactly snapshot_budget
-        // the fast path is taken (reasoning kept, `strip_reasoning=false`); one
-        // token over takes the over-budget path (reasoning stripped). The
-        // reasoning item's presence is the observable branch discriminator.
+        // the fast path is taken (supported reasoning kept); one token over
+        // takes the over-budget path and trims the oldest reasoning boundary.
         let tag = "system-reminder";
         let instruction_tokens =
             estimate_item_tokens(&ConversationItem::user(recap_instruction(tag)));
         let snapshot_budget = recap_prompt_budget(8_000).saturating_sub(instruction_tokens);
         assert!(snapshot_budget > 8, "window must leave room for the probe");
 
+        let call = ConversationItem::assistant_tool_calls(vec![mk_tool_call("boundary", "{}")]);
+        let result = ConversationItem::tool_result("boundary", "done");
         let reasoning_tokens = estimate_item_tokens(&mk_reasoning("r"));
-        let filler_tokens = snapshot_budget - reasoning_tokens;
+        let call_tokens = estimate_item_tokens(&call);
+        let result_tokens = estimate_item_tokens(&result);
+        let filler_tokens = snapshot_budget - reasoning_tokens - call_tokens - result_tokens;
 
-        // Exactly at budget => fast path (`<=`) keeps reasoning verbatim.
+        // Exactly at budget => fast path (`<=`) keeps supported reasoning.
         let at = vec![
-            mk_reasoning("r"),
             ConversationItem::user("a".repeat((filler_tokens * 4) as usize)),
+            mk_reasoning("r"),
+            call.clone(),
+            result.clone(),
         ];
         assert_eq!(estimate_conversation_tokens(&at), snapshot_budget);
         let out_at = budget_recap_items(at, tag, false, 8_000);
@@ -807,10 +836,12 @@ mod tests {
             "exactly-at-budget must take the fast path (reasoning kept), locking `<=`"
         );
 
-        // One token over => over-budget path strips reasoning.
+        // One token over => over-budget path trims away the oldest reasoning.
         let over = vec![
-            mk_reasoning("r"),
             ConversationItem::user("a".repeat((filler_tokens * 4 + 4) as usize)),
+            mk_reasoning("r"),
+            call,
+            result,
         ];
         assert!(estimate_conversation_tokens(&over) > snapshot_budget);
         let out_over = budget_recap_items(over, tag, false, 8_000);
@@ -818,7 +849,7 @@ mod tests {
             !out_over
                 .iter()
                 .any(|i| matches!(i, ConversationItem::Reasoning(_))),
-            "one token over budget must take the over-budget path (reasoning stripped)"
+            "one token over budget must take the over-budget path (reasoning trimmed)"
         );
     }
 

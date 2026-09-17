@@ -15,7 +15,7 @@
 //!   programmatic rejection into the next Sideband attempt, and emits the
 //!   `CompactionRetryDegraded` event.
 //!
-//! The verbatim → fitted → simplified **input ladder** and auto-compaction
+//! The bounded source-range retries and auto-compaction
 //! suppression stay in L5 (`compaction.rs`), driven by the
 //! `context_overflow` / `deterministic` flags on
 //! [`SummaryError`](compaction::SummaryError).
@@ -68,6 +68,10 @@ pub(crate) struct ShellCompactionSampler {
     /// Full output of the most recent successful sample (for L5 telemetry).
     last_success: Mutex<Option<CompactOutput>>,
     image_input_unsupported: std::sync::atomic::AtomicBool,
+    source_ref: chat_state::TimelineRangeRef,
+    source_revision: u64,
+    context_surface_ids: Vec<chat_state::SurfaceId>,
+    selected_surface_ids: Mutex<Vec<chat_state::SurfaceId>>,
     infrastructure_error: Mutex<Option<String>>,
 }
 
@@ -82,6 +86,9 @@ impl ShellCompactionSampler {
         cancel: tokio_util::sync::CancellationToken,
         sideband: std::sync::Arc<tokio::sync::Mutex<SidebandRun>>,
         sideband_feedback: std::sync::Arc<Mutex<Option<String>>>,
+        source_ref: chat_state::TimelineRangeRef,
+        source_revision: u64,
+        context_surface_ids: Vec<chat_state::SurfaceId>,
     ) -> Self {
         Self {
             user_context,
@@ -94,10 +101,18 @@ impl ShellCompactionSampler {
             cancel,
             sideband,
             sideband_feedback,
+            source_ref,
+            source_revision,
+            context_surface_ids,
+            selected_surface_ids: Mutex::new(Vec::new()),
             last_success: Mutex::new(None),
             image_input_unsupported: std::sync::atomic::AtomicBool::new(false),
             infrastructure_error: Mutex::new(None),
         }
+    }
+
+    pub(crate) fn select_range(&self, ids: &[chat_state::SurfaceId]) {
+        *self.selected_surface_ids.lock().unwrap() = ids.to_vec();
     }
 
     /// Take the [`CompactOutput`] of the most recent successful sample, if any.
@@ -160,12 +175,25 @@ impl CompactionSampler for ShellCompactionSampler {
         let audit_request = ConversationRequest {
             items: request_surface.clone(),
             model: Some(self.sampling_config.model.clone()),
+            max_output_tokens: Some(super::session_compact::compaction_output_limit(
+                &self.sampling_config,
+            )),
             ..ConversationRequest::default()
         };
+        let selected_surface_ids = self.selected_surface_ids.lock().unwrap().clone();
         self.sideband
             .lock()
             .await
-            .attempt_all_sources(&audit_request, self.client.api_backend(), feedback)
+            .attempt_selected(
+                &audit_request,
+                self.client.api_backend(),
+                vec![self.source_ref.clone()],
+                Some(self.source_revision),
+                self.context_surface_ids.clone(),
+                selected_surface_ids,
+                "compaction-range",
+                feedback,
+            )
             .await
             .map_err(|error| self.sideband_error(error))?;
         let observed_usage = std::sync::Arc::new(Mutex::new(None));

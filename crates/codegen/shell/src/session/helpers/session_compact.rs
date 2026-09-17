@@ -175,6 +175,15 @@ pub(crate) fn build_compaction_request_surface(
     input_surface.push(ConversationItem::user(prompt));
     input_surface
 }
+/// Reserve a bounded summary output independently of the main model default.
+/// Keep the same cap in Sideband evidence and every provider wire request.
+pub(crate) fn compaction_output_limit(config: &SamplingConfig) -> u32 {
+    let window_limit = (config.context_window / 8).clamp(1, 32_768) as u32;
+    config
+        .output_limit
+        .map_or(window_limit, |limit| limit.max(1).min(window_limit))
+}
+
 /// Build the bare summarization prompt text (without a request Surface). See
 /// [`build_compaction_request_surface`] for the wrapper that appends this to a
 /// conversation as a user message.
@@ -394,8 +403,9 @@ pub(crate) async fn generate_session_compact(
         ApiBackend::ChatCompletions => {
             let chat_messages: Vec<ChatRequestMessage> =
                 conversation_to_chat_messages(input_surface);
-            let message =
+            let mut message =
                 ChatCompletionRequest::new(sampling_config.model.to_owned(), chat_messages);
+            message.max_tokens = Some(compaction_output_limit(sampling_config));
             tracing::info!(
                 compact_model = %sampling_config.model,
                 num_messages = num_messages,
@@ -495,6 +505,7 @@ pub(crate) async fn generate_session_compact(
             let request = ConversationRequest {
                 items: input_surface,
                 model: Some(sampling_config.model.to_owned()),
+                max_output_tokens: Some(compaction_output_limit(sampling_config)),
                 ..Default::default()
             };
             let stream_result =
@@ -662,6 +673,7 @@ pub(crate) async fn generate_session_compact(
             let request = ConversationRequest {
                 items: input_surface,
                 model: Some(sampling_config.model.to_owned()),
+                max_output_tokens: Some(compaction_output_limit(sampling_config)),
                 ..Default::default()
             };
             let stream_result =
@@ -1198,6 +1210,22 @@ mod reasoning_compaction_regression_tests {
         assert_eq!(output.content, "<summary>ok</summary>");
         let _ = shutdown_tx.send(());
     }
+    #[test]
+    fn compaction_output_budget_scales_and_respects_the_model_limit() {
+        let mut config = test_config("http://unused");
+        for (window, model_cap, expected) in [
+            (256_000, Some(131_072), 32_000),
+            (1_000_000, None, 32_768),
+            (16_000, Some(131_072), 2_000),
+            (100_000, Some(1_000), 1_000),
+            (1, None, 1),
+        ] {
+            config.context_window = window;
+            config.output_limit = model_cap;
+            assert_eq!(compaction_output_limit(&config), expected);
+        }
+    }
+
     fn test_config(base_url: &str) -> SamplerConfig {
         SamplerConfig {
             api_key: Some("test-api-key".to_string()),

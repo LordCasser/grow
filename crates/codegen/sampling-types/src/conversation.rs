@@ -7035,34 +7035,20 @@ mod tests {
     }
 
     /// Regression: /btw side questions snapshot the conversation (which may
-    /// include thinking blocks from prior turns) but fire without
-    /// reasoning_effort.  If the caller forgets to strip reasoning from items,
-    /// `build_messages_request` emits `ContentBlock::Thinking` blocks inside
-    /// messages while setting top-level `thinking: null` — the Messages API
-    /// rejects this with a 400.  Verify that stripped reasoning produces a
-    /// valid request with no thinking blocks in messages.
+    /// include reasoning from prior turns) but fire without reasoning_effort.
+    /// Verify that the portable projection produces a valid request with no
+    /// thinking blocks in messages.
     #[test]
-    fn test_btw_stripped_reasoning_produces_no_thinking_blocks() {
-        // Simulate a conversation where the model responded with thinking.
-        let with_reasoning = ConversationItem::Assistant(AssistantItem {
-            content: "Here is the answer.".into(),
-            tool_calls: vec![],
-            model_id: Some("messages-compatible-model".into()),
-            model_fingerprint: None,
-            reasoning_effort: None,
-        });
-
-        // Reasoning now lives as a sibling `ConversationItem::Reasoning`,
-        // so "stripping reasoning" means filtering those siblings out — see
-        // `strip_reasoning_blocks` in chat-state. Here the assistant
-        // never had a sibling Reasoning, so the strip is a no-op.
-        let stripped = with_reasoning;
-
-        let req = ConversationRequest::from_items(vec![
+    fn test_btw_portable_projection_produces_no_thinking_blocks() {
+        let with_reasoning = vec![
             ConversationItem::user("hello"),
-            stripped,
-            ConversationItem::user("btw what is X?"),
-        ]);
+            ConversationItem::Reasoning(synthesized_reasoning_item("private thought")),
+            ConversationItem::assistant("Here is the answer."),
+        ];
+        let mut projected = project_portable_history(&with_reasoning);
+        projected.push(ConversationItem::user("btw what is X?"));
+
+        let req = ConversationRequest::from_items(projected);
 
         let msg = build_messages_request(&req);
         let json = serde_json::to_value(&msg).unwrap();
@@ -7075,7 +7061,7 @@ mod tests {
                     assert_ne!(
                         block.get("type").and_then(|t| t.as_str()),
                         Some("thinking"),
-                        "message[{i}] must not contain thinking blocks after stripping reasoning",
+                        "message[{i}] must not contain thinking blocks after portable projection",
                     );
                 }
             }
@@ -7094,15 +7080,13 @@ mod tests {
 
     /// Regression: /btw snapshots the conversation mid-turn. If the last
     /// assistant message has tool_calls without matching tool_results, the
-    /// Anthropic Messages API rejects with "tool_use ids were found without
-    /// tool_result blocks". The shell truncates trailing incomplete
-    /// assistant+tool_result runs before building the request. This test
-    /// validates the truncation pattern.
+    /// portable history projection must omit that incomplete call while
+    /// preserving earlier complete exchanges.
     #[test]
-    fn test_btw_mid_turn_truncation_removes_trailing_tool_use() {
+    fn test_btw_mid_turn_projection_removes_incomplete_tool_use() {
         // Simulate a conversation that was snapshotted mid-turn: the last
         // assistant made a tool call that hasn't been answered yet.
-        let mut items = vec![
+        let items = vec![
             ConversationItem::system("You are a helpful assistant."),
             ConversationItem::user("Fix the bug"),
             ConversationItem::assistant("I'll look at the code."),
@@ -7122,32 +7106,19 @@ mod tests {
             }]),
         ];
 
-        // Apply the same truncation pattern as handle_side_question.
-        while let Some(last) = items.last() {
-            match last {
-                ConversationItem::Assistant(a) if !a.tool_calls.is_empty() => {
-                    items.pop();
-                }
-                ConversationItem::ToolResult(_) => {
-                    items.pop();
-                }
-                _ => break,
-            }
-        }
-
-        // Add the btw user question.
+        let mut items = project_portable_history(&items);
         items.push(ConversationItem::user("btw what is X?"));
 
         let msg = build_messages_request(&ConversationRequest::from_items(items.clone()));
         let json = serde_json::to_value(&msg).unwrap();
         let messages = json.get("messages").unwrap().as_array().unwrap();
 
-        // The last message before the btw question should be a plain
-        // assistant text (not a tool_use), so the request is valid.
+        // The last assistant before the btw question should be plain text,
+        // while the earlier complete pair remains in the request.
         // Messages: user("Fix the bug"), asst("I'll look"), asst(tool_use call_1),
         //           user(tool_result call_1), asst("I see the issue"),
         //           user("btw what is X?")
-        // The orphaned call_2 assistant must be gone.
+        // The incomplete call_2 assistant must be gone.
         let last_assistant = messages
             .iter()
             .rev()
@@ -7168,12 +7139,11 @@ mod tests {
         assert_eq!(items.len(), 7);
     }
 
-    /// Same truncation pattern should also strip trailing ToolResult items
-    /// that appear without their owning assistant (edge case from partial
-    /// conversation state).
+    /// Portable history keeps completed calls from a partially completed
+    /// batch and omits calls that have no matching result.
     #[test]
-    fn test_btw_mid_turn_truncation_strips_partial_tool_result_run() {
-        let mut items = vec![
+    fn test_btw_projection_preserves_completed_partial_tool_pair() {
+        let items = vec![
             ConversationItem::user("hello"),
             ConversationItem::assistant("I'll search."),
             ConversationItem::assistant_tool_calls(vec![
@@ -7192,54 +7162,36 @@ mod tests {
             ConversationItem::tool_result("call_A", "match found"),
         ];
 
-        while let Some(last) = items.last() {
-            match last {
-                ConversationItem::Assistant(a) if !a.tool_calls.is_empty() => {
-                    items.pop();
-                }
-                ConversationItem::ToolResult(_) => {
-                    items.pop();
-                }
-                _ => break,
-            }
-        }
+        let projected = project_portable_history(&items);
 
-        // The trailing tool_result and the assistant with tool_calls should
-        // both be removed, leaving just user + assistant text.
-        assert_eq!(items.len(), 2);
-        assert!(matches!(items[0], ConversationItem::User(_)));
-        assert!(matches!(items[1], ConversationItem::Assistant(_)));
+        assert_eq!(projected.len(), 4);
+        assert!(matches!(projected[0], ConversationItem::User(_)));
+        assert!(matches!(projected[1], ConversationItem::Assistant(_)));
+        assert!(
+            matches!(&projected[2], ConversationItem::Assistant(assistant)
+                if assistant.tool_calls.len() == 1
+                    && assistant.tool_calls[0].id.as_ref() == "call_A")
+        );
+        assert!(matches!(&projected[3], ConversationItem::ToolResult(result)
+            if result.tool_call_id == "call_A"));
     }
 
-    /// Helper: simulate the btw truncation + strip_reasoning pattern from
-    /// handle_side_question. Returns items ready for request construction.
-    fn btw_prepare_items(mut items: Vec<ConversationItem>) -> Vec<ConversationItem> {
-        // Strip reasoning (same as strip_reasoning_blocks): filter out
-        // sibling Reasoning items entirely.
-        items.retain(|item| !matches!(item, ConversationItem::Reasoning(_)));
-        // Truncate trailing incomplete tool runs.
-        while let Some(last) = items.last() {
-            match last {
-                ConversationItem::Assistant(a) if !a.tool_calls.is_empty() => {
-                    items.pop();
-                }
-                ConversationItem::ToolResult(_) => {
-                    items.pop();
-                }
-                _ => break,
-            }
-        }
+    /// Helper: build the /btw portable history projection and append its
+    /// question. Returns items ready for request construction.
+    fn btw_prepare_items(items: Vec<ConversationItem>) -> Vec<ConversationItem> {
+        let mut items = project_portable_history(&items);
         items.push(ConversationItem::user("btw what is X?"));
         items
     }
 
-    /// Build a mid-turn conversation that exercises both bug paths:
-    /// thinking blocks + trailing orphaned tool_use.
+    /// Build a mid-turn conversation that exercises both projection paths:
+    /// durable reasoning + trailing incomplete tool_use.
     fn btw_mid_turn_conversation() -> Vec<ConversationItem> {
         vec![
             ConversationItem::system("You are helpful."),
             ConversationItem::user("Fix the bug"),
-            // Completed turn with thinking
+            // Completed turn with reasoning that portable projection removes.
+            ConversationItem::Reasoning(synthesized_reasoning_item("private thought")),
             ConversationItem::Assistant(AssistantItem {
                 content: "I'll look at the code.".into(),
                 tool_calls: vec![],
@@ -7282,7 +7234,7 @@ mod tests {
         ]
     }
 
-    /// Validate the btw truncation + strip produces a valid Anthropic
+    /// Validate the btw portable projection produces a valid Anthropic
     /// Messages API request: no thinking blocks, no orphaned tool_use,
     /// temperature omitted.
     #[test]
@@ -7369,7 +7321,7 @@ mod tests {
         );
     }
 
-    /// Validate the btw truncation + strip produces a valid Chat Completions
+    /// Validate the btw portable projection produces a valid Chat Completions
     /// API request: no orphaned tool_calls, temperature omitted.
     #[test]
     fn test_btw_cross_api_chat_completions_no_regressions() {
@@ -7434,7 +7386,7 @@ mod tests {
         );
     }
 
-    /// Validate the btw truncation + strip produces a valid Responses API
+    /// Validate the btw portable projection produces a valid Responses API
     /// request: no orphaned function_call, temperature omitted, reasoning
     /// stripped.
     #[test]

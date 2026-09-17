@@ -9,6 +9,14 @@ Grow 的配置保持本地化：全局配置位于 `$GROW_HOME/config.toml`，�
 
 远程配置管理、deployment-config 服务、签名策略同步及其专用 CLI 不在规划范围内。
 
+## Recap 与压缩摘要的工具证据保留（已完成）
+
+2026-09-17 排查确认 recap 会删除完整工具尾部；压缩的 Fitted/Simplified 会裁减来源而仍替换原 target，simplified 还会删除工具结果。用户已授权与阈值附近压缩失败一起处理，已完成有界选区与真实 target 对齐、显式输入/输出预算、跨 turn 大小失败恢复及 recap 工具证据保留；验证见 [fix-compaction-budget-recovery](changes/archive/2026-09-17-fix-compaction-budget-recovery/verification.md)。原始审计见 [压缩输入核对](changes/archive/2026-09-17-audit-compaction-sideband-evidence/verification.md)。
+
+## Memory flush 摘要输入的工具证据
+
+2026-09-17 联合核对发现 `shell/src/session/actor/memory_dream.rs::snapshot_memory_flush_state` 仍调用 `prepare_conversation_for_summarization`，该变换删除工具结果并只保留工具名，可能使跨会话记忆遗漏只出现在执行输出中的事实。memory flush 不替换主 Surface，影响与本轮 compaction target 错配不同；本次未改。后续独立核对冻结来源、记忆预算、结果正文/附件投影和事实出处，以“计划未执行 → 工具结果证实完成但没有 Assistant 总结”的实际请求及记忆产物回归验证，不把问答全上下文混入 PermissionJudgment 授权链路。
+
 ## 2026-09-12 全局架构审查（分批落地，体验目标继续跟踪）
 
 审查覆盖当前工作树的会话恢复、用量校验、客户端投影、Workflow 和内部依赖。原始证据、批次与验收条件见 [审查方案](changes/archive/2026-09-12-review-global-architecture-2026-09-12/review.md)。用户随后批准首批实施：已完成已知用量事实的恢复冲突校验、Context 异步结果的 session/epoch/nonce 归属检查，并去掉 Timeline 冷恢复的重复 fold 与 Grow-only 扫描中的 ACP typed decode。具体结果见 [首批实施复核](changes/archive/2026-09-12-reuse-validated-resume-timeline/implementation-review.md)。后续债务保持独立，不由本条自动授权。

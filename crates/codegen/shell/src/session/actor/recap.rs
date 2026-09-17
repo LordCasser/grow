@@ -49,14 +49,14 @@ pub(super) async fn deliver_suggestion(
 
 impl SessionActor {
     /// Handle a /btw side question — single-turn model call using the
-    /// parent session's full context.
+    /// parent session's committed context.
     ///
     /// Approach:
     /// - Keeps the parent's system prompt (conversation[0]) intact
-    /// - Passes the full conversation history (including tool calls/results)
-    /// - Includes tool definitions so the model knows capabilities
+    /// - Preserves completed tool exchanges and visible assistant text
+    /// - Omits reasoning and unanswered calls through portable history projection
     /// - Wraps the question in a `<system-reminder>` block in a user message
-    /// - Single turn, no tool execution
+    /// - Single turn, no tool definitions or execution
     ///
     /// The parent Timeline freezes the input range and owns one Sideband spawn;
     /// the independent Sideband ledger owns every request attempt and outcome.
@@ -76,36 +76,18 @@ impl SessionActor {
             }
         });
 
-        // Full conversation snapshot including system prompt, tool calls, and results.
-        // Strip reasoning/thinking blocks from assistant items so we don't send
-        // `ContentBlock::Thinking` without a top-level `thinking` config. The
-        // Anthropic Messages API rejects requests that include thinking blocks in
-        // messages but omit the `thinking` parameter.
+        // Freeze the committed context and its source reference together.
         let materialized = self
             .chat_state_handle
             .materialize_timeline(self.session_info.id.to_string())
             .await
             .ok_or_else(|| SideQuestionError::Sideband("chat-state actor is unavailable".into()))?;
         let input_ref = materialized.input_ref;
-        let mut items: Vec<ConversationItem> =
-            chat_state::compaction_utils::strip_reasoning_blocks(materialized.surface);
-
-        // /btw fires mid-turn, so the snapshot may end with an assistant
-        // message whose tool_calls have no matching ToolResult yet. The
-        // Anthropic Messages API rejects this with "tool_use ids were found
-        // without tool_result blocks". Truncate the trailing incomplete
-        // assistant+tool_result run.
-        while let Some(last) = items.last() {
-            match last {
-                ConversationItem::Assistant(a) if !a.tool_calls.is_empty() => {
-                    items.pop();
-                }
-                ConversationItem::ToolResult(_) => {
-                    items.pop();
-                }
-                _ => break,
-            }
-        }
+        // Mid-turn snapshots can contain unanswered calls. The shared portable
+        // projection omits those protocols and reasoning while retaining real
+        // results (including partially completed batches) and assistant text.
+        // Trimming by tail item type would also erase completed tool evidence.
+        let mut items = sampling_types::project_portable_history(&materialized.surface);
 
         // Wrap the question in a <system-reminder> user message.
         let tag = self.reminder_wrapper_tag();

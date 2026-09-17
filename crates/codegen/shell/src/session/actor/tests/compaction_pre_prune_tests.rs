@@ -188,7 +188,7 @@ fn async_compaction_scenario(action: &'static str) {
             let mut foreground = server.expect_response("foreground continues",
                 InferenceRequestMatcher::foreground(InferenceEndpoint::Messages),
                 messages_turn_with_usage(&[("foreground response after freeze", END_TURN)], END_TURN, 74_000));
-            let (actor, mut notifications) = actor_with_sampler_cw_ex(&server, sampling_types::ApiBackend::Messages, 100_000, None, if action == "timeout" { 2 } else { 0 }).await;
+            let (actor, mut notifications) = actor_with_sampler_cw_ex(&server, sampling_types::ApiBackend::Messages, 100_000, None, if action == "timeout" { 2 } else { 0 }, true, None).await;
             use tools::implementations::{context_recall::ContextRecallImpl, grow_build::{todo::TodoWriteTool, read_file::ReadFileTool}};
             use tools::registry::types::ToolConfig;
             // Two stable tools distinguish foreground requests from the tool-free
@@ -481,7 +481,7 @@ async fn actor_with_sampler_cw(
     std::sync::Arc<SessionActor>,
     mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
 ) {
-    actor_with_sampler_cw_ex(server, api_backend, context_window, None, 0).await
+    actor_with_sampler_cw_ex(server, api_backend, context_window, None, 0, true, None).await
 }
 
 /// [`actor_with_sampler_cw`] variant for fork-scenario tests: sets
@@ -493,21 +493,26 @@ async fn actor_with_sampler_cw_ex(
     context_window: u64,
     inherited_prefix_len: Option<usize>,
     wall_clock_budget_secs: u64,
+    verbatim_input: bool,
+    evidence: Option<std::sync::Arc<std::sync::Mutex<Vec<chat_state::SidebandEvent>>>>,
 ) -> (
     std::sync::Arc<SessionActor>,
     mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
 ) {
     let (gateway_tx, gateway_rx) = mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
     let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+    let bounded_output_test = evidence.is_some();
     tokio::task::spawn_local(async move {
         while let Some(message) = persistence_rx.recv().await {
-            if let PersistenceMsg::SidebandDurablyAndAck { respond_to, .. } = message {
+            if let PersistenceMsg::SidebandDurablyAndAck { event, respond_to } = message {
+                if let Some(evidence) = &evidence { evidence.lock().unwrap().push(event); }
                 let _ = respond_to.send(Ok(()));
             }
         }
     });
     let mut actor = create_test_actor(0, context_window, 85, gateway_tx, persistence_tx).await;
     actor.compaction.wall_clock_budget_secs = wall_clock_budget_secs;
+    actor.compaction.verbatim_input = verbatim_input;
     let (goal_usage_tx, mut goal_usage_rx) = mpsc::unbounded_channel();
     actor.goal_usage_window = goal_support::GoalUsageWindow::new(goal_usage_tx.clone(), None);
     if let Some(prefix_len) = inherited_prefix_len {
@@ -516,6 +521,7 @@ async fn actor_with_sampler_cw_ex(
     if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
         cfg.base_url = server.url();
         cfg.api_backend = api_backend.clone();
+        if bounded_output_test { cfg.output_limit = Some(131_072); }
         actor.chat_state_handle.replace_sampling_route(cfg);
     }
     let sampler_config = sampler::SamplerConfig {
@@ -1142,14 +1148,14 @@ fn context_window_exceeded_converged_over_window_fails_turn() {
                 2,
                 "sampling must be bounded (no continue loop)"
             );
-            // The convergence failure sticky-suppresses AUTO (no re-loop).
+            // Convergence failure suppresses only this turn (no re-loop).
             assert_eq!(
                 actor
                     .compaction
                     .auto_compact_suppressed
                     .load(std::sync::atomic::Ordering::Relaxed),
-                crate::session::compaction_config::SUPPRESS_STICKY,
-                "convergence failure must sticky-suppress AUTO"
+                crate::session::compaction_config::SUPPRESS_TURN,
+                "convergence failure must allow recovery in a later turn"
             );
             let trajectory = actor.chat_state_handle.trajectory().await.unwrap();
             let compaction_terminal = trajectory
@@ -1266,9 +1272,9 @@ fn pre_prune_error_fails_open_to_summary() {
                 "pre-prune failure must not suppress auto-compaction"
             );
 
-            // Phase B: the fallback path still runs the summary. Re-seed the
-            // conversation, switch pre-prune off (so the ladder short-circuits
-            // and the summary is the only path), and run a real compaction.
+            // Phase B: the summary fallback must not send a single 50K-token
+            // exchange to a 40K window or silently discard its result. The old
+            // mock accepted that impossible request; pin safe failure instead.
             replace_test_surface(
                 &actor.chat_state_handle,
                 vec![
@@ -1291,10 +1297,29 @@ fn pre_prune_error_fails_open_to_summary() {
             actor.compaction.pre_prune.set(false);
             let _ = actor.chat_state_handle.get_conversation_len().await;
 
-            actor
-                .run_compact_only(trigger)
-                .await
-                .expect("summary path must succeed after the prune failure");
+            let before = actor.chat_state_handle.materialize_timeline(actor.session_id_string()).await.unwrap();
+            let error = actor.run_compact_only(trigger).await.expect_err("an indivisible oversized exchange must fail without replacing history");
+            assert!(error.to_string().contains("exceeds budget"));
+            assert_eq!(server.messages_request_count(), 0);
+            let after = actor.chat_state_handle.materialize_timeline(actor.session_id_string()).await.unwrap();
+            assert_eq!(before.surface_ids, after.surface_ids);
+            assert_eq!(serde_json::to_value(before.surface).unwrap(), serde_json::to_value(after.surface).unwrap());
+
+            // Phase C: the same total tool evidence in two complete exchanges
+            // can be summarized incrementally. Manual compaction is also
+            // available while the previous turn is suppressed.
+            replace_test_surface(&actor.chat_state_handle, vec![
+                ConversationItem::system("test system prompt"), prompt("u0", 0),
+                ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {id:"first-half".into(), name:"grep".into(), arguments:"{}".into()}]),
+                ConversationItem::tool_result("first-half", "x".repeat(100_000)),
+                ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {id:"second-half".into(), name:"grep".into(), arguments:"{}".into()}]),
+                ConversationItem::tool_result("second-half", "x".repeat(100_000)),
+                prompt("recent retained turn", 1), ConversationItem::assistant("y".repeat(40_000)),
+            ]).await;
+            actor.chat_state_handle.record_provider_context_anchor(40_000);
+            actor.run_compact(None).await.expect("manual summary of a complete bounded prefix succeeds");
+            let remaining = actor.chat_state_handle.get_conversation().await;
+            assert!(remaining.iter().any(|item| matches!(item, ConversationItem::ToolResult(result) if result.tool_call_id == "second-half" && result.content.len() == 100_000)));
 
             assert_eq!(
                 server.messages_request_count(),
@@ -1610,4 +1635,294 @@ fn prune_rewrites_history_snapshot_without_updates_or_ui_events() {
             "compaction replace must emit ContextPressureUpdated"
         );
     }));
+}
+
+
+/// The actual summary wire, frozen Sideband selection and committed target
+/// agree after a provider rejects the first (locally fitting) request.
+#[test]
+fn compaction_bounded_requests_preserve_evidence_and_target_on_all_backends() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            for backend in [
+                sampling_types::ApiBackend::ChatCompletions,
+                sampling_types::ApiBackend::Responses,
+                sampling_types::ApiBackend::Messages,
+            ] {
+                for verbatim in [true, false] {
+                    let server = MockInferenceServer::start().await.unwrap();
+                    let summary = format!(
+                        "Deployment completed and artifacts verified. {}",
+                        "Earlier checks are recorded; continue the current authorized task. "
+                            .repeat(24)
+                    );
+                    server.set_response(&summary);
+                    let endpoint = match backend {
+                        sampling_types::ApiBackend::ChatCompletions => "/v1/chat/completions",
+                        sampling_types::ApiBackend::Responses => "/v1/responses",
+                        sampling_types::ApiBackend::Messages => "/v1/messages",
+                    };
+                    server.enqueue_response(
+                        endpoint,
+                        ScriptedResponse::json(
+                            400,
+                            json!({"error":{"type":"invalid_request_error","message":"maximum context length exceeded"}}),
+                        ),
+                    );
+                    let transient_retry = backend == sampling_types::ApiBackend::Messages && verbatim;
+                    if transient_retry {
+                        server.enqueue_response(
+                            endpoint,
+                            ScriptedResponse::json(
+                                503,
+                                json!({"error":{"message":"temporarily unavailable"}}),
+                            ),
+                        );
+                    }
+                    let evidence = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+                    let (actor, _) = actor_with_sampler_cw_ex(
+                        &server,
+                        backend.clone(),
+                        100_000,
+                        None,
+                        0,
+                        verbatim,
+                        Some(evidence.clone()),
+                    )
+                    .await;
+                    actor.compaction.pre_prune.set(false);
+                    let mut history = vec![
+                        ConversationItem::system("test system"),
+                        prompt("Deploy Fedora; the old plan has not run yet.", 0),
+                    ];
+                    for i in 0..6 {
+                        history.push(ConversationItem::assistant_tool_calls(vec![
+                            sampling_types::ToolCall {
+                                id: format!("deploy-{i}").into(),
+                                name: "verify_deployment".into(),
+                                arguments: format!("{{\"artifact\":\"module-{i}\"}}").into(),
+                            },
+                        ]));
+                        history.push(ConversationItem::tool_result(
+                            format!("deploy-{i}"),
+                            format!("DEPLOYED_{i}: {}", "x".repeat(68_000)),
+                        ));
+                    }
+                    if let ConversationItem::ToolResult(result) = &mut history[3] {
+                        result.images = vec![
+                            sampling_types::ContentPart::Text {
+                                text: "Verified attachment evidence".into(),
+                            },
+                            sampling_types::ContentPart::Image {
+                                url: "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aO1cAAAAASUVORK5CYII=".into(),
+                                description: None,
+                            },
+                        ];
+                    }
+                    history.push(prompt("Current task remains in the retained tail", 1));
+                    history.push(ConversationItem::assistant("y".repeat(64_000)));
+                    replace_test_surface(&actor.chat_state_handle, history).await;
+                    let before = actor
+                        .chat_state_handle
+                        .materialize_timeline(actor.session_id_string())
+                        .await
+                        .unwrap();
+                    actor
+                        .run_compact(None)
+                        .await
+                        .expect("smaller complete range must succeed");
+                    let requests = server.requests();
+                    assert_eq!(
+                        requests.len(),
+                        if transient_retry { 3 } else { 2 },
+                        "{backend:?}, verbatim={verbatim}"
+                    );
+                    if transient_retry {
+                        assert_eq!(
+                            requests[1].body,
+                            requests[2].body,
+                            "transient retry must reuse the exact frozen request"
+                        );
+                    }
+                    let first = requests[0].body.as_ref().unwrap().to_string();
+                    let last_body = requests[1].body.as_ref().unwrap();
+                    let last = last_body.to_string();
+                    assert!(first.contains("DEPLOYED_3"));
+                    assert!(
+                        !first.contains("DEPLOYED_4"),
+                        "initial selection must fit the full request budget"
+                    );
+                    assert!(last.contains("Verified attachment evidence"));
+                    assert!(last.contains("iVBORw0KGgo"));
+                    for i in 0..2 {
+                        assert!(last.contains(&format!("DEPLOYED_{i}")));
+                        assert!(last.contains(&format!("module-{i}")));
+                    }
+                    assert!(!last.contains("DEPLOYED_2"));
+                    let cap_field = if backend == sampling_types::ApiBackend::Responses {
+                        "max_output_tokens"
+                    } else {
+                        "max_tokens"
+                    };
+                    for request in &requests {
+                        assert_eq!(request.body.as_ref().unwrap()[cap_field], 12_500);
+                    }
+                    let attempts = evidence
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter_map(|event| match &event.kind {
+                            chat_state::SidebandEventKind::Attempt(attempt) => {
+                                Some(attempt.clone())
+                            }
+                            _ => None,
+                        })
+                        .collect::<Vec<_>>();
+                    assert_eq!(
+                        attempts.len(),
+                        if transient_retry { 3 } else { 2 }
+                    );
+                    if transient_retry {
+                        assert_eq!(
+                            attempts[1].assembly_manifest,
+                            attempts[2].assembly_manifest
+                        );
+                    }
+                    assert_eq!(attempts[0].input_refs, attempts[1].input_refs);
+                    assert!(
+                        attempts[1].assembly_manifest.selected_surface_ids.len()
+                            < attempts[0].assembly_manifest.selected_surface_ids.len()
+                    );
+                    for attempt in &attempts {
+                        assert_eq!(attempt.assembly_manifest.max_output_tokens, Some(12_500));
+                        assert!(attempt.assembly_manifest.materialized_input_tokens <= 82_500);
+                    }
+                    let events = actor
+                        .chat_state_handle
+                        .timeline_events()
+                        .await
+                        .unwrap();
+                    let target = events
+                        .iter()
+                        .find_map(|event| match &event.kind {
+                            chat_state::TimelineEventKind::Compaction(
+                                chat_state::CompactionEvent::Summary { target, .. },
+                            ) => Some(target),
+                            _ => None,
+                        })
+                        .unwrap();
+                    assert_eq!(
+                        target.shadowed,
+                        attempts[1].assembly_manifest.selected_surface_ids
+                    );
+                    let after = actor
+                        .chat_state_handle
+                        .materialize_timeline(actor.session_id_string())
+                        .await
+                        .unwrap();
+                    for (id, item) in before.surface_ids.iter().zip(&before.surface) {
+                        if target.shadowed.contains(id) {
+                            continue;
+                        }
+                        let retained = after
+                            .surface_ids
+                            .iter()
+                            .position(|current| current == id)
+                            .expect("unselected source identity retained");
+                        assert_eq!(
+                            serde_json::to_value(item).unwrap(),
+                            serde_json::to_value(&after.surface[retained]).unwrap()
+                        );
+                    }
+                    assert!(after
+                        .surface
+                        .iter()
+                        .any(|item| item.text_content().contains("DEPLOYED_3")));
+                }
+            }
+        }));
+    });
+}
+
+#[test]
+fn compaction_size_failure_allows_the_next_user_turn_to_recover() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response(
+                "/v1/messages",
+                ScriptedResponse::json(
+                    400,
+                    json!({"error":{"type":"invalid_request_error","message":"maximum context length exceeded"}}),
+                ),
+            );
+            let (actor, mut notifications) = actor_with_sampler_cw(
+                &server,
+                sampling_types::ApiBackend::Messages,
+                100_000,
+            )
+            .await;
+            actor.compaction.pre_prune.set(false);
+            seed_closed_compaction_range(&actor, 68_000).await;
+            actor.chat_state_handle.record_provider_context_anchor(85_000);
+            let before = actor.chat_state_handle.get_conversation().await;
+            run_user_turn(&actor, "size-failed")
+                .await
+                .expect_err("first turn must report the rejected summary");
+            assert_eq!(
+                server.messages_request_count(),
+                1,
+                "no retry of an indivisible rejected source"
+            );
+            assert_eq!(
+                actor
+                    .compaction
+                    .auto_compact_suppressed
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                crate::session::compaction_config::SUPPRESS_TURN
+            );
+            let after = actor.chat_state_handle.get_conversation().await;
+            assert_eq!(
+                serde_json::to_value(&after[..before.len()]).unwrap(),
+                serde_json::to_value(&before).unwrap(),
+                "failure cannot replace or trim history"
+            );
+            let updates = drain_session_updates(&mut notifications);
+            assert!(!format!("{updates:?}").contains("/new"));
+            let summary = format!(
+                "Recovered summary of the completed work. {}",
+                "Evidence is preserved and the latest request remains active. ".repeat(24)
+            );
+            server.enqueue_response(
+                "/v1/messages",
+                messages_turn(&[(&summary, END_TURN)], END_TURN),
+            );
+            server.enqueue_response(
+                "/v1/messages",
+                messages_turn(
+                    &[("continued in the same session", END_TURN)],
+                    END_TURN,
+                ),
+            );
+            run_user_turn(&actor, "size-retry")
+                .await
+                .expect("next user turn must retry compaction and resume sampling");
+            assert_eq!(server.messages_request_count(), 3);
+            assert_eq!(
+                actor
+                    .compaction
+                    .auto_compact_suppressed
+                    .load(std::sync::atomic::Ordering::Relaxed),
+                crate::session::compaction_config::SUPPRESS_NONE
+            );
+        }));
+    });
 }

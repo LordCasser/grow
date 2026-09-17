@@ -443,7 +443,8 @@ the Timeline range replacement, whether `get_projected_tokens()` still
 exceeds the context window (the fork-scenario trigger-threshold check is
 unchanged and orthogonal). If it does:
 
-- `auto_compact_suppressed` is set to `SUPPRESS_STICKY` (no new suppress value),
+- `auto_compact_suppressed` is set to `SUPPRESS_TURN`; the next durable turn
+  may retry compaction (see the [recovery contract](../../openspec/specs/context-compaction/spec.md#requirement-size-failures-do-not-permanently-disable-session-recovery)),
 - a `warn` is logged,
 - `run_compact_only` returns `Err` with the marker
   `data.compact_error = "compact_converged_over_window"` and

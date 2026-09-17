@@ -521,6 +521,71 @@ pub fn plan_compaction_range(
         .then(|| range_plan(surface_ids, start, end, source_tokens))?
 }
 
+/// Fit an existing compaction selection by reducing its oldest-history prefix.
+/// Unlike message trimming, the returned identity range covers exactly the
+/// complete source retained for summarization; excluded items remain live.
+pub fn fit_compaction_range_to_budget(
+    surface: &[ConversationItem],
+    surface_ids: &[crate::SurfaceId],
+    plan: &CompactionRangePlan,
+    max_source_tokens: u64,
+    min_source_tokens: u64,
+) -> Option<CompactionRangePlan> {
+    let start = plan.start_index;
+    let end = plan.end_index;
+    if surface.len() != surface_ids.len()
+        || start > end
+        || surface_ids.get(start..=end)? != plan.target.shadowed.as_slice()
+        || surface_ids.get(start) != Some(&plan.target.start)
+        || surface_ids.get(end) != Some(&plan.target.end)
+    {
+        return None;
+    }
+    let mut tokens = 0u64;
+    let mut best = None;
+    let mut pending_calls = BTreeSet::new();
+    for index in start..=end {
+        tokens = tokens.saturating_add(estimate_item_tokens(&surface[index]));
+        if tokens > max_source_tokens {
+            break;
+        }
+        match &surface[index] {
+            ConversationItem::ToolResult(result) => {
+                if !pending_calls.remove(result.tool_call_id.as_str()) {
+                    break;
+                }
+            }
+            item => {
+                if !pending_calls.is_empty() {
+                    break;
+                }
+                if let ConversationItem::Assistant(assistant) = item {
+                    if !assistant
+                        .tool_calls
+                        .iter()
+                        .all(|call| pending_calls.insert(call.id.as_ref()))
+                    {
+                        break;
+                    }
+                }
+            }
+        }
+        let next = index + 1;
+        let closed = pending_calls.is_empty()
+            && !matches!(
+                &surface[index],
+                ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_)
+            )
+            && (index == end
+                || is_response_group_start(surface, start, next)
+                || matches!(surface[next], ConversationItem::User(_)));
+        if closed && tokens >= min_source_tokens {
+            best = range_plan(surface_ids, start, index, tokens);
+        }
+    }
+    best
+}
+
 fn is_response_group_start(surface: &[ConversationItem], body_start: usize, index: usize) -> bool {
     if index < body_start || index >= surface.len() {
         return false;
@@ -1235,6 +1300,206 @@ mod tests {
         ];
         surface[1].set_prompt_index(0);
         assert!(plan_compaction_range(&surface, &[], 1, 1).is_none());
+    }
+
+    #[test]
+    fn fit_compaction_range_keeps_complete_tool_batches_and_reasoning_groups() {
+        let items = vec![
+            ConversationItem::system("system"),
+            ConversationItem::user("task"),
+            ConversationItem::assistant_tool_calls(vec![tool_call("first", "read_file", "{}")]),
+            ConversationItem::tool_result("first", "a".repeat(20_000)),
+            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
+                "reasoning ".repeat(800),
+            )),
+            ConversationItem::assistant_tool_calls(vec![tool_call("second", "read_file", "{}")]),
+            ConversationItem::tool_result("second", "b".repeat(20_000)),
+            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
+                "reasoning ".repeat(800),
+            )),
+            ConversationItem::assistant_tool_calls(vec![tool_call("third", "read_file", "{}")]),
+            ConversationItem::tool_result("third", "c".repeat(20_000)),
+        ];
+        let (surface, ids) = surface_with_ids(items);
+        let plan = range_plan(
+            &ids,
+            2,
+            9,
+            crate::estimate_conversation_tokens(&surface[2..=9]),
+        )
+        .unwrap();
+        let first_two_batches = crate::estimate_conversation_tokens(&surface[2..=6]);
+        let max_source_tokens =
+            first_two_batches + crate::estimate_conversation_tokens(&surface[7..=8]);
+
+        let fitted = fit_compaction_range_to_budget(
+            &surface,
+            &ids,
+            &plan,
+            max_source_tokens,
+            first_two_batches,
+        )
+        .expect("two complete tool batches fit before the third result");
+
+        assert_eq!((fitted.start_index, fitted.end_index), (2, 6));
+        assert_eq!(fitted.target.start, ids[2]);
+        assert_eq!(fitted.target.end, ids[6]);
+        assert_eq!(fitted.target.shadowed, ids[2..=6]);
+        assert_eq!(fitted.source_tokens, first_two_batches);
+        assert!(fitted.source_tokens <= max_source_tokens);
+    }
+
+    #[test]
+    fn fit_compaction_range_leaves_unfinished_evidence_outside_the_target() {
+        for tail in [
+            vec![ConversationItem::assistant_tool_calls(vec![tool_call(
+                "pending",
+                "read_file",
+                "{}",
+            )])],
+            vec![
+                ConversationItem::assistant_tool_calls(vec![
+                    tool_call("done", "read_file", "{}"),
+                    tool_call("pending", "read_file", "{}"),
+                ]),
+                ConversationItem::tool_result("done", "partial evidence"),
+            ],
+            vec![ConversationItem::Reasoning(
+                sampling_types::synthesized_reasoning_item("unfinished reasoning"),
+            )],
+        ] {
+            let mut items = vec![ConversationItem::assistant(
+                "complete response ".repeat(1500),
+            )];
+            items.extend(tail);
+            let (surface, ids) = surface_with_ids(items);
+            let original = range_plan(
+                &ids,
+                0,
+                surface.len() - 1,
+                crate::estimate_conversation_tokens(&surface),
+            )
+            .unwrap();
+            let fitted =
+                fit_compaction_range_to_budget(&surface, &ids, &original, u64::MAX, 5_000).unwrap();
+            assert_eq!(
+                fitted.target.shadowed,
+                ids[..1],
+                "an unfinished batch cannot be shadowed by a summary that omits it"
+            );
+            let incomplete_only = range_plan(
+                &ids,
+                1,
+                surface.len() - 1,
+                crate::estimate_conversation_tokens(&surface[1..]),
+            )
+            .unwrap();
+            assert!(
+                fit_compaction_range_to_budget(&surface, &ids, &incomplete_only, u64::MAX, 1)
+                    .is_none()
+            );
+        }
+    }
+
+    #[test]
+    fn fit_compaction_range_enforces_minimum_and_rejects_unsplittable_group() {
+        let small_items = vec![
+            ConversationItem::system("system"),
+            ConversationItem::assistant_tool_calls(vec![tool_call("small", "read_file", "{}")]),
+            ConversationItem::tool_result("small", "x".repeat(12_000)),
+        ];
+        let (small_surface, small_ids) = surface_with_ids(small_items);
+        let small_plan = range_plan(
+            &small_ids,
+            1,
+            2,
+            crate::estimate_conversation_tokens(&small_surface[1..=2]),
+        )
+        .unwrap();
+        assert!(crate::estimate_conversation_tokens(&small_surface[1..=2]) < 5_000);
+        assert!(
+            fit_compaction_range_to_budget(&small_surface, &small_ids, &small_plan, 10_000, 5_000,)
+                .is_none()
+        );
+
+        let giant_items = vec![
+            ConversationItem::system("system"),
+            ConversationItem::assistant_tool_calls(vec![tool_call("giant", "read_file", "{}")]),
+            ConversationItem::tool_result("giant", "x".repeat(24_000)),
+        ];
+        let (giant_surface, giant_ids) = surface_with_ids(giant_items);
+        let giant_plan = range_plan(
+            &giant_ids,
+            1,
+            2,
+            crate::estimate_conversation_tokens(&giant_surface[1..=2]),
+        )
+        .unwrap();
+        assert!(crate::estimate_conversation_tokens(&giant_surface[1..=2]) > 5_000);
+        assert!(
+            fit_compaction_range_to_budget(&giant_surface, &giant_ids, &giant_plan, 5_000, 5_000,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn fit_compaction_range_rejects_stale_surface_identity() {
+        let items = vec![
+            ConversationItem::system("system"),
+            ConversationItem::assistant("x".repeat(20_000)),
+        ];
+        let (surface, ids) = surface_with_ids(items);
+        let plan = range_plan(
+            &ids,
+            1,
+            1,
+            crate::estimate_conversation_tokens(&surface[1..=1]),
+        )
+        .unwrap();
+        let max_source_tokens = crate::estimate_conversation_tokens(&surface[1..=1]);
+
+        let mut shadowed_mismatch = plan.clone();
+        shadowed_mismatch.target.shadowed[0] = crate::SurfaceId {
+            event: crate::EventSeq::new(999),
+            item: 0,
+        };
+        assert!(
+            fit_compaction_range_to_budget(
+                &surface,
+                &ids,
+                &shadowed_mismatch,
+                max_source_tokens,
+                1,
+            )
+            .is_none()
+        );
+
+        let mut endpoint_mismatch = plan.clone();
+        endpoint_mismatch.target.end = crate::SurfaceId {
+            event: crate::EventSeq::new(999),
+            item: 0,
+        };
+        assert!(
+            fit_compaction_range_to_budget(
+                &surface,
+                &ids,
+                &endpoint_mismatch,
+                max_source_tokens,
+                1,
+            )
+            .is_none()
+        );
+
+        let mut length_mismatch = ids.clone();
+        length_mismatch.pop();
+        assert!(fit_compaction_range_to_budget(
+            &surface,
+            &length_mismatch,
+            &plan,
+            max_source_tokens,
+            1,
+        )
+        .is_none());
     }
 
     #[test]
