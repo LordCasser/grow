@@ -106,7 +106,19 @@ pub(crate) fn project_admitted_response(
 pub(crate) enum ProjectionObservation<'a> {
     Candidate(&'a (String, u32)),
     Projection(&'a ResponseReplayProjection),
+    /// A storage-only projection envelope that could not be decoded. It is
+    /// never public replay data and must be safely suppressed.
+    MalformedProjection,
     Other,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProjectionPlanningMode {
+    /// Reconcile the cache, synthesizing missing active projections.
+    Reconcile,
+    /// Initial replay already emitted all active canonicals; only validate and
+    /// suppress cache rows in this physical delta.
+    AlreadyEmitted,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -125,6 +137,7 @@ pub(crate) fn plan_response_projections(
     timeline: &chat_state::Timeline,
     canonicals: &[ResponseReplayProjection],
     observations: &[ProjectionObservation<'_>],
+    mode: ProjectionPlanningMode,
 ) -> std::io::Result<ProjectionPlan> {
     let admitted = timeline.admitted_responses();
     let active_by_identity = admitted
@@ -156,11 +169,22 @@ pub(crate) fn plan_response_projections(
                     candidate_anchor[canonical_index].get_or_insert(physical_index);
                 }
             }
+            ProjectionObservation::MalformedProjection => {
+                suppressed[physical_index] = true;
+                changed = true;
+            }
             ProjectionObservation::Projection(existing) => {
                 let identity = (existing.request_id.as_str(), existing.attempt);
                 let Some(&canonical_index) = active_by_identity.get(&identity) else {
-                    suppressed[physical_index] = true;
-                    changed = true;
+                    if mode == ProjectionPlanningMode::Reconcile {
+                        // A projection for an inactive/rewound response is stale
+                        // cache and must not be replayed. During a resident delta,
+                        // however, it may be a newly admitted response written
+                        // after the initial Timeline snapshot; keep that physical
+                        // row and let rewind filtering provide the branch boundary.
+                        suppressed[physical_index] = true;
+                        changed = true;
+                    }
                     continue;
                 };
                 if !existing.exact_match(&canonicals[canonical_index]) {
@@ -177,6 +201,18 @@ pub(crate) fn plan_response_projections(
     }
 
     let mut insertions = std::collections::BTreeMap::<usize, Vec<PlannedProjection>>::new();
+    if mode == ProjectionPlanningMode::AlreadyEmitted {
+        return Ok(ProjectionPlan {
+            entries: observations
+                .iter()
+                .enumerate()
+                .filter_map(|(index, _)| {
+                    (!suppressed[index]).then_some(PlannedProjection::Existing(index))
+                })
+                .collect(),
+            changed,
+        });
+    }
     for (canonical_index, response) in admitted.iter().enumerate() {
         let exact = &exact_indices[canonical_index];
         let anchor = candidate_anchor[canonical_index]
@@ -251,7 +287,12 @@ pub(crate) fn reconcile_response_projections(
             _ => ProjectionObservation::Other,
         })
         .collect::<Vec<_>>();
-    let plan = plan_response_projections(timeline, &canonicals, &observations)?;
+    let plan = plan_response_projections(
+        timeline,
+        &canonicals,
+        &observations,
+        ProjectionPlanningMode::Reconcile,
+    )?;
     Ok(plan
         .entries
         .into_iter()

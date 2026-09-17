@@ -1043,7 +1043,7 @@ impl MvpAgent {
         persist_data: Option<&serde_json::Value>,
         target_client_id: Option<&serde_json::Value>,
         cursor: Option<&str>,
-    ) -> Result<(u64, crate::session::storage::SubagentProjectionState), acp::Error> {
+    ) -> Result<(u64, bool, crate::session::storage::SubagentProjectionState), acp::Error> {
         let mut replay_timer = crate::instrumentation_timer!("session.load_session_replay");
         replay_timer.with_field("session_id", session_id.0.as_ref());
         replay_timer.with_field("cwd", cwd.as_str());
@@ -1066,18 +1066,15 @@ impl MvpAgent {
                 None => (String::new(), 0, 0),
             }
         };
-        let raw_contents = crate::session::storage::reconcile_replay_snapshot(
-            session_id,
-            &timeline,
-            &raw_contents,
-        )
-        .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
-        if raw_contents.is_empty() {
-            return Ok((end_offset, Default::default()));
-        }
         let mut prepared = {
-            let _timer = crate::instrumentation_timer!("session.replay.read_and_filter");
-            crate::session::storage::prepare_replay_lines(&raw_contents, cursor)
+            let _timer = crate::instrumentation_timer!("session.replay.read_and_reconcile");
+            crate::session::storage::prepare_reconciled_replay_lines(
+                session_id,
+                timeline,
+                &raw_contents,
+                cursor,
+            )
+            .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?
         };
         let subagent_projections = std::mem::take(&mut prepared.subagent_projections);
         if cursor.is_some() {
@@ -1108,7 +1105,7 @@ impl MvpAgent {
             let mut pending_tool_calls = std::collections::HashMap::new();
             for line in &lines_to_send {
                 self.forward_raw_replay_line(
-                    line,
+                    line.as_str(),
                     persist_data,
                     target_client_id,
                     &mut completions,
@@ -1139,7 +1136,7 @@ impl MvpAgent {
             "replay: completed"
         );
         replay_timer.with_field("updates_count", updates_count);
-        Ok((end_offset, subagent_projections))
+        Ok((end_offset, mark_replay, subagent_projections))
     }
     /// Enqueue replay notifications for updates appended after `from_offset`.
     /// Returns completion receivers; callers open the gate then drain.
@@ -1153,6 +1150,7 @@ impl MvpAgent {
         session_id: &acp::SessionId,
         session_directory: &crate::session::storage::ContainedDirectory,
         from_offset: u64,
+        timeline: &chat_state::Timeline,
         persist_data: Option<&serde_json::Value>,
         target_client_id: Option<&serde_json::Value>,
         mark_replay: bool,
@@ -1188,15 +1186,23 @@ impl MvpAgent {
         if lines.is_empty() {
             return Vec::new();
         }
-        let live_lines = crate::session::storage::filter_delta_replay_lines(
+        let live_lines = match crate::session::storage::prepare_reconciled_delta_lines(
+            session_id,
+            timeline,
             lines.iter().map(String::as_str).collect(),
-        );
+        ) {
+            Ok(lines) => lines,
+            Err(error) => {
+                tracing::warn!(?error, "Delta replay reconciliation failed; skipping delta replay");
+                return Vec::new();
+            }
+        };
         let delta_count = live_lines.len();
         let mut completions = Vec::with_capacity(live_lines.len());
         let mut pending_tool_calls = std::collections::HashMap::new();
         for line in &live_lines {
             self.forward_raw_replay_line(
-                line,
+                line.as_str(),
                 persist_data,
                 target_client_id,
                 &mut completions,

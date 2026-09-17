@@ -4096,6 +4096,20 @@ pub(crate) fn reconcile_raw_replay_lines<'a>(
     timeline: &chat_state::Timeline,
     lines: Vec<&'a str>,
 ) -> io::Result<RawReconciliation<'a>> {
+    reconcile_raw_replay_lines_with_mode(
+        session_id,
+        timeline,
+        lines,
+        crate::session::response_projection::ProjectionPlanningMode::Reconcile,
+    )
+}
+
+fn reconcile_raw_replay_lines_with_mode<'a>(
+    session_id: &acp::SessionId,
+    timeline: &chat_state::Timeline,
+    lines: Vec<&'a str>,
+    mode: crate::session::response_projection::ProjectionPlanningMode,
+) -> io::Result<RawReconciliation<'a>> {
     use crate::session::response_projection::{
         PlannedProjection, ProjectionObservation, plan_response_projections,
         project_admitted_response,
@@ -4132,10 +4146,11 @@ pub(crate) fn reconcile_raw_replay_lines<'a>(
             RawObservationKind::Projection(projection) => {
                 ProjectionObservation::Projection(&projections[*projection])
             }
+            RawObservationKind::MalformedProjection => ProjectionObservation::MalformedProjection,
             RawObservationKind::Other => ProjectionObservation::Other,
         })
         .collect::<Vec<_>>();
-    let plan = plan_response_projections(timeline, &canonicals, &observations)?;
+    let plan = plan_response_projections(timeline, &canonicals, &observations, mode)?;
     let mut result = Vec::with_capacity(plan.entries.len());
     for entry in plan.entries {
         match entry {
@@ -4156,6 +4171,7 @@ pub(crate) fn reconcile_raw_replay_lines<'a>(
 enum RawObservationKind {
     Candidate,
     Projection(usize),
+    MalformedProjection,
     Other,
 }
 
@@ -4165,7 +4181,9 @@ fn raw_projection_observation(
 ) -> Option<(RawObservationKind, Option<(String, u32)>)> {
     let env = serde_json::from_str::<RawLinePeek<'_>>(line).ok()?;
     if env.method == crate::session::response_projection::RESPONSE_REPLAY_PROJECTION_METHOD {
-        let projection = serde_json::from_str(env.params.get()).ok()?;
+        let Ok(projection) = serde_json::from_str(env.params.get()) else {
+            return Some((RawObservationKind::MalformedProjection, None));
+        };
         projections.push(projection);
         return Some((RawObservationKind::Projection(projections.len() - 1), None));
     }
@@ -4191,6 +4209,87 @@ fn raw_projection_observation(
     ))
 }
 
+pub(crate) struct PreparedReconciledReplay<'a> {
+    pub(crate) lines: Vec<ReconciledReplayLine<'a>>,
+    pub(crate) mark_replay: bool,
+    pub(crate) max_event_seq: Option<u64>,
+    pub(crate) total_live: usize,
+    pub(crate) subagent_projections: SubagentProjectionState,
+}
+
+/// Prepare the replay directly from the one physical snapshot. Canonical
+/// projection rows are owned only when synthesized; physical rows remain
+/// borrowed from `contents`.
+pub(crate) fn prepare_reconciled_replay_lines<'a>(
+    session_id: &acp::SessionId,
+    timeline: &chat_state::Timeline,
+    contents: &'a str,
+    cursor: Option<&str>,
+) -> io::Result<PreparedReconciledReplay<'a>> {
+    let filtered = filter_rewind_lines(contents.lines().filter(|l| !l.trim().is_empty()).collect());
+    let max_event_seq = max_event_seq(&filtered);
+    let total_live = filtered
+        .iter()
+        .filter(|line| !line_is_available_commands_update(line))
+        .count();
+    let subagent_projections = collect_subagent_projection_state(&filtered);
+    let reconciled = reconcile_raw_replay_lines(session_id, timeline, filtered.clone())?;
+    let cursor_pos = cursor
+        .and_then(|id| {
+            filtered
+                .iter()
+                .rposition(|line| line_has_event_id(line, id))
+        })
+        .filter(|&pos| {
+            let bounded = filtered[pos + 1..].iter().all(|line| {
+                line_is_available_commands_update(line) || line_event_id(line).is_some()
+            });
+            if !bounded {
+                tracing::warn!(
+                    "replay: post-cursor tail contains eventId-less lines; full replay instead"
+                );
+            }
+            bounded
+        });
+    let mark_replay = cursor_pos.is_none() || (cursor.is_some() && reconciled.changed);
+    // ACUs participate in cursor resolution and physical positions, but are
+    // never forwarded. This mirrors `prepare_replay_lines` without building a
+    // second whole contents String.
+    let reconciled_lines = reconciled
+        .lines
+        .into_iter()
+        .filter(|line| !line_is_available_commands_update(line.as_str()));
+    let lines = if mark_replay {
+        reconciled_lines.collect()
+    } else {
+        let cursor_pos = cursor_pos.expect("incremental replay has a cursor");
+        // `mark_replay == false` implies `reconciled.changed == false`, so the
+        // plan contains only borrowed physical rows. Never use a pointer lookup
+        // for an owned synthesized line; the map is explicitly scoped to this
+        // unchanged reconciliation path.
+        let physical_positions = filtered
+            .iter()
+            .enumerate()
+            .map(|(position, line)| (((*line).as_ptr(), line.len()), position))
+            .collect::<std::collections::HashMap<(*const u8, usize), usize>>();
+        reconciled_lines
+            .filter(|line| match line {
+                ReconciledReplayLine::Borrowed(line) => physical_positions
+                    .get(&(line.as_ptr(), line.len()))
+                    .is_some_and(|&position| position > cursor_pos),
+                ReconciledReplayLine::Owned(_) => false,
+            })
+            .collect()
+    };
+    Ok(PreparedReconciledReplay {
+        lines,
+        mark_replay,
+        max_event_seq,
+        total_live,
+        subagent_projections,
+    })
+}
+
 /// Rewind-filter and reconcile the response-projection cache in memory.
 /// Storage-only projection records are synthesized from validated Timeline
 /// authority and candidate rows for the exact admitted attempt are removed.
@@ -4214,25 +4313,9 @@ pub(crate) fn reconcile_replay_snapshot(
     Ok(output)
 }
 
-/// Rewind-filter, resolve the reconnect cursor, and drop redundant command
-/// catalogs. Pure UI replay processing, no agent-state recovery.
-///
-/// The cursor is resolved before dropping ACUs, because an idle client often
-/// reconnects with an ACU's `eventId` as its cursor; resolving against the
-/// ACU-inclusive set keeps reconnect incremental instead of a full replay.
-///
-/// `#[doc(hidden)] pub` (not stable API): production replay uses it, and the
-/// session-load memory test drives it to check the peek stays zero-copy.
-#[doc(hidden)]
-pub fn prepare_replay_lines<'a>(contents: &'a str, cursor: Option<&str>) -> PreparedReplay<'a> {
-    let filtered = filter_rewind_lines(contents.lines().filter(|l| !l.trim().is_empty()).collect());
-
-    // Highest `eventId` counter across all live (rewind-filtered) lines, used to
-    // re-seed the process-global event counter on resume so post-load live events
-    // keep monotonically increasing ids. eventId is "{sessionId}-{counter}" and
-    // session ids contain dashes, so the counter is the suffix after the LAST '-'.
+fn max_event_seq(filtered: &[&str]) -> Option<u64> {
     let mut max_event_seq: Option<u64> = None;
-    for line in &filtered {
+    for line in filtered {
         if line.contains("eventId")
             && let Ok(env) = serde_json::from_str::<RawLinePeek<'_>>(line)
             && matches!(
@@ -4251,6 +4334,24 @@ pub fn prepare_replay_lines<'a>(contents: &'a str, cursor: Option<&str>) -> Prep
             max_event_seq = Some(max_event_seq.map_or(seq, |m| m.max(seq)));
         }
     }
+    max_event_seq
+}
+
+/// Rewind-filter, resolve the reconnect cursor, and drop redundant command
+/// catalogs. Pure UI replay processing, no agent-state recovery.
+///
+/// The cursor is resolved before dropping ACUs, because an idle client often
+/// reconnects with an ACU's `eventId` as its cursor; resolving against the
+/// ACU-inclusive set keeps reconnect incremental instead of a full replay.
+///
+/// `#[doc(hidden)] pub` (not stable API): production replay uses it, and the
+/// session-load memory test drives it to check the peek stays zero-copy.
+#[doc(hidden)]
+pub fn prepare_replay_lines<'a>(contents: &'a str, cursor: Option<&str>) -> PreparedReplay<'a> {
+    let filtered = filter_rewind_lines(contents.lines().filter(|l| !l.trim().is_empty()).collect());
+
+    // Highest event counter across all live rewind-filtered lines.
+    let max_event_seq = max_event_seq(&filtered);
 
     // Resolve the reconnect cursor against the ACU-inclusive set. `mark_replay`
     // is true for a full historical replay (no cursor, or cursor not found).
@@ -4313,6 +4414,21 @@ pub(crate) fn filter_delta_replay_lines(lines: Vec<&str>) -> Vec<&str> {
     filter_rewind_lines(live)
 }
 
+pub(crate) fn prepare_reconciled_delta_lines<'a>(
+    session_id: &acp::SessionId,
+    timeline: &chat_state::Timeline,
+    lines: Vec<&'a str>,
+) -> io::Result<Vec<ReconciledReplayLine<'a>>> {
+    let filtered = filter_delta_replay_lines(lines);
+    Ok(reconcile_raw_replay_lines_with_mode(
+        session_id,
+        timeline,
+        filtered,
+        crate::session::response_projection::ProjectionPlanningMode::AlreadyEmitted,
+    )?
+    .lines)
+}
+
 // ============================================================================
 // Tests
 // ============================================================================
@@ -4320,6 +4436,238 @@ pub(crate) fn filter_delta_replay_lines(lines: Vec<&str>) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn replay_timeline(request_id: &str, attempt: u32) -> chat_state::Timeline {
+        let mut timeline = chat_state::Timeline::default();
+        let turn = chat_state::TurnId(1);
+        let step = chat_state::StepId { turn, index: 0 };
+        timeline
+            .record(chat_state::TimelineEventKind::Turn(
+                chat_state::TurnEvent::Started {
+                    id: turn,
+                    input_ids: Vec::new(),
+                    identity: chat_state::TurnIdentity {
+                        origin: "user".into(),
+                        turn_kind: "internal".into(),
+                        goal_id: None,
+                        goal_definition_revision: None,
+                        stage_id: None,
+                    },
+                    model_id: "model".into(),
+                    input_message_count: 0,
+                    prompt_index: 0,
+                    prompt_text: "test".into(),
+                    input_kind: chat_state::TurnInputKind::Prompt,
+                    redirect_kind: None,
+                },
+            ))
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Step(
+                chat_state::StepEvent::Started { id: step },
+            ))
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Request(
+                chat_state::RequestEvent::Started {
+                    id: request_id.into(),
+                    turn,
+                    step,
+                    model_id: "model".into(),
+                    input_message_count: 0,
+                    tool_count: 0,
+                },
+            ))
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Request(
+                chat_state::RequestEvent::Completed {
+                    id: request_id.into(),
+                    duration_ms: 1,
+                    time_to_first_token_ms: None,
+                    usage: chat_state::RequestUsage::default(),
+                    response_message_count: 1,
+                    attempt,
+                    provider_terminal: None,
+                },
+            ))
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Messages(
+                chat_state::MessageEvent {
+                    cause: chat_state::MessageCause::Assistant,
+                    items: vec![sampling_types::ConversationItem::assistant("answer")],
+                    surface: chat_state::SurfaceOp::Append,
+                    response_admission: Some(chat_state::ResponseAdmission {
+                        identity: chat_state::ResponseAdmissionIdentity {
+                            request_id: request_id.into(),
+                            attempt,
+                        },
+                        quarantined_tool_exchanges: 0,
+                    }),
+                },
+            ))
+            .unwrap();
+        timeline
+    }
+
+    fn acp_replay_line(text: &str, event_id: Option<&str>) -> String {
+        let mut notification = acp::SessionNotification::new(
+            acp::SessionId::new("session-1"),
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+                acp::TextContent::new(text),
+            ))),
+        );
+        notification.meta = event_id.map(|event_id| {
+            serde_json::json!({ "eventId": event_id })
+                .as_object()
+                .cloned()
+                .unwrap()
+        });
+        let update = SessionUpdate::Acp(Box::new(notification));
+        serde_json::to_string(&SessionUpdateEnvelope::from_update(&update).unwrap()).unwrap()
+    }
+
+    fn candidate_replay_line(request_id: &str, attempt: u32) -> String {
+        let mut notification = acp::SessionNotification::new(
+            acp::SessionId::new("session-1"),
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+                acp::TextContent::new("candidate"),
+            ))),
+        );
+        notification.meta = Some(
+            serde_json::json!({
+                "samplingRequestId": request_id,
+                "samplingAttempt": attempt,
+            })
+            .as_object()
+            .cloned()
+            .unwrap(),
+        );
+        let update = SessionUpdate::Acp(Box::new(notification));
+        serde_json::to_string(&SessionUpdateEnvelope::from_update(&update).unwrap()).unwrap()
+    }
+
+    fn projection_replay_line(
+        session_id: &acp::SessionId,
+        timeline: &chat_state::Timeline,
+    ) -> String {
+        let response = timeline.admitted_responses().pop().unwrap();
+        let projection =
+            crate::session::response_projection::project_admitted_response(session_id, &response)
+                .unwrap();
+        projection_envelope(&projection).unwrap()
+    }
+
+    #[test]
+    fn reconciled_changed_before_cursor_forces_full_replay_without_candidate_or_acu() {
+        let session_id = acp::SessionId::new("session-1");
+        let timeline = replay_timeline("request-1", 2);
+        let candidate = candidate_replay_line("request-1", 2);
+        let later = acp_replay_line("later", Some("later"));
+        let acu =
+            acp_envelope(r#"{"sessionUpdate":"available_commands_update","availableCommands":[]}"#);
+        let raw = format!("{candidate}\n{later}\n{acu}\n");
+
+        let prepared =
+            prepare_reconciled_replay_lines(&session_id, &timeline, &raw, Some("later")).unwrap();
+        assert!(prepared.mark_replay);
+        assert_eq!(prepared.lines.len(), 2);
+        assert!(
+            prepared.lines[0]
+                .as_str()
+                .contains(crate::session::response_projection::RESPONSE_REPLAY_PROJECTION_METHOD)
+        );
+        assert!(prepared.lines[1].as_str().contains("later"));
+        assert!(prepared.lines.iter().all(|line| {
+            !line.as_str().contains("candidate")
+                && !line_is_available_commands_update(line.as_str())
+        }));
+    }
+
+    #[test]
+    fn reconciled_exact_projection_with_later_event_stays_incremental() {
+        let session_id = acp::SessionId::new("session-1");
+        let timeline = replay_timeline("request-1", 2);
+        let projection = projection_replay_line(&session_id, &timeline);
+        let seen = acp_replay_line("seen", Some("seen"));
+        let later = acp_replay_line("later", Some("later"));
+        let raw = format!("{projection}\n{seen}\n{later}\n");
+
+        let prepared =
+            prepare_reconciled_replay_lines(&session_id, &timeline, &raw, Some("seen")).unwrap();
+        assert!(!prepared.mark_replay);
+        assert_eq!(prepared.lines.len(), 1);
+        assert!(prepared.lines[0].as_str().contains("later"));
+    }
+
+    #[test]
+    fn idless_projection_after_cursor_forces_full_replay() {
+        let session_id = acp::SessionId::new("session-1");
+        let timeline = replay_timeline("request-1", 2);
+        let seen = acp_replay_line("seen", Some("seen"));
+        let projection = projection_replay_line(&session_id, &timeline);
+        let raw = format!("{seen}\n{projection}\n");
+
+        let prepared =
+            prepare_reconciled_replay_lines(&session_id, &timeline, &raw, Some("seen")).unwrap();
+        assert!(prepared.mark_replay);
+        assert!(prepared.lines.iter().any(|line| {
+            line.as_str()
+                .contains(crate::session::response_projection::RESPONSE_REPLAY_PROJECTION_METHOD)
+        }));
+    }
+
+    #[test]
+    fn delta_suppresses_known_candidate_and_projection_but_keeps_independent() {
+        let session_id = acp::SessionId::new("session-1");
+        let timeline = replay_timeline("request-1", 2);
+        let projection = projection_replay_line(&session_id, &timeline);
+        let candidate = candidate_replay_line("request-1", 2);
+        let independent = acp_replay_line("independent", Some("independent"));
+        let raw = vec![
+            projection.as_str(),
+            candidate.as_str(),
+            independent.as_str(),
+        ];
+
+        let lines = prepare_reconciled_delta_lines(&session_id, &timeline, raw).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].as_str().contains("independent"));
+    }
+
+    #[test]
+    fn delta_known_projection_conflict_fails() {
+        let session_id = acp::SessionId::new("session-1");
+        let timeline = replay_timeline("request-1", 2);
+        let response = timeline.admitted_responses().pop().unwrap();
+        let mut projection =
+            crate::session::response_projection::project_admitted_response(&session_id, &response)
+                .unwrap();
+        projection.digest = "conflict".into();
+        let line = projection_envelope(&projection).unwrap();
+
+        let error = prepare_reconciled_delta_lines(&session_id, &timeline, vec![line.as_str()])
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn delta_unknown_projection_survives_initial_timeline_snapshot() {
+        let session_id = acp::SessionId::new("session-1");
+        let initial = replay_timeline("request-1", 2);
+        let newly_admitted = replay_timeline("request-2", 1);
+        let unknown = projection_replay_line(&session_id, &newly_admitted);
+
+        let lines =
+            prepare_reconciled_delta_lines(&session_id, &initial, vec![unknown.as_str()]).unwrap();
+        assert_eq!(lines.len(), 1);
+        assert!(
+            lines[0]
+                .as_str()
+                .contains(crate::session::response_projection::RESPONSE_REPLAY_PROJECTION_METHOD)
+        );
+    }
 
     #[cfg(any(unix, windows))]
     #[test]

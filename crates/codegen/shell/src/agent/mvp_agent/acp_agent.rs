@@ -1012,7 +1012,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             );
             (Vec::new(), Default::default())
         } else {
-            let (replay_end_offset, subagent_projections) = self
+            let (replay_end_offset, mark_replay, subagent_projections) = self
                 // Replay must use the already validated/pinned Timeline snapshot.
                 .replay_session_updates(
                     &session_id,
@@ -1024,7 +1024,6 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                     cursor.as_deref(),
                 )
                 .await?;
-            let cursor_mark_replay = cursor.is_none();
             let _timer = crate::instrumentation_timer!("session.delta_flush_replay");
             let completions = match self.flush_session(&session_id).await {
                 Ok(()) => {
@@ -1032,9 +1031,10 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                         &session_id,
                         &session_directory,
                         replay_end_offset,
+                        &timeline,
                         persist_data.as_ref(),
                         target_client_id.as_ref(),
-                        cursor_mark_replay,
+                        mark_replay,
                     )
                 }
                 Err(reason) => {
