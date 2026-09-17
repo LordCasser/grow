@@ -44,6 +44,8 @@ pub struct JsonlStorageAdapter {
     >,
     #[cfg(test)]
     update_append_probe: Option<std::sync::Arc<AppendProbe>>,
+    #[cfg(test)]
+    update_sync_probe: Option<std::sync::Arc<UpdateSyncProbe>>,
 }
 
 #[derive(Clone)]
@@ -256,6 +258,14 @@ impl OpenedSession {
 }
 #[cfg(test)]
 type AppendProbe = dyn Fn(AppendDurability) -> io::Result<()> + Send + Sync;
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpdateSyncPoint {
+    File,
+    Directory,
+}
+#[cfg(test)]
+type UpdateSyncProbe = dyn Fn(UpdateSyncPoint) -> io::Result<()> + Send + Sync;
 impl Default for JsonlStorageAdapter {
     fn default() -> Self {
         Self::new()
@@ -366,6 +376,8 @@ impl JsonlStorageAdapter {
             timeline_prefixes: Default::default(),
             #[cfg(test)]
             update_append_probe: None,
+            #[cfg(test)]
+            update_sync_probe: None,
         }
     }
     pub fn with_root(root_dir: PathBuf) -> Self {
@@ -377,6 +389,8 @@ impl JsonlStorageAdapter {
             timeline_prefixes: Default::default(),
             #[cfg(test)]
             update_append_probe: None,
+            #[cfg(test)]
+            update_sync_probe: None,
         }
     }
     /// Create an adapter that writes directly to `session_dir`, bypassing
@@ -393,6 +407,8 @@ impl JsonlStorageAdapter {
             timeline_prefixes: Default::default(),
             #[cfg(test)]
             update_append_probe: None,
+            #[cfg(test)]
+            update_sync_probe: None,
         }
     }
     #[cfg(test)]
@@ -407,6 +423,22 @@ impl JsonlStorageAdapter {
             writer_leases: Default::default(),
             timeline_prefixes: Default::default(),
             update_append_probe: Some(std::sync::Arc::new(append_probe)),
+            update_sync_probe: None,
+        }
+    }
+    #[cfg(test)]
+    fn with_update_sync_probe(
+        session_dir: PathBuf,
+        sync_probe: impl Fn(UpdateSyncPoint) -> io::Result<()> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            dir_mode: SessionDirMode::Explicit(session_dir),
+            authority: Default::default(),
+            opened_sessions: Default::default(),
+            writer_leases: Default::default(),
+            timeline_prefixes: Default::default(),
+            update_append_probe: None,
+            update_sync_probe: Some(std::sync::Arc::new(sync_probe)),
         }
     }
     /// Read one committed ledger snapshot and derive its exact reference plus
@@ -1566,12 +1598,13 @@ impl JsonlStorageAdapter {
         Self::append_jsonl_line_in_directory_sync(&directory, name, path, line, durability)
     }
 
-    fn append_jsonl_line_in_directory_sync(
+    fn append_jsonl_line_in_directory_sync_with_probe(
         directory: &super::ContainedDirectory,
         name: &std::ffi::OsStr,
         path: &Path,
         mut line: Vec<u8>,
         durability: AppendDurability,
+        #[cfg(test)] sync_probe: Option<&UpdateSyncProbe>,
     ) -> io::Result<()> {
         #[cfg(not(any(unix, windows)))]
         {
@@ -1606,8 +1639,16 @@ impl JsonlStorageAdapter {
             file.write_all(&line)?;
             file.flush()?;
             if matches!(durability, AppendDurability::Durable) {
+                #[cfg(test)]
+                if let Some(sync_probe) = sync_probe {
+                    sync_probe(UpdateSyncPoint::File)?;
+                }
                 Self::sync_file_durable(&file)?;
                 drop(file);
+                #[cfg(test)]
+                if let Some(sync_probe) = sync_probe {
+                    sync_probe(UpdateSyncPoint::Directory)?;
+                }
                 directory.sync()?;
             }
             Ok(())
@@ -1616,6 +1657,27 @@ impl JsonlStorageAdapter {
         {
             let _ = lock.unlock();
             result
+        }
+    }
+
+    fn append_jsonl_line_in_directory_sync(
+        directory: &super::ContainedDirectory,
+        name: &std::ffi::OsStr,
+        path: &Path,
+        line: Vec<u8>,
+        durability: AppendDurability,
+    ) -> io::Result<()> {
+        #[cfg(test)]
+        {
+            Self::append_jsonl_line_in_directory_sync_with_probe(
+                directory, name, path, line, durability, None,
+            )
+        }
+        #[cfg(not(test))]
+        {
+            Self::append_jsonl_line_in_directory_sync_with_probe(
+                directory, name, path, line, durability,
+            )
         }
     }
     #[cfg(test)]
@@ -2041,7 +2103,20 @@ impl JsonlStorageAdapter {
         line.push(b'\n');
         let directory = self.bound_session_directory(info)?;
         let path = directory.display_path().join(super::UPDATES_FILE);
+        #[cfg(test)]
+        let sync_probe = self.update_sync_probe.clone();
         tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            if let Some(sync_probe) = sync_probe {
+                return Self::append_jsonl_line_in_directory_sync_with_probe(
+                    &directory,
+                    std::ffi::OsStr::new(super::UPDATES_FILE),
+                    &path,
+                    line,
+                    durability,
+                    Some(sync_probe.as_ref()),
+                );
+            }
             Self::append_jsonl_line_in_directory_sync(
                 &directory,
                 std::ffi::OsStr::new(super::UPDATES_FILE),
@@ -2136,6 +2211,43 @@ impl JsonlStorageAdapter {
             );
         }
         Ok(updates)
+    }
+
+    fn sync_updates_file_and_directory_sync(
+        directory: &super::ContainedDirectory,
+        #[cfg(test)] sync_probe: Option<&UpdateSyncProbe>,
+    ) -> io::Result<()> {
+        let file = directory.open_read_write_create(std::ffi::OsStr::new(super::UPDATES_FILE))?;
+        #[cfg(test)]
+        if let Some(sync_probe) = sync_probe {
+            sync_probe(UpdateSyncPoint::File)?;
+        }
+        Self::sync_file_durable(&file)?;
+        drop(file);
+        #[cfg(test)]
+        if let Some(sync_probe) = sync_probe {
+            sync_probe(UpdateSyncPoint::Directory)?;
+        }
+        directory.sync()?;
+        Ok(())
+    }
+
+    async fn sync_updates_file_and_directory(&self, info: &Info) -> io::Result<()> {
+        let directory = self.bound_session_directory(info)?;
+        #[cfg(test)]
+        let sync_probe = self.update_sync_probe.clone();
+        tokio::task::spawn_blocking(move || {
+            #[cfg(test)]
+            {
+                Self::sync_updates_file_and_directory_sync(&directory, sync_probe.as_deref())
+            }
+            #[cfg(not(test))]
+            {
+                Self::sync_updates_file_and_directory_sync(&directory)
+            }
+        })
+        .await
+        .map_err(io::Error::other)?
     }
 
     fn raw_acp_event_status(
@@ -2996,24 +3108,29 @@ impl JsonlStorageAdapter {
 fn transform_session_id_in_update(
     update: super::SessionUpdate,
     new_id: &acp::SessionId,
-) -> super::SessionUpdate {
+) -> Vec<super::SessionUpdate> {
     match update {
-        super::SessionUpdate::Acp(notification) => {
-            let mut inner = (*notification).clone();
-            inner.session_id = new_id.clone();
-            super::SessionUpdate::Acp(Box::new(inner))
+        super::SessionUpdate::Acp(mut notification) => {
+            notification.session_id = new_id.clone();
+            vec![super::SessionUpdate::Acp(notification)]
         }
-        super::SessionUpdate::Grow(notification) => {
-            let mut inner = (*notification).clone();
-            inner.session_id = new_id.clone();
-            super::SessionUpdate::Grow(Box::new(inner))
+        super::SessionUpdate::Grow(mut notification) => {
+            notification.session_id = new_id.clone();
+            vec![super::SessionUpdate::Grow(notification)]
         }
         super::SessionUpdate::ResponseReplayProjection(projection) => {
-            let mut inner = (*projection).clone();
-            for notification in &mut inner.updates {
-                notification.session_id = new_id.clone();
-            }
-            super::SessionUpdate::ResponseReplayProjection(Box::new(inner))
+            projection
+                .updates
+                .into_iter()
+                .map(|mut notification| {
+                    notification.session_id = new_id.clone();
+                    // A fork is a new lineage. The projection is expanded into
+                    // ordinary inherited ACP history, so the child must not
+                    // inherit the parent's response/candidate identity metadata.
+                    notification.meta = None;
+                    super::SessionUpdate::Acp(Box::new(notification))
+                })
+                .collect()
         }
     }
 }
@@ -3134,6 +3251,20 @@ impl JsonlStorageAdapter {
             let mut surface_to_copy = source_timeline.surface().to_vec();
             let mut updates_to_copy: Vec<super::SessionUpdate> =
                 Self::read_updates_from_directory(source_session.directory())?;
+            if !options.fork_filter {
+                // Reconcile against the validated parent Timeline before any
+                // fork truncation. This removes stale/candidate rows, dedups
+                // exact projections, and synthesizes a missing projection at
+                // its canonical parent position. The projection is expanded
+                // below into ordinary child history; no child admission fact
+                // is fabricated.
+                updates_to_copy =
+                    crate::session::response_projection::reconcile_response_projections(
+                        &source_info.id,
+                        &source_timeline,
+                        updates_to_copy,
+                    )?;
+            }
             if let Some(target_idx) = options.target_prompt_index {
                 updates_to_copy = super::filter_rewind_updates(updates_to_copy);
                 updates_to_copy.truncate(updates_truncate_for_prompt(&updates_to_copy, target_idx));
@@ -3181,7 +3312,11 @@ impl JsonlStorageAdapter {
                 .filter_map(ConversationItem::working_directory_switch_generation)
                 .max()
                 .unwrap_or(0);
-            let num_messages = updates_to_copy.len();
+            let transformed_updates: Vec<super::SessionUpdate> = updates_to_copy
+                .into_iter()
+                .flat_map(|u| transform_session_id_in_update(u, &target_info.id))
+                .collect();
+            let num_messages = transformed_updates.len();
             let target_model_id = options
                 .new_model_id
                 .map(crate::agent::models::ModelId::new)
@@ -3289,10 +3424,6 @@ impl JsonlStorageAdapter {
                 true,
                 false,
             )?;
-            let transformed_updates: Vec<super::SessionUpdate> = updates_to_copy
-                .into_iter()
-                .map(|u| transform_session_id_in_update(u, &target_info.id))
-                .collect();
             let update_envelopes = transformed_updates
                 .iter()
                 .map(SessionUpdateEnvelope::from_update)
@@ -3398,7 +3529,10 @@ impl StorageAdapter for JsonlStorageAdapter {
             .raw_acp_event_status(info, notification)
             .map_err(super::AppendUpdateError::NotCommitted)?
         {
-            RawExactStatus::Exact => Ok(()),
+            RawExactStatus::Exact => self
+                .sync_updates_file_and_directory(info)
+                .await
+                .map_err(super::AppendUpdateError::NotCommitted),
             RawExactStatus::Conflict => {
                 Err(super::AppendUpdateError::NotCommitted(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -3425,7 +3559,10 @@ impl StorageAdapter for JsonlStorageAdapter {
                         Err(error) => Err(super::AppendUpdateError::NotCommitted(error)),
                     },
                     Err(error) => match self.raw_acp_event_status(info, notification) {
-                        Ok(RawExactStatus::Exact) => Ok(()),
+                        Ok(RawExactStatus::Exact) => self
+                            .sync_updates_file_and_directory(info)
+                            .await
+                            .map_err(super::AppendUpdateError::NotCommitted),
                         Ok(RawExactStatus::Conflict) => {
                             Err(super::AppendUpdateError::NotCommitted(io::Error::new(
                                 io::ErrorKind::InvalidData,
@@ -3450,7 +3587,10 @@ impl StorageAdapter for JsonlStorageAdapter {
             .raw_projection_status(info, projection)
             .map_err(super::AppendUpdateError::NotCommitted)?
         {
-            RawExactStatus::Exact => Ok(()),
+            RawExactStatus::Exact => self
+                .sync_updates_file_and_directory(info)
+                .await
+                .map_err(super::AppendUpdateError::NotCommitted),
             RawExactStatus::Conflict => {
                 Err(super::AppendUpdateError::NotCommitted(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -3477,7 +3617,10 @@ impl StorageAdapter for JsonlStorageAdapter {
                         Err(error) => Err(super::AppendUpdateError::NotCommitted(error)),
                     },
                     Err(error) => match self.raw_projection_status(info, projection) {
-                        Ok(RawExactStatus::Exact) => Ok(()),
+                        Ok(RawExactStatus::Exact) => self
+                            .sync_updates_file_and_directory(info)
+                            .await
+                            .map_err(super::AppendUpdateError::NotCommitted),
                         Ok(RawExactStatus::Conflict) => {
                             Err(super::AppendUpdateError::NotCommitted(io::Error::new(
                                 io::ErrorKind::InvalidData,

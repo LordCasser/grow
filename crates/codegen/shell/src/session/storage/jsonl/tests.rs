@@ -423,10 +423,11 @@ fn loaded_surface(events: &[chat_state::TimelineEvent]) -> Vec<ConversationItem>
         .surface()
         .to_vec()
 }
-fn response_projection_production_timeline(
+fn response_projection_production_timeline_with_items(
     request_id: &str,
     attempt: u32,
-    canonical: &str,
+    items: Vec<ConversationItem>,
+    quarantined_tool_exchanges: usize,
 ) -> chat_state::Timeline {
     let mut timeline = chat_state::Timeline::default();
     let turn = chat_state::TurnId(1);
@@ -463,26 +464,38 @@ fn response_projection_production_timeline(
             duration_ms: 1,
             time_to_first_token_ms: None,
             usage: chat_state::RequestUsage::default(),
-            response_message_count: 1,
+            response_message_count: items.len(),
             attempt,
             provider_terminal: None,
         }),
         chat_state::TimelineEventKind::Messages(chat_state::MessageEvent {
             cause: chat_state::MessageCause::Assistant,
-            items: vec![ConversationItem::assistant(canonical)],
+            items,
             surface: chat_state::SurfaceOp::Append,
             response_admission: Some(chat_state::ResponseAdmission {
                 identity: chat_state::ResponseAdmissionIdentity {
                     request_id: request_id.into(),
                     attempt,
                 },
-                quarantined_tool_exchanges: 0,
+                quarantined_tool_exchanges,
             }),
         }),
     ] {
         timeline.record(kind).unwrap();
     }
     timeline
+}
+fn response_projection_production_timeline(
+    request_id: &str,
+    attempt: u32,
+    canonical: &str,
+) -> chat_state::Timeline {
+    response_projection_production_timeline_with_items(
+        request_id,
+        attempt,
+        vec![ConversationItem::assistant(canonical)],
+        0,
+    )
 }
 async fn append_response_projection_production_timeline(
     adapter: &JsonlStorageAdapter,
@@ -507,6 +520,16 @@ fn response_projection_production_update(
     notification.meta = Some(meta);
     SessionUpdate::Acp(Box::new(notification))
 }
+fn response_projection_production_tool_update(info: &Info, id: &str) -> SessionUpdate {
+    let tool = acp::ToolCallUpdate::new(
+        acp::ToolCallId::new(id),
+        acp::ToolCallUpdateFields::new().title(Some("tool".into())),
+    );
+    SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+        info.id.clone(),
+        acp::SessionUpdate::ToolCallUpdate(tool),
+    )))
+}
 fn response_projection_production_texts(updates: Vec<acp::SessionUpdate>) -> Vec<String> {
     updates.into_iter().map(|update| {
         let acp::SessionUpdate::AgentMessageChunk(chunk) = update else {
@@ -530,6 +553,290 @@ fn response_projection_production_physical_count(
                 if projection.request_id == request_id && projection.attempt == attempt
         )
     }).count()
+}
+
+fn response_projection_update_for_timeline(
+    info: &Info,
+    timeline: &chat_state::Timeline,
+) -> SessionUpdate {
+    let response = timeline
+        .admitted_responses()
+        .pop()
+        .expect("fixture must contain an admitted response");
+    let projection =
+        crate::session::response_projection::project_admitted_response(&info.id, &response)
+            .unwrap();
+    SessionUpdate::ResponseReplayProjection(Box::new(projection))
+}
+
+fn describe_fork_replay(updates: Vec<acp::SessionUpdate>) -> Vec<String> {
+    updates
+        .into_iter()
+        .map(|update| match update {
+            acp::SessionUpdate::AgentThoughtChunk(chunk) => {
+                let acp::ContentBlock::Text(text) = chunk.content else {
+                    panic!("expected text thought projection")
+                };
+                format!("thought:{}", text.text)
+            }
+            acp::SessionUpdate::AgentMessageChunk(chunk) => {
+                let acp::ContentBlock::Text(text) = chunk.content else {
+                    panic!("expected text message projection")
+                };
+                format!("message:{}", text.text)
+            }
+            acp::SessionUpdate::ToolCallUpdate(_) => "tool".into(),
+            other => panic!("unexpected fork replay update: {other:?}"),
+        })
+        .collect()
+}
+
+fn loaded_child_acp_updates(updates: Vec<SessionUpdate>) -> Vec<acp::SessionNotification> {
+    updates
+        .into_iter()
+        .map(|update| match update {
+            SessionUpdate::Acp(notification) => *notification,
+            other => panic!("unexpected non-ACP child update: {other:?}"),
+        })
+        .collect()
+}
+
+#[tokio::test]
+async fn fork_reconciles_and_expands_response_projection_into_child_history() {
+    let root = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("fork-projection-source"),
+        cwd: "/source".into(),
+    };
+    adapter
+        .init_session(&source_info, default_model_id())
+        .await
+        .unwrap();
+    let timeline = response_projection_production_timeline_with_items(
+        "fork-projection-request",
+        2,
+        vec![
+            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item("thought")),
+            ConversationItem::assistant("answer"),
+        ],
+        0,
+    );
+    append_response_projection_production_timeline(&adapter, &source_info, &timeline).await;
+    let candidate = response_projection_production_update(
+        &source_info,
+        "candidate",
+        serde_json::json!({
+            "samplingRequestId": "fork-projection-request",
+            "samplingAttempt": 2,
+        })
+        .as_object()
+        .cloned()
+        .unwrap(),
+    );
+    adapter
+        .append_update(&source_info, &candidate)
+        .await
+        .unwrap();
+    let projection = response_projection_update_for_timeline(&source_info, &timeline);
+    adapter
+        .append_update(&source_info, &projection)
+        .await
+        .unwrap();
+    adapter
+        .append_update(&source_info, &projection)
+        .await
+        .unwrap();
+    adapter
+        .append_update(
+            &source_info,
+            &response_projection_production_tool_update(&source_info, "tool-after-response"),
+        )
+        .await
+        .unwrap();
+
+    let target_info = Info {
+        id: acp::SessionId::new("fork-projection-child"),
+        cwd: "/child".into(),
+    };
+    adapter
+        .copy_session_data(&source_info, &target_info, Default::default())
+        .await
+        .unwrap();
+
+    let physical = JsonlStorageAdapter::read_updates_from_directory(
+        adapter.open_session(&target_info).unwrap().directory(),
+    )
+    .unwrap();
+    assert_eq!(
+        physical.len(),
+        3,
+        "thought, answer, and tool survive the fork"
+    );
+    assert!(
+        physical
+            .iter()
+            .all(|update| matches!(update, SessionUpdate::Acp(_)))
+    );
+    let loaded = adapter.load_session(&target_info).await.unwrap();
+    assert_eq!(loaded.summary.num_messages, 3);
+    let notifications = loaded_child_acp_updates(loaded.updates);
+    assert_eq!(
+        notifications
+            .iter()
+            .map(|notification| notification.session_id.clone())
+            .collect::<Vec<_>>(),
+        vec![target_info.id.clone(); 3]
+    );
+    assert!(
+        notifications[..2]
+            .iter()
+            .all(|notification| notification.meta.is_none())
+    );
+    let typed = describe_fork_replay(
+        notifications
+            .iter()
+            .cloned()
+            .map(|notification| notification.update)
+            .collect(),
+    );
+    assert_eq!(typed, ["thought:thought", "message:answer", "tool"]);
+
+    let direct =
+        crate::session::storage::load_updates_for_replay_at(target_info.id.0.as_ref(), root.path())
+            .unwrap()
+            .unwrap();
+    let mut streamed = Vec::new();
+    assert_eq!(
+        crate::session::storage::stream_replay_updates_at(
+            target_info.id.0.as_ref(),
+            root.path(),
+            |update| streamed.push(update),
+        )
+        .unwrap(),
+        crate::session::storage::ReplayEmission::Emitted,
+    );
+    assert_eq!(describe_fork_replay(direct), typed);
+    assert_eq!(describe_fork_replay(streamed), typed);
+}
+
+#[tokio::test]
+async fn fork_synthesizes_missing_projection_without_child_admission() {
+    let root = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("fork-missing-projection-source"),
+        cwd: "/source".into(),
+    };
+    adapter
+        .init_session(&source_info, default_model_id())
+        .await
+        .unwrap();
+    let timeline = response_projection_production_timeline_with_items(
+        "fork-missing-request",
+        1,
+        vec![ConversationItem::assistant("recovered answer")],
+        0,
+    );
+    append_response_projection_production_timeline(&adapter, &source_info, &timeline).await;
+
+    let target_info = Info {
+        id: acp::SessionId::new("fork-missing-projection-child"),
+        cwd: "/child".into(),
+    };
+    adapter
+        .copy_session_data(&source_info, &target_info, Default::default())
+        .await
+        .unwrap();
+
+    let physical = JsonlStorageAdapter::read_updates_from_directory(
+        adapter.open_session(&target_info).unwrap().directory(),
+    )
+    .unwrap();
+    assert_eq!(physical.len(), 1);
+    let SessionUpdate::Acp(notification) = &physical[0] else {
+        panic!("missing parent projection must be expanded to ACP history")
+    };
+    assert_eq!(notification.session_id, target_info.id);
+    assert!(notification.meta.is_none());
+    assert_eq!(
+        describe_fork_replay(vec![notification.update.clone()]),
+        ["message:recovered answer"]
+    );
+}
+
+#[tokio::test]
+async fn fork_drops_quarantined_projection_and_parent_candidate_metadata() {
+    let root = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let source_info = Info {
+        id: acp::SessionId::new("fork-quarantine-source"),
+        cwd: "/source".into(),
+    };
+    adapter
+        .init_session(&source_info, default_model_id())
+        .await
+        .unwrap();
+    let timeline = response_projection_production_timeline_with_items(
+        "fork-quarantine-request",
+        3,
+        vec![ConversationItem::assistant_tool_calls(vec![
+            sampling_types::ToolCall {
+                id: "".into(),
+                name: "".into(),
+                arguments: "{}".into(),
+            },
+        ])],
+        1,
+    );
+    append_response_projection_production_timeline(&adapter, &source_info, &timeline).await;
+    adapter
+        .append_update(
+            &source_info,
+            &response_projection_production_update(
+                &source_info,
+                "quarantined candidate",
+                serde_json::json!({
+                    "samplingRequestId": "fork-quarantine-request",
+                    "samplingAttempt": 3,
+                })
+                .as_object()
+                .cloned()
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    let projection = response_projection_update_for_timeline(&source_info, &timeline);
+    adapter
+        .append_update(&source_info, &projection)
+        .await
+        .unwrap();
+
+    let target_info = Info {
+        id: acp::SessionId::new("fork-quarantine-child"),
+        cwd: "/child".into(),
+    };
+    adapter
+        .copy_session_data(&source_info, &target_info, Default::default())
+        .await
+        .unwrap();
+    let physical = JsonlStorageAdapter::read_updates_from_directory(
+        adapter.open_session(&target_info).unwrap().directory(),
+    )
+    .unwrap();
+    assert!(
+        physical.is_empty(),
+        "discarded parent response cannot seed child history"
+    );
+    assert!(
+        adapter
+            .load_session(&target_info)
+            .await
+            .unwrap()
+            .updates
+            .is_empty()
+    );
 }
 
 #[tokio::test]

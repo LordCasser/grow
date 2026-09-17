@@ -1019,6 +1019,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                     &cwd,
                     &session_directory,
                     &timeline,
+                    !spawn_new_actor,
                     persist_data.as_ref(),
                     target_client_id.as_ref(),
                     cursor.as_deref(),

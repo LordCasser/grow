@@ -832,7 +832,13 @@ pub(crate) struct OrphanedTask {
 fn read_complete_jsonl_snapshot_from_file(
     file: std::fs::File,
     label: std::path::PathBuf,
+    response_frontier: Option<u64>,
 ) -> std::io::Result<(String, u64, u64)> {
+    #[derive(serde::Deserialize)]
+    struct ProjectionPosition {
+        timeline_event: u64,
+    }
+
     let file_size = file.metadata()?.len();
     let mut lines = crate::session::storage::CommittedJsonlLines::from_open_file_at(
         file,
@@ -842,7 +848,23 @@ fn read_complete_jsonl_snapshot_from_file(
     )?;
     let mut contents = String::new();
     while let Some(line) = lines.next() {
-        let line = String::from_utf8(line?)
+        let line = line?;
+        if let Some(frontier) = response_frontier
+            && let Ok(envelope) =
+                serde_json::from_slice::<crate::session::storage::RawLinePeek<'_>>(&line)
+            && envelope.method
+                == crate::session::response_projection::RESPONSE_REPLAY_PROJECTION_METHOD
+            && let Ok(position) =
+                serde_json::from_str::<ProjectionPosition>(envelope.params.get())
+            && position.timeline_event > frontier
+        {
+            // The resident actor committed this response after our Timeline
+            // snapshot. Leave it and all following records for delta replay.
+            // Use the physical position: the reader skips empty JSONL lines.
+            let record_start = lines.stream_position()? - (line.len() as u64 + 1);
+            return Ok((contents, record_start, file_size));
+        }
+        let line = String::from_utf8(line)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         contents.push_str(&line);
         contents.push('\n');
@@ -856,6 +878,7 @@ fn read_complete_jsonl_snapshot(path: &std::path::Path) -> std::io::Result<(Stri
     let (contents, end, _) = read_complete_jsonl_snapshot_from_file(
         std::fs::File::open(path)?,
         path.to_path_buf(),
+        None,
     )?;
     Ok((contents, end))
 }
@@ -1040,6 +1063,7 @@ impl MvpAgent {
         session_directory: &crate::session::storage::ContainedDirectory,
         // Replay the already validated/pinned Timeline snapshot; do not reread ambient storage.
         timeline: &chat_state::Timeline,
+        resident: bool,
         persist_data: Option<&serde_json::Value>,
         target_client_id: Option<&serde_json::Value>,
         cursor: Option<&str>,
@@ -1061,6 +1085,7 @@ impl MvpAgent {
                 Some(file) => read_complete_jsonl_snapshot_from_file(
                     file,
                     session_directory.display_path().join("updates.jsonl"),
+                    resident.then(|| timeline.events().last().map_or(0, |event| event.seq.get())),
                 )
                 .unwrap_or_default(),
                 None => (String::new(), 0, 0),

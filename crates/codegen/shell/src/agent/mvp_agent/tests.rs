@@ -3623,3 +3623,223 @@ async fn persistence_drain_timeout_retains_incarnation() {
     assert_eq!(agent.drain_old_session_thread(&sid).await.unwrap(), SessionThreadExit::Clean);
     assert!(!agent.session_threads.borrow().contains_key(&sid));
 }
+
+fn replay_frontier_timeline(
+    request_id: &str,
+    attempt: u32,
+    items: Vec<sampling_types::ConversationItem>,
+    quarantined_tool_exchanges: usize,
+) -> chat_state::Timeline {
+    let mut timeline = chat_state::Timeline::default();
+    let turn = chat_state::TurnId(1);
+    let step = chat_state::StepId { turn, index: 0 };
+    timeline
+        .record(chat_state::TimelineEventKind::Turn(
+            chat_state::TurnEvent::Started {
+                id: turn,
+                input_ids: Vec::new(),
+                identity: chat_state::TurnIdentity {
+                    origin: "user".into(),
+                    turn_kind: "internal".into(),
+                    goal_id: None,
+                    goal_definition_revision: None,
+                    stage_id: None,
+                },
+                model_id: "model".into(),
+                input_message_count: 0,
+                prompt_index: 0,
+                prompt_text: "test".into(),
+                input_kind: chat_state::TurnInputKind::Prompt,
+                redirect_kind: None,
+            },
+        ))
+        .unwrap();
+    timeline
+        .record(chat_state::TimelineEventKind::Step(
+            chat_state::StepEvent::Started { id: step },
+        ))
+        .unwrap();
+    timeline
+        .record(chat_state::TimelineEventKind::Request(
+            chat_state::RequestEvent::Started {
+                id: request_id.into(),
+                turn,
+                step,
+                model_id: "model".into(),
+                input_message_count: 0,
+                tool_count: 0,
+            },
+        ))
+        .unwrap();
+    timeline
+        .record(chat_state::TimelineEventKind::Request(
+            chat_state::RequestEvent::Completed {
+                id: request_id.into(),
+                duration_ms: 1,
+                time_to_first_token_ms: None,
+                usage: chat_state::RequestUsage::default(),
+                response_message_count: items.len(),
+                attempt,
+                provider_terminal: None,
+            },
+        ))
+        .unwrap();
+    timeline
+        .record(chat_state::TimelineEventKind::Messages(
+            chat_state::MessageEvent {
+                cause: chat_state::MessageCause::Assistant,
+                items,
+                surface: chat_state::SurfaceOp::Append,
+                response_admission: Some(chat_state::ResponseAdmission {
+                    identity: chat_state::ResponseAdmissionIdentity {
+                        request_id: request_id.into(),
+                        attempt,
+                    },
+                    quarantined_tool_exchanges,
+                }),
+            },
+        ))
+        .unwrap();
+    timeline
+}
+
+#[test]
+fn resident_response_snapshot_delivers_future_projection_once_before_tools() {
+    run_local_for_bridge_test(|| async {
+        use crate::session::response_projection::project_admitted_response;
+        for already_admitted in [false, true] {
+            for cursor in [None, Some("frontier-1")] {
+                let root = tempfile::tempdir().unwrap();
+                let sid = acp::SessionId::new("frontier-session");
+                let timeline = replay_frontier_timeline(
+                    "frontier-request",
+                    1,
+                    vec![
+                        sampling_types::ConversationItem::Reasoning(
+                            sampling_types::synthesized_reasoning_item("thought"),
+                        ),
+                        sampling_types::ConversationItem::assistant("answer"),
+                    ],
+                    0,
+                );
+                let projection =
+                    project_admitted_response(&sid, &timeline.admitted_responses()[0]).unwrap();
+                let snapshot = if already_admitted {
+                    timeline.clone()
+                } else {
+                    chat_state::Timeline::from_events(
+                        timeline.events()[..timeline.events().len() - 1].to_vec(),
+                    )
+                    .unwrap()
+                };
+                let prefix = format!(
+                    "\n{}\n\n",
+                    serde_json::json!({
+                        "method":"session/update", "params": {
+                            "sessionId":sid, "update":{"sessionUpdate":"user_message_chunk","content":{"type":"text","text":"prompt"}},
+                            "_meta":{"eventId":"frontier-1"}
+                        }
+                    })
+                );
+                let tail = format!(
+                    "{}\n{}\n",
+                    serde_json::json!({
+                        "method":"_grow/response-replay-projection", "params":projection
+                    }),
+                    serde_json::json!({
+                        "method":"session/update", "params": {
+                            "sessionId":sid, "update":{"sessionUpdate":"tool_call","toolCallId":"tool-1","title":"tool completed","status":"completed"},
+                            "_meta":{"eventId":"frontier-2"}
+                        }
+                    })
+                );
+                let path = root.path().join("updates.jsonl");
+                // Deterministic ordering: authority was captured above; commit
+                // the newer cache before the production initial replay reads it.
+                std::fs::write(
+                    &path,
+                    if already_admitted {
+                        prefix.clone()
+                    } else {
+                        format!("{prefix}{tail}")
+                    },
+                )
+                .unwrap();
+                let directory = crate::session::storage::ContainedDirectory::open(
+                    root.path(),
+                    std::path::Path::new(""),
+                    "reconnect fixture",
+                    false,
+                )
+                .unwrap();
+                let cwd = paths::AbsPathBuf::new(root.path().to_path_buf()).unwrap();
+                let mut agent = build_minimal_agent_for_tests();
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+                agent.gateway = GatewaySender::new(tx);
+                let seen = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+                let captured = seen.clone();
+                let drain = tokio::task::spawn_local(async move {
+                    while let Some(message) = rx.recv().await {
+                        match message {
+                            acp_transport::AcpClientMessage::SessionNotification(args) => {
+                                captured.borrow_mut().push(args.request);
+                                let _ = args.response_tx.send(Ok(()));
+                            }
+                            _ => panic!("unexpected replay message"),
+                        }
+                    }
+                });
+                let (offset, mark_replay, _) = agent
+                    .replay_session_updates(
+                        &sid, &cwd, &directory, &snapshot, true, None, None, cursor,
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    offset,
+                    prefix.len() as u64,
+                    "snapshot must leave the entire future projection for delta; admitted={already_admitted}, cursor={cursor:?}"
+                );
+                if already_admitted {
+                    use std::io::Write as _;
+                    std::fs::OpenOptions::new()
+                        .append(true)
+                        .open(&path)
+                        .unwrap()
+                        .write_all(tail.as_bytes())
+                        .unwrap();
+                }
+                for completion in agent.replay_session_updates_from_offset_enqueue(
+                    &sid,
+                    &directory,
+                    offset,
+                    &snapshot,
+                    None,
+                    None,
+                    mark_replay,
+                ) {
+                    completion.await.unwrap().unwrap();
+                }
+                let visible = seen
+                    .borrow()
+                    .iter()
+                    .filter_map(|notice| match &notice.update {
+                        acp::SessionUpdate::AgentThoughtChunk(chunk)
+                        | acp::SessionUpdate::AgentMessageChunk(chunk) => match &chunk.content {
+                            acp::ContentBlock::Text(text) => Some(text.text.clone()),
+                            _ => None,
+                        },
+                        acp::SessionUpdate::ToolCall(_) => Some("tool".to_owned()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    visible,
+                    ["thought", "answer", "tool"],
+                    "admitted={already_admitted}, cursor={cursor:?}"
+                );
+                drain.abort();
+            }
+        }
+    });
+}

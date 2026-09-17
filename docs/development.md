@@ -18,6 +18,8 @@ Assistant response admission 由 ChatState Timeline 持有 `request_id + final a
 
 Identity-bearing response 在 Timeline admission 后还要经过 Shell 的 `response-replay-projection` durable gate。`updates.jsonl` 中的 versioned projection record 只是可重建 UI cache；流式 candidate 只用于可撤回 live preview，不能成为 accepted history authority。Projection commit 经过 session event FIFO，丢弃 exact attempt candidate、保留独立交织更新，且在 ACK 前禁止发布 Accepted、继续 provider/continuation 或执行工具；quarantine 记录 Discarded disposition 且不保存 raw malformed preview。Replay reader 展开 storage-only record，不将其作为公开 SamplingAttempt 通知。
 
+重复 rewind 保留原始 branch leaf 和 response admission 来源，compaction 后也按未压缩前缀选择历史。普通 fork 先用父 Timeline 核对响应投影，再展开为子会话的普通继承展示行；父 request/attempt 身份不成为子 Timeline 的 admission。Resident reconnect 在初次回放遇到晚于 Timeline snapshot 的投影时，将物理读取截点留在该行之前，由 delta 连同后继更新交付；已合成过的响应继续去重。Exact projection/ACP 提交若只确认记录可读，仍须完成文件与目录同步才能 ACK，同步恢复后的重试不会重复追加。契约见 [rewind 来源](../openspec/specs/session-timeline/spec.md#requirement-repeated-rewind-preserves-retained-response-provenance)、[exact 持久确认](../openspec/specs/session-timeline/spec.md#requirement-exact-replay-commits-acknowledge-durable-barriers)、[fork 历史](../openspec/specs/client-surfaces/spec.md#requirement-forked-response-history-belongs-to-the-new-lineage) 和 [resident 回放截点](../openspec/specs/client-surfaces/spec.md#requirement-resident-replay-preserves-the-physical-snapshot-frontier)。
+
 ## 环境
 
 Rust toolchain 由 `rust-toolchain.toml` 声明，构建仍使用 Cargo。OpenSpec 是开发工具，不进入 Cargo 运行时依赖。

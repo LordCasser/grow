@@ -2,6 +2,10 @@ use super::*;
 use crate::session::info::Info;
 use crate::session::persistence::default_model_id;
 use crate::session::storage::{SessionUpdate, StorageAdapter};
+use std::sync::{
+    Arc,
+    atomic::{AtomicBool, Ordering},
+};
 
 fn info() -> Info {
     Info {
@@ -627,6 +631,132 @@ async fn exact_acp_event_is_physically_idempotent_and_conflicts_on_payload() {
         .into_io_error();
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 1);
+}
+
+async fn exact_projection_retries_after_sync_failure(point: UpdateSyncPoint) {
+    let dir = tempfile::tempdir().unwrap();
+    let info = info();
+    let fail_sync = Arc::new(AtomicBool::new(true));
+    let probe_state = Arc::clone(&fail_sync);
+    let adapter =
+        JsonlStorageAdapter::with_update_sync_probe(dir.path().join("session"), move |observed| {
+            if observed == point && probe_state.load(Ordering::SeqCst) {
+                Err(io::Error::other("injected update sync failure"))
+            } else {
+                Ok(())
+            }
+        });
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let expected = projection(&info, "answer");
+
+    assert!(matches!(
+        adapter.commit_response_projection(&info, &expected).await,
+        Err(crate::session::storage::AppendUpdateError::NotCommitted(_))
+    ));
+    let path = adapter.session_dir(&info).join("updates.jsonl");
+    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
+
+    fail_sync.store(false, Ordering::SeqCst);
+    adapter
+        .commit_response_projection(&info, &expected)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
+
+    fail_sync.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        adapter.commit_response_projection(&info, &expected).await,
+        Err(crate::session::storage::AppendUpdateError::NotCommitted(_))
+    ));
+    fail_sync.store(false, Ordering::SeqCst);
+    adapter
+        .commit_response_projection(&info, &expected)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 1);
+}
+
+#[tokio::test]
+async fn exact_projection_file_sync_failure_is_not_acknowledged_and_retries() {
+    exact_projection_retries_after_sync_failure(UpdateSyncPoint::File).await;
+}
+
+#[tokio::test]
+async fn exact_projection_directory_sync_failure_is_not_acknowledged_and_retries() {
+    exact_projection_retries_after_sync_failure(UpdateSyncPoint::Directory).await;
+}
+
+fn acp_event(info: &Info, text: &str) -> acp::SessionNotification {
+    let mut notification = match update(info, text.to_owned()) {
+        SessionUpdate::Acp(notification) => *notification,
+        _ => unreachable!(),
+    };
+    notification.meta = Some(
+        serde_json::json!({"eventId": "event-sync-retry"})
+            .as_object()
+            .unwrap()
+            .clone(),
+    );
+    notification
+}
+
+async fn exact_acp_retries_after_sync_failure(point: UpdateSyncPoint) {
+    let dir = tempfile::tempdir().unwrap();
+    let info = info();
+    let fail_sync = Arc::new(AtomicBool::new(true));
+    let probe_state = Arc::clone(&fail_sync);
+    let adapter =
+        JsonlStorageAdapter::with_update_sync_probe(dir.path().join("session"), move |observed| {
+            if observed == point && probe_state.load(Ordering::SeqCst) {
+                Err(io::Error::other("injected update sync failure"))
+            } else {
+                Ok(())
+            }
+        });
+    adapter
+        .init_session(&info, default_model_id())
+        .await
+        .unwrap();
+    let expected = acp_event(&info, "answer");
+
+    assert!(matches!(
+        adapter.append_acp_event_exact(&info, &expected).await,
+        Err(crate::session::storage::AppendUpdateError::NotCommitted(_))
+    ));
+    let path = adapter.session_dir(&info).join("updates.jsonl");
+    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
+
+    fail_sync.store(false, Ordering::SeqCst);
+    adapter
+        .append_acp_event_exact(&info, &expected)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(&path).unwrap().lines().count(), 1);
+
+    fail_sync.store(true, Ordering::SeqCst);
+    assert!(matches!(
+        adapter.append_acp_event_exact(&info, &expected).await,
+        Err(crate::session::storage::AppendUpdateError::NotCommitted(_))
+    ));
+    fail_sync.store(false, Ordering::SeqCst);
+    adapter
+        .append_acp_event_exact(&info, &expected)
+        .await
+        .unwrap();
+    assert_eq!(std::fs::read_to_string(path).unwrap().lines().count(), 1);
+}
+
+#[tokio::test]
+async fn exact_acp_file_sync_failure_is_not_acknowledged_and_retries() {
+    exact_acp_retries_after_sync_failure(UpdateSyncPoint::File).await;
+}
+
+#[tokio::test]
+async fn exact_acp_directory_sync_failure_is_not_acknowledged_and_retries() {
+    exact_acp_retries_after_sync_failure(UpdateSyncPoint::Directory).await;
 }
 
 #[cfg(target_os = "macos")]

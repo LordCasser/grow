@@ -6520,53 +6520,32 @@ fn reset_branch(fold: &mut BranchFold, event: EventSeq, items: &[ConversationIte
     append_branch_leaves(fold, event, items, true);
 }
 
-/// Rewind writes a fresh Surface replacement, but branch ownership must retain
-/// the births of canonical leaves included in that replacement. Match the
-/// rewind payload against the pre-rewind uncompressed branch in order; this is
-/// the same canonical transcript from which valid rewind replacements are
-/// constructed. Admission events absent from the retained births are cut away.
+/// A validated rewind is a prefix of the uncompressed branch. Replace Surface
+/// identities, but retain that prefix's canonical leaf coordinates and births
+/// so subsequent rewinds can still resolve the original response admissions.
 fn reset_rewind_branch(fold: &mut BranchFold, event: EventSeq, items: &[ConversationItem]) {
-    let old_order = fold.leaf_order.clone();
-    let old_values = fold.leaf_values.clone();
-    let old_birth = fold.leaf_birth.clone();
-    let old_surface = fold.surface.clone();
-    let old_admissions = fold.admitted_response_events.clone();
-    let mut retained_births = BTreeSet::new();
-    let mut leaf_cursor = 0usize;
-    let mut surface_cursor = 0usize;
-    for item in items {
-        // Normal rewind payloads are built from the uncompressed branch. Also
-        // recognize a retained compacted/replaced Surface entry and expand all
-        // of its provenance leaves so a summary carrier cannot erase response
-        // ownership merely because its display identity changed.
-        if let Some(offset) = old_surface[surface_cursor..]
-            .iter()
-            .position(|entry| conversation_items_match(&entry.value, item))
-        {
-            let index = surface_cursor + offset;
-            for leaf in &old_surface[index].leaves {
-                if let Some(birth) = old_birth.get(leaf) {
-                    retained_births.insert(*birth);
-                }
-            }
-            surface_cursor = index + 1;
-        }
-        if let Some(offset) = old_order[leaf_cursor..].iter().position(|id| {
-            old_values
-                .get(id)
-                .is_some_and(|value| conversation_items_match(value, item))
-        }) {
-            let index = leaf_cursor + offset;
-            if let Some(birth) = old_birth.get(&old_order[index]) {
-                retained_births.insert(*birth);
-            }
-            leaf_cursor = index + 1;
-        }
-    }
-    reset_branch(fold, event, items);
-    fold.admitted_response_events = old_admissions
-        .into_iter()
-        .filter(|admission| retained_births.contains(admission))
+    fold.leaf_order.truncate(items.len());
+    let retained = fold.leaf_order.iter().copied().collect::<BTreeSet<_>>();
+    fold.leaf_values.retain(|id, _| retained.contains(id));
+    fold.leaf_birth.retain(|id, _| retained.contains(id));
+    fold.leaf_is_message.retain(|id, _| retained.contains(id));
+    fold.unloaded.clear();
+    let retained_births = fold.leaf_birth.values().copied().collect::<BTreeSet<_>>();
+    fold.admitted_response_events
+        .retain(|admission| retained_births.contains(admission));
+    fold.surface = items
+        .iter()
+        .cloned()
+        .zip(&fold.leaf_order)
+        .enumerate()
+        .map(|(item, (value, leaf))| BranchProvenance {
+            id: SurfaceId {
+                event,
+                item: item as u32,
+            },
+            value,
+            leaves: vec![*leaf],
+        })
         .collect();
 }
 
@@ -7137,10 +7116,10 @@ mod tests {
             first_seq: 0,
             last_seq: timeline.next_seq().get() - 1,
         };
-        let sideband_id = "00000000-0000-0000-0000-000000000001";
+        let sideband_id = uuid::Uuid::now_v7().to_string();
         timeline
             .record(TimelineEventKind::Sideband(crate::SidebandSpawnEvent {
-                sideband_id: sideband_id.into(),
+                sideband_id: sideband_id.clone(),
                 purpose: crate::SidebandPurpose::CompactionSummary,
                 source_refs: vec![input_ref.clone()],
             }))
@@ -13613,6 +13592,87 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![first]
         );
+    }
+
+    #[test]
+    fn admitted_response_view_survives_repeated_rewind_and_cold_fold() {
+        for compact in [false, true] {
+            let mut timeline = Timeline::default();
+            record_prompt(&mut timeline, 1, 0, "retained prompt");
+            let first = record_admitted_response(
+                &mut timeline,
+                10,
+                vec![ConversationItem::assistant("retained answer")],
+                0,
+            );
+            let retained_ids = timeline.branch_transcript_with_ids().0;
+            for round in 0..3 {
+                if compact {
+                    let id = format!("repeat-rewind-{round}");
+                    let source_items = timeline.surface_len();
+                    timeline
+                        .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                            mode: crate::CompactionMode::Foreground,
+                            id: id.clone(),
+                            source_items,
+                            prompt_index: 1,
+                        }))
+                        .unwrap();
+                    let target = record_compaction_summary(&mut timeline, &id);
+                    timeline
+                        .replace_compaction_range(
+                            target,
+                            vec![ConversationItem::user_meta("summary")],
+                        )
+                        .unwrap();
+                    timeline
+                        .record(TimelineEventKind::Compaction(CompactionEvent::Completed {
+                            id,
+                            source_items,
+                            result_items: 1,
+                            duration_ms: 1,
+                        }))
+                        .unwrap();
+                }
+                record_prompt(&mut timeline, 20 + round, 1, "replacement prompt");
+                record_admitted_response(
+                    &mut timeline,
+                    30 + round,
+                    vec![ConversationItem::assistant("discarded answer")],
+                    0,
+                );
+                let rewound = timeline.rewind_surface(1).unwrap();
+                timeline.replace_all(rewound, MessageCause::Rewind).unwrap();
+                timeline = Timeline::from_events(timeline.events().to_vec()).unwrap();
+                assert_eq!(
+                    timeline
+                        .admitted_responses()
+                        .iter()
+                        .map(|response| response.event_seq)
+                        .collect::<Vec<_>>(),
+                    vec![first],
+                    "compact={compact}, round={round}",
+                );
+                assert!(
+                    timeline
+                        .surface()
+                        .iter()
+                        .any(|item| item.text_content() == "retained answer")
+                );
+                assert!(
+                    !timeline
+                        .branch_transcript()
+                        .iter()
+                        .any(|item| item.text_content() == "discarded answer")
+                );
+            }
+            assert_eq!(timeline.branch_transcript_with_ids().0, retained_ids);
+            assert!(
+                timeline
+                    .completed_compaction_unloaded_branch_ids()
+                    .is_empty()
+            );
+        }
     }
 
     #[test]
