@@ -423,6 +423,202 @@ fn loaded_surface(events: &[chat_state::TimelineEvent]) -> Vec<ConversationItem>
         .surface()
         .to_vec()
 }
+fn response_projection_production_timeline(
+    request_id: &str,
+    attempt: u32,
+    canonical: &str,
+) -> chat_state::Timeline {
+    let mut timeline = chat_state::Timeline::default();
+    let turn = chat_state::TurnId(1);
+    let step = chat_state::StepId { turn, index: 0 };
+    for kind in [
+        chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started {
+            id: turn,
+            input_ids: Vec::new(),
+            identity: chat_state::TurnIdentity {
+                origin: "user".into(),
+                turn_kind: "internal".into(),
+                goal_id: None,
+                goal_definition_revision: None,
+                stage_id: None,
+            },
+            model_id: "model".into(),
+            input_message_count: 0,
+            prompt_index: 0,
+            prompt_text: "test".into(),
+            input_kind: chat_state::TurnInputKind::Prompt,
+            redirect_kind: None,
+        }),
+        chat_state::TimelineEventKind::Step(chat_state::StepEvent::Started { id: step }),
+        chat_state::TimelineEventKind::Request(chat_state::RequestEvent::Started {
+            id: request_id.into(),
+            turn,
+            step,
+            model_id: "model".into(),
+            input_message_count: 0,
+            tool_count: 0,
+        }),
+        chat_state::TimelineEventKind::Request(chat_state::RequestEvent::Completed {
+            id: request_id.into(),
+            duration_ms: 1,
+            time_to_first_token_ms: None,
+            usage: chat_state::RequestUsage::default(),
+            response_message_count: 1,
+            attempt,
+            provider_terminal: None,
+        }),
+        chat_state::TimelineEventKind::Messages(chat_state::MessageEvent {
+            cause: chat_state::MessageCause::Assistant,
+            items: vec![ConversationItem::assistant(canonical)],
+            surface: chat_state::SurfaceOp::Append,
+            response_admission: Some(chat_state::ResponseAdmission {
+                identity: chat_state::ResponseAdmissionIdentity {
+                    request_id: request_id.into(),
+                    attempt,
+                },
+                quarantined_tool_exchanges: 0,
+            }),
+        }),
+    ] {
+        timeline.record(kind).unwrap();
+    }
+    timeline
+}
+async fn append_response_projection_production_timeline(
+    adapter: &JsonlStorageAdapter,
+    info: &Info,
+    timeline: &chat_state::Timeline,
+) {
+    for event in timeline.events() {
+        adapter.append_timeline_event_durable(info, event).await.unwrap();
+    }
+}
+fn response_projection_production_update(
+    info: &Info,
+    text: &str,
+    meta: serde_json::Map<String, serde_json::Value>,
+) -> SessionUpdate {
+    let mut notification = acp::SessionNotification::new(
+        info.id.clone(),
+        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+            acp::TextContent::new(text),
+        ))),
+    );
+    notification.meta = Some(meta);
+    SessionUpdate::Acp(Box::new(notification))
+}
+fn response_projection_production_texts(updates: Vec<acp::SessionUpdate>) -> Vec<String> {
+    updates.into_iter().map(|update| {
+        let acp::SessionUpdate::AgentMessageChunk(chunk) = update else {
+            panic!("expected only agent message chunks")
+        };
+        let acp::ContentBlock::Text(text) = chunk.content else {
+            panic!("expected text content")
+        };
+        text.text
+    }).collect()
+}
+fn response_projection_production_physical_count(
+    bytes: &[u8],
+    request_id: &str,
+    attempt: u32,
+) -> usize {
+    std::str::from_utf8(bytes).unwrap().lines().filter(|line| {
+        matches!(
+            SessionUpdateEnvelope::from_str(line),
+            Ok(SessionUpdate::ResponseReplayProjection(projection))
+                if projection.request_id == request_id && projection.attempt == attempt
+        )
+    }).count()
+}
+
+#[tokio::test]
+async fn response_projection_production_cold_writer_repairs_once_after_timeline_admission() {
+    let root = TempDir::new().unwrap();
+    let info = create_test_info();
+    let request_id = "production-request";
+    let attempt = 2;
+    let canonical = "canonical response";
+    let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    writer.init_session(&info, default_model_id()).await.unwrap();
+    let timeline = response_projection_production_timeline(request_id, attempt, canonical);
+    append_response_projection_production_timeline(&writer, &info, &timeline).await;
+    let updates_path = writer.session_dir(&info).join(super::super::UPDATES_FILE);
+    std::fs::write(&updates_path, b"").unwrap();
+    drop(writer);
+
+    let replacement = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    replacement.load_session_for_write_without_updates(&info).await.unwrap();
+    let repaired = std::fs::read(&updates_path).unwrap();
+    assert_eq!(response_projection_production_physical_count(&repaired, request_id, attempt), 1);
+    drop(replacement);
+
+    let reopened = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    reopened.load_session_for_write_without_updates(&info).await.unwrap();
+    let repaired_again = std::fs::read(&updates_path).unwrap();
+    assert_eq!(repaired_again, repaired);
+    assert_eq!(response_projection_production_physical_count(&repaired_again, request_id, attempt), 1);
+    drop(reopened);
+
+    let replay = crate::session::storage::load_updates_for_replay_at(
+        info.id.0.as_ref(),
+        root.path(),
+    ).unwrap().unwrap();
+    assert_eq!(response_projection_production_texts(replay), [canonical]);
+}
+
+#[tokio::test]
+async fn response_projection_production_read_only_cores_synthesize_without_writer_authority() {
+    let root = TempDir::new().unwrap();
+    let info = create_test_info();
+    let request_id = "production-request";
+    let attempt = 2;
+    let canonical = "canonical response";
+    let later = "independent later message";
+    let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    writer.init_session(&info, default_model_id()).await.unwrap();
+    let timeline = response_projection_production_timeline(request_id, attempt, canonical);
+    append_response_projection_production_timeline(&writer, &info, &timeline).await;
+    writer.append_update(&info, &response_projection_production_update(
+        &info,
+        "candidate",
+        serde_json::json!({
+            "samplingRequestId": request_id,
+            "samplingAttempt": attempt,
+        }).as_object().cloned().unwrap(),
+    )).await.unwrap();
+    writer.append_update(&info, &response_projection_production_update(
+        &info,
+        later,
+        serde_json::json!({ "eventId": "event-later" })
+            .as_object().cloned().unwrap(),
+    )).await.unwrap();
+    let updates_path = writer.session_dir(&info).join(super::super::UPDATES_FILE);
+    let physical_before = std::fs::read(&updates_path).unwrap();
+
+    let mut streamed = Vec::new();
+    assert_eq!(
+        crate::session::storage::stream_replay_updates_at(
+            info.id.0.as_ref(),
+            root.path(),
+            |update| streamed.push(update),
+        ).unwrap(),
+        crate::session::storage::ReplayEmission::Emitted,
+    );
+    let materialized = crate::session::storage::load_updates_for_replay_at(
+        info.id.0.as_ref(),
+        root.path(),
+    ).unwrap().unwrap();
+    assert_eq!(response_projection_production_texts(streamed), [canonical, later]);
+    assert_eq!(response_projection_production_texts(materialized), [canonical, later]);
+    assert_eq!(std::fs::read(&updates_path).unwrap(), physical_before);
+
+    let contender = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    assert!(!contender.try_acquire_writer_lease(&info).unwrap());
+    drop(writer);
+    assert!(contender.try_acquire_writer_lease(&info).unwrap());
+}
+
 async fn append_control_snapshot(
     adapter: &JsonlStorageAdapter,
     info: &Info,
