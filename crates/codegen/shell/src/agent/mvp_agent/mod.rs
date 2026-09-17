@@ -1038,6 +1038,8 @@ impl MvpAgent {
         session_id: &acp::SessionId,
         cwd: &AbsPathBuf,
         session_directory: &crate::session::storage::ContainedDirectory,
+        // Replay the already validated/pinned Timeline snapshot; do not reread ambient storage.
+        timeline: &chat_state::Timeline,
         persist_data: Option<&serde_json::Value>,
         target_client_id: Option<&serde_json::Value>,
         cursor: Option<&str>,
@@ -1045,13 +1047,6 @@ impl MvpAgent {
         let mut replay_timer = crate::instrumentation_timer!("session.load_session_replay");
         replay_timer.with_field("session_id", session_id.0.as_ref());
         replay_timer.with_field("cwd", cwd.as_str());
-        let timeline_events = crate::session::storage::read_timeline_file(
-            &session_directory.display_path().join(crate::session::storage::TIMELINE_FILE),
-        )
-        .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
-        let timeline = chat_state::Timeline::from_events(timeline_events).map_err(|error| {
-            acp::Error::internal_error().data(format!("invalid Timeline during replay: {error}"))
-        })?;
         let updates_file = match session_directory.open_regular(
             std::ffi::OsStr::new("updates.jsonl"),
             "session updates ledger",

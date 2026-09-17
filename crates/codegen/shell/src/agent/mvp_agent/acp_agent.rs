@@ -1013,10 +1013,12 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             (Vec::new(), Default::default())
         } else {
             let (replay_end_offset, subagent_projections) = self
+                // Replay must use the already validated/pinned Timeline snapshot.
                 .replay_session_updates(
                     &session_id,
                     &cwd,
                     &session_directory,
+                    &timeline,
                     persist_data.as_ref(),
                     target_client_id.as_ref(),
                     cursor.as_deref(),
