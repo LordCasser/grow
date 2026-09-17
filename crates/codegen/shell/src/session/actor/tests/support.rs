@@ -349,12 +349,13 @@ pub(crate) async fn create_test_actor_ex(
     SessionActor,
     tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
 ) {
-    create_test_actor_ex_with_projection_error(
+    create_test_actor_ex_inner(
         total_tokens,
         context_window,
         threshold_percent,
         gateway_tx,
         persistence_tx,
+        false,
         None,
     )
     .await
@@ -367,6 +368,31 @@ pub(crate) async fn create_test_actor_ex_with_projection_error(
     threshold_percent: u8,
     gateway_tx: tokio::sync::mpsc::UnboundedSender<acp_transport::AcpClientMessage>,
     persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
+    projection_error: Option<crate::session::storage::AppendUpdateError>,
+) -> (
+    SessionActor,
+    tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
+) {
+    create_test_actor_ex_inner(
+        total_tokens,
+        context_window,
+        threshold_percent,
+        gateway_tx,
+        persistence_tx,
+        true,
+        projection_error,
+    )
+    .await
+}
+
+#[cfg(test)]
+async fn create_test_actor_ex_inner(
+    total_tokens: u64,
+    context_window: u64,
+    threshold_percent: u8,
+    gateway_tx: tokio::sync::mpsc::UnboundedSender<acp_transport::AcpClientMessage>,
+    persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
+    bridge_projection_events: bool,
     projection_error: Option<crate::session::storage::AppendUpdateError>,
 ) -> (
     SessionActor,
@@ -449,25 +475,30 @@ pub(crate) async fn create_test_actor_ex_with_projection_error(
     });
     let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let (event_tx, mut raw_event_rx) = tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
-    let (observed_event_tx, observed_event_rx) =
-        tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
-    tokio::spawn(async move {
-        let mut projection_error = projection_error;
-        while let Some(event) = raw_event_rx.recv().await {
-            match event {
-                SessionEvent::ResponseProjection { respond_to, .. } => {
-                    let result = projection_error.take().map_or(Ok(()), Err);
-                    let _ = respond_to.send(result);
-                }
-                SessionEvent::FlushReplay { respond_to: Some(respond_to) } => {
-                    let _ = respond_to.send(());
-                }
-                event => {
-                    let _ = observed_event_tx.send(event);
+    let observed_event_rx = if bridge_projection_events {
+        let (observed_event_tx, observed_event_rx) =
+            tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
+        tokio::spawn(async move {
+            let mut projection_error = projection_error;
+            while let Some(event) = raw_event_rx.recv().await {
+                match event {
+                    SessionEvent::ResponseProjection { respond_to, .. } => {
+                        let result = projection_error.take().map_or(Ok(()), Err);
+                        let _ = respond_to.send(result);
+                    }
+                    SessionEvent::FlushReplay { respond_to: Some(respond_to) } => {
+                        let _ = respond_to.send(());
+                    }
+                    event => {
+                        let _ = observed_event_tx.send(event);
+                    }
                 }
             }
-        }
-    });
+        });
+        observed_event_rx
+    } else {
+        raw_event_rx
+    };
     let chat_state_handle = chat_state::ChatStateActor::spawn(
         vec![sampling_types::ConversationItem::system(
             "test system prompt",
@@ -740,12 +771,13 @@ pub(crate) async fn create_test_actor(
     gateway_tx: tokio::sync::mpsc::UnboundedSender<acp_transport::AcpClientMessage>,
     persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
 ) -> SessionActor {
-    create_test_actor_ex(
+    create_test_actor_ex_with_projection_error(
         total_tokens,
         context_window,
         threshold_percent,
         gateway_tx,
         persistence_tx,
+        None,
     )
     .await
     .0

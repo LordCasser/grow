@@ -281,7 +281,15 @@ async fn actor_with_sampler_delivery(
             }
         }
     });
-    let (actor, events) = create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+    let (actor, events) = create_test_actor_ex_with_projection_error(
+        0,
+        256_000,
+        85,
+        gateway_tx,
+        persistence_tx,
+        None,
+    )
+    .await;
     configure_actor_with_sampler(server, api_backend, delivery, actor, gateway_rx, events).await
 }
 
