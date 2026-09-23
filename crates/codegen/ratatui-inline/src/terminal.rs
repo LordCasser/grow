@@ -29,6 +29,22 @@ pub struct LinkSpan {
     pub id: Option<u32>,
 }
 
+/// One already-styled row for native history insertion. `soft_wrap` is source
+/// provenance, not a guess from the last occupied column; the terminal uses
+/// autowrap only when both flags are true and a nonempty next row exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticRow {
+    pub ansi: String,
+    pub fills_width: bool,
+    pub soft_wrap: bool,
+}
+
+fn semantic_xenl_pending(rows: &[SemanticRow], index: usize) -> bool {
+    rows.get(index)
+        .is_some_and(|row| row.fills_width && row.soft_wrap)
+        && rows.get(index + 1).is_some_and(|row| !row.ansi.is_empty())
+}
+
 /// Resolved hyperlink target stored in a frame's link table; `link_ids` entries
 /// are 1-based indices into the matching `link_tables` vector.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -902,6 +918,145 @@ where
             Viewport::Inline(_) => self.insert_before_no_scrolling_regions(buffer, &links),
             _ => Ok(()),
         }
+    }
+
+    /// Insert semantic rows into native scrollback while preserving terminal
+    /// WRAPLINE for genuine full-width continuations. This API owns DECAWM as
+    /// enabled for its duration and leaves it enabled on return: native soft
+    /// wraps cannot be produced if an inherited terminal mode disabled it.
+    /// Row count, rather than ANSI byte length, drives viewport movement.
+    pub fn insert_before_rows(&mut self, rows: &[SemanticRow]) -> io::Result<()>
+    where
+        B: Write,
+    {
+        if !matches!(self.viewport, Viewport::Inline(_)) || rows.is_empty() {
+            return Ok(());
+        }
+        let height = u16::try_from(rows.len()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "semantic row count exceeds u16",
+            )
+        })?;
+        let result = self
+            .backend
+            .write_all(b"\x1b[?7h")
+            .and_then(|_| self.insert_before_semantic_rows(rows, height));
+        // A partial write cannot be rolled back. Best-effort cleanup avoids
+        // leaving a link, styling, or disabled autowrap active when I/O works.
+        let cleanup = self
+            .backend
+            .write_all(b"\x1b]8;;\x07\x1b[0m\x1b[?7h")
+            .and_then(|_| Backend::flush(&mut self.backend).map_err(Into::into));
+        result.and(cleanup)
+    }
+
+    fn insert_before_semantic_rows(&mut self, rows: &[SemanticRow], height: u16) -> io::Result<()>
+    where
+        B: Write,
+    {
+        let mut drawn_height = i32::from(self.viewport_area.top());
+        let mut remaining = i32::from(height);
+        let viewport_height = i32::from(self.viewport_area.height);
+        let screen_height = i32::from(self.last_known_area.height);
+        let max_chunk = usize::try_from(screen_height.saturating_sub(1).max(1)).unwrap_or(1);
+        let mut row_idx = 0usize;
+
+        while remaining + viewport_height > screen_height {
+            let mut end = row_idx.saturating_add(max_chunk).min(rows.len());
+            // Prefer keeping a wrap pair in the same chunk. A longer chain
+            // still crosses chunks; `write_semantic_rows` consumes pending
+            // xenl before the next cursor movement.
+            if end < rows.len() && end > row_idx + 1 && semantic_xenl_pending(rows, end - 1) {
+                end -= 1;
+            }
+            let count = end - row_idx;
+            let to_draw = i32::try_from(count).unwrap_or(0);
+            let more_xenl = end < rows.len() && semantic_xenl_pending(rows, end - 1);
+            let consume_slack = i32::from(more_xenl && screen_height > 1);
+            let scroll_up = 0.max(drawn_height + to_draw + consume_slack - screen_height);
+            self.scroll_for_semantic_rows(scroll_up as u16)?;
+            self.write_semantic_rows(
+                (drawn_height - scroll_up) as u16,
+                &rows[row_idx..end],
+                more_xenl,
+            )?;
+            row_idx = end;
+            drawn_height += to_draw - scroll_up;
+            remaining -= to_draw;
+        }
+
+        let scroll_up = 0.max(drawn_height + remaining + viewport_height - screen_height);
+        self.scroll_for_semantic_rows(scroll_up as u16)?;
+        self.write_semantic_rows((drawn_height - scroll_up) as u16, &rows[row_idx..], false)?;
+        drawn_height += remaining - scroll_up;
+        self.set_viewport_area(Rect {
+            y: drawn_height as u16,
+            ..self.viewport_area
+        });
+        self.clear()
+    }
+
+    fn scroll_for_semantic_rows(&mut self, lines: u16) -> io::Result<()> {
+        if lines == 0 {
+            return Ok(());
+        }
+        #[cfg(feature = "scrolling-regions")]
+        self.backend
+            .scroll_region_up(0..self.last_known_area.height, lines)?;
+        #[cfg(not(feature = "scrolling-regions"))]
+        self.scroll_up(lines)?;
+        Ok(())
+    }
+
+    fn write_semantic_rows(
+        &mut self,
+        y_offset: u16,
+        rows: &[SemanticRow],
+        more_xenl: bool,
+    ) -> io::Result<()>
+    where
+        B: Write,
+    {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        self.set_cursor_position(Position::new(0, y_offset))?;
+        let last_screen = self.last_known_area.height.saturating_sub(1);
+        let mut pending_wrap = false;
+        for (index, row) in rows.iter().enumerate() {
+            let continues =
+                semantic_xenl_pending(rows, index) || (more_xenl && index + 1 == rows.len());
+            let hard_full = row.fills_width && !continues;
+            if pending_wrap {
+                // Printable consumption latches WRAPLINE before SGR/OSC8/CUP
+                // (which can clear xterm's delayed-wrap state). CR lets the
+                // actual continuation overwrite the temporary cell.
+                self.backend.write_all(b" \r")?;
+            }
+            if hard_full {
+                self.backend.write_all(b"\x1b[?7l")?;
+            }
+            self.backend.write_all(row.ansi.as_bytes())?;
+            if !continues {
+                if !row.fills_width {
+                    self.backend.write_all(b"\x1b[K")?;
+                }
+                let y = y_offset.saturating_add(u16::try_from(index).unwrap_or(u16::MAX));
+                if y < last_screen {
+                    self.backend.write_all(b"\r\n")?;
+                }
+            }
+            if hard_full {
+                self.backend.write_all(b"\x1b[?7h")?;
+            }
+            pending_wrap = continues;
+        }
+        if pending_wrap {
+            self.backend.write_all(b" \r")?;
+        }
+        Backend::flush(&mut self.backend)?;
+        Ok(())
     }
 
     /// Sets the height of an inline viewport and resizes it accordingly.

@@ -175,9 +175,9 @@ pub struct SamplingErrorInfo {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub backend: Option<ApiBackend>,
     /// The provider explicitly requires visible reasoning text to accompany
-    /// portable Responses tool history on resubmission.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub portable_responses_reasoning_required: bool,
+    /// history on resubmission, using the named backend's wire field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub portable_reasoning_required: Option<ApiBackend>,
     /// The in-process typed cause. This is deliberately omitted from the DTO
     /// wire representation; deserialized DTOs use the legacy fallback below.
     #[serde(skip)]
@@ -294,7 +294,7 @@ impl From<&SamplingError> for SamplingErrorInfo {
             SamplingError::IncompleteStream { backend, .. } => Some(backend.clone()),
             _ => None,
         };
-        let portable_responses_reasoning_required = err.requires_portable_responses_reasoning();
+        let portable_reasoning_required = err.portable_reasoning_requirement();
 
         Self {
             kind,
@@ -310,7 +310,7 @@ impl From<&SamplingError> for SamplingErrorInfo {
             usage: None,
             cost_usd_ticks: None,
             backend,
-            portable_responses_reasoning_required,
+            portable_reasoning_required,
             source: Some(err.clone()),
         }
     }
@@ -502,19 +502,25 @@ mod tests {
 
     #[test]
     fn explicit_reasoning_replay_requirement_survives_dto_round_trip() {
-        let original = SamplingError::Api {
-            status: StatusCode::BAD_REQUEST,
-            message: "The `reasoning_text` in the thinking mode must be passed back to the API."
-                .into(),
-            model_metadata: None,
-            retry_after_secs: None,
-            should_retry: Some(false),
-        };
-        let info: SamplingErrorInfo = serde_json::from_value(
-            serde_json::to_value(SamplingErrorInfo::from(&original)).unwrap(),
-        )
-        .unwrap();
-        assert!(info.portable_responses_reasoning_required);
+        for (backend, field) in [
+            (ApiBackend::Responses, "reasoning_text"),
+            (ApiBackend::ChatCompletions, "reasoning_content"),
+        ] {
+            let original = SamplingError::Api {
+                status: StatusCode::BAD_REQUEST,
+                message: format!(
+                    "The `{field}` in the thinking mode must be passed back to the API."
+                ),
+                model_metadata: None,
+                retry_after_secs: None,
+                should_retry: Some(false),
+            };
+            let info: SamplingErrorInfo = serde_json::from_value(
+                serde_json::to_value(SamplingErrorInfo::from(&original)).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(info.portable_reasoning_required, Some(backend));
+        }
 
         let legacy: SamplingErrorInfo = serde_json::from_value(serde_json::json!({
             "kind": "Api",
@@ -525,7 +531,7 @@ mod tests {
             "model_metadata": null
         }))
         .unwrap();
-        assert!(!legacy.portable_responses_reasoning_required);
+        assert_eq!(legacy.portable_reasoning_required, None);
     }
 
     #[test]
@@ -577,7 +583,7 @@ mod tests {
             let wire = format!(
                 r#"{{"error":{{"message":"failure","type":"invalid_request_error","code":"{code}"}}}}"#
             );
-            let parsed = sampling_types::error::try_parse_stream_error(&wire)
+            let parsed = sampling_types::error::try_parse_stream_error("error", &wire)
                 .unwrap_or_else(|| panic!("failed to parse {code}"));
             let first = SamplingErrorInfo::from(&parsed);
             assert_eq!(first.kind, expected_kind, "wrong kind for {code}");
@@ -616,7 +622,7 @@ mod tests {
             let wire = format!(
                 r#"{{"error":{{"message":"failure","type":"invalid_request_error","code":{code}}}}}"#
             );
-            let parsed = sampling_types::error::try_parse_stream_error(&wire)
+            let parsed = sampling_types::error::try_parse_stream_error("error", &wire)
                 .unwrap_or_else(|| panic!("failed to parse numeric {code}"));
             let first = SamplingErrorInfo::from(&parsed);
             assert_eq!(first.kind, expected_kind, "wrong kind for numeric {code}");

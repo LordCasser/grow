@@ -356,9 +356,122 @@ pub(crate) async fn create_test_actor_ex(
         gateway_tx,
         persistence_tx,
         false,
+        ProjectionBarrier::Inject(None),
         None,
     )
     .await
+}
+
+/// Test-only `TimelinePersistence` for chat-state whose acknowledgement of
+/// `ImageProjection` commits can be made to fail permanently.
+///
+/// Every other event behaves exactly like [`chat_state::NullTimelinePersistence`]:
+/// acknowledged immediately and kept nowhere. Image projections are the only
+/// events this harness observes, so a test can prove that the shell never
+/// resubmits from an in-memory-only projection.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct ImageProjectionPersistence {
+    fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    committed: std::sync::Arc<std::sync::Mutex<Vec<(chat_state::TimelineEvent, bool)>>>,
+}
+
+#[cfg(test)]
+impl ImageProjectionPersistence {
+    /// Reject every later `ImageProjection` commit with a permanent I/O error.
+    pub(crate) fn fail_projection_commits(&self) {
+        self.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// Image projections the actor tried to persist, with their acknowledge
+    /// outcome. A permanently failed attempt still appears exactly once.
+    pub(crate) fn attempted_projections(&self) -> Vec<(chat_state::TimelineEvent, bool)> {
+        self.committed
+            .lock()
+            .expect("image projection log must not be poisoned")
+            .iter()
+            .filter(|(event, _)| {
+                matches!(
+                    event.kind,
+                    chat_state::TimelineEventKind::ImageProjection(_)
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The model-visible Surface implied by the *durable* prefix only.
+    pub(crate) fn durable_surface(&self) -> Vec<ConversationItem> {
+        let events = self
+            .committed
+            .lock()
+            .expect("image projection log must not be poisoned")
+            .iter()
+            .filter(|(_, acknowledged)| *acknowledged)
+            .map(|(event, _)| event.clone())
+            .collect::<Vec<_>>();
+        chat_state::Timeline::from_events(events)
+            .expect("acknowledged events form a valid Timeline prefix")
+            .surface()
+            .to_vec()
+    }
+}
+
+#[cfg(test)]
+impl chat_state::TimelinePersistence for ImageProjectionPersistence {
+    fn persist_timeline_event_and_ack(
+        &mut self,
+        event: &chat_state::TimelineEvent,
+    ) -> tokio::sync::oneshot::Receiver<std::io::Result<()>> {
+        let (reply, receiver) = tokio::sync::oneshot::channel();
+        let failed = matches!(
+            event.kind,
+            chat_state::TimelineEventKind::ImageProjection(_)
+        ) && self.fail.load(std::sync::atomic::Ordering::SeqCst);
+        self.committed
+            .lock()
+            .expect("image projection log must not be poisoned")
+            .push((event.clone(), !failed));
+        let result = if failed {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::StorageFull,
+                "simulated full disk while persisting an image projection",
+            ))
+        } else {
+            Ok(())
+        };
+        let _ = reply.send(result);
+        receiver
+    }
+
+    fn flush(&mut self) {}
+}
+
+/// Actor whose chat-state Timeline persistence observes image projections and
+/// can fail them permanently; used to prove the shell fails closed instead of
+/// resubmitting a lossy in-memory request.
+#[cfg(test)]
+pub(crate) async fn create_test_actor_with_image_projection_persistence(
+    total_tokens: u64,
+    context_window: u64,
+    threshold_percent: u8,
+    gateway_tx: tokio::sync::mpsc::UnboundedSender<acp_transport::AcpClientMessage>,
+    persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
+) -> (SessionActor, ImageProjectionPersistence) {
+    let image_projection_persistence = ImageProjectionPersistence::default();
+    let actor = create_test_actor_ex_inner(
+        total_tokens,
+        context_window,
+        threshold_percent,
+        gateway_tx,
+        persistence_tx,
+        true,
+        ProjectionBarrier::Inject(None),
+        Some(image_projection_persistence.clone()),
+    )
+    .await
+    .0;
+    (actor, image_projection_persistence)
 }
 
 #[cfg(test)]
@@ -380,9 +493,40 @@ pub(crate) async fn create_test_actor_ex_with_projection_error(
         gateway_tx,
         persistence_tx,
         true,
-        projection_error,
+        ProjectionBarrier::Inject(projection_error),
+        None,
     )
     .await
+}
+
+#[cfg(test)]
+pub(crate) async fn create_test_actor_ex_with_physical_projection(
+    total_tokens: u64,
+    context_window: u64,
+    threshold_percent: u8,
+    gateway_tx: tokio::sync::mpsc::UnboundedSender<acp_transport::AcpClientMessage>,
+    persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
+) -> (
+    SessionActor,
+    tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
+) {
+    create_test_actor_ex_inner(
+        total_tokens,
+        context_window,
+        threshold_percent,
+        gateway_tx,
+        persistence_tx,
+        true,
+        ProjectionBarrier::Forward,
+        None,
+    )
+    .await
+}
+
+#[cfg(test)]
+enum ProjectionBarrier {
+    Inject(Option<crate::session::storage::AppendUpdateError>),
+    Forward,
 }
 
 #[cfg(test)]
@@ -393,7 +537,8 @@ async fn create_test_actor_ex_inner(
     gateway_tx: tokio::sync::mpsc::UnboundedSender<acp_transport::AcpClientMessage>,
     persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
     bridge_projection_events: bool,
-    projection_error: Option<crate::session::storage::AppendUpdateError>,
+    mut projection_barrier: ProjectionBarrier,
+    image_projection_persistence: Option<ImageProjectionPersistence>,
 ) -> (
     SessionActor,
     tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
@@ -402,6 +547,7 @@ async fn create_test_actor_ex_inner(
     // appends. Unit tests pass an observation channel instead, so bridge the
     // durable envelope to the historical `Update` shape while completing the
     // barrier. Tests that care about ordering still observe the exact record.
+    let response_projection_persistence_tx = persistence_tx.clone();
     let (actor_persistence_tx, mut actor_persistence_rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
         while let Some(message) = actor_persistence_rx.recv().await {
@@ -479,14 +625,48 @@ async fn create_test_actor_ex_inner(
         let (observed_event_tx, observed_event_rx) =
             tokio::sync::mpsc::unbounded_channel::<SessionEvent>();
         tokio::spawn(async move {
-            let mut projection_error = projection_error;
             while let Some(event) = raw_event_rx.recv().await {
                 match event {
-                    SessionEvent::ResponseProjection { respond_to, .. } => {
-                        let result = projection_error.take().map_or(Ok(()), Err);
+                    SessionEvent::ResponseProjection {
+                        projection,
+                        respond_to,
+                    } => {
+                        let result = match &mut projection_barrier {
+                            ProjectionBarrier::Inject(projection_error) => {
+                                projection_error.take().map_or(Ok(()), Err)
+                            }
+                            ProjectionBarrier::Forward => {
+                                let (persist_tx, persist_rx) = tokio::sync::oneshot::channel();
+                                let send_result = response_projection_persistence_tx.send(
+                                    PersistenceMsg::CommitResponseProjection {
+                                        projection,
+                                        respond_to: persist_tx,
+                                    },
+                                );
+                                if send_result.is_err() {
+                                    Err(crate::session::storage::AppendUpdateError::NotCommitted(
+                                        std::io::Error::new(
+                                            std::io::ErrorKind::BrokenPipe,
+                                            "test projection persistence channel closed",
+                                        ),
+                                    ))
+                                } else {
+                                    persist_rx.await.unwrap_or_else(|_| {
+                                        Err(crate::session::storage::AppendUpdateError::NotCommitted(
+                                            std::io::Error::new(
+                                                std::io::ErrorKind::BrokenPipe,
+                                                "test projection acknowledgement lost",
+                                            ),
+                                        ))
+                                    })
+                                }
+                            }
+                        };
                         let _ = respond_to.send(result);
                     }
-                    SessionEvent::FlushReplay { respond_to: Some(respond_to) } => {
+                    SessionEvent::FlushReplay {
+                        respond_to: Some(respond_to),
+                    } => {
                         let _ = respond_to.send(());
                     }
                     event => {
@@ -499,6 +679,11 @@ async fn create_test_actor_ex_inner(
     } else {
         raw_event_rx
     };
+    let timeline_persistence: Box<dyn chat_state::TimelinePersistence> =
+        match image_projection_persistence {
+            Some(persistence) => Box::new(persistence),
+            None => Box::new(chat_state::NullTimelinePersistence),
+        };
     let chat_state_handle = chat_state::ChatStateActor::spawn(
         vec![sampling_types::ConversationItem::system(
             "test system prompt",
@@ -518,7 +703,7 @@ async fn create_test_actor_ex_inner(
             reasoning_effort: None,
             stream_tool_calls: None,
         },
-        Box::new(chat_state::NullTimelinePersistence),
+        timeline_persistence,
         chat_event_tx,
         tokio_util::sync::CancellationToken::new(),
     );
@@ -600,6 +785,7 @@ async fn create_test_actor_ex_inner(
         subagent_capabilities: None,
         compaction: crate::session::compaction_config::CompactionConfig {
             background: Default::default(),
+            pending_async_notice: std::cell::Cell::new(None),
             background_failed: std::cell::Cell::new(false),
             lease: Default::default(),
             threshold_percent: std::cell::Cell::new(threshold_percent),

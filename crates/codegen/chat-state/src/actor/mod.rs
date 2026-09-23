@@ -324,6 +324,7 @@ impl ChatStateActor {
                                 && (!matches!(
                                     source,
                                     crate::NotificationSource::ParentMessage { .. }
+                                        | crate::NotificationSource::AgentReply { .. }
                                 ) || existing_source == &source),
                         )),
                         _ => None,
@@ -561,7 +562,7 @@ impl ChatStateActor {
                 );
                 let _ = reply.send(());
             }
-            ChatStateCommand::EnablePortableResponsesReasoning { reply } => {
+            ChatStateCommand::EnablePortableReasoning { backend, reply } => {
                 let surface = self.state.timeline.surface();
                 let projection = self
                     .state
@@ -570,16 +571,30 @@ impl ChatStateActor {
                 let portable_end = projection
                     .portable_prefix_end(surface)
                     .unwrap_or(surface.len());
-                let has_reasoning = sampling_types::project_portable_history_with_reasoning(
+                let portable = sampling_types::project_portable_history_with_reasoning(
                     &surface[..portable_end],
-                    true,
-                )
-                .iter()
-                .any(|item| matches!(item, ConversationItem::Reasoning(_)));
+                    Some(backend.clone()),
+                );
+                let changes_history = match backend {
+                    sampling_types::ApiBackend::Responses => portable
+                        .iter()
+                        .any(|item| matches!(item, ConversationItem::Reasoning(_))),
+                    sampling_types::ApiBackend::ChatCompletions => portable
+                        .iter()
+                        .any(|item| matches!(item, ConversationItem::Assistant(_)))
+                        || projection.spans.iter().any(|span| {
+                            matches!(
+                                &span.fragment,
+                                sampling_types::NativeContinuationFragment::ChatCompletions(message)
+                                    if message.reasoning_content.is_none()
+                            )
+                        }),
+                    sampling_types::ApiBackend::Messages => false,
+                };
                 let changed = self
                     .state
                     .continuation
-                    .enable_portable_responses_reasoning(has_reasoning);
+                    .enable_portable_reasoning(backend, changes_history);
                 let _ = reply.send(changed);
             }
             ChatStateCommand::RecordAgentEditedPath { path } => {

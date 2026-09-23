@@ -2556,6 +2556,225 @@ async fn image_projection_pairs_descriptions_and_selects_images_per_request() {
 }
 
 #[tokio::test]
+async fn image_removal_projection_replaces_user_images_and_replays_identically() {
+    use sampling_types::conversation::{
+        ContentPart, UNSUPPORTED_IMAGE_REPLACEMENT, UserItem, conversation_image_groups,
+    };
+
+    let user = ConversationItem::User(UserItem {
+        content: vec![
+            ContentPart::Text {
+                text: "inspect these".into(),
+            },
+            ContentPart::Image {
+                description: None,
+                url: "data:image/png;base64,first".into(),
+            },
+            ContentPart::Image {
+                description: None,
+                url: "data:image/png;base64,second".into(),
+            },
+        ],
+        synthetic_reason: None,
+        permission_evidence: None,
+        goal_directive: None,
+        cwd_generation: None,
+        prior_turn_interrupt: None,
+        prompt_index: Some(5),
+    });
+    let mut h = TestHarness::new();
+    h.handle.begin_turn_capture();
+    h.handle.push_user_message(user);
+    let materialized = h
+        .handle
+        .materialize_timeline("test-timeline".into())
+        .await
+        .unwrap();
+    let group = conversation_image_groups(&materialized.surface).remove(0);
+    assert_eq!(group.image_count(), 2);
+    let source = materialized.surface_ids[group.item_index];
+
+    let report = h
+        .handle
+        .record_image_projection_and_ack(crate::ImageProjectionEvent {
+            trigger_runtime: sampling_types::model_image_input_key(&test_config()),
+            source_revision: materialized.surface_revision,
+            shadows: vec![crate::ImageShadow {
+                source,
+                fingerprint: group.fingerprint.clone(),
+                image_count: group.image_count(),
+                replacement: UNSUPPORTED_IMAGE_REPLACEMENT.to_owned(),
+                provenance: crate::ImageShadowSource::UnsupportedModel,
+            }],
+            tool_calls: vec![],
+        })
+        .await
+        .unwrap();
+    assert_eq!(report.removed_images, 2);
+    assert_eq!(report.described_images, 0);
+    assert_eq!(report.total_images(), 2);
+
+    let accepted = h
+        .handle
+        .materialize_timeline("test-timeline".into())
+        .await
+        .unwrap();
+    assert!(conversation_image_groups(&accepted.surface).is_empty());
+    assert_ne!(
+        accepted.surface_ids[0], source,
+        "a removal projection must advance the Surface identity"
+    );
+    let ConversationItem::User(projected) = &accepted.surface[0] else {
+        panic!("expected user item");
+    };
+    assert_eq!(projected.prompt_index, Some(5));
+    assert!(matches!(
+        projected.content.as_slice(),
+        [ContentPart::Text { text: heading }, ContentPart::Text { text: replacement }]
+            if heading.as_ref() == "inspect these"
+                && replacement.as_ref() == UNSUPPORTED_IMAGE_REPLACEMENT
+    ));
+
+    let events = h
+        .drain_persistence()
+        .into_iter()
+        .filter_map(|record| match record {
+            PersistenceRecord::Timeline(event) => Some(event),
+            PersistenceRecord::Flush => None,
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        events.iter().any(|event| matches!(
+            &event.kind,
+            crate::TimelineEventKind::Messages(messages)
+                if !conversation_image_groups(&messages.items).is_empty()
+        )),
+        "the raw image-bearing message must stay immutable evidence"
+    );
+    let replayed = crate::Timeline::from_events(events).unwrap();
+    assert_eq!(
+        serde_json::to_value(replayed.surface()).unwrap(),
+        serde_json::to_value(&accepted.surface).unwrap()
+    );
+    assert_eq!(replayed.surface_ids(), accepted.surface_ids);
+}
+
+#[tokio::test]
+async fn mixed_description_and_removal_projection_splits_report_counts() {
+    use sampling_types::conversation::{
+        ContentPart, UNSUPPORTED_IMAGE_REPLACEMENT, UserItem, conversation_image_groups,
+    };
+
+    let described = ConversationItem::User(UserItem {
+        content: vec![
+            ContentPart::Text {
+                text: "described group".into(),
+            },
+            ContentPart::Image {
+                description: None,
+                url: "data:image/png;base64,described".into(),
+            },
+        ],
+        ..Default::default()
+    });
+    let removed = ConversationItem::User(UserItem {
+        content: vec![
+            ContentPart::Text {
+                text: "removed group".into(),
+            },
+            ContentPart::Image {
+                description: None,
+                url: "data:image/png;base64,removed-a".into(),
+            },
+            ContentPart::Image {
+                description: None,
+                url: "data:image/png;base64,removed-b".into(),
+            },
+        ],
+        ..Default::default()
+    });
+    let h = TestHarness::new();
+    h.handle.begin_turn_capture();
+    h.handle.push_user_message(described);
+    h.handle.push_user_message(removed);
+    let materialized = h
+        .handle
+        .materialize_timeline("test-timeline".into())
+        .await
+        .unwrap();
+    let groups = conversation_image_groups(&materialized.surface);
+    assert_eq!(groups.len(), 2);
+    let shadows = groups
+        .iter()
+        .map(|group| crate::ImageShadow {
+            source: materialized.surface_ids[group.item_index],
+            fingerprint: group.fingerprint.clone(),
+            image_count: group.image_count(),
+            replacement: if group.item_index == 0 {
+                "described in order".to_owned()
+            } else {
+                UNSUPPORTED_IMAGE_REPLACEMENT.to_owned()
+            },
+            provenance: if group.item_index == 0 {
+                crate::ImageShadowSource::LocalOcr {
+                    engine: "tesseract".into(),
+                }
+            } else {
+                crate::ImageShadowSource::UnsupportedModel
+            },
+        })
+        .collect::<Vec<_>>();
+
+    let report = h
+        .handle
+        .record_image_projection_and_ack(crate::ImageProjectionEvent {
+            trigger_runtime: sampling_types::model_image_input_key(&test_config()),
+            source_revision: materialized.surface_revision,
+            shadows,
+            tool_calls: vec![],
+        })
+        .await
+        .unwrap();
+    assert_eq!(report.described_images, 1);
+    assert_eq!(report.removed_images, 2);
+    assert_eq!(report.total_images(), 3);
+
+    let conversation = h.handle.get_conversation().await;
+    assert_eq!(
+        sampling_types::conversation::item_image_description(&conversation[0]),
+        Some("described in order")
+    );
+    assert_eq!(conversation_image_groups(&conversation[..1]).len(), 1);
+    assert!(conversation_image_groups(&conversation[1..]).is_empty());
+    let ConversationItem::User(removed_item) = &conversation[1] else {
+        panic!("expected user item");
+    };
+    assert!(matches!(
+        removed_item.content.as_slice(),
+        [ContentPart::Text { text: heading }, ContentPart::Text { text: replacement }]
+            if heading.as_ref() == "removed group"
+                && replacement.as_ref() == UNSUPPORTED_IMAGE_REPLACEMENT
+    ));
+    let materialized_after = h
+        .handle
+        .materialize_timeline("test-timeline".into())
+        .await
+        .unwrap();
+    assert_ne!(
+        materialized_after.surface_ids[0],
+        materialized.surface_ids[0]
+    );
+    assert_ne!(
+        materialized_after.surface_ids[1],
+        materialized.surface_ids[1]
+    );
+    assert_eq!(
+        materialized_after.surface_revision,
+        materialized.surface_revision + 1
+    );
+}
+
+#[tokio::test]
 async fn image_projection_retries_an_uncertain_persistence_failure() {
     use sampling_types::conversation::{ContentPart, UserItem, conversation_image_groups};
 
@@ -6618,97 +6837,164 @@ async fn acknowledged_continuation_reset_keeps_session_usable() {
 }
 
 #[tokio::test]
-async fn responses_reasoning_replay_is_route_local_and_acknowledged() {
+async fn reasoning_replay_is_route_local_and_acknowledged() {
     use sampling_types::{ApiBackend, ToolCall};
 
-    let reasoning_text = "reasoning required after queued route switch";
-    let responses_config = SamplingConfig {
-        api_backend: ApiBackend::Responses,
-        model: "responses-a".into(),
-        ..test_config()
-    };
-    let h = TestHarness::with_config(
-        vec![
-            ConversationItem::system("sys"),
-            ConversationItem::user("inspect"),
-            ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(reasoning_text)),
-            ConversationItem::assistant_tool_calls(vec![ToolCall {
-                id: "queued-switch-call".into(),
-                name: "read_file".into(),
-                arguments: r#"{"path":"a"}"#.into(),
-            }]),
-            ConversationItem::tool_result("queued-switch-call", "done"),
-        ],
-        responses_config.clone(),
-    );
+    for backend in [ApiBackend::Responses, ApiBackend::ChatCompletions] {
+        let reasoning_text = "reasoning required after queued route switch";
+        let responses_config = SamplingConfig {
+            api_backend: backend.clone(),
+            model: "responses-a".into(),
+            ..test_config()
+        };
+        let h = TestHarness::with_config(
+            vec![
+                ConversationItem::system("sys"),
+                ConversationItem::user("inspect"),
+                ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
+                    reasoning_text,
+                )),
+                ConversationItem::assistant_tool_calls(vec![ToolCall {
+                    id: "queued-switch-call".into(),
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"a"}"#.into(),
+                }]),
+                ConversationItem::tool_result("queued-switch-call", "done"),
+            ],
+            responses_config.clone(),
+        );
 
-    let before = h
-        .handle
-        .build_request("reasoning-replay", vec![], None, None, None)
-        .await
-        .unwrap();
-    assert!(
-        !wire_request_json(&before, &ApiBackend::Responses)
-            .to_string()
-            .contains(reasoning_text)
-    );
+        let before = h
+            .handle
+            .build_request("reasoning-replay", vec![], None, None, None)
+            .await
+            .unwrap();
+        assert!(
+            !wire_request_json(&before, &backend)
+                .to_string()
+                .contains(reasoning_text)
+        );
 
-    assert_eq!(
-        h.handle.enable_portable_responses_reasoning().await,
-        Some(true)
-    );
-    assert_eq!(
-        h.handle.enable_portable_responses_reasoning().await,
-        Some(false),
-        "the compatibility state may change only once per route"
-    );
-    let enabled = h
-        .handle
-        .build_request("reasoning-replay", vec![], None, None, None)
-        .await
-        .unwrap();
-    let enabled_wire = wire_request_json(&enabled, &ApiBackend::Responses);
-    let reasoning = enabled_wire["input"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|item| item["type"] == "reasoning")
-        .expect("enabled route must carry the visible reasoning item");
-    assert_eq!(reasoning["content"][0]["type"], "reasoning_text");
-    assert_eq!(reasoning["content"][0]["text"], reasoning_text);
-    assert_eq!(
-        enabled.source_projection.as_ref().unwrap()["replay_portable_responses_reasoning"],
-        true
-    );
+        let wrong_backend = if backend == ApiBackend::Responses {
+            ApiBackend::ChatCompletions
+        } else {
+            ApiBackend::Responses
+        };
+        assert_eq!(
+            h.handle.enable_portable_reasoning(wrong_backend).await,
+            Some(false)
+        );
+        assert_eq!(
+            h.handle.enable_portable_reasoning(backend.clone()).await,
+            Some(true)
+        );
+        assert_eq!(
+            h.handle.enable_portable_reasoning(backend.clone()).await,
+            Some(false),
+            "the compatibility state may change only once per route"
+        );
+        let enabled = h
+            .handle
+            .build_request("reasoning-replay", vec![], None, None, None)
+            .await
+            .unwrap();
+        let enabled_wire = wire_request_json(&enabled, &backend);
+        if backend == ApiBackend::Responses {
+            let reasoning = enabled_wire["input"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|item| item["type"] == "reasoning")
+                .unwrap();
+            assert_eq!(reasoning["content"][0]["type"], "reasoning_text");
+            assert_eq!(reasoning["content"][0]["text"], reasoning_text);
+        } else {
+            assert_eq!(
+                enabled_wire["messages"][2]["reasoning_content"],
+                reasoning_text
+            );
+        }
+        assert_eq!(
+            enabled.source_projection.as_ref().unwrap()["portable_reasoning_backend"],
+            serde_json::to_value(&backend).unwrap()
+        );
+        assert!(
+            crate::estimate_request_input_tokens(&enabled)
+                > crate::estimate_request_input_tokens(&before)
+        );
+        assert_eq!(
+            serde_json::to_value(&enabled.items).unwrap(),
+            serde_json::to_value(&before.items).unwrap()
+        );
+        h.handle.update_sampling_config(responses_config.clone());
 
-    assert!(h.handle.reset_continuation().await);
-    let after_reset = h
-        .handle
-        .build_request("reasoning-replay", vec![], None, None, None)
-        .await
-        .unwrap();
-    assert!(
-        wire_request_json(&after_reset, &ApiBackend::Responses)
-            .to_string()
-            .contains(reasoning_text),
-        "same-route native reset must preserve the learned compatibility"
-    );
+        assert!(h.handle.reset_continuation().await);
+        let after_reset = h
+            .handle
+            .build_request("reasoning-replay", vec![], None, None, None)
+            .await
+            .unwrap();
+        assert!(
+            wire_request_json(&after_reset, &backend)
+                .to_string()
+                .contains(reasoning_text),
+            "same-route native reset must preserve the learned compatibility"
+        );
 
-    h.handle.replace_sampling_route(SamplingConfig {
-        model: "responses-b".into(),
-        ..responses_config
-    });
-    let replaced = h
-        .handle
-        .build_request("reasoning-replay", vec![], None, None, None)
-        .await
-        .unwrap();
-    assert!(
-        !wire_request_json(&replaced, &ApiBackend::Responses)
-            .to_string()
-            .contains(reasoning_text),
-        "a real route replacement must not leak learned compatibility"
-    );
+        h.handle.replace_sampling_route(SamplingConfig {
+            model: "responses-b".into(),
+            ..responses_config
+        });
+        let replaced = h
+            .handle
+            .build_request("reasoning-replay", vec![], None, None, None)
+            .await
+            .unwrap();
+        assert!(
+            !wire_request_json(&replaced, &backend)
+                .to_string()
+                .contains(reasoning_text),
+            "a real route replacement must not leak learned compatibility"
+        );
+    }
+}
+
+#[tokio::test]
+async fn chat_reasoning_replay_requires_an_assistant_but_not_invented_reasoning() {
+    use sampling_types::ApiBackend;
+    for backend in [
+        ApiBackend::ChatCompletions,
+        ApiBackend::Responses,
+        ApiBackend::Messages,
+    ] {
+        let h = TestHarness::with_config(
+            vec![ConversationItem::user("question")],
+            SamplingConfig {
+                api_backend: backend.clone(),
+                ..test_config()
+            },
+        );
+        assert_eq!(
+            h.handle.enable_portable_reasoning(backend.clone()).await,
+            Some(false)
+        );
+        h.handle
+            .push_assistant_response(ConversationItem::assistant("plain history"));
+        assert!(h.handle.reset_continuation().await);
+        assert_eq!(
+            h.handle.enable_portable_reasoning(backend.clone()).await,
+            Some(backend == ApiBackend::ChatCompletions)
+        );
+        if backend == ApiBackend::ChatCompletions {
+            let request = h
+                .handle
+                .build_request("plain-history", vec![], None, None, None)
+                .await
+                .unwrap();
+            let wire = wire_request_json(&request, &backend);
+            assert_eq!(wire["messages"][1]["reasoning_content"], "");
+        }
+    }
 }
 
 #[tokio::test]
@@ -6728,7 +7014,9 @@ async fn responses_reasoning_replay_requires_a_complete_portable_tool_exchange()
     );
 
     assert_eq!(
-        h.handle.enable_portable_responses_reasoning().await,
+        h.handle
+            .enable_portable_reasoning(sampling_types::ApiBackend::Responses)
+            .await,
         Some(false)
     );
 }
@@ -7543,6 +7831,465 @@ async fn prune_tool_results_error_paths() {
         .await
         .expect_err("dead actor must be an error");
     assert!(matches!(err, crate::commands::PruneError::ActorUnavailable));
+}
+
+#[tokio::test]
+async fn durable_agent_message_received_is_hidden_until_ack() {
+    let mut h = TestHarness::with_manual_timeline_ack(vec![]);
+    let source = crate::NotificationSource::ParentMessage {
+        parent_session_id: "parent".into(),
+        message_id: "message-1".into(),
+        interrupt: false,
+    };
+    let version = crate::NotificationSourceVersion::Ordinal {
+        value: crate::PARENT_MESSAGE_SOURCE_VERSION,
+    };
+    let payload = crate::NotificationPayloadRef {
+        blake3: blake3::hash(b"shared body").to_hex().to_string(),
+        bytes: 11,
+    };
+    let handle = h.handle.clone();
+    let receive = tokio::spawn(async move {
+        handle
+            .receive_notification_durably("session-1".into(), source, version, payload)
+            .await
+    });
+
+    let ack = h
+        .persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("Received persistence acknowledgement");
+    assert!(
+        !receive.is_finished(),
+        "Received must not be reported before its durable acknowledgement"
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(30), h.handle.get_conversation())
+            .await
+            .is_err(),
+        "the actor must not expose a Surface while Received is awaiting its acknowledgement"
+    );
+    assert!(
+        h.drain_events().is_empty(),
+        "an uncommitted Received must not publish a Surface event"
+    );
+
+    ack.send(Ok(()))
+        .expect("actor is awaiting the acknowledgement");
+    let receipt = receive
+        .await
+        .expect("receive task completes")
+        .expect("Received commits after acknowledgement");
+    assert!(matches!(
+        receipt.kind,
+        crate::TimelineEventKind::Notification(crate::NotificationEvent::Received { .. })
+    ));
+    assert!(
+        h.handle.get_conversation().await.is_empty(),
+        "a Received receipt alone is not model-visible context"
+    );
+    let receipts = h.handle.parent_message_receipts().await.unwrap();
+    assert_eq!(receipts.len(), 1);
+}
+
+#[tokio::test]
+async fn durable_agent_message_receive_retries_lost_and_failed_ack_without_duplicate_receipts() {
+    let mut h = TestHarness::with_manual_timeline_ack(vec![]);
+
+    let receive_lost = {
+        let handle = h.handle.clone();
+        tokio::spawn(async move {
+            handle
+                .receive_notification_durably(
+                    "session-1".into(),
+                    crate::NotificationSource::ParentMessage {
+                        parent_session_id: "parent".into(),
+                        message_id: "lost-ack".into(),
+                        interrupt: false,
+                    },
+                    crate::NotificationSourceVersion::Ordinal {
+                        value: crate::PARENT_MESSAGE_SOURCE_VERSION,
+                    },
+                    crate::NotificationPayloadRef {
+                        blake3: blake3::hash(b"lost").to_hex().to_string(),
+                        bytes: 4,
+                    },
+                )
+                .await
+        })
+    };
+    let first_lost_ack = h
+        .persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("first Received acknowledgement");
+    let first_lost_event = h
+        .drain_persistence()
+        .into_iter()
+        .find_map(|record| match record {
+            PersistenceRecord::Timeline(event) => Some(event),
+            PersistenceRecord::Flush => None,
+        })
+        .expect("first Received persistence record");
+    drop(first_lost_ack);
+    let retry_lost_ack = h
+        .persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("retry Received acknowledgement after a lost acknowledgement");
+    let retry_lost_event = h
+        .drain_persistence()
+        .into_iter()
+        .find_map(|record| match record {
+            PersistenceRecord::Timeline(event) => Some(event),
+            PersistenceRecord::Flush => None,
+        })
+        .expect("retry Received persistence record");
+    assert_eq!(
+        serde_json::to_vec(&first_lost_event).unwrap(),
+        serde_json::to_vec(&retry_lost_event).unwrap(),
+        "a lost acknowledgement retries the exact immutable event"
+    );
+    retry_lost_ack
+        .send(Ok(()))
+        .expect("actor is awaiting the retry acknowledgement");
+    let lost_receipt = receive_lost
+        .await
+        .expect("lost acknowledgement receive task completes")
+        .expect("retry after a lost acknowledgement commits");
+
+    let receive_failed = {
+        let handle = h.handle.clone();
+        tokio::spawn(async move {
+            handle
+                .receive_notification_durably(
+                    "session-1".into(),
+                    crate::NotificationSource::ParentMessage {
+                        parent_session_id: "parent".into(),
+                        message_id: "failed-ack".into(),
+                        interrupt: false,
+                    },
+                    crate::NotificationSourceVersion::Ordinal {
+                        value: crate::PARENT_MESSAGE_SOURCE_VERSION,
+                    },
+                    crate::NotificationPayloadRef {
+                        blake3: blake3::hash(b"failed").to_hex().to_string(),
+                        bytes: 6,
+                    },
+                )
+                .await
+        })
+    };
+    let first_failed_ack = h
+        .persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("first failed Received acknowledgement");
+    let first_failed_event = h
+        .drain_persistence()
+        .into_iter()
+        .find_map(|record| match record {
+            PersistenceRecord::Timeline(event) => Some(event),
+            PersistenceRecord::Flush => None,
+        })
+        .expect("first failed Received persistence record");
+    first_failed_ack
+        .send(Err(std::io::Error::other("simulated disk failure")))
+        .expect("actor is awaiting the failed acknowledgement");
+    let retry_failed_ack = h
+        .persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("retry Received acknowledgement after a failed acknowledgement");
+    let retry_failed_event = h
+        .drain_persistence()
+        .into_iter()
+        .find_map(|record| match record {
+            PersistenceRecord::Timeline(event) => Some(event),
+            PersistenceRecord::Flush => None,
+        })
+        .expect("retry failed Received persistence record");
+    assert_eq!(
+        serde_json::to_vec(&first_failed_event).unwrap(),
+        serde_json::to_vec(&retry_failed_event).unwrap(),
+        "a failed acknowledgement retries the exact immutable event"
+    );
+    retry_failed_ack
+        .send(Ok(()))
+        .expect("actor is awaiting the retry acknowledgement");
+    let failed_receipt = receive_failed
+        .await
+        .expect("failed acknowledgement receive task completes")
+        .expect("retry after a failed acknowledgement commits");
+
+    assert_ne!(lost_receipt.seq, failed_receipt.seq);
+    let receipts = h.handle.parent_message_receipts().await.unwrap();
+    assert_eq!(
+        receipts.len(),
+        2,
+        "retries must not append a second receipt for either source"
+    );
+    assert_eq!(h.handle.pending_notifications().await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn source_tool_result_ack_loss_does_not_redeliver_received_message() {
+    let send_call = ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+        id: "send-call".into(),
+        name: "send_subagent_message".into(),
+        arguments: serde_json::json!({
+            "subagent_id": "target-session",
+            "message": "shared body",
+            "interrupt": false,
+        })
+        .to_string()
+        .into(),
+    }]);
+    let mut source = TestHarness::with_manual_timeline_ack_after(vec![], 1);
+    source.handle.push_assistant_response(send_call);
+    let mut target = TestHarness::new();
+    let source_session_id = "source-session";
+    let owner_session_id = "target-session";
+    let source_notification = crate::NotificationSource::ParentMessage {
+        parent_session_id: source_session_id.into(),
+        message_id: "send-call".into(),
+        interrupt: false,
+    };
+    let source_version = crate::NotificationSourceVersion::Ordinal {
+        value: crate::PARENT_MESSAGE_SOURCE_VERSION,
+    };
+    let payload = crate::NotificationPayloadRef {
+        blake3: blake3::hash(b"shared body").to_hex().to_string(),
+        bytes: 11,
+    };
+
+    // Admit the live send call before driving its result acknowledgement;
+    // loading an incomplete historical call would correctly repair it first.
+    assert_eq!(source.handle.get_conversation().await.len(), 1);
+    assert_eq!(source.drain_persistence().len(), 1);
+
+    let target_receipt = target
+        .handle
+        .receive_notification_durably(
+            owner_session_id.into(),
+            source_notification.clone(),
+            source_version.clone(),
+            payload.clone(),
+        )
+        .await
+        .expect("target Received must be durable before source result handling");
+    let target_receipt_id = match &target_receipt.kind {
+        crate::TimelineEventKind::Notification(crate::NotificationEvent::Received {
+            id, ..
+        }) => id.clone(),
+        _ => panic!("target must return a Received event"),
+    };
+    let target_records = target.drain_persistence();
+    assert_eq!(
+        target_records
+            .iter()
+            .filter(|record| matches!(record, PersistenceRecord::Timeline(_)))
+            .count(),
+        1,
+        "the target must persist exactly one Received event"
+    );
+
+    let tool_result = ConversationItem::tool_result(
+        "send-call",
+        serde_json::json!({
+            "id": "send-call",
+            "status": "received",
+            "receipt_id": target_receipt_id,
+        })
+        .to_string(),
+    );
+    let source_handle = source.handle.clone();
+    let push =
+        tokio::spawn(async move { source_handle.push_tool_result_durably(tool_result).await });
+
+    let first_ack = source
+        .persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("source ToolResult persistence acknowledgement");
+    assert!(
+        !push.is_finished(),
+        "source must not expose the ToolResult before its durable acknowledgement"
+    );
+    let first_event = source
+        .drain_persistence()
+        .into_iter()
+        .find_map(|record| match record {
+            PersistenceRecord::Timeline(event) => Some(event),
+            PersistenceRecord::Flush => None,
+        })
+        .expect("first source ToolResult event");
+    first_ack
+        .send(Err(std::io::Error::other("source result write failed")))
+        .expect("source actor is awaiting the first acknowledgement");
+
+    let second_ack = source
+        .persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("source retries the same ToolResult after failure");
+    let second_event = source
+        .drain_persistence()
+        .into_iter()
+        .find_map(|record| match record {
+            PersistenceRecord::Timeline(event) => Some(event),
+            PersistenceRecord::Flush => None,
+        })
+        .expect("retried source ToolResult event");
+    drop(second_ack);
+
+    let third_ack = source
+        .persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("source retries after the lost acknowledgement");
+    let third_event = source
+        .drain_persistence()
+        .into_iter()
+        .find_map(|record| match record {
+            PersistenceRecord::Timeline(event) => Some(event),
+            PersistenceRecord::Flush => None,
+        })
+        .expect("second retried source ToolResult event");
+    third_ack
+        .send(Ok(()))
+        .expect("source actor is awaiting the final acknowledgement");
+    push.await
+        .expect("source ToolResult task should finish")
+        .expect("the exact result event should recover after retries");
+
+    assert_eq!(
+        serde_json::to_value(&first_event).unwrap(),
+        serde_json::to_value(&second_event).unwrap(),
+        "a failed source result write must retry the exact immutable event"
+    );
+    assert_eq!(
+        serde_json::to_value(&second_event).unwrap(),
+        serde_json::to_value(&third_event).unwrap(),
+        "a lost source result acknowledgement must retry the exact immutable event"
+    );
+
+    let source_surface = source.handle.get_conversation().await;
+    let ConversationItem::ToolResult(result) = &source_surface[1] else {
+        panic!("source must expose the persisted send ToolResult after its final ACK");
+    };
+    let result_json: serde_json::Value =
+        serde_json::from_str(result.content.as_ref()).expect("typed send result JSON");
+    assert_eq!(result_json["status"], "received");
+    assert_eq!(result_json["receipt_id"], target_receipt_id);
+
+    let retry = target
+        .handle
+        .receive_notification_durably(
+            owner_session_id.into(),
+            source_notification,
+            source_version,
+            payload,
+        )
+        .await
+        .expect("same target identity can recheck its existing receipt");
+    assert_eq!(retry.seq, target_receipt.seq);
+    let receipts = target
+        .handle
+        .parent_message_receipts()
+        .await
+        .expect("target receipt index");
+    assert_eq!(receipts.len(), 1);
+    assert!(
+        matches!(
+            &receipts[0].kind,
+            crate::TimelineEventKind::Notification(crate::NotificationEvent::Received { id, .. })
+                if id == &target_receipt_id
+        ),
+        "source result persistence must not create a second target receipt"
+    );
+    assert!(
+        target.drain_persistence().is_empty(),
+        "receipt recheck must not redeliver or append a second Received event"
+    );
+}
+
+#[tokio::test]
+async fn durable_agent_message_receive_rejects_body_and_interrupt_conflicts() {
+    let h = TestHarness::new();
+    let source = crate::NotificationSource::ParentMessage {
+        parent_session_id: "parent".into(),
+        message_id: "message-1".into(),
+        interrupt: false,
+    };
+    let version = crate::NotificationSourceVersion::Ordinal {
+        value: crate::PARENT_MESSAGE_SOURCE_VERSION,
+    };
+    let payload = crate::NotificationPayloadRef {
+        blake3: blake3::hash(b"shared body").to_hex().to_string(),
+        bytes: 11,
+    };
+    let first = h
+        .handle
+        .receive_notification_durably(
+            "session-1".into(),
+            source.clone(),
+            version.clone(),
+            payload.clone(),
+        )
+        .await
+        .expect("first receipt commits");
+    let duplicate = h
+        .handle
+        .receive_notification_durably(
+            "session-1".into(),
+            source.clone(),
+            version.clone(),
+            payload.clone(),
+        )
+        .await
+        .expect("exact retry is idempotent");
+    assert_eq!(duplicate.seq, first.seq);
+
+    let body_conflict = h
+        .handle
+        .receive_notification_durably(
+            "session-1".into(),
+            source.clone(),
+            version.clone(),
+            crate::NotificationPayloadRef {
+                blake3: blake3::hash(b"changed body").to_hex().to_string(),
+                bytes: 12,
+            },
+        )
+        .await
+        .expect_err("same source and message id cannot change the body");
+    assert!(matches!(
+        body_conflict,
+        crate::commands::TimelineWriteError::Invalid(crate::TimelineError::InvalidNotification)
+    ));
+
+    let interrupt_conflict = h
+        .handle
+        .receive_notification_durably(
+            "session-1".into(),
+            crate::NotificationSource::ParentMessage {
+                parent_session_id: "parent".into(),
+                message_id: "message-1".into(),
+                interrupt: true,
+            },
+            version,
+            payload,
+        )
+        .await
+        .expect_err("same source and message id cannot change interrupt semantics");
+    assert!(matches!(
+        interrupt_conflict,
+        crate::commands::TimelineWriteError::Invalid(crate::TimelineError::InvalidNotification)
+    ));
+    assert_eq!(h.handle.parent_message_receipts().await.unwrap().len(), 1);
+    assert_eq!(h.handle.pending_notifications().await.unwrap().len(), 1);
 }
 
 #[tokio::test]

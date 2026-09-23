@@ -252,7 +252,7 @@ fn buffer_to_ansi(buf: &Buffer, links: &[ratatui_inline::LinkSpan], out: &mut St
     }
 }
 
-fn push_osc8_open(out: &mut String, url: &str, id: Option<u32>) {
+pub(crate) fn push_osc8_open(out: &mut String, url: &str, id: Option<u32>) {
     use std::fmt::Write as _;
 
     let sanitized: String = url.chars().filter(|c| !c.is_control()).collect();
@@ -274,7 +274,7 @@ fn push_osc8_open(out: &mut String, url: &str, id: Option<u32>) {
 /// style *run*, which in syntax-highlighted code is nearly once per token —
 /// the `Vec<String>` + `join` version dominated the serializer's profile on
 /// long transcripts.
-fn cell_sgr(fg: Color, bg: Color, modifier: Modifier, sgr: &mut String) {
+pub(crate) fn cell_sgr(fg: Color, bg: Color, modifier: Modifier, sgr: &mut String) {
     use std::fmt::Write as _;
 
     sgr.clear();

@@ -172,19 +172,52 @@ pub struct McpCallRequest {
 }
 
 #[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpCallResponse {
-    pub content: Vec<McpContentBlock>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub is_error: Option<bool>,
+#[serde(transparent)]
+pub struct McpCallResponse(pub rmcp::model::CallToolResult);
+
+/// Direct ACP calls carry the complete native result, unlike the model-facing
+/// projection. Reject an oversized result before a second JSON allocation.
+const MCP_DIRECT_RESULT_MAX_BYTES: usize = 16 * 1024 * 1024;
+
+struct BoundedJsonCount {
+    bytes: usize,
+    exceeded: bool,
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct McpContentBlock {
-    #[serde(rename = "type")]
-    pub kind: String,
-    pub text: String,
+impl std::io::Write for BoundedJsonCount {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let Some(total) = self.bytes.checked_add(buf.len()) else {
+            self.exceeded = true;
+            return Err(std::io::Error::other("MCP result too large"));
+        };
+        if total > MCP_DIRECT_RESULT_MAX_BYTES {
+            self.exceeded = true;
+            return Err(std::io::Error::other("MCP result too large"));
+        }
+        self.bytes = total;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn bound_direct_result(result: rmcp::model::CallToolResult) -> Result<McpCallResponse, String> {
+    let mut counter = BoundedJsonCount {
+        bytes: 0,
+        exceeded: false,
+    };
+    if let Err(error) = serde_json::to_writer(&mut counter, &result) {
+        if counter.exceeded {
+            return Err(format!(
+                "MCP direct result exceeds the {} byte response limit",
+                MCP_DIRECT_RESULT_MAX_BYTES
+            ));
+        }
+        return Err(format!("MCP direct result cannot be serialized: {error}"));
+    }
+    Ok(McpCallResponse(result))
 }
 
 // ── Internal types (not serialized to wire) ─────────────────────────
@@ -630,33 +663,12 @@ pub async fn call_mcp_tool(
 
     let tool_timeout_sec = client.tool_timeout_for(tool_name);
     let timeout = std::time::Duration::from_secs(tool_timeout_sec);
-    let result = tokio::time::timeout(timeout, client.call_tool(tool_name, arguments))
+    let result = client
+        .call_tool(tool_name, arguments, timeout)
         .await
-        .map_err(|_| format!("tool '{}' timed out after {}s", tool_name, tool_timeout_sec))?
         .map_err(|e| format!("tool call failed: {}", e))?;
 
-    let content = result
-        .content
-        .iter()
-        .filter_map(|c| match c {
-            rmcp::model::ContentBlock::Text(t) => Some(McpContentBlock {
-                kind: "text".to_string(),
-                text: t.text.clone(),
-            }),
-            rmcp::model::ContentBlock::Resource(r) => {
-                serde_json::to_string(r).ok().map(|json| McpContentBlock {
-                    kind: "resource".to_string(),
-                    text: json,
-                })
-            }
-            _ => None,
-        })
-        .collect();
-
-    Ok(McpCallResponse {
-        content,
-        is_error: result.is_error,
-    })
+    bound_direct_result(result)
 }
 
 // ── mcp/list handler ────────────────────────────────────────────────
@@ -1507,17 +1519,40 @@ mod tests {
 
     #[test]
     fn test_mcp_call_response_serialization() {
-        let resp = McpCallResponse {
-            content: vec![McpContentBlock {
-                kind: "text".to_string(),
-                text: "Created issue LIN-123".to_string(),
-            }],
-            is_error: Some(false),
-        };
+        let result: rmcp::model::CallToolResult = serde_json::from_value(serde_json::json!({
+            "content": [
+                {"type":"text", "text":"Created issue LIN-123"},
+                {"type":"image", "mimeType":"image/png", "data":"AAAA"},
+                {"type":"audio", "mimeType":"audio/wav", "data":"BBBB"},
+                {"type":"resource", "resource":{"uri":"file:///one", "text":"one"}},
+                {"type":"resource_link", "uri":"file:///two", "name":"two"}
+            ],
+            "structuredContent": {"issue":"LIN-123"},
+            "isError": false,
+            "_meta": {"source":"test"}
+        }))
+        .unwrap();
+        let resp = bound_direct_result(result).unwrap();
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["content"][0]["type"], "text");
         assert_eq!(json["content"][0]["text"], "Created issue LIN-123");
+        assert_eq!(json["content"][1]["type"], "image");
+        assert_eq!(json["content"][2]["type"], "audio");
+        assert_eq!(json["content"][3]["type"], "resource");
+        assert_eq!(json["content"][4]["type"], "resource_link");
+        assert_eq!(json["structuredContent"]["issue"], "LIN-123");
+        assert_eq!(json["_meta"]["source"], "test");
         assert_eq!(json["isError"], false);
+    }
+
+    #[test]
+    fn direct_mcp_result_over_limit_is_rejected_without_partial_json() {
+        let result = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
+            "x".repeat(MCP_DIRECT_RESULT_MAX_BYTES),
+        )]);
+        let error = bound_direct_result(result).unwrap_err();
+        assert!(error.contains("exceeds"));
+        assert!(error.contains("response limit"));
     }
 
     #[test]

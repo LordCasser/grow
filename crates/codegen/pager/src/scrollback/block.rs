@@ -1151,9 +1151,12 @@ impl RenderBlock {
             }
             RenderBlock::ToolCall(ToolCallBlock::Other(b)) => {
                 // Image-backed generic tools retain their OS-native viewer.
-                b.media_ref_path().is_none() && (b.error.is_some() || b.output.is_some())
+                b.media_ref_path().is_none()
+                    && (b.error.is_some() || b.output.is_some() || b.communication_body().is_some())
             }
-            RenderBlock::Notice(notice) => notice.has_details(),
+            RenderBlock::Notice(notice) => {
+                notice.has_details() || notice.communication_body().is_some()
+            }
             _ => false,
         }
     }
@@ -1166,7 +1169,12 @@ impl RenderBlock {
     /// Whether this block supports copy-to-clipboard.
     pub fn supports_copy(&self) -> bool {
         match self {
-            RenderBlock::Notice(notice) => notice.has_details(),
+            RenderBlock::Notice(notice) => {
+                notice.has_details() || notice.communication_body().is_some()
+            }
+            RenderBlock::ToolCall(ToolCallBlock::Other(block)) => {
+                block.communication_body().is_some()
+            }
             RenderBlock::UserPrompt(_)
             | RenderBlock::AgentMessage(_)
             | RenderBlock::Thinking(_)
@@ -1204,6 +1212,21 @@ impl RenderBlock {
             RenderBlock::ToolCall(ToolCallBlock::WebFetch(b)) => Some(b.copy_text()),
             RenderBlock::ToolCall(ToolCallBlock::IntegrationSearch(b)) => Some(b.copy_text()),
             RenderBlock::ToolCall(ToolCallBlock::UseTool(b)) => Some(b.copy_text()),
+            RenderBlock::ToolCall(ToolCallBlock::Other(b)) if b.communication_body().is_some() => {
+                Some(if raw {
+                    b.communication_body().unwrap().raw_text()
+                } else {
+                    b.communication_body().unwrap().rendered_text()
+                })
+            }
+            RenderBlock::Notice(notice) if notice.communication_body().is_some() => {
+                let body = notice.communication_body().expect("checked above");
+                Some(if raw {
+                    body.raw_text()
+                } else {
+                    body.rendered_text()
+                })
+            }
             RenderBlock::Notice(notice) if notice.has_details() => Some(notice.detail_text()),
             _ => None,
         }
@@ -1244,7 +1267,10 @@ impl RenderBlock {
             RenderBlock::UserPrompt(b) => join_searchable([Some(b.text.clone())]),
             RenderBlock::AgentMessage(b) => join_searchable([Some(b.copy_text(false))]),
             RenderBlock::Thinking(b) => join_searchable([Some(b.copy_text(false))]),
-            RenderBlock::Notice(b) => join_searchable([Some(b.text.clone())]),
+            RenderBlock::Notice(b) => join_searchable([
+                Some(b.text.clone()),
+                b.communication_body().map(|body| body.raw_text()),
+            ]),
             RenderBlock::SessionEvent(b) => join_searchable([Some(b.event.message())]),
             RenderBlock::BgTask(b) => {
                 join_searchable([Some(b.command.clone()), b.description.clone()])
@@ -1321,6 +1347,8 @@ impl RenderBlock {
         match self {
             RenderBlock::AgentMessage(block) => block.set_raw_mode(raw),
             RenderBlock::Thinking(block) => block.set_raw_mode(raw),
+            RenderBlock::ToolCall(ToolCallBlock::Other(block)) => block.set_raw_mode(raw),
+            RenderBlock::Notice(block) => block.set_raw_mode(raw),
             _ => {} // Other blocks don't support raw mode
         }
     }

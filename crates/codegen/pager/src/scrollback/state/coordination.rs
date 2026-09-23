@@ -48,9 +48,13 @@ impl ScrollbackState {
             // An older replay receipt must not stop a sideband observed live.
             running |= entry.is_running && !terminal;
             if previous.name == block.name
+                && previous.summary == block.summary
                 && previous.output == block.output
                 && previous.error == block.error
                 && previous.coordination == block.coordination
+                && previous.communication_body().map(|body| body.fingerprint())
+                    == block.communication_body().map(|body| body.fingerprint())
+                && previous.communication_data() == block.communication_data()
                 && entry.is_running == running
             {
                 return false;

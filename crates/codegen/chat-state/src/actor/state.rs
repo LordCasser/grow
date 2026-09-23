@@ -81,15 +81,16 @@ fn estimate_effective_conversation_tokens(request: &ConversationRequest) -> u64 
     let Some(native) = &request.native_continuation else {
         return estimate_wire_items(&request.items, false);
     };
-    let replay_reasoning = native.replay_portable_responses_reasoning;
+    let reasoning_backend = native.portable_reasoning_backend.clone();
+    let replay_reasoning = reasoning_backend.is_some();
     let Some(portable_end) = native.portable_prefix_end(&request.items) else {
         return estimate_wire_items(
-            &project_portable_history_with_reasoning(&request.items, replay_reasoning),
+            &project_portable_history_with_reasoning(&request.items, reasoning_backend),
             replay_reasoning,
         );
     };
     let mut total = estimate_wire_items(
-        &project_portable_history_with_reasoning(&request.items[..portable_end], replay_reasoning),
+        &project_portable_history_with_reasoning(&request.items[..portable_end], reasoning_backend),
         replay_reasoning,
     );
     let mut cursor = portable_end;
@@ -114,6 +115,42 @@ fn estimate_tool_tokens(
         + description.map_or(0, str::len)
         + serde_json::to_string(parameters).map_or(0, |value| value.len());
     (bytes as u64) / token_estimation::BYTES_PER_TOKEN
+}
+
+/// Estimate the provider-visible receive call/result pair for one runtime
+/// message. The canonical item occupies one Surface coordinate, but its
+/// request projection carries the stable receipt identity in both halves and
+/// the complete source/body/reply metadata in the result.
+fn estimate_agent_message_tokens(batch: &sampling_types::AgentMessageItem) -> u64 {
+    batch
+        .messages
+        .iter()
+        .map(|message| {
+            let call_id = sampling_types::agent_message_call_id(&message.receipt_id);
+            let arguments = serde_json::json!({
+                "receipt_id": message.receipt_id,
+                "source_session_id": message.source_session_id,
+                "message_id": message.message_id,
+            });
+            let call = serde_json::json!({
+                "role": "assistant",
+                "tool_calls": [{
+                    "id": call_id,
+                    "type": "function",
+                    "function": {
+                        "name": sampling_types::RECEIVE_AGENT_MESSAGE_TOOL_NAME,
+                        "arguments": arguments.to_string(),
+                    },
+                }],
+            });
+            let result = serde_json::json!({
+                "role": "tool",
+                "tool_call_id": call_id,
+                "content": sampling_types::agent_message_result_content(message),
+            });
+            token_estimation::estimate_tokens(&format!("{call}{result}"))
+        })
+        .sum()
 }
 
 /// Bytes/4 estimate for a single [`ConversationItem`].
@@ -157,6 +194,7 @@ pub fn estimate_item_tokens(item: &ConversationItem) -> u64 {
             bytes as u64 / token_estimation::BYTES_PER_TOKEN
                 + token_estimation::estimate_image_tokens(images)
         }
+        ConversationItem::AgentMessage(batch) => estimate_agent_message_tokens(batch),
         ConversationItem::BackendToolCall(b) => {
             token_estimation::estimate_tokens(&b.text_summary())
         }
@@ -177,8 +215,8 @@ pub fn estimate_conversation_tokens(items: &[ConversationItem]) -> u64 {
 ///
 /// Where another host plugs a real BPE tokenizer into the same seam,
 /// grow-build estimates instead, reusing [`estimate_item_tokens`] so the
-/// per-variant arithmetic (images, reasoning blobs, tool-call args) stays in
-/// one place.
+/// per-variant arithmetic (images, reasoning blobs, tool-call args and runtime
+/// receive pairs) stays in one place.
 pub struct EstimatedItemTokenCounter;
 
 impl compaction::ItemTokenCounter<ConversationItem> for EstimatedItemTokenCounter {
@@ -427,7 +465,7 @@ pub(crate) struct ContinuationLane {
     portable_prefix_len: usize,
     observed_projection: Vec<(SurfaceId, blake3::Hash)>,
     spans: Vec<NativeSpanRecord>,
-    replay_portable_responses_reasoning: bool,
+    portable_reasoning_backend: Option<sampling_types::ApiBackend>,
 }
 
 impl ContinuationLane {
@@ -438,7 +476,7 @@ impl ContinuationLane {
             portable_prefix_len,
             observed_projection: Vec::new(),
             spans: Vec::new(),
-            replay_portable_responses_reasoning: false,
+            portable_reasoning_backend: None,
         }
     }
 
@@ -448,7 +486,10 @@ impl ContinuationLane {
         portable_prefix_len: usize,
         reason: &'static str,
     ) {
-        let replay_portable_responses_reasoning = self.replay_portable_responses_reasoning;
+        let portable_reasoning_backend = self
+            .portable_reasoning_backend
+            .clone()
+            .filter(|learned| *learned == backend);
         tracing::info!(
             reason,
             ?backend,
@@ -456,7 +497,7 @@ impl ContinuationLane {
             "reset native continuation epoch"
         );
         *self = Self::new(backend, portable_prefix_len);
-        self.replay_portable_responses_reasoning = replay_portable_responses_reasoning;
+        self.portable_reasoning_backend = portable_reasoning_backend;
     }
 
     pub(super) fn replace_route(
@@ -472,19 +513,24 @@ impl ContinuationLane {
         *self = Self::new(backend, portable_prefix_len);
     }
 
-    pub(super) fn enable_portable_responses_reasoning(&mut self, has_reasoning: bool) -> bool {
-        if self.backend != sampling_types::ApiBackend::Responses
-            || !has_reasoning
-            || self.replay_portable_responses_reasoning
+    pub(super) fn enable_portable_reasoning(
+        &mut self,
+        backend: sampling_types::ApiBackend,
+        changes_history: bool,
+    ) -> bool {
+        if self.backend != backend
+            || backend == sampling_types::ApiBackend::Messages
+            || !changes_history
+            || self.portable_reasoning_backend.is_some()
         {
             return false;
         }
-        self.replay_portable_responses_reasoning = true;
+        self.portable_reasoning_backend = Some(backend);
         true
     }
 
-    pub(super) fn replays_portable_responses_reasoning(&self) -> bool {
-        self.replay_portable_responses_reasoning
+    pub(super) fn portable_reasoning_backend(&self) -> Option<sampling_types::ApiBackend> {
+        self.portable_reasoning_backend.clone()
     }
 
     pub(super) fn epoch_nonce(&self) -> &str {
@@ -565,7 +611,7 @@ impl ContinuationLane {
         NativeContinuationProjection {
             portable_prefix_len: self.portable_prefix_len.min(current_ids.len()),
             spans,
-            replay_portable_responses_reasoning: self.replay_portable_responses_reasoning,
+            portable_reasoning_backend: self.portable_reasoning_backend.clone(),
         }
     }
 }
@@ -740,6 +786,25 @@ mod tests {
         assert_eq!(estimate_system_message_tokens(&asst), 0);
         let tr = ConversationItem::tool_result("call-1", "x".repeat(4000).as_str());
         assert_eq!(estimate_system_message_tokens(&tr), 0);
+    }
+
+    #[test]
+    fn estimate_agent_message_tokens_includes_projected_identity_and_result() {
+        let item = ConversationItem::received_agent_message(sampling_types::AgentMessage {
+            receipt_id: "receipt-1".into(),
+            source_session_id: "source-session".into(),
+            target_session_id: "target-session".into(),
+            message_id: "message-1".into(),
+            reply_to: Some(sampling_types::AgentMessageRef {
+                source_session_id: "target-session".into(),
+                message_id: "parent-1".into(),
+            }),
+            message: "body\twith\r\nsource identity".into(),
+        });
+
+        let tokens = estimate_item_tokens(&item);
+        assert!(tokens > 0);
+        assert!(tokens > token_estimation::estimate_tokens("body\twith\r\nsource identity"));
     }
 
     #[test]

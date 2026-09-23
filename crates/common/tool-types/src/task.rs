@@ -800,7 +800,9 @@ pub fn build_task_description(subagents: &[SubagentDescriptor], naming: &TaskToo
          ## Usage notes\n\
          - When the agent is done, it returns a single message with its agent ID. Use that ID to resume the agent later for follow-up work.\n\
          - {run_in_background_param}: Returns immediately with a subagent_id. Use {background_retrieval_tool} to retrieve results. This is set to true by default.\n\
-         - Subagents receive a compacted version of project instructions (AGENTS.md). If the task requires detailed conventions (e.g., build rules, testing patterns), include the relevant rules directly in the prompt.\n\
+         - Describe the objective, necessary inputs and unresolved assumptions, expected deliverable, write boundaries, and acceptance criteria. Include the task-specific evidence and constraints needed to work independently. Keep the assignment proportional to its scope; no fixed report schema is required.\n\
+         - Use {run_in_background_param}=true when useful independent work can proceed alongside the subagent. If no worthwhile independent work remains, wait through the available task mechanism. A returned result still requires verification appropriate to its intended use.\n\
+         - The runtime supplies project-instruction and capability context. Include task-specific constraints and relevant evidence in the assignment; do not assume that the child knows your unstated decisions or current plan. Refer to applicable project instructions instead of inventing or overriding them.\n\
          - When using the {task_tool} tool, you must specify a {subagent_type_param} parameter to select which agent type to use.\n\n\
          Resuming a previous agent (resume_from):\n\
          - Use {resume_from_param} to continue a previously completed subagent's conversation. Pass the subagent_id returned by a prior {task_tool} call. A resumed agent keeps its full transcript and tool state, so you only need to describe what changed since the last run — don't re-explain the original task.\n\
@@ -953,6 +955,7 @@ pub fn build_task_output_description(naming: &TaskOutputToolNaming) -> String {
          Usage notes:\n\
          - Pass {task_ids_param} with one or more ids from {sources}{monitor_note}; for a single task use a one-element array. Multiple ids with a positive {timeout_ms_param} wait until all complete\n\
          - Omit {timeout_ms_param} or pass 0 for a non-blocking status snapshot; set a positive {timeout_ms_param} to wait up to that many milliseconds, capped at {wait_cap}\n\
+         - Wait for multiple tasks together only when the next useful step requires all of their results. Otherwise, inspect available results at natural checkpoints and advance work whose prerequisites are satisfied. Do not repeatedly request unchanged snapshots without a decision-relevant reason.\n\
          - Returns current output, status, and exit code if completed{read_note}"
     )
 }
@@ -1138,6 +1141,10 @@ mod tests {
             },
         ];
         let desc = build_task_description(&subagents, &literal_naming());
+        println!(
+            "task description (two test agents, literal names): {} bytes",
+            desc.len()
+        );
         assert!(desc.starts_with("Start a subagent that works on a task independently"));
         assert!(desc.contains("Agent types:"));
         assert!(
@@ -1151,6 +1158,9 @@ mod tests {
         ));
         assert!(desc.contains("you must specify a subagent_type parameter"));
         assert!(desc.contains("Use resume_from to continue"));
+        assert!(desc.contains("Use run_in_background=true when useful independent work"));
+        assert!(desc.contains("The runtime supplies project-instruction and capability context"));
+        assert!(!desc.contains("compacted version of project instructions"));
     }
 
     #[test]
@@ -1321,6 +1331,9 @@ mod tests {
             "${{ params.task.run_in_background }}: Returns immediately with a subagent_id. Use ${{ tools.by_kind.background_task_action }} to retrieve results. This is set to true by default."
         ));
         assert!(desc.contains("Use ${{ params.task.isolation }} to control"));
+        assert!(desc.contains(
+            "Use ${{ params.task.run_in_background }}=true when useful independent work"
+        ));
     }
 
     // ── Lifecycle tool descriptions ──────────────────────────────────────
@@ -1454,12 +1467,17 @@ mod tests {
             timeout_ms_param: "timeout_ms",
             task_id_param: "task_id",
         });
+        println!(
+            "task output description (CLI default): {} bytes",
+            desc.len()
+        );
         assert_eq!(
             desc,
             "Get output and status from a background task, monitor, or subagent.\n\n\
              Usage notes:\n\
              - Pass task_ids with one or more ids from background=true commands or subagents (a monitor's task_id is returned by monitor); for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
              - Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at {max_wait_ms}\n\
+             - Wait for multiple tasks together only when the next useful step requires all of their results. Otherwise, inspect available results at natural checkpoints and advance work whose prerequisites are satisfied. Do not repeatedly request unchanged snapshots without a decision-relevant reason.\n\
              - Returns current output, status, and exit code if completed\n\
              - If output is large, use read_file on the output_file path"
         );
@@ -1482,6 +1500,7 @@ mod tests {
              Usage notes:\n\
              - Pass task_ids with one or more ids from run_in_background=true subagents; for a single task use a one-element array. Multiple ids with a positive timeout_ms wait until all complete\n\
              - Omit timeout_ms or pass 0 for a non-blocking status snapshot; set a positive timeout_ms to wait up to that many milliseconds, capped at {max_wait_ms}\n\
+             - Wait for multiple tasks together only when the next useful step requires all of their results. Otherwise, inspect available results at natural checkpoints and advance work whose prerequisites are satisfied. Do not repeatedly request unchanged snapshots without a decision-relevant reason.\n\
              - Returns current output, status, and exit code if completed\n\
              - If output is large, use read_file on the output_file path"
         );

@@ -3809,6 +3809,7 @@ fn resident_response_snapshot_delivers_future_projection_once_before_tools() {
                         .write_all(tail.as_bytes())
                         .unwrap();
                 }
+                let physical_before_delta = std::fs::read(&path).unwrap();
                 for completion in agent.replay_session_updates_from_offset_enqueue(
                     &sid,
                     &directory,
@@ -3837,6 +3838,11 @@ fn resident_response_snapshot_delivers_future_projection_once_before_tools() {
                     visible,
                     ["thought", "answer", "tool"],
                     "admitted={already_admitted}, cursor={cursor:?}"
+                );
+                assert_eq!(
+                    std::fs::read(&path).unwrap(),
+                    physical_before_delta,
+                    "replay reconciliation must not rewrite the updates ledger; admitted={already_admitted}, cursor={cursor:?}"
                 );
                 drain.abort();
             }

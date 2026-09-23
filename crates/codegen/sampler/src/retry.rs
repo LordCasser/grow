@@ -595,6 +595,45 @@ mod tests {
     }
 
     #[test]
+    fn named_provider_error_codes_preserve_bounded_retry_policy() {
+        for code in [
+            "InvalidParameter",
+            "DataInspectionFailed",
+            "VendorUnmappedCode",
+        ] {
+            let error = SamplingError::from_stream_error(code, "provider rejection");
+            assert!(matches!(
+                classify_error(&error, 0, 5, RATE_LIMIT_RETRY_THRESHOLD),
+                RetryDecision::Fatal(_)
+            ));
+        }
+
+        let throttled = SamplingError::from_stream_error("Throttling", "slow down");
+        assert!(matches!(
+            classify_error(&throttled, 0, 5, RATE_LIMIT_RETRY_THRESHOLD),
+            RetryDecision::RetryWithBackoff {
+                is_rate_limited: true,
+                ..
+            }
+        ));
+        assert!(matches!(
+            classify_error(
+                &throttled,
+                RATE_LIMIT_RETRY_THRESHOLD - 1,
+                5,
+                RATE_LIMIT_RETRY_THRESHOLD
+            ),
+            RetryDecision::Fatal(_)
+        ));
+
+        let overloaded = SamplingError::from_stream_error("overloaded_error", "busy");
+        assert!(matches!(
+            classify_error(&overloaded, 0, 5, RATE_LIMIT_RETRY_THRESHOLD),
+            RetryDecision::Retry { .. } | RetryDecision::RetryWithClientRebuild { .. }
+        ));
+    }
+
+    #[test]
     fn classify_idle_timeout_is_retryable() {
         let err = SamplingError::IdleTimeout { elapsed_secs: 300 };
         match classify_error(&err, 0, 5, RATE_LIMIT_RETRY_THRESHOLD) {

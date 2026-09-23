@@ -20,6 +20,7 @@ mod project_instructions_idempotence_tests;
 mod prompt_context_persistence_tests;
 mod prompt_mode_transition_tests;
 mod read_file_image_description_tests;
+mod mcp_result_tests;
 mod recap_display_only_tests;
 mod record_response_token_usage_tests;
 mod sampling_attempt_delivery_tests;

@@ -116,6 +116,11 @@ impl ScreenTracker {
             .join("\n")
     }
 
+    /// Copy projection with the terminal emulator's WRAPLINE flags applied.
+    pub fn scrollback_copy_text(&self) -> String {
+        self.terminal.scrollback_copy_text()
+    }
+
     /// Scrollback history plus the visible screen, joined oldest→newest:
     /// everything a user could see by scrolling up. Minimal-mode committed
     /// content may be in either region depending on how much has accumulated,

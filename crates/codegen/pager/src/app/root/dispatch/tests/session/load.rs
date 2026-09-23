@@ -1,6 +1,30 @@
 //! Tests for session loading, restore, pickers, and deep search.
 use super::*;
 use shell::session::unified_list::ListScope;
+
+/// Override the pager-render owned thread-local cache for queue-drain tests.
+///
+/// The production drain reads the cache rather than `AppView::current_ui`, so
+/// these tests must pin the setting explicitly. The cache is thread-local;
+/// restoring the previous value keeps this helper safe for parallel tests.
+struct CombineQueuedPromptsGuard {
+    previous: bool,
+}
+
+impl CombineQueuedPromptsGuard {
+    fn set(enabled: bool) -> Self {
+        let previous = crate::appearance::cache::load_combine_queued_prompts();
+        crate::appearance::cache::set_combine_queued_prompts(enabled);
+        Self { previous }
+    }
+}
+
+impl Drop for CombineQueuedPromptsGuard {
+    fn drop(&mut self) {
+        crate::appearance::cache::set_combine_queued_prompts(self.previous);
+    }
+}
+
 #[test]
 fn follow_up_chip_bypasses_project_picker() {
     let mut app = test_app_with_agent();
@@ -585,6 +609,7 @@ fn resume_known_session_id_loads_not_creates() {
 }
 #[test]
 fn session_loaded_drains_pending_first_prompt_to_front() {
+    let _combine = CombineQueuedPromptsGuard::set(false);
     let mut app = fork_test_app();
     dispatch(
         Action::Fork(fork_args(Some(false), Some("first directive"))),
@@ -597,7 +622,7 @@ fn session_loaded_drains_pending_first_prompt_to_front() {
         .session
         .enqueue_prompt("user-typed prompt".into());
     app.agents.get_mut(&new_id).unwrap().session.session_id = Some("new-fork-sid".into());
-    dispatch(
+    let effects = dispatch(
         Action::TaskComplete(TaskResult::SessionLoaded {
             agent_id: new_id,
             session_id: "new-fork-sid".into(),
@@ -608,6 +633,27 @@ fn session_loaded_drains_pending_first_prompt_to_front() {
         }),
         &mut app,
     );
+    assert!(
+        effects.iter().any(|effect| matches!(
+            effect,
+            Effect::SendPrompt { text, .. } if text == "first directive"
+        )),
+        "the pending directive must be sent before the typed prompt: {effects:?}"
+    );
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(effect, Effect::SendPrompt { .. }))
+            .count(),
+        1,
+        "the directive must be sent exactly once",
+    );
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::SendPromptBlocks { .. })),
+        "combining is disabled for the single-prompt drain scenario: {effects:?}"
+    );
     let queue: Vec<_> = app.agents[&new_id]
         .session
         .pending_prompts
@@ -615,9 +661,100 @@ fn session_loaded_drains_pending_first_prompt_to_front() {
         .map(|p| p.text.clone())
         .collect();
     assert_eq!(queue, vec!["user-typed prompt".to_string()]);
+    let in_flight = app.agents[&new_id]
+        .session
+        .in_flight_prompt
+        .as_ref()
+        .expect("the drained directive must become the in-flight prompt");
+    assert_eq!(in_flight.text, "first directive");
+    assert!(in_flight.images.is_empty());
+    assert!(in_flight.combined_scrollback_entries.is_empty());
+    assert!(in_flight.chip_elements.is_empty());
     assert!(
         app.agents[&new_id].pending_first_prompt.is_none(),
         "drained prompt must be cleared"
+    );
+}
+
+#[test]
+fn session_loaded_combines_pending_first_prompt_before_typed_prompt() {
+    let _combine = CombineQueuedPromptsGuard::set(true);
+    let mut app = fork_test_app();
+    dispatch(
+        Action::Fork(fork_args(Some(false), Some("first directive"))),
+        &mut app,
+    );
+    let new_id = AgentId(1);
+    app.agents
+        .get_mut(&new_id)
+        .unwrap()
+        .session
+        .enqueue_prompt("user-typed prompt".into());
+    app.agents.get_mut(&new_id).unwrap().session.session_id = Some("new-fork-sid".into());
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionLoaded {
+            agent_id: new_id,
+            session_id: "new-fork-sid".into(),
+            models: None,
+            code_restored: false,
+            restore_summary: None,
+            foreground: None,
+        }),
+        &mut app,
+    );
+
+    let block = effects.iter().find_map(|effect| {
+        let Effect::SendPromptBlocks { blocks, images, .. } = effect else {
+            return None;
+        };
+        if !images.is_empty() || blocks.len() != 1 {
+            return None;
+        }
+        let acp::ContentBlock::Text(block) = &blocks[0] else {
+            return None;
+        };
+        Some(block)
+    });
+    let block = block.expect("combined load drain must send one text block");
+    assert_eq!(
+        effects
+            .iter()
+            .filter(|effect| matches!(
+                effect,
+                Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }
+            ))
+            .count(),
+        1,
+        "the combined prompt must be sent exactly once",
+    );
+    assert_eq!(block.text, "first directive\n\nuser-typed prompt");
+    let segments = block
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get(crate::app::prompt_queue::COMBINED_DISPLAY_TEXTS_META))
+        .and_then(serde_json::Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(serde_json::Value::as_str)
+                .collect::<Vec<_>>()
+        })
+        .expect("combined prompt must retain ordered display segments");
+    assert_eq!(segments, vec!["first directive", "user-typed prompt"]);
+
+    let session = &app.agents[&new_id].session;
+    assert!(session.pending_prompts.is_empty());
+    let in_flight = session
+        .in_flight_prompt
+        .as_ref()
+        .expect("the combined drain must become the in-flight prompt");
+    assert_eq!(in_flight.text, "first directive\n\nuser-typed prompt");
+    assert_eq!(in_flight.combined_scrollback_entries.len(), 1);
+    assert!(in_flight.images.is_empty());
+    assert!(in_flight.chip_elements.is_empty());
+    assert!(
+        app.agents[&new_id].pending_first_prompt.is_none(),
+        "combined drain must still clear the parked first prompt"
     );
 }
 

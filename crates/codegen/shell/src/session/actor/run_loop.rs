@@ -1480,9 +1480,11 @@ pub(super) async fn run_session(
                         let state = session.state.lock().await;
                         let _ = respond_to.send(state.foreground.snapshot());
                     }
-                    SessionCommand::ReceiveParentMessage { source_session_id, message_id, message, interrupt, respond_to } => {
-                        let result = session.receive_parent_message(source_session_id, message_id, message, interrupt).await;
+                    SessionCommand::ReceiveAgentMessage { source_session_id, message_id, message, interrupt, reply_to, respond_to } => {
+                        let result = session.receive_agent_message(source_session_id, message_id, message, interrupt, reply_to).await;
+                        let accepted = result.is_ok();
                         let _ = respond_to.send(result);
+                        if accepted { SessionActor::maybe_drain_notifications(session.clone(), completion_tx.clone()).await; }
                     }
                     SessionCommand::ReceiveNotification {
                         source,
@@ -1501,6 +1503,7 @@ pub(super) async fn run_session(
                             | chat_state::NotificationSource::TaskStillRunning { .. }
                             | chat_state::NotificationSource::PlanHandoff { .. }
                             | chat_state::NotificationSource::ParentMessage { .. }
+                | chat_state::NotificationSource::AgentReply { .. }
                             | chat_state::NotificationSource::WorkflowHandoff { .. } => None,
                         };
                         let admission = session

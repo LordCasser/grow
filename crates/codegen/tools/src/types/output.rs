@@ -751,6 +751,28 @@ impl ToolOutput {
         }
     }
 }
+
+/// Reattach images after an in-process typed dispatch crosses a JSON `value`
+/// conversion. The image blocks live only in `TypedToolOutput.model_output`;
+/// ACP `raw_output` still receives the redacted serialized `ToolOutput`.
+pub(crate) fn restore_mcp_images(
+    output: ToolOutput,
+    blocks: Vec<tool_runtime::ContentBlock>,
+) -> ToolOutput {
+    let ToolOutput::MCP(mcp) = output else {
+        return output;
+    };
+    let images = blocks
+        .into_iter()
+        .filter_map(|block| match block {
+            tool_runtime::ContentBlock::Image {
+                mime_type, data, ..
+            } => Some(crate::util::base64_images::ExtractedImage { data, mime_type }),
+            _ => None,
+        })
+        .collect();
+    ToolOutput::MCP(mcp.with_extracted_images(images))
+}
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct TodoWriteSuccess {
     pub summary_for_prompt: String,
@@ -798,6 +820,10 @@ pub struct MCPOutput {
     tool_name: String,
     server_name: String,
     output: MCPOutputDetails,
+    /// Runtime-only attachments. The Shell projects these into Timeline image
+    /// follow-ups; serializing them into ACP raw_output would leak base64.
+    #[serde(skip)]
+    extracted_images: Vec<crate::util::base64_images::ExtractedImage>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub reconnect_attempted: bool,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
@@ -813,6 +839,7 @@ impl MCPOutput {
             tool_name,
             server_name,
             output: MCPOutputDetails::OkayOutput(output),
+            extracted_images: Vec::new(),
             reconnect_attempted: false,
             auth_retry_attempted: false,
             is_timeout: false,
@@ -824,6 +851,7 @@ impl MCPOutput {
             tool_name,
             server_name,
             output: MCPOutputDetails::Error(error),
+            extracted_images: Vec::new(),
             reconnect_attempted: false,
             auth_retry_attempted: false,
             is_timeout: false,
@@ -836,8 +864,43 @@ impl MCPOutput {
     pub fn output_mut(&mut self) -> &mut MCPOutputDetails {
         &mut self.output
     }
+
+    pub fn with_extracted_images(
+        mut self,
+        images: Vec<crate::util::base64_images::ExtractedImage>,
+    ) -> Self {
+        self.extracted_images = images;
+        self
+    }
+
+    pub fn extracted_images(&self) -> &[crate::util::base64_images::ExtractedImage] {
+        &self.extracted_images
+    }
 }
 impl tool_runtime::ToolOutput for ToolOutput {
+    fn model_output(&self) -> Vec<tool_runtime::ContentBlock> {
+        let ToolOutput::MCP(mcp) = self else {
+            return Vec::new();
+        };
+        if mcp.extracted_images().is_empty() {
+            return Vec::new();
+        }
+        let mut blocks = vec![tool_runtime::ContentBlock::Text {
+            text: self.to_prompt_format(),
+        }];
+        blocks.extend(mcp.extracted_images().iter().map(|image| {
+            tool_runtime::ContentBlock::Image {
+                mime_type: image.mime_type.clone(),
+                data: image.data.clone(),
+                media_id: None,
+                filename: None,
+                path: None,
+                metadata: Default::default(),
+            }
+        }));
+        blocks
+    }
+
     fn chat_completion_output(&self) -> Option<tool_runtime::ToolChatCompletionResponse> {
         match self {
             Self::Bash(bash) => tool_runtime::ToolOutput::chat_completion_output(bash),
@@ -902,6 +965,34 @@ mod tests {
     use serde_json::json;
     use tool_types::KillTaskResult;
     use tool_types::TaskOutputResult;
+
+    #[test]
+    fn mcp_runtime_image_crosses_typed_dispatch_without_raw_output_leak() {
+        let output = ToolOutput::MCP(
+            MCPOutput::okay_output(
+                "image".to_owned(),
+                "server".to_owned(),
+                "[image content will be provided separately]".to_owned(),
+            )
+            .with_extracted_images(vec![crate::util::base64_images::ExtractedImage {
+                data: "A".repeat(2048),
+                mime_type: "image/png".to_owned(),
+            }]),
+        );
+        let blocks = tool_runtime::ToolOutput::model_output(&output);
+        assert!(matches!(
+            &blocks[1],
+            tool_runtime::ContentBlock::Image { .. }
+        ));
+        let wire = serde_json::to_value(&output).unwrap();
+        assert!(!wire.to_string().contains(&"A".repeat(2048)));
+        let restored = restore_mcp_images(serde_json::from_value(wire).unwrap(), blocks);
+        let ToolOutput::MCP(restored) = restored else {
+            panic!("expected MCP output");
+        };
+        assert_eq!(restored.extracted_images()[0].data, "A".repeat(2048));
+    }
+
     /// Serialize a ToolOutput to JSON value
     fn to_json(output: ToolOutput) -> serde_json::Value {
         serde_json::to_value(&output).unwrap()

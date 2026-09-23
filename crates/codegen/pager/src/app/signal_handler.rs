@@ -223,7 +223,10 @@ fn shutdown_with_terminal_restore(exit_code: i32) -> ! {
     };
     // Signal-path shutdown has no terminal handle, so fall back to the screen
     // bottom for the final cursor position.
-    super::emit_terminal_teardown_sequences(mode, None);
+    let _ = super::bounded_teardown(
+        move || super::emit_terminal_teardown_sequences(mode, None),
+        std::time::Duration::from_millis(250),
+    );
     let _ = crossterm::terminal::disable_raw_mode();
     // Mark after teardown so concurrent paths see TERMINAL_OWNED == true
     // until all escape sequences and tcsetattr have been written.

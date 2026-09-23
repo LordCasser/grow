@@ -1,11 +1,11 @@
-//! Shared startup terminal-probe primitive: write a query, and (OSC 11
-//! only) raw-fd poll/read stdin until a terminator or deadline.
+//! Shared terminal-probe primitives: startup queries and the teardown DA1
+//! fence's bounded write/read.
 //! XTVERSION uses only `write_query`;
 //! its reply is handled by the event loop's response filter.
 //!
 //! Safety invariants (timed-read path):
-//! - Startup-only: must run before crossterm's `EventStream` exists (both
-//!   compete for stdin).
+//! - Startup reads run before crossterm's reader exists; teardown reads run
+//!   only after that reader has exited. Both compete for stdin otherwise.
 //! - Keystrokes typed inside the read window are consumed and dropped — no
 //!   portable re-injection exists (TIOCSTI is blocked); accepted loss.
 
@@ -40,6 +40,121 @@ pub(crate) fn write_query(query: &[u8]) -> bool {
         stderr.flush()
     });
     write_result.is_ok()
+}
+
+/// Write a teardown query through the render fd with one deadline covering
+/// stderr lock acquisition and the tty write. A failed write sends no reply
+/// reader into stdin.
+#[cfg(unix)]
+pub(crate) fn write_query_until(query: &[u8], deadline: std::time::Instant) -> bool {
+    use std::io::IsTerminal;
+    use std::os::unix::io::AsRawFd;
+
+    let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+    client_support::stderr::try_with_locked_stderr_for(remaining, |stderr| {
+        stderr.is_terminal() && write_all_until(stderr.as_raw_fd(), query, deadline)
+    })
+    .unwrap_or(false)
+}
+
+#[cfg(unix)]
+fn write_all_until(fd: i32, mut bytes: &[u8], deadline: std::time::Instant) -> bool {
+    let original_flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if original_flags < 0 {
+        return false;
+    }
+    if original_flags & libc::O_NONBLOCK == 0
+        && unsafe { libc::fcntl(fd, libc::F_SETFL, original_flags | libc::O_NONBLOCK) } < 0
+    {
+        return false;
+    }
+    let written = (|| {
+        while !bytes.is_empty() {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                return false;
+            }
+            let mut pfd = libc::pollfd {
+                fd,
+                events: libc::POLLOUT,
+                revents: 0,
+            };
+            let timeout = remaining
+                .as_millis()
+                .saturating_add(1)
+                .min(i32::MAX as u128) as i32;
+            let ready = unsafe { libc::poll(&mut pfd, 1, timeout) };
+            if ready < 0 {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return false;
+            }
+            if ready == 0 {
+                continue;
+            }
+            let count = unsafe { libc::write(fd, bytes.as_ptr().cast(), bytes.len()) };
+            if count < 0 {
+                if matches!(
+                    std::io::Error::last_os_error().kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ) {
+                    continue;
+                }
+                return false;
+            }
+            bytes = &bytes[count as usize..];
+        }
+        true
+    })();
+    // The duplicated fd normally shares the same open file description as
+    // the render fd. Do not leave its nonblocking flag set for the shell.
+    let restored = loop {
+        if unsafe { libc::fcntl(fd, libc::F_SETFL, original_flags) } >= 0 {
+            break true;
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != std::io::ErrorKind::Interrupted || std::time::Instant::now() >= deadline
+        {
+            tracing::warn!(%error, "could not restore tty file-status flags");
+            break false;
+        }
+    };
+    written && restored
+}
+
+/// Crossterm reads stdin when it is a TTY, otherwise the controlling TTY.
+#[cfg(unix)]
+pub(crate) enum TtyInput {
+    Stdin,
+    Controlling(std::fs::File),
+}
+
+#[cfg(unix)]
+impl TtyInput {
+    pub(crate) fn fd(&self) -> i32 {
+        use std::os::unix::io::AsRawFd;
+
+        match self {
+            Self::Stdin => libc::STDIN_FILENO,
+            Self::Controlling(file) => file.as_raw_fd(),
+        }
+    }
+}
+
+#[cfg(unix)]
+pub(crate) fn tty_input() -> Option<TtyInput> {
+    use std::io::IsTerminal;
+
+    if std::io::stdin().is_terminal() {
+        return Some(TtyInput::Stdin);
+    }
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/tty")
+        .ok()
+        .map(TtyInput::Controlling)
 }
 
 /// Read stdin until `is_terminated`, the size cap, or the deadline.
@@ -112,16 +227,17 @@ fn finish_after_deadline(
 }
 
 #[cfg(unix)]
-enum PollRead {
+pub(crate) enum PollRead {
     Byte(u8),
     Interrupted,
     Timeout,
     Error,
 }
 
-/// One EINTR-retrying poll-then-read step for a single byte.
+/// One poll-then-read step for a single byte. Callers recompute their deadline
+/// after an interrupted read rather than retrying here without a bound.
 #[cfg(unix)]
-fn poll_read_byte(fd: i32, timeout_ms: i32) -> PollRead {
+pub(crate) fn poll_read_byte(fd: i32, timeout_ms: i32) -> PollRead {
     let mut pfd = libc::pollfd {
         fd,
         events: libc::POLLIN,
@@ -140,17 +256,15 @@ fn poll_read_byte(fd: i32, timeout_ms: i32) -> PollRead {
         };
     }
 
-    loop {
-        let mut byte = [0u8; 1];
-        // SAFETY: byte is a valid buffer of length 1.
-        let n = unsafe { libc::read(fd, byte.as_mut_ptr().cast(), 1) };
-        if n == 1 {
-            return PollRead::Byte(byte[0]);
-        }
-        if n < 0 && last_errno_is_eintr() {
-            continue;
-        }
-        return PollRead::Error;
+    let mut byte = [0u8; 1];
+    // SAFETY: byte is a valid buffer of length 1.
+    let n = unsafe { libc::read(fd, byte.as_mut_ptr().cast(), 1) };
+    if n == 1 {
+        PollRead::Byte(byte[0])
+    } else if n < 0 && last_errno_is_eintr() {
+        PollRead::Interrupted
+    } else {
+        PollRead::Error
     }
 }
 

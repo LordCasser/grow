@@ -281,12 +281,20 @@ mod tests {
         assert!(PRIMARY_AUDIENCE_PROMPT.contains("not to hand off the problem as a whole"));
         assert!(PRIMARY_AUDIENCE_PROMPT.contains("While delegated work runs"));
         assert!(PRIMARY_AUDIENCE_PROMPT.contains("Wait only when"));
+        assert!(
+            PRIMARY_AUDIENCE_PROMPT.contains("Treat returned results as candidates for acceptance")
+        );
+        assert!(PRIMARY_AUDIENCE_PROMPT.contains("Confirm a safe handoff before taking over"));
     }
 
     #[test]
     fn subagent_audience_returns_evidence_without_expanding_scope() {
         assert!(SUBAGENT_AUDIENCE_PROMPT.contains("supporting evidence and paths"));
         assert!(SUBAGENT_AUDIENCE_PROMPT.contains("instead of silently expanding"));
+        assert!(SUBAGENT_AUDIENCE_PROMPT.contains("stop the affected work"));
+        assert!(
+            SUBAGENT_AUDIENCE_PROMPT.contains("return completed work and the specific blocker")
+        );
     }
 
     // ── Determinism ─────────────────────────────────────────────────

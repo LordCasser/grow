@@ -1,0 +1,10 @@
+incident_flat_error: serialization error: missing field `type` at line 1 column 138
+  classification: Fatal(Serialization(Error("missing field `type`", line: 1, column: 138)))
+recognized_rejection: API error (status 400 Bad Request): InvalidParameter: Output data may contain inappropriate content.
+  classification: Fatal(Api { status: 400, message: "InvalidParameter: Output data may contain inappropriate content.", model_metadata: None, retry_after_secs: None, should_retry: None })
+recognized_overload: API error (status 529 <unknown status code>): overloaded_error: temporary overload
+  classification: RetryWithClientRebuild { backoff: 2.249s }
+code mapping DataInspectionFailed: API error (status 500 Internal Server Error): DataInspectionFailed: fixture; retryable=true
+code mapping data_inspection_failed: API error (status 500 Internal Server Error): data_inspection_failed: fixture; retryable=true
+code mapping Throttling: API error (status 500 Internal Server Error): Throttling: fixture; retryable=true
+code mapping ServiceUnavailable: API error (status 529 <unknown status code>): ServiceUnavailable: fixture; retryable=true

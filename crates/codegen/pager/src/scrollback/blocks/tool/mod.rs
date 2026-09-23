@@ -527,6 +527,7 @@ impl ToolCallBlock {
                 Some(b.summary.clone()),
                 b.output.clone(),
                 b.error.clone(),
+                b.communication_body().map(|body| body.raw_text()),
             ]),
             ToolCallBlock::Lifecycle(b) => join_searchable([Some(b.name.clone())]),
         }

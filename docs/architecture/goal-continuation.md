@@ -1,4 +1,4 @@
-# Long-term Goal runtime v9
+# Long-term Goal runtime v10
 
 Goal is one durable objective plus the right to request another turn after the session becomes idle. It is not a plan executor and owns no blackboard, task graph, planner/verifier child, or finalization phase.
 
@@ -13,6 +13,12 @@ enum GoalStatus {
     Complete,
 }
 
+struct GoalTokenUsage {
+    cached_input_tokens: u64,
+    uncached_input_tokens: u64,
+    output_tokens: u64,
+}
+
 struct GoalState {
     architecture_version: u8,
     goal_id: String,
@@ -21,6 +27,9 @@ struct GoalState {
     status: GoalStatus,
     token_budget: Option<i64>,
     tokens_used: i64,
+    usage_breakdown: Option<GoalTokenUsage>,
+    usage_incomplete: bool,
+    usage_incomplete_acknowledged: bool,
     elapsed_ms: u64,
     created_at: String,
     updated_at: String,
@@ -31,7 +40,7 @@ struct GoalState {
 
 Goal and the selected Behavior are written together in the versioned Timeline `Control` snapshot. The Timeline is the only persistence authority. A transition publishes UI state only after the durable append succeeds; failure restores the prior in-memory Goal. Create, edit, restart, complete, and clear therefore cannot expose a half-applied Goal/Behavior pair.
 
-Goal architecture v9 deliberately rejects older snapshots. `goal_id` is the stable identity of one long-lived Goal and changes only after explicit clear plus create. `definition_revision` advances when the user-controlled objective or token budget changes and invalidates stale continuation directives. Keeping identity and revision separate means an edit can cancel old execution without orphaning usage from work admitted before the edit; pause/restart likewise preserves the owner so late terminal receipts settle against the Goal that admitted them. Restart only resets stopped lifecycle state and the blocked audit. Lifecycle and accounting checkpoints cannot invalidate model context. `tokens_used` is cumulative model consumption—full input (including cache hits) plus output from each admitted primary-Agent call and each acknowledged usage fold from a Goal-owned child. It never derives from current context pressure, so compaction, pruning, provider anchors, and request shadows cannot decrease or replay the budget. Planner/blackboard state is not projected or migrated because that would keep two lifecycle models alive.
+Goal architecture v10 deliberately rejects snapshots from another architecture version; it does not project older planner/blackboard state into the current lifecycle model. `goal_id` is the stable identity of one long-lived Goal and changes only after explicit clear plus create. `definition_revision` advances when the user-controlled objective or token budget changes and invalidates stale continuation directives. Keeping identity and revision separate means an edit can cancel old execution without orphaning usage from work admitted before the edit; pause/restart likewise preserves the owner so late terminal receipts settle against the Goal that admitted them. Restart only resets stopped lifecycle state and the blocked audit. Lifecycle and accounting checkpoints cannot invalidate model context. `tokens_used` is cumulative model consumption—full input (including cache hits) plus output from each admitted primary-Agent call and each acknowledged usage fold from a Goal-owned child. `usage_breakdown` retains the categorized counters when available; `usage_incomplete` marks an unclassified historical or missing-usage lower bound, and its acknowledgement does not invent missing categories. The total never derives from current context pressure, so compaction, pruning, provider anchors, and request shadows cannot decrease or replay the budget.
 
 ## Lifecycle ownership
 

@@ -11,7 +11,11 @@ use tools::util::image_compress::{FilterType, ReEncodeParams, re_encode_under_li
 #[derive(Debug)]
 enum NormalizedEntry {
     Unchanged,
-    Compressed { bytes: Bytes, mime: Cow<'static, str>, info: ImageCompressionInfo },
+    Compressed {
+        bytes: Bytes,
+        mime: Cow<'static, str>,
+        info: ImageCompressionInfo,
+    },
     ReEncodingOversized,
 }
 #[derive(Debug, thiserror::Error)]
@@ -138,14 +142,21 @@ impl ImageCompressionInfo {
         )
     }
 }
+/// One image dropped before send: stable input index plus the exact reason.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DroppedImage {
+    pub index: usize,
+    pub reason: String,
+}
 #[derive(Default)]
 pub struct NormalizeResult {
     pub images: Vec<ImageContent>,
     pub compressed: Vec<ImageCompressionInfo>,
     pub re_encode_fallbacks: Vec<String>,
     /// Images dropped entirely (integrity failure, too small, etc.).
-    /// Surfaced via [`render_image_dropped_notice`].
-    pub dropped: Vec<String>,
+    /// Rendered once per batch by [`dropped_to_envelope`], which groups
+    /// identical reasons instead of repeating one sentence per image.
+    pub dropped: Vec<DroppedImage>,
 }
 pub async fn normalize_images(images: Vec<ImageContent>) -> NormalizeResult {
     let mut result = NormalizeResult {
@@ -174,7 +185,10 @@ impl NormalizeResult {
             }
             Outcome::Failed { index, error } => {
                 tracing::warn!("image {index}: normalization failed: {error}");
-                self.dropped.push(format!("Image {index} was dropped before send: {error}."));
+                self.dropped.push(DroppedImage {
+                    index,
+                    reason: error,
+                });
             }
         }
     }
@@ -193,19 +207,65 @@ fn render_notice(notes: &[String], inner_tag: &str) -> String {
         notes.join("\n"),
     )
 }
-/// System-reminder for images dropped entirely before send.
+/// System-reminder for images dropped entirely before send. Takes the
+/// already-rendered lines produced by [`dropped_to_envelope`].
 pub fn render_image_dropped_notice(notes: &[String]) -> String {
     render_notice(notes, "image_dropped_notice")
 }
-/// Build the (system-reminder, owned-notes) pair for a
-/// `NormalizeResult.dropped` list. Shared by the user-attachment flow
-/// and the tool-result-extraction flow.
-pub(crate) fn dropped_to_envelope(dropped: Vec<String>) -> Option<(String, Vec<String>)> {
+/// Group one batch's drop facts by identical reason (exact string equality)
+/// and render one line per distinct reason. Reason groups keep
+/// first-occurrence order and indexes render ascending inside a group.
+///
+/// Shared by the user-attachment flow and the tool-result-extraction flow, so
+/// one batch always yields at most one model reminder and one `ImageDropped`
+/// notes list — never one repeated sentence per dropped image.
+pub(crate) fn dropped_to_envelope(dropped: Vec<DroppedImage>) -> Option<(String, Vec<String>)> {
     if dropped.is_empty() {
         return None;
     }
-    let notice = render_image_dropped_notice(&dropped);
-    Some((notice, dropped))
+    let mut groups: Vec<(String, Vec<usize>)> = Vec::new();
+    for entry in dropped {
+        let existing = groups
+            .iter()
+            .position(|(reason, _)| *reason == entry.reason);
+        match existing {
+            Some(at) => groups[at].1.push(entry.index),
+            None => groups.push((entry.reason, vec![entry.index])),
+        }
+    }
+    let notes: Vec<String> = groups
+        .into_iter()
+        .map(|(reason, mut indexes)| {
+            indexes.sort_unstable();
+            render_drop_line(&indexes, &reason)
+        })
+        .collect();
+    let notice = render_image_dropped_notice(&notes);
+    Some((notice, notes))
+}
+/// `Image 3 was dropped…` for one index, `Images 1 and 3 were dropped…` for
+/// two, `Images 1, 3 and 5 were dropped…` beyond that (no Oxford comma).
+/// `indexes` comes from a reason group, so it is never empty.
+fn render_drop_line(indexes: &[usize], reason: &str) -> String {
+    let list = match indexes {
+        [only] => only.to_string(),
+        [first, second] => format!("{first} and {second}"),
+        [rest @ .., last] => format!(
+            "{} and {last}",
+            rest.iter()
+                .map(usize::to_string)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        // A reason group always starts from one index, so this arm is defensive.
+        [] => String::new(),
+    };
+    let (noun, verb) = if indexes.len() > 1 {
+        ("Images", "were")
+    } else {
+        ("Image", "was")
+    };
+    format!("{noun} {list} {verb} dropped before send: {reason}.")
 }
 /// System-reminder when oversized attachments were kept after re-encode failure.
 pub fn render_re_encode_fallback_notice(notes: &[String]) -> String {
@@ -756,10 +816,14 @@ mod tests {
         assert!(result.compressed.is_empty());
         assert!(result.re_encode_fallbacks.is_empty());
         assert_eq!(result.dropped.len(), 1, "bad image must surface as dropped");
+        assert_eq!(
+            result.dropped[0].index, 2,
+            "drop fact names the per-call index"
+        );
         assert!(
-            result.dropped[0].contains("Image 2"),
-            "drop note must name the per-call index, got: {}",
-            result.dropped[0]
+            result.dropped[0].reason.contains("base64"),
+            "drop fact keeps the failure reason, got: {}",
+            result.dropped[0].reason
         );
     }
     /// Wide raster so `resize(max_side, max_side)` must not equal a square output.
@@ -1221,7 +1285,7 @@ mod tests {
             other => panic!("expected Unchanged, got {other:?}"),
         }
     }
-    /// Dropped notes propagate to the top-level `NormalizeResult`.
+    /// Dropped facts propagate to the top-level `NormalizeResult`.
     #[tokio::test]
     async fn normalize_images_collects_dropped_notes() {
         let mut bytes = make_test_png(32, 32);
@@ -1235,8 +1299,13 @@ mod tests {
         let good = make_image_content(60, 40);
         let result = normalize_images(vec![good, bad]).await;
         assert_eq!(result.images.len(), 1, "good image preserved");
-        assert_eq!(result.dropped.len(), 1, "one drop note");
-        assert!(result.dropped[0].contains("Image 2"), "drop names index");
+        assert_eq!(result.dropped.len(), 1, "one drop fact");
+        assert_eq!(result.dropped[0].index, 2, "drop names index");
+        assert!(
+            result.dropped[0].reason.contains("integrity check failed"),
+            "drop keeps the failure reason, got: {}",
+            result.dropped[0].reason
+        );
     }
     #[test]
     fn dropped_to_envelope_returns_none_for_empty() {
@@ -1244,12 +1313,165 @@ mod tests {
     }
     #[test]
     fn dropped_to_envelope_emits_notice_and_notes() {
-        let notes = vec!["Image 1 was dropped before send: corrupt.".to_string()];
-        let (notice, returned) = dropped_to_envelope(notes.clone()).unwrap();
+        let dropped = vec![dropped_fact(1, "corrupt")];
+        let (notice, notes) = dropped_to_envelope(dropped).unwrap();
         assert!(notice.contains("<system-reminder>"));
         assert!(notice.contains("<image_dropped_notice>"));
+        assert_eq!(
+            notes,
+            vec!["Image 1 was dropped before send: corrupt.".to_owned()]
+        );
         assert!(notice.contains(&notes[0]));
-        assert_eq!(returned, notes);
+    }
+    fn dropped_fact(index: usize, reason: &str) -> DroppedImage {
+        DroppedImage {
+            index,
+            reason: reason.to_owned(),
+        }
+    }
+    fn envelope_notes(dropped: Vec<DroppedImage>) -> Vec<String> {
+        dropped_to_envelope(dropped)
+            .expect("dropped facts must produce an envelope")
+            .1
+    }
+    /// One image keeps the singular wording and both structured fields.
+    #[test]
+    fn single_drop_stays_singular() {
+        let notes = envelope_notes(vec![dropped_fact(3, "integrity check failed")]);
+        assert_eq!(
+            notes,
+            vec!["Image 3 was dropped before send: integrity check failed.".to_owned()]
+        );
+    }
+    /// Two identical failures collapse into one line naming both indexes.
+    #[test]
+    fn two_same_reason_drops_share_one_line() {
+        let notes = envelope_notes(vec![
+            dropped_fact(1, "too small (16×16 = 256 px)"),
+            dropped_fact(3, "too small (16×16 = 256 px)"),
+        ]);
+        assert_eq!(
+            notes,
+            vec!["Images 1 and 3 were dropped before send: too small (16×16 = 256 px).".to_owned()]
+        );
+    }
+    /// Three or more identical failures: comma-separated with ` and ` last.
+    #[test]
+    fn three_same_reason_drops_use_comma_list() {
+        let notes = envelope_notes(vec![
+            dropped_fact(1, "too small"),
+            dropped_fact(3, "too small"),
+            dropped_fact(5, "too small"),
+        ]);
+        assert_eq!(
+            notes,
+            vec!["Images 1, 3 and 5 were dropped before send: too small.".to_owned()]
+        );
+    }
+    /// Indexes render ascending inside a group regardless of fact order.
+    #[test]
+    fn same_reason_indexes_render_ascending() {
+        let notes = envelope_notes(vec![
+            dropped_fact(5, "corrupt"),
+            dropped_fact(1, "corrupt"),
+            dropped_fact(3, "corrupt"),
+        ]);
+        assert_eq!(
+            notes,
+            vec!["Images 1, 3 and 5 were dropped before send: corrupt.".to_owned()]
+        );
+    }
+    /// Distinct reasons get one line each, in first-occurrence order, and a
+    /// line only ever lists the indexes that failed for its own reason.
+    #[test]
+    fn distinct_reasons_render_one_line_each_in_first_occurrence_order() {
+        let notes = envelope_notes(vec![
+            dropped_fact(1, "base64 decode: invalid symbol"),
+            dropped_fact(2, "too small"),
+            dropped_fact(3, "base64 decode: invalid symbol"),
+            dropped_fact(4, "integrity check failed"),
+        ]);
+        assert_eq!(
+            notes,
+            vec![
+                "Images 1 and 3 were dropped before send: base64 decode: invalid symbol."
+                    .to_owned(),
+                "Image 2 was dropped before send: too small.".to_owned(),
+                "Image 4 was dropped before send: integrity check failed.".to_owned(),
+            ]
+        );
+    }
+    /// One batch yields exactly one reminder block and one note line per
+    /// distinct reason; a repeated reason appears exactly once per block.
+    #[test]
+    fn one_batch_yields_one_note_per_distinct_reason() {
+        let (notice, notes) = dropped_to_envelope(vec![
+            dropped_fact(1, "too small"),
+            dropped_fact(2, "too small"),
+            dropped_fact(3, "corrupt"),
+        ])
+        .expect("dropped facts must produce an envelope");
+        assert_eq!(notes.len(), 2, "one line per distinct reason: {notes:?}");
+        assert_eq!(notice.matches("<image_dropped_notice>").count(), 1);
+        assert_eq!(notice.matches("too small").count(), 1, "notice: {notice}");
+        assert_eq!(notice.matches("corrupt").count(), 1, "notice: {notice}");
+    }
+    /// End-to-end: a batch of equally small attachments renders one line with
+    /// every affected index instead of the same sentence per image.
+    #[tokio::test]
+    async fn normalize_images_groups_identical_drop_reasons() {
+        let result = normalize_images(vec![
+            make_image_content(16, 16),
+            make_image_content(60, 40),
+            make_image_content(16, 16),
+            make_image_content(60, 40),
+            make_image_content(16, 16),
+        ])
+        .await;
+        assert_eq!(result.images.len(), 2, "valid images survive");
+        assert_eq!(result.dropped.len(), 3, "every drop keeps its own fact");
+        assert!(
+            result
+                .dropped
+                .iter()
+                .all(|d| d.reason.contains("too small"))
+        );
+        let (notice, notes) =
+            dropped_to_envelope(result.dropped).expect("dropped images must produce an envelope");
+        assert_eq!(
+            notes,
+            vec![
+                "Images 1, 3 and 5 were dropped before send: too small (16×16 = 256 px); \
+                 images must have at least 512 total pixels."
+                    .to_owned()
+            ]
+        );
+        assert_eq!(
+            notice.matches("total pixels").count(),
+            1,
+            "notice: {notice}"
+        );
+    }
+    /// End-to-end tool/user wording: one batch that drops for two different
+    /// reasons yields one line per reason, each naming only its own index.
+    #[tokio::test]
+    async fn normalize_images_keeps_distinct_reasons_on_separate_lines() {
+        let bad = ImageContent::new(String::from("!!!"), "image/png");
+        let result = normalize_images(vec![bad, make_image_content(16, 16)]).await;
+        assert!(result.images.is_empty());
+        assert_eq!(result.dropped.len(), 2);
+        let notes = envelope_notes(result.dropped);
+        assert_eq!(notes.len(), 2, "distinct reasons stay separate: {notes:?}");
+        assert!(
+            notes[0].starts_with("Image 1 was dropped before send: base64 decode:"),
+            "first-occurrence order: {notes:?}"
+        );
+        assert!(
+            notes[1].starts_with("Image 2 was dropped before send: too small"),
+            "second reason keeps its own index: {notes:?}"
+        );
+        assert!(!notes[0].contains("too small"), "notes: {notes:?}");
+        assert!(!notes[1].contains("base64"), "notes: {notes:?}");
     }
     #[test]
     fn image_dropped_notice_uses_canonical_tag() {
@@ -1357,15 +1579,14 @@ mod tests {
         let result = normalize_images(vec![tiny, ok]).await;
         assert_eq!(result.images.len(), 1, "only the >=8x8 image proceeds");
         assert_eq!(result.dropped.len(), 1);
+        let drop = &result.dropped[0];
+        assert_eq!(drop.index, 1);
         assert!(
-            result.dropped[0].contains("4×3") && result.dropped[0].contains("8×8"),
-            "dropped note must mention the offending dims and the min: {}",
-            result.dropped[0]
-        );
-        assert!(
-            result.dropped[0].contains("too small"),
-            "dropped: {}",
-            result.dropped[0]
+            drop.reason.contains("4×3")
+                && drop.reason.contains("8×8")
+                && drop.reason.contains("too small"),
+            "drop reason must mention the offending dims and the min: {}",
+            drop.reason
         );
     }
     /// Boundary: 8×8 clears the per-side floor but not the API's
@@ -1376,10 +1597,11 @@ mod tests {
         let result = normalize_images(vec![img]).await;
         assert!(result.images.is_empty());
         assert_eq!(result.dropped.len(), 1);
+        assert_eq!(result.dropped[0].index, 1);
         assert!(
-            result.dropped[0].contains("total pixels"),
-            "dropped: {}",
-            result.dropped[0]
+            result.dropped[0].reason.contains("total pixels"),
+            "drop reason: {}",
+            result.dropped[0].reason
         );
     }
     /// One dimension below threshold.
@@ -1389,6 +1611,11 @@ mod tests {
         let result = normalize_images(vec![img]).await;
         assert!(result.images.is_empty());
         assert_eq!(result.dropped.len(), 1);
-        assert!(result.dropped[0].contains("7×8"));
+        assert_eq!(result.dropped[0].index, 1);
+        assert!(
+            result.dropped[0].reason.contains("7×8"),
+            "drop reason: {}",
+            result.dropped[0].reason
+        );
     }
 }

@@ -21,6 +21,15 @@ use crate::theme::Theme;
 /// Preserve the former ~0.69s visual wave period without coupling it to FPS.
 const WAVE_PERIOD: std::time::Duration = std::time::Duration::from_millis(691);
 
+fn native_soft_continuation(line: &crate::scrollback::types::BlockLine) -> bool {
+    line.joiner.as_deref() == Some("")
+        && matches!(&line.selectable, Selectable::All)
+        && !line
+            .link_source
+            .as_ref()
+            .is_some_and(|source| source.display_start > 0)
+}
+
 pub struct EntryRenderer<'a> {
     entry: &'a ScrollbackEntry,
     theme: &'a Theme,
@@ -675,6 +684,67 @@ impl<'a> EntryRenderer<'a> {
             u16::try_from(output.lines.len().saturating_sub(1)).unwrap_or(u16::MAX),
         );
         (starts, last_content_row)
+    }
+
+    /// Per painted row, the no-separator continuation flag and the exclusive
+    /// source-content end column. The latter retains literal trailing spaces
+    /// present in `BlockLine.content` without copying the rest of the Buffer's
+    /// layout padding. Neither property can be inferred from painted cells.
+    pub fn native_row_provenance(&self, width: u16, height: u16) -> (Vec<bool>, Vec<Option<u16>>) {
+        let mut wraps = vec![false; usize::from(height)];
+        let mut source_ends = vec![None; usize::from(height)];
+        if height == 0 || (self.group_header_count > 0 && !self.group_collapse_header) {
+            return (wraps, source_ends);
+        }
+        let layout_cfg = &self.appearance().scrollback.layout;
+        let accent_width = if self.hide_accent {
+            0
+        } else {
+            HorizontalLayout::ACCENT
+        };
+        let [_accent, _left_pad, content_area, _right_pad] = Layout::horizontal([
+            Constraint::Length(accent_width),
+            Constraint::Length(layout_cfg.block_pad_left),
+            Constraint::Min(1),
+            Constraint::Length(layout_cfg.block_pad_right),
+        ])
+        .areas(Rect::new(0, 0, width, height));
+        let content_width = content_area.width.saturating_sub(self.timestamp_reserved());
+        self.entry
+            .ensure_cached(content_width, self.appearance(), self.is_selected, self.cwd);
+        let output = self.entry.cached_output_ref();
+        let vpad_top = u16::from(self.entry.block.has_vpad_for(self.appearance()));
+        let (header_rows, skip_rows) = if self.group_collapse_header {
+            if self.skip_rows == 0 {
+                (1u16, 0u16)
+            } else {
+                (0u16, self.skip_rows.saturating_sub(1))
+            }
+        } else {
+            (0u16, self.skip_rows)
+        };
+        let content_start = header_rows.saturating_add(u16::from(skip_rows < vpad_top));
+        let content_skip = usize::from(skip_rows.saturating_sub(vpad_top));
+        for (visible, line) in output.lines.iter().skip(content_skip).enumerate() {
+            let row = content_start.saturating_add(u16::try_from(visible).unwrap_or(u16::MAX));
+            if row >= height {
+                break;
+            }
+            source_ends[usize::from(row)] = Some(
+                content_area.x.saturating_add(
+                    u16::try_from(line.content.width().min(usize::from(content_width)))
+                        .unwrap_or(content_width),
+                ),
+            );
+            // A repeated quote bar or other non-selectable prefix would enter
+            // native copy if this row joined seamlessly. Keep its visual row,
+            // but conservatively make it a hard break rather than falsifying
+            // the copied source token.
+            if visible > 0 && native_soft_continuation(line) {
+                wraps[usize::from(row - 1)] = true;
+            }
+        }
+        (wraps, source_ends)
     }
 
     /// Rendered-row offset from the entry's top (including any top vpad row) at
@@ -1744,6 +1814,143 @@ mod tests {
         let entry = ScrollbackEntry::new(RenderBlock::stub("a\nb\nc", Color::Blue));
         let r = EntryRenderer::new(&entry, &theme);
         assert_eq!(r.estimate_height(80), r.desired_height(80));
+    }
+
+    #[test]
+    fn native_wrap_flags_do_not_confuse_exact_width_hard_lines() {
+        let _theme = pin_theme();
+        let theme = Theme::current();
+        let width = 20;
+        let entry = ScrollbackEntry::new(RenderBlock::stub(
+            format!("{}\nnext", "x".repeat(width as usize)),
+            Color::Blue,
+        ));
+        let mut appearance = crate::appearance::AppearanceConfig::default();
+        appearance.show_timestamps = false;
+        appearance.scrollback.layout.block_pad_left = 0;
+        appearance.scrollback.layout.block_pad_right = 0;
+        let renderer = EntryRenderer::new(&entry, &theme)
+            .with_hide_accent(true)
+            .with_appearance(appearance);
+        let height = renderer.desired_height(width);
+        let (wraps, _) = renderer.native_row_provenance(width, height);
+        assert!(wraps.iter().all(|wrap| !wrap));
+    }
+
+    #[test]
+    fn native_provenance_keeps_source_spaces_but_not_buffer_padding() {
+        let _theme = pin_theme();
+        let theme = Theme::current();
+        let width = 12;
+        let entry = ScrollbackEntry::new(RenderBlock::stub("a  ", Color::Blue));
+        let mut appearance = crate::appearance::AppearanceConfig::default();
+        appearance.show_timestamps = false;
+        appearance.scrollback.layout.block_pad_left = 0;
+        appearance.scrollback.layout.block_pad_right = 0;
+        let renderer = EntryRenderer::new(&entry, &theme)
+            .with_hide_accent(true)
+            .with_appearance(appearance);
+        let height = renderer.desired_height(width);
+        let (_, source_ends) = renderer.native_row_provenance(width, height);
+        assert!(source_ends.contains(&Some(3)), "{source_ends:?}");
+        assert!(!source_ends.contains(&Some(width)), "{source_ends:?}");
+    }
+
+    #[test]
+    fn native_provenance_aligns_vpad_group_header_and_skipped_rows() {
+        let _theme = pin_theme();
+        let theme = Theme::current();
+        let entry = ScrollbackEntry::new(RenderBlock::stub("a\nbb", Color::Blue));
+        let mut appearance = crate::appearance::AppearanceConfig::default();
+        appearance.show_timestamps = false;
+        appearance.scrollback.layout.block_pad_left = 0;
+        appearance.scrollback.layout.block_pad_right = 0;
+        let renderer = EntryRenderer::new(&entry, &theme)
+            .with_hide_accent(true)
+            .with_appearance(appearance.clone());
+        let (_, ends) = renderer.native_row_provenance(12, 4);
+        assert_eq!(ends, [None, Some(1), Some(2), None]);
+
+        let skipped = EntryRenderer::new(&entry, &theme)
+            .with_hide_accent(true)
+            .with_appearance(appearance.clone())
+            .with_skip_rows(1);
+        let (_, ends) = skipped.native_row_provenance(12, 3);
+        assert_eq!(ends, [Some(1), Some(2), None]);
+
+        let grouped = EntryRenderer::new(&entry, &theme)
+            .with_hide_accent(true)
+            .with_appearance(appearance)
+            .with_group_header_count(2)
+            .with_group_collapse_header(true);
+        let (_, ends) = grouped.native_row_provenance(12, 5);
+        assert_eq!(ends, [None, None, Some(1), Some(2), None]);
+    }
+
+    #[test]
+    fn native_wrap_flags_follow_long_token_joiners() {
+        let _theme = pin_theme();
+        let theme = Theme::current();
+        let width = 20;
+        let entry = ScrollbackEntry::new(RenderBlock::agent_message("x".repeat(73)));
+        let mut appearance = crate::appearance::AppearanceConfig::default();
+        appearance.show_timestamps = false;
+        appearance.scrollback.layout.block_pad_left = 0;
+        appearance.scrollback.layout.block_pad_right = 0;
+        let renderer = EntryRenderer::new(&entry, &theme)
+            .with_hide_accent(true)
+            .with_appearance(appearance);
+        let height = renderer.desired_height(width);
+        let (flags, _) = renderer.native_row_provenance(width, height);
+        assert!(flags.iter().any(|flag| *flag), "long token must soft-wrap");
+        assert!(!flags.last().copied().unwrap_or(false));
+    }
+
+    #[test]
+    fn native_wrap_flags_do_not_join_word_wrapped_prose() {
+        let _theme = pin_theme();
+        let theme = Theme::current();
+        let width = 20;
+        let entry = ScrollbackEntry::new(RenderBlock::agent_message("word ".repeat(30)));
+        let mut appearance = crate::appearance::AppearanceConfig::default();
+        appearance.show_timestamps = false;
+        appearance.scrollback.layout.block_pad_left = 0;
+        appearance.scrollback.layout.block_pad_right = 0;
+        let renderer = EntryRenderer::new(&entry, &theme)
+            .with_hide_accent(true)
+            .with_appearance(appearance);
+        let height = renderer.desired_height(width);
+        assert!(height > 1);
+        let (flags, _) = renderer.native_row_provenance(width, height);
+        assert!(
+            flags.iter().all(|flag| !flag),
+            "word joiners must not become no-separator soft wraps"
+        );
+    }
+
+    #[test]
+    fn native_wrap_rejects_repeated_visual_prefixes() {
+        use crate::scrollback::types::{BlockLine, LinkSource};
+
+        let mut line = BlockLine::text("continuation").with_joiner(Some(String::new()));
+        assert!(native_soft_continuation(&line));
+
+        line.link_source = Some(LinkSource {
+            line_index: 0,
+            columns: 10..22,
+            display_start: 2,
+        });
+        assert!(
+            !native_soft_continuation(&line),
+            "repeated quote bar would leak into native copy"
+        );
+
+        line.link_source = None;
+        line.selectable = Selectable::Spans(1..2);
+        assert!(
+            !native_soft_continuation(&line),
+            "decorated edit path continuation would copy its indent"
+        );
     }
 
     #[test]

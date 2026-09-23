@@ -72,8 +72,10 @@ pub(crate) fn build_recap_items(
     // Messages cannot accept durable reasoning without a top-level thinking
     // configuration. Chat filters this display-only item at wire conversion;
     // Responses can retain visible reasoning when its route supports it.
-    let mut items =
-        sampling_types::project_portable_history_with_reasoning(&conversation, !strip_reasoning);
+    let mut items = sampling_types::project_portable_history_with_reasoning(
+        &conversation,
+        (!strip_reasoning).then_some(sampling_types::ApiBackend::Responses),
+    );
 
     items.push(ConversationItem::user(recap_instruction(tag)));
     items

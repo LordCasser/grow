@@ -380,12 +380,14 @@ pub enum SessionCommand {
     /// Admit one source-owned signal into the durable Timeline inbox.
     /// Producers never queue model turns directly; the actor derives delivery
     /// from received-minus-consumed facts after the immutable payload lands.
-    ReceiveParentMessage {
+    ReceiveAgentMessage {
         source_session_id: String,
         message_id: String,
         message: String,
         interrupt: bool,
-        respond_to: oneshot::Sender<Result<String, String>>,
+        reply_to: Option<sampling_types::AgentMessageRef>,
+        respond_to:
+            oneshot::Sender<Result<String, super::notification_inbox::AgentMessageDeliveryError>>,
     },
     ReceiveNotification {
         source: chat_state::NotificationSource,

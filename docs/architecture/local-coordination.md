@@ -48,19 +48,23 @@ Coordination capability、私有 IPC 和 peer manifest schema 现在为 **2**，
 
 ## 父子消息与通信展示
 
-行为契约见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md)、[local-coordination](../../openspec/specs/local-coordination/spec.md) 和 [session-timeline](../../openspec/specs/session-timeline/spec.md)。
+行为契约见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md)、[local-coordination](../../openspec/specs/local-coordination/spec.md)、[session-timeline](../../openspec/specs/session-timeline/spec.md) 和 [model-sampling](../../openspec/specs/model-sampling/spec.md)。
 
-直接委派的 parent/child 各有自己的 SessionActor。`ask_parent`、`ask_subagent`、`send_subagent_message` 的真实工具开始事件保留工具身份、目标 ID 和完整原始输入。Pager 根据 typed input 或工具身份元数据识别通信工具，在原工具行显示目标、状态、最多两行正文预览，展开保留全文及原始返回值。协调器返回实际参与子任务名和目标 Session ID；同名任务仍由完整身份区分。`ask_parent` 的参与子任务是来源，不能标成目标任务。
+`ask_parent`、`ask_subagent`、`ask_session` 使用冻结 Surface 的无工具 Sideband。问题和答案保留在调用方的正常工具调用/结果中；接收侧 UI 可以展示问答，目标主 Surface 不追加这些内容。显式 `get_inquiry` 的查询结果进入调用方上下文，被动 phase、重连和 UI 回放不会生成模型输入。
 
-`send_subagent_message` 的 `received` 只证明 child inbox 已持久接收。`interrupt=false` 表示下一个安全步骤纳入上下文；`interrupt=true` 表示请求安全中断，不保证不可中断操作已经停止。ACK 不可用或发送后取消时显示投递未知，不自动重发，也不显示已读或子任务完成。跨主 Session 仍只有已有询问协议，没有增加任意发指令入口。
+`send_subagent_message` 使用同一入口发送和回复。初始发送提供 `subagent_id`，只接受直接 owned active child；回复提供 `reply_to: { source_session_id, message_id }`，两者二选一。Runtime 从调用者实际收到的 Timeline receipt 校验原发送者和操作 ID，沿该两方关系返回意见。猜中别人的消息 ID、第三方目标和上行 interrupt 均不获得路由权限。回复调用不授予文件/进程 RWX，收到的意见也不成为人类授权。
 
-父消息的 `NotificationEvent::Received` 是唯一收件事实。artifact 保存原始正文，ParentMessage source version 为 **2**；模型消费时再加 delegating agent 与非人类授权的来源包装。旧表示版本明确拒绝，不能从自然语言包装猜正文。同一消息 ID 重试必须保持正文和 interrupt 一致。
+发送返回 `received | rejected | unconfirmed`、结构化 `error.code/message`，成功带真实 `receipt_id`。`received` 只承诺目标已持久接收，不承诺消费、模型回答或任务完成。`interrupt` 保留原有安全让出语义，回复固定不请求 interrupt。ACK 和取消同时可用时优先确认 ACK；派发后未知仅做一次有界只读核验，不重发。相同操作/正文/参数复用原 receipt，冲突拒绝；新的工具调用使用新操作 ID。
 
-持久提交后，共用 receipt projector 生成 child 的系统通知。UI notice 不进入模型上下文，不触发第二次 Notification hook，也不抢焦点。NoticeBlock 使用 `parent-message:<receipt ID>` 去重；传输 `eventId` 继续只服务原有事件去重和重连 cursor，不能替换成 receipt ID。父消息是不可变收件事实，Minimal 可追加一次；询问仍等待自己的终态。
+已取消或结束的 direct child 只开放 `receipt_only` 路由。活 actor 查询既有 ChatState；已关闭目标经只读打开、验证 Timeline 和 direct security-parent 关系后查询，不创建 writer、恢复 child 或接纳新消息。目标的幂等核验先于新消息 active-turn gate，因此已完成操作仍可确认。可能已提交的持久化错误保留 write-ahead 正文，恢复后的权威 Timeline 决定能否清理。
 
-消费仅移除 pending 状态。Timeline 的收件索引派生父消息历史引用，cleanup 和启动 sweep 都保留这些正文及共享 hash；无引用 orphan 继续清理。根 Session load 在已有协调状态重发阶段发布收件历史，child 首次打开通过只读、已验证 Timeline 重建通信记录，不依赖 `updates.jsonl`。先到的 Notice 不得让子视图跳过历史重放。正文缺失或 hash 不符时保留收件身份并显示无法恢复正文；该降级不改变未消费消息的严格模型输入校验。
+初始消息继续使用 `ParentMessage` source，反向意见使用 `AgentReply` source；两者复用 Received/Consumed 索引与原始正文 artifact，不增加消息账本。安全步骤在一个 `Consumed` 事实中提交精确 `AgentMessage` batch；Timeline 核对每条 receipt、双方、reply 引用和正文 hash。普通任务通知保持原有类型。已消费消息可被后续 Sideband 快照读取，未消费 inbox 不属于 Surface。
 
-通信正文含图片路径时仍以文本展示，详情沿用现有键盘/双击入口并支持复制；预览按 Unicode 显示宽度截断，状态同时使用文字表达。
+Provider 在请求投影中将一个 canonical AgentMessage 展开为完整的 `receive_agent_message` 调用/结果对。该名称不注册可执行工具，也不计入模型主动工具次数；稳定 Surface/input_ref 仍指向单个消费事实。发送者自己的正文已在原 send 参数中，不追加重复入站消息。意见回复是新消息，ACK 不自动生成回复。忙碌目标在安全步骤消费；停止后的目标保留 pending 回复，不能借通知越过暂停或恢复关闭任务。
+
+TUI 固定文案使用英文，正文保留原语言。来源工具行保留原 tool-call ID，接收询问按 `(sourcePeerId, inquiryId)` 原位更新，入站消息沿用 `parent-message:<receipt ID>` 去重。标题只展示动作、参与方与短状态；默认问题两行，回答后问题一行/答案两行，消息两行。问题、答案、错误和消息分别渲染 Markdown，元数据独立于正文。详情复用 BlockViewer 的搜索、选择、复制和 wrap；`r` 查看原文，`D` 查看协议数据，不新增常驻路由解释或每行按钮。
+
+Minimal 的 inquiry 保持 live，直到自身终态才提交原生历史；immutable message 只打印一次。UI notice 均从 durable receipt 派生，不推进模型消费，不触发第二次 Notification hook。冷恢复从已验证 Timeline 和正文 artifact 重建；正文缺失显示 `Message unavailable`，不从旧包装文字猜内容。旧结果没有 receipt ID 时不伪造，旧字符串错误保守展示 `Unconfirmed`。
 
 ## Windows 特有处理
 

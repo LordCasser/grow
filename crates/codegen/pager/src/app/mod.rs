@@ -12,6 +12,7 @@ pub mod agent_view;
 pub mod bundle;
 pub mod cli;
 pub mod doctor;
+mod reader_thread;
 pub mod root;
 pub mod session;
 pub use crate::link_opener;
@@ -677,15 +678,22 @@ pub async fn run(
     let minimal_live_rows = config_watcher.current().minimal_live_rows;
     let (frame_tx, writer_sync, writer_event_rx, writer_thread) =
         crate::render::draw::spawn_writer_thread();
+    let mut reader_thread = reader_thread::ReaderThread::absent();
     let cursor_blink = root::event_loop::load_initial_ui_config().cursor_blink;
-    let (mut terminal, screen_mode) = init_terminal(
+    let (mut terminal, screen_mode) = match init_terminal(
         screen_mode,
         minimal_live_rows,
         relaunched_into_minimal,
         frame_tx,
         writer_sync,
         cursor_blink,
-    )?;
+    ) {
+        Ok(initialized) => initialized,
+        Err(error) => {
+            let _ = writer_thread.join_within(std::time::Duration::from_secs(2));
+            return Err(error.into());
+        }
+    };
     MINIMAL_SHOW_SWITCH_BACK_TO_FULLSCREEN.store(
         relaunched_into_minimal && screen_mode.is_minimal(),
         Ordering::Release,
@@ -739,7 +747,7 @@ pub async fn run(
         }
         Err(e) => {
             crate::unified_log::flush_blocking().await;
-            let _ = restore_terminal(terminal, writer_thread, screen_mode);
+            let _ = restore_terminal(terminal, writer_thread, reader_thread, screen_mode);
             cancel.cancel();
             return Err(e);
         }
@@ -772,10 +780,11 @@ pub async fn run(
         screen_mode_control_handoffs,
         bg_update_rx,
         writer_event_rx,
+        &mut reader_thread,
     )
     .await;
     crate::unified_log::flush_blocking().await;
-    let restore_result = restore_terminal(terminal, writer_thread, screen_mode);
+    let restore_result = restore_terminal(terminal, writer_thread, reader_thread, screen_mode);
     drop(agent_guard);
     tty_utils::global_process_scope().kill_all();
     if let Err(cleanup_error) = restore_result {
@@ -892,6 +901,17 @@ fn drain_pending_events() {
 fn drain_pending_events_with_timeout(timeout: std::time::Duration) {
     while crossterm::event::poll(timeout).unwrap_or(false) {
         if crossterm::event::read().is_err() {
+            break;
+        }
+    }
+}
+/// Unlike the startup quiet-window drain, teardown cannot be extended by a
+/// continuous stream of input after the reader has stopped.
+fn drain_exit_events_for(grace: std::time::Duration) {
+    let deadline = std::time::Instant::now() + grace;
+    while let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
+        if !crossterm::event::poll(remaining).unwrap_or(false) || crossterm::event::read().is_err()
+        {
             break;
         }
     }
@@ -1200,26 +1220,32 @@ fn init_terminal(
             skip_reason,
             crate::terminal::da2::detected_packed(),
         );
-        if flags.is_empty() {
+        let pushed_flags = if flags.is_empty() {
             tracing::info!(
                 kitty.flags = "none",
                 kitty.skipped_reason = skip_reason.unwrap_or("unknown"),
                 "kitty keyboard protocol skipped"
             );
+            flags
         } else {
-            shell::util::with_locked_stderr(|stderr| {
-                let _ = execute!(stderr, event::PushKeyboardEnhancementFlags(flags));
-            });
-            tracing::info!(
-                kitty.flags = ?flags,
-                kitty.disambiguate = true,
-                kitty.report_event_types =
-                    flags.contains(event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES),
-                kitty.report_all_keys = false,
-                "kitty keyboard protocol pushed"
-            );
-        }
-        crate::terminal::set_pushed_kitty_flags(flags);
+            if shell::util::with_locked_stderr(|stderr| {
+                execute!(stderr, event::PushKeyboardEnhancementFlags(flags)).is_ok()
+            }) {
+                tracing::info!(
+                    kitty.flags = ?flags,
+                    kitty.disambiguate = true,
+                    kitty.report_event_types =
+                        flags.contains(event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES),
+                    kitty.report_all_keys = false,
+                    "kitty keyboard protocol pushed"
+                );
+                flags
+            } else {
+                tracing::warn!("kitty keyboard protocol push failed");
+                event::KeyboardEnhancementFlags::empty()
+            }
+        };
+        crate::terminal::set_pushed_kitty_flags(pushed_flags);
         if mode.is_fullscreen() {
             let backend = CrosstermBackend::new(
                 crate::render::draw::TermWriter::new(frame_tx, writer_sync)
@@ -1301,21 +1327,23 @@ fn init_terminal(
         }
     })()
     .inspect_err(|_| {
-        emit_terminal_teardown_sequences(mode, None);
+        let _ = bounded_teardown(
+            move || emit_terminal_teardown_sequences(mode, None),
+            std::time::Duration::from_millis(250),
+        );
         let _ = terminal::disable_raw_mode();
         signal_handler::mark_restored();
         crash_handler::disable_terminal_escape_restore();
     })
 }
-/// Drop the terminal (closing the writer mpsc channel) and join the
-/// writer thread. After this returns, subsequent direct stderr writes
-/// are guaranteed to land strictly after every queued frame.
+/// Drop the terminal (closing the writer mpsc channel) and give accepted
+/// frames a bounded chance to finish. Only `Joined` proves output ordering.
 fn drain_writer_thread_before_teardown(
     terminal: PagerTerminal,
     writer_thread: crate::render::draw::WriterThread,
-) -> io::Result<()> {
+) -> io::Result<crate::render::draw::WriterJoin> {
     drop(terminal);
-    writer_thread.join()
+    writer_thread.join_within(std::time::Duration::from_secs(2))
 }
 /// Inline teardown escape sequences in the canonical order, shared by
 /// `restore_terminal` and `set_panic_hook` so the on-wire byte order is
@@ -1327,7 +1355,7 @@ fn drain_writer_thread_before_teardown(
 /// (zellij/tmux) stop buffering before the resets arrive. Does NOT call
 /// `disable_raw_mode`. Callers should drain queued writer-thread frames
 /// first when possible; the panic hook can't (would deadlock).
-fn emit_terminal_teardown_sequences(mode: ScreenMode, inline_cursor_row: Option<u16>) {
+fn emit_terminal_teardown_sequences(mode: ScreenMode, inline_cursor_row: Option<u16>) -> bool {
     shell::util::with_locked_stderr(|stderr| {
         let _ = stderr.write_all(crate::notifications::progress::OSC_CLEAR.as_bytes());
         let _ = stderr.flush();
@@ -1346,11 +1374,10 @@ fn emit_terminal_teardown_sequences(mode: ScreenMode, inline_cursor_row: Option<
     shell::util::with_locked_stderr(|stderr| {
         let _ = execute!(stderr, event::DisableFocusChange);
     });
-    if crate::terminal::take_kitty_flags_pushed() {
-        shell::util::with_locked_stderr(|stderr| {
-            let _ = execute!(stderr, event::PopKeyboardEnhancementFlags);
+    let pop_written = crate::terminal::take_kitty_flags_pushed()
+        && shell::util::with_locked_stderr(|stderr| {
+            execute!(stderr, event::PopKeyboardEnhancementFlags).is_ok()
         });
-    }
     let restore_style = CURSOR_STYLE_FORCED.load(Ordering::Acquire);
     if mode.is_fullscreen() {
         shell::util::with_locked_stderr(|stderr| {
@@ -1374,18 +1401,24 @@ fn emit_terminal_teardown_sequences(mode: ScreenMode, inline_cursor_row: Option<
     }
     #[cfg(windows)]
     win_native_selection::restore_stdin_mode();
+    pop_written
 }
-/// Consumes `terminal` and `writer_thread`: queues a final fullscreen clear,
-/// drains every accepted frame, then emits teardown sequences. Teardown still
-/// runs if draining fails, so terminal state is restored before returning that
-/// error. Draining first prevents a late frame after `LeaveAlternateScreen`.
+/// Consumes terminal and both I/O threads. A joined writer proves all accepted
+/// frames precede teardown; a timed-out writer forces bounded best-effort
+/// teardown and skips the reply fence.
 fn restore_terminal_with(
     mut terminal: PagerTerminal,
     writer_thread: crate::render::draw::WriterThread,
+    reader_thread: reader_thread::ReaderThread,
     mode: ScreenMode,
-    drain: impl FnOnce(PagerTerminal, crate::render::draw::WriterThread) -> io::Result<()>,
-    teardown: impl FnOnce(ScreenMode, Option<u16>),
+    drain: impl FnOnce(
+        PagerTerminal,
+        crate::render::draw::WriterThread,
+    ) -> io::Result<crate::render::draw::WriterJoin>,
+    teardown: impl FnOnce(ScreenMode, Option<u16>) -> bool + Send + 'static,
+    fence: impl FnOnce(reader_thread::ReaderJoin, bool, bool),
 ) -> io::Result<()> {
+    let reader_join = reader_thread.join_within(reader_thread::READER_JOIN_GRACE);
     if mode.is_fullscreen() && !writer_thread.writer_sync().failed() {
         let _ = terminal.clear();
         {
@@ -1395,26 +1428,108 @@ fn restore_terminal_with(
     }
     let inline_cursor_row = (!mode.is_fullscreen()).then(|| terminal.viewport_area().bottom());
     let drain_result = drain(terminal, writer_thread);
-    teardown(mode, inline_cursor_row);
-    drain_pending_events_with_timeout(std::time::Duration::from_millis(10));
+    let writer_joined = matches!(&drain_result, Ok(crate::render::draw::WriterJoin::Joined));
+    let teardown_result = bounded_teardown(
+        move || teardown(mode, inline_cursor_row),
+        std::time::Duration::from_secs(2),
+    );
+    if teardown_result.is_none() {
+        tracing::warn!("terminal teardown exceeded its bounded grace");
+    }
+    let pop_written = teardown_result.unwrap_or(false);
+    fence(reader_join, writer_joined, pop_written);
     let _ = terminal::disable_raw_mode();
     signal_handler::mark_restored();
     crash_handler::disable_terminal_escape_restore();
     tty_utils::restore_native_stderr();
-    drain_result
+    drain_result.map(|_| ())
 }
 fn restore_terminal(
     terminal: PagerTerminal,
     writer_thread: crate::render::draw::WriterThread,
+    reader_thread: reader_thread::ReaderThread,
     mode: ScreenMode,
 ) -> io::Result<()> {
+    let flags_pushed = crate::terminal::kitty_flags_pushed();
     restore_terminal_with(
         terminal,
         writer_thread,
+        reader_thread,
         mode,
         drain_writer_thread_before_teardown,
         emit_terminal_teardown_sequences,
+        move |reader, writer_joined, pop_written| {
+            run_pop_fence(flags_pushed, reader, writer_joined, pop_written)
+        },
     )
+}
+
+/// A wedged writer can hold the stderr lock indefinitely. Give best-effort
+/// teardown a deadline and never wait again for its detached helper.
+fn bounded_teardown(
+    f: impl FnOnce() -> bool + Send + 'static,
+    grace: std::time::Duration,
+) -> Option<bool> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    let handle = std::thread::Builder::new()
+        .name("terminal-teardown".into())
+        .spawn(move || {
+            let _ = tx.send(f());
+        })
+        .ok()?;
+    let result = rx.recv_timeout(grace).ok();
+    drop(handle);
+    result
+}
+
+fn run_pop_fence(
+    flags_pushed: bool,
+    reader: reader_thread::ReaderJoin,
+    writer_joined: bool,
+    pop_written: bool,
+) {
+    let reason = fence_skip_reason(flags_pushed, reader, writer_joined, pop_written);
+    if let Some(reason) = reason {
+        tracing::info!(reason, ?reader, "kitty pop fence skipped");
+        if reader != reader_thread::ReaderJoin::TimedOut && writer_joined {
+            drain_exit_events_for(std::time::Duration::from_millis(10));
+        }
+    } else {
+        let report = crate::terminal::pop_fence::run(std::time::Duration::from_secs(1));
+        tracing::info!(
+            ?reader,
+            outcome = ?report.outcome,
+            residue_bytes = report.residue_bytes,
+            elapsed = ?report.elapsed,
+            "kitty pop fence"
+        );
+        if matches!(
+            report.outcome,
+            crate::terminal::pop_fence::PopFenceOutcome::QueryFailed
+                | crate::terminal::pop_fence::PopFenceOutcome::Unsupported
+        ) {
+            drain_exit_events_for(std::time::Duration::from_millis(10));
+        }
+    }
+}
+
+fn fence_skip_reason(
+    flags_pushed: bool,
+    reader: reader_thread::ReaderJoin,
+    writer_joined: bool,
+    pop_written: bool,
+) -> Option<&'static str> {
+    if !writer_joined {
+        Some("writer_unavailable")
+    } else if reader == reader_thread::ReaderJoin::TimedOut {
+        Some("reader_alive")
+    } else if !flags_pushed {
+        Some("no_flags")
+    } else if !pop_written {
+        Some("pop_write_failed")
+    } else {
+        None
+    }
 }
 pub(crate) fn set_terminal_title(title: &str) {
     let full = terminal_title_string(title);
@@ -1439,7 +1554,10 @@ fn terminal_title_string(title: &str) -> String {
 fn set_panic_hook(mode: ScreenMode) {
     let hook = panic::take_hook();
     panic::set_hook(Box::new(move |info| {
-        emit_terminal_teardown_sequences(mode, None);
+        let _ = bounded_teardown(
+            move || emit_terminal_teardown_sequences(mode, None),
+            std::time::Duration::from_millis(250),
+        );
         let _ = terminal::disable_raw_mode();
         signal_handler::mark_restored();
         crash_handler::disable_terminal_escape_restore();
@@ -1475,20 +1593,168 @@ mod tests {
         let (writer_tx, _writer_sync, _events, writer_thread) =
             crate::render::draw::spawn_writer_thread();
         drop(writer_tx);
-        let teardown_called = std::cell::Cell::new(false);
+        let teardown_called = std::sync::Arc::new(AtomicBool::new(false));
+        let teardown_observed = teardown_called.clone();
+        let drained = std::sync::Arc::new(AtomicBool::new(false));
+        let drain_observed = drained.clone();
+        let drain_before_teardown = drained.clone();
+        let fence_called = std::cell::Cell::new(false);
         let result = restore_terminal_with(
             terminal,
             writer_thread,
+            reader_thread::ReaderThread::absent(),
             ScreenMode::Inline,
-            |terminal, writer_thread| {
+            move |terminal, writer_thread| {
                 drop(terminal);
                 drop(writer_thread);
+                drain_observed.store(true, Ordering::Release);
                 Err(io::Error::other("injected drain failure"))
             },
-            |_, _| teardown_called.set(true),
+            move |_, _| {
+                assert!(drain_before_teardown.load(Ordering::Acquire));
+                teardown_observed.store(true, Ordering::Release);
+                false
+            },
+            |reader, writer_joined, pop_written| {
+                assert_eq!(reader, reader_thread::ReaderJoin::Absent);
+                assert!(!writer_joined);
+                assert!(!pop_written);
+                assert!(teardown_called.load(Ordering::Acquire));
+                fence_called.set(true);
+            },
         );
         assert!(result.is_err());
-        assert!(teardown_called.get());
+        assert!(teardown_called.load(Ordering::Acquire));
+        assert!(fence_called.get());
+    }
+    #[test]
+    fn kitty_fence_requires_both_io_owners_and_a_written_pop() {
+        use reader_thread::ReaderJoin::{Absent, Joined, TimedOut};
+        assert_eq!(fence_skip_reason(true, Joined, true, true), None);
+        assert_eq!(fence_skip_reason(true, Absent, true, true), None);
+        assert_eq!(
+            fence_skip_reason(true, TimedOut, true, true),
+            Some("reader_alive")
+        );
+        assert_eq!(
+            fence_skip_reason(true, Joined, false, true),
+            Some("writer_unavailable")
+        );
+        assert_eq!(
+            fence_skip_reason(false, Joined, true, false),
+            Some("no_flags")
+        );
+        assert_eq!(
+            fence_skip_reason(true, Joined, true, false),
+            Some("pop_write_failed")
+        );
+    }
+    #[test]
+    fn bounded_teardown_does_not_wait_for_stalled_stderr() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let started = std::time::Instant::now();
+        assert_eq!(
+            bounded_teardown(
+                move || {
+                    let _ = release_rx.recv();
+                    true
+                },
+                std::time::Duration::from_millis(10),
+            ),
+            None
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let _ = release_tx.send(());
+    }
+    #[test]
+    #[ignore = "runs the global panic hook in isolated child processes"]
+    fn panic_hook_is_bounded_and_skips_da1() {
+        const CHILD_MODE: &str = "GROW_KITTY_PANIC_HOOK_TEST_CHILD_MODE";
+        const TEST_NAME: &str = "app::tests::panic_hook_is_bounded_and_skips_da1";
+
+        struct RestoreHook(Option<Box<dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync + 'static>>);
+        impl Drop for RestoreHook {
+            fn drop(&mut self) {
+                if let Some(hook) = self.0.take() {
+                    panic::set_hook(hook);
+                }
+            }
+        }
+
+        if let Ok(mode) = std::env::var(CHILD_MODE) {
+            let restore = RestoreHook(Some(panic::take_hook()));
+            panic::set_hook(Box::new(|_| {}));
+            crate::terminal::set_pushed_kitty_flags(
+                event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES,
+            );
+            set_panic_hook(ScreenMode::Inline);
+            let started = std::time::Instant::now();
+            if mode == "blocked" {
+                // The detached teardown helper can never write after this lock
+                // is released: the entire child exits while still holding it.
+                let _stderr_guard = shell::util::stderr_lock();
+                let caught = panic::catch_unwind(|| panic!("Kitty hook probe")).is_err();
+                std::process::exit(i32::from(
+                    !caught || started.elapsed() >= std::time::Duration::from_secs(1),
+                ));
+            }
+            assert_eq!(mode, "available");
+            assert!(panic::catch_unwind(|| panic!("Kitty hook probe")).is_err());
+            drop(restore);
+            std::process::exit(0);
+        }
+
+        for mode in ["available", "blocked"] {
+            let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    TEST_NAME,
+                    "--exact",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(CHILD_MODE, mode)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("spawn isolated panic-hook test");
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                if child.try_wait().expect("poll panic-hook child").is_some() {
+                    break;
+                }
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("{mode} panic-hook child exceeded two seconds");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            let output = child
+                .wait_with_output()
+                .expect("read panic-hook child output");
+            assert!(
+                output.status.success(),
+                "{mode} panic-hook child failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            if mode == "available" {
+                assert!(
+                    output
+                        .stderr
+                        .windows(b"\x1b[<1u".len())
+                        .any(|bytes| bytes == b"\x1b[<1u"),
+                    "panic hook did not pop Kitty flags"
+                );
+            }
+            assert!(
+                !output
+                    .stderr
+                    .windows(b"\x1b[c".len())
+                    .any(|bytes| bytes == b"\x1b[c"),
+                "panic hook must not query DA1"
+            );
+        }
     }
     /// `[ui].cursor_blink` tri-state → startup cursor policy; the `None`
     /// default must be Inherit (emit nothing).

@@ -22,6 +22,7 @@ use acp_transport::protocol as acp;
 use super::super::actions::{Action, Effect, TaskResult};
 use super::{ActiveView, AppView, InputOutcome, PasteProvenance, TrustState};
 use crate::app::acp_handler;
+use crate::app::reader_thread::ReaderThread;
 use crate::app::root::dispatch;
 use crate::app::root::effects;
 use crate::app::{PagerArgs, PagerTerminal};
@@ -43,7 +44,7 @@ pub(crate) struct TimedInputEvent {
 }
 
 impl TimedInputEvent {
-    fn now(event: Event) -> Self {
+    pub(crate) fn now(event: Event) -> Self {
         Self {
             event,
             arrived_at: std::time::Instant::now(),
@@ -796,6 +797,7 @@ pub(crate) async fn run(
         tokio::sync::oneshot::Receiver<Option<update::auto_update::UpdateAvailable>>,
     >,
     mut writer_event_rx: tokio::sync::mpsc::UnboundedReceiver<crate::render::draw::WriterEvent>,
+    reader_thread: &mut ReaderThread,
 ) -> anyhow::Result<RunResult> {
     // Initialize tracing capture. Until the tracing pane is integrated, its
     // completion channel is drained directly by the event loop.
@@ -1201,68 +1203,11 @@ pub(crate) async fn run(
     // stdin and the inheriting child process keeps every keystroke. The handoff
     // does not proceed until `reader_parked` acknowledges this pause.
     let input_paused = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let reader_paused = input_paused.clone();
     // Set by the reader once it has parked (stopped calling crossterm) so the
     // $EDITOR handoff can wait for it: poll/read share one global lock, so the
     // main-thread drain must be the sole crossterm caller.
     let reader_parked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let reader_parked_thread = reader_parked.clone();
-    std::thread::spawn(move || {
-        use std::sync::atomic::Ordering;
-        // Short enough that a pause / receiver-drop is observed promptly, long
-        // enough to keep the thread parked when idle. A `poll()` timeout here
-        // does NOT wake the main loop -- only a successful `send` does -- so the
-        // idle event loop still parks (no reintroduced metronome tick).
-        const POLL_TIMEOUT: Duration = Duration::from_millis(100);
-        let mut consecutive_event_errors: u32 = 0;
-        loop {
-            // Shutdown observed within one poll cycle in every state (idle or
-            // paused); the send() break below covers close-while-sending.
-            if input_tx.is_closed() {
-                break;
-            }
-            // While a tty handoff owns stdin, do not read(): the child (e.g. the
-            // editor) must keep its bytes. Re-check soon without touching stdin.
-            if reader_paused.load(Ordering::Acquire) {
-                // Signal the handoff that the reader is no longer in crossterm.
-                reader_parked_thread.store(true, Ordering::Release);
-                std::thread::sleep(POLL_TIMEOUT);
-                continue;
-            }
-            // Active path: this thread owns crossterm again this iteration.
-            reader_parked_thread.store(false, Ordering::Release);
-            // poll()+read() (not a bare blocking read) so the pause flag and a
-            // dropped receiver are observed within POLL_TIMEOUT.
-            let event = match crossterm::event::poll(POLL_TIMEOUT) {
-                Ok(true) => crossterm::event::read(),
-                Ok(false) => continue,
-                Err(e) => Err(e),
-            };
-            match event {
-                Ok(ev) => {
-                    consecutive_event_errors = 0;
-                    let timed = TimedInputEvent::now(ev);
-                    if input_tx.send(timed).is_err() {
-                        break; // event loop has shut down
-                    }
-                }
-                Err(e) => {
-                    // VTE terminals / SSH PTYs can emit garbage that crossterm's
-                    // parser rejects; skip transient errors rather than kill the
-                    // TUI (ratatui#1275), bailing only if they never stop.
-                    consecutive_event_errors += 1;
-                    if consecutive_event_errors >= 50 {
-                        tracing::error!(
-                            "crossterm read returned {consecutive_event_errors} \
-                             consecutive errors, exiting reader: {e}"
-                        );
-                        break;
-                    }
-                    tracing::warn!("crossterm read error (skipping): {e}");
-                }
-            }
-        }
-    });
+    *reader_thread = ReaderThread::spawn(input_tx, input_paused.clone(), reader_parked.clone());
     let mut acp_rx = connection.rx;
     let connection_cancel = connection.cancel;
     let mut leader_status_rx = connection.leader_status_rx;

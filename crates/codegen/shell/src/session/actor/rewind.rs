@@ -306,6 +306,10 @@ impl SessionActor {
                 }
                 anyhow::bail!(message);
             }
+            // The durable branch change may restore the range replaced by the
+            // completed background compaction, so its still-unpublished UI
+            // result is no longer valid.
+            self.compaction.pending_async_notice.take();
 
             // Store for edit-and-retry detection only after the branch fact is durable.
             if let Ok(mut pending) = self.rewind_pending_prompt.lock() {

@@ -51,6 +51,12 @@ impl CompactionLease {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct PendingAsyncCompactionNotice {
+    pub(crate) tokens_before: u64,
+    pub(crate) elapsed_ms: i64,
+}
+
 /// Auto-compaction is gated whenever `auto_compact_suppressed` is not [`SUPPRESS_NONE`].
 pub(crate) const SUPPRESS_NONE: u8 = 0;
 /// Resolvable failure (`size` or `other`): suppressed for the current turn, then
@@ -153,6 +159,9 @@ impl CompactCancelGate {
 pub struct CompactionConfig {
     pub lease: CompactionLease,
     pub(crate) background: RefCell<Option<crate::session::actor::compaction::BackgroundCompaction>>,
+    /// Successful background compaction awaiting the next materialized
+    /// ordinary request projection before its UI completion is published.
+    pub(crate) pending_async_notice: Cell<Option<PendingAsyncCompactionNotice>>,
     pub(crate) background_failed: Cell<bool>,
     /// Context window usage percentage (0-100) at which auto-compact triggers.
     ///

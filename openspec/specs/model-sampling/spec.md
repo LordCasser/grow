@@ -119,53 +119,101 @@ Sampling client construction/request events and sampling request spans SHALL des
 - **THEN** sampling event/span logs contain no credential value while the built request retains the configured authentication header.
 
 ### Requirement: Image normalization uses the bounded compute path
-Image normalization SHALL run through its existing cancellation-safe worker admission without an inactive process-wide normalization cache or its unused remote activation flag. Image format conversion, integrity checks, size and pixel limits, original-content fallback, attachment metadata and per-image feedback SHALL retain their existing behavior.
+
+Image normalization SHALL run through its existing cancellation-safe worker admission without an inactive process-wide normalization cache or its unused remote activation flag. Image format conversion, integrity checks, size and pixel limits, original-content fallback and attachment metadata SHALL retain their existing behavior. Drop outcomes SHALL remain attributable to individual input indexes but SHALL be grouped by identical reason before rendering; one normalization batch SHALL produce at most one model reminder and one `ImageDropped` update, with each distinct reason rendered once and all affected indexes listed in stable input order.
 
 #### Scenario: Normalize repeated attachments
+
 - **WHEN** attachments with identical content are admitted
 - **THEN** each uses the supported normalization path and produces the same valid content and per-attachment metadata without consulting a disabled cache.
 
 #### Scenario: Cancel a normalization waiter
+
 - **WHEN** a caller is cancelled after blocking normalization has started
 - **THEN** the running worker retains admission capacity until its actual work completes.
 
 #### Scenario: Re-encoding cannot meet the bound
+
 - **WHEN** normalization cannot produce an encoding under its byte limit
 - **THEN** the original attachment and its indexed fallback notice remain available.
 
+#### Scenario: Several images fail for the same reason
+
+- **WHEN** one normalization batch drops multiple images for an identical integrity, dimension or pixel-count reason
+- **THEN** the model reminder and `ImageDropped` notes contain one summary line for that reason with every affected image index, and the client receives one NOTICE block rather than one repeated sentence per image.
+
+#### Scenario: Images fail for different reasons
+
+- **WHEN** one normalization batch drops images for more than one reason
+- **THEN** each distinct reason appears on one line in first-occurrence order, indexes within each line preserve input order, and the user-attachment and tool-result paths use the same summaries.
+
 ### Requirement: Session image descriptions retain original media
-Grow SHALL retain original image information alongside a reusable textual description. Sampling SHALL send original images for an unmarked canonical provider/model pair. Only a confirmed unsupported-image failure SHALL mark that pair in the current session and trigger text fallback; unrelated request failures SHALL NOT do so.
+
+Grow SHALL retain original image information as immutable Timeline evidence. Sampling SHALL send original images for an unmarked canonical provider/model pair. Only a confirmed unsupported-image failure SHALL mark that pair in the current session and trigger a durable `ImageProjection`; unrelated request failures SHALL NOT do so. A successful description or OCR projection SHALL retain original images alongside reusable text in the current Surface. When no textual fallback can be produced after a confirmed rejection, an acknowledged unsupported-image projection SHALL remove the unresolved images from the current Surface and leave the canonical replacement text without altering the original Timeline message.
 
 #### Scenario: First request for a model
+
 - **WHEN** a session sends an image to an unmarked provider/model pair
-- **THEN** the request includes original image content rather than a preemptive description.
+- **THEN** the request includes original image content rather than a preemptive description or deletion.
 
 #### Scenario: Model rejects image input
-- **WHEN** the primary model explicitly rejects image input
-- **THEN** the session records that provider/model pair and retries with a description while retaining the original image.
+
+- **WHEN** the primary model explicitly rejects a request that contains image input
+- **THEN** the session records that provider/model pair, commits one exact-revision image projection, and retries only after the projection is durably acknowledged.
+
+#### Scenario: GLM-style multimodal rejection
+
+- **WHEN** an image-bearing request receives HTTP 400 with `InvalidParameter: glm-5.2 is not a multimodal model`
+- **THEN** the shared classifier treats it as an unconditional image-input rejection rather than an ordinary terminal request failure.
 
 #### Scenario: Switch to a different model
-- **WHEN** sampling switches to an unmarked provider/model pair after another pair used text fallback
-- **THEN** the first request to the new pair again includes original images; returning to a marked pair selects descriptions.
+
+- **WHEN** sampling switches to an unmarked provider/model pair after another pair used a successful description or OCR projection
+- **THEN** the first request to the new pair can use the retained original images, while returning to a marked pair selects the reusable text.
+
+#### Scenario: Switch after an unsupported removal projection
+
+- **WHEN** unresolved images were durably removed from the current Surface and sampling later switches models
+- **THEN** request assembly does not resurrect images from immutable Timeline evidence; retrying the original media requires an explicit rewind or new attachment.
+
+#### Scenario: Unrelated image validation failure
+
+- **WHEN** a 400 reports malformed bytes, size, dimensions, format, transparency or policy rather than unconditional model capability
+- **THEN** Grow does not mark the pair text-only and does not delete images through the unsupported-model projection.
 
 ### Requirement: Visual auxiliary and local OCR fallback
-For unsupported image input, Grow SHALL use an available configured visual auxiliary model to describe images and show `当前模型不支持多模态，调用视觉辅助LLM处理中...`. If the auxiliary model is absent or fails, Grow SHALL show `视觉辅助模型未配置或者调用失败，使用OCR处理中...` and attempt local OCR. A successful description or OCR result SHALL be retained as the image text description and reused for marked models. If neither succeeds, Grow SHALL report the failure without discarding the original image or silently dropping its content.
+
+For explicitly unsupported image input, Grow SHALL use an available configured visual auxiliary model to describe images and show `当前模型不支持多模态，调用视觉辅助LLM处理中...`. If the auxiliary model is absent or fails, Grow SHALL show `视觉辅助模型未配置或者调用失败，使用OCR处理中...` and attempt local OCR. A successful description or OCR result SHALL be retained and reused for marked models. Every still-unresolved image group SHALL instead receive a typed unsupported-model projection whose exact replacement is `当前模型不支持多模态，图片已经被删除`. Description, OCR and removal shadows for one Surface revision SHALL commit atomically before the primary request is rebuilt.
 
 #### Scenario: Auxiliary description succeeds
+
 - **WHEN** a configured visual auxiliary model produces a nonempty description
-- **THEN** Grow retains that description and retries the primary request with text.
+- **THEN** Grow retains that description and retries the primary request with text after the projection ACK.
 
 #### Scenario: Auxiliary unavailable
+
 - **WHEN** the visual auxiliary route is unconfigured or fails
 - **THEN** Grow displays the OCR status and attempts local OCR, retaining a successful nonempty result in the description field.
 
 #### Scenario: Both fallbacks fail
-- **WHEN** neither visual description nor local OCR can provide text
-- **THEN** the original image remains intact and the request fails with actionable feedback rather than a lossy retry.
+
+- **WHEN** neither visual description nor local OCR can provide text for an image group after the primary model explicitly rejects images
+- **THEN** Grow durably replaces that group in the current Surface with one `当前模型不支持多模态，图片已经被删除`, removes its raw image parts and retries the primary request without those images.
+
+#### Scenario: Mixed fallback outcomes
+
+- **WHEN** one rejected request contains groups that are described successfully and groups that remain unresolved
+- **THEN** one exact-revision projection atomically attaches descriptions to the successful groups and removes only the unresolved groups, without emitting repeated per-image projection notices.
 
 #### Scenario: Image fallback fails without damaging the session
-- **WHEN** both auxiliary description and OCR fail
-- **THEN** only the current request fails recoverably, the user is told the current model does not support multimodal input and may switch models or rewind, no automatic rewind or incomplete image projection occurs, and Timeline replay and manual rewind remain usable.
+
+- **WHEN** unsupported-image removal is acknowledged and the user later sends a text-only follow-up
+- **THEN** the new request uses the repaired Surface, contains none of the removed historical images and does not repeat the same capability 400 merely because the raw Timeline evidence still exists.
+
+#### Scenario: Image projection cannot be committed
+
+- **WHEN** projection validation, durable write or acknowledgement fails
+- **THEN** Grow does not resubmit an in-memory-only lossy request, reports a typed projection failure, and preserves the original Timeline evidence for exact retry or explicit recovery.
 
 ### Requirement: Malformed completed tool arguments recover without execution
 
@@ -273,7 +321,7 @@ Chat Completions、Responses 和 Messages 中结构及身份有效且完整结�
 
 ### Requirement: Portable history preserves complete local tool exchanges
 
-Portable 请求投影 SHALL 保留完整、无歧义的本地工具调用和匹配结果，并通过目标 backend 的结构化工具协议表达名称、合法 JSON 对象参数、关联 ID、结果正文及预算允许的图片。默认投影 SHALL 移除旧 provider reasoning、签名、加密数据、输出 item identity/status 和模型诊断；若当前 Responses 路由以明确的协议错误要求回传 `reasoning_text`，则该路由 MAY 仅回放 Surface 中既有的可见 reasoning 文本，仍 SHALL 移除 opaque identity、签名、加密内容及状态。投影 SHALL NOT 将历史调用作为新的执行请求。原始 Timeline 和既有隔离事实保持不变。
+Portable 请求投影 SHALL 保留完整、无歧义的本地工具调用和匹配结果，并通过目标 backend 的结构化工具协议表达名称、合法 JSON 对象参数、关联 ID、结果正文及预算允许的图片。默认投影 SHALL 移除旧 provider reasoning、签名、加密数据、输出 item identity/status 和模型诊断；若当前路由以明确的协议错误要求回传 Responses `reasoning_text` 或 Chat Completions `reasoning_content`，则该路由 SHALL 仅回放 Surface 中既有的可见 reasoning 文本；Chat 历史 assistant 没有该文本时 SHALL 编码空字符串，仍 SHALL 移除 opaque identity、签名、加密内容及状态。投影 SHALL NOT 将历史调用作为新的执行请求。原始 Timeline 和既有隔离事实保持不变。
 
 #### Scenario: Tool attachments include eviction text
 - **WHEN** 工具结果附件同时含图片与图片预算产生的文本，或只剩替换文本
@@ -281,7 +329,7 @@ Portable 请求投影 SHALL 保留完整、无歧义的本地工具调用和匹�
 
 #### Scenario: Restore or switch provider
 - **WHEN** 会话恢复或切换模型/backend 后中性历史包含完整工具往返
-- **THEN** Chat Completions、Responses、Messages 请求分别保留配对的工具协议和内容，默认不包含被撤销的 native reasoning，切回原模型也不复活 native；仅当前 Responses 路由明确要求时可回放无 opaque 字段的可见 reasoning。
+- **THEN** Chat Completions、Responses、Messages 请求分别保留配对的工具协议和内容，默认不包含被撤销的 native reasoning，切回原模型也不复活 native；仅当前 Responses 或 Chat Completions 路由明确要求时可回放无 opaque 字段的可见 reasoning。
 
 #### Scenario: Ambiguous or incomplete history
 - **WHEN** portable 区域包含未配对、重复或无效工具记录
@@ -296,8 +344,16 @@ Portable 请求投影 SHALL 保留完整、无歧义的本地工具调用和匹�
 - **THEN** 系统在当前路由内启用可见 reasoning 回放，确认投影状态后按同一 logical sampling 余额重建请求，reasoning、function call 与结果各保留一次。
 
 #### Scenario: Replayed portable reasoning remains narrow
-- **WHEN** 兼容回放已为当前 Responses 路由启用，随后发生 native reset、相同路由参数更新或真正的 route 替换
-- **THEN** 前两者保留当前路由兼容状态，真正 route 替换清除它；Chat Completions、Messages 和未学习的 Responses 路由不接收该 portable reasoning。
+- **WHEN** 兼容回放已为当前 Responses 或 Chat Completions 路由启用，随后发生 native reset、相同路由参数更新或真正的 route 替换
+- **THEN** 前两者保留当前路由兼容状态，真正 route 替换清除它；Messages、未学习路由以及与已学习 backend 不匹配的 wire 转换不接收该 portable reasoning。
+
+#### Scenario: Chat route requires reasoning content after a switch
+- **WHEN** 切换后的 Chat Completions 路由明确要求历史 assistant 回传 `reasoning_content`
+- **THEN** 确认启用后，每条 assistant 使用紧邻它的已有可见 reasoning 按顺序编码（包括普通正文），无文本时使用空字符串；保留完整工具调用、结果和附件，不重放工具执行。
+
+#### Scenario: Chat reasoning stays within its assistant boundary
+- **WHEN** 历史含多段 reasoning、不同 assistant、User/System/ToolResult 边界或有效 native span
+- **THEN** 可见 reasoning 不跨越无关边界绑定，native 原文保持且不重复，缺 reasoning 字段时仅补空字符串；Timeline 不改写。
 
 ### Requirement: Portable boundaries keep tool exchanges together
 
@@ -345,15 +401,25 @@ Portable prefix 与 live suffix 的切点 SHALL NOT 将同一完整工具往返�
 
 ### Requirement: Provider-required portable reasoning recovery is bounded
 
-系统 SHALL 将明确的 Responses reasoning 回传拒绝表示为类型化 attempt 事实。兼容状态只有在当前 Surface 含可回放的非空 reasoning 且当前路由尚未启用时才可改变；自动重提交 SHALL 使用同一 logical sampling 的剩余 attempt 上限与绝对期限。
+系统 SHALL 将明确的 Responses `reasoning_text` 或 Chat Completions `reasoning_content` 回传拒绝表示为类型化 attempt 事实。兼容状态只有在拒绝指向当前 backend、存在会改变 wire 的有效历史且当前路由尚未启用时才可改变；自动重提交 SHALL 使用同一 logical sampling 的剩余 attempt 上限与绝对期限。
 
 #### Scenario: First explicit rejection enables replay
-- **WHEN** 当前请求因缺少要求的 `reasoning_text` 首次被明确拒绝，且存在可回放 reasoning 与恢复余额
+- **WHEN** 当前请求因缺少要求的 reasoning 字段首次被明确拒绝，且存在可改变的有效历史与恢复余额
 - **THEN** ChatState 确认启用当前路由投影模式后静默重提交，不把失败候选加入 Surface。
 
 #### Scenario: Repeated rejection does not loop
-- **WHEN** 回放模式已经启用后端点仍返回相同拒绝，或 Surface 没有可回放 reasoning
+- **WHEN** 回放模式已经启用后端点仍返回相同拒绝，或不存在可改变的有效历史（Responses 仍要求完整工具往返前的非空 reasoning）
 - **THEN** 系统不再次声明状态已改变，不重置 logical sampling 预算，并按既有其他恢复或终态路径处理。
+
+#### Scenario: Chat history has no visible reasoning
+- **WHEN** Chat 历史 assistant 没有可见 reasoning，端点明确拒绝缺失 `reasoning_content`
+- **THEN** 当前 Chat 路由可确认一次空字段编码恢复，不能为满足字段要求虚构 reasoning 正文。
+
+#### Scenario: Rejection identifies a different backend
+- **WHEN** 错误要求的 reasoning 字段属于另一 backend，或错误不同时满足 400、thinking mode 与明确回传要求
+- **THEN** 不启用当前路由的 reasoning 兼容状态。
+
+验证入口：`sampling-types/src/conversation.rs` 的 wire 投影、`sampling-types/src/error.rs` 的分类、`chat-state/src/actor/tests.rs` 的路由状态测试与 `shell/src/session/actor/turn/sampling.rs` 的恢复测试。
 
 ### Requirement: Messages tool identity encoding preserves distinct exchanges
 Messages 请求 SHALL 将中性工具调用 ID 与结果关联 ID 一致转换为 ASCII 字母、数字、下划线或连字符组成的非空有界 ID。请求中不同原始身份 SHALL NOT 因编码而碰撞。有效 native continuation 的原生内容和 ID SHALL 保持不变，生成 ID SHALL 避免与其冲突。编码 SHALL NOT 改写原始 Timeline 或执行身份。
@@ -425,3 +491,59 @@ Recap SHALL 保留冻结输入中可合法配对的已完成工具调用、结�
 #### Scenario: Recap requires budget trimming
 - **WHEN** recap 输入超预算而需要去掉较早历史
 - **THEN** 最新可保留工具证据进入请求且不存在孤立工具协议。
+
+### Requirement: Subagent cancellation settles admitted attempts before closing the child Timeline
+
+Subagent cancellation SHALL stop new provider admission, cancel active provider work and await the terminal evidence and all applicable usage settlement for every admitted attempt before committing the SubagentResult that closes the child Timeline. Unknown usage SHALL cross the existing durable incomplete-settlement boundary rather than being treated as zero. A cancellation signal alone SHALL NOT authorize child Timeline closure.
+
+#### Scenario: Cancellation overlaps final attempt settlement
+
+- **WHEN** a child is cancelled after its final provider attempt was admitted but that attempt's evidence or an applicable usage settlement acknowledgment is still pending
+- **THEN** the cancellation remains in settlement, the child SubagentResult and parent Ended reference remain uncommitted, and the attempt settlement is allowed to reach its durable boundary before child closure.
+
+#### Scenario: Settlement completes after cancellation
+
+- **WHEN** all admitted attempt evidence and known or incomplete usage settlements are durably acknowledged and the child turn reaches its cancellation terminal
+- **THEN** the system may commit exactly one SubagentResult(cancelled), followed by the parent Ended fact that references it, and no later attempt event is appended to that child Timeline.
+
+#### Scenario: Settlement or terminal acknowledgment fails
+
+- **WHEN** the child cannot confirm attempt settlement, its turn terminal, or the required persistence frontier within the existing bounded shutdown policy
+- **THEN** the system reports a terminalization failure, does not commit a misleading canonical SubagentResult and does not make the lifecycle eligible for resume.
+
+#### Scenario: Cancellation has no admitted provider work
+
+- **WHEN** a child is cancelled before any provider attempt is admitted
+- **THEN** the empty settlement frontier is acknowledged through the same terminal path and the canonical cancelled lifecycle may close without a fixed delay.
+
+### Requirement: Runtime agent messages project to complete tool exchanges
+
+有来源的 runtime agent-message context item SHALL 在模型请求中投影为完整、可配对的专用收件工具调用/结果，使用从 receipt 确定的稳定身份。该投影 SHALL NOT 冒充模型主动执行或触发工具 dispatch，不得追加孤立 ToolResult 或篡改其他真实工具的结果。canonical Surface 坐标 SHALL 不因 provider 一对多展开改变。
+
+#### Scenario: Receiving a message during a tool batch
+- **WHEN** 消息到达而现有真实工具批次尚未闭合
+- **THEN** 消息在安全边界加入请求，完整收件调用/结果对不插断原工具配对。
+
+#### Scenario: Provider switch and portable history
+- **WHEN** 含已消费 agent 消息的请求切换现有 provider adapter 或供 Sideband 冻结
+- **THEN** 完整正文、来源和稳定身份保留，portable projection 不把它作为孤立结果丢弃，也不执行历史调用。
+
+#### Scenario: Compaction and source permissions
+- **WHEN** 对含 runtime agent message 的 Surface 进行 compaction 或权限判定
+- **THEN** input_ref 仍指向 canonical 事实，消息不获得 DirectUser/Interjection 权限证据；一对 provider item 不生成两份消费坐标。
+
+### Requirement: Named provider stream errors retain their error facts
+
+Chat Completions, Responses, and Messages SHALL recognize a complete `event:error` SSE frame with nonempty `code` and `message` as a provider error, even when its JSON body lacks a `type` or nested `error` field. Grow SHALL retain the provider code, message, and supplied request ID for diagnosis. Error classification SHALL distinguish confirmed content rejection, throttling, and overload, while unknown codes and malformed ordinary events SHALL NOT gain automatic retry eligibility. Existing attempt settlement, output retraction, admission, tool execution, and shared retry budgets SHALL remain authoritative.
+
+#### Scenario: Content rejection after provisional tool output
+- **WHEN** a provider emits a partial tool candidate followed by `event:error` with `InvalidParameter`, a content rejection message, and a request ID
+- **THEN** Grow reports the provider facts, settles usage as known or unknown according to actual evidence, rejects the entire candidate, executes no tool, and does not retry that rejection.
+
+#### Scenario: Known transient stream error
+- **WHEN** an `event:error` frame carries a confirmed throttling or service overload code
+- **THEN** Grow uses the existing 429 or overload classification, and any retry remains bounded by attempt safety and the shared budget.
+
+#### Scenario: Missing fields or unknown code
+- **WHEN** a non-error SSE frame lacks a required event type, a named error lacks required fields, or a named error has an unknown provider code
+- **THEN** missing-field frames remain protocol failures and unknown provider errors preserve their code/message without being assumed transient.

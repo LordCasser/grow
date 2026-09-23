@@ -98,7 +98,7 @@ fn end_to_end_normalized_conversation_shape() {
         false,
         &mut conv,
         &mut seeded_prefix_len,
-        "child system prompt with tool guidance",
+        Some("child system prompt with tool guidance"),
     )
     .unwrap();
     if let ConversationItem::System(ref sys) = conv[0] {
@@ -475,7 +475,7 @@ fn resumed_session_preserves_its_seeded_system_head() {
         false,
         &mut conversation,
         &mut prefix_len,
-        "freshly rendered current system prompt",
+        Some("freshly rendered current system prompt"),
     )
     .unwrap();
     match &conversation[0] {
@@ -609,6 +609,14 @@ fn durable_resume_projection_requires_parent_terminal_fact() {
         ))
         .unwrap();
     assert!(resume_source_from_timeline(&timeline, "sa-resume").is_none());
+    assert_eq!(
+        resume_source_facts_from_timeline(&timeline, "sa-resume").unwrap_err(),
+        DurableResumeSourceError::TerminalMissing,
+    );
+    assert_eq!(
+        resume_source_facts_from_timeline(&timeline, "unknown-source").unwrap_err(),
+        DurableResumeSourceError::SpawnMissing,
+    );
     timeline
         .record(chat_state::TimelineEventKind::Subagent(
             chat_state::SubagentEvent::Ended(chat_state::SubagentTerminalEvent {
@@ -626,6 +634,7 @@ fn durable_resume_projection_requires_parent_terminal_fact() {
         ))
         .unwrap();
     let source = resume_source_from_timeline(&timeline, "sa-resume").unwrap();
+    assert!(resume_source_facts_from_timeline(&timeline, "sa-resume").is_ok());
     assert_eq!(source.child_session_id, "child-resume");
     assert_eq!(source.child_cwd, "/workspace/project");
     assert_eq!(source.worktree_path.as_deref(), Some(Path::new("/tmp/worktree")));

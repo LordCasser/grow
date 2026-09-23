@@ -277,6 +277,9 @@ pub struct ClassifierContext {
     pub tool_call_id: Option<String>,
     /// Working directory in which the child would execute the requested action.
     pub execution_cwd: Option<String>,
+    /// Harness-captured identity and bounded operation evidence for the same
+    /// frozen arguments that execution later binds into its permit.
+    pub call_evidence: Option<crate::permission::types::PermissionCallEvidence>,
 }
 
 impl ClassifierContext {
@@ -1393,6 +1396,12 @@ pub fn build_classifier_messages(
     proposed_action.push_str(&format!(
         "tool: {tool_name}\naccess_kind: {access_kind}\ndetail: {detail}"
     ));
+    if let Some(evidence) = ctx.call_evidence.as_ref() {
+        let evidence =
+            serde_json::to_string(evidence).expect("permission call evidence is JSON-serializable");
+        proposed_action.push_str("\nfrozen_call: ");
+        proposed_action.push_str(&neutralize_headings(&evidence));
+    }
     // Trailing user message, composed per prompt_type.
     let trailing = match prompt_type {
         ClassifierPromptType::Full => {
@@ -1448,6 +1457,7 @@ pub fn build_primary_context_judgment_message(request: &PermissionJudgmentReques
         "tool": request.tool_name,
         "access_kind": access_kind,
         "detail": request.access_detail,
+        "frozen_call": request.context.call_evidence,
         "recent_child_context": recent_child_context,
         "recorded_permission_decisions": recorded_decisions,
     });
@@ -2423,6 +2433,50 @@ mod tests {
         assert!(last.text.contains("access_kind: bash"));
         assert!(last.text.contains("Respond with JSON only"));
         assert!(!msgs[0].text.contains("## Proposed action"));
+    }
+
+    #[test]
+    fn frozen_call_evidence_is_explicit_untrusted_classifier_input() {
+        let evidence = crate::permission::types::PermissionCallEvidence {
+            tool_name: "write".into(),
+            canonical_args_hash: "frozen-hash".into(),
+            operation: Some(serde_json::json!({
+                "operation": "replace_entire_file",
+                "path": "src/lib.rs",
+                "content_bytes": 4096,
+                "content_preview": "bounded…",
+                "content_preview_truncated": true,
+            })),
+        };
+        let ctx = ClassifierContext {
+            subagent_session_id: Some("child-write".into()),
+            call_evidence: Some(evidence.clone()),
+            ..ClassifierContext::default()
+        };
+        let messages = build_classifier_messages(
+            "write",
+            &AccessKind::Edit("src/lib.rs".into()),
+            Some("src/lib.rs"),
+            &ctx,
+            ClassifierPromptType::BareInstructions,
+        );
+        let proposed = &messages.last().unwrap().text;
+        assert!(proposed.contains("tool: write"));
+        assert!(proposed.contains("frozen_call:"));
+        assert!(proposed.contains("frozen-hash"));
+        assert!(proposed.contains("replace_entire_file"));
+
+        let primary = build_primary_context_judgment_message(&PermissionJudgmentRequest {
+            tool_call_id: Some("call-write".into()),
+            tool_name: "write".into(),
+            access: AccessKind::Edit("src/lib.rs".into()),
+            access_detail: Some("src/lib.rs".into()),
+            context: ctx,
+            prompt_type: ClassifierPromptType::Full,
+        });
+        assert!(primary.contains("<untrusted_subagent_permission_request>"));
+        assert!(primary.contains("frozen-hash"));
+        assert!(primary.contains("replace_entire_file"));
     }
 
     /// The AGENTS.md message is omitted when `project_instructions` is None, and an

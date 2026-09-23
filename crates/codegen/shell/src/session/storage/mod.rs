@@ -2348,77 +2348,82 @@ pub(crate) fn validate_sideband_ledgers(
             continue;
         };
         for shadow in &projection.shadows {
-            let chat_state::ImageShadowSource::Description { result_ref } = &shadow.provenance
-            else {
-                // Local OCR has no provider Sideband; Timeline validates its
-                // engine, source identity, image fingerprint and description.
-                continue;
-            };
-            let owner = "image projection";
-            let result = completed_sideband_result(
-                ledgers,
-                &result_ref.timeline_id,
-                result_ref.first_seq,
-                owner,
-            )?;
-            let expected = crate::session::image_describe::render_image_description_block(
-                result.raw_output.trim(),
-            );
-            if expected != shadow.replacement {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "image projection text does not match sideband {}/{}",
-                        result_ref.timeline_id, result_ref.first_seq
-                    ),
-                ));
-            }
-            let attempt_seq = result.source_event_seqs[1];
-            let attempt = ledgers
-                .get(&result_ref.timeline_id)
-                .and_then(|events| {
-                    usize::try_from(attempt_seq)
-                        .ok()
-                        .and_then(|i| events.get(i))
-                })
-                .and_then(|event| match &event.kind {
-                    chat_state::SidebandEventKind::Attempt(attempt) => Some(attempt),
-                    _ => None,
-                })
-                .ok_or_else(|| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "image projection references missing attempt {}/{}",
-                            result_ref.timeline_id, attempt_seq
-                        ),
-                    )
-                })?;
-            let source_is_selected = attempt
-                .assembly_manifest
-                .selected_surface_ids
-                .contains(&shadow.source)
-                && attempt
-                    .assembly_manifest
-                    .context_surface_ids
-                    .contains(&shadow.source)
-                && attempt.assembly_manifest.source_revision == Some(projection.source_revision)
-                && attempt.input_refs.iter().any(|source| {
-                    source.first_seq <= shadow.source.event.get()
-                        && shadow.source.event.get() <= source.last_seq
-                })
-                && result.evidence_refs.iter().any(|source| {
-                    source.first_seq <= shadow.source.event.get()
-                        && shadow.source.event.get() <= source.last_seq
-                });
-            if !source_is_selected {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!(
-                        "image projection source is not proven by sideband {}/{}",
-                        result_ref.timeline_id, result_ref.first_seq
-                    ),
-                ));
+            match &shadow.provenance {
+                chat_state::ImageShadowSource::Description { result_ref } => {
+                    let owner = "image projection";
+                    let result = completed_sideband_result(
+                        ledgers,
+                        &result_ref.timeline_id,
+                        result_ref.first_seq,
+                        owner,
+                    )?;
+                    let expected = crate::session::image_describe::render_image_description_block(
+                        result.raw_output.trim(),
+                    );
+                    if expected != shadow.replacement {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "image projection text does not match sideband {}/{}",
+                                result_ref.timeline_id, result_ref.first_seq
+                            ),
+                        ));
+                    }
+                    let attempt_seq = result.source_event_seqs[1];
+                    let attempt = ledgers
+                        .get(&result_ref.timeline_id)
+                        .and_then(|events| {
+                            usize::try_from(attempt_seq)
+                                .ok()
+                                .and_then(|i| events.get(i))
+                        })
+                        .and_then(|event| match &event.kind {
+                            chat_state::SidebandEventKind::Attempt(attempt) => Some(attempt),
+                            _ => None,
+                        })
+                        .ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!(
+                                    "image projection references missing attempt {}/{}",
+                                    result_ref.timeline_id, attempt_seq
+                                ),
+                            )
+                        })?;
+                    let source_is_selected = attempt
+                        .assembly_manifest
+                        .selected_surface_ids
+                        .contains(&shadow.source)
+                        && attempt
+                            .assembly_manifest
+                            .context_surface_ids
+                            .contains(&shadow.source)
+                        && attempt.assembly_manifest.source_revision
+                            == Some(projection.source_revision)
+                        && attempt.input_refs.iter().any(|source| {
+                            source.first_seq <= shadow.source.event.get()
+                                && shadow.source.event.get() <= source.last_seq
+                        })
+                        && result.evidence_refs.iter().any(|source| {
+                            source.first_seq <= shadow.source.event.get()
+                                && shadow.source.event.get() <= source.last_seq
+                        });
+                    if !source_is_selected {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "image projection source is not proven by sideband {}/{}",
+                                result_ref.timeline_id, result_ref.first_seq
+                            ),
+                        ));
+                    }
+                }
+                // Neither disposition has a provider Sideband to cross-check
+                // here. Timeline validation enforces the local OCR engine, the
+                // source identity/fingerprint, and the exact canonical
+                // unsupported-model replacement text.
+                chat_state::ImageShadowSource::LocalOcr { .. }
+                | chat_state::ImageShadowSource::UnsupportedModel => continue,
             }
         }
     }

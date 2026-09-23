@@ -319,6 +319,11 @@ fn render_item_to_background(out: &mut String, item: &ConversationItem) {
             };
             let _ = writeln!(out, "[Tool Result]: {preview}");
         }
+        ConversationItem::AgentMessage(batch) => {
+            for message in &batch.messages {
+                let _ = writeln!(out, "[Agent Message]: {}", sampling_types::agent_message_result_content(message));
+            }
+        }
         ConversationItem::System(_) => {}
         ConversationItem::BackendToolCall(b) => {
             let _ = writeln!(out, "[Backend Tool]: {}", b.text_summary());

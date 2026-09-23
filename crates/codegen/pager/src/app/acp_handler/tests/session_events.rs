@@ -213,9 +213,21 @@
                 assert_eq!(block.name, "Answering session peer");
                 assert_eq!(block.coordination.as_ref().unwrap().inquiry_id, "inquiry-1");
                 assert!(entry.is_running);
-                let details = block.output.as_deref().unwrap();
-                assert!(details.contains("Source session: peer"));
-                assert!(details.contains("Inquiry ID: inquiry-1"));
+                assert_eq!(
+                    block
+                        .communication_body()
+                        .expect("typed coordination body")
+                        .raw_text(),
+                    "Status?"
+                );
+                let audit: shell::coordination::IncomingInquiryAudit = serde_json::from_str(
+                    block
+                        .communication_data()
+                        .expect("typed coordination metadata"),
+                )
+                .unwrap();
+                assert_eq!(audit.source_session_id, "peer");
+                assert_eq!(audit.source_cwd, "/tmp/work");
             }
             other => panic!("expected passive coordination tool row, got {other:?}"),
         }

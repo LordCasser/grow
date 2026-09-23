@@ -6504,6 +6504,7 @@ dependencies = [
  "similar",
  "token-estimation",
  "tracing",
+ "unicode-width 0.2.2",
  "uuid",
  "version",
 ]
@@ -8116,6 +8117,7 @@ dependencies = [
  "indexmap 2.14.1",
  "jsonschema",
  "reqwest",
+ "schemars 1.2.2",
  "serde",
  "serde_json",
  "thiserror 2.0.20",
@@ -9835,6 +9837,7 @@ dependencies = [
  "pulldown-cmark",
  "regex",
  "reqwest",
+ "sampling-types",
  "sandbox",
  "schemars 1.2.2",
  "scraper",

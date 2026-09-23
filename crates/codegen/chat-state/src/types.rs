@@ -105,11 +105,36 @@ impl ConversationCounts {
                 sampling_types::ConversationItem::Assistant(_) => counts.assistant += 1,
                 sampling_types::ConversationItem::ToolResult(_) => counts.tool_result += 1,
                 sampling_types::ConversationItem::System(_)
+                | sampling_types::ConversationItem::AgentMessage(_)
                 | sampling_types::ConversationItem::BackendToolCall(_)
                 | sampling_types::ConversationItem::Reasoning(_) => {}
             }
         }
         counts
+    }
+}
+
+#[cfg(test)]
+mod conversation_count_tests {
+    use super::ConversationCounts;
+    use sampling_types::ConversationItem;
+
+    #[test]
+    fn runtime_agent_message_is_one_item_but_not_user_or_tool_count() {
+        let item = ConversationItem::received_agent_message(sampling_types::AgentMessage {
+            receipt_id: "receipt-1".into(),
+            source_session_id: "source".into(),
+            target_session_id: "target".into(),
+            message_id: "message-1".into(),
+            reply_to: None,
+            message: "runtime body".into(),
+        });
+
+        let counts = ConversationCounts::from_items(&[item]);
+        assert_eq!(counts.total, 1);
+        assert_eq!(counts.user, 0);
+        assert_eq!(counts.assistant, 0);
+        assert_eq!(counts.tool_result, 0);
     }
 }
 

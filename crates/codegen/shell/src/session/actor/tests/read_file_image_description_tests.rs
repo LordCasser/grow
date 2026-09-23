@@ -79,11 +79,15 @@ async fn configured_auxiliary_does_not_preempt_unknown_current_model() {
         .await;
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn known_text_only_model_degrades_read_file_image_before_sampling() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+#[test]
+fn known_text_only_model_removes_read_file_image_before_sampling() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async {
             let actor = test_actor().await;
             mark_current_model_as_text_only(&actor).await;
 
@@ -94,78 +98,158 @@ async fn known_text_only_model_degrades_read_file_image_before_sampling() {
                 "read_file must keep ImageContent"
             );
 
-            let error = actor
+            let report = actor
                 .project_images_for_known_text_model()
                 .await
-                .expect_err("a permanent shadow requires a durable description");
-            assert!(format!("{error:?}").contains("当前模型不支持多模态"));
-            assert!(!crate::session::commands::is_fatal_turn_boundary_error(&error));
+                .expect("the pre-sampling gate must repair the Surface, not fail");
+            assert_eq!(report.described_images, 0);
+            assert_eq!(report.removed_images, 1);
+
             let conversation = actor.chat_state_handle.get_conversation().await;
-            assert_eq!(
-                sampling_types::conversation::conversation_image_groups(&conversation).len(),
-                1
+            assert!(
+                sampling_types::conversation::conversation_image_groups(&conversation).is_empty()
             );
             let ConversationItem::ToolResult(result) = conversation.last().unwrap() else {
                 panic!("expected tool result");
             };
             assert_eq!(result.tool_call_id, "read-image-1");
-            assert_eq!(result.images.len(), 1);
-            assert_eq!(result.content.as_ref(), "Read image file.");
-            assert!(!result.content.contains("/workspace/image.png"));
+            assert!(result.images.is_empty());
+            assert_eq!(
+                result.content.as_ref(),
+                format!(
+                    "Read image file.\n\n[Projected image removal]\n{}",
+                    sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT
+                )
+            );
+
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert!(events.iter().any(|event| matches!(
+                event.kind,
+                chat_state::TimelineEventKind::ImageProjection(_)
+            )));
+            let sealed_message_groups = events
+                .iter()
+                .filter_map(|event| event.messages())
+                .map(|messages| {
+                    sampling_types::conversation::conversation_image_groups(&messages.items).len()
+                })
+                .sum::<usize>();
+            assert_eq!(
+                sealed_message_groups, 1,
+                "the raw read_file payload must stay as Timeline evidence"
+            );
 
             let request = actor
                 .chat_state_handle
                 .build_request(&actor.session_info.id.to_string(), vec![], None, None, None)
                 .await
                 .unwrap();
-            assert_eq!(
-                sampling_types::conversation::conversation_image_groups(&request.items).len(),
-                1,
-                "failed translation must leave the canonical model view untouched"
+            assert!(
+                sampling_types::conversation::conversation_image_groups(&request.items).is_empty(),
+                "the repaired Surface must assemble a request without images"
             );
-        })
-        .await;
+            assert!(request.items.iter().any(|item| {
+                item.text_content()
+                    .contains(sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT)
+            }));
+        }));
+    });
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn compaction_refuses_to_erase_images_when_text_projection_is_unavailable() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+/// Compaction recursion needs a bigger stack than the default test thread.
+fn run_with_session_stack(body: impl FnOnce() + Send + 'static) {
+    std::thread::Builder::new()
+        .stack_size(32 * 1024 * 1024)
+        .spawn(body)
+        .unwrap()
+        .join()
+        .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+}
+
+#[test]
+fn compaction_proceeds_after_an_acknowledged_removal_projection() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async {
             let actor = Arc::new(test_actor().await);
             mark_current_model_as_text_only(&actor).await;
             run_image_result(&actor).await;
 
-            let error = actor
-                .run_compact(None)
+            let report = actor
+                .project_images_for_known_text_model()
                 .await
-                .expect_err("compaction must fail before replacing an untranslated image");
+                .expect("the image gate must remove the unresolved image durably");
+            assert_eq!(report.removed_images, 1);
 
-            assert!(format!("{error:?}").contains("当前模型不支持多模态"));
-            assert!(!crate::session::commands::is_fatal_turn_boundary_error(&error));
             let timeline_events = actor.chat_state_handle.timeline_events().await.unwrap();
             assert!(
-                !timeline_events.iter().any(|event| matches!(
+                timeline_events.iter().any(|event| matches!(
                     event.kind,
-                    chat_state::TimelineEventKind::Compaction(_)
+                    chat_state::TimelineEventKind::ImageProjection(_)
                 )),
-                "ImageProjection is an admission gate and must run before Compaction::Started"
+                "the removal must be an accepted Timeline fact"
             );
+            assert!(
+                timeline_events.iter().any(|event| matches!(
+                    &event.kind,
+                    chat_state::TimelineEventKind::Messages(messages)
+                        if !sampling_types::conversation::conversation_image_groups(
+                            &messages.items
+                        )
+                        .is_empty()
+                )),
+                "the original image-bearing message stays as evidence"
+            );
+
+            // Compaction is no longer refused because of the image; it proceeds
+            // past the gate into its own transaction. This harness has no
+            // compaction provider, so any later failure is not image-related.
+            if let Err(error) = actor.run_compact(None).await {
+                assert!(
+                    !format!("{error:?}").contains("failed to persist text-only image projection"),
+                    "{error:?}"
+                );
+            }
+            assert!(
+                actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .any(|event| matches!(
+                        event.kind,
+                        chat_state::TimelineEventKind::Compaction(_)
+                    )),
+                "compaction must reach its transaction boundary after the removal"
+            );
+
             let conversation = actor.chat_state_handle.get_conversation().await;
-            assert_eq!(
-                sampling_types::conversation::conversation_image_groups(&conversation).len(),
-                1,
-                "failed projection must leave the canonical image untouched"
+            assert!(
+                sampling_types::conversation::conversation_image_groups(&conversation).is_empty(),
+                "no compaction path may resurrect the removed image"
             );
-        })
-        .await;
+            assert!(conversation.iter().any(|item| {
+                item.text_content()
+                    .contains(sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT)
+            }));
+        }));
+    });
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn pdf_extracted_images_stay_one_ordered_group_and_only_the_text_route_is_projected() {
-    let local = tokio::task::LocalSet::new();
-    local
-        .run_until(async {
+#[test]
+fn pdf_extracted_images_stay_one_ordered_group_and_only_the_text_route_is_projected() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async {
             let actor = test_actor().await;
             let image = test_image_content();
             let result = ToolRunResult {
@@ -214,14 +298,34 @@ async fn pdf_extracted_images_stay_one_ordered_group_and_only_the_text_route_is_
             actor.chat_state_handle.push_user_message(deferred[0].clone());
 
             mark_current_model_as_text_only(&actor).await;
-            actor
+            let report = actor
                 .project_images_for_known_text_model()
                 .await
-                .expect_err("PDF images may not be permanently omitted");
+                .expect("PDF images are removed only through a durable projection");
+            assert_eq!(report.removed_images, 2);
             let conversation = actor.chat_state_handle.get_conversation().await;
+            assert!(
+                sampling_types::conversation::conversation_image_groups(&conversation).is_empty()
+            );
+            let replacement_count = conversation
+                .iter()
+                .flat_map(|item| match item {
+                    ConversationItem::User(user) => user.content.as_slice(),
+                    ConversationItem::ToolResult(result) => result.images.as_slice(),
+                    _ => &[],
+                })
+                .filter(|part| {
+                    matches!(
+                        part,
+                        sampling_types::ContentPart::Text { text }
+                            if text.as_ref()
+                                == sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT
+                    )
+                })
+                .count();
             assert_eq!(
-                sampling_types::conversation::conversation_image_groups(&conversation).len(),
-                1
+                replacement_count, 1,
+                "one replacement covers the whole ordered group"
             );
             assert!(conversation.iter().any(|item| {
                 matches!(item, ConversationItem::ToolResult(result) if result.content.contains("PDF text"))
@@ -232,9 +336,17 @@ async fn pdf_extracted_images_stay_one_ordered_group_and_only_the_text_route_is_
                 .build_request(&actor.session_info.id.to_string(), vec![], None, None, None)
                 .await
                 .unwrap();
-            assert_eq!(
-                sampling_types::conversation::conversation_image_groups(&text_request.items).len(),
-                1
+            assert!(
+                sampling_types::conversation::conversation_image_groups(&text_request.items)
+                    .is_empty()
+            );
+            assert!(
+                text_request
+                    .items
+                    .iter()
+                    .any(|item| item.text_content().contains(
+                        sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT
+                    ))
             );
 
             let mut vision_config = actor.chat_state_handle.get_sampling_config().await.unwrap();
@@ -245,13 +357,21 @@ async fn pdf_extracted_images_stay_one_ordered_group_and_only_the_text_route_is_
                 .build_request(&actor.session_info.id.to_string(), vec![], None, None, None)
                 .await
                 .unwrap();
-            assert_eq!(
+            assert!(
                 sampling_types::conversation::conversation_image_groups(&vision_request.items)
-                    .len(),
-                1
+                    .is_empty(),
+                "another model must not resurrect a durably removed image"
             );
-        })
-        .await;
+            assert!(
+                vision_request
+                    .items
+                    .iter()
+                    .any(|item| item.text_content().contains(
+                        sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT
+                    ))
+            );
+        }));
+    });
 }
 
 #[tokio::test(flavor = "current_thread")]

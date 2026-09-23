@@ -13,12 +13,17 @@ fn run_with_session_stack(body: impl FnOnce() + Send + 'static) {
         .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
 }
 
-async fn actor_with_sampler(
+/// Sampler-backed actor with a controllable chat-state Timeline persistence.
+/// The returned gate observes acknowledged/failed image projections; callers
+/// that do not care about durability keep the default behaviour (immediate
+/// acknowledgement, nothing stored).
+async fn actor_with_sampler_and_persistence(
     server: &MockInferenceServer,
     image_description_model: Option<&str>,
 ) -> (
     std::sync::Arc<SessionActor>,
     mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+    ImageProjectionPersistence,
 ) {
     let (gateway_tx, gateway_rx) = mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
     let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
@@ -29,7 +34,15 @@ async fn actor_with_sampler(
             }
         }
     });
-    let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+    let (mut actor, image_projection_persistence) =
+        create_test_actor_with_image_projection_persistence(
+            0,
+            256_000,
+            85,
+            gateway_tx,
+            persistence_tx,
+        )
+        .await;
     if let Some(mut config) = actor.chat_state_handle.get_sampling_config().await {
         config.base_url = server.url();
         config.api_backend = sampling_types::ApiBackend::Messages;
@@ -108,6 +121,18 @@ async fn actor_with_sampler(
             drainer.handle_sampling_event(event).await;
         }
     });
+    (actor, gateway_rx, image_projection_persistence)
+}
+
+async fn actor_with_sampler(
+    server: &MockInferenceServer,
+    image_description_model: Option<&str>,
+) -> (
+    std::sync::Arc<SessionActor>,
+    mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+) {
+    let (actor, gateway_rx, _) =
+        actor_with_sampler_and_persistence(server, image_description_model).await;
     (actor, gateway_rx)
 }
 
@@ -162,8 +187,52 @@ fn count_wire_images(value: &serde_json::Value) -> usize {
     }
 }
 
+fn multimodal_capability_rejection() -> ScriptedResponse {
+    ScriptedResponse::json(
+        400,
+        json!({
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "message": "InvalidParameter: test-model is not a multimodal model"
+            }
+        }),
+    )
+}
+
+/// Task 4.2 acceptance: the exact GLM-style capability 400 is classified,
+/// the unresolved image is durably removed from the current Surface, and the
+/// resubmitted request carries the canonical text with zero images. The raw
+/// payload stays in the immutable Timeline evidence, and the following
+/// text-only turn never repeats the capability rejection.
+/// Count image groups carried verbatim by the durable event ledger. The
+/// canonical user item is sealed by `Messages`, `Input::Consumed` or
+/// `Notification::Consumed` depending on how the turn was admitted, and every
+/// one of them is immutable evidence that a projection must not rewrite.
+fn sealed_image_groups(events: &[chat_state::TimelineEvent]) -> usize {
+    events
+        .iter()
+        .flat_map(|event| match &event.kind {
+            chat_state::TimelineEventKind::Messages(messages) => messages.items.as_slice(),
+            chat_state::TimelineEventKind::Input(chat_state::InputEvent::Consumed {
+                item, ..
+            }) => std::slice::from_ref(item),
+            chat_state::TimelineEventKind::Notification(
+                chat_state::NotificationEvent::Consumed {
+                    input: Some(item), ..
+                },
+            ) => std::slice::from_ref(item),
+            _ => &[],
+        })
+        .map(|item| {
+            sampling_types::conversation::conversation_image_groups(std::slice::from_ref(item))
+                .len()
+        })
+        .sum()
+}
+
 #[test]
-fn explicit_image_400_without_description_fails_without_lossy_resubmission() {
+fn explicit_multimodal_400_removes_images_and_resubmits_text_only() {
     run_with_session_stack(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -172,29 +241,24 @@ fn explicit_image_400_without_description_fails_without_lossy_resubmission() {
         let local = tokio::task::LocalSet::new();
         runtime.block_on(local.run_until(async {
             let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response("/v1/messages", multimodal_capability_rejection());
             server.enqueue_response(
                 "/v1/messages",
-                ScriptedResponse::json(
-                    400,
-                    json!({
-                        "type": "error",
-                        "error": {
-                            "type": "invalid_request_error",
-                            "message": "Failed to deserialize messages[18]: unknown variant `image_url`, expected `text`"
-                        }
-                    }),
-                ),
+                messages_text_turn("Continued without the removed image.", "test-model"),
+            );
+            server.enqueue_response(
+                "/v1/messages",
+                messages_text_turn("Plain text follow-up.", "test-model"),
             );
             let (actor, mut gateway_rx) = actor_with_sampler(&server, None).await;
-            install_test_foreground(&actor, "image-400-recovery").await;
+            install_test_foreground(&actor, "image-400-removal").await;
 
-            let result = tokio::time::timeout(
-                std::time::Duration::from_secs(30),
-                actor.handle_prompt(
-                    "image-400-recovery",
+            actor
+                .handle_prompt(
+                    "image-400-removal",
                     crate::session::actor::tests::support::admit_test_human_input(
                         &actor,
-                        "image-400-recovery",
+                        "image-400-removal",
                     )
                     .await,
                     crate::session::PromptOrigin::User,
@@ -210,18 +274,269 @@ fn explicit_image_400_without_description_fails_without_lossy_resubmission() {
                     false,
                     None,
                     None,
-                ),
-            )
-            .await
-            .expect("recovery must not loop");
-            let error = result.expect_err("missing description route must fail closed");
-            assert!(format!("{error:?}").contains("当前模型不支持多模态"), "{error:?}");
-            assert!(format!("{error:?}").contains("rewind"));
-            assert!(!crate::session::commands::is_fatal_turn_boundary_error(&error));
+                )
+                .await
+                .expect("a durable removal projection must recover the turn");
+
+            let requests: Vec<_> = server
+                .requests()
+                .into_iter()
+                .filter(|request| request.path == "/v1/messages")
+                .collect();
+            assert_eq!(requests.len(), 2, "initial image request plus one resubmit");
+            assert!(count_wire_images(requests[0].body.as_ref().unwrap()) > 0);
+            assert_eq!(count_wire_images(requests[1].body.as_ref().unwrap()), 0);
+            assert!(
+                requests[1]
+                    .body
+                    .as_ref()
+                    .unwrap()
+                    .to_string()
+                    .contains(sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT)
+            );
+
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            assert!(
+                sampling_types::conversation::conversation_image_groups(&conversation).is_empty()
+            );
+            let user = conversation
+                .iter()
+                .find_map(|item| match item {
+                    ConversationItem::User(user) => Some(user),
+                    _ => None,
+                })
+                .expect("the user image turn must stay on the Surface");
+            assert!(user.content.iter().any(|part| matches!(
+                part,
+                sampling_types::ContentPart::Text { text }
+                    if text.as_ref() == sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT
+            )));
+            assert!(
+                actor
+                    .unsupported_current_model_for_images()
+                    .await
+                    .is_some(),
+                "the capability pair must be marked text-only"
+            );
+
             let events = actor.chat_state_handle.timeline_events().await.unwrap();
-            assert!(!events.iter().any(|event| matches!(event.kind, chat_state::TimelineEventKind::ImageProjection(_))));
-            let replay = chat_state::Timeline::from_events(events).expect("failed image turn must remain replayable");
-            assert_eq!(sampling_types::conversation::conversation_image_groups(replay.surface()).len(), 1);
+            assert!(events.iter().any(|event| matches!(
+                event.kind,
+                chat_state::TimelineEventKind::ImageProjection(_)
+            )));
+            assert_eq!(
+                sealed_image_groups(&events),
+                1,
+                "the original payload must remain immutable Timeline evidence"
+            );
+            chat_state::Timeline::from_events(events)
+                .expect("the repaired Timeline must stay replayable");
+
+            let drained = drain_notifications(&mut gateway_rx);
+            assert!(drained.retry_failures.is_empty());
+            assert_eq!(drained.image_projected_updates, 1);
+            assert_eq!(
+                drained.notes,
+                vec![
+                    "当前模型不支持多模态，1 张图片无法生成文字描述，已从当前会话中删除；原图仍保留在会话历史记录中。"
+                        .to_owned()
+                ]
+            );
+
+            release_settled_foreground(&actor).await;
+            install_test_foreground(&actor, "image-400-removal-follow-up").await;
+            actor
+                .handle_prompt(
+                    "image-400-removal-follow-up",
+                    crate::session::actor::tests::support::admit_test_human_input(
+                        &actor,
+                        "image-400-removal-follow-up",
+                    )
+                    .await,
+                    crate::session::PromptOrigin::User,
+                    Vec::new(),
+                    crate::session::TurnKind::User,
+                    vec![acp::ContentBlock::Text(acp::TextContent::new("plain text"))],
+                    tool_types::BehaviorId::Normal,
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                )
+                .await
+                .expect("a text-only turn on the repaired Surface must succeed");
+            let requests: Vec<_> = server
+                .requests()
+                .into_iter()
+                .filter(|request| request.path == "/v1/messages")
+                .collect();
+            assert_eq!(requests.len(), 3, "the follow-up turn must not retry images");
+            assert_eq!(count_wire_images(requests[2].body.as_ref().unwrap()), 0);
+        }));
+    });
+}
+
+/// Projection-related notifications the client received during a turn.
+#[derive(Default)]
+struct DrainedNotifications {
+    image_projected_updates: usize,
+    image_compressed_updates: usize,
+    compressed_messages: Vec<String>,
+    image_dropped_updates: usize,
+    dropped_notes: Vec<String>,
+    notes: Vec<String>,
+    retry_failures: Vec<String>,
+}
+
+/// Direct `handle_prompt` fixtures stop at `Settling`; production's completion
+/// mailbox releases this owner before admitting the next prompt.
+async fn release_settled_foreground(actor: &SessionActor) {
+    let mut state = actor.state.lock().await;
+    assert!(
+        matches!(state.foreground, ForegroundState::Settling { .. }),
+        "a completed direct turn must settle before the next prompt"
+    );
+    state.foreground = ForegroundState::Idle;
+}
+
+fn drain_notifications(
+    gateway_rx: &mut mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+) -> DrainedNotifications {
+    let mut drained = DrainedNotifications::default();
+    while let Ok(message) = gateway_rx.try_recv() {
+        let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
+            continue;
+        };
+        if args.request.method.as_ref() != "grow/session_notification" {
+            continue;
+        }
+        let notification: crate::extensions::notification::SessionNotification =
+            serde_json::from_str(args.request.params.get()).unwrap();
+        match notification.update {
+            GrowSessionUpdate::ImageCompressed { message, .. } => {
+                drained.image_compressed_updates += 1;
+                drained.compressed_messages.push(message);
+            }
+            GrowSessionUpdate::ImageDropped { notes } => {
+                drained.image_dropped_updates += 1;
+                drained.dropped_notes.extend(notes);
+            }
+            GrowSessionUpdate::ImageProjected { notes } => {
+                drained.image_projected_updates += 1;
+                drained.notes.extend(notes);
+            }
+            GrowSessionUpdate::RetryState(
+                crate::extensions::notification::RetryState::Failed { message, .. },
+            ) => drained.retry_failures.push(message),
+            _ => {}
+        }
+    }
+    drained
+}
+
+fn inline_data_uri(image: &acp::ImageContent) -> String {
+    format!("data:{};base64,{}", image.mime_type, image.data)
+}
+
+/// A large, flat PNG keeps this fixture small while exceeding the normalizer's
+/// side limit, so it deterministically exercises the re-encode path.
+fn inline_compressed_image() -> String {
+    use base64::Engine as _;
+    use image::{ImageBuffer, Rgb};
+
+    let image: ImageBuffer<Rgb<u8>, Vec<u8>> =
+        ImageBuffer::from_pixel(3000, 2000, Rgb([128, 64, 32]));
+    let mut bytes = Vec::new();
+    image
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .expect("encode oversized inline PNG");
+    format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    )
+}
+
+/// Keep the payload above the extractor threshold while remaining under all
+/// image normalization limits.
+fn inline_healthy_image() -> String {
+    use base64::Engine as _;
+    use image::{ImageBuffer, Rgb};
+
+    let image: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(64, 64, |x, y| {
+        Rgb([
+            (x.wrapping_mul(31).wrapping_add(y.wrapping_mul(17))) as u8,
+            (x.wrapping_mul(13).wrapping_add(y.wrapping_mul(29))) as u8,
+            (x.wrapping_mul(7).wrapping_add(y.wrapping_mul(43))) as u8,
+        ])
+    });
+    let mut bytes = Vec::new();
+    image
+        .write_to(
+            &mut std::io::Cursor::new(&mut bytes),
+            image::ImageFormat::Png,
+        )
+        .expect("encode healthy inline PNG");
+    let content = acp::ImageContent::new(
+        base64::engine::general_purpose::STANDARD.encode(bytes),
+        "image/png",
+    );
+    inline_data_uri(&content)
+}
+
+fn inline_dropped_image() -> String {
+    // The extractor requires at least 1024 base64 characters. This decodes as
+    // bytes but is not an image, making normalization drop it with one stable
+    // validation reason.
+    format!("data:image/png;base64,{}", "A".repeat(1024))
+}
+
+async fn admit_inline_query(actor: &std::sync::Arc<SessionActor>, prompt_id: &str, text: String) {
+    install_test_foreground(actor, prompt_id).await;
+    actor
+        .handle_prompt(
+            prompt_id,
+            crate::session::actor::tests::support::admit_test_human_input(actor, prompt_id).await,
+            crate::session::PromptOrigin::User,
+            Vec::new(),
+            crate::session::TurnKind::User,
+            vec![acp::ContentBlock::Text(acp::TextContent::new(text))],
+            tool_types::BehaviorId::Normal,
+            None,
+            None,
+            false,
+            None,
+            None,
+        )
+        .await
+        .expect("inline image prompt should complete");
+}
+
+#[test]
+fn inline_image_normalization_notices_cover_dropped_compressed_and_mixed_input() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response(
+                "/v1/messages",
+                messages_text_turn("inline image result", "test-model"),
+            );
+            let (actor, mut gateway_rx) = actor_with_sampler(&server, None).await;
+            let dropped = inline_dropped_image();
+            let compressed = inline_compressed_image();
+            let healthy = inline_healthy_image();
+            let query = format!(
+                "before {dropped} between {dropped} compressed {compressed} healthy {healthy} after",
+            );
+            admit_inline_query(&actor, "inline-image-mixed", query).await;
 
             let requests: Vec<_> = server
                 .requests()
@@ -229,44 +544,128 @@ fn explicit_image_400_without_description_fails_without_lossy_resubmission() {
                 .filter(|request| request.path == "/v1/messages")
                 .collect();
             assert_eq!(requests.len(), 1);
-            assert!(count_wire_images(requests[0].body.as_ref().unwrap()) > 0);
+            let body = requests[0].body.as_ref().unwrap().to_string();
+            assert_eq!(count_wire_images(requests[0].body.as_ref().unwrap()), 2);
+            assert_eq!(body.matches("<image_dropped_notice>").count(), 1);
+            assert_eq!(body.matches("<image_compression_notice>").count(), 1);
+            assert_eq!(body.matches("Images 1 and 2 were dropped").count(), 1);
+            assert_eq!(body.matches("Image 3 ").count(), 1);
 
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            let groups = sampling_types::conversation::conversation_image_groups(&conversation);
+            assert_eq!(groups.len(), 1);
+            assert_eq!(groups[0].image_count(), 2);
+            assert_eq!(groups[0].image_urls[1].as_ref(), healthy.as_str());
+            let ConversationItem::User(user) = &conversation[groups[0].item_index] else {
+                panic!("inline images must belong to the admitted user message");
+            };
+            let placeholder = "[image content will be provided separately]";
+            assert_eq!(
+                user.permission_evidence,
+                Some(sampling_types::PermissionEvidence::direct_user(format!(
+                    "<user_query>\nbefore {placeholder} between {placeholder} compressed {placeholder} healthy {placeholder} after\n</user_query>",
+                ))),
+                "normalization reminders must not become user permission evidence",
+            );
+            for uri in [&dropped, &compressed, &healthy] {
+                let payload = uri.split_once(',').unwrap().1;
+                assert!(!groups[0].source_text.contains(payload));
+            }
+            assert_eq!(
+                groups[0]
+                    .source_text
+                    .matches("<image_dropped_notice>")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                groups[0]
+                    .source_text
+                    .matches("<image_compression_notice>")
+                    .count(),
+                1
+            );
+
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            let replay = chat_state::Timeline::from_events(events).expect("Timeline replay");
+            let replay_groups =
+                sampling_types::conversation::conversation_image_groups(replay.surface());
+            assert_eq!(replay_groups.len(), 1);
+            assert_eq!(replay_groups[0].image_count(), 2);
+            assert_eq!(replay_groups[0].image_urls[1].as_ref(), healthy.as_str());
+            assert_eq!(replay_groups[0].image_urls, groups[0].image_urls);
+            assert_eq!(replay_groups[0].source_text, groups[0].source_text);
+            let ConversationItem::User(replayed_user) =
+                &replay.surface()[replay_groups[0].item_index]
+            else {
+                panic!("replayed images must retain the user-message owner");
+            };
+            assert_eq!(replayed_user.permission_evidence, user.permission_evidence);
+            assert_eq!(
+                replay_groups[0]
+                    .source_text
+                    .matches("<image_dropped_notice>")
+                    .count(),
+                1
+            );
+            assert_eq!(
+                replay_groups[0]
+                    .source_text
+                    .matches("<image_compression_notice>")
+                    .count(),
+                1
+            );
+            let drained = drain_notifications(&mut gateway_rx);
+            assert_eq!(drained.image_dropped_updates, 1);
+            assert_eq!(drained.dropped_notes.len(), 1);
+            assert!(drained.dropped_notes[0].contains("Images 1 and 2 were dropped"));
+            assert_eq!(drained.image_compressed_updates, 1);
+            assert_eq!(drained.compressed_messages.len(), 1);
+            assert!(drained.compressed_messages[0].contains("Image 3"));
+        }));
+    });
+}
+
+#[test]
+fn inline_healthy_image_has_no_normalization_notice() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response(
+                "/v1/messages",
+                messages_text_turn("healthy inline image result", "test-model"),
+            );
+            let (actor, mut gateway_rx) = actor_with_sampler(&server, None).await;
+            admit_inline_query(
+                &actor,
+                "inline-image-healthy",
+                format!("keep this image {}", inline_healthy_image()),
+            )
+            .await;
+
+            let requests: Vec<_> = server
+                .requests()
+                .into_iter()
+                .filter(|request| request.path == "/v1/messages")
+                .collect();
+            assert_eq!(requests.len(), 1);
+            let body = requests[0].body.as_ref().unwrap().to_string();
+            assert_eq!(count_wire_images(requests[0].body.as_ref().unwrap()), 1);
+            assert!(!body.contains("<image_dropped_notice>"));
+            assert!(!body.contains("<image_compression_notice>"));
             let conversation = actor.chat_state_handle.get_conversation().await;
             assert_eq!(
                 sampling_types::conversation::conversation_image_groups(&conversation).len(),
                 1
             );
-            assert!(actor.unsupported_current_model_for_images().await.is_some());
-
-            let mut image_projected_count = 0;
-            let mut image_projected_notes = Vec::new();
-            let mut terminal_retry_failure = false;
-            while let Ok(message) = gateway_rx.try_recv() {
-                let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
-                    continue;
-                };
-                if args.request.method.as_ref() != "grow/session_notification" {
-                    continue;
-                }
-                let notification: crate::extensions::notification::SessionNotification =
-                    serde_json::from_str(args.request.params.get()).unwrap();
-                match notification.update {
-                    GrowSessionUpdate::ImageProjected { notes } => {
-                        image_projected_count += 1;
-                        image_projected_notes.extend(notes);
-                    }
-                    GrowSessionUpdate::RetryState(
-                        crate::extensions::notification::RetryState::Failed { .. },
-                    ) => terminal_retry_failure = true,
-                    _ => {}
-                }
-            }
-            assert_eq!(image_projected_count, 0);
-            assert!(image_projected_notes.is_empty());
-            assert!(terminal_retry_failure);
-            actor.chat_state_handle.rewind_durably(0).await.expect("manual rewind remains usable after image failure");
-            chat_state::Timeline::from_events(actor.chat_state_handle.timeline_events().await.unwrap())
-                .expect("manual rewind keeps the Timeline replayable");
+            let drained = drain_notifications(&mut gateway_rx);
+            assert_eq!(drained.image_dropped_updates, 0);
+            assert_eq!(drained.image_compressed_updates, 0);
         }));
     });
 }
@@ -365,32 +764,88 @@ fn active_goal_image_400_uses_auxiliary_description_then_retries_without_images(
             );
 
             let conversation = actor.chat_state_handle.get_conversation().await;
-            assert_eq!(sampling_types::conversation::conversation_image_groups(&conversation).len(), 1);
-            assert!(
-                conversation
-                    .iter()
-                    .any(|item| sampling_types::conversation::item_image_description(item).is_some_and(|text| text.contains("code E42")))
+            assert_eq!(
+                sampling_types::conversation::conversation_image_groups(&conversation).len(),
+                1
             );
-            let replay = chat_state::Timeline::from_events(actor.chat_state_handle.timeline_events().await.unwrap()).unwrap();
-            assert_eq!(sampling_types::conversation::conversation_image_groups(replay.surface()).len(), 1);
+            assert!(conversation.iter().any(|item| {
+                sampling_types::conversation::item_image_description(item)
+                    .is_some_and(|text| text.contains("code E42"))
+            }));
+            let replay = chat_state::Timeline::from_events(
+                actor.chat_state_handle.timeline_events().await.unwrap(),
+            )
+            .unwrap();
+            assert_eq!(
+                sampling_types::conversation::conversation_image_groups(replay.surface()).len(),
+                1
+            );
             let original_id = actor.current_catalog_model_id();
             let config = actor.model_route.snapshot().sampling_config;
-            actor.model_route.replace(crate::agent::models::ModelId::new("other-provider/test-model"), config.clone());
+            actor.model_route.replace(
+                crate::agent::models::ModelId::new("other-provider/test-model"),
+                config.clone(),
+            );
             assert!(actor.unsupported_current_model_for_images().await.is_none());
-            let unknown = actor.chat_state_handle.build_request_for_image_mode(
-                &actor.session_id_string(), vec![], None, None, None,
-                actor.unsupported_current_model_for_images().await.is_some()).await.unwrap();
-            assert_eq!(unknown.image_count(), 1, "another provider first receives the original image");
-            actor.record_unsupported_model_image_input(actor.current_catalog_model_id()).await.unwrap();
-            assert_eq!(actor.project_images_for_known_text_model().await.unwrap().total_images(), 0,
-                "existing description is reused without another auxiliary request");
-            let known = actor.chat_state_handle.build_request_for_image_mode(
-                &actor.session_id_string(), vec![], None, None, None,
-                actor.unsupported_current_model_for_images().await.is_some()).await.unwrap();
+            let unknown = actor
+                .chat_state_handle
+                .build_request_for_image_mode(
+                    &actor.session_id_string(),
+                    vec![],
+                    None,
+                    None,
+                    None,
+                    actor.unsupported_current_model_for_images().await.is_some(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                unknown.image_count(),
+                1,
+                "another provider first receives the original image"
+            );
+            actor
+                .record_unsupported_model_image_input(actor.current_catalog_model_id())
+                .await
+                .unwrap();
+            assert_eq!(
+                actor
+                    .project_images_for_known_text_model()
+                    .await
+                    .unwrap()
+                    .total_images(),
+                0,
+                "existing description is reused without another auxiliary request"
+            );
+            let known = actor
+                .chat_state_handle
+                .build_request_for_image_mode(
+                    &actor.session_id_string(),
+                    vec![],
+                    None,
+                    None,
+                    None,
+                    actor.unsupported_current_model_for_images().await.is_some(),
+                )
+                .await
+                .unwrap();
             assert_eq!(known.image_count(), 0);
-            actor.model_route.replace(crate::agent::models::ModelId::new(original_id.clone()), config);
-            assert_eq!(actor.unsupported_current_model_for_images().await, Some(original_id));
-            assert_eq!(server.requests().iter().filter(|r| r.path == "/v1/messages").count(), 3);
+            actor.model_route.replace(
+                crate::agent::models::ModelId::new(original_id.clone()),
+                config,
+            );
+            assert_eq!(
+                actor.unsupported_current_model_for_images().await,
+                Some(original_id)
+            );
+            assert_eq!(
+                server
+                    .requests()
+                    .iter()
+                    .filter(|r| r.path == "/v1/messages")
+                    .count(),
+                3
+            );
             let goal = actor.goal_tracker.lock().snapshot().cloned().unwrap();
             assert_eq!(
                 goal.status,
@@ -398,37 +853,20 @@ fn active_goal_image_400_uses_auxiliary_description_then_retries_without_images(
             );
             assert!(!goal.usage_incomplete);
 
-            let mut notes = Vec::new();
-            let mut terminal_retry_failure = false;
-            while let Ok(message) = gateway_rx.try_recv() {
-                let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
-                    continue;
-                };
-                if args.request.method.as_ref() != "grow/session_notification" {
-                    continue;
-                }
-                let notification: crate::extensions::notification::SessionNotification =
-                    serde_json::from_str(args.request.params.get()).unwrap();
-                match notification.update {
-                    GrowSessionUpdate::ImageProjected { notes: current } => notes.extend(current),
-                    GrowSessionUpdate::RetryState(
-                        crate::extensions::notification::RetryState::Failed { .. },
-                    ) => terminal_retry_failure = true,
-                    _ => {}
-                }
-            }
+            let drained = drain_notifications(&mut gateway_rx);
             assert!(
-                notes
+                drained
+                    .notes
                     .iter()
                     .any(|note| note.contains("已生成 1 张图片的文字描述"))
             );
-            assert!(!terminal_retry_failure);
+            assert!(drained.retry_failures.is_empty());
         }));
     });
 }
 
 #[test]
-fn auxiliary_image_400_fails_without_installing_a_lossy_shadow() {
+fn auxiliary_image_400_installs_a_durable_removal_projection() {
     run_with_session_stack(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -482,20 +920,56 @@ fn auxiliary_image_400_fails_without_installing_a_lossy_shadow() {
                     None,
                 )
                 .await
-                .expect_err("auxiliary rejection must leave the image view intact");
+                .expect("auxiliary rejection must fall back to a durable removal");
 
             let requests: Vec<_> = server
                 .requests()
                 .into_iter()
                 .filter(|request| request.path == "/v1/messages")
                 .collect();
-            assert_eq!(requests.len(), 2);
+            assert_eq!(requests.len(), 3, "primary, auxiliary, resubmit");
+            assert!(count_wire_images(requests[0].body.as_ref().unwrap()) > 0);
             assert_eq!(
-                sampling_types::conversation::conversation_image_groups(
-                    &actor.chat_state_handle.get_conversation().await
-                )
-                .len(),
-                1
+                requests[1].body.as_ref().unwrap()["model"],
+                "vision-model"
+            );
+            assert_eq!(count_wire_images(requests[2].body.as_ref().unwrap()), 0);
+            assert!(
+                requests[2]
+                    .body
+                    .as_ref()
+                    .unwrap()
+                    .to_string()
+                    .contains(sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT)
+            );
+
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            assert!(
+                sampling_types::conversation::conversation_image_groups(&conversation).is_empty()
+            );
+            let replacements = conversation
+                .iter()
+                .flat_map(|item| match item {
+                    ConversationItem::User(user) => user.content.as_slice(),
+                    ConversationItem::ToolResult(result) => result.images.as_slice(),
+                    _ => &[],
+                })
+                .filter(|part| {
+                    matches!(
+                        part,
+                        sampling_types::ContentPart::Text { text }
+                            if text.as_ref()
+                                == sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT
+                    )
+                })
+                .count();
+            assert_eq!(replacements, 1, "one canonical replacement per image group");
+            assert!(
+                actor
+                    .unsupported_current_model_for_images()
+                    .await
+                    .is_some(),
+                "the primary pair must stay marked text-only"
             );
 
             let mut auxiliary_config = actor.chat_state_handle.get_sampling_config().await.unwrap();
@@ -512,24 +986,281 @@ fn auxiliary_image_400_fails_without_installing_a_lossy_shadow() {
                     .unsupported_current_model_for_images()
                     .await
                     .as_deref(),
-                Some("vision")
+                Some("vision"),
+                "an auxiliary route that rejects images must be marked as well"
             );
 
-            let mut notes = Vec::new();
-            while let Ok(message) = gateway_rx.try_recv() {
-                let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
-                    continue;
-                };
-                if args.request.method.as_ref() != "grow/session_notification" {
-                    continue;
-                }
-                let notification: crate::extensions::notification::SessionNotification =
-                    serde_json::from_str(args.request.params.get()).unwrap();
-                if let GrowSessionUpdate::ImageProjected { notes: current } = notification.update {
-                    notes.extend(current);
-                }
+            let drained = drain_notifications(&mut gateway_rx);
+            assert!(drained.retry_failures.is_empty());
+            assert_eq!(drained.image_projected_updates, 1);
+            assert_eq!(
+                drained.notes,
+                vec![
+                    "当前模型不支持多模态，1 张图片无法生成文字描述，已从当前会话中删除；原图仍保留在会话历史记录中。"
+                        .to_owned()
+                ]
+            );
+        }));
+    });
+}
+
+/// A permanently failing durable projection must fail closed: the turn ends
+/// with a typed error, the provider sees exactly one (image-bearing) request,
+/// no projection is accepted, and the Surface keeps the image.
+#[test]
+fn failed_image_projection_commit_never_resubmits_a_lossy_request() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response("/v1/messages", multimodal_capability_rejection());
+            let (actor, mut gateway_rx, image_projection_persistence) =
+                actor_with_sampler_and_persistence(&server, None).await;
+            image_projection_persistence.fail_projection_commits();
+            install_test_foreground(&actor, "image-projection-disk-full").await;
+
+            let error = actor
+                .handle_prompt(
+                    "image-projection-disk-full",
+                    crate::session::actor::tests::support::admit_test_human_input(
+                        &actor,
+                        "image-projection-disk-full",
+                    )
+                    .await,
+                    crate::session::PromptOrigin::User,
+                    Vec::new(),
+                    crate::session::TurnKind::User,
+                    vec![
+                        acp::ContentBlock::Text(acp::TextContent::new("describe this image")),
+                        acp::ContentBlock::Image(test_image_content()),
+                    ],
+                    tool_types::BehaviorId::Normal,
+                    None,
+                    None,
+                    false,
+                    None,
+                    None,
+                )
+                .await
+                .expect_err("a failed durable projection must not be retried from memory");
+            // The projection error is the terminal failure; the turn boundary
+            // cannot be recorded either because the poisoned writer closed the
+            // chat-state mailbox. Both are typed, and neither is a resubmission.
+            assert!(
+                format!("{error:?}").contains("turn_boundary_persistence_failed")
+                    || format!("{error:?}")
+                        .contains("failed to persist text-only image projection"),
+                "{error:?}"
+            );
+
+            let requests: Vec<_> = server
+                .requests()
+                .into_iter()
+                .filter(|request| request.path == "/v1/messages")
+                .collect();
+            assert_eq!(
+                requests.len(),
+                1,
+                "only the original image request was sent"
+            );
+            assert!(count_wire_images(requests[0].body.as_ref().unwrap()) > 0);
+
+            let attempted = image_projection_persistence.attempted_projections();
+            assert_eq!(
+                attempted.len(),
+                1,
+                "exactly one commit was attempted; it never became durable"
+            );
+            let (event, acknowledged) = &attempted[0];
+            assert!(!acknowledged, "the commit must have failed permanently");
+            let chat_state::TimelineEventKind::ImageProjection(projection) = &event.kind else {
+                panic!("expected an image projection commit");
+            };
+            assert_eq!(projection.shadows.len(), 1);
+            assert_eq!(
+                projection.shadows[0].replacement,
+                sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT
+            );
+            assert!(matches!(
+                projection.shadows[0].provenance,
+                chat_state::ImageShadowSource::UnsupportedModel
+            ));
+
+            let durable_surface = image_projection_persistence.durable_surface();
+            assert!(
+                !sampling_types::conversation::conversation_image_groups(&durable_surface)
+                    .is_empty(),
+                "the durable Surface must still hold the rejected image: {durable_surface:#?}"
+            );
+
+            let drained = drain_notifications(&mut gateway_rx);
+            assert_eq!(drained.image_projected_updates, 0);
+            assert!(drained.notes.is_empty());
+            // The poisoned writer withholds hooked notifications, so this
+            // scenario reports the typed turn error instead of a RetryState
+            // notice; either way no success path was published.
+            assert!(drained.retry_failures.is_empty());
+        }));
+    });
+}
+
+/// One rejected request with a describable group and an unresolvable group
+/// commits a single projection carrying both dispositions.
+#[test]
+fn mixed_description_and_removal_groups_commit_as_one_projection() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response(
+                "/v1/messages",
+                messages_text_turn("Accepted the first screenshot.", "test-model"),
+            );
+            server.enqueue_response("/v1/messages", multimodal_capability_rejection());
+            server.enqueue_response(
+                "/v1/messages",
+                messages_text_turn("A red build-error dialog.", "vision-model"),
+            );
+            server.enqueue_response(
+                "/v1/messages",
+                ScriptedResponse::json(
+                    400,
+                    json!({
+                        "type": "error",
+                        "error": {
+                            "type": "invalid_request_error",
+                            "message": "request body rejected: tool schema is not an object"
+                        }
+                    }),
+                ),
+            );
+            server.enqueue_response(
+                "/v1/messages",
+                messages_text_turn("Recovered with a mixed projection.", "test-model"),
+            );
+            let (actor, mut gateway_rx) = actor_with_sampler(&server, Some("vision")).await;
+
+            for label in ["mixed-first", "mixed-second"] {
+                install_test_foreground(&actor, label).await;
+                actor
+                    .handle_prompt(
+                        label,
+                        crate::session::actor::tests::support::admit_test_human_input(
+                            &actor, label,
+                        )
+                        .await,
+                        crate::session::PromptOrigin::User,
+                        Vec::new(),
+                        crate::session::TurnKind::User,
+                        vec![
+                            acp::ContentBlock::Text(acp::TextContent::new("inspect")),
+                            acp::ContentBlock::Image(test_image_content()),
+                        ],
+                        tool_types::BehaviorId::Normal,
+                        None,
+                        None,
+                        false,
+                        None,
+                        None,
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{label} must complete: {error:?}"));
+                release_settled_foreground(&actor).await;
             }
-            assert!(notes.is_empty());
+
+            let requests: Vec<_> = server
+                .requests()
+                .into_iter()
+                .filter(|request| request.path == "/v1/messages")
+                .collect();
+            assert_eq!(
+                requests.len(),
+                5,
+                "two primary turns, two auxiliary calls, one resubmit"
+            );
+            assert_eq!(count_wire_images(requests[4].body.as_ref().unwrap()), 0);
+
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            let projections = events
+                .iter()
+                .filter_map(|event| match &event.kind {
+                    chat_state::TimelineEventKind::ImageProjection(projection) => Some(projection),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(projections.len(), 1, "one event carries both groups");
+            assert_eq!(projections[0].shadows.len(), 2);
+            let described = projections[0]
+                .shadows
+                .iter()
+                .filter(|shadow| {
+                    matches!(
+                        shadow.provenance,
+                        chat_state::ImageShadowSource::Description { .. }
+                    )
+                })
+                .count();
+            let removed = projections[0]
+                .shadows
+                .iter()
+                .filter(|shadow| {
+                    matches!(
+                        shadow.provenance,
+                        chat_state::ImageShadowSource::UnsupportedModel
+                    )
+                })
+                .count();
+            assert_eq!((described, removed), (1, 1));
+
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            assert_eq!(
+                sampling_types::conversation::conversation_image_groups(&conversation).len(),
+                1,
+                "the described group keeps its image"
+            );
+            assert_eq!(
+                conversation
+                    .iter()
+                    .filter_map(sampling_types::conversation::item_image_description)
+                    .count(),
+                1
+            );
+            assert_eq!(
+                conversation
+                    .iter()
+                    .flat_map(|item| match item {
+                        ConversationItem::User(user) => user.content.as_slice(),
+                        ConversationItem::ToolResult(result) => result.images.as_slice(),
+                        _ => &[],
+                    })
+                    .filter(|part| matches!(
+                        part,
+                        sampling_types::ContentPart::Text { text }
+                            if text.as_ref()
+                                == sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT
+                    ))
+                    .count(),
+                1
+            );
+
+            let drained = drain_notifications(&mut gateway_rx);
+            assert!(drained.retry_failures.is_empty());
+            assert_eq!(drained.image_projected_updates, 1);
+            assert_eq!(
+                drained.notes,
+                vec![
+                    "已生成 1 张图片的文字描述；1 张图片无法生成描述，已从当前会话中删除。"
+                        .to_owned()
+                ]
+            );
         }));
     });
 }

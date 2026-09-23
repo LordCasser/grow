@@ -100,7 +100,7 @@ mod links {
     use ratatui::style::Style;
     use ratatui::{TerminalOptions, Viewport};
 
-    use crate::{LinkSpan, Terminal};
+    use crate::{LinkSpan, SemanticRow, Terminal};
 
     /// Backend that records the raw byte stream and renders each drawn cell as
     /// its bare symbol, so tests can assert on OSC 8 sequences interleaved with
@@ -475,5 +475,80 @@ mod links {
             out.contains("report.md"),
             "visible basename remains text: {out:?}"
         );
+    }
+
+    fn native_row(ansi: impl Into<String>, fills_width: bool, soft_wrap: bool) -> SemanticRow {
+        SemanticRow {
+            ansi: ansi.into(),
+            fills_width,
+            soft_wrap,
+        }
+    }
+
+    #[test]
+    fn semantic_insert_uses_wrapline_only_for_source_soft_continuations() {
+        let mut terminal = Terminal::with_options(
+            RecordingBackend::default(),
+            TerminalOptions {
+                viewport: Viewport::Inline(3),
+            },
+        )
+        .unwrap();
+        terminal.backend_mut().buf.clear();
+        let full = "a".repeat(80);
+        terminal
+            .insert_before_rows(&[
+                native_row(full, true, true),
+                native_row("tail", false, false),
+            ])
+            .unwrap();
+        let out = String::from_utf8(terminal.backend().buf.clone()).unwrap();
+        assert!(
+            out.starts_with("\x1b[?7h"),
+            "autowrap was not established: {out:?}"
+        );
+        assert!(out.contains(" \rtail"), "xenl was not consumed: {out:?}");
+        assert!(
+            !out.contains("\x1b[?7l"),
+            "soft row disabled autowrap: {out:?}"
+        );
+
+        terminal.backend_mut().buf.clear();
+        terminal
+            .insert_before_rows(&[
+                native_row("b".repeat(80), true, false),
+                native_row("next", false, false),
+            ])
+            .unwrap();
+        let out = String::from_utf8(terminal.backend().buf.clone()).unwrap();
+        assert!(out.contains("\x1b[?7l"), "hard row was joined: {out:?}");
+        assert!(out.contains("\x1b[?7h"), "autowrap not restored: {out:?}");
+    }
+
+    #[test]
+    fn semantic_insert_long_wrap_chain_keeps_viewport_inside_screen() {
+        let mut terminal = Terminal::with_options(
+            RecordingBackend::default(),
+            TerminalOptions {
+                viewport: Viewport::Inline(3),
+            },
+        )
+        .unwrap();
+        let rows = (0..30)
+            .map(|i| {
+                native_row(
+                    format!("{}", char::from(b'a' + (i % 26) as u8)).repeat(80),
+                    true,
+                    i < 29,
+                )
+            })
+            .collect::<Vec<_>>();
+        terminal.insert_before_rows(&rows).unwrap();
+        let area = terminal.viewport_area();
+        assert!(
+            area.y + area.height <= 24,
+            "viewport moved off screen: {area:?}"
+        );
+        assert!(terminal.backend().appended_lines > 0);
     }
 }

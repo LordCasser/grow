@@ -119,6 +119,8 @@ pub enum ViewerKind {
     Grep,
     /// Plain text content (e.g., catalog entry).
     PlainText,
+    /// Structured communication body with Markdown and protocol data views.
+    Communication,
 }
 
 /// Fullscreen block content viewer.
@@ -143,6 +145,10 @@ pub struct BlockViewerPane {
     /// Set by handle_key when 'r' is pressed. Caller should toggle raw mode
     /// on the entry and call rebuild_items().
     pub raw_toggle_pending: bool,
+    /// Set by handle_key when `D` is pressed on a communication viewer.
+    pub data_toggle_pending: bool,
+    /// Whether the communication viewer is showing protocol data.
+    pub data_mode: bool,
     /// Set by handle_key when 'Y' is pressed. Caller should copy the command.
     pub copy_meta_pending: bool,
     /// Set by handle_key when 'y' is pressed on edit blocks. Caller should copy patch.
@@ -263,10 +269,68 @@ impl BlockViewerPane {
             last_content_area: Rect::default(),
 
             raw_toggle_pending: false,
+            data_toggle_pending: false,
+            data_mode: false,
             copy_meta_pending: false,
             copy_content_pending: false,
             diff_meta: Vec::new(),
             last_generation: generation,
+            was_running: entry.is_running,
+            bg_task_id: None,
+            last_theme: Theme::current_kind(),
+            modal: ModalWindowState::new(),
+            prepend_items: Vec::new(),
+            text_drag: None,
+            drag_copy_text: None,
+            cached_unified: Vec::new(),
+        })
+    }
+
+    /// Create a viewer for a structured communication row. The same viewer
+    /// keeps Markdown rendering, raw source, and protocol Data behind one
+    /// stable selection/search/copy surface.
+    pub fn for_communication(entry_id: EntryId, entry: &ScrollbackEntry) -> Option<Self> {
+        if !matches!(
+            &entry.block,
+            RenderBlock::ToolCall(ToolCallBlock::Other(block))
+                if block.communication_body().is_some()
+        ) && !matches!(
+            &entry.block,
+            RenderBlock::Notice(block) if block.communication_body().is_some()
+        ) {
+            return None;
+        }
+        let config = ListPaneConfig {
+            follow_enabled: entry.is_running,
+            wrap_toggle_enabled: true,
+            search_enabled: true,
+            copy_enabled: true,
+            show_selection_when_unfocused: false,
+            visual_select_enabled: true,
+            filter_enabled: true,
+            goto_line_enabled: false,
+        };
+        let mut list_state =
+            ListPaneState::new_with_config(WrapMode::Wrap, entry.is_running, config);
+        list_state.set_clipboard_provider(Box::new(SystemClipboard));
+        let lines = Self::extract_communication_lines(&entry.block, 120, false)?;
+        Some(Self {
+            entry_id,
+            kind: ViewerKind::Communication,
+            list_state,
+            list_style: ListPaneStyle {
+                uniform_visual_bg: true,
+                ..ListPaneStyle::default()
+            },
+            items: ContentLine::from_lines(&lines),
+            last_content_area: Rect::default(),
+            raw_toggle_pending: false,
+            data_toggle_pending: false,
+            data_mode: false,
+            copy_meta_pending: false,
+            copy_content_pending: false,
+            diff_meta: Vec::new(),
+            last_generation: Self::extract_generation(&entry.block).unwrap_or(0),
             was_running: entry.is_running,
             bg_task_id: None,
             last_theme: Theme::current_kind(),
@@ -317,6 +381,8 @@ impl BlockViewerPane {
             last_content_area: Rect::default(),
 
             raw_toggle_pending: false,
+            data_toggle_pending: false,
+            data_mode: false,
             copy_meta_pending: false,
             copy_content_pending: false,
             diff_meta: Vec::new(),
@@ -370,6 +436,8 @@ impl BlockViewerPane {
             last_content_area: Rect::default(),
 
             raw_toggle_pending: false,
+            data_toggle_pending: false,
+            data_mode: false,
             copy_meta_pending: false,
             copy_content_pending: false,
             diff_meta: Vec::new(),
@@ -643,6 +711,8 @@ impl BlockViewerPane {
             last_content_area: Rect::default(),
 
             raw_toggle_pending: false,
+            data_toggle_pending: false,
+            data_mode: false,
             copy_meta_pending: false,
             copy_content_pending: false,
             diff_meta: Vec::new(),
@@ -712,6 +782,8 @@ impl BlockViewerPane {
             last_content_area: Rect::default(),
 
             raw_toggle_pending: false,
+            data_toggle_pending: false,
+            data_mode: false,
             copy_meta_pending: false,
             copy_content_pending: false,
             diff_meta: Vec::new(),
@@ -811,6 +883,8 @@ impl BlockViewerPane {
             last_content_area: Rect::default(),
 
             raw_toggle_pending: false,
+            data_toggle_pending: false,
+            data_mode: false,
             copy_meta_pending: false,
             copy_content_pending: false,
             diff_meta,
@@ -888,6 +962,42 @@ impl BlockViewerPane {
         }
     }
 
+    fn extract_communication_lines(
+        block: &RenderBlock,
+        width: usize,
+        data_mode: bool,
+    ) -> Option<Vec<Line<'static>>> {
+        match block {
+            RenderBlock::ToolCall(ToolCallBlock::Other(block)) => {
+                if data_mode {
+                    block.communication_data().map(|data| {
+                        data.lines()
+                            .map(|line| Line::raw(line.to_owned()))
+                            .collect()
+                    })
+                } else {
+                    block
+                        .communication_body()
+                        .map(|body| body.viewer_lines(width))
+                }
+            }
+            RenderBlock::Notice(block) => {
+                if data_mode {
+                    block.communication_data().map(|data| {
+                        data.lines()
+                            .map(|line| Line::raw(line.to_owned()))
+                            .collect()
+                    })
+                } else {
+                    block
+                        .communication_body()
+                        .map(|body| body.viewer_lines(width))
+                }
+            }
+            _ => None,
+        }
+    }
+
     /// Extract a change-detection counter from the block.
     ///
     /// For markdown blocks: content generation counter.
@@ -899,8 +1009,22 @@ impl BlockViewerPane {
             RenderBlock::ToolCall(ToolCallBlock::Execute(b)) => {
                 Some(b.output.as_ref().map_or(0, |o| o.len()) as u64)
             }
+            RenderBlock::ToolCall(ToolCallBlock::Other(b)) => b.communication_body().map(|body| {
+                Self::communication_generation(body.fingerprint(), b.communication_data())
+            }),
+            RenderBlock::Notice(b) => b.communication_body().map(|body| {
+                Self::communication_generation(body.fingerprint(), b.communication_data())
+            }),
             _ => None,
         }
+    }
+
+    fn communication_generation(mut hash: u64, data: Option<&str>) -> u64 {
+        for byte in data.unwrap_or_default().as_bytes() {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
     }
 
     /// Extract the line source map from a markdown block.
@@ -928,6 +1052,15 @@ impl BlockViewerPane {
                 if let RenderBlock::ToolCall(ToolCallBlock::Execute(exec)) = &entry.block {
                     let theme = Theme::current();
                     self.items = Self::build_execute_items(exec.output.as_deref(), &theme);
+                    self.list_state.invalidate_layout();
+                }
+            }
+            ViewerKind::Communication => {
+                let width = self.last_content_area.width.max(1) as usize;
+                if let Some(lines) =
+                    Self::extract_communication_lines(&entry.block, width, self.data_mode)
+                {
+                    self.items = ContentLine::from_lines(&lines);
                     self.list_state.invalidate_layout();
                 }
             }
@@ -970,11 +1103,13 @@ impl BlockViewerPane {
     /// Returns `true` if a redraw is needed.
     pub fn tick(&mut self, entry: &ScrollbackEntry) -> bool {
         let mut needs_redraw = false;
+        let communication_update_deferred = self.communication_update_deferred();
 
         // Check if content changed via generation counter.
         // Generation is bumped on every push_chunk, finish, or set_raw_mode.
         if let Some(current_gen) = Self::extract_generation(&entry.block)
             && current_gen != self.last_generation
+            && !communication_update_deferred
         {
             self.last_generation = current_gen;
             self.rebuild_items(entry);
@@ -986,16 +1121,29 @@ impl BlockViewerPane {
         if self.was_running && !entry.is_running {
             self.was_running = false;
             self.list_state.disable_follow_permanently();
-            // Select the last item by stable_id (layout may be stale after
-            // invalidate_layout, so we can't use select_last which reads
-            // layout.item_count). select_by_id is resolved on next prepare_layout.
-            if let Some(last) = self.items.last() {
-                self.list_state.select_by_id(last.stable_id());
+            if self.kind != ViewerKind::Communication {
+                // Select the last item by stable_id (layout may be stale after
+                // invalidate_layout, so we can't use select_last which reads
+                // layout.item_count). select_by_id is resolved on next prepare_layout.
+                if let Some(last) = self.items.last() {
+                    self.list_state.select_by_id(last.stable_id());
+                }
             }
             needs_redraw = true;
         }
 
         needs_redraw
+    }
+
+    /// Keep the visible communication body stable while the user is selecting
+    /// or copying it. Streaming data remains represented by the generation
+    /// counter and is applied on the first tick/render after the selection is
+    /// released.
+    fn communication_update_deferred(&self) -> bool {
+        self.kind == ViewerKind::Communication
+            && (self.list_state.visual_mode
+                || self.text_drag.is_some()
+                || self.drag_copy_text.is_some())
     }
 
     /// Build shortcuts bar hints for this viewer.
@@ -1010,6 +1158,10 @@ impl BlockViewerPane {
         match self.kind {
             ViewerKind::Markdown => {
                 hints.push(HintItem::new(crate::key!('r'), "raw"));
+            }
+            ViewerKind::Communication => {
+                hints.push(HintItem::new(crate::key!('r'), "raw"));
+                hints.push(HintItem::new(crate::key!('D'), "data"));
             }
             ViewerKind::Execute => {
                 hints.push(HintItem::new(crate::key!('Y'), "copy cmd"));
@@ -1056,12 +1208,22 @@ impl BlockViewerPane {
     /// Close keys should be checked via `is_close_key` before calling this.
     pub fn handle_key(&mut self, key: &KeyEvent) -> bool {
         // r: toggle raw mode (markdown blocks only) — handled by caller
-        if self.kind == ViewerKind::Markdown
+        if matches!(self.kind, ViewerKind::Markdown | ViewerKind::Communication)
             && key.code == KeyCode::Char('r')
             && key.modifiers == KeyModifiers::NONE
             && self.list_state.input_mode().is_none()
+            && (self.kind != ViewerKind::Communication || !self.data_mode)
         {
             self.raw_toggle_pending = true;
+            return true;
+        }
+
+        if self.kind == ViewerKind::Communication
+            && key.code == KeyCode::Char('D')
+            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT)
+            && self.list_state.input_mode().is_none()
+        {
+            self.data_toggle_pending = true;
             return true;
         }
 
@@ -1625,6 +1787,177 @@ impl BlockViewerPane {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::blocks::communication::{CommunicationBody, CommunicationSectionKind};
+    use crate::scrollback::blocks::tool::{OtherToolCallBlock, ToolCallBlock};
+
+    fn communication_entry_with(message: &str, data: &str, is_running: bool) -> ScrollbackEntry {
+        let body = CommunicationBody::new()
+            .with_section(CommunicationSectionKind::Message, message)
+            .with_section(CommunicationSectionKind::Answer, "answer");
+        let block = OtherToolCallBlock::new("send_subagent_message → child", "Received")
+            .with_communication_body(body)
+            .with_communication_data(data);
+        let mut entry = ScrollbackEntry::new(RenderBlock::ToolCall(ToolCallBlock::Other(block)));
+        entry.is_running = is_running;
+        entry
+    }
+
+    fn communication_entry() -> ScrollbackEntry {
+        communication_entry_with("typed\tmessage", "{\"receipt_id\":\"r-1\"}", false)
+    }
+
+    #[test]
+    fn communication_viewer_dispatches_raw_data_and_existing_list_keys() {
+        let entry = communication_entry();
+        let mut viewer = BlockViewerPane::for_communication(entry.id, &entry).unwrap();
+        assert_eq!(viewer.kind, ViewerKind::Communication);
+
+        assert!(viewer.handle_key(&KeyEvent::new(KeyCode::Char('D'), KeyModifiers::NONE)));
+        assert!(viewer.data_toggle_pending);
+        viewer.data_toggle_pending = false;
+        viewer.data_mode = true;
+        assert!(!viewer.handle_key(&KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)));
+        assert!(viewer.handle_key(&KeyEvent::new(KeyCode::Char('D'), KeyModifiers::SHIFT)));
+        assert!(viewer.handle_key(&KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE)));
+        assert!(viewer.handle_key(&KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE)));
+        assert!(viewer.is_close_key(&KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)));
+    }
+
+    #[test]
+    fn communication_tick_refreshes_same_length_body_and_data_only_changes() {
+        let initial =
+            communication_entry_with("same length old", "{\"receipt_id\":\"r-old\"}", true);
+        let mut viewer = BlockViewerPane::for_communication(initial.id, &initial).unwrap();
+        viewer.last_content_area = Rect::new(0, 0, 80, 20);
+        let updated =
+            communication_entry_with("same length new", "{\"receipt_id\":\"r-new\"}", true);
+
+        assert!(viewer.tick(&updated));
+        assert!(
+            viewer
+                .items
+                .iter()
+                .any(|line| line.plain_text.contains("same length new"))
+        );
+        assert!(
+            !viewer
+                .items
+                .iter()
+                .any(|line| line.plain_text.contains("same length old"))
+        );
+
+        viewer.data_mode = true;
+        viewer.rebuild_items(&updated);
+        assert!(
+            viewer
+                .items
+                .iter()
+                .any(|line| line.plain_text.contains("r-new"))
+        );
+        let data_updated =
+            communication_entry_with("same length new", "{\"receipt_id\":\"r-final\"}", true);
+        assert!(viewer.tick(&data_updated));
+        assert!(
+            viewer
+                .items
+                .iter()
+                .any(|line| line.plain_text.contains("r-final"))
+        );
+    }
+
+    #[test]
+    fn communication_tick_defers_body_replace_during_visual_or_mouse_selection() {
+        let initial = communication_entry_with("selection old", "{\"receipt_id\":\"r-old\"}", true);
+        let updated = communication_entry_with("selection new", "{\"receipt_id\":\"r-new\"}", true);
+        let mut viewer = BlockViewerPane::for_communication(initial.id, &initial).unwrap();
+        viewer.last_content_area = Rect::new(0, 0, 80, 20);
+
+        viewer.list_state.visual_mode = true;
+        assert!(!viewer.tick(&updated));
+        assert!(
+            viewer
+                .items
+                .iter()
+                .any(|line| line.plain_text.contains("selection old"))
+        );
+
+        viewer.list_state.visual_mode = false;
+        viewer.text_drag = Some(TextDrag {
+            anchor: TextEndpoint {
+                item_idx: 0,
+                col: 0,
+            },
+            head: TextEndpoint {
+                item_idx: 0,
+                col: 1,
+            },
+            active: false,
+        });
+        assert!(!viewer.tick(&updated));
+        assert!(
+            viewer
+                .items
+                .iter()
+                .any(|line| line.plain_text.contains("selection old"))
+        );
+
+        viewer.text_drag = None;
+        assert!(viewer.tick(&updated));
+        assert!(
+            viewer
+                .items
+                .iter()
+                .any(|line| line.plain_text.contains("selection new"))
+        );
+    }
+
+    #[test]
+    fn communication_render_defers_generation_until_visual_selection_released() {
+        let initial = communication_entry_with("render old", "{\"receipt_id\":\"r-old\"}", true);
+        let updated = communication_entry_with("render new", "{\"receipt_id\":\"r-new\"}", true);
+        let mut viewer = BlockViewerPane::for_communication(initial.id, &initial).unwrap();
+        let area = Rect::new(0, 0, 40, 8);
+        let mut buffer = Buffer::empty(area);
+
+        viewer.render_content(area, &mut buffer, &initial, true, &[]);
+        viewer.list_state.visual_mode = true;
+        viewer.render_content(area, &mut buffer, &updated, true, &[]);
+        assert!(
+            viewer
+                .items
+                .iter()
+                .any(|line| line.plain_text.contains("render old"))
+        );
+
+        viewer.list_state.visual_mode = false;
+        viewer.render_content(area, &mut buffer, &updated, true, &[]);
+        assert!(
+            viewer
+                .items
+                .iter()
+                .any(|line| line.plain_text.contains("render new"))
+        );
+    }
+
+    #[test]
+    fn communication_finish_preserves_user_position_and_selection() {
+        let running = communication_entry_with("keep position", "{\"receipt_id\":\"r-1\"}", true);
+        let finished = communication_entry_with("keep position", "{\"receipt_id\":\"r-1\"}", false);
+        let mut viewer = BlockViewerPane::for_communication(running.id, &running).unwrap();
+        viewer.list_state.follow_mode = false;
+        viewer.list_state.select_by_id(0);
+        viewer.list_state.set_scroll_offset(2);
+
+        assert!(viewer.tick(&finished));
+        assert_eq!(viewer.list_state.selected_id(), Some(0));
+        assert_eq!(viewer.list_state.scroll_offset(), 2);
+    }
+}
+
 /// Display width of a `Line` in terminal columns, clamped to `u16::MAX`.
 fn line_display_width_u16(line: &Line<'_>) -> u16 {
     use unicode_width::UnicodeWidthStr;
@@ -1652,11 +1985,14 @@ impl BlockViewerPane {
         prepend_lines: &[Line<'static>],
     ) {
         let theme = Theme::current();
+        let communication_width_changed = self.last_content_area.width != content_area.width;
+        let mut communication_theme_changed = false;
 
         // Detect theme switch and rebuild items + list style.
         let current_theme = Theme::current_kind();
         if current_theme != self.last_theme {
             self.last_theme = current_theme;
+            communication_theme_changed = self.kind == ViewerKind::Communication;
             self.list_style = match self.kind {
                 ViewerKind::BgTask | ViewerKind::Execute => ListPaneStyle {
                     selection_bg: theme.bg_highlight,
@@ -1685,7 +2021,27 @@ impl BlockViewerPane {
             }
         }
 
+        let communication_generation = (self.kind == ViewerKind::Communication)
+            .then(|| Self::extract_generation(&entry.block).unwrap_or(0));
+        let communication_generation_changed =
+            communication_generation.is_some_and(|generation| generation != self.last_generation);
+        let communication_update_deferred = self.communication_update_deferred();
+        let communication_generation_applied =
+            communication_generation_changed && !communication_update_deferred;
+        if communication_generation_applied {
+            self.last_generation = communication_generation.unwrap_or(0);
+        }
         self.last_content_area = content_area;
+
+        // Communication sections are width-budgeted Markdown; refresh their
+        // pre-wrap lines when the modal is resized or its data/raw tab flips.
+        if self.kind == ViewerKind::Communication
+            && (communication_width_changed
+                || communication_theme_changed
+                || communication_generation_applied)
+        {
+            self.rebuild_items(entry);
+        }
 
         // Cache prepend lines as ContentLines on self so the input handlers
         // (scroll / mouse / key) can rebuild the same unified vec the

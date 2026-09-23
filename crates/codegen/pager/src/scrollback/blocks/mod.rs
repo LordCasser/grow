@@ -5,6 +5,7 @@
 mod agent;
 mod bg_task;
 mod btw;
+pub(crate) mod communication;
 mod context_info;
 pub mod markdown_content;
 pub mod mermaid_content;

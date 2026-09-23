@@ -81,7 +81,7 @@ fn async_compaction_starts_at_exact_pre_threshold_but_not_at_the_hard_threshold(
 /// Real foreground sampling proceeds while the auxiliary HTTP response is
 /// held at its terminal event. No timing-based provider sleeps are involved.
 #[test]
-fn async_compaction_runs_beside_foreground_and_publishes_only_at_boundary() {
+fn async_compaction_commits_at_boundary_and_notifies_after_request_projection() {
     async_compaction_scenario("publish");
 }
 
@@ -189,6 +189,7 @@ fn async_compaction_scenario(action: &'static str) {
                 InferenceRequestMatcher::foreground(InferenceEndpoint::Messages),
                 messages_turn_with_usage(&[("foreground response after freeze", END_TURN)], END_TURN, 74_000));
             let (actor, mut notifications) = actor_with_sampler_cw_ex(&server, sampling_types::ApiBackend::Messages, 100_000, None, if action == "timeout" { 2 } else { 0 }, true, None).await;
+            let mut projected_completion = None;
             use tools::implementations::{context_recall::ContextRecallImpl, grow_build::{todo::TodoWriteTool, read_file::ReadFileTool}};
             use tools::registry::types::ToolConfig;
             // Two stable tools distinguish foreground requests from the tool-free
@@ -315,12 +316,73 @@ fn async_compaction_scenario(action: &'static str) {
                         actor.background_compaction_boundary().await.unwrap();
                     }
                 }).await.expect("ready result commits at the next boundary");
+                if action == "publish" {
+                    let (_, premature) = drain_session_updates(&mut notifications);
+                    assert!(
+                        premature.is_empty(),
+                        "Surface-only projection must not be published as the async completion"
+                    );
+                    assert!(actor.compaction.pending_async_notice.get().is_some());
+                    assert!(!actor.background_compaction_boundary().await.unwrap());
+                    assert!(
+                        actor.compaction.background.borrow().is_none(),
+                        "a pending notice must prevent another background compaction"
+                    );
+
+                    let mut next = server.expect_response_blocked(
+                        "first sample after pending async notice",
+                        InferenceRequestMatcher::foreground(InferenceEndpoint::Messages),
+                        messages_turn(&[("next turn response", END_TURN)], END_TURN),
+                    );
+                    let next_turn = tokio::task::spawn_local({
+                        let actor = actor.clone();
+                        async move { run_user_turn(&actor, "async-notice-projection").await }
+                    });
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        next.wait_blocked(),
+                    )
+                    .await
+                    .expect("next request reaches provider");
+                    let request_projection = actor.chat_state_handle.get_projected_tokens().await;
+                    let (_, mut completed_after_projection) =
+                        drain_session_updates(&mut notifications);
+                    assert_eq!(
+                        completed_after_projection.len(),
+                        1,
+                        "the next materialized request publishes one async completion"
+                    );
+                    assert_eq!(
+                        completed_after_projection[0]["update"]["tokens_after"],
+                        request_projection
+                    );
+                    assert!(actor.compaction.pending_async_notice.get().is_none());
+                    projected_completion = completed_after_projection.pop();
+                    actor.publish_pending_async_compaction_notice().await;
+                    let (_, duplicate) = drain_session_updates(&mut notifications);
+                    assert!(
+                        duplicate.is_empty(),
+                        "a finalized async notice must not publish twice"
+                    );
+                    next.release();
+                    tokio::time::timeout(std::time::Duration::from_secs(10), next_turn)
+                        .await
+                        .unwrap()
+                        .unwrap()
+                        .unwrap();
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        next.wait_satisfied(),
+                    )
+                    .await
+                    .unwrap();
+                }
             }
             let events = actor.chat_state_handle.timeline_events().await.unwrap();
             let completed = events.iter().filter(|event| matches!(event.kind, chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Completed { .. }))).count();
             let should_commit = matches!(action, "publish" | "between_step" | "promote" | "goal" | "cross_turn");
             assert_eq!(completed, usize::from(should_commit));
-            assert_eq!(server.messages_request_count(), 3 + usize::from(action == "cross_turn"), "promotion must not issue another summary request");
+            assert_eq!(server.messages_request_count(), 3 + usize::from(matches!(action, "cross_turn" | "publish")), "promotion must not issue another summary request");
             let surface = actor.chat_state_handle.get_conversation().await;
             let text = surface.iter().map(ConversationItem::text_content).collect::<Vec<_>>().join("\n");
             assert_eq!(text.contains("foreground response after freeze"), action != "rewind");
@@ -359,9 +421,11 @@ fn async_compaction_scenario(action: &'static str) {
                 let ended = events.iter().filter(|event| matches!(event.kind, chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended { .. }))).count();
                 assert_eq!(ended, 1, "the continued work remains one turn");
             }
-            let (notifications, completions) = drain_session_updates(&mut notifications);
-            assert_eq!(completions.len(), usize::from(should_commit));
-            if should_commit { assert_eq!(completions[0]["update"]["async_compact"], action != "promote"); }
+            let (notifications, mut completions) = drain_session_updates(&mut notifications);
+            completions.extend(projected_completion);
+            let should_notify = should_commit && action != "goal";
+            assert_eq!(completions.len(), usize::from(should_notify));
+            if should_notify { assert_eq!(completions[0]["update"]["async_compact"], action != "promote"); }
             assert_eq!(notifications.iter().filter(|kind| *kind == "auto_compact_started").count(), usize::from(promotes));
             if action == "promote_incomplete" {
                 assert_eq!(actor.goal_tracker.lock().status(), Some(crate::session::goal_tracker::GoalStatus::Paused));
@@ -376,6 +440,12 @@ fn async_compaction_scenario(action: &'static str) {
             }
             if action == "promote" { assert!(text.contains("late input")); }
             if action == "goal" { assert_eq!(actor.goal_tokens_used(), 148_025, "each foreground and summary attempt is charged exactly once"); }
+            if action == "goal" {
+                assert!(
+                    actor.compaction.pending_async_notice.get().is_some(),
+                    "without a later request the async notice must remain pending"
+                );
+            }
             if action == "budget" {
                 tokio::time::timeout(std::time::Duration::from_secs(2), actor.goal_usage_window.wait_for_owner_settlements_through(&actor.session_id_string(), 0)).await.expect("cancelled summary accounting must settle without a wait cycle");
                 assert_eq!(actor.goal_tokens_used(), 148_025);
@@ -983,10 +1053,20 @@ fn pre_prune_insufficient_projection_runs_summary() {
             );
 
             actor.compaction.pre_prune.set(false);
+            actor.compaction.pending_async_notice.set(Some(
+                crate::session::compaction_config::PendingAsyncCompactionNotice {
+                    tokens_before: 190_000,
+                    elapsed_ms: 10,
+                },
+            ));
             actor
                 .run_compact_only(trigger)
                 .await
                 .expect("summary path must run after the strict gate rejects the skip");
+            assert!(
+                actor.compaction.pending_async_notice.get().is_none(),
+                "successful synchronous compaction supersedes an unprojected async notice"
+            );
             assert_eq!(
                 server.messages_request_count(),
                 1,
@@ -1317,7 +1397,17 @@ fn pre_prune_error_fails_open_to_summary() {
                 prompt("recent retained turn", 1), ConversationItem::assistant("y".repeat(40_000)),
             ]).await;
             actor.chat_state_handle.record_provider_context_anchor(40_000);
+            actor.compaction.pending_async_notice.set(Some(
+                crate::session::compaction_config::PendingAsyncCompactionNotice {
+                    tokens_before: 80_000,
+                    elapsed_ms: 10,
+                },
+            ));
             actor.run_compact(None).await.expect("manual summary of a complete bounded prefix succeeds");
+            assert!(
+                actor.compaction.pending_async_notice.get().is_none(),
+                "successful manual compaction supersedes an unprojected async notice"
+            );
             let remaining = actor.chat_state_handle.get_conversation().await;
             assert!(remaining.iter().any(|item| matches!(item, ConversationItem::ToolResult(result) if result.tool_call_id == "second-half" && result.content.len() == 100_000)));
 
@@ -1414,6 +1504,12 @@ fn pre_prune_under_sticky_suppress_clears_it_on_success() {
                 .chat_state_handle
                 .record_provider_context_anchor(105_000);
             let _ = actor.chat_state_handle.get_conversation_len().await;
+            actor.compaction.pending_async_notice.set(Some(
+                crate::session::compaction_config::PendingAsyncCompactionNotice {
+                    tokens_before: 105_000,
+                    elapsed_ms: 10,
+                },
+            ));
 
             let pruned = actor
                 .maybe_pre_prune(&trigger)
@@ -1427,6 +1523,10 @@ fn pre_prune_under_sticky_suppress_clears_it_on_success() {
                     .load(Ordering::Relaxed),
                 SUPPRESS_NONE,
                 "a passing gate must clear the sticky bit"
+            );
+            assert!(
+                actor.compaction.pending_async_notice.get().is_none(),
+                "successful synchronous pruning supersedes an unprojected async notice"
             );
             let conversation = actor.chat_state_handle.get_conversation().await;
             let tool_texts = tool_result_texts(&conversation);

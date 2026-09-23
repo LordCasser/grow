@@ -536,6 +536,7 @@ impl SessionActor {
         if projected_images.total_images() > 0 {
             tracing::info!(
                 described_images = projected_images.described_images,
+                removed_images = projected_images.removed_images,
                 "installed irreversible ImageShadows before manual compaction"
             );
         }
@@ -560,6 +561,10 @@ impl SessionActor {
             span.record("error", e.to_string().as_str());
             return Err(e);
         }
+        // A successful manual replacement supersedes an async result that
+        // never reached a subsequent request projection. Do not attribute the
+        // manual result to the older background transaction later.
+        self.compaction.pending_async_notice.take();
         use crate::extensions::notification::SessionUpdate as GrowSessionUpdate;
         let tokens_after = self.chat_state_handle.get_projected_tokens().await;
         let span = tracing::Span::current();
@@ -1998,6 +2003,7 @@ impl SessionActor {
         }
         let committed = self.finish_background_compaction(false).await?;
         if self.compaction.background.borrow().is_some()
+            || self.compaction.pending_async_notice.get().is_some()
             || self.compaction.background_failed.get()
             || self.compaction.lease.is_in_flight()
             || self.tool_context.task_output_token_budget.is_some()
@@ -2320,25 +2326,37 @@ impl SessionActor {
         }
         match result {
             Ok(()) => {
-                let tokens_after = self.chat_state_handle.get_projected_tokens().await;
-                self.send_grow_notification(
-                    crate::extensions::notification::SessionUpdate::AutoCompactCompleted {
-                        tokens_before,
-                        tokens_after,
-                        elapsed_ms: Some(
-                            if wait {
-                                foreground_started.elapsed()
-                            } else {
-                                pending.started.elapsed()
-                            }
-                            .as_millis() as i64,
-                        ),
-                        summary_preview: None,
-                        manual: false,
-                        async_compact: !wait,
-                    },
-                )
-                .await;
+                let elapsed_ms = (if wait {
+                    foreground_started.elapsed()
+                } else {
+                    pending.started.elapsed()
+                })
+                .as_millis() as i64;
+                if wait {
+                    let tokens_after = self.chat_state_handle.get_projected_tokens().await;
+                    self.send_grow_notification(
+                        crate::extensions::notification::SessionUpdate::AutoCompactCompleted {
+                            tokens_before,
+                            tokens_after,
+                            elapsed_ms: Some(elapsed_ms),
+                            summary_preview: None,
+                            manual: false,
+                            async_compact: false,
+                        },
+                    )
+                    .await;
+                } else {
+                    debug_assert!(
+                        self.compaction.pending_async_notice.get().is_none(),
+                        "a second async compaction cannot commit before the first notice is finalized"
+                    );
+                    self.compaction.pending_async_notice.set(Some(
+                        crate::session::compaction_config::PendingAsyncCompactionNotice {
+                            tokens_before,
+                            elapsed_ms,
+                        },
+                    ));
+                }
                 Ok(true)
             }
             Err(error) => {
@@ -2371,6 +2389,27 @@ impl SessionActor {
                 Err(error)
             }
         }
+    }
+
+    /// Publish a committed background compaction only after ChatState has
+    /// applied the complete next ordinary request projection. Until then the
+    /// Surface-only estimate still carries the previous request envelope.
+    pub(crate) async fn publish_pending_async_compaction_notice(&self) {
+        let Some(pending) = self.compaction.pending_async_notice.take() else {
+            return;
+        };
+        let tokens_after = self.chat_state_handle.get_projected_tokens().await;
+        self.send_grow_notification(
+            crate::extensions::notification::SessionUpdate::AutoCompactCompleted {
+                tokens_before: pending.tokens_before,
+                tokens_after,
+                elapsed_ms: Some(pending.elapsed_ms),
+                summary_preview: None,
+                manual: false,
+                async_compact: true,
+            },
+        )
+        .await;
     }
 
     /// Check if auto-compact should be triggered based on context window usage.
@@ -2709,6 +2748,7 @@ impl SessionActor {
         // `run_compact_only`); `summary_preview` carries a short explanation
         // instead of a summary snippet.
         if notify {
+            self.compaction.pending_async_notice.take();
             self.send_grow_notification(
                 crate::extensions::notification::SessionUpdate::AutoCompactCompleted {
                     manual: false,
@@ -2778,6 +2818,7 @@ impl SessionActor {
         if projected_images.total_images() > 0 {
             tracing::info!(
                 described_images = projected_images.described_images,
+                removed_images = projected_images.removed_images,
                 "installed irreversible ImageShadows before auto compaction"
             );
             let projected_tokens = self.chat_state_handle.get_projected_tokens().await;
@@ -2851,6 +2892,7 @@ impl SessionActor {
                 let span = tracing::Span::current();
                 span.record("post_tokens", tokens_after as i64);
                 span.record("success", true);
+                self.compaction.pending_async_notice.take();
                 self.send_grow_notification(GrowSessionUpdate::AutoCompactCompleted {
                     manual: false,
                     async_compact: false,
@@ -3056,7 +3098,7 @@ mod context_recall_tests {
             credential: sampling_types::SentCredential::Unknown,
             usage: None,
             cost_usd_ticks: None,
-            portable_responses_reasoning_required: false,
+            portable_reasoning_required: None,
         }
     }
 

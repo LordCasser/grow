@@ -10,48 +10,113 @@ use std::path::Path;
 const ARTIFACT_DIRECTORY: &str = "artifacts/notifications";
 const ORPHAN_SWEEP_BATCH_SIZE: usize = 256;
 
+/// A delivery error is classified at the commit boundary, never by UI prose.
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum AgentMessageDeliveryError {
+    #[error("{message}")]
+    Rejected { code: String, message: String },
+    #[error("{message}")]
+    Unconfirmed { code: String, message: String },
+}
+impl AgentMessageDeliveryError {
+    pub(crate) fn rejected(code: &str, message: impl Into<String>) -> Self {
+        Self::Rejected {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+    pub(crate) fn unconfirmed(code: &str, message: impl Into<String>) -> Self {
+        Self::Unconfirmed {
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+}
+
+/// Read-only exact-identity confirmation. It never admits or replays delivery.
+pub(crate) fn agent_message_receipt(
+    receipts: &[chat_state::TimelineEvent],
+    owner: &str,
+    source: &chat_state::NotificationSource,
+    body: &str,
+) -> Result<Option<String>, AgentMessageDeliveryError> {
+    let Some((source_id, operation, _, _)) = source.agent_message() else {
+        return Err(AgentMessageDeliveryError::rejected(
+            "invalid_source",
+            "Invalid agent message source",
+        ));
+    };
+    for event in receipts {
+        let chat_state::TimelineEventKind::Notification(chat_state::NotificationEvent::Received {
+            id,
+            owner_session_id,
+            source: existing,
+            source_version,
+            payload_ref,
+        }) = &event.kind
+        else {
+            continue;
+        };
+        if existing
+            .agent_message()
+            .is_some_and(|(sender, id, _, _)| sender == source_id && id == operation)
+        {
+            if owner_session_id != owner
+                || existing != source
+                || *source_version
+                    != (chat_state::NotificationSourceVersion::Ordinal {
+                        value: chat_state::PARENT_MESSAGE_SOURCE_VERSION,
+                    })
+                || payload_ref.bytes != body.len() as u64
+                || payload_ref.blake3 != blake3::hash(body.as_bytes()).to_hex().as_str()
+            {
+                return Err(AgentMessageDeliveryError::rejected(
+                    "message_conflict",
+                    "Message identity conflicts with its durable receipt",
+                ));
+            }
+            return Ok(Some(id.clone()));
+        }
+    }
+    Ok(None)
+}
+
 /// Project only a verified receipt; transport metadata never owns its identity.
 pub(crate) fn parent_message_notice(
     event: &chat_state::TimelineEvent,
     body: Option<String>,
 ) -> Option<crate::extensions::notification::UiNotice> {
     use crate::extensions::notification::{
-        ParentMessageNotice, UiNotice, UiNoticeCategory, UiNoticeTone,
+        AgentMessageNotice, UiNotice, UiNoticeCategory, UiNoticeTone,
     };
     let chat_state::TimelineEventKind::Notification(chat_state::NotificationEvent::Received {
         id,
-        source:
-            chat_state::NotificationSource::ParentMessage {
-                parent_session_id,
-                message_id,
-                interrupt,
-            },
+        source,
         ..
     }) = &event.kind
     else {
         return None;
     };
-    let details = ParentMessageNotice {
-        parent_session_id: parent_session_id.clone(),
-        message_id: message_id.clone(),
-        interrupt: *interrupt,
+    let (source_id, message_id, reply_to, interrupt) = source.agent_message()?;
+    let details = AgentMessageNotice {
+        source_session_id: source_id.to_owned(),
+        message_id: message_id.to_owned(),
+        interrupt,
+        reply_to: reply_to.cloned(),
         message: body,
     };
     let missing = details.message.is_none();
     Some(UiNotice {
         correlation_id: id.clone(),
         category: UiNoticeCategory::Coordination,
-        subject: Some(ParentMessageNotice::SUBJECT.into()),
+        subject: Some(AgentMessageNotice::SUBJECT.into()),
         description: None,
-        message: format!(
-            "Received message from parent agent · {}{}",
-            details.delivery_mode(),
-            if missing {
-                " · Message body could not be recovered"
-            } else {
-                ""
-            }
-        ),
+        message: if missing {
+            "Message unavailable"
+        } else {
+            "Received"
+        }
+        .into(),
         tone: if missing {
             UiNoticeTone::Warning
         } else {
@@ -66,13 +131,14 @@ pub(crate) fn read_parent_message_notice(
     event: &chat_state::TimelineEvent,
 ) -> Option<crate::extensions::notification::UiNotice> {
     let chat_state::TimelineEventKind::Notification(chat_state::NotificationEvent::Received {
-        source: chat_state::NotificationSource::ParentMessage { .. },
+        source,
         payload_ref,
         ..
     }) = &event.kind
     else {
         return None;
     };
+    source.agent_message()?;
     let body = match read_payload(session, payload_ref) {
         Ok(body) => Some(body),
         Err(error) => {

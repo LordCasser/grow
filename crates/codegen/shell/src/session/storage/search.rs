@@ -1367,6 +1367,7 @@ fn timeline_indexable_content(timeline: &Timeline) -> String {
             ConversationItem::System(_)
             | ConversationItem::User(_)
             | ConversationItem::ToolResult(_)
+            | ConversationItem::AgentMessage(_)
             | ConversationItem::Reasoning(_) => {}
         }
     }

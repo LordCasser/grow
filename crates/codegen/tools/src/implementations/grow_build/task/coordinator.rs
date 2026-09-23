@@ -82,6 +82,70 @@ struct GoalCancelWaiter {
     respond_to: oneshot::Sender<SubagentCancelOutcome>,
 }
 
+/// A communication route is deliberately classified before it reaches the
+/// host runner. New messages can only use an active owned child. Replies may
+/// use a previously known direct lineage so the host can perform its
+/// read-only receipt authorization, but that route never grants admission to
+/// a new inbound message by itself.
+enum InteractionRoute {
+    ActiveChild {
+        target_session_id: String,
+        subagent_task_name: String,
+    },
+    DirectParent {
+        target_session_id: String,
+        subagent_task_name: String,
+    },
+    Reply {
+        target_session_id: String,
+        subagent_task_name: String,
+    },
+    ReceiptOnly {
+        target_session_id: String,
+        subagent_task_name: String,
+    },
+}
+
+impl InteractionRoute {
+    fn target_session_id(&self) -> &str {
+        match self {
+            Self::ActiveChild {
+                target_session_id, ..
+            }
+            | Self::DirectParent {
+                target_session_id, ..
+            } => target_session_id,
+            Self::Reply {
+                target_session_id, ..
+            } => target_session_id,
+            Self::ReceiptOnly {
+                target_session_id, ..
+            } => target_session_id,
+        }
+    }
+
+    fn subagent_task_name(&self) -> &str {
+        match self {
+            Self::ActiveChild {
+                subagent_task_name, ..
+            }
+            | Self::DirectParent {
+                subagent_task_name, ..
+            } => subagent_task_name,
+            Self::Reply {
+                subagent_task_name, ..
+            } => subagent_task_name,
+            Self::ReceiptOnly {
+                subagent_task_name, ..
+            } => subagent_task_name,
+        }
+    }
+
+    fn receipt_only(&self) -> bool {
+        matches!(self, Self::ReceiptOnly { .. })
+    }
+}
+
 impl PromptScope {
     fn new(parent_session_id: String, prompt_id: String) -> Self {
         Self {
@@ -174,61 +238,22 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
 
     fn handle_command(&mut self, command: SubagentEvent) {
         match command {
-            SubagentEvent::Interact(request) => {
-                let target = match request.target_child_id.as_deref() {
-                    Some(id) => self
-                        .active
-                        .get(id)
-                        .filter(|child| {
-                            child.immediate_parent_session_id == request.source_session_id
-                                && !child.cancellation.is_cancelled()
-                                && !child.request.owner.is_workflow()
-                        })
-                        .map(|child| {
-                            let task_name = child.request.description.trim();
-                            (
-                                child.child_session_id.clone(),
-                                if task_name.is_empty() {
-                                    child.request.id.clone()
-                                } else {
-                                    task_name.to_owned()
-                                },
-                            )
-                        }),
-                    None if matches!(
-                        &request.action,
-                        super::interaction::AgentInteraction::Ask { .. }
-                    ) =>
-                    {
-                        self.active
-                            .values()
-                            .find(|child| {
-                                child.child_session_id == request.source_session_id
-                                    && !child.cancellation.is_cancelled()
-                            })
-                            .map(|child| {
-                                let task_name = child.request.description.trim();
-                                (
-                                    child.immediate_parent_session_id.clone(),
-                                    if task_name.is_empty() {
-                                        child.request.id.clone()
-                                    } else {
-                                        task_name.to_owned()
-                                    },
-                                )
-                            })
+            SubagentEvent::Interact(mut request) => {
+                let route = self.interaction_route(&request);
+                match route {
+                    Some(route) if route.receipt_only() || !request.cancellation.is_cancelled() => {
+                        request.receipt_only = route.receipt_only();
+                        self.runner.interact(
+                            request,
+                            route.target_session_id().to_owned(),
+                            route.subagent_task_name().to_owned(),
+                        )
                     }
-                    None => None,
-                };
-                match target {
-                    Some((target, task_name)) if !request.cancellation.is_cancelled() => {
-                        self.runner.interact(request, target, task_name)
-                    }
-                    _ => {
-                        let _ = request.respond_to.send(Err(
-                            "No active direct parent-child route for this operation".into(),
-                        ));
-                    }
+                    _ => self.reject_interaction(
+                        request,
+                        "no_direct_route",
+                        "No active direct parent-child route for this operation",
+                    ),
                 }
             }
             SubagentEvent::Spawn(command) => {
@@ -613,6 +638,150 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 let _ = request.respond_to.send(is_active);
             }
         }
+    }
+
+    fn interaction_route(
+        &self,
+        request: &super::interaction::AgentInteractionRequest,
+    ) -> Option<InteractionRoute> {
+        use super::interaction::AgentInteraction;
+
+        match (&request.action, request.target_child_id.as_deref()) {
+            (AgentInteraction::Ask { .. }, Some(id)) => self
+                .active
+                .get(id)
+                .filter(|child| {
+                    child.immediate_parent_session_id == request.source_session_id
+                        && !child.cancellation.is_cancelled()
+                        && !child.request.owner.is_workflow()
+                })
+                .map(|child| InteractionRoute::ActiveChild {
+                    target_session_id: child.child_session_id.clone(),
+                    subagent_task_name: task_name(&child.request),
+                }),
+            (AgentInteraction::Send { reply_to: None, .. }, Some(id)) => {
+                self.send_to_child_route(&request.source_session_id, id)
+            }
+            (AgentInteraction::Ask { .. }, None) => self
+                .active
+                .values()
+                .find(|child| {
+                    child.child_session_id == request.source_session_id
+                        && !child.cancellation.is_cancelled()
+                        && !child.request.owner.is_workflow()
+                })
+                .map(|child| InteractionRoute::DirectParent {
+                    target_session_id: child.immediate_parent_session_id.clone(),
+                    subagent_task_name: task_name(&child.request),
+                }),
+            (
+                AgentInteraction::Send {
+                    reply_to: Some(reply_to),
+                    ..
+                },
+                None,
+            ) => self.reply_route(&request.source_session_id, reply_to),
+            // A new send must identify an owned child. A reply must not carry
+            // an independently selected target; the referenced source session
+            // is only a candidate until the runtime validates its receipt.
+            _ => None,
+        }
+    }
+
+    fn send_to_child_route(
+        &self,
+        source_session_id: &str,
+        subagent_id: &str,
+    ) -> Option<InteractionRoute> {
+        if let Some(child) = self.active.get(subagent_id).filter(|child| {
+            child.immediate_parent_session_id == source_session_id
+                && !child.request.owner.is_workflow()
+        }) {
+            let route = InteractionRoute::ActiveChild {
+                target_session_id: child.child_session_id.clone(),
+                subagent_task_name: task_name(&child.request),
+            };
+            return Some(if child.cancellation.is_cancelled() {
+                InteractionRoute::ReceiptOnly {
+                    target_session_id: child.child_session_id.clone(),
+                    subagent_task_name: task_name(&child.request),
+                }
+            } else {
+                route
+            });
+        }
+
+        // Completed children retain the direct ownership edge so a retry can
+        // ask the target runtime to inspect an already durable receipt. This
+        // route is read-only and cannot admit a new message.
+        self.completed
+            .get(subagent_id)
+            .filter(|child| {
+                child.immediate_parent_session_id == source_session_id
+                    && !child.request.owner.is_workflow()
+            })
+            .map(|child| InteractionRoute::ReceiptOnly {
+                target_session_id: child.child_session_id.clone(),
+                subagent_task_name: task_name(&child.request),
+            })
+    }
+
+    fn reply_route(
+        &self,
+        source_session_id: &str,
+        reply_to: &sampling_types::AgentMessageRef,
+    ) -> Option<InteractionRoute> {
+        let active = self.active.values().find(|child| {
+            child.child_session_id == source_session_id
+                && child.immediate_parent_session_id == reply_to.source_session_id
+                && !child.request.owner.is_workflow()
+        });
+        if let Some(child) = active {
+            return Some(if child.cancellation.is_cancelled() {
+                InteractionRoute::ReceiptOnly {
+                    target_session_id: reply_to.source_session_id.clone(),
+                    subagent_task_name: task_name(&child.request),
+                }
+            } else {
+                InteractionRoute::Reply {
+                    target_session_id: reply_to.source_session_id.clone(),
+                    subagent_task_name: task_name(&child.request),
+                }
+            });
+        }
+
+        // Completed sources are retained only to verify an existing receipt;
+        // this route must never admit a new reply delivery.
+        self.completed
+            .values()
+            .find(|child| {
+                child.child_session_id == source_session_id
+                    && child.immediate_parent_session_id == reply_to.source_session_id
+                    && !child.request.owner.is_workflow()
+            })
+            .map(|child| InteractionRoute::ReceiptOnly {
+                target_session_id: reply_to.source_session_id.clone(),
+                subagent_task_name: task_name(&child.request),
+            })
+    }
+
+    fn reject_interaction(
+        &self,
+        request: super::interaction::AgentInteractionRequest,
+        code: &str,
+        message: &str,
+    ) {
+        use super::interaction::AgentInteraction;
+
+        let result = match request.action {
+            AgentInteraction::Send { .. } => Ok(
+                super::interaction::AgentInteractionOutput::message_rejected(
+                    request.id, code, message,
+                ),
+            ),
+            AgentInteraction::Ask { .. } => Err(message.to_owned()),
+        };
+        let _ = request.respond_to.send(result);
     }
 
     fn handle_internal(&mut self, event: InternalEvent<R::Control>) {
@@ -1203,6 +1372,15 @@ fn belongs_to_session(
     // immediate parent session. Both are authorized owners of the child.
     parent_session_id
         .is_none_or(|id| request.parent_session_id == id || immediate_parent_session_id == id)
+}
+
+fn task_name(request: &SubagentRequest) -> String {
+    let description = request.description.trim();
+    if description.is_empty() {
+        request.id.clone()
+    } else {
+        description.to_owned()
+    }
 }
 
 impl<R: ChildRunner> Drop for SubagentCoordinator<R> {

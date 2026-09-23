@@ -8,9 +8,10 @@
 //! needed for a same-route follow-up lives separately in the non-serializable
 //! continuation projection, so switching backends cannot leak wire metadata.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::rs;
@@ -36,6 +37,12 @@ pub enum ConversationItem {
     Assistant(AssistantItem),
     /// Tool/function result
     ToolResult(ToolResultItem),
+    /// Runtime-delivered agent messages.
+    ///
+    /// This is one canonical context fact even though provider adapters expand
+    /// each contained message to a receive call/result pair at request time.
+    /// It is never a model-generated tool call and is never dispatched.
+    AgentMessage(AgentMessageItem),
     /// Provider-neutral display fact for a tool call executed server-side by
     /// the backend. The native continuation lane, not Timeline, carries the
     /// protocol object required for a same-route follow-up request.
@@ -44,6 +51,74 @@ pub enum ConversationItem {
     /// (signatures, encrypted blobs, native ids and statuses) never crosses
     /// this durable boundary.
     Reasoning(VisibleReasoningItem),
+}
+
+/// Stable identity of a message in the source session.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize, JsonSchema)]
+pub struct AgentMessageRef {
+    pub source_session_id: String,
+    pub message_id: String,
+}
+
+/// An immutable message received from another runtime session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentMessage {
+    pub receipt_id: String,
+    pub source_session_id: String,
+    pub target_session_id: String,
+    pub message_id: String,
+    pub reply_to: Option<AgentMessageRef>,
+    pub message: Arc<str>,
+}
+
+/// An ordered batch of runtime agent messages consumed into one canonical
+/// Surface coordinate.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentMessageItem {
+    pub messages: Vec<AgentMessage>,
+    /// Prompt-turn coordinate assigned when the runtime inserts this idle
+    /// batch into an active turn. Multiple adjacent batches may share it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_index: Option<usize>,
+}
+
+/// Provider-neutral name used only when projecting a runtime message into
+/// historical provider input. It is deliberately not registered as a model
+/// executable tool.
+pub const RECEIVE_AGENT_MESSAGE_TOOL_NAME: &str = "receive_agent_message";
+
+/// Derive the stable provider correlation id for one runtime receipt.
+///
+/// The adapter-specific projection reserves model tool ids and adds a suffix
+/// only on the (rare) direct collision. This base is short enough for the
+/// Anthropic tool-id limit while keeping the receipt out of the wire body.
+pub fn agent_message_call_id(receipt_id: &str) -> String {
+    let digest = blake3::hash(receipt_id.as_bytes()).to_hex();
+    format!("grow_receive_agent_message_{}", &digest[..32])
+}
+
+/// Serialize the complete runtime fact used as the projected tool result.
+/// `serde_json` preserves the message string byte-for-byte when decoded,
+/// including tabs and CRLF sequences.
+pub fn agent_message_result_content(message: &AgentMessage) -> String {
+    serde_json::json!({
+        "receipt_id": message.receipt_id,
+        "source_session_id": message.source_session_id,
+        "target_session_id": message.target_session_id,
+        "message_id": message.message_id,
+        "reply_to": message.reply_to,
+        "message": message.message,
+    })
+    .to_string()
+}
+
+fn agent_message_call_arguments(message: &AgentMessage) -> String {
+    serde_json::json!({
+        "receipt_id": message.receipt_id,
+        "source_session_id": message.source_session_id,
+        "message_id": message.message_id,
+    })
+    .to_string()
 }
 
 /// Durable reasoning is deliberately smaller than any provider wire type.
@@ -490,10 +565,11 @@ impl ConversationImageGroup {
     }
 }
 
-/// Match a provider's unconditional text-only capability rejection. Format,
-/// size, corruption and policy failures are deliberately excluded: projecting
-/// those images would permanently discard a modality the model otherwise
-/// supports.
+/// Match a provider's unconditional text-only capability rejection, including
+/// the provider-neutral terminal capability claim `is not a multimodal model`.
+/// Format, size, corruption and policy failures are deliberately excluded:
+/// projecting those images would permanently discard a modality the model
+/// otherwise supports.
 pub fn is_unconditional_image_input_unsupported(
     status_code: Option<u16>,
     message: &str,
@@ -559,6 +635,7 @@ pub fn is_unconditional_image_input_unsupported(
     .iter()
     .any(|claim| contains_terminal_claim(&message, claim));
     let model_rejects_images = [
+        "is not a multimodal model",
         "model does not support images",
         "model doesn't support images",
         "model does not accept images",
@@ -735,6 +812,11 @@ pub fn select_image_descriptions(items: &mut [ConversationItem]) -> Result<usize
     Ok(replaced)
 }
 
+/// Canonical model-visible text that replaces images a confirmed text-only
+/// model cannot accept. The ImageProjection validator enforces exact equality,
+/// so every producer must use this constant.
+pub const UNSUPPORTED_IMAGE_REPLACEMENT: &str = "当前模型不支持多模态，图片已经被删除";
+
 /// Replace every image in one item with a single model-visible text block.
 /// Returns the number of actual image parts removed.
 ///
@@ -749,6 +831,23 @@ pub fn select_image_descriptions(items: &mut [ConversationItem]) -> Result<usize
 /// replacement is appended to the tool result's ordinary text content so all
 /// API backends can see it.
 pub fn replace_item_images_with_text(item: &mut ConversationItem, replacement: &str) -> usize {
+    replace_item_images_under_heading(item, replacement, "[Projected image description]")
+}
+
+/// Remove every image of one item and leave one canonical text block.
+///
+/// Used when the primary model confirmed it cannot accept images and no
+/// description or OCR text exists. Only the model-visible projection changes;
+/// the immutable Timeline message keeps the original payload as evidence.
+pub fn remove_item_images_with_text(item: &mut ConversationItem, replacement: &str) -> usize {
+    replace_item_images_under_heading(item, replacement, "[Projected image removal]")
+}
+
+fn replace_item_images_under_heading(
+    item: &mut ConversationItem,
+    replacement: &str,
+    heading: &str,
+) -> usize {
     match item {
         ConversationItem::User(user) => {
             let mut removed = 0usize;
@@ -793,7 +892,7 @@ pub fn replace_item_images_with_text(item: &mut ConversationItem, replacement: &
                     Arc::<str>::from(replacement)
                 } else {
                     Arc::<str>::from(format!(
-                        "{}\n\n[Projected image description]\n{}",
+                        "{}\n\n{heading}\n{}",
                         original.trim_end(),
                         replacement
                     ))
@@ -957,17 +1056,43 @@ pub fn redact_projected_image_response_carrier_compaction_references(
 /// Compaction keeps the original branch leaves as provenance. That means a
 /// later image projection can identify which summary owns an image-bearing
 /// source, but the summary itself is already text-only and therefore cannot be
-/// repaired by [`replace_item_images_with_text`]. Only references derived from
-/// the source's image URLs or managed `<image_files>` envelope are replaced;
-/// unrelated summary text remains byte-for-byte unchanged.
+/// repaired by [`replace_item_images_with_text`] or
+/// [`remove_item_images_with_text`]. Only references derived from the source's
+/// image URLs or managed `<image_files>` envelope are replaced; unrelated
+/// summary text remains byte-for-byte unchanged.
 pub fn redact_projected_image_compaction_references(
     item: &mut ConversationItem,
     source: &ConversationItem,
     replacement: &str,
 ) -> bool {
+    redact_item_image_compaction_references(
+        item,
+        source,
+        &format!("[Projected image description: {replacement}]"),
+    )
+}
+
+/// Remove exact image references copied into a completed compaction summary
+/// when the image group itself is removed from the current Surface.
+pub fn redact_removed_image_compaction_references(
+    item: &mut ConversationItem,
+    source: &ConversationItem,
+    replacement: &str,
+) -> bool {
+    redact_item_image_compaction_references(
+        item,
+        source,
+        &format!("[Projected image removal: {replacement}]"),
+    )
+}
+
+fn redact_item_image_compaction_references(
+    item: &mut ConversationItem,
+    source: &ConversationItem,
+    replacement: &str,
+) -> bool {
     let references = projected_image_reference_tokens(source);
-    let replacement = format!("[Projected image description: {replacement}]");
-    replace_compaction_reference_tokens(item, &references, &replacement)
+    replace_compaction_reference_tokens(item, &references, replacement)
 }
 
 /// Remove exact image-source arguments copied from an associated Assistant
@@ -1383,9 +1508,9 @@ pub struct NativeContinuationSpan {
 pub struct NativeContinuationProjection {
     pub portable_prefix_len: usize,
     pub spans: Vec<NativeContinuationSpan>,
-    /// Current-route compatibility learned from an explicit Responses API
-    /// rejection. Other backends and routes keep dropping portable reasoning.
-    pub replay_portable_responses_reasoning: bool,
+    /// Current-route compatibility learned from an explicit API rejection.
+    /// Other backends and routes keep dropping portable reasoning.
+    pub portable_reasoning_backend: Option<ApiBackend>,
 }
 
 impl NativeContinuationProjection {
@@ -1416,6 +1541,172 @@ impl NativeContinuationProjection {
         }
         Some(end)
     }
+}
+
+fn collect_agent_message_model_ids(
+    items: &[ConversationItem],
+    native: Option<&NativeContinuationProjection>,
+) -> BTreeSet<String> {
+    let mut reserved = BTreeSet::new();
+    for item in items {
+        match item {
+            ConversationItem::Assistant(assistant) => {
+                reserved.extend(
+                    assistant
+                        .tool_calls
+                        .iter()
+                        .map(|call| call.id.as_ref().to_owned()),
+                );
+            }
+            ConversationItem::ToolResult(result) => {
+                reserved.insert(result.tool_call_id.clone());
+            }
+            _ => {}
+        }
+    }
+    let Some(native) = native else {
+        return reserved;
+    };
+    for span in &native.spans {
+        match &span.fragment {
+            NativeContinuationFragment::ChatCompletions(message) => {
+                reserved.extend(
+                    message
+                        .tool_calls
+                        .iter()
+                        .filter_map(|call| call.id.as_deref())
+                        .map(str::to_owned),
+                );
+                if let Some(id) = &message.tool_call_id {
+                    reserved.insert(id.clone());
+                }
+            }
+            NativeContinuationFragment::Responses(items) => {
+                for item in items {
+                    let rs::InputItem::Item(item) = item else {
+                        continue;
+                    };
+                    match item {
+                        rs::Item::FunctionCall(call) => {
+                            reserved.insert(call.call_id.clone());
+                        }
+                        rs::Item::FunctionCallOutput(output) => {
+                            reserved.insert(output.call_id.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            NativeContinuationFragment::Messages(blocks) => {
+                for block in blocks {
+                    match block {
+                        crate::messages::ContentBlock::ToolUse { id, .. } => {
+                            reserved.insert(id.clone());
+                        }
+                        crate::messages::ContentBlock::ToolResult { tool_use_id, .. } => {
+                            reserved.insert(tool_use_id.clone());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    reserved
+}
+
+fn agent_message_call_ids(
+    items: &[ConversationItem],
+    native: Option<&NativeContinuationProjection>,
+) -> BTreeMap<String, String> {
+    let mut reserved = collect_agent_message_model_ids(items, native);
+    let mut ids = BTreeMap::new();
+    for item in items {
+        let ConversationItem::AgentMessage(batch) = item else {
+            continue;
+        };
+        for message in &batch.messages {
+            if ids.contains_key(&message.receipt_id) {
+                continue;
+            }
+            let base = agent_message_call_id(&message.receipt_id);
+            let mut candidate = base.clone();
+            let mut suffix = 0usize;
+            while reserved.contains(&candidate) {
+                suffix += 1;
+                candidate = format!("{base}_{suffix}");
+            }
+            reserved.insert(candidate.clone());
+            ids.insert(message.receipt_id.clone(), candidate);
+        }
+    }
+    ids
+}
+
+fn agent_message_call_id_for(ids: &BTreeMap<String, String>, message: &AgentMessage) -> String {
+    ids.get(&message.receipt_id)
+        .cloned()
+        .unwrap_or_else(|| agent_message_call_id(&message.receipt_id))
+}
+
+/// Keep a runtime message outside an open model tool batch in provider input.
+/// The canonical item order remains unchanged; this only moves the expanded
+/// receive pair to the first safe boundary after all expected results.
+fn defer_agent_messages_after_tool_batch(items: Vec<ConversationItem>) -> Vec<ConversationItem> {
+    let mut projected = Vec::with_capacity(items.len());
+    let mut pending_tool_ids = BTreeSet::new();
+    let mut deferred_messages = Vec::new();
+    let mut open_batch_start = None;
+
+    for item in items {
+        match item {
+            ConversationItem::Assistant(assistant) if !assistant.tool_calls.is_empty() => {
+                if !pending_tool_ids.is_empty() {
+                    // A second assistant tool batch is a boundary for the
+                    // malformed first batch. Keep any runtime messages before
+                    // that open batch instead of appending them after it.
+                    if let Some(start) = open_batch_start.take() {
+                        let deferred = std::mem::take(&mut deferred_messages);
+                        projected.splice(start..start, deferred);
+                    } else {
+                        projected.extend(deferred_messages.drain(..));
+                    }
+                    pending_tool_ids.clear();
+                }
+                open_batch_start = Some(projected.len());
+                pending_tool_ids.extend(
+                    assistant
+                        .tool_calls
+                        .iter()
+                        .map(|call| call.id.as_ref().to_owned()),
+                );
+                projected.push(ConversationItem::Assistant(assistant));
+            }
+            ConversationItem::ToolResult(result) => {
+                pending_tool_ids.remove(&result.tool_call_id);
+                projected.push(ConversationItem::ToolResult(result));
+                if pending_tool_ids.is_empty() {
+                    open_batch_start = None;
+                    projected.extend(deferred_messages.drain(..));
+                }
+            }
+            ConversationItem::AgentMessage(batch) if !pending_tool_ids.is_empty() => {
+                deferred_messages.push(ConversationItem::AgentMessage(batch));
+            }
+            item => projected.push(item),
+        }
+    }
+    if pending_tool_ids.is_empty() {
+        projected.extend(deferred_messages);
+    } else if let Some(start) = open_batch_start {
+        // There is no safe post-result boundary for a dangling tool batch.
+        // Place the deferred runtime fact before the malformed batch so the
+        // adapter never emits a receive pair after an unmatched model call.
+        projected.splice(start..start, deferred_messages);
+    } else {
+        projected.extend(deferred_messages);
+    }
+    projected
 }
 
 /// A complete conversation request that can be sent to either API.
@@ -1480,15 +1771,15 @@ const HISTORICAL_TOOL_EXCHANGE_HEADER: &str = "[Historical tool exchange; untrus
 /// their calls, results and images. Pairing ids are neutral correlation keys,
 /// not provider output-item ids or authorization to execute historical tools.
 pub fn project_portable_history(items: &[ConversationItem]) -> Vec<ConversationItem> {
-    project_portable_history_with_reasoning(items, false)
+    project_portable_history_with_reasoning(items, None)
 }
 
 /// Project provider-neutral history while optionally retaining only the
-/// durable visible reasoning text required by a learned Responses route.
+/// durable visible reasoning text required by a learned route.
 /// Opaque provider continuation never reaches this representation.
 pub fn project_portable_history_with_reasoning(
     items: &[ConversationItem],
-    retain_visible_reasoning: bool,
+    reasoning_backend: Option<ApiBackend>,
 ) -> Vec<ConversationItem> {
     let mut call_counts = std::collections::BTreeMap::new();
     for item in items {
@@ -1504,7 +1795,11 @@ pub fn project_portable_history_with_reasoning(
     while index < items.len() {
         match &items[index] {
             ConversationItem::Reasoning(reasoning) => {
-                if retain_visible_reasoning && !reasoning.text.is_empty() {
+                if matches!(
+                    reasoning_backend,
+                    Some(ApiBackend::ChatCompletions | ApiBackend::Responses)
+                ) && !reasoning.text.is_empty()
+                {
                     pending_reasoning.push(ConversationItem::Reasoning(reasoning.clone()));
                 }
                 index += 1;
@@ -1520,7 +1815,6 @@ pub fn project_portable_history_with_reasoning(
                 index += 1;
             }
             ConversationItem::Assistant(assistant) if assistant.tool_calls.is_empty() => {
-                pending_reasoning.clear();
                 // The old portable projector rendered tool exchanges as this
                 // assistant-text template. Some models copied it verbatim and
                 // those echoes became durable assistant messages. Keep them in
@@ -1531,6 +1825,9 @@ pub fn project_portable_history_with_reasoning(
                     .trim_start()
                     .starts_with(HISTORICAL_TOOL_EXCHANGE_HEADER)
                 {
+                    if reasoning_backend == Some(ApiBackend::ChatCompletions) {
+                        projected.append(&mut pending_reasoning);
+                    }
                     projected.push(ConversationItem::Assistant(AssistantItem {
                         content: assistant.content.clone(),
                         tool_calls: Vec::new(),
@@ -1539,6 +1836,7 @@ pub fn project_portable_history_with_reasoning(
                         reasoning_effort: None,
                     }));
                 }
+                pending_reasoning.clear();
                 index += 1;
             }
             ConversationItem::Assistant(assistant) => {
@@ -1569,7 +1867,14 @@ pub fn project_portable_history_with_reasoning(
                     .cloned()
                     .collect();
                 let retained_ids: BTreeSet<_> = calls.iter().map(|call| call.id.clone()).collect();
-                if !calls.is_empty() {
+                if !calls.is_empty()
+                    || (reasoning_backend == Some(ApiBackend::ChatCompletions)
+                        && !assistant.content.is_empty()
+                        && !assistant
+                            .content
+                            .trim_start()
+                            .starts_with(HISTORICAL_TOOL_EXCHANGE_HEADER))
+                {
                     projected.append(&mut pending_reasoning);
                 } else {
                     pending_reasoning.clear();
@@ -1608,6 +1913,13 @@ pub fn project_portable_history_with_reasoning(
                 // in any of the three endpoint protocols.
                 index += 1;
             }
+            ConversationItem::AgentMessage(agent_messages) => {
+                pending_reasoning.clear();
+                // Keep the canonical runtime fact intact. Provider adapters
+                // expand it only at request projection time.
+                projected.push(ConversationItem::AgentMessage(agent_messages.clone()));
+                index += 1;
+            }
             ConversationItem::BackendToolCall(call) => {
                 pending_reasoning.clear();
                 projected.push(ConversationItem::assistant(call.text_summary()));
@@ -1622,7 +1934,7 @@ pub fn project_portable_history_with_reasoning(
 enum RequestSegment {
     Items {
         items: Vec<ConversationItem>,
-        replay_portable_responses_reasoning: bool,
+        replay_portable_reasoning: bool,
     },
     Native(NativeContinuationFragment),
 }
@@ -1631,14 +1943,17 @@ fn request_segments(req: &ConversationRequest, backend: ApiBackend) -> Vec<Reque
     let Some(native) = &req.native_continuation else {
         return vec![RequestSegment::Items {
             items: req.items.clone(),
-            replay_portable_responses_reasoning: false,
+            replay_portable_reasoning: false,
         }];
     };
-    let replay_portable_responses_reasoning =
-        backend == ApiBackend::Responses && native.replay_portable_responses_reasoning;
+    let replay_portable_reasoning = native.portable_reasoning_backend.as_ref() == Some(&backend)
+        && backend != ApiBackend::Messages;
     let portable_segment = |items: &[ConversationItem]| RequestSegment::Items {
-        items: project_portable_history_with_reasoning(items, replay_portable_responses_reasoning),
-        replay_portable_responses_reasoning,
+        items: project_portable_history_with_reasoning(
+            items,
+            replay_portable_reasoning.then(|| backend.clone()),
+        ),
+        replay_portable_reasoning,
     };
     let Some(portable_end) = native.portable_prefix_end(&req.items) else {
         return vec![portable_segment(&req.items)];
@@ -1660,7 +1975,7 @@ fn request_segments(req: &ConversationRequest, backend: ApiBackend) -> Vec<Reque
         if cursor < span.start {
             segments.push(RequestSegment::Items {
                 items: req.items[cursor..span.start].to_vec(),
-                replay_portable_responses_reasoning: false,
+                replay_portable_reasoning: false,
             });
         }
         segments.push(RequestSegment::Native(span.fragment.clone()));
@@ -1669,7 +1984,7 @@ fn request_segments(req: &ConversationRequest, backend: ApiBackend) -> Vec<Reque
     if cursor < req.items.len() {
         segments.push(RequestSegment::Items {
             items: req.items[cursor..].to_vec(),
-            replay_portable_responses_reasoning: false,
+            replay_portable_reasoning: false,
         });
     }
     segments
@@ -2349,6 +2664,19 @@ impl ConversationItem {
         })
     }
 
+    /// Create one canonical runtime item containing an ordered message batch.
+    pub fn agent_message(messages: Vec<AgentMessage>) -> Self {
+        Self::AgentMessage(AgentMessageItem {
+            messages,
+            prompt_index: None,
+        })
+    }
+
+    /// Create a canonical runtime item from one received message.
+    pub fn received_agent_message(message: AgentMessage) -> Self {
+        Self::agent_message(vec![message])
+    }
+
     /// Get the role of this item
     pub fn role(&self) -> Role {
         match self {
@@ -2356,6 +2684,10 @@ impl ConversationItem {
             Self::User(_) => Role::User,
             Self::Assistant(_) => Role::Assistant,
             Self::ToolResult(_) => Role::Tool,
+            // Runtime messages have no standalone provider role. User is the
+            // neutral role fallback for callers that only need a coarse role;
+            // request adapters never use this branch for wire projection.
+            Self::AgentMessage(_) => Role::User,
             Self::BackendToolCall(_) => Role::Assistant,
             // Reasoning is semantically part of the assistant's turn.
             Self::Reasoning(_) => Role::Assistant,
@@ -2387,6 +2719,12 @@ impl ConversationItem {
                 .join("\n"),
             Self::Assistant(a) => a.content.as_ref().to_owned(),
             Self::ToolResult(t) => t.content.as_ref().to_owned(),
+            Self::AgentMessage(batch) => batch
+                .messages
+                .iter()
+                .map(|message| message.message.as_ref())
+                .collect::<Vec<_>>()
+                .join("\n"),
             Self::BackendToolCall(b) => b.text_summary(),
             Self::Reasoning(r) => reasoning_item_text(r),
         }
@@ -2510,11 +2848,23 @@ impl ConversationItem {
     }
 
     /// Record the prompt-turn index this user item starts (see
-    /// [`UserItem::prompt_index`]). No-op for any non-`User` variant, so
-    /// callers can apply it unconditionally.
+    /// [`UserItem::prompt_index`]). Runtime message batches use the same
+    /// coordinate so an idle turn remains attached to its active prompt.
     pub fn set_prompt_index(&mut self, prompt_index: usize) {
-        if let Self::User(u) = self {
-            u.prompt_index = Some(prompt_index);
+        match self {
+            Self::User(u) => u.prompt_index = Some(prompt_index),
+            Self::AgentMessage(batch) => batch.prompt_index = Some(prompt_index),
+            _ => {}
+        }
+    }
+
+    /// Return the prompt-turn coordinate carried by this item, when it starts
+    /// or belongs to a marked turn.
+    pub fn prompt_index(&self) -> Option<usize> {
+        match self {
+            Self::User(user) => user.prompt_index,
+            Self::AgentMessage(batch) => batch.prompt_index,
+            _ => None,
         }
     }
 
@@ -2664,10 +3014,10 @@ fn sanitize_tool_arguments(id: &str, name: &str, arguments: Arc<str>) -> Arc<str
 /// Convert a single non-`Reasoning` [`ConversationItem`] into the
 /// chat-completions wire format.
 ///
-/// `Reasoning` is intentionally unsupported: durable reasoning is display-only
-/// and must not be reconstructed into provider history. Same-route Chat
-/// `reasoning_content` is supplied by the ephemeral native continuation lane.
-/// Batch conversion filters `Reasoning` before reaching this function, so the
+/// `Reasoning` is intentionally unsupported by this single-item converter.
+/// Batch conversion handles it only for an explicitly learned Chat route;
+/// same-route native fragments carry their original `reasoning_content`.
+/// Batch conversion consumes `Reasoning` before reaching this function, so the
 /// corresponding match arm below is structurally unreachable.
 ///
 /// Replaces the old `From<ConversationItem> for ChatRequestMessage` impl,
@@ -2731,8 +3081,8 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
                 })
                 .collect();
 
-            // Reasoning is no longer stored on AssistantItem. Same-route
-            // `reasoning_content` is supplied only by a native fragment.
+            // Batch conversion associates visible reasoning when the current
+            // route explicitly requires it; native fragments stay separate.
             ChatRequestMessage {
                 role: Role::Assistant,
                 content: MessageContent::Text(a.content.as_ref().to_owned()),
@@ -2771,6 +3121,9 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
                 }
             }
         }
+        ConversationItem::AgentMessage(_) => unreachable!(
+            "conversation_to_chat_messages expands AgentMessage into a call/result pair"
+        ),
         // Backend tool calls have no Chat Completions equivalent.
         // Emit a synthetic assistant message so the model sees context
         // about what was searched, without breaking the message sequence.
@@ -2795,11 +3148,50 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
 /// Timeline reasoning is display-only; same-route reasoning is supplied by
 /// the ephemeral native continuation lane.
 pub fn conversation_to_chat_messages(items: Vec<ConversationItem>) -> Vec<ChatRequestMessage> {
-    items
-        .into_iter()
-        .filter(|item| !matches!(item, ConversationItem::Reasoning(_)))
-        .map(conversation_item_to_chat_message)
-        .collect()
+    let ids = agent_message_call_ids(&items, None);
+    conversation_to_chat_messages_with_reasoning(items, false, &ids)
+}
+
+fn conversation_to_chat_messages_with_reasoning(
+    items: Vec<ConversationItem>,
+    replay_reasoning: bool,
+    agent_ids: &BTreeMap<String, String>,
+) -> Vec<ChatRequestMessage> {
+    let items = defer_agent_messages_after_tool_batch(items);
+    let mut reasoning = Vec::new();
+    let mut messages = Vec::new();
+    for item in items {
+        if let ConversationItem::Reasoning(item) = item {
+            if replay_reasoning && !item.text.is_empty() {
+                reasoning.push(item.text);
+            }
+            continue;
+        }
+        if let ConversationItem::AgentMessage(batch) = item {
+            reasoning.clear();
+            for message in batch.messages {
+                let call_id = agent_message_call_id_for(agent_ids, &message);
+                let call = ToolCallRequest::function(
+                    RECEIVE_AGENT_MESSAGE_TOOL_NAME,
+                    agent_message_call_arguments(&message),
+                )
+                .with_id(call_id.clone());
+                messages.push(ChatRequestMessage::assistant_tool_call(call));
+                messages.push(ChatRequestMessage::tool(
+                    call_id,
+                    agent_message_result_content(&message),
+                ));
+            }
+            continue;
+        }
+        let mut message = conversation_item_to_chat_message(item);
+        if replay_reasoning && message.role == Role::Assistant {
+            message.reasoning_content = Some(reasoning.join("\n"));
+        }
+        reasoning.clear();
+        messages.push(message);
+    }
+    messages
 }
 
 // ============================================================================
@@ -3105,11 +3497,30 @@ const STRUCTURED_OUTPUT_SCHEMA_NAME: &str = "structured_output";
 
 impl From<ConversationRequest> for ChatCompletionRequest {
     fn from(req: ConversationRequest) -> Self {
+        let agent_ids = agent_message_call_ids(&req.items, req.native_continuation.as_ref());
         let messages: Vec<ChatRequestMessage> = request_segments(&req, ApiBackend::ChatCompletions)
             .into_iter()
             .flat_map(|segment| match segment {
-                RequestSegment::Items { items, .. } => conversation_to_chat_messages(items),
-                RequestSegment::Native(NativeContinuationFragment::ChatCompletions(message)) => {
+                RequestSegment::Items {
+                    items,
+                    replay_portable_reasoning,
+                } => conversation_to_chat_messages_with_reasoning(
+                    items,
+                    replay_portable_reasoning,
+                    &agent_ids,
+                ),
+                RequestSegment::Native(NativeContinuationFragment::ChatCompletions(
+                    mut message,
+                )) => {
+                    if req
+                        .native_continuation
+                        .as_ref()
+                        .and_then(|projection| projection.portable_reasoning_backend.as_ref())
+                        == Some(&ApiBackend::ChatCompletions)
+                        && message.role == Role::Assistant
+                    {
+                        message.reasoning_content.get_or_insert_with(String::new);
+                    }
                     vec![message]
                 }
                 RequestSegment::Native(_) => Vec::new(),
@@ -3253,16 +3664,17 @@ impl From<&ConversationRequest> for rs::CreateResponse {
 /// learned that visible reasoning attached to a complete tool exchange is
 /// required.
 fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
+    let agent_ids = agent_message_call_ids(&req.items, req.native_continuation.as_ref());
     let items: Vec<rs::InputItem> = request_segments(req, ApiBackend::Responses)
         .into_iter()
         .flat_map(|segment| match segment {
             RequestSegment::Items {
                 items,
-                replay_portable_responses_reasoning,
-            } => items
+                replay_portable_reasoning,
+            } => defer_agent_messages_after_tool_batch(items)
                 .iter()
                 .flat_map(|item| {
-                    conversation_item_to_input_items(item, replay_portable_responses_reasoning)
+                    conversation_item_to_input_items(item, replay_portable_reasoning, &agent_ids)
                 })
                 .collect(),
             RequestSegment::Native(NativeContinuationFragment::Responses(items)) => items,
@@ -3310,6 +3722,7 @@ pub fn patch_reasoning_text_types(body: &mut serde_json::Value) {
 fn conversation_item_to_input_items(
     item: &ConversationItem,
     replay_visible_reasoning: bool,
+    agent_ids: &BTreeMap<String, String>,
 ) -> Vec<rs::InputItem> {
     match item {
         ConversationItem::System(s) => {
@@ -3417,6 +3830,33 @@ fn conversation_item_to_input_items(
                 },
             ))]
         }
+        ConversationItem::AgentMessage(batch) => batch
+            .messages
+            .iter()
+            .flat_map(|message| {
+                let call_id = agent_message_call_id_for(agent_ids, message);
+                vec![
+                    rs::InputItem::Item(rs::Item::FunctionCall(rs::FunctionToolCall {
+                        call_id: call_id.clone(),
+                        name: RECEIVE_AGENT_MESSAGE_TOOL_NAME.to_owned(),
+                        arguments: agent_message_call_arguments(message),
+                        id: None,
+                        status: None,
+                        namespace: None,
+                    })),
+                    rs::InputItem::Item(rs::Item::FunctionCallOutput(
+                        rs::FunctionCallOutputItemParam {
+                            call_id,
+                            output: rs::FunctionCallOutput::Text(agent_message_result_content(
+                                message,
+                            )),
+                            id: None,
+                            status: None,
+                        },
+                    )),
+                ]
+            })
+            .collect(),
         ConversationItem::BackendToolCall(b) => {
             vec![rs::InputItem::EasyMessage(rs::EasyInputMessage {
                 r#type: rs::MessageType::Message,
@@ -3735,6 +4175,10 @@ pub fn transform_conversation_cwd(
                     t.content = Arc::<str>::from(t.content.replace(source_cwd, target_cwd));
                 }
             }
+            // Runtime messages are immutable cross-session facts. Their body
+            // and source identity must survive a worktree path rewrite byte
+            // for byte, so they are intentionally left untouched.
+            ConversationItem::AgentMessage(_) => {}
             // Backend tool calls don't contain workspace paths — no-op.
             ConversationItem::BackendToolCall(_) => {}
             ConversationItem::Reasoning(r) => {
@@ -4152,6 +4596,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
 
     let segments = request_segments(req, ApiBackend::Messages);
     let tool_ids = messages_tool_id_map(&segments);
+    let agent_ids = agent_message_call_ids(&req.items, req.native_continuation.as_ref());
     let wire_tool_id = |id: &str| tool_ids.get(id).map_or(id, String::as_str).to_owned();
 
     // Helper to convert ContentPart to Anthropic ContentBlock
@@ -4234,6 +4679,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
     for segment in segments {
         match segment {
             RequestSegment::Items { items, .. } => {
+                let items = defer_agent_messages_after_tool_batch(items);
                 for item in &items {
                     match item {
                         ConversationItem::System(s) => {
@@ -4298,6 +4744,37 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                                 content,
                                 cache_control: None,
                             });
+                        }
+                        ConversationItem::AgentMessage(batch) => {
+                            flush_assistant(&mut pending_assistant, &mut messages);
+                            flush_tool_results(&mut pending_tool_results, &mut messages);
+                            for message in &batch.messages {
+                                let call_id = agent_message_call_id_for(&agent_ids, message);
+                                messages.push(Message {
+                                    role: MessageRole::Assistant,
+                                    content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                                        id: call_id.clone(),
+                                        name: RECEIVE_AGENT_MESSAGE_TOOL_NAME.to_owned(),
+                                        input: serde_json::from_str(&agent_message_call_arguments(
+                                            message,
+                                        ))
+                                        .expect("agent message arguments are valid JSON"),
+                                        cache_control: None,
+                                    }]),
+                                });
+                                messages.push(Message {
+                                    role: MessageRole::User,
+                                    content: MessageContent::Blocks(vec![
+                                        ContentBlock::ToolResult {
+                                            tool_use_id: call_id,
+                                            content: ToolResultContent::Text(
+                                                agent_message_result_content(message),
+                                            ),
+                                            cache_control: None,
+                                        },
+                                    ]),
+                                });
+                            }
                         }
                         // Anthropic Messages API has no native backend-tool-call concept.
                         // Emit a synthetic assistant text block so the model retains
@@ -4488,6 +4965,236 @@ mod compaction_item_bridge_tests {
 mod tests {
     use super::*;
     use assert_matches::assert_matches;
+
+    fn received_message(receipt_id: &str, message_id: &str, body: &str) -> AgentMessage {
+        AgentMessage {
+            receipt_id: receipt_id.to_owned(),
+            source_session_id: "source-session".to_owned(),
+            target_session_id: "target-session".to_owned(),
+            message_id: message_id.to_owned(),
+            reply_to: Some(AgentMessageRef {
+                source_session_id: "source-session".to_owned(),
+                message_id: "parent-message".to_owned(),
+            }),
+            message: Arc::from(body),
+        }
+    }
+
+    #[test]
+    fn agent_message_serde_round_trip_preserves_identity_and_body() {
+        let item = ConversationItem::received_agent_message(received_message(
+            "receipt-1",
+            "message-1",
+            "first\tline\r\nsecond",
+        ));
+        let encoded = serde_json::to_value(&item).unwrap();
+        assert_eq!(encoded["type"], "agent_message");
+        let decoded: ConversationItem = serde_json::from_value(encoded.clone()).unwrap();
+        assert_eq!(serde_json::to_value(decoded).unwrap(), encoded);
+        assert_eq!(item.text_content(), "first\tline\r\nsecond");
+    }
+
+    #[test]
+    fn agent_message_prompt_index_round_trips_and_shares_user_coordinate() {
+        let mut item = ConversationItem::received_agent_message(received_message(
+            "receipt-index",
+            "message-index",
+            "idle",
+        ));
+        assert_eq!(item.prompt_index(), None);
+        item.set_prompt_index(12);
+        assert_eq!(item.prompt_index(), Some(12));
+
+        let encoded = serde_json::to_value(&item).unwrap();
+        assert_eq!(encoded["prompt_index"], 12);
+        let decoded: ConversationItem = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.prompt_index(), Some(12));
+    }
+
+    #[test]
+    fn agent_message_projection_pairs_all_adapters_without_model_metadata() {
+        let message = received_message("receipt-1", "message-1", "body\twith\r\nline");
+        let request = ConversationRequest::from_items(vec![
+            ConversationItem::user("before"),
+            ConversationItem::received_agent_message(message.clone()),
+        ]);
+        let expected_id = agent_message_call_id("receipt-1");
+
+        let chat = ChatCompletionRequest::from(request.clone());
+        let chat_call = chat
+            .messages
+            .iter()
+            .find_map(|message| message.tool_calls.first())
+            .expect("chat receive call");
+        assert_eq!(chat_call.id.as_deref(), Some(expected_id.as_str()));
+        assert_eq!(chat_call.function.name, RECEIVE_AGENT_MESSAGE_TOOL_NAME);
+        let chat_result = chat
+            .messages
+            .iter()
+            .find(|message| message.tool_call_id.as_deref() == Some(expected_id.as_str()))
+            .expect("chat receive result");
+        let chat_result: serde_json::Value =
+            serde_json::from_str(&chat_result.text_content()).unwrap();
+        assert_eq!(chat_result["message"], "body\twith\r\nline");
+        assert_eq!(chat_result["reply_to"]["message_id"], "parent-message");
+
+        let responses = rs::CreateResponse::from(&request);
+        let rs::InputParam::Items(response_items) = responses.input else {
+            panic!("expected Responses items");
+        };
+        let response_call = response_items.iter().find_map(|item| match item {
+            rs::InputItem::Item(rs::Item::FunctionCall(call))
+                if call.name == RECEIVE_AGENT_MESSAGE_TOOL_NAME =>
+            {
+                Some(call)
+            }
+            _ => None,
+        });
+        let response_call = response_call.expect("Responses receive call");
+        assert_eq!(response_call.call_id, expected_id);
+        let response_result = response_items.iter().find_map(|item| match item {
+            rs::InputItem::Item(rs::Item::FunctionCallOutput(output))
+                if output.call_id == expected_id =>
+            {
+                Some(output)
+            }
+            _ => None,
+        });
+        let Some(response_result) = response_result else {
+            panic!("Responses receive result");
+        };
+        let rs::FunctionCallOutput::Text(response_result) = &response_result.output else {
+            panic!("expected text result");
+        };
+        let response_result: serde_json::Value = serde_json::from_str(response_result).unwrap();
+        assert_eq!(response_result["source_session_id"], "source-session");
+        assert_eq!(response_result["message"], "body\twith\r\nline");
+
+        let messages = build_messages_request(&request);
+        let blocks = messages
+            .messages
+            .iter()
+            .flat_map(|message| match &message.content {
+                crate::messages::MessageContent::Blocks(blocks) => {
+                    blocks.iter().collect::<Vec<_>>()
+                }
+                crate::messages::MessageContent::Text(_) => Vec::new(),
+            })
+            .collect::<Vec<_>>();
+        let message_call = blocks.iter().find_map(|block| match block {
+            crate::messages::ContentBlock::ToolUse { id, name, .. }
+                if name == RECEIVE_AGENT_MESSAGE_TOOL_NAME =>
+            {
+                Some(id)
+            }
+            _ => None,
+        });
+        assert_eq!(message_call.map(String::as_str), Some(expected_id.as_str()));
+        assert!(blocks.iter().any(|block| matches!(
+            block,
+            crate::messages::ContentBlock::ToolResult { tool_use_id, content: crate::messages::ToolResultContent::Text(content), .. }
+                if tool_use_id == &expected_id && content.contains("body\\twith")
+        )));
+
+        let canonical = serde_json::to_string(&request.items).unwrap();
+        assert!(!canonical.contains("model_id"));
+        assert!(request.tools.is_empty());
+    }
+
+    #[test]
+    fn agent_message_projection_keeps_one_portable_coordinate_and_stable_ids() {
+        let first =
+            ConversationItem::received_agent_message(received_message("receipt-1", "m1", "one"));
+        let second =
+            ConversationItem::received_agent_message(received_message("receipt-2", "m2", "two"));
+        let projected = project_portable_history(&[first.clone(), second.clone()]);
+        assert_eq!(projected.len(), 2);
+        assert!(matches!(projected[0], ConversationItem::AgentMessage(_)));
+        assert!(matches!(projected[1], ConversationItem::AgentMessage(_)));
+        assert_eq!(
+            agent_message_call_id("receipt-1"),
+            agent_message_call_id("receipt-1")
+        );
+        assert_ne!(
+            agent_message_call_id("receipt-1"),
+            agent_message_call_id("receipt-2")
+        );
+        let result = agent_message_result_content(&received_message("receipt-1", "m1", "one"));
+        let result: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(result.get("status").is_none());
+        assert!(result.get("model_id").is_none());
+        assert!(result.get("tool_calls").is_none());
+    }
+
+    #[test]
+    fn agent_message_projection_waits_for_open_model_tool_batch() {
+        let receipt = received_message("receipt-safe", "message-safe", "safe");
+        let model_call_id = "model-call";
+        let request = ConversationRequest::from_items(vec![
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: model_call_id.into(),
+                name: "inspect".into(),
+                arguments: "{}".into(),
+            }]),
+            ConversationItem::received_agent_message(receipt),
+            ConversationItem::tool_result(model_call_id, "done"),
+        ]);
+        let chat = ChatCompletionRequest::from(request);
+        let receive_index = chat
+            .messages
+            .iter()
+            .position(|message| {
+                message
+                    .tool_calls
+                    .iter()
+                    .any(|call| call.function.name == RECEIVE_AGENT_MESSAGE_TOOL_NAME)
+            })
+            .expect("receive call");
+        let model_result_index = chat
+            .messages
+            .iter()
+            .position(|message| message.tool_call_id.as_deref() == Some(model_call_id))
+            .expect("model result");
+        assert!(receive_index > model_result_index);
+    }
+
+    #[test]
+    fn agent_message_projection_precedes_unpaired_model_tool_tail() {
+        let request = ConversationRequest::from_items(vec![
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: "model-tail".into(),
+                name: "inspect".into(),
+                arguments: "{}".into(),
+            }]),
+            ConversationItem::received_agent_message(received_message(
+                "receipt-tail",
+                "message-tail",
+                "tail",
+            )),
+        ]);
+        let chat = ChatCompletionRequest::from(request);
+        let receive_index = chat
+            .messages
+            .iter()
+            .position(|message| {
+                message
+                    .tool_calls
+                    .iter()
+                    .any(|call| call.function.name == RECEIVE_AGENT_MESSAGE_TOOL_NAME)
+            })
+            .expect("receive call");
+        let model_index = chat
+            .messages
+            .iter()
+            .position(|message| {
+                message
+                    .tool_calls
+                    .iter()
+                    .any(|call| call.id.as_deref() == Some("model-tail"))
+            })
+            .expect("unpaired model call");
+        assert!(receive_index < model_index);
+    }
 
     #[test]
     fn output_schema_rejects_external_references() {
@@ -5655,7 +6362,7 @@ mod tests {
             request.native_continuation = Some(NativeContinuationProjection {
                 portable_prefix_len: prefix,
                 spans: Vec::new(),
-                replay_portable_responses_reasoning: false,
+                portable_reasoning_backend: None,
             });
             let wire = portable_wire(&request, ApiBackend::Messages);
             let blocks = wire["messages"]
@@ -5750,7 +6457,7 @@ mod tests {
                 } else {
                     Vec::new()
                 },
-                replay_portable_responses_reasoning: false,
+                portable_reasoning_backend: None,
             });
             let wire = portable_wire(&request, ApiBackend::Messages);
             let old_id = wire["messages"][1]["content"][0]["id"].as_str().unwrap();
@@ -5806,7 +6513,7 @@ mod tests {
                 request.native_continuation = Some(NativeContinuationProjection {
                     portable_prefix_len: prefix,
                     spans: Vec::new(),
-                    replay_portable_responses_reasoning: false,
+                    portable_reasoning_backend: None,
                 });
                 assert_wire_tool_pairs(&portable_wire(&request, backend), &["call_a", "call_b"]);
             }
@@ -5861,7 +6568,7 @@ mod tests {
             request.native_continuation = Some(NativeContinuationProjection {
                 portable_prefix_len: request.items.len(),
                 spans: Vec::new(),
-                replay_portable_responses_reasoning: false,
+                portable_reasoning_backend: None,
             });
             for backend in [
                 ApiBackend::ChatCompletions,
@@ -5899,7 +6606,7 @@ mod tests {
                     serde_json::from_value(serde_json::json!({"type":"tool_use", "id":"native_call", "name":"read_file", "input":{}})).unwrap(),
                 ]),
             }],
-            replay_portable_responses_reasoning: false,
+            portable_reasoning_backend: None,
         });
         let wire = portable_wire(&request, ApiBackend::Messages);
         assert_wire_tool_pairs(&wire, &["old_call", "native_call"]);
@@ -5944,7 +6651,7 @@ mod tests {
         request.native_continuation = Some(NativeContinuationProjection {
             portable_prefix_len: request.items.len(),
             spans: Vec::new(),
-            replay_portable_responses_reasoning: false,
+            portable_reasoning_backend: None,
         });
         let projected = project_portable_history(&request.items);
         assert!(
@@ -6005,6 +6712,105 @@ mod tests {
     }
 
     #[test]
+    fn learned_chat_route_replays_assistant_reasoning() {
+        let mut request = ConversationRequest::from_items(vec![
+            ConversationItem::user("inspect"),
+            ConversationItem::Reasoning(synthesized_reasoning_item("first thought")),
+            ConversationItem::Reasoning(synthesized_reasoning_item("second thought")),
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: "chat-replay-call".into(),
+                name: "read_file".into(),
+                arguments: r#"{"path":"a"}"#.into(),
+            }]),
+            ConversationItem::tool_result("chat-replay-call", "done"),
+            ConversationItem::Reasoning(synthesized_reasoning_item("answer thought")),
+            ConversationItem::assistant("answer"),
+            ConversationItem::user("continue"),
+            ConversationItem::assistant("answer without reasoning"),
+        ]);
+        request.native_continuation = Some(NativeContinuationProjection {
+            portable_prefix_len: request.items.len(),
+            spans: Vec::new(),
+            portable_reasoning_backend: Some(ApiBackend::ChatCompletions),
+        });
+        let wire = portable_wire(&request, ApiBackend::ChatCompletions);
+        let messages = wire["messages"].as_array().unwrap();
+        assert_eq!(
+            messages[1]["reasoning_content"],
+            "first thought\nsecond thought"
+        );
+        assert_eq!(messages[3]["reasoning_content"], "answer thought");
+        assert_eq!(messages[5]["reasoning_content"], "");
+        assert_wire_tool_pairs(&wire, &["chat-replay-call"]);
+        for backend in [ApiBackend::Responses, ApiBackend::Messages] {
+            let wire = portable_wire(&request, backend);
+            assert!(!wire.to_string().contains("first thought"));
+            assert!(!wire.to_string().contains("answer thought"));
+        }
+    }
+
+    #[test]
+    fn learned_chat_reasoning_does_not_cross_boundaries_or_replace_native_content() {
+        let mut request = ConversationRequest::from_items(vec![
+            ConversationItem::Reasoning(synthesized_reasoning_item("before user")),
+            ConversationItem::user("question"),
+            ConversationItem::assistant("after user"),
+            ConversationItem::Reasoning(synthesized_reasoning_item("before system")),
+            ConversationItem::system("instruction"),
+            ConversationItem::assistant("after system"),
+            ConversationItem::Reasoning(synthesized_reasoning_item("before orphan result")),
+            ConversationItem::tool_result("orphan", "unpaired result"),
+            ConversationItem::assistant("after result"),
+            ConversationItem::Reasoning(synthesized_reasoning_item("native display fact")),
+            ConversationItem::assistant("native answer"),
+            ConversationItem::assistant("native without reasoning"),
+        ]);
+        let original = serde_json::to_value(&request.items).unwrap();
+        request.native_continuation = Some(NativeContinuationProjection {
+            portable_prefix_len: 9,
+            spans: vec![
+                NativeContinuationSpan {
+                    start: 9,
+                    end: 11,
+                    fragment: NativeContinuationFragment::ChatCompletions(
+                        ChatRequestMessage::assistant(
+                            "native answer",
+                            Some("original native reasoning".into()),
+                        ),
+                    ),
+                },
+                NativeContinuationSpan {
+                    start: 11,
+                    end: 12,
+                    fragment: NativeContinuationFragment::ChatCompletions(
+                        ChatRequestMessage::assistant("native without reasoning", None),
+                    ),
+                },
+            ],
+            portable_reasoning_backend: Some(ApiBackend::ChatCompletions),
+        });
+        let wire = portable_wire(&request, ApiBackend::ChatCompletions);
+        let assistants: Vec<_> = wire["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|message| message["role"] == "assistant")
+            .collect();
+        assert_eq!(assistants.len(), 5);
+        for message in &assistants[..3] {
+            assert_eq!(message["reasoning_content"], "");
+        }
+        assert_eq!(
+            assistants[3]["reasoning_content"],
+            "original native reasoning"
+        );
+        assert_eq!(assistants[4]["reasoning_content"], "");
+        assert!(!wire.to_string().contains("native display fact"));
+        assert!(!wire.to_string().contains("before "));
+        assert_eq!(serde_json::to_value(&request.items).unwrap(), original);
+    }
+
+    #[test]
     fn learned_responses_route_replays_only_visible_portable_reasoning() {
         let mut request = ConversationRequest::from_items(vec![
             ConversationItem::user("earlier question"),
@@ -6026,7 +6832,7 @@ mod tests {
         request.native_continuation = Some(NativeContinuationProjection {
             portable_prefix_len: request.items.len(),
             spans: Vec::new(),
-            replay_portable_responses_reasoning: true,
+            portable_reasoning_backend: Some(ApiBackend::Responses),
         });
 
         let responses = portable_wire(&request, ApiBackend::Responses);
@@ -6083,7 +6889,7 @@ mod tests {
                 request.native_continuation = Some(NativeContinuationProjection {
                     portable_prefix_len: items.len(),
                     spans: Vec::new(),
-                    replay_portable_responses_reasoning: false,
+                    portable_reasoning_backend: None,
                 });
             }
             for backend in [
@@ -6178,7 +6984,7 @@ mod tests {
                     }),
                 )]),
             }],
-            replay_portable_responses_reasoning: false,
+            portable_reasoning_backend: None,
         });
 
         let responses_req: rs::CreateResponse = (&req).into();
@@ -7016,7 +7822,7 @@ mod tests {
                     },
                 ]),
             }],
-            replay_portable_responses_reasoning: false,
+            portable_reasoning_backend: None,
         });
 
         let json = serde_json::to_value(build_messages_request(&req)).unwrap();
@@ -9186,6 +9992,209 @@ mod tests {
         ));
 
         assert_eq!(req.image_count(), 3);
+    }
+
+    #[test]
+    fn unconditional_image_rejection_accepts_terminal_multimodal_claims() {
+        for message in [
+            "InvalidParameter: glm-5.2 is not a multimodal model",
+            "400 InvalidParameter: zhipu/glm-5.2 is not a multimodal model.",
+            "is not a multimodal model",
+        ] {
+            assert!(
+                is_unconditional_image_input_unsupported(Some(400), message, 1),
+                "expected capability claim to classify: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn multimodal_claim_requires_a_terminal_capability_statement() {
+        for message in [
+            "glm-5.2 is not a multimodal model for audio input",
+            "glm-5.2 is not a multimodal model yet",
+            "glm-5.2 is not a multimodal model because of the request",
+        ] {
+            assert!(
+                !is_unconditional_image_input_unsupported(Some(400), message, 1),
+                "non-terminal lookalike must stay unclassified: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn multimodal_claim_keeps_status_image_count_and_exclusion_gates() {
+        let message = "InvalidParameter: glm-5.2 is not a multimodal model";
+        assert!(!is_unconditional_image_input_unsupported(
+            Some(500),
+            message,
+            1
+        ));
+        assert!(!is_unconditional_image_input_unsupported(
+            Some(400),
+            message,
+            0
+        ));
+        for excluded in [
+            "InvalidParameter: glm-5.2 is not a multimodal model; invalid image encoding",
+            "InvalidParameter: glm-5.2 is not a multimodal model; image too large",
+            "InvalidParameter: glm-5.2 is not a multimodal model; unsupported image format",
+            "InvalidParameter: glm-5.2 is not a multimodal model; transparency is rejected",
+            "InvalidParameter: glm-5.2 is not a multimodal model; content policy violation",
+        ] {
+            assert!(
+                !is_unconditional_image_input_unsupported(Some(400), excluded, 1),
+                "validation and policy failures keep their own path: {excluded}"
+            );
+        }
+    }
+
+    #[test]
+    fn removal_replacement_leaves_one_block_at_the_first_image_position() {
+        let mut item = ConversationItem::user_with_parts(vec![
+            ContentPart::Text {
+                text: "before".into(),
+            },
+            ContentPart::Image {
+                description: None,
+                url: "data:image/png;base64,first".into(),
+            },
+            ContentPart::Text {
+                text: "between".into(),
+            },
+            ContentPart::Image {
+                description: None,
+                url: "data:image/png;base64,second".into(),
+            },
+        ]);
+
+        // The count reports every removed image part; only one replacement
+        // block is emitted, at the first image position.
+        assert_eq!(
+            remove_item_images_with_text(&mut item, UNSUPPORTED_IMAGE_REPLACEMENT),
+            2
+        );
+        let ConversationItem::User(user) = &item else {
+            panic!("expected user item");
+        };
+        assert_eq!(user.content.len(), 3);
+        assert!(
+            matches!(&user.content[0], ContentPart::Text { text } if text.as_ref() == "before")
+        );
+        assert!(
+            matches!(&user.content[1], ContentPart::Text { text } if text.as_ref() == UNSUPPORTED_IMAGE_REPLACEMENT)
+        );
+        assert!(
+            matches!(&user.content[2], ContentPart::Text { text } if text.as_ref() == "between")
+        );
+    }
+
+    #[test]
+    fn tool_result_removal_uses_the_removal_heading() {
+        let mut item = ConversationItem::tool_result_with_images(
+            "call_1",
+            "Read image file foo.png",
+            vec![
+                ContentPart::Text {
+                    text: "metadata retained".into(),
+                },
+                ContentPart::Image {
+                    description: None,
+                    url: "data:image/png;base64,first".into(),
+                },
+                ContentPart::Image {
+                    description: Some("old description".into()),
+                    url: "data:image/png;base64,second".into(),
+                },
+            ],
+        );
+
+        assert_eq!(
+            remove_item_images_with_text(&mut item, UNSUPPORTED_IMAGE_REPLACEMENT),
+            2
+        );
+        let ConversationItem::ToolResult(result) = &item else {
+            panic!("expected tool result");
+        };
+        assert!(matches!(
+            result.images.as_slice(),
+            [ContentPart::Text { text }] if text.as_ref() == "metadata retained"
+        ));
+        assert_eq!(
+            result.content.as_ref(),
+            format!(
+                "Read image file foo.png\n\n[Projected image removal]\n{UNSUPPORTED_IMAGE_REPLACEMENT}"
+            )
+        );
+    }
+
+    #[test]
+    fn tool_result_replacement_keeps_the_description_heading() {
+        let mut item = ConversationItem::tool_result_with_images(
+            "call_1",
+            "Read image file foo.png",
+            vec![ContentPart::Image {
+                description: None,
+                url: "data:image/png;base64,first".into(),
+            }],
+        );
+
+        assert_eq!(
+            replace_item_images_with_text(&mut item, "described in order"),
+            1
+        );
+        let ConversationItem::ToolResult(result) = &item else {
+            panic!("expected tool result");
+        };
+        assert_eq!(
+            result.content.as_ref(),
+            "Read image file foo.png\n\n[Projected image description]\ndescribed in order"
+        );
+    }
+
+    #[test]
+    fn removal_compaction_redaction_replaces_only_derived_reference_tokens() {
+        let asset = "/assets/removed-image.png";
+        let source = ConversationItem::user_with_parts(vec![
+            ContentPart::Text {
+                text: format!("<image_files>\n1. {asset}\n</image_files>\ninspect the diagram")
+                    .into(),
+            },
+            ContentPart::Image {
+                description: None,
+                url: "data:image/png;base64,source".into(),
+            },
+        ]);
+        let mut summary = ConversationItem::user_meta(format!(
+            "The diagram came from the attached file {asset} and is stored as data:image/png;base64,source."
+        ));
+
+        assert!(redact_removed_image_compaction_references(
+            &mut summary,
+            &source,
+            UNSUPPORTED_IMAGE_REPLACEMENT
+        ));
+        let text = summary.text_content();
+        assert!(text.contains("The diagram came from the attached file"));
+        assert!(!text.contains(asset));
+        assert!(!text.contains("data:image/png;base64,source"));
+        assert!(text.contains(&format!(
+            "[Projected image removal: {UNSUPPORTED_IMAGE_REPLACEMENT}]"
+        )));
+
+        let mut description_summary = ConversationItem::user_meta(format!(
+            "The diagram came from the attached file {asset} and is stored as data:image/png;base64,source."
+        ));
+        assert!(redact_projected_image_compaction_references(
+            &mut description_summary,
+            &source,
+            "described in order"
+        ));
+        assert!(
+            description_summary
+                .text_content()
+                .contains("[Projected image description: described in order]")
+        );
     }
 
     #[test]

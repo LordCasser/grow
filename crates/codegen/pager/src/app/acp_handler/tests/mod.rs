@@ -1123,6 +1123,8 @@ pub(super) fn write_child_updates_jsonl(
     content: &str,
 ) {
     let sessions_dir = write_session_summary(grow_home, "/tmp", child_sid, Some("subagent"));
+    // Replay validates the Timeline even when this fixture only has ACP history.
+    std::fs::write(sessions_dir.join("timeline.jsonl"), "").unwrap();
     let committed = if content.ends_with('\n') {
         content.to_owned()
     } else {

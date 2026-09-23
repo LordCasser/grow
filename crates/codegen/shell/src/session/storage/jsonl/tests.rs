@@ -22,7 +22,7 @@ fn create_test_chat_messages() -> Vec<ConversationItem> {
 
 #[tokio::test]
 async fn communication_receipt_replay_uses_timeline_without_updates_cache() {
-    use crate::extensions::notification::ParentMessageNotice;
+    use crate::extensions::notification::AgentMessageNotice;
     let root = TempDir::new().unwrap();
     let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
     let info = create_test_info();
@@ -46,7 +46,7 @@ async fn communication_receipt_replay_uses_timeline_without_updates_cache() {
     assert_eq!(crate::session::storage::stream_coordination_notices_at(info.id.0.as_ref(), root.path(), |notice| notices.push(notice)).unwrap(), crate::session::storage::ReplayEmission::Emitted);
     assert_eq!(notices.len(), 1);
     assert_eq!(notices[0].correlation_id, id);
-    let restored = ParentMessageNotice::from_notice(&notices[0]).unwrap();
+    let restored = AgentMessageNotice::from_notice(&notices[0]).unwrap();
     assert_eq!(restored.message.as_deref(), Some(body));
     assert!(restored.interrupt);
     crate::session::notification_inbox::remove_payload(opened.directory(), &payload_ref).unwrap();
@@ -55,7 +55,7 @@ async fn communication_receipt_replay_uses_timeline_without_updates_cache() {
     assert_eq!(crate::session::storage::stream_coordination_notices_at(info.id.0.as_ref(), root.path(), |notice| missing.push(notice)).unwrap(), crate::session::storage::ReplayEmission::Emitted);
     assert_eq!(missing.len(), 1);
     assert_eq!(missing[0].correlation_id, id);
-    assert!(ParentMessageNotice::from_notice(&missing[0]).unwrap().message.is_none());
+    assert!(AgentMessageNotice::from_notice(&missing[0]).unwrap().message.is_none());
     assert_eq!(std::fs::read(writer.session_dir(&info).join("timeline.jsonl")).unwrap(), before, "read-only recovery cannot rewrite delivery facts");
 }
 
@@ -1139,6 +1139,37 @@ async fn prepared_session_atomically_publishes_the_exact_prompt_blob_set() {
 }
 
 #[tokio::test]
+async fn session_load_preserves_sampling_recovery_stop_evidence() {
+    let root = TempDir::new().unwrap();
+    let info = create_test_info();
+    let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    writer.init_session(&info, default_model_id()).await.unwrap();
+    let mut timeline = chat_state::Timeline::default();
+    let event = timeline.record(chat_state::TimelineEventKind::Observation(chat_state::ObservationEvent {
+        scope: "sampling_evidence".into(), name: "recovery_stop".into(), turn: None, step: None,
+        data: Some(serde_json::json!({
+            "owner": {"request_id": "stopped-request"}, "kind": "recovery_stop",
+            "metadata": {"attempt": 5, "max_retries": 5, "decision": "Fatal", "attempt_number": 5},
+            "bytes": 0, "chunks": [],
+        })),
+    })).unwrap();
+    writer.append_timeline_event_durable(&info, &event).await.unwrap();
+    let path = writer.session_dir(&info).join("timeline.jsonl");
+    let before = std::fs::read(&path).unwrap();
+
+    let observer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let observed = observer.load_session_without_updates(&info).await.unwrap();
+    assert_eq!(serde_json::to_value(observed.timeline.events()).unwrap(), serde_json::json!([event]));
+    assert!(observed.timeline.surface().is_empty());
+    observer.load_session(&info).await.unwrap();
+    drop(writer);
+    let restored = observer.load_session_for_write_without_updates(&info).await.unwrap();
+    assert_eq!(serde_json::to_value(restored.timeline.events()).unwrap(), serde_json::json!([event]));
+    assert!(restored.timeline.surface().is_empty());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[tokio::test]
 async fn session_load_rejects_missing_or_corrupt_prompt_blobs() {
     let temp_dir = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
@@ -1488,6 +1519,147 @@ async fn timeline_round_trip_folds_the_current_surface() {
     assert!(
         opened.materialize_timeline(&info.id.to_string()).is_err(),
         "fork/resume materialization must reject a Timeline whose Sideband proof was tampered"
+    );
+}
+
+#[tokio::test]
+async fn strict_reload_accepts_sideband_selected_consumed_input() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let info = create_test_info();
+    adapter.init_session(&info, default_model_id()).await.unwrap();
+
+    let input_id = "input-1";
+    let mut timeline = chat_state::Timeline::default();
+    timeline.record(chat_state::TimelineEventKind::Input(chat_state::InputEvent::Submitted {
+        input_id: input_id.into(),
+        intent: chat_state::InputIntent::Prompt,
+        payload_ref: chat_state::InputPayloadRef {
+            blake3: blake3::hash(b"hello").to_hex().to_string(),
+            bytes: 5,
+        },
+    })).unwrap();
+    let occurrence_id = "hook-input-1";
+    timeline.record(chat_state::TimelineEventKind::Hook(chat_state::HookEvent::Triggered {
+        occurrence_id: occurrence_id.into(),
+        event: chat_state::HookEventType::UserPromptSubmit,
+        gate: chat_state::HookGateKind::Prompt,
+        cause: chat_state::HookCause::Input { input_id: input_id.into() },
+        config_generation: 1,
+        handlers: Vec::new(),
+    })).unwrap();
+    timeline.record(chat_state::TimelineEventKind::Hook(chat_state::HookEvent::Completed {
+        occurrence_id: occurrence_id.into(),
+        decision: chat_state::HookAggregateDecision::Prompt {
+            decision: chat_state::HookGateDecision::Allow,
+        },
+    })).unwrap();
+    timeline.record(chat_state::TimelineEventKind::Input(chat_state::InputEvent::AdmissionResolved {
+        input_id: input_id.into(),
+        decision: chat_state::InputAdmissionDecision::Allow,
+        route: Some(chat_state::InputRoute::Fifo),
+        supersedes: Vec::new(),
+    })).unwrap();
+    let turn = chat_state::TurnId(1);
+    timeline.record(chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started {
+        id: turn,
+        input_ids: vec![input_id.into()],
+        identity: chat_state::TurnIdentity {
+            origin: "user".into(),
+            turn_kind: "user".into(),
+            goal_id: None,
+            goal_definition_revision: None,
+            stage_id: None,
+        },
+        model_id: "test-model".into(),
+        input_message_count: 0,
+        prompt_index: 0,
+        prompt_text: "hello".into(),
+        input_kind: chat_state::TurnInputKind::Prompt,
+        redirect_kind: None,
+    })).unwrap();
+    timeline.record(chat_state::TimelineEventKind::Input(chat_state::InputEvent::Consumed {
+        input_ids: vec![input_id.into()],
+        turn,
+        item: ConversationItem::user("hello"),
+    })).unwrap();
+    let selected = *timeline.surface_ids().last().unwrap();
+    let source_ref = chat_state::TimelineRangeRef {
+        timeline_id: info.id.to_string(),
+        first_seq: 0,
+        last_seq: timeline.events().last().unwrap().seq.get(),
+    };
+    let sideband_id = uuid::Uuid::now_v7().to_string();
+    timeline.record(chat_state::TimelineEventKind::Sideband(chat_state::SidebandSpawnEvent {
+        sideband_id: sideband_id.clone(),
+        purpose: chat_state::SidebandPurpose::CompactionSummary,
+        source_refs: vec![source_ref.clone()],
+    })).unwrap();
+
+    let mut sideband = chat_state::SidebandTimeline::new(sideband_id.clone()).unwrap();
+    for kind in [
+        chat_state::SidebandEventKind::Request(chat_state::SidebandRequest {
+            purpose: chat_state::SidebandPurpose::CompactionSummary,
+            prompt: "summarize".into(),
+            source_refs: vec![source_ref.clone()],
+            budget_policy: chat_state::SidebandBudgetPolicy {
+                max_attempts: 1,
+                max_input_tokens_per_attempt: 8,
+                max_output_tokens_per_attempt: Some(8),
+            },
+            route: chat_state::SidebandRoute {
+                model: "test-model".into(),
+                backend: sampling_types::ApiBackend::Responses,
+            },
+            initiator_ref: format!("t:{}/sideband:{sideband_id}", info.id),
+            executor: "main".into(),
+            output_schema: None,
+        }),
+        chat_state::SidebandEventKind::Attempt(chat_state::SidebandAttempt {
+            attempt_no: 1,
+            input_refs: vec![source_ref],
+            assembly_manifest: chat_state::SidebandAssemblyManifest {
+                strategy: "compaction-range".into(),
+                strategy_version: 1,
+                source_revision: Some(timeline.surface_revision()),
+                context_surface_ids: Vec::new(),
+                selected_surface_ids: vec![selected],
+                materialized_input_tokens: 1,
+                max_output_tokens: Some(8),
+            },
+            feedback: None,
+        }),
+        chat_state::SidebandEventKind::Result(chat_state::SidebandResult {
+            raw_output: "summary".into(),
+            structured_output: None,
+            usage: chat_state::SidebandUsage::default(),
+            finish: "stop".into(),
+            source_event_seqs: [0, 1],
+            evidence_refs: Vec::new(),
+        }),
+        chat_state::SidebandEventKind::End(chat_state::SidebandEnd {
+            outcome: chat_state::SidebandOutcome::Completed,
+            error: None,
+        }),
+    ] {
+        let event = sideband.prepare(kind).unwrap();
+        sideband.accept(event).unwrap();
+    }
+
+    for event in timeline.events() {
+        adapter.append_timeline_event(&info, event).await.unwrap();
+    }
+    for event in sideband.events() {
+        adapter.append_sideband_event_durable(&info, event).await.unwrap();
+    }
+
+    let loaded = adapter.load_session_without_updates(&info).await.unwrap();
+    assert_eq!(loaded.timeline.surface().len(), 1);
+    assert_eq!(loaded.timeline.surface()[0].text_content(), "hello");
+    let ledgers = adapter.read_sideband_ledgers_sync(&info, &loaded.timeline).unwrap();
+    assert_eq!(
+        serde_json::to_value(ledgers.get(&sideband_id).unwrap()).unwrap(),
+        serde_json::to_value(sideband.events()).unwrap(),
     );
 }
 

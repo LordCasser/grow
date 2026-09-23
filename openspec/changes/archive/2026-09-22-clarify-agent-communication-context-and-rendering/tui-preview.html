@@ -1,0 +1,82 @@
+<section id="grow-comm-preview" aria-label="Grow agent communication design">
+<style>
+#grow-comm-preview{--bg:light-dark(#eeeeee,#141414);--fg:light-dark(#262626,#e1e1e1);--muted:light-dark(#444444,#c8c8c8);--border:light-dark(#a5a5a5,#585858);--code:light-dark(#0f87a2,#3a95ab);--code-bg:light-dark(#e4e4e4,#1c1c1c);--ok:light-dark(#378e23,#9ece6a);--warn:light-dark(#a27612,#e0af68);--bad:light-dark(#cd3048,#f7768e);--selection:light-dark(#dedede,#242424);--cols:80;color:var(--fg);background:var(--bg);font:13px/1.65 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;width:min(100%,calc(var(--cols)*1ch + 24px));margin:auto;box-sizing:border-box;padding:12px 10px}
+#grow-comm-preview *{box-sizing:border-box}
+#grow-comm-preview [hidden]{display:none!important}
+#grow-comm-preview button{font:inherit;color:inherit;background:transparent;border:0;padding:0;text-align:left}
+#grow-comm-preview button:hover{background:var(--selection)}
+#grow-comm-preview .gc-list{display:flex;flex-direction:column;gap:14px;padding-bottom:14px}
+#grow-comm-preview .gc-head{display:flex;width:100%;gap:1ch;align-items:baseline;min-width:0}
+#grow-comm-preview .gc-bullet{flex:0 0 1ch;color:var(--muted)}
+#grow-comm-preview .gc-head:focus .gc-bullet{font-size:0}
+#grow-comm-preview .gc-head:focus .gc-bullet:before{content:"›";font-size:13px}
+#grow-comm-preview .gc-heading{min-width:0;overflow-wrap:anywhere}
+#grow-comm-preview .gc-status{color:var(--muted);margin-left:2ch;white-space:nowrap}
+#grow-comm-preview .gc-status.unconfirmed,#grow-comm-preview .gc-status.sending{color:var(--warn)}
+#grow-comm-preview .gc-status.failed{color:var(--bad)}
+#grow-comm-preview .gc-body{padding-left:2ch;overflow-wrap:anywhere}
+#grow-comm-preview .gc-preview{display:-webkit-box;-webkit-box-orient:vertical;overflow:hidden;-webkit-line-clamp:2}
+#grow-comm-preview .gc-one{-webkit-line-clamp:1}
+#grow-comm-preview .gc-expanded{padding-top:8px}
+#grow-comm-preview .gc-doc{display:flex;flex-direction:column;gap:8px;min-width:0}
+#grow-comm-preview .gc-doc p,#grow-comm-preview .gc-doc ol{margin:0}
+#grow-comm-preview .gc-doc ol{padding-left:3ch}
+#grow-comm-preview .gc-doc strong{font-weight:500}
+#grow-comm-preview .gc-doc h3{font:inherit;font-weight:500;color:var(--code);margin:0}
+#grow-comm-preview code{font:inherit;color:var(--code)}
+#grow-comm-preview pre{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere;tab-size:4;max-width:100%;margin:0;padding:5px 1ch;background:var(--code-bg)}
+#grow-comm-preview table{font:inherit;border-collapse:collapse;table-layout:fixed;width:100%}
+#grow-comm-preview th,#grow-comm-preview td{border:1px solid var(--border);text-align:left;font-weight:400;padding:2px 1ch;overflow-wrap:anywhere}
+#grow-comm-preview th{color:var(--code)}
+#grow-comm-preview .gc-footer{color:var(--muted);display:flex;flex-wrap:wrap;gap:4px 2ch;padding-top:7px;border-top:1px solid var(--border)}
+#grow-comm-preview .gc-footer button+button:before{content:'│';margin-right:2ch;color:var(--muted)}
+#grow-comm-preview .gc-reader{border:1px solid var(--border);border-radius:5px;padding:5px 2ch 10px}
+#grow-comm-preview .gc-reader-top{display:flex;justify-content:flex-end}
+#grow-comm-preview .gc-reader-title{font-weight:500;color:var(--code);padding-bottom:10px;overflow-wrap:anywhere}
+#grow-comm-preview .gc-reader-body{display:flex;flex-direction:column;gap:12px;padding-bottom:10px;overflow-wrap:anywhere}
+#grow-comm-preview .gc-feedback{color:var(--muted);padding-top:7px;overflow-wrap:anywhere}
+#grow-comm-preview.gc-narrow .gc-participant{display:block}
+@media(max-width:520px){#grow-comm-preview .gc-participant{display:block}}
+</style>
+<div id="gc-transcript">
+  <div class="gc-list" id="gc-rows"></div>
+  <div class="gc-footer"><button type="button" id="gc-expand" class="cursor-interaction">e:expand</button><button type="button" id="gc-open" class="cursor-interaction">Enter:open</button></div>
+</div>
+<div id="gc-reader" class="gc-reader" hidden>
+  <div class="gc-reader-top"><button type="button" id="gc-close" aria-label="Close details" class="cursor-interaction">[x]</button></div>
+  <div class="gc-reader-title" id="gc-reader-title"></div>
+  <div class="gc-reader-body" id="gc-reader-body"></div>
+  <div class="gc-footer"><button type="button" id="gc-back" class="cursor-interaction">Esc:close</button><button type="button" id="gc-raw" class="cursor-interaction">r:raw</button><button type="button" id="gc-data" class="cursor-interaction">D:data</button></div>
+</div>
+<div id="gc-feedback" class="gc-feedback" role="status" aria-live="polite" hidden></div>
+<script>
+(()=>{
+const root=document.getElementById('grow-comm-preview');const $=id=>root.querySelector('#'+id);
+const config={columns:'80',theme:'auto',send:'received',inquiry:'answered'};
+let selected=0,reader=false,mode='body',previousMode='body';const expanded=new Set();
+const question='Should width calculation stay in the renderer?';
+const answer=['Yes. Keep parsing local and share **width calculation**.','','## Implementation','1. Parse each message independently.','2. Pass the available width to the table renderer.','','```rust','if width < MIN_TABLE_WIDTH {','\treturn render_wrapped_rows();','}','```','','| Part | Owner |','| --- | --- |','| Parsing | Message body |','| Width | Shared renderer |'].join('\n');
+const answerHtml='<p>Yes. Keep parsing local and share <strong>width calculation</strong>.</p><h3>Implementation</h3><ol><li>Parse each message independently.</li><li>Pass the available width to the table renderer.</li></ol><pre><code>if width &lt; MIN_TABLE_WIDTH {\n\treturn render_wrapped_rows();\n}</code></pre><table aria-label="Rendering responsibilities"><thead><tr><th>Part</th><th>Owner</th></tr></thead><tbody><tr><td>Parsing</td><td>Message body</td></tr><tr><td>Width</td><td>Shared renderer</td></tr></tbody></table>';
+const escape=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function entries(){return [
+{title:'send_subagent_message',peer:'→ Parser review',state:config.send,status:({received:'Received',sending:'Sending',unconfirmed:'Unconfirmed'})[config.send],body:'Keep the parser local; share width calculation.',html:'<p>Keep the parser local; share width calculation.</p>',error:config.send==='unconfirmed'?'Receipt unavailable. The message may have been received.':'',data:{id:'demo:send-01',status:config.send,receipt_id:config.send==='received'?'demo:receipt-01':null,target_session_id:'demo:reviewer',interrupt:false}},
+{title:'COORDINATION',peer:'Message from Parser review',state:'received',status:'',body:'Agreed. I will check the narrow-table case.',html:'<p>Agreed. I will check the narrow-table case.</p>',data:{id:'demo:reply-02',receipt_id:'demo:receipt-02',from:'demo:reviewer',reply_to:'demo:send-01'}},
+{title:'ask_subagent',peer:'→ Parser review',state:config.inquiry,status:config.inquiry==='answered'?'Answered':'Waiting',question,body:config.inquiry==='answered'?answer:'',html:answerHtml,data:{id:'demo:ask-03',status:config.inquiry,question,answer:config.inquiry==='answered'?answer:null}}
+];}
+function sections(item,raw=false){let out='';if(item.question)out+='<section class="gc-doc"><strong>Question</strong><'+(raw?'pre':'p')+'>'+escape(item.question)+'</'+(raw?'pre':'p')+'></section>';if(item.body)out+='<section class="gc-doc">'+(item.question?'<strong>Answer</strong>':'')+(raw?'<pre>'+escape(item.body)+'</pre>':item.html)+'</section>';if(item.error)out+='<p>'+escape(item.error)+'</p>';if(item.question&&!item.body)out+='<p>Waiting for answer.</p>';return out;}
+function save(){if(window.openai?.setWidgetState)window.openai.setWidgetState({modelContent:{design:'grow-communication-v3',...config},privateContent:{...config,selected,reader,mode}}).catch(()=>{});}
+function render(){root.style.setProperty('--cols',config.columns);root.style.colorScheme=config.theme==='auto'?'':config.theme;root.classList.toggle('gc-narrow',Number(config.columns)<60);const all=entries();$('gc-rows').innerHTML=all.map((item,i)=>{let content;if(expanded.has(i))content='<div class="gc-body gc-doc gc-expanded">'+sections(item)+'</div>';else if(item.question)content='<div class="gc-body"><div class="gc-preview '+(item.body?'gc-one':'')+'">Q: '+escape(item.question)+'</div>'+(item.body?'<div class="gc-preview">A: Yes. Keep parsing local and share width calculation.</div>':'')+'</div>';else content='<div class="gc-body"><div class="gc-preview '+(item.error?'gc-one':'')+'">'+escape(item.body)+'</div>'+(item.error?'<div class="gc-preview">'+escape(item.error)+'</div>':'')+'</div>';return '<article data-row="'+i+'"><button type="button" data-toggle="'+i+'" class="gc-head cursor-interaction" aria-expanded="'+expanded.has(i)+'"><span class="gc-bullet">'+(item.title==='COORDINATION'?' ': '◆')+'</span><span class="gc-heading">'+item.title+' <span class="gc-participant">'+item.peer+'</span>'+(item.status?'<span class="gc-status '+item.state+'">'+item.status+'</span>':'')+'</span></button>'+content+'</article>';}).join('');$('gc-transcript').hidden=reader;$('gc-reader').hidden=!reader;$('gc-expand').textContent=expanded.has(selected)?'e:collapse':'e:expand';if(reader){const item=all[selected];$('gc-reader-title').textContent=item.title+' '+item.peer+(item.status?'  '+item.status:'');$('gc-reader-body').innerHTML=mode==='data'?'<pre>'+escape(JSON.stringify(item.data,null,2))+'</pre>':sections(item,mode==='raw');$('gc-raw').textContent=mode==='raw'?'r:rendered':'r:raw';$('gc-raw').disabled=mode==='data';$('gc-data').textContent=mode==='data'?'D:back':'D:data';}}
+function focusRow(){root.querySelector('[data-toggle="'+selected+'"]').focus();}
+function toggle(i){selected=i;expanded.has(i)?expanded.delete(i):expanded.add(i);render();focusRow();save();}
+function open(){reader=true;mode='body';render();$('gc-close').focus();save();}
+function close(){reader=false;render();focusRow();save();}
+function view(next){mode=next;render();save();}
+root.addEventListener('focusin',event=>{const i=event.target.dataset.toggle;if(i!==undefined){selected=Number(i);$('gc-expand').textContent=expanded.has(selected)?'e:collapse':'e:expand';}});
+root.addEventListener('click',async event=>{const b=event.target.closest('button');if(!b)return;if(b.dataset.toggle!==undefined)toggle(Number(b.dataset.toggle));else if(b.id==='gc-expand')toggle(selected);else if(b.id==='gc-open')open();else if(b.id==='gc-close'||b.id==='gc-back')close();else if(b.id==='gc-raw')view(mode==='raw'?'body':'raw');else if(b.id==='gc-data'){if(mode==='data')view(previousMode);else{previousMode=mode;view('data');}}});
+root.addEventListener('keydown',event=>{if(event.ctrlKey||event.metaKey||event.altKey)return;if(reader&&event.key==='Escape'){event.preventDefault();close();}else if(reader&&event.key==='r'&&mode!=='data'){event.preventDefault();view(mode==='raw'?'body':'raw');}else if(reader&&event.key==='D'){event.preventDefault();$('gc-data').click();}else if(!reader&&event.target.dataset.toggle!==undefined){if(event.key==='Enter'){event.preventDefault();selected=Number(event.target.dataset.toggle);open();}else if(event.key==='e'){event.preventDefault();toggle(Number(event.target.dataset.toggle));}}});
+function restore(value,initial=false){const before=JSON.stringify({...config,selected,reader,mode});const state=value?.privateContent||{};if(['40','60','80','100'].includes(String(state.columns)))config.columns=String(state.columns);if(['auto','light','dark'].includes(state.theme))config.theme=state.theme;if(['received','sending','unconfirmed'].includes(state.send))config.send=state.send;if(['waiting','answered'].includes(state.inquiry))config.inquiry=state.inquiry;if(Number.isInteger(state.selected)&&state.selected>=0&&state.selected<3)selected=state.selected;if(typeof state.reader==='boolean')reader=state.reader;if(['body','raw','data'].includes(state.mode))mode=state.mode;if(initial||before!==JSON.stringify({...config,selected,reader,mode}))render();}
+restore(window.openai?.widgetState,true);window.addEventListener('openai:set_globals',event=>{if(event.detail?.globals?.widgetState)restore(event.detail.globals.widgetState);});
+if(globalThis.Tweak){const tweak=new Tweak({container:root,onChange:()=>{render();save();}});tweak.addSelect(config,'columns',{label:'Columns',options:['40','60','80','100']});tweak.addSelect(config,'theme',{label:'Theme',options:[{label:'Auto',value:'auto'},{label:'GrowDay',value:'light'},{label:'GrowNight',value:'dark'}]});tweak.addSelect(config,'send',{label:'Receipt',options:['received','sending','unconfirmed']});tweak.addSelect(config,'inquiry',{label:'Question',options:['answered','waiting']});}
+})();
+</script>
+</section>

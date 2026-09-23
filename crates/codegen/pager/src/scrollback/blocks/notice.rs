@@ -7,6 +7,7 @@ use std::fmt;
 use crate::appearance::AppearanceConfig;
 use crate::render::wrapping::word_wrap_lines;
 use crate::scrollback::block::BlockContent;
+use crate::scrollback::blocks::communication::CommunicationBody;
 use crate::scrollback::types::{
     AccentStyle, BlockContext, BlockLine, BlockOutput, DisplayMode, Selectable,
 };
@@ -108,6 +109,8 @@ pub struct NoticeBlock {
     /// Optional bounded body shown below the title while collapsed. The full
     /// body belongs in `details` so expansion and copying retain the source.
     communication_preview: Option<String>,
+    communication_body: Option<CommunicationBody>,
+    communication_data: Option<String>,
 }
 
 impl NoticeBlock {
@@ -115,13 +118,17 @@ impl NoticeBlock {
         matches!(
             self.category,
             NoticeCategory::Coordination | NoticeCategory::Command
-        ) && self
-            .details
-            .as_ref()
-            .is_some_and(|details| !details.is_empty())
+        ) && (self.communication_body.is_some()
+            || self
+                .details
+                .as_ref()
+                .is_some_and(|details| !details.is_empty()))
     }
 
     pub fn detail_text(&self) -> String {
+        if let Some(body) = &self.communication_body {
+            return body.rendered_text();
+        }
         format!(
             "{}\n\n{}",
             self.text,
@@ -140,6 +147,8 @@ impl NoticeBlock {
             text,
             details: None,
             communication_preview: None,
+            communication_body: None,
+            communication_data: None,
         }
     }
 
@@ -160,6 +169,8 @@ impl NoticeBlock {
             text: text.into(),
             details,
             communication_preview: None,
+            communication_body: None,
+            communication_data: None,
         }
     }
 
@@ -178,6 +189,8 @@ impl NoticeBlock {
             text: text.into(),
             details,
             communication_preview: None,
+            communication_body: None,
+            communication_data: None,
         }
     }
 
@@ -192,16 +205,40 @@ impl NoticeBlock {
     pub fn set_communication_preview(&mut self, preview: Option<String>) {
         self.communication_preview = preview.filter(|preview| !preview.is_empty());
     }
+
+    pub(crate) fn set_communication_body(&mut self, body: CommunicationBody) {
+        self.communication_body = (!body.is_empty()).then_some(body);
+    }
+
+    pub(crate) fn set_communication_data(&mut self, data: impl Into<String>) {
+        let data = data.into();
+        self.communication_data = (!data.is_empty()).then_some(data);
+    }
+
+    pub(crate) fn communication_body(&self) -> Option<&CommunicationBody> {
+        self.communication_body.as_ref()
+    }
+
+    pub(crate) fn communication_data(&self) -> Option<&str> {
+        self.communication_data.as_deref()
+    }
+
+    pub(crate) fn set_raw_mode(&mut self, raw: bool) {
+        if let Some(body) = &mut self.communication_body {
+            body.set_raw_mode(raw);
+        }
+    }
 }
 
 impl BlockContent for NoticeBlock {
     fn output(&self, ctx: &BlockContext) -> BlockOutput {
         let theme = Theme::current();
-        let body_style = if self.communication_preview.is_some() {
-            theme.primary()
-        } else {
-            theme.muted()
-        };
+        let body_style =
+            if self.communication_preview.is_some() || self.communication_body.is_some() {
+                theme.primary()
+            } else {
+                theme.muted()
+            };
         let label_style = Style::default()
             .fg(self.tone.color(&theme))
             .add_modifier(Modifier::BOLD);
@@ -214,6 +251,16 @@ impl BlockContent for NoticeBlock {
         styled_lines.extend(
             source_lines.map(|line| Line::from(Span::styled(line.to_string(), body_style))),
         );
+        if let Some(body) = &self.communication_body
+            && ctx.mode != DisplayMode::Collapsed
+        {
+            styled_lines.extend(
+                body.expanded(ctx.width.saturating_sub(2) as usize)
+                    .lines
+                    .into_iter()
+                    .map(|line| line.content),
+            );
+        }
         if let Some(details) = self.details.as_deref()
             && !(self.has_details() && ctx.mode == DisplayMode::Collapsed)
         {
@@ -230,6 +277,7 @@ impl BlockContent for NoticeBlock {
             .collect();
         if ctx.mode == DisplayMode::Collapsed
             && let Some(preview) = self.communication_preview.as_deref()
+            && self.communication_body.is_none()
         {
             all_lines.extend(
                 crate::scrollback::blocks::tool::OtherToolCallBlock::communication_preview_lines(
@@ -239,6 +287,11 @@ impl BlockContent for NoticeBlock {
                     body_style,
                 ),
             );
+        }
+        if ctx.mode == DisplayMode::Collapsed
+            && let Some(body) = &self.communication_body
+        {
+            all_lines.extend(body.preview(ctx.content_width()).lines);
         }
 
         // Apply max_lines budget if set
@@ -281,11 +334,11 @@ impl BlockContent for NoticeBlock {
     }
 
     fn has_raw_mode(&self) -> bool {
-        false
+        self.communication_body.is_some()
     }
 
     fn is_foldable(&self) -> bool {
-        self.has_details()
+        self.has_details() || self.communication_body.is_some()
     }
 
     fn is_selectable(&self) -> bool {

@@ -1,0 +1,7 @@
+# Design
+
+The SSE frame name is available at each of the three existing readers but is currently dropped before error parsing. Pass that name into the shared parser. Continue recognizing the existing nested and gateway envelopes independent of frame name; recognize `code/message` only when the name is exactly `error`. Require nonempty string code and message. A malformed named error must remain a protocol failure, and an ordinary non-error frame lacking `type` must remain a protocol failure. Include a nonempty `request_id` only as diagnostic text, never as a retry hint.
+
+Map `InvalidParameter` and content inspection codes to a nonretryable request failure; `Throttling` to the existing 429 path; known overload/service codes to existing 529/5xx paths. Unknown provider codes must fail closed for automatic retry while retaining their raw identity. Do not infer a transient failure from the HTTP 200 transport status or the message text. The existing attempt owner still decides whether any retry is safe after output retraction, usage settlement, budget, and tool admission checks.
+
+Use the actual SSE readers in tests for all three backends, then a focused session test where a partial tool candidate is followed by a named rejection: no tool dispatch, no accepted response, unknown usage stays unknown, and no retry for a content rejection. Existing bounded rate-limit/overload retry tests remain the scheduler evidence.

@@ -162,19 +162,48 @@ Acknowledged local resource persistence SHALL synchronize the published parent d
 - **THEN** directory synchronization succeeds for a valid writable store even if its original capability descriptor uses O_PATH.
 
 ### Requirement: Image descriptions retain their original image evidence
-An acknowledged ImageProjection SHALL retain original image payloads alongside their nonempty descriptions in materialized image parts, while advancing existing replacement Surface identities and validating source fingerprints, counts and provenance. Local OCR descriptions SHALL identify their local engine rather than claim a provider Sideband.
+
+An acknowledged `ImageProjection` SHALL retain original image payloads in immutable Timeline message evidence while advancing the affected current-branch Surface identities. Each image shadow SHALL carry an exact source fingerprint/count and a typed disposition: provider description and local OCR dispositions SHALL retain the image with a nonempty reusable description, while unsupported-model disposition SHALL remove the image from the materialized Surface and insert the canonical replacement `当前模型不支持多模态，图片已经被删除`. Live apply and bulk replay SHALL validate and produce identical Surface, compaction-reference and image-tool-path redaction results. Local OCR SHALL identify its engine, provider descriptions SHALL reference a valid ImageDescription Sideband, and unsupported-model replacement SHALL require the exact canonical text rather than arbitrary unproven content.
 
 #### Scenario: Resume a described image
-- **WHEN** a session with a completed image description is replayed
-- **THEN** the image and description are both available with consistent causal Surface identities.
+
+- **WHEN** a session with a completed provider description or local OCR projection is replayed
+- **THEN** the current Surface contains the image and its description with consistent causal Surface identities, and immutable Timeline evidence remains available.
+
+#### Scenario: Resume a removed unsupported image
+
+- **WHEN** a session with an acknowledged unsupported-model image projection is replayed
+- **THEN** the original message event still contains the raw image as evidence, while the current Surface contains one canonical replacement at that image group's causal position and no raw image from the group.
 
 #### Scenario: Select request representation
-- **WHEN** a known unsupported canonical provider/model pair prepares a request
-- **THEN** the request uses available descriptions without mutating the retained image, and unresolved descriptions prevent a lossy retry.
+
+- **WHEN** a known unsupported canonical provider/model pair prepares a request after successful description or OCR projection
+- **THEN** the request uses available descriptions without mutating the retained image.
+
+#### Scenario: Unresolved group is removed atomically
+
+- **WHEN** an exact-revision projection contains both description-backed groups and unsupported-model groups
+- **THEN** Timeline validates every source, fingerprint, count and disposition before accepting one event, then atomically attaches descriptions and removes unresolved Surface images.
+
+#### Scenario: Image-bearing tool result is removed
+
+- **WHEN** unsupported-model projection targets an image-bearing tool result
+- **THEN** replay removes the result images, retains one canonical replacement in the same causal item and applies the validated tool-call, response-carrier and compaction-reference redactions so no model-visible path can re-inject the image.
+
+#### Scenario: Projection persistence is not acknowledged
+
+- **WHEN** a prepared image projection is invalid, cannot be durably written or has an unconfirmed acknowledgement
+- **THEN** the accepted Surface remains unchanged and sampling cannot claim removal or resubmit from a temporary request copy.
 
 #### Scenario: Switch to an unknown pair
-- **WHEN** another canonical provider/model pair prepares its first request
-- **THEN** original image parameters remain available even if another pair previously used descriptions.
+
+- **WHEN** another canonical provider/model pair prepares its first request after a description-backed projection
+- **THEN** original image parameters remain available even if another pair previously selected descriptions.
+
+#### Scenario: Removed evidence is not implicitly resurrected
+
+- **WHEN** another model prepares a request after an unsupported-model projection removed an image from the current Surface
+- **THEN** request assembly reads the projected Surface and does not recover raw media from historical Timeline evidence without an explicit branch operation.
 
 ### Requirement: Bulk replay avoids cumulative lifecycle copying
 Timeline restoration SHALL validate all events and expose only a fully validated fold, without copying all accumulated lifecycle history for every replayed event. Live prepare and accept SHALL retain failed-write atomicity.
@@ -193,34 +222,44 @@ Timeline restoration SHALL validate all events and expose only a fully validated
 
 ### Requirement: Attempt evidence and accepted response have distinct authority
 
-被废弃 attempt 的原始证据、用量及恢复决定 SHALL 保留在既有 Timeline 证据链或其不可变 artifact 引用中，但 SHALL NOT 投影成模型有效上下文、native continuation 或可执行工具。候选只有在会话 durable admission 确认后才能发布已接纳状态。每个产生 canonical assistant response 事件的新 admission SHALL 在该事件上携带原 sampler request 与最终 attempt 组成的不可变 identity 及确定性 admission result；同 identity、同 response payload 的本地 admission 重放 SHALL 幂等返回原结果，同 identity、不同 payload SHALL fail closed。接纳失败或确认不明 SHALL NOT 触发盲目重新采样。
+被废弃 attempt 的原始证据、用量及恢复决定 SHALL 保留在既有 Timeline 证据链或其不可变 artifact 引用中，但 SHALL NOT 投影成模型有效上下文、native continuation 或可执行工具。候选只有在会话 durable admission 与其 Timeline-derived replay projection 均确认后才能发布已接纳状态。每个产生 canonical assistant response 事件的新 admission SHALL 在该事件上携带原 sampler request 与最终 attempt 组成的不可变 identity 及确定性 admission result；同 identity、同 response payload 的本地 admission 重放 SHALL 幂等返回原结果，同 identity、不同 payload SHALL fail closed。Replay projection SHALL 以 Timeline response 为 authority 并按 identity、Timeline event、payload digest 和 projection version 幂等提交；接纳或 projection 失败/确认不明 SHALL NOT 触发盲目重新采样，也 SHALL NOT 越过到 continuation、工具或成功 Turn terminal。
 
 #### Scenario: Failed generation is followed by a valid attempt
 
 - **WHEN** 第一次候选被拒收而第二次被持久化接纳
-- **THEN** 证据可以追溯两次调用及废弃原因，模型 Surface 和可执行工具只包含第二次被接纳结果。
+- **THEN** 证据可以追溯两次调用及废弃原因，模型 Surface、accepted UI projection 和可执行工具只包含第二次被接纳结果。
 
 #### Scenario: Admission write acknowledgment is lost
 
 - **WHEN** 响应可能已经写入 Timeline 但提交确认丢失
-- **THEN** 系统只按原 admission identity 和原 payload 核对或重放本地 Timeline admission，不启动新 provider 请求；确认仍不明时停止当前 Step/Turn，不发布 Accepted、不执行工具，也不进入 completion recovery。
+- **THEN** 系统只按原 admission identity 和原 payload 核对或重放本地 Timeline admission，不启动新 provider 请求；确认仍不明时停止当前 Step/Turn，不提交 replay projection、不发布 Accepted、不执行工具，也不进入 completion recovery。
 
 #### Scenario: Exact admission submission is repeated
 
 - **WHEN** 同一 response admission identity 以完全相同的 canonical response payload 再次提交
-- **THEN** 返回原 admission 结果且 Timeline 只保留一份 response；不得重复安装或用历史重建 provider-native continuation。
+- **THEN** 返回原 admission 结果且 Timeline 只保留一份 response；不得重复安装或用历史重建 provider-native continuation，replay projection 仍以同 event/digest 幂等核对。
 
 #### Scenario: Admission identity is reused with a different payload
 
 - **WHEN** 已存在的 response admission identity 被用于不同 canonical response payload
-- **THEN** admission 以身份冲突失败，既有 Timeline 与 Surface 保持不变，不发布 Accepted 或执行任一 payload 的新工具。
+- **THEN** admission 以身份冲突失败，既有 Timeline、Surface 与 replay cache 保持不变，不发布 Accepted 或执行任一 payload 的新工具。
+
+#### Scenario: Replay projection cannot be confirmed
+
+- **WHEN** Timeline response 已确认，但对应 replay projection durable append 失败、冲突或确认不明
+- **THEN** response 保留为 canonical Timeline 事实，当前 Step/Turn 在 typed projection boundary fail closed；不发布 Accepted、不进入 completion recovery、不继续 truncation/pause-turn、不启动下一 provider request或工具。
+
+#### Scenario: Projection is reconciled during recovery
+
+- **WHEN** cold/replacement load 发现当前 branch 的 identity-bearing response 缺少 matching projection record
+- **THEN** 只由该 Timeline event 确定性重建 projection；不得安装 native continuation、调用 provider、执行工具或复活被 rewind/discard/quarantine 排除的 candidate。
 
 #### Scenario: Process stops before attempt closure
 
-- **WHEN** 进程在 provider 调用后、证据/结算/接纳闭合前终止
-- **THEN** 恢复保留未确认状态、原 response admission identity 和可用证据，不把未确认 attempt 自动重放为成功消息，也不据此自动重发 provider 请求；历史无 identity 的 response 不能被猜测为该提交。
+- **WHEN** 进程在 provider 调用后、证据/结算/接纳/projection 闭合前终止
+- **THEN** 恢复保留未确认状态、原 response admission identity 和可用证据；已接纳但未投影的 response 只做本地 UI reconciliation，不把未确认 attempt 自动重放为成功消息，也不据此自动重发 provider 请求；历史无 identity 的 response 不能被猜测为该提交。
 
-证据入口：`crates/codegen/chat-state/src/timeline.rs` 的 response admission fold，`crates/codegen/chat-state/src/actor/mutations.rs::push_response_durably`，`crates/codegen/shell/src/session/actor/turn/mod.rs` 的 response admission gate。
+证据入口：`crates/codegen/chat-state/src/timeline.rs` 的 response admission/branch fold，`crates/codegen/chat-state/src/actor/mutations.rs::push_response_durably`，`crates/codegen/shell/src/session/actor/turn/mod.rs` 的 response admission/projection gate，以及 `crates/codegen/shell/src/session/persistence.rs`/storage replay 的 projection reconciliation。
 
 ### Requirement: Turn terminals identify their actual authority
 
@@ -406,3 +445,150 @@ Response projection 和独立 ACP event 的 exact commit SHALL 只有在所需�
 
 - **WHEN** 同一记录在同步恢复后按原 identity/payload 重试
 - **THEN** 同步已有记录后成功且不重复追加；payload conflict 仍拒绝。
+
+### Requirement: Sampling recovery stop evidence survives session storage
+
+会话存储 SHALL 接受采样器持久记录的 `sampling_evidence/recovery_stop`，在恢复及导入导出中保留原始恢复决定，并继续校验记录名称、类型及 artifact 引用完整性；停止恢复记录 SHALL NOT 被当作已接纳的模型响应或重发请求的指令。
+
+#### Scenario: Load a session after recovery stops
+- **WHEN** 会话 Timeline 包含格式有效的 recovery_stop 证据
+- **THEN** 观察加载和写者恢复均能读取该会话，证据保持原值，不因该记录启动 provider 请求或增加模型上下文。
+
+#### Scenario: Transfer mixed sampling evidence
+- **WHEN** 导入导出的 Timeline 同时包含 recovery_stop 和带 body 的 response 证据
+- **THEN** 保留停止决定并完整校验二进制 artifact；缺失或篡改 body 仍被拒绝。
+
+#### Scenario: Invalid evidence remains invalid
+- **WHEN** 证据类型未知、名称与类型不一致或分块引用不合法
+- **THEN** 读取失败并保留原始记录，不以支持 recovery_stop 为由跳过校验。
+
+证据入口：`crates/codegen/shell/src/session/sampling_evidence.rs::decode_record`、`crates/codegen/shell/src/session/storage/jsonl/tests.rs`、`crates/codegen/shell/src/extensions/session_state.rs::sampling_blob_tests`。
+
+### Requirement: Sideband coordinates follow canonical Timeline Surface producers
+
+Sideband parent validation SHALL accept a historical Surface coordinate exactly when the referenced parent Timeline event canonically produced that item, including consumed user input and consumed notification input. It SHALL continue to reject non-Surface lifecycle facts, wrong event identity, out-of-range items and coordinates outside the frozen source/input ranges. Strict reload SHALL apply the same rule as live Timeline materialization.
+
+#### Scenario: Reload a compaction selected from consumed inputs
+
+- **WHEN** a completed compaction Sideband selected valid coordinates produced by `Input::Consumed` or `Notification::Consumed` with model input
+- **THEN** strict session reload accepts the Sideband ledger and reconstructs the same Surface without migration or ledger rewrite.
+
+#### Scenario: Reject a non-Surface coordinate
+
+- **WHEN** a Sideband manifest names an Observation, lifecycle-only Input/Notification event, or an item outside a producing event's cardinality
+- **THEN** parent validation rejects the ledger as an invalid Surface selection.
+
+### Requirement: Canonical cancelled subagent lifecycles are resumable
+
+A cancelled subagent SHALL be a valid durable resume source when its parent Timeline contains matching Spawned and Ended facts, its child identity and seed match that spawn, and the terminal result reference resolves to an exactly matching validated child SubagentResult. Resume eligibility SHALL be based on this canonical linkage and the existing security/workspace checks, not on requiring a successful or completed outcome. Resuming SHALL preserve the source agent, model route, reasoning effort, context and worktree semantics and SHALL NOT relabel the cancelled source as successful.
+
+#### Scenario: Goal stop cancels a child using another model
+
+- **WHEN** a root Goal stop cancels a child whose model route differs from the root, and Spawned, Ended(cancelled), SubagentSeed and SubagentResult(cancelled) form a valid canonical link
+- **THEN** a later explicit resume accepts that child as its source and pins the original child route instead of rejecting it because its outcome is cancelled or silently replacing it with a fresh spawn.
+
+#### Scenario: Cancelled result has an exact canonical link
+
+- **WHEN** parent and child identities, spawn/seed coordinates, outcome, duration, tool/turn counts, usage, error and result reference all match and both Timelines validate
+- **THEN** resume uses the child as a durable source under the existing security and workspace constraints.
+
+#### Scenario: Cancelled lifecycle is incomplete or inconsistent
+
+- **WHEN** the source lacks a spawn or terminal, the child identity/seed does not match, the result reference is missing or invalid, or either Timeline fails validation
+- **THEN** resume fails closed without starting a child, provider request or worktree mutation and without treating the source as a valid canonical lifecycle.
+
+### Requirement: Subagent resume rejection preserves its cause
+
+Durable subagent resume resolution SHALL preserve a typed cause for parent or child storage failure, lifecycle incompleteness, identity or security rejection, Timeline validation failure and invalid result linkage. Live activity SHALL remain a separate observation. User-visible errors SHALL distinguish actionable authorized-source categories and SHALL NOT describe every rejection as a missing completed lifecycle. Security rejection SHALL NOT reveal whether an unauthorized source session exists.
+
+#### Scenario: Source is still settling
+
+- **WHEN** the durable lifecycle has no terminal and the live coordinator still owns the source child
+- **THEN** resume reports that the source is still running or settling and does not claim that a completed-only outcome is required.
+
+#### Scenario: Authorized source has invalid durable linkage
+
+- **WHEN** the requester is authorized for the source lineage but child loading, Timeline validation or exact result-link validation fails
+- **THEN** resume reports the corresponding durable source category, records the internal typed cause and starts no replacement child.
+
+#### Scenario: Requester is outside the security lineage
+
+- **WHEN** the requester is neither the lifecycle root nor the recorded security parent
+- **THEN** resume rejects the request without exposing whether storage, lifecycle or result facts exist for that source.
+
+### Requirement: Subagent resume admission is fail-closed and retry-safe
+
+Subagent resume SHALL reject a source while its original runtime remains live, even if terminal facts are already visible. After durable source validation, agent/model/transport/effort, workspace, context and derived-child admission failures SHALL stop only the requested resume epoch, preserve the immutable source lifecycle and return the failing stage. No valid resume request SHALL silently become a fresh child. A later retry SHALL revalidate the source and current environment.
+
+#### Scenario: Durable terminal is visible while the source remains live
+
+- **WHEN** the parent and child contain an exact terminal link but the coordinator still owns the source as pending, active or settling
+- **THEN** resume reports that the source is still running or settling and does not start an overlapping child epoch.
+
+#### Scenario: Historical non-worktree cwd is missing
+
+- **WHEN** a validated non-worktree source names a cwd that no longer exists and the current parent workspace is valid
+- **THEN** resume uses the current parent workspace and preserves the source transcript and route; an existing non-directory, unverifiable path or canonical path outside the parent workspace remains rejected.
+
+#### Scenario: Source route or context is incompatible
+
+- **WHEN** the source agent type, model, reasoning effort or transport is unavailable, its transcript cannot be validated or fit safely, or required prompt artifacts cannot be loaded
+- **THEN** resume identifies the incompatible stage, starts no fresh replacement and does not change the source lifecycle or guess a substitute route, effort, context or artifact.
+
+#### Scenario: Current child System head cannot be rendered
+
+- **WHEN** a validated resume source already contains its stable System head but the current child-audience head renderer is unavailable or invalid
+- **THEN** resume preserves the inherited head and does not invoke the current renderer; a new or normalized child without a renderable head still fails before persistence.
+
+#### Scenario: Historical completion output artifact is missing
+
+- **WHEN** a validated source has an exact terminal/result link and materializable Timeline Surface but its optional completion output artifact is absent
+- **THEN** resume remains eligible because the display artifact is not context authority; any immutable prompt blob directly referenced by the Surface remains required.
+
+#### Scenario: Workflow route authority no longer exists
+
+- **WHEN** a workflow-owned resume source is canonical but its owning Workflow Run or frozen runtime route is no longer registered
+- **THEN** resume rejects the derived epoch and does not replace the route with the current global agent definition.
+
+#### Scenario: Isolated source workspace cannot be restored
+
+- **WHEN** a source worktree is absent without a snapshot or snapshot rehydration cannot produce the exact recorded target
+- **THEN** the derived resume epoch fails without discarding the snapshot reference or claiming an empty workspace continuation.
+
+#### Scenario: Derived child admission fails after source validation
+
+- **WHEN** parent spawn persistence, child storage, session startup, catalog convergence, promotion or first-prompt admission fails
+- **THEN** the requested derived epoch is failed or left for existing canonical recovery as appropriate, while the original source remains unchanged and eligible for a later fully revalidated retry.
+
+#### Scenario: First prompt is not durably admitted
+
+- **WHEN** child control publication, Goal snapshot mailbox delivery, QueuePrompt delivery or the durable prompt persistence acknowledgment fails
+- **THEN** the derived epoch reports the exact launch stage, admits no further provider work, settles any prompt that may already have started before committing its child result, and leaves the original resume source unchanged.
+
+### Requirement: Agent opinion consumption preserves source and exact context
+
+正式 agent 消息 SHALL 复用 durable Received/Consumed 生命周期。消费与准确的 runtime agent-message context item SHALL 在同一持久事实中提交，保留 receipt、双方身份、reply 关联和正文；不得拆成先确认消费后另写模型输入。发送方既有调用正文 SHALL NOT 再作为自己的接收消息重复注入。
+
+#### Scenario: Consume an opinion
+- **WHEN** 目标在安全步骤消费已接收意见
+- **THEN** 该 receipt 与有来源的准确正文一起进入 Surface，回复内容不带人类权限证据。
+
+#### Scenario: Restore after consumption
+- **WHEN** 消费后崩溃并重建 Session
+- **THEN** 同一消息只恢复一次，保留 reply 关系，不重新投递、重新唤醒或伪造新输入。
+
+#### Scenario: Send and receive on the same agent
+- **WHEN** agent 发出意见后收到另一方回复
+- **THEN** 自己的意见保留在原发送调用/回执中，对方意见作为接收 item；不会为自己的发送增加重复入站正文。
+
+### Requirement: MCP image evidence survives text-output truncation
+
+主工具结果中的 MCP 图片 SHALL 先与会被截断的文本分离，再按现有图片验证、正规化与预算进入模型可见附件；已接纳的附件顺序和省略说明 SHALL 可由 Timeline 恢复的 Surface 重建。工具结果本体与附件 SHALL 不因 direct extension 调用而混入另一条会话。
+
+#### Scenario: Long mixed result is restored
+- **WHEN** MCP 结果含超长文本、结构化内容和多张有效图片，文本预览被截断后会话恢复或切换模型
+- **THEN** 截断正文、完整输出指针和预算内图片各保留一次且顺序一致；恢复/portable 请求不把图片退化为 base64 字符串。
+
+#### Scenario: Rejected image is explicit
+- **WHEN** 一个图片附件因类型、解码或预算被拒收
+- **THEN** Surface 有明确替代说明，后续有效附件仍按原序处理，不产生损坏的图片 part。

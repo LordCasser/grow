@@ -4145,7 +4145,7 @@ mod tests {
                 assert_eq!(
                     actor
                         .chat_state_handle
-                        .enable_portable_responses_reasoning()
+                        .enable_portable_reasoning(sampling_types::ApiBackend::Responses)
                         .await,
                     Some(true)
                 );

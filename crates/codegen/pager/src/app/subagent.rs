@@ -764,6 +764,7 @@ mod tests {
             r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"tool_call","toolCallId":"tc1","title":"Read foo","kind":"read","locations":[{{"path":"/tmp/foo"}}]}}}}}}"#
         );
         std::fs::write(session_dir.join("updates.jsonl"), tool_line + "\n").unwrap();
+        write_timeline_events(&session_dir, &chat_state::Timeline::default());
         set_replay_grow_home_for_tests(Some(home.path().to_path_buf()));
         let mut parent = make_min_child_view();
         parent
@@ -812,14 +813,14 @@ mod tests {
         );
         assert!(parent.session.subagent_sessions[ghost_sid].child_updates_replayed);
         let empty_sid = "child-purge-empty";
-        let empty_dir = home
-            .path()
-            .join("sessions")
-            .join(urlencoding::encode("/tmp").as_ref())
-            .join(empty_sid);
-        std::fs::create_dir_all(&empty_dir).unwrap();
-        std::fs::write(empty_dir.join("summary.json"), "{}").unwrap();
+        let empty_dir = setup_enrichment_dir(home.path(), std::path::Path::new("/tmp"), empty_sid);
+        write_timeline_events(&empty_dir, &chat_state::Timeline::default());
         std::fs::write(empty_dir.join("updates.jsonl"), "").unwrap();
+        assert_eq!(
+            stream_replay_updates_at(empty_sid, home.path(), |_| panic!("empty history"))
+                .expect("empty fixture must be readable"),
+            ReplayEmission::Empty,
+        );
         parent
             .subagent_views
             .insert(empty_sid.to_string(), Box::new(make_min_child_view()));
@@ -882,6 +883,7 @@ mod tests {
         let child_sid = "child-notice-before-replay";
         let session_dir =
             setup_enrichment_dir(home.path(), std::path::Path::new("/tmp"), child_sid);
+        write_timeline_events(&session_dir, &chat_state::Timeline::default());
         let tool_line = format!(
             r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"tool_call","toolCallId":"tc1","title":"Read foo","kind":"read","locations":[{{"path":"/tmp/foo"}}]}}}}}}"#
         );
@@ -1161,16 +1163,17 @@ mod tests {
         receipt_id: &str,
         body: Option<&str>,
     ) -> shell::extensions::notification::UiNotice {
-        let details = shell::extensions::notification::ParentMessageNotice {
-            parent_session_id: "parent-session".into(),
+        let details = shell::extensions::notification::AgentMessageNotice {
+            source_session_id: "parent-session".into(),
             message_id: "message-1".into(),
             interrupt: true,
+            reply_to: None,
             message: body.map(str::to_owned),
         };
         shell::extensions::notification::UiNotice {
             correlation_id: receipt_id.into(),
             category: shell::extensions::notification::UiNoticeCategory::Coordination,
-            subject: Some(shell::extensions::notification::ParentMessageNotice::SUBJECT.into()),
+            subject: Some(shell::extensions::notification::AgentMessageNotice::SUBJECT.into()),
             description: None,
             message: "Parent guidance received".into(),
             tone: shell::extensions::notification::UiNoticeTone::Info,

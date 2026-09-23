@@ -199,6 +199,20 @@ impl PermissionRequestSource {
     }
 }
 
+/// Frozen, bounded evidence for the exact tool invocation being authorized.
+///
+/// `AccessKind` intentionally remains a coarse policy vocabulary. This record
+/// preserves the wire identity and arguments independently so child review,
+/// classifier input, and permission audit do not silently relabel one edit
+/// implementation as another.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PermissionCallEvidence {
+    pub tool_name: String,
+    pub canonical_args_hash: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub operation: Option<serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PermissionRequestContext {
     pub source: PermissionRequestSource,
@@ -214,6 +228,9 @@ pub struct PermissionRequestContext {
     /// Request-local transcript. `Some(empty)` deliberately clears stale
     /// context for this source; `None` retains the last source-local snapshot.
     pub classifier_turns: Option<Vec<super::auto_mode::ClassifierTurn>>,
+    /// Exact-call evidence captured from the same frozen arguments that later
+    /// bind the one-shot execution permit.
+    pub call_evidence: Option<PermissionCallEvidence>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

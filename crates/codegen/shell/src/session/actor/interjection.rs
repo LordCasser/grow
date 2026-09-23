@@ -560,7 +560,7 @@ impl SessionActor {
             .any(|item| {
                 matches!(
                     &item.source,
-                    chat_state::NotificationSource::ParentMessage { .. }
+                    chat_state::NotificationSource::ParentMessage { .. } | chat_state::NotificationSource::AgentReply { .. }
                 )
             });
         let delivered_parent_message =

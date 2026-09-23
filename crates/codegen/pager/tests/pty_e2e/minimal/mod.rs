@@ -19,6 +19,7 @@ mod minimal_external_editor_round_trip;
 mod minimal_flush_left_no_hpad;
 mod minimal_help_opens_command_palette;
 mod minimal_lookup_commits_one_line_summary;
+mod minimal_native_copy_wraps_long_token;
 mod minimal_new_session_keeps_history_and_resets;
 mod minimal_parked_plan_commits_to_scrollback;
 mod minimal_parked_plan_survives_quit;

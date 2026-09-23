@@ -138,7 +138,14 @@ impl ToolBridge {
             .map(|identity| identity.max_access)
     }
 
-    pub fn native_tool_descriptors(&self) -> Vec<(String, ToolKind, tool_protocol::ToolAccess)> {
+    pub fn native_tool_descriptors(
+        &self,
+    ) -> Vec<(
+        String,
+        ToolKind,
+        tool_protocol::ToolAccess,
+        tool_protocol::SubagentReviewPolicy,
+    )> {
         self.registry.native_tool_descriptors()
     }
 

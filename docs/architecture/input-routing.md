@@ -144,11 +144,15 @@ with it; it is text extraction, not full visual understanding. Inline inputs,
 subprocess output and runtime are bounded. Remote image URLs are not fetched by
 OCR. Cancellation terminates the child. Empty or failed results are not used.
 
-One acknowledged `ImageProjection` attaches complete descriptions while retaining
-original images and advancing the existing causal Surface identities. Visual
-results retain Sideband provenance; OCR identifies its local engine. Existing
-image-associated tool/native-carrier sanitization remains. Failed groups prevent
-a lossy projection or retry. Resume and rewind retain both representations.
+One acknowledged `ImageProjection` carries one typed disposition per image group:
+described/OCR groups keep their original images and gain reusable text, while a
+group with no usable text is removed from the current Surface and replaced by the
+canonical `当前模型不支持多模态，图片已经被删除`. Every group of one exact Surface
+revision commits in that single event before the primary request is rebuilt; a
+failed validation, durable write or acknowledgement is fail-closed and never
+resubmits from an in-memory-only request copy. The removed group's original
+payload stays in the immutable Timeline evidence and is not resurrected by
+resume, model switch or compaction.
 
 Request assembly chooses descriptions for marked pairs before byte budgeting and
 native continuation reconciliation. Compaction uses the same choice. A new pair

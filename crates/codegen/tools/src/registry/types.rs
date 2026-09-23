@@ -255,17 +255,17 @@ impl ToolMetadata for DefaultToolMetadata {
         &self.description
     }
 }
-/// Drain a `ToolStream<TypedToolOutput>` to the terminal result's `value`.
+/// Drain a `ToolStream<TypedToolOutput>` to its terminal result.
 /// Progress items are discarded.
-pub async fn drain_value_stream(
+pub async fn drain_terminal_stream(
     mut stream: tool_runtime::ToolStream<tool_runtime::TypedToolOutput>,
-) -> Result<serde_json::Value, tool_runtime::ToolError> {
+) -> Result<tool_runtime::TypedToolOutput, tool_runtime::ToolError> {
     use futures::StreamExt;
     while let Some(item) = stream.next().await {
         match item {
             tool_runtime::ToolStreamItem::Progress(_) => continue,
             tool_runtime::ToolStreamItem::Terminal(result) => {
-                return result.map(|typed| typed.value);
+                return result;
             }
         }
     }
@@ -1239,13 +1239,25 @@ impl tool_runtime::ToolDispatch for InnerDispatchForToolset {
             .call_raw(tool_id.as_str(), args, ctx)
             .await
             .and_then(|output| {
+                let images = match &output {
+                    ToolOutput::MCP(mcp) => mcp.extracted_images(),
+                    _ => &[],
+                };
                 let value = serde_json::to_value(&output).map_err(|e| {
                     tool_runtime::ToolError::custom("output_encoding", e.to_string())
                 })?;
-                Ok(tool_runtime::TypedToolOutput::from_value(
-                    tool_id.clone(),
-                    value,
-                ))
+                let mut typed = tool_runtime::TypedToolOutput::from_value(tool_id.clone(), value);
+                typed.model_output.extend(images.iter().map(|image| {
+                    tool_runtime::ContentBlock::Image {
+                        mime_type: image.mime_type.clone(),
+                        data: image.data.clone(),
+                        media_id: None,
+                        filename: None,
+                        path: None,
+                        metadata: Default::default(),
+                    }
+                }));
+                Ok(typed)
             });
         tool_runtime::terminal_only(result)
     }
@@ -1321,7 +1333,14 @@ impl FinalizedToolset {
     /// Descriptor snapshot for every model-visible native tool. Authorization
     /// consumers use the exact client-facing identity; `ToolKind` remains
     /// presentation metadata and must not be projected back into RWX.
-    pub fn native_tool_descriptors(&self) -> Vec<(String, ToolKind, tool_protocol::ToolAccess)> {
+    pub fn native_tool_descriptors(
+        &self,
+    ) -> Vec<(
+        String,
+        ToolKind,
+        tool_protocol::ToolAccess,
+        tool_protocol::SubagentReviewPolicy,
+    )> {
         self.tools
             .read()
             .iter()
@@ -1331,6 +1350,7 @@ impl FinalizedToolset {
                     tool.client_name.clone(),
                     tool.metadata.kind(),
                     tool.capabilities.max_access,
+                    tool.capabilities.subagent_review,
                 )
             })
             .collect()
@@ -1492,9 +1512,13 @@ impl FinalizedToolset {
             )
         })?;
         let stream = lr_handle.execute(ctx, canonical_params).await;
-        let value = drain_value_stream(stream).await?;
-        (output_converter)(value)
-            .map_err(|e| tool_runtime::ToolError::custom("output_decoding", e.to_string()))
+        let typed = drain_terminal_stream(stream).await?;
+        let output = (output_converter)(typed.value)
+            .map_err(|e| tool_runtime::ToolError::custom("output_decoding", e.to_string()))?;
+        Ok(crate::types::output::restore_mcp_images(
+            output,
+            typed.model_output,
+        ))
     }
     /// Dispatch a tool call by client-facing name with client-facing params.
     ///
@@ -1613,7 +1637,7 @@ impl FinalizedToolset {
                     }
                     tool_runtime::ToolStreamItem::Terminal(Ok(typed)) => {
                         let run_result = this
-                            .finalize_output(typed.value, &output_converter, effective_tool_name)
+                            .finalize_output(typed, &output_converter, effective_tool_name)
                             .await;
                         yield tool_runtime::ToolStreamItem::Terminal(run_result);
                         return;
@@ -1704,18 +1728,19 @@ impl FinalizedToolset {
     }
     /// Post-dispatch tail shared by [`call`] / [`call_streaming`].
     ///
-    /// Applies the `output_converter` to the terminal `value`, collects
+    /// Applies the `output_converter` to the terminal typed value, collects
     /// reminders, renders prompt text, persists resources, and builds the final
     /// [`ToolRunResult`]. This is the single source of truth for terminal-result
     /// construction so the streaming and non-streaming paths can never diverge.
     async fn finalize_output(
         &self,
-        value: serde_json::Value,
+        typed: tool_runtime::TypedToolOutput,
         output_converter: &OutputConverter,
         effective_tool_name: Option<String>,
     ) -> Result<ToolRunResult, tool_runtime::ToolError> {
-        let output = (output_converter)(value)
+        let output = (output_converter)(typed.value)
             .map_err(|e| tool_runtime::ToolError::custom("output_decoding", e.to_string()))?;
+        let output = crate::types::output::restore_mcp_images(output, typed.model_output);
         let reminders_enabled;
         {
             reminders_enabled = self
@@ -4410,6 +4435,26 @@ mod tests {
         crate::bridge::ToolBridge::finalize_builder(builder, config, test_session_context(tmp))
             .await
             .expect("finalize")
+    }
+    #[tokio::test]
+    async fn finalized_write_retains_required_child_review_policy() {
+        let tmp = TempDir::new().unwrap();
+        let bridge = crate::bridge::ToolBridge::finalize_builder(
+            ToolRegistryBuilder::new(),
+            ToolServerConfig {
+                tools: vec![ToolConfig::for_tool::<grow_build::WriteTool>()],
+            },
+            test_session_context(&tmp),
+        )
+        .await
+        .expect("finalize write bridge");
+        let write = bridge
+            .native_tool_descriptors()
+            .into_iter()
+            .find(|(name, _, _, _)| name == "write")
+            .expect("finalized write descriptor");
+        assert_eq!(write.2, tool_protocol::ToolAccess::Write);
+        assert_eq!(write.3, tool_protocol::SubagentReviewPolicy::Required);
     }
     /// list_dir through the local bridge returns valid output.
     #[tokio::test]

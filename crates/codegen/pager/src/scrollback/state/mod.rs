@@ -1626,6 +1626,7 @@ impl ScrollbackState {
             ),
             _ => (false, false),
         };
+        block.set_raw_mode(entry.raw);
         entry.block = block;
         if edit_to_edit {
             // Keep the current mode: the entry was already an Edit, so any

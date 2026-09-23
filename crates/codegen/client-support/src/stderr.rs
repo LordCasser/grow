@@ -20,7 +20,21 @@ pub fn stderr_lock() -> MutexGuard<'static, ()> {
 /// `/dev/null` redirect on fd 2). Otherwise falls back to normal stderr.
 pub fn with_locked_stderr<T>(f: impl FnOnce(&mut std::fs::File) -> T) -> T {
     let _guard = stderr_lock();
-    let mut file = tty_utils::dup_tui_stderr().unwrap_or_else(|_| {
+    f(&mut duplicate_tui_stderr())
+}
+
+/// Bound lock acquisition for terminal teardown, where a stopped writer may
+/// still hold the stderr lock. `None` means no query was written.
+pub fn try_with_locked_stderr_for<T>(
+    timeout: std::time::Duration,
+    f: impl FnOnce(&mut std::fs::File) -> T,
+) -> Option<T> {
+    let _guard = stderr_output_lock().try_lock_for(timeout)?;
+    Some(f(&mut duplicate_tui_stderr()))
+}
+
+fn duplicate_tui_stderr() -> std::fs::File {
+    let file = tty_utils::dup_tui_stderr().unwrap_or_else(|_| {
         // Fallback: try_clone stderr to get an independently-owned
         // File. This path is hit if redirect_native_stderr was never
         // called or fd dup fails.
@@ -46,5 +60,5 @@ pub fn with_locked_stderr<T>(f: impl FnOnce(&mut std::fs::File) -> T) -> T {
         }
         stderr_file
     });
-    f(&mut file)
+    file
 }

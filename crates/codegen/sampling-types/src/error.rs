@@ -257,7 +257,10 @@ impl SamplingError {
             || normalized.contains("payload_too_large")
         {
             StatusCode::PAYLOAD_TOO_LARGE
-        } else if normalized.contains("rate_limit") || normalized.contains("too_many_requests") {
+        } else if normalized.contains("rate_limit")
+            || normalized.contains("too_many_requests")
+            || normalized == "throttling"
+        {
             StatusCode::TOO_MANY_REQUESTS
         } else if normalized.contains("overloaded")
             || normalized.contains("service_unavailable")
@@ -267,17 +270,29 @@ impl SamplingError {
         } else if normalized.contains("invalid")
             || normalized.contains("unsupported")
             || normalized.contains("bad_request")
+            || normalized.contains("data_inspection")
+            || normalized.contains("datainspection")
+            || normalized.contains("content_filter")
+            || normalized.contains("content_policy")
         {
             StatusCode::BAD_REQUEST
         } else {
             StatusCode::INTERNAL_SERVER_ERROR
         };
+        // An unrecognized provider code is not proof of a transient server
+        // failure. Preserve the upstream error identity without resampling.
+        let known_server_error = matches!(
+            normalized.as_str(),
+            "server_error" | "internal_server_error" | "network_error" | "transient"
+        );
+        let should_retry =
+            (status == StatusCode::INTERNAL_SERVER_ERROR && !known_server_error).then_some(false);
         Self::Api {
             status,
             message: format!("{error_type}: {message}"),
             model_metadata: None,
             retry_after_secs: None,
-            should_retry: None,
+            should_retry,
         }
     }
 
@@ -347,22 +362,32 @@ impl SamplingError {
         )
     }
 
-    /// Whether a Responses-compatible endpoint explicitly rejected a
+    /// Which backend explicitly rejected a
     /// stateless thinking request because prior visible reasoning text was
     /// omitted. Downstream recovery consumes this as a typed attempt fact.
-    pub fn requires_portable_responses_reasoning(&self) -> bool {
+    pub fn portable_reasoning_requirement(&self) -> Option<ApiBackend> {
         let SamplingError::Api {
             status: StatusCode::BAD_REQUEST,
             message,
             ..
         } = self
         else {
-            return false;
+            return None;
         };
         let message = message.to_ascii_lowercase();
-        message.contains("reasoning_text")
-            && message.contains("thinking mode")
-            && (message.contains("passed back") || message.contains("pass back"))
+        if !message.contains("thinking mode")
+            || !(message.contains("passed back") || message.contains("pass back"))
+        {
+            return None;
+        }
+        match (
+            message.contains("reasoning_text"),
+            message.contains("reasoning_content"),
+        ) {
+            (true, false) => Some(ApiBackend::Responses),
+            (false, true) => Some(ApiBackend::ChatCompletions),
+            _ => None,
+        }
     }
 
     pub fn is_retryable(&self) -> bool {
@@ -375,8 +400,13 @@ impl SamplingError {
             SamplingError::Serialization(_) => false,
             SamplingError::IncompleteStream { .. } | SamplingError::IdleTimeout { .. } => true,
             SamplingError::InvalidToolArguments(_) => true,
-            SamplingError::Api { status, .. } => {
-                matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504 | 520 | 529)
+            SamplingError::Api {
+                status,
+                should_retry,
+                ..
+            } => {
+                *should_retry != Some(false)
+                    && matches!(status.as_u16(), 429 | 500 | 502 | 503 | 504 | 520 | 529)
             }
             SamplingError::EventStreamError(_) => true,
             SamplingError::EmptyResponse { .. } => true,
@@ -483,6 +513,14 @@ struct FlatErrorResponse {
     error: String,
     #[serde(default)]
     code: Option<String>,
+}
+
+/// A provider may report an error in the SSE name rather than the JSON body.
+#[derive(Debug, Deserialize)]
+struct NamedStreamErrorResponse {
+    code: String,
+    message: String,
+    request_id: Option<String>,
 }
 
 /// Extract `(error_type, message)` from either error format.
@@ -593,8 +631,25 @@ pub fn user_facing_api_error_message(status: StatusCode, bytes: &[u8]) -> String
     structured_error_message(bytes).unwrap_or_else(|| status_user_message(status))
 }
 
-pub fn try_parse_stream_error(data: &str) -> Option<SamplingError> {
-    let (error_type, message) = try_parse_error(data)?;
+pub fn try_parse_stream_error(event_name: &str, data: &str) -> Option<SamplingError> {
+    let parsed = try_parse_error(data).or_else(|| {
+        if event_name != "error" {
+            return None;
+        }
+        let named = serde_json::from_str::<NamedStreamErrorResponse>(data).ok()?;
+        if named.code.trim().is_empty() || named.message.trim().is_empty() {
+            return None;
+        }
+        let message = match named.request_id.filter(|id| !id.trim().is_empty()) {
+            Some(id) => format!("{} (request_id: {id})", named.message),
+            None => named.message,
+        };
+        Some((named.code, message))
+    });
+    let Some((error_type, message)) = parsed else {
+        return (event_name == "error")
+            .then(|| SamplingError::serialization_message("malformed named SSE error event"));
+    };
     tracing::warn!(error_type, message, "Server-side stream error");
     Some(SamplingError::from_stream_error(error_type, message))
 }
@@ -915,7 +970,7 @@ mod tests {
     #[test]
     fn try_parse_stream_error_flat_format() {
         let data = r#"{"code":"The service is currently unavailable","error":"Service temporarily unavailable. The model did not respond to this request."}"#;
-        let err = try_parse_stream_error(data).expect("should parse flat error");
+        let err = try_parse_stream_error("error", data).expect("should parse flat error");
         match err {
             SamplingError::Api {
                 status,
@@ -931,6 +986,80 @@ mod tests {
                 assert_eq!(should_retry, None);
             }
             other => panic!("expected typed Api error, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn named_stream_error_preserves_provider_facts_and_retry_safety() {
+        let rejected = try_parse_stream_error(
+            "error",
+            r#"{"request_id":"req-123","code":"InvalidParameter","message":"Output data may contain inappropriate content."}"#,
+        )
+        .expect("named provider error");
+        assert!(matches!(
+            &rejected,
+            SamplingError::Api {
+                status: StatusCode::BAD_REQUEST,
+                message,
+                ..
+            } if message.contains("InvalidParameter")
+                && message.contains("inappropriate content")
+                && message.contains("req-123")
+        ));
+        assert!(!rejected.is_retryable());
+
+        for code in ["DataInspectionFailed", "data_inspection_failed"] {
+            let error = SamplingError::from_stream_error(code, "content rejected");
+            assert!(matches!(
+                error,
+                SamplingError::Api {
+                    status: StatusCode::BAD_REQUEST,
+                    ..
+                }
+            ));
+            assert!(!error.is_retryable());
+        }
+
+        let throttled = SamplingError::from_stream_error("Throttling", "slow down");
+        assert!(matches!(
+            throttled,
+            SamplingError::Api {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                ..
+            }
+        ));
+        assert!(throttled.is_retryable());
+
+        let overloaded = SamplingError::from_stream_error("overloaded_error", "busy");
+        assert!(overloaded.is_overloaded());
+        assert!(overloaded.is_retryable());
+
+        let unknown = SamplingError::from_stream_error("VendorUnmappedCode", "failed");
+        assert!(!unknown.is_retryable());
+        assert!(unknown.is_retry_vetoed());
+    }
+
+    #[test]
+    fn only_named_complete_errors_accept_flat_code_and_message() {
+        let body = r#"{"code":"InvalidParameter","message":"rejected"}"#;
+        assert!(try_parse_stream_error("message", body).is_none());
+        assert!(matches!(
+            try_parse_stream_error("error", body),
+            Some(SamplingError::Api {
+                status: StatusCode::BAD_REQUEST,
+                ..
+            })
+        ));
+        for body in [
+            r#"{"code":"InvalidParameter"}"#,
+            r#"{"code":"","message":"rejected"}"#,
+            r#"{"code":"InvalidParameter","message":""}"#,
+            "not json",
+        ] {
+            assert!(matches!(
+                try_parse_stream_error("error", body),
+                Some(SamplingError::Serialization(_))
+            ));
         }
     }
 
@@ -976,7 +1105,7 @@ mod tests {
     #[test]
     fn nested_stream_error_prefers_specific_code_over_generic_type() {
         let data = r#"{"error":{"message":"Incorrect API key","type":"invalid_request_error","code":"invalid_api_key"}}"#;
-        let err = try_parse_stream_error(data).expect("should parse nested error");
+        let err = try_parse_stream_error("error", data).expect("should parse nested error");
         assert!(matches!(err, SamplingError::Auth { .. }));
     }
 
@@ -984,7 +1113,7 @@ mod tests {
     fn try_parse_stream_error_valid_chunk_returns_none() {
         let data = r#"{"id":"abc","object":"chat.completion.chunk","created":0,"model":"test","choices":[]}"#;
         assert!(
-            try_parse_stream_error(data).is_none(),
+            try_parse_stream_error("message", data).is_none(),
             "valid chunk should not be parsed as error"
         );
     }
@@ -1144,7 +1273,7 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_only_explicit_responses_reasoning_replay_rejections() {
+    fn recognizes_only_explicit_backend_reasoning_replay_rejections() {
         let exact = SamplingError::Api {
             status: StatusCode::BAD_REQUEST,
             message: "The `reasoning_text` in the thinking mode must be passed back to the API."
@@ -1153,7 +1282,21 @@ mod tests {
             retry_after_secs: None,
             should_retry: Some(false),
         };
-        assert!(exact.requires_portable_responses_reasoning());
+        assert_eq!(
+            exact.portable_reasoning_requirement(),
+            Some(ApiBackend::Responses)
+        );
+        let chat = SamplingError::Api {
+            status: StatusCode::BAD_REQUEST,
+            message: "Error from provider (Console Go): Upstream request failed: [invalid_request_error] The `reasoning_content` in the thinking mode must be passed back to the API.".into(),
+            model_metadata: None,
+            retry_after_secs: None,
+            should_retry: Some(false),
+        };
+        assert_eq!(
+            chat.portable_reasoning_requirement(),
+            Some(ApiBackend::ChatCompletions)
+        );
 
         for (status, message) in [
             (
@@ -1168,6 +1311,14 @@ mod tests {
                 StatusCode::BAD_REQUEST,
                 "reasoning_text is invalid in thinking mode",
             ),
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "reasoning_content in thinking mode must be passed back",
+            ),
+            (
+                StatusCode::BAD_REQUEST,
+                "reasoning_text or reasoning_content in thinking mode must be passed back",
+            ),
         ] {
             let other = SamplingError::Api {
                 status,
@@ -1176,7 +1327,7 @@ mod tests {
                 retry_after_secs: None,
                 should_retry: Some(false),
             };
-            assert!(!other.requires_portable_responses_reasoning(), "{message}");
+            assert_eq!(other.portable_reasoning_requirement(), None, "{message}");
         }
     }
 

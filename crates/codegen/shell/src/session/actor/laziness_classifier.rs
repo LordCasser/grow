@@ -354,6 +354,11 @@ pub(crate) fn flatten_transcript_for_classifier(
                     truncate(&tr.content),
                 );
             }
+            ConversationItem::AgentMessage(batch) => {
+                for message in &batch.messages {
+                    let _ = writeln!(out, "[agent_message] {}", truncate(&sampling_types::agent_message_result_content(message)));
+                }
+            }
             ConversationItem::BackendToolCall(btc) => {
                 let _ = writeln!(out, "[backend_tool_call] {}", btc.text_summary());
             }

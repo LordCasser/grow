@@ -2405,6 +2405,7 @@ pub(crate) async fn spawn_session_actor(
         compaction: super::compaction_config::CompactionConfig {
             lease: Default::default(),
             background: Default::default(),
+            pending_async_notice: std::cell::Cell::new(None),
             background_failed: std::cell::Cell::new(false),
             threshold_percent: std::cell::Cell::new(auto_compact_threshold_percent),
             memory_flush_enabled: memory_flush_before_compaction,

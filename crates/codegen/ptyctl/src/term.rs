@@ -245,6 +245,43 @@ impl Terminal {
         lines
     }
 
+    /// Text a native selection of the complete scrollback would copy: rows
+    /// carrying WRAPLINE join without an inserted newline. Unlike
+    /// `scrollback_lines`, this retains the emulator's wrap provenance.
+    pub fn scrollback_copy_text(&self) -> String {
+        let grid = self.term.grid();
+        let columns = grid.columns();
+        if columns == 0 {
+            return String::new();
+        }
+        let mut out = String::new();
+        for offset in (1..=grid.history_size()).rev() {
+            let row = &grid[Line(-(offset as i32))];
+            let wrapped = row[Column(columns - 1)].flags.contains(Flags::WRAPLINE);
+            let mut text = String::new();
+            for col_idx in 0..columns {
+                let cell = &row[Column(col_idx)];
+                if cell
+                    .flags
+                    .intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+                text.push(cell.c);
+                if let Some(zerowidth) = cell.zerowidth() {
+                    text.extend(zerowidth.iter().copied());
+                }
+            }
+            if wrapped {
+                out.push_str(&text);
+            } else {
+                out.push_str(text.trim_end());
+                out.push('\n');
+            }
+        }
+        out
+    }
+
     /// Read screen content as plain text lines.
     pub fn screen_content(&self, opts: &ScreenOpts) -> ScreenOutput {
         let grid = self.term.grid();
@@ -354,5 +391,32 @@ fn resolve_range(range: &Option<Range<usize>>, max: usize) -> (usize, usize) {
             (start, end)
         }
         None => (0, max),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrollback_copy_text_respects_native_wrapline() {
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut terminal = Terminal::new(4, 2, SessionListener::new(tx));
+        terminal.feed(b"abcdefgh\r\nijkl\r\n");
+        assert!(terminal.scrollback_count() >= 2);
+        assert!(
+            terminal.scrollback_copy_text().contains("abcdefgh\n"),
+            "native copy inserted a hard break: {:?}",
+            terminal.scrollback_copy_text()
+        );
+
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut hard = Terminal::new(4, 2, SessionListener::new(tx));
+        hard.feed(b"abcd\r\nefgh\r\nijkl\r\n");
+        assert!(
+            hard.scrollback_copy_text().contains("abcd\nefgh\n"),
+            "exact-width hard break was joined: {:?}",
+            hard.scrollback_copy_text()
+        );
     }
 }

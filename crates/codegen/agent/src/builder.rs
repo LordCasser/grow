@@ -187,7 +187,11 @@ fn apply_coordination_tool_gates(
             tool_config.tools.push((&SendSubagentMessageTool).into());
         }
         crate::prompt::context::PromptAudience::Subagent => {
-            tool_config.tools.push((&AskParentTool).into())
+            tool_config.tools.push((&AskParentTool).into());
+            // Subagents may use the same message tool for replies to durable
+            // receipts. The coordinator/runtime reject an unreferenced
+            // upward send, so this does not grant arbitrary parent writes.
+            tool_config.tools.push((&SendSubagentMessageTool).into());
         }
     }
     let list_id = format!("{namespace}:{LIST_ACTIVE_SESSIONS_TOOL_NAME}");
@@ -1102,8 +1106,19 @@ mod tests {
             &mut subagent,
             crate::prompt::context::PromptAudience::Subagent,
         );
-        assert_eq!(subagent.tools.len(), 1);
-        assert!(subagent.tools[0].id.ends_with(":ask_parent"));
+        assert_eq!(subagent.tools.len(), 2);
+        assert!(
+            subagent
+                .tools
+                .iter()
+                .any(|tool| tool.id.ends_with(":ask_parent"))
+        );
+        assert!(
+            subagent
+                .tools
+                .iter()
+                .any(|tool| tool.id.ends_with(":send_subagent_message"))
+        );
     }
 
     /// reqwest is built with `rustls-no-provider` (see the vendoring notes on
@@ -1577,6 +1592,18 @@ mod tests {
         assert!(
             !has(&names, "run_terminal_cmd"),
             "must not inherit-all: {names:?}"
+        );
+    }
+    #[tokio::test]
+    async fn final_agent_filter_removes_runtime_write_before_capability_projection() {
+        let agent = build_with_tools(vec![], vec!["write".into()]).await;
+        assert!(
+            agent
+                .tool_bridge()
+                .native_tool_descriptors()
+                .iter()
+                .all(|(name, _, _, _)| name != "write"),
+            "descriptor review cannot restore an identity removed by final Agent filtering"
         );
     }
     /// An unresolved own-allowlist entry grants nothing; resolved entries and

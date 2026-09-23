@@ -31,12 +31,15 @@ use acp_transport::protocol as acp;
 use acp_transport::{AcpAgentGatewaySender, AcpClientMessage};
 use paths::AbsPathBuf;
 use tools::implementations::grow_build::bash::BashTool;
+use tools::implementations::grow_build::read_file::ReadFileTool;
+use tools::implementations::grow_build::search_replace::SearchReplaceTool;
 use tools::implementations::grow_build::task::TaskTool;
 use tools::implementations::grow_build::task::backend::{SubagentBackend, SubagentBackendResource};
 use tools::implementations::grow_build::task::types::{
     MaxSubagentDepth, SessionIdResource, SubagentCancelOutcome, SubagentDepthCounter,
     SubagentRequest, SubagentResult, SubagentSnapshot, SubagentValidateTypeOutcome,
 };
+use tools::implementations::grow_build::write::WriteTool;
 use tools::implementations::grow_build::{KillTaskTool, TaskOutputTool};
 use tools::registry::types::ToolConfig;
 use workspace::permission::{ClientType, PermissionEvent, spawn_permission_manager};
@@ -441,6 +444,106 @@ fn bash_call_with(id: &str, args: &str) -> crate::sampling::types::ToolCallRespo
     }
 }
 
+fn write_call(
+    id: &str,
+    path: &std::path::Path,
+    content: &str,
+) -> crate::sampling::types::ToolCallResponse {
+    crate::sampling::types::ToolCallResponse {
+        id: id.to_owned(),
+        kind: "function".to_owned(),
+        function: crate::sampling::types::ToolCallFunction::new(
+            "write",
+            serde_json::json!({
+                "file_path": path,
+                "content": content,
+            })
+            .to_string(),
+        ),
+    }
+}
+
+fn search_replace_call(
+    id: &str,
+    path: &std::path::Path,
+    old: &str,
+    new: &str,
+) -> crate::sampling::types::ToolCallResponse {
+    crate::sampling::types::ToolCallResponse {
+        id: id.to_owned(),
+        kind: "function".to_owned(),
+        function: crate::sampling::types::ToolCallFunction::new(
+            "search_replace",
+            serde_json::json!({
+                "file_path": path,
+                "old_string": old,
+                "new_string": new,
+                "replace_all": false,
+            })
+            .to_string(),
+        ),
+    }
+}
+
+async fn configure_reviewed_write_actor(actor: &mut SessionActor) {
+    let edit_config = ToolConfig::for_tool::<SearchReplaceTool>();
+    let read_config = ToolConfig::for_tool::<ReadFileTool>();
+    // The lightweight test builder does not run AgentBuilder's default-tool
+    // injection. Keep the authored snapshot separate, then add write only to
+    // the finalized live config to reproduce the production two-stage shape.
+    let runtime_write_config = ToolConfig::for_tool::<WriteTool>();
+    let authored_tools = tools::registry::types::ToolServerConfig {
+        tools: vec![read_config.clone(), edit_config.clone()],
+    };
+    *actor.agent.borrow_mut() =
+        test_agent_with_tools(vec![read_config, edit_config, runtime_write_config]).await;
+    let bridge = actor.agent.borrow().tool_bridge().clone();
+    assert!(
+        bridge
+            .native_tool_descriptors()
+            .iter()
+            .any(|(name, _, _, review)| name == "write"
+                && *review == tool_protocol::SubagentReviewPolicy::Required),
+        "the finalized post-authored toolset must retain write review metadata"
+    );
+    assert!(
+        !bridge
+            .authored_native_tool_names(&authored_tools)
+            .contains("write"),
+        "write must remain outside the authored preset snapshot"
+    );
+    let capabilities = crate::session::subagent_capability::SubagentCapabilityState::from_bridge(
+        &bridge,
+        &authored_tools,
+        tool_types::SubagentCapabilityMode::ReadWrite,
+        None,
+        Default::default(),
+    )
+    .await;
+    assert!(capabilities.native_call_eligible("write", tool_protocol::ToolAccess::Write));
+    assert!(!capabilities.native_call_available("write", tool_protocol::ToolAccess::Write));
+    assert!(
+        capabilities.native_call_available("search_replace", tool_protocol::ToolAccess::ReadWrite,)
+    );
+    assert!(
+        capabilities
+            .native_catalog_prompt()
+            .contains("approval-required native tools")
+    );
+    actor.subagent_capabilities = Some(capabilities);
+    actor
+        .workspace_ops
+        .bind_local_session(
+            &actor.session_id_string(),
+            actor.tool_context.cwd.as_path().to_path_buf(),
+            actor.tool_context.hunk_tracker_handle.clone(),
+            actor.agent.borrow().tool_bridge().toolset(),
+            None,
+        )
+        .await
+        .expect("rebind reviewed-write toolset");
+}
+
 fn task_call(id: &str) -> crate::sampling::types::ToolCallResponse {
     crate::sampling::types::ToolCallResponse {
         id: id.to_owned(),
@@ -594,6 +697,167 @@ async fn subagent_in_fence_bash_keeps_fast_path_without_prompt() {
                 drain_permission_events(&mut permission_events).is_empty(),
                 "the in-fence fast path must not create permission audit noise"
             );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn injected_write_is_reviewed_per_call_while_matching_edit_keeps_fast_path() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (mut actor, _event_rx, log, mut permission_events) =
+                make_subagent_fixture(Some("allow-once"), std::time::Duration::from_secs(60)).await;
+            configure_reviewed_write_actor(&mut actor).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("reviewed.txt");
+
+            for (id, content) in [
+                ("call_write_first", "first content\n"),
+                ("call_write_second", "second content\n"),
+            ] {
+                let result = actor
+                    .execute_tool_calls(vec![write_call(id, &path, content)])
+                    .await
+                    .expect("approved write must not error");
+                assert!(matches!(result, ToolLoop::Continue));
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), content);
+            }
+
+            let result = actor
+                .execute_tool_calls(vec![search_replace_call(
+                    "call_matching_edit",
+                    &path,
+                    "second",
+                    "edited",
+                )])
+                .await
+                .expect("in-fence matching edit must not error");
+            assert!(matches!(result, ToolLoop::Continue));
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "edited content\n");
+
+            assert!(
+                wait_for_gateway_log(&log, |entry| entry.permission_requests.len() == 2).await,
+                "each write invocation must open its own Gate request"
+            );
+            tokio::task::yield_now().await;
+            assert_eq!(
+                log.lock()
+                    .expect("gateway log lock")
+                    .permission_requests
+                    .len(),
+                2,
+                "the authored matching edit must stay on the initial-RWX fast path"
+            );
+            let events = drain_permission_events(&mut permission_events);
+            let reviewed = events
+                .iter()
+                .filter(|event| event.tool_name == "write")
+                .collect::<Vec<_>>();
+            assert_eq!(reviewed.len(), 2);
+            assert!(reviewed.iter().all(|event| event.decision == "allow"));
+            assert!(
+                events
+                    .iter()
+                    .all(|event| event.tool_name != "search_replace"),
+                "an in-fence matching edit must not create approval audit noise"
+            );
+            assert!(
+                !actor
+                    .subagent_capabilities
+                    .as_ref()
+                    .expect("child capability state")
+                    .native_call_available("write", tool_protocol::ToolAccess::Write),
+                "two allow-once decisions must not widen later write calls"
+            );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn reviewed_write_auto_honors_allow_and_deny_without_human_prompt() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for (decision, should_write) in [("allow", true), ("deny", false)] {
+                let (mut actor, _event_rx, log, mut permission_events) =
+                    make_subagent_fixture(None, std::time::Duration::from_secs(60)).await;
+                actor.startup_hints.subagent_permission_mode =
+                    Some(workspace::permission::types::RequestPermissionMode::Auto);
+                actor.permissions.set_classifier(Some(
+                    workspace::permission::auto_mode::LlmPermissionClassifier::with_fixed_model_text(
+                        format!(
+                            r#"{{"decision":"{decision}","reason":"reviewed write {decision}"}}"#
+                        ),
+                    ),
+                ));
+                configure_reviewed_write_actor(&mut actor).await;
+                let tmp = tempfile::tempdir().unwrap();
+                let path = tmp.path().join(format!("auto-{decision}.txt"));
+                let call_id = format!("call_write_auto_{decision}");
+
+                let result = actor
+                    .execute_tool_calls(vec![write_call(&call_id, &path, "reviewed\n")])
+                    .await
+                    .expect("Auto review must resolve as a tool outcome");
+                assert!(matches!(result, ToolLoop::Continue));
+                assert_eq!(path.exists(), should_write);
+                tokio::task::yield_now().await;
+                assert!(
+                    log.lock()
+                        .expect("gateway log lock")
+                        .permission_requests
+                        .is_empty(),
+                    "Auto uses the primary-context classifier, not a human prompt"
+                );
+                let events = drain_permission_events(&mut permission_events);
+                let event = events
+                    .iter()
+                    .find(|event| event.tool_id == call_id)
+                    .expect("reviewed write permission event");
+                assert_eq!(event.tool_name, "write");
+                assert_eq!(event.decision, if should_write { "allow" } else { "reject" });
+                assert_eq!(event.classifier_source.as_deref(), Some("llm"));
+            }
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn reviewed_write_always_approve_keeps_explicit_operator_semantics() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (mut actor, _event_rx, log, mut permission_events) =
+                make_subagent_fixture(None, std::time::Duration::from_secs(60)).await;
+            actor.startup_hints.subagent_permission_mode =
+                Some(workspace::permission::types::RequestPermissionMode::AlwaysApprove);
+            configure_reviewed_write_actor(&mut actor).await;
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("always-approved.txt");
+
+            let result = actor
+                .execute_tool_calls(vec![write_call(
+                    "call_write_always_approve",
+                    &path,
+                    "operator mode\n",
+                )])
+                .await
+                .expect("AlwaysApprove write must resolve");
+            assert!(matches!(result, ToolLoop::Continue));
+            assert_eq!(std::fs::read_to_string(path).unwrap(), "operator mode\n");
+            tokio::task::yield_now().await;
+            assert!(
+                log.lock()
+                    .expect("gateway log lock")
+                    .permission_requests
+                    .is_empty()
+            );
+            let events = drain_permission_events(&mut permission_events);
+            let event = events
+                .iter()
+                .find(|event| event.tool_id == "call_write_always_approve")
+                .expect("AlwaysApprove audit event");
+            assert_eq!(event.tool_name, "write");
+            assert_eq!(event.decision, "allow");
+            assert_eq!(event.decision_reason.as_deref(), Some("always_approve"));
         })
         .await;
 }

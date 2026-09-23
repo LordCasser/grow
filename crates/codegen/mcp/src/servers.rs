@@ -17,11 +17,12 @@ use tokio::{
 use rmcp::{
     ClientHandler, ServiceExt,
     model::{
-        CallToolRequestParams, ClientCapabilities, ClientInfo, Implementation,
-        PaginatedRequestParams,
+        CallToolRequest, CallToolRequestParams, ClientCapabilities, ClientInfo, ClientRequest,
+        Implementation, PaginatedRequestParams, ServerResult,
     },
     service::{
-        ClientInitializeError, NotificationContext, RoleClient, RunningService, ServiceError,
+        ClientInitializeError, NotificationContext, PeerRequestOptions, RoleClient, RunningService,
+        ServiceError,
     },
     service::{RxJsonRpcMessage, TxJsonRpcMessage},
     transport::{
@@ -1738,47 +1739,13 @@ impl tool_runtime::Tool for McpErasedTool {
         };
 
         let is_error = call_result.is_error.unwrap_or(false);
-        let mut output = if is_error {
-            let error_msg = call_result
-                .content
-                .iter()
-                .filter_map(|c| match c {
-                    rmcp::model::ContentBlock::Text(t) => Some(t.text.clone()),
-                    _ => None,
-                })
-                .collect::<Vec<_>>()
-                .join("\n");
-            ToolOutput::MCP(MCPOutput::errored(tool.clone(), server.clone(), error_msg))
+        let (text, images) = project_mcp_call_result(call_result, client.expose_image_base64());
+        let mcp_output = if is_error {
+            MCPOutput::errored(tool.clone(), server.clone(), text)
         } else {
-            let expose_base64 = client.expose_image_base64();
-            let parts: Vec<String> = call_result
-                .content
-                .into_iter()
-                .filter_map(|c| match c {
-                    rmcp::model::ContentBlock::Text(t) => Some(t.text),
-                    rmcp::model::ContentBlock::Image(img) => {
-                        Some(format_mcp_image(&img.mime_type, &img.data, expose_base64))
-                    }
-                    rmcp::model::ContentBlock::Resource(r) => match &r.resource {
-                        rmcp::model::ResourceContents::BlobResourceContents {
-                            mime_type,
-                            blob,
-                            ..
-                        } if mime_type
-                            .as_deref()
-                            .is_some_and(|m| m.starts_with("image/")) =>
-                        {
-                            let mime = mime_type.as_deref().unwrap();
-                            Some(format_mcp_image(mime, blob, expose_base64))
-                        }
-                        _ => serde_json::to_string(&r).ok(),
-                    },
-                    _ => None,
-                })
-                .collect();
-            let text = parts.join("\n");
-            ToolOutput::MCP(MCPOutput::okay_output(tool.clone(), server.clone(), text))
+            MCPOutput::okay_output(tool.clone(), server.clone(), text)
         };
+        let mut output = ToolOutput::MCP(mcp_output.with_extracted_images(images));
 
         if let ToolOutput::MCP(ref mut mcp_out) = output {
             mcp_out.auth_retry_attempted = false;
@@ -1799,21 +1766,140 @@ impl tool_runtime::Tool for McpErasedTool {
     }
 }
 
-/// Render an MCP image content block. The data URI is consumed by the
-/// session-layer `extract_base64_images` and rendered as vision tokens.
-/// When `expose_base64`, also emit a `<mcp_image_base64>` wrapper that
-/// survives extraction (wrapper has no `data:image/` prefix → regex skips
-/// it), exposing the raw bytes to the agent for path-based forwarding.
-fn format_mcp_image(mime: &str, base64_data: &str, expose_base64: bool) -> String {
-    if expose_base64 {
-        format!(
-            "data:{mime};base64,{base64_data}\n\
-             <mcp_image_base64 mime=\"{mime}\">\n\
-             {base64_data}\n\
-             </mcp_image_base64>"
-        )
+/// Project the native result once for both success and `isError`. Image bytes
+/// travel only in runtime attachments, outside text truncation and ACP raw JSON.
+fn project_mcp_call_result(
+    result: rmcp::model::CallToolResult,
+    expose_base64: bool,
+) -> (String, Vec<tools::util::base64_images::ExtractedImage>) {
+    use rmcp::model::{ContentBlock, ResourceContents};
+    let mut parts = Vec::new();
+    let mut images = Vec::new();
+    let structured = result.structured_content;
+    let mut structured_seen = false;
+    for block in result.content {
+        match block {
+            ContentBlock::Text(text) => {
+                structured_seen |= structured.as_ref().is_some_and(|value| {
+                    serde_json::from_str::<serde_json::Value>(&text.text)
+                        .is_ok_and(|parsed| &parsed == value)
+                });
+                push_mcp_text(&mut parts, &mut images, text.text);
+            }
+            ContentBlock::Image(image) => parts.push(project_mcp_image(
+                &image.mime_type,
+                &image.data,
+                expose_base64,
+                &mut images,
+            )),
+            ContentBlock::Resource(resource) => match resource.resource {
+                ResourceContents::TextResourceContents {
+                    uri,
+                    mime_type,
+                    text,
+                    ..
+                } => push_mcp_text(
+                    &mut parts,
+                    &mut images,
+                    format!(
+                        "[MCP resource: {}, MIME: {}]\n{text}",
+                        mcp_uri_summary(&uri),
+                        mime_type.as_deref().unwrap_or("unknown")
+                    ),
+                ),
+                ResourceContents::BlobResourceContents {
+                    uri,
+                    mime_type,
+                    blob,
+                    ..
+                } if mime_type
+                    .as_deref()
+                    .is_some_and(|m| m.starts_with("image/")) =>
+                {
+                    parts.push(format!(
+                        "[MCP resource: {}] {}",
+                        mcp_uri_summary(&uri),
+                        project_mcp_image(
+                            mime_type.as_deref().unwrap_or_default(),
+                            &blob,
+                            expose_base64,
+                            &mut images,
+                        )
+                    ));
+                }
+                ResourceContents::BlobResourceContents {
+                    uri,
+                    mime_type,
+                    blob,
+                    ..
+                } => parts.push(format!(
+                    "[MCP binary resource omitted: {}, MIME: {}, encoded bytes: {}]",
+                    mcp_uri_summary(&uri),
+                    mime_type.as_deref().unwrap_or("unknown"),
+                    blob.len()
+                )),
+                _ => parts.push("[Unsupported MCP resource content]".to_owned()),
+            },
+            ContentBlock::ResourceLink(link) => {
+                parts.push(format!(
+                    "[MCP resource link: {}, URI: {}, MIME: {}, description: {}]",
+                    link.title.as_deref().unwrap_or(&link.name),
+                    mcp_uri_summary(&link.uri),
+                    link.mime_type.as_deref().unwrap_or("unknown"),
+                    link.description.as_deref().unwrap_or("none")
+                ));
+            }
+            ContentBlock::Audio(audio) => parts.push(format!(
+                "[MCP audio cannot be presented: MIME: {}, encoded bytes: {}]",
+                audio.mime_type,
+                audio.data.len()
+            )),
+            _ => parts.push("[Unsupported MCP content block]".to_owned()),
+        }
+    }
+    if let Some(structured) = structured.filter(|_| !structured_seen) {
+        push_mcp_text(&mut parts, &mut images, structured.to_string());
+    }
+    (parts.join("\n"), images)
+}
+
+fn push_mcp_text(
+    parts: &mut Vec<String>,
+    images: &mut Vec<tools::util::base64_images::ExtractedImage>,
+    text: String,
+) {
+    let remaining = tools::util::base64_images::MAX_IMAGES.saturating_sub(images.len());
+    let extracted = tools::util::base64_images::extract_base64_images_with_budget(text, remaining);
+    parts.push(extracted.text);
+    images.extend(extracted.images);
+}
+
+fn mcp_uri_summary(uri: &str) -> &str {
+    if uri.starts_with("data:") {
+        "[inline data URI omitted]"
     } else {
-        format!("data:{mime};base64,{base64_data}")
+        tools::util::truncate::truncate_str(uri, 512)
+    }
+}
+
+fn project_mcp_image(
+    mime: &str,
+    data: &str,
+    expose_base64: bool,
+    images: &mut Vec<tools::util::base64_images::ExtractedImage>,
+) -> String {
+    match tools::util::base64_images::admit_typed_image(mime, data, images.len()) {
+        Ok(image) => {
+            images.push(image);
+            if expose_base64 {
+                format!(
+                    "[image content will be provided separately]\n<mcp_image_base64 mime=\"{mime}\">\n{data}\n</mcp_image_base64>"
+                )
+            } else {
+                "[image content will be provided separately]".to_owned()
+            }
+        }
+        Err(reason) => format!("[{reason}]"),
     }
 }
 
@@ -1873,12 +1959,11 @@ impl McpErasedTool {
         let mut params = CallToolRequestParams::new(self.tool.name.clone());
         params.arguments = raw.as_object().cloned();
 
-        let result =
-            tokio::time::timeout(timeout_duration, mcp_service.call_tool(params.clone())).await;
+        let result = call_tool_cancel_aware(&mcp_service, params.clone(), timeout_duration).await;
 
         match result {
-            Ok(Ok(call_result)) => Ok(call_result),
-            Ok(Err(service_err))
+            Ok(call_result) => Ok(call_result),
+            Err(service_err)
                 if should_recover_service_error(
                     &service_err,
                     client.is_http(),
@@ -1897,11 +1982,7 @@ impl McpErasedTool {
                 )
                 .await
             }
-            Ok(Err(e)) => Err(tool_runtime::ToolError::custom(
-                "process_manager",
-                e.to_string(),
-            )),
-            Err(_) => {
+            Err(ServiceError::Timeout { .. }) => {
                 *is_timeout = true;
                 // Reset for the next call but don't retry — a slow side-effecting tool must not run twice.
                 if client.is_http() && !*reconnect_attempted {
@@ -1916,6 +1997,10 @@ impl McpErasedTool {
                     ),
                 ))
             }
+            Err(e) => Err(tool_runtime::ToolError::custom(
+                "process_manager",
+                e.to_string(),
+            )),
         }
     }
 
@@ -1948,13 +2033,9 @@ impl McpErasedTool {
                 ));
             }
         };
-        match tokio::time::timeout(timeout_duration, mcp_service.call_tool(params)).await {
-            Ok(Ok(call_result)) => Ok(call_result),
-            Ok(Err(retry_err)) => Err(tool_runtime::ToolError::custom(
-                "process_manager",
-                retry_err.to_string(),
-            )),
-            Err(_) => {
+        match call_tool_cancel_aware(&mcp_service, params, timeout_duration).await {
+            Ok(call_result) => Ok(call_result),
+            Err(ServiceError::Timeout { .. }) => {
                 *is_timeout = true;
                 Err(tool_runtime::ToolError::custom(
                     "process_manager",
@@ -1964,7 +2045,78 @@ impl McpErasedTool {
                     ),
                 ))
             }
+            Err(retry_err) => Err(tool_runtime::ToolError::custom(
+                "process_manager",
+                retry_err.to_string(),
+            )),
         }
+    }
+}
+
+/// A single `tools/call` round. Grow owns both the deadline and cancellation:
+/// rmcp's own timeout notifier must not race the drop guard and send twice.
+async fn call_tool_cancel_aware(
+    service: &McpService,
+    params: CallToolRequestParams,
+    timeout: std::time::Duration,
+) -> Result<rmcp::model::CallToolResult, ServiceError> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    let handle = tokio::time::timeout_at(
+        deadline,
+        service.peer().send_cancellable_request(
+            ClientRequest::CallToolRequest(CallToolRequest::new(params)),
+            PeerRequestOptions::no_options(),
+        ),
+    )
+    .await
+    .map_err(|_| ServiceError::Timeout { timeout })??;
+    let mut guard = CancelMcpCallOnDrop {
+        service: Arc::clone(service),
+        request_id: Some(handle.id.clone()),
+    };
+    match tokio::time::timeout_at(deadline, handle.await_response()).await {
+        Ok(response) => {
+            guard.request_id = None;
+            match response? {
+                ServerResult::CallToolResult(result) => Ok(result),
+                _ => Err(ServiceError::UnexpectedResponse),
+            }
+        }
+        Err(_) => {
+            drop(guard); // one best-effort notification, without extending the deadline
+            Err(ServiceError::Timeout { timeout })
+        }
+    }
+}
+
+struct CancelMcpCallOnDrop {
+    /// Keep the originating transport alive until the notification is queued.
+    service: McpService,
+    request_id: Option<rmcp::model::RequestId>,
+}
+
+impl Drop for CancelMcpCallOnDrop {
+    fn drop(&mut self) {
+        let Some(request_id) = self.request_id.take() else {
+            return;
+        };
+        let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+            tracing::debug!(
+                ?request_id,
+                "MCP call dropped outside a runtime; cancel not sent"
+            );
+            return;
+        };
+        let service = Arc::clone(&self.service);
+        runtime.spawn(async move {
+            let params = rmcp::model::CancelledNotificationParam::new(
+                Some(request_id.clone()),
+                Some("client cancelled".to_owned()),
+            );
+            if let Err(error) = service.peer().notify_cancelled(params).await {
+                tracing::debug!(?request_id, %error, "MCP cancellation notification not delivered");
+            }
+        });
     }
 }
 
@@ -3836,15 +3988,24 @@ impl McpClient {
         &self,
         tool_name: &str,
         arguments: serde_json::Value,
+        timeout: std::time::Duration,
     ) -> Result<rmcp::model::CallToolResult, McpError> {
-        let mcp_service = self.ensure_initialized().await?;
-        let result = mcp_service
-            .call_tool({
-                let mut params = CallToolRequestParams::new(tool_name.to_string());
-                params.arguments = arguments.as_object().cloned();
-                params
-            })
-            .await?;
+        let deadline = tokio::time::Instant::now() + timeout;
+        let mcp_service = tokio::time::timeout_at(deadline, self.ensure_initialized())
+            .await
+            .map_err(|_| McpError::timeout(&self.server_name, timeout))??;
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            return Err(McpError::timeout(&self.server_name, timeout));
+        }
+        let mut params = CallToolRequestParams::new(tool_name.to_string());
+        params.arguments = arguments.as_object().cloned();
+        let result = call_tool_cancel_aware(&mcp_service, params, remaining)
+            .await
+            .map_err(|error| match error {
+                ServiceError::Timeout { .. } => McpError::timeout(&self.server_name, timeout),
+                other => McpError::ServiceError(other),
+            })?;
         Ok(result)
     }
 }
@@ -6462,6 +6623,381 @@ mod tests {
         }
     }
 
+    /// Real rmcp peer over duplex pipes, with every client wire message visible
+    /// to the test. A non-responding tool keeps its request in flight.
+    async fn cancellation_test_service(
+        respond_to_tools: bool,
+    ) -> (
+        McpService,
+        tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+    ) {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+
+        let (client_read, server_write) = tokio::io::duplex(64 * 1024);
+        let (server_read, client_write) = tokio::io::duplex(64 * 1024);
+        let (wire_tx, wire_rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut reader = BufReader::new(server_read);
+            let mut writer = server_write;
+            let mut line = String::new();
+            loop {
+                line.clear();
+                if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                    break;
+                }
+                let message: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+                let method = message["method"].as_str().unwrap_or_default();
+                let response = match method {
+                    "initialize" => Some(serde_json::json!({
+                        "jsonrpc": "2.0", "id": message["id"], "result": {
+                            "protocolVersion": message["params"]["protocolVersion"],
+                            "capabilities": {"tools": {}},
+                            "serverInfo": {"name": "cancel-test", "version": "0.0.0"}
+                        }
+                    })),
+                    "tools/call" if respond_to_tools => Some(serde_json::json!({
+                        "jsonrpc": "2.0", "id": message["id"], "result": {
+                            "content": [{"type": "text", "text": "ok"}],
+                            "isError": false
+                        }
+                    })),
+                    _ => None,
+                };
+                let _ = wire_tx.send(message);
+                if let Some(response) = response {
+                    let mut encoded = serde_json::to_vec(&response).unwrap();
+                    encoded.push(b'\n');
+                    if writer.write_all(&encoded).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        });
+        let handler = GrowClientHandler {
+            info: McpClient::make_client_info("cancel-test"),
+            server_name: "cancel-test".to_owned(),
+            transport_revision: 0,
+            notify_tx: Arc::new(parking_lot::Mutex::new(None)),
+        };
+        let transport = rmcp::transport::async_rw::AsyncRwTransport::<RoleClient, _, _>::new(
+            client_read,
+            client_write,
+        );
+        let service = Arc::new(handler.serve(transport).await.unwrap());
+        (service, wire_rx)
+    }
+
+    async fn next_tool_wire(
+        wire: &mut tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>,
+    ) -> serde_json::Value {
+        loop {
+            let message = tokio::time::timeout(std::time::Duration::from_secs(2), wire.recv())
+                .await
+                .expect("MCP wire message deadline")
+                .expect("MCP wire closed");
+            if message["method"] == "tools/call" {
+                return message;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn completed_mcp_tool_call_sends_no_cancel() {
+        let (service, mut wire) = cancellation_test_service(true).await;
+        let result = call_tool_cancel_aware(
+            &service,
+            CallToolRequestParams::new("echo"),
+            std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.is_error, Some(false));
+        next_tool_wire(&mut wire).await;
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(80), wire.recv())
+                .await
+                .is_err(),
+            "settled call sent a cancellation"
+        );
+    }
+
+    #[tokio::test]
+    async fn timed_out_mcp_tool_call_cancels_its_exact_request_once() {
+        let (service, mut wire) = cancellation_test_service(false).await;
+        let call = tokio::spawn(async move {
+            call_tool_cancel_aware(
+                &service,
+                CallToolRequestParams::new("slow"),
+                std::time::Duration::from_millis(200),
+            )
+            .await
+        });
+        let request = next_tool_wire(&mut wire).await;
+        assert!(matches!(
+            call.await.unwrap(),
+            Err(ServiceError::Timeout { .. })
+        ));
+        let cancellation = tokio::time::timeout(std::time::Duration::from_secs(2), wire.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancellation["method"], "notifications/cancelled");
+        assert_eq!(cancellation["params"]["requestId"], request["id"]);
+        assert!(
+            !matches!(
+                tokio::time::timeout(std::time::Duration::from_millis(80), wire.recv()).await,
+                Ok(Some(_))
+            ),
+            "one timeout sent more than one cancellation"
+        );
+    }
+
+    #[tokio::test]
+    async fn dropped_mcp_tool_call_cancels_its_exact_request() {
+        let (service, mut wire) = cancellation_test_service(false).await;
+        let call = tokio::spawn(async move {
+            call_tool_cancel_aware(
+                &service,
+                CallToolRequestParams::new("slow"),
+                std::time::Duration::from_secs(5),
+            )
+            .await
+        });
+        let request = next_tool_wire(&mut wire).await;
+        call.abort();
+        let _ = call.await;
+        let cancellation = tokio::time::timeout(std::time::Duration::from_secs(2), wire.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancellation["method"], "notifications/cancelled");
+        assert_eq!(cancellation["params"]["requestId"], request["id"]);
+    }
+
+    #[tokio::test]
+    async fn abandoned_mcp_call_never_cancels_replacement_service() {
+        let (old_service, mut old_wire) = cancellation_test_service(false).await;
+        let (new_service, mut new_wire) = cancellation_test_service(false).await;
+        let client = McpClient::stub("cancel-test");
+        *client.state.lock() = ClientState::Ready(Arc::clone(&old_service));
+        let call = tokio::spawn(async move {
+            call_tool_cancel_aware(
+                &old_service,
+                CallToolRequestParams::new("slow"),
+                std::time::Duration::from_secs(5),
+            )
+            .await
+        });
+        let request = next_tool_wire(&mut old_wire).await;
+        *client.state.lock() = ClientState::Ready(new_service);
+        call.abort();
+        let _ = call.await;
+        let cancellation = tokio::time::timeout(std::time::Duration::from_secs(2), old_wire.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancellation["params"]["requestId"], request["id"]);
+        // The replacement still has its post-handshake initialized notification
+        // queued; it must never receive a cancellation for the old peer's id.
+        while let Ok(Some(message)) =
+            tokio::time::timeout(std::time::Duration::from_millis(80), new_wire.recv()).await
+        {
+            assert_ne!(
+                message["method"], "notifications/cancelled",
+                "replacement service received an old request's cancellation"
+            );
+        }
+
+        // A later round on the replacement owns its own id and cancellation.
+        let replacement = client.ensure_initialized().await.unwrap();
+        let retry = tokio::spawn(async move {
+            call_tool_cancel_aware(
+                &replacement,
+                CallToolRequestParams::new("slow"),
+                std::time::Duration::from_secs(5),
+            )
+            .await
+        });
+        let retry_request = next_tool_wire(&mut new_wire).await;
+        retry.abort();
+        let _ = retry.await;
+        let retry_cancellation =
+            tokio::time::timeout(std::time::Duration::from_secs(2), new_wire.recv())
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(retry_cancellation["method"], "notifications/cancelled");
+        assert_eq!(
+            retry_cancellation["params"]["requestId"],
+            retry_request["id"]
+        );
+    }
+
+    #[tokio::test]
+    async fn timeout_and_future_drop_race_sends_only_one_cancellation() {
+        for _ in 0..8 {
+            let (service, mut wire) = cancellation_test_service(false).await;
+            let active = Arc::clone(&service);
+            let call = tokio::spawn(async move {
+                call_tool_cancel_aware(
+                    &active,
+                    CallToolRequestParams::new("slow"),
+                    std::time::Duration::from_millis(30),
+                )
+                .await
+            });
+            let request = next_tool_wire(&mut wire).await;
+            tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+            call.abort();
+            let _ = call.await;
+            let cancellation = tokio::time::timeout(std::time::Duration::from_secs(2), wire.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(cancellation["method"], "notifications/cancelled");
+            assert_eq!(cancellation["params"]["requestId"], request["id"]);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(40), wire.recv())
+                    .await
+                    .is_err(),
+                "timeout/drop race duplicated cancellation"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn cancellation_send_failure_does_not_block_drop() {
+        let (service, _wire) = cancellation_test_service(false).await;
+        service.cancellation_token().cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while service
+                .peer()
+                .notify_cancelled(rmcp::model::CancelledNotificationParam::new(
+                    Some(rmcp::model::RequestId::Number(999)),
+                    None,
+                ))
+                .await
+                .is_ok()
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("closed peer should reject notification");
+        let guard = CancelMcpCallOnDrop {
+            service,
+            request_id: Some(rmcp::model::RequestId::Number(999)),
+        };
+        tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            drop(guard);
+        })
+        .await
+        .expect("failed notification must not block Drop");
+    }
+
+    #[tokio::test]
+    async fn direct_mcp_call_uses_same_deadline_and_cancellation() {
+        let (service, mut wire) = cancellation_test_service(false).await;
+        let client = McpClient::stub("cancel-test");
+        *client.state.lock() = ClientState::Ready(service);
+        let call = tokio::spawn(async move {
+            client
+                .call_tool(
+                    "slow",
+                    serde_json::json!({}),
+                    std::time::Duration::from_millis(200),
+                )
+                .await
+        });
+        let request = next_tool_wire(&mut wire).await;
+        assert!(matches!(call.await.unwrap(), Err(McpError::Timeout { .. })));
+        let cancellation = tokio::time::timeout(std::time::Duration::from_secs(2), wire.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(cancellation["method"], "notifications/cancelled");
+        assert_eq!(cancellation["params"]["requestId"], request["id"]);
+    }
+
+    #[test]
+    fn mcp_projection_preserves_structured_and_nontext_error_content() {
+        use rmcp::model::{CallToolResult, ContentBlock, Resource, ResourceContents};
+
+        let mut result = CallToolResult::error(vec![
+            ContentBlock::text("summary"),
+            ContentBlock::image("A".repeat(1024), "image/png"),
+            ContentBlock::resource(ResourceContents::text("body", "file:///body")),
+            ContentBlock::resource(
+                ResourceContents::blob("A".repeat(1024), "file:///image")
+                    .with_mime_type("image/png"),
+            ),
+            ContentBlock::resource_link(Resource::new("data:image/png;base64,AAAA", "linked")),
+            ContentBlock::audio("AAAA", "audio/wav"),
+        ]);
+        result.structured_content = Some(serde_json::json!({"answer": 42}));
+        let (text, images) = project_mcp_call_result(result, false);
+        assert!(text.contains("summary"));
+        assert!(text.contains("\"answer\":42"));
+        assert!(text.contains("file:///body"));
+        assert!(text.contains("inline data URI omitted"));
+        assert!(!text.contains("data:image/png"));
+        assert!(text.contains("audio cannot be presented"));
+        assert!(!text.contains("A".repeat(1024).as_str()));
+        assert_eq!(images.len(), 2);
+    }
+
+    #[test]
+    fn mcp_projection_deduplicates_equivalent_json_not_distinct_summary() {
+        use rmcp::model::{CallToolResult, ContentBlock};
+
+        let mut same = CallToolResult::success(vec![ContentBlock::text("{\"b\":2,\"a\":1}")]);
+        same.structured_content = Some(serde_json::json!({"a": 1, "b": 2}));
+        let (same_text, _) = project_mcp_call_result(same, false);
+        assert_eq!(same_text, "{\"b\":2,\"a\":1}");
+
+        let mut distinct = CallToolResult::success(vec![ContentBlock::text("summary")]);
+        distinct.structured_content = Some(serde_json::json!({"a": 1}));
+        let (distinct_text, _) = project_mcp_call_result(distinct, false);
+        assert_eq!(distinct_text, "summary\n{\"a\":1}");
+    }
+
+    #[test]
+    fn mcp_projection_rejects_invalid_and_excessive_images_explicitly() {
+        use rmcp::model::{CallToolResult, ContentBlock};
+
+        let mut content = vec![ContentBlock::image("!".repeat(1024), "image/png")];
+        content.extend((0..6).map(|_| ContentBlock::image("A".repeat(1024), "image/png")));
+        let (text, images) = project_mcp_call_result(CallToolResult::success(content), false);
+        assert!(text.contains("invalid base64"));
+        assert!(text.contains("image count limit"));
+        assert_eq!(images.len(), 5);
+    }
+
+    #[test]
+    fn mcp_projection_keeps_inline_and_typed_images_in_block_order() {
+        use rmcp::model::{CallToolResult, ContentBlock, ResourceContents};
+
+        let result = CallToolResult::success(vec![
+            ContentBlock::text(format!("first data:image/png;base64,{}", "A".repeat(1024))),
+            ContentBlock::image("B".repeat(1024), "image/png"),
+            ContentBlock::resource(ResourceContents::text(
+                format!("third data:image/png;base64,{}", "C".repeat(1024)),
+                "file:///third",
+            )),
+        ]);
+        let (text, images) = project_mcp_call_result(result, false);
+        assert_eq!(images.len(), 3);
+        assert_eq!(images[0].data, "A".repeat(1024));
+        assert_eq!(images[1].data, "B".repeat(1024));
+        assert_eq!(images[2].data, "C".repeat(1024));
+        assert_eq!(
+            text.matches("[image content will be provided separately]")
+                .count(),
+            3
+        );
+        assert!(!text.contains("data:image/png"));
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn try_call_tool_http_mcperror_recovers_then_retry_succeeds() {
         let (url, inits, calls) =
@@ -7190,24 +7726,32 @@ mod tests {
     }
 
     #[test]
-    fn format_mcp_image_default_emits_only_data_uri() {
-        let out = format_mcp_image("image/png", "AAAA", false);
-        assert_eq!(out, "data:image/png;base64,AAAA");
-        assert!(!out.contains("<mcp_image_base64"));
+    fn project_mcp_image_default_keeps_data_out_of_text() {
+        let mut images = Vec::new();
+        let out = project_mcp_image("image/png", &"A".repeat(1024), false, &mut images);
+        assert_eq!(out, "[image content will be provided separately]");
+        assert_eq!(images.len(), 1);
+        assert!(!out.contains("base64"));
     }
 
     #[test]
-    fn format_mcp_image_expose_emits_data_uri_and_raw_block() {
-        let out = format_mcp_image("image/png", "AAAA", true);
-        assert!(out.contains("data:image/png;base64,AAAA"));
-        assert!(out.contains("<mcp_image_base64 mime=\"image/png\">\nAAAA\n</mcp_image_base64>"));
+    fn project_mcp_image_expose_emits_bounded_raw_block() {
+        let mut images = Vec::new();
+        let data = "A".repeat(1024);
+        let out = project_mcp_image("image/png", &data, true, &mut images);
+        assert!(out.contains(&format!(
+            "<mcp_image_base64 mime=\"image/png\">\n{data}\n</mcp_image_base64>"
+        )));
+        assert_eq!(images.len(), 1);
     }
 
-    /// Wrapper must not re-match the extractor regex, else the raw copy gets stripped too.
+    /// The explicit raw wrapper does not become an implicit data-URI image.
     #[test]
-    fn format_mcp_image_expose_raw_block_has_no_data_prefix() {
-        let out = format_mcp_image("image/jpeg", "ZZZZ", true);
-        assert_eq!(out.matches("data:image/").count(), 1);
+    fn project_mcp_image_expose_raw_block_has_no_data_prefix() {
+        let mut images = Vec::new();
+        let out = project_mcp_image("image/jpeg", &"A".repeat(1024), true, &mut images);
+        assert_eq!(out.matches("data:image/").count(), 0);
+        assert_eq!(images.len(), 1);
     }
 
     #[test]

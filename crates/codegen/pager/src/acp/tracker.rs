@@ -6,6 +6,7 @@
 use crate::acp::meta::{NotificationMeta, user_message_chunk_meta, user_prompt_meta};
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::SessionEvent;
+use crate::scrollback::blocks::communication::{CommunicationBody, CommunicationSectionKind};
 use crate::scrollback::blocks::tool::list_dir::ListDirToolCallBlock;
 use crate::scrollback::blocks::tool::search::{
     SearchFileMatch, SearchInputMeta, SearchLineMatch, SearchOutputMode, SearchToolCallBlock,
@@ -1832,7 +1833,7 @@ struct CommunicationInput {
     tool: CommunicationTool,
     target_id: Option<String>,
     body: Option<String>,
-    interrupt: Option<bool>,
+    reply_to: Option<String>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -1841,8 +1842,10 @@ struct CommunicationResult {
     phase: Option<String>,
     answer: Option<String>,
     error: Option<String>,
+    error_code: Option<String>,
     target_task_name: Option<String>,
     target_session_id: Option<String>,
+    receipt_id: Option<String>,
 }
 
 fn canonical_tool_name(tc: &acp::ToolCall) -> Option<&str> {
@@ -1899,8 +1902,8 @@ fn communication_input(tc: &acp::ToolCall, tool: CommunicationTool) -> Communica
         tool,
         target_id,
         body,
-        interrupt: (tool == CommunicationTool::SendSubagentMessage)
-            .then(|| tc.raw_input.as_ref()?.get("interrupt")?.as_bool())
+        reply_to: (tool == CommunicationTool::SendSubagentMessage)
+            .then(|| extract_raw_value_text(tc, "reply_to"))
             .flatten(),
     }
 }
@@ -1941,9 +1944,7 @@ fn communication_result(tc: &acp::ToolCall) -> CommunicationResult {
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
         answer: object.get("answer").and_then(json_text),
-        // Tool execution failures carry a stable machine error plus the
-        // coordinator's human-facing message. Preserve the latter so delivery
-        // ambiguity such as `timed out` can still select the right status.
+        // Rendering uses typed status/code; legacy prose stays display-only.
         error: object.get("error").and_then(|error| {
             if error.is_null() {
                 None
@@ -1954,12 +1955,21 @@ fn communication_result(tc: &acp::ToolCall) -> CommunicationResult {
                     .or_else(|| json_text(error))
             }
         }),
+        error_code: object
+            .get("error")
+            .and_then(|error| error.get("code"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
         target_task_name: object
             .get("subagent_task_name")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
         target_session_id: object
             .get("target_session_id")
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_owned),
+        receipt_id: object
+            .get("receipt_id")
             .and_then(serde_json::Value::as_str)
             .map(str::to_owned),
     };
@@ -1984,6 +1994,15 @@ fn title_target(input: &CommunicationInput, result: &CommunicationResult) -> Str
     match input.tool {
         CommunicationTool::AskParent => "parent agent".to_owned(),
         CommunicationTool::AskSubagent | CommunicationTool::SendSubagentMessage => {
+            if let Some(reply_to) = input.reply_to.as_deref() {
+                let reference: Option<serde_json::Value> = serde_json::from_str(reply_to).ok();
+                let participant = result
+                    .target_session_id
+                    .as_deref()
+                    .or_else(|| reference.as_ref()?.get("source_session_id")?.as_str())
+                    .unwrap_or("agent");
+                return format!("agent {participant}");
+            }
             let id = input
                 .target_id
                 .as_deref()
@@ -2040,21 +2059,26 @@ fn communication_status(
     match input.tool {
         CommunicationTool::SendSubagentMessage => {
             if status == "received" {
-                if input.interrupt == Some(true) {
-                    "Received · safe interrupt requested".to_owned()
+                "Received".to_owned()
+            } else if status == "rejected" {
+                if result.error_code.as_deref() == Some("payload_write_failed") {
+                    "Failed"
                 } else {
-                    "Received · queued for next step".to_owned()
+                    "Rejected"
                 }
+                .to_owned()
+            } else if status == "unconfirmed" {
+                "Unconfirmed".to_owned()
             } else if pending {
                 "Sending".to_owned()
-            } else if result
-                .error
-                .as_deref()
-                .is_some_and(is_unknown_delivery_error)
+            } else if result.error.is_some()
+                || (tc.status == acp::ToolCallStatus::Failed && !content_text(tc).is_empty())
             {
-                "Delivery status unknown · may have been received".to_owned()
+                // Legacy string errors have no delivery semantics. Preserve
+                // that uncertainty instead of interpreting words in prose.
+                "Unconfirmed".to_owned()
             } else {
-                "Delivery failed".to_owned()
+                "Failed".to_owned()
             }
         }
         CommunicationTool::GetInquiry => {
@@ -2084,15 +2108,6 @@ fn communication_status(
             }
         }
     }
-}
-
-fn is_unknown_delivery_error(error: &str) -> bool {
-    let error = error.to_ascii_lowercase();
-    error.contains("timeout")
-        || error.contains("timed out")
-        || error.contains("delivery is unknown")
-        || error.contains("receipt may already")
-        || error.contains("may already be durable")
 }
 
 fn inquiry_phase_label(phase: &str) -> String {
@@ -2133,16 +2148,6 @@ fn communication_details(
     let mut lines = vec![format!("Target: {target}"), format!("Status: {status}")];
     if let Some(target_id) = &input.target_id {
         lines.push(format!("Target ID: {target_id}"));
-    }
-    if let Some(interrupt) = input.interrupt {
-        lines.push(format!(
-            "Delivery: {}",
-            if interrupt {
-                "request safe interrupt"
-            } else {
-                "queue for the next step"
-            }
-        ));
     }
     if let Some(body) = &input.body {
         lines.push(format!(
@@ -2193,9 +2198,43 @@ fn communication_tool_call_to_block(tc: &acp::ToolCall) -> Option<OtherToolCallB
     let title = format!("{} → {target}", communication_tool_name(tool));
     let details = communication_details(tc, &input, &result, &status);
     let mut block = OtherToolCallBlock::new(title, status.clone());
-    if let Some(body) = &input.body {
-        block = block.with_communication_preview(body.clone());
+    let mut body = CommunicationBody::new();
+    if let Some(text) = &input.body {
+        body.push(
+            if tool == CommunicationTool::SendSubagentMessage {
+                CommunicationSectionKind::Message
+            } else {
+                CommunicationSectionKind::Question
+            },
+            text.clone(),
+        );
     }
+    if let Some(answer) = &result.answer {
+        body.push(CommunicationSectionKind::Answer, answer.clone());
+    }
+    let communication_error = result.error.clone().or_else(|| {
+        (tc.status == acp::ToolCallStatus::Failed)
+            .then(|| content_text(tc))
+            .filter(|error| !error.is_empty())
+    });
+    if let Some(error) = communication_error {
+        body.push(CommunicationSectionKind::Error, error);
+    }
+    if !body.is_empty() {
+        block = block.with_communication_body(body);
+    } else if let Some(text) = &input.body {
+        block = block.with_communication_preview(text.clone());
+    }
+    let data = serde_json::json!({
+        "input": tc.raw_input.clone(),
+        "output": tc.raw_output.clone(),
+        "receipt_id": result.receipt_id.clone(),
+        "status": result.status.clone(),
+        "error": result.error.clone(),
+    });
+    block = block.with_communication_data(
+        serde_json::to_string_pretty(&data).unwrap_or_else(|_| data.to_string()),
+    );
     block.set_output_text(details);
     if tc.status == acp::ToolCallStatus::Failed {
         block.error = Some(result.error.unwrap_or_else(|| content_text(tc)));
@@ -2745,6 +2784,24 @@ fn extract_raw_field(tc: &acp::ToolCall, field: &str) -> Option<String> {
         .and_then(|v| v.get(field))
         .and_then(|v| v.as_str())
         .map(|s| s.to_string())
+}
+
+fn extract_raw_value_text(tc: &acp::ToolCall, field: &str) -> Option<String> {
+    tc.raw_input
+        .as_ref()
+        .and_then(|value| value.get(field))
+        .and_then(|value| {
+            value
+                .as_str()
+                .map(str::to_owned)
+                .or_else(|| {
+                    let object = value.as_object()?;
+                    let source = object.get("source_session_id")?.as_str()?;
+                    let message = object.get("message_id")?.as_str()?;
+                    Some(format!("{source}/{message}"))
+                })
+                .or_else(|| serde_json::to_string(value).ok())
+        })
 }
 /// Extract a short, user-friendly error label from a failed Edit tool call.
 fn extract_edit_error(tc: &acp::ToolCall) -> String {
@@ -6993,6 +7050,57 @@ mod tests {
         assert_eq!(ut.tool_name, "grafana__search");
     }
     #[test]
+    fn mcp_image_result_renders_redacted_use_tool_text() {
+        use crate::scrollback::block::BlockContent;
+        use crate::scrollback::types::{BlockContext, DisplayMode};
+        use tools::types::output::{MCPOutput, ToolOutput};
+
+        let image_bytes = "A".repeat(2048);
+        let result = ToolOutput::MCP(
+            MCPOutput::okay_output(
+                "image".to_owned(),
+                "server".to_owned(),
+                "before [image content will be provided separately] after".to_owned(),
+            )
+            .with_extracted_images(vec![tools::util::base64_images::ExtractedImage {
+                data: image_bytes.clone(),
+                mime_type: "image/png".to_owned(),
+            }]),
+        );
+        let raw = serde_json::to_value(result).unwrap();
+        assert!(!raw.to_string().contains(&image_bytes));
+        let tc = acp::ToolCall::new(acp::ToolCallId::new("mcp-image"), "use_tool")
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::Completed)
+            .content(vec![])
+            .raw_input(Some(serde_json::json!({
+                "variant": "UseTool", "tool_name": "server__image", "tool_input": {}
+            })))
+            .raw_output(Some(raw));
+        let RenderBlock::ToolCall(ToolCallBlock::UseTool(block)) = tool_call_to_block(&tc, None)
+        else {
+            panic!("MCP result must use the UseTool renderer");
+        };
+        let rendered = block.output(&BlockContext {
+            width: 80,
+            mode: DisplayMode::Expanded,
+            is_running: false,
+            raw: false,
+            max_lines: None,
+            appearance: Default::default(),
+            is_selected: false,
+            cwd: None,
+        });
+        let visible = rendered
+            .lines
+            .iter()
+            .flat_map(|line| line.content.spans.iter())
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        assert!(visible.contains("image content will be provided separately"));
+        assert!(!visible.contains(&image_bytes));
+    }
+    #[test]
     fn call_mcp_tool_no_raw_input_does_not_panic() {
         let tc = acp::ToolCall::new(
             acp::ToolCallId::new(Arc::from("mcp2")),
@@ -7166,7 +7274,7 @@ mod tests {
     }
 
     #[test]
-    fn send_message_ack_timeout_is_shown_as_unknown_delivery() {
+    fn send_message_legacy_error_is_unconfirmed_without_word_matching() {
         for error in [
             "Message receipt acknowledgement unavailable; delivery is unknown",
             "Message receipt acknowledgement timed out; delivery may already be durable",
@@ -7191,11 +7299,52 @@ mod tests {
             else {
                 panic!("expected communication row");
             };
-            assert_eq!(
-                block.summary,
-                "Delivery status unknown · may have been received"
-            );
+            assert_eq!(block.summary, "Unconfirmed");
             assert_eq!(block.error.as_deref(), Some(error));
+        }
+    }
+
+    #[test]
+    fn send_message_uses_typed_receipt_statuses_without_delivery_explanations() {
+        for (status, expected) in [("received", "Received"), ("rejected", "Rejected")] {
+            let call = acp::ToolCall::new(
+                acp::ToolCallId::new(format!("send-{status}")),
+                "send_subagent_message",
+            )
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::Completed)
+            .raw_input(Some(serde_json::json!({
+                "variant": "SendSubagentMessage",
+                "subagent_id": "child-typed",
+                "message": "Please continue.",
+                "interrupt": false
+            })))
+            .raw_output(Some(serde_json::json!({
+                "status": status,
+                "receipt_id": "receipt-1",
+                "error": if status == "rejected" {
+                    serde_json::json!({"code": "rejected", "message": "not accepted"})
+                } else {
+                    serde_json::Value::Null
+                }
+            })));
+            let RenderBlock::ToolCall(ToolCallBlock::Other(block)) =
+                tool_call_to_block(&call, None)
+            else {
+                panic!("expected communication row");
+            };
+            assert_eq!(block.summary, expected);
+            assert!(
+                block
+                    .output
+                    .as_deref()
+                    .is_some_and(|text| !text.contains("Delivery:"))
+            );
+            assert!(
+                block
+                    .communication_data()
+                    .is_some_and(|data| data.contains("receipt-1"))
+            );
         }
     }
 
@@ -7222,10 +7371,7 @@ mod tests {
         else {
             panic!("expected communication row");
         };
-        assert_eq!(
-            block.summary,
-            "Delivery status unknown · may have been received"
-        );
+        assert_eq!(block.summary, "Unconfirmed");
         assert_eq!(block.error.as_deref(), Some(error));
         assert!(
             block

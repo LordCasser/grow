@@ -1192,6 +1192,7 @@ impl SessionActor {
             if projected_images.total_images() > 0 {
                 tracing::info!(
                     described_images = projected_images.described_images,
+                    removed_images = projected_images.removed_images,
                     "installed irreversible model-facing ImageShadows"
                 );
             }
@@ -1249,6 +1250,11 @@ impl SessionActor {
             if self.tool_context.task_output_token_budget.is_none()
                 && let Some(trigger_info) = self.check_auto_compact_needed().await
             {
+                // This request projection is complete even though its pressure
+                // requires a synchronous compaction before provider admission.
+                // Finalize any earlier async notice before that later
+                // compaction establishes a different result.
+                self.publish_pending_async_compaction_notice().await;
                 // Compaction is a provider call of its own. Move it across the
                 // StepEnded fence so response settlement, Goal limits and any
                 // queued route/definition controls become authoritative before
@@ -1273,6 +1279,7 @@ impl SessionActor {
                 continue;
             }
             image_projection_retries = 0;
+            self.publish_pending_async_compaction_notice().await;
             // Request assembly may itself spend Goal tokens (most notably
             // irreversible image-description and compaction Sidebands), and a
             // descendant can settle usage concurrently. Wait for every older
@@ -1391,7 +1398,7 @@ impl SessionActor {
                     auth_retry_schedule.reset();
                     continue;
                 }
-                Ok(SamplerTurnOutcome::EnablePortableResponsesReasoningAndResubmit) => {
+                Ok(SamplerTurnOutcome::EnablePortableReasoningAndResubmit) => {
                     context_overflow_recovery_pending = false;
                     auth_retry_schedule.reset();
                     continue;

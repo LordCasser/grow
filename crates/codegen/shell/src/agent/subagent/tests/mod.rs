@@ -42,7 +42,7 @@ fn normalized_child_seeds_its_system_head_before_timeline_creation() {
         false,
         &mut conversation,
         &mut prefix_len,
-        "child head",
+        Some("child head"),
     )
     .unwrap();
 
@@ -63,7 +63,7 @@ fn new_child_system_head_is_part_of_the_preserved_prefix() {
         false,
         &mut conversation,
         &mut prefix_len,
-        "child head",
+        Some("child head"),
     )
     .unwrap();
 
@@ -84,7 +84,7 @@ fn inherited_child_context_requires_and_preserves_its_system_head() {
             verbatim,
             &mut conversation,
             &mut prefix_len,
-            "fresh child head",
+            None,
         )
         .unwrap();
         assert!(matches!(
@@ -100,11 +100,165 @@ fn inherited_child_context_requires_and_preserves_its_system_head() {
                 verbatim,
                 &mut missing,
                 &mut prefix_len,
-                "fresh child head",
+                None,
             )
             .is_err()
         );
     }
+}
+
+#[test]
+fn a_new_child_still_requires_a_rendered_system_head() {
+    let mut conversation = Vec::new();
+    let mut prefix_len = None;
+
+    assert!(
+        seed_child_system_head(
+            &InitialContextSource::New,
+            false,
+            &mut conversation,
+            &mut prefix_len,
+            None,
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn missing_non_worktree_cwd_falls_back_but_unsafe_paths_do_not() {
+    let parent = tempfile::tempdir().expect("parent workspace");
+    let missing = parent.path().join("removed-child-dir");
+    assert!(
+        validate_resume_non_worktree_cwd(
+            missing.to_string_lossy().as_ref(),
+            parent.path(),
+        )
+        .is_ok()
+    );
+
+    let file = parent.path().join("not-a-directory");
+    std::fs::write(&file, b"file").expect("fixture file");
+    assert!(
+        validate_resume_non_worktree_cwd(file.to_string_lossy().as_ref(), parent.path()).is_err()
+    );
+
+    let outside = tempfile::tempdir().expect("outside directory");
+    assert!(
+        validate_resume_non_worktree_cwd(
+            outside.path().to_string_lossy().as_ref(),
+            parent.path(),
+        )
+        .is_err()
+    );
+}
+
+#[tokio::test]
+async fn cancellation_waits_for_the_child_prompt_terminal() {
+    let (prompt_tx, prompt_rx) = oneshot::channel();
+    let cancel = CancellationToken::new();
+    cancel.cancel();
+    let mut wait = Box::pin(await_subagent_turn_or_cancellation(prompt_rx, cancel));
+
+    assert!(
+        tokio::time::timeout(std::time::Duration::ZERO, &mut wait)
+            .await
+            .is_err(),
+        "cancellation alone must not synthesize a terminal result"
+    );
+    prompt_tx
+        .send(Ok(crate::session::commands::PromptTurnOk {
+            stop_reason: acp::StopReason::Cancelled,
+            total_tokens: 7,
+            turn_snapshot: None,
+            completion_kind: PromptCompletionKind::Cancelled {
+                category: Some(CancellationCategory::MidTurnAbort),
+                context: None,
+            },
+            structured_output: None,
+            usage: None,
+        }))
+        .expect("settled prompt terminal");
+    let terminal = wait.await.expect("prompt sender remained live").unwrap();
+    assert!(matches!(
+        terminal.completion_kind,
+        PromptCompletionKind::Cancelled {
+            category: Some(CancellationCategory::MidTurnAbort),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn cancelled_canonical_link_remains_resume_eligible() {
+    let spawn_fact = recovery_spawn("cancelled-source", "cancelled-child");
+    let mut parent = chat_state::Timeline::default();
+    let spawn = parent
+        .record(chat_state::TimelineEventKind::Subagent(
+            chat_state::SubagentEvent::Spawned(spawn_fact.clone()),
+        ))
+        .expect("parent spawn");
+    let mut child = chat_state::Timeline::default();
+    child
+        .record(chat_state::TimelineEventKind::SubagentSeed(
+            chat_state::SubagentSeedEvent {
+                parent_timeline_id: "parent-session".into(),
+                parent_spawn_seq: spawn.seq.get(),
+                subagent_id: spawn_fact.subagent_id.clone(),
+                security_parent_session_id: spawn_fact.security_parent_session_id.clone(),
+                context_source: spawn_fact.context_source,
+                source_ref: spawn_fact.source_ref.clone(),
+                normalized: spawn_fact.context_normalized,
+            },
+        ))
+        .expect("child seed");
+    let result = child
+        .record(chat_state::TimelineEventKind::SubagentResult(
+            chat_state::SubagentResultEvent {
+                subagent_id: spawn_fact.subagent_id.clone(),
+                outcome: chat_state::SubagentOutcome::Cancelled,
+                duration_ms: 41,
+                tool_calls: 2,
+                turns: 1,
+                tokens_used: 73,
+                error: Some("provider quota stopped the root Goal".into()),
+                output_ref: None,
+            },
+        ))
+        .expect("child result");
+    let terminal = chat_state::SubagentTerminalEvent {
+        subagent_id: spawn_fact.subagent_id.clone(),
+        child_session_id: spawn_fact.child_session_id.clone(),
+        outcome: chat_state::SubagentOutcome::Cancelled,
+        duration_ms: 41,
+        tool_calls: 2,
+        turns: 1,
+        tokens_used: 73,
+        error: Some("provider quota stopped the root Goal".into()),
+        result_ref: Some(chat_state::TimelineRangeRef {
+            timeline_id: spawn_fact.child_session_id.clone(),
+            first_seq: result.seq.get(),
+            last_seq: result.seq.get(),
+        }),
+        snapshot_ref: None,
+    };
+
+    child
+        .validate_subagent_result_link(
+            "parent-session",
+            spawn.seq,
+            &spawn_fact,
+            &terminal,
+        )
+        .expect("cancelled result link is canonical");
+    parent
+        .record(chat_state::TimelineEventKind::Subagent(
+            chat_state::SubagentEvent::Ended(terminal),
+        ))
+        .expect("parent terminal");
+    let source = resume_source_from_timeline(&parent, "cancelled-source")
+        .expect("cancelled lifecycle projects as a resume source");
+    assert_eq!(source.child_session_id, "cancelled-child");
+    assert_eq!(source.model_id, "model");
 }
 #[test]
 fn canonical_total_tokens_does_not_double_count_reasoning() {

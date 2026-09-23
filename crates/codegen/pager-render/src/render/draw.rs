@@ -245,6 +245,11 @@ pub struct WriterThread {
     handle: Option<std::thread::JoinHandle<std::io::Result<()>>>,
     sync: WriterSync,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriterJoin {
+    Joined,
+    TimedOut,
+}
 impl WriterThread {
     /// Block until the writer thread has processed all pending frames and
     /// exited. The [`mpsc::Sender`] must be dropped *before* calling this,
@@ -255,6 +260,25 @@ impl WriterThread {
         };
         match handle.join() {
             Ok(result) => result,
+            Err(_) => Err(std::io::Error::other("terminal writer thread panicked")),
+        }
+    }
+    /// Wait for accepted frames up to `grace`. A timed-out writer is detached;
+    /// joining it again from Drop would defeat the deadline.
+    pub fn join_within(mut self, grace: std::time::Duration) -> std::io::Result<WriterJoin> {
+        let Some(handle) = self.handle.take() else {
+            return Ok(WriterJoin::Joined);
+        };
+        let deadline = std::time::Instant::now() + grace;
+        while !handle.is_finished() {
+            if std::time::Instant::now() >= deadline {
+                drop(handle);
+                return Ok(WriterJoin::TimedOut);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        match handle.join() {
+            Ok(result) => result.map(|()| WriterJoin::Joined),
             Err(_) => Err(std::io::Error::other("terminal writer thread panicked")),
         }
     }
@@ -767,5 +791,27 @@ mod tests {
             test_payload,
             "Round-tripped bytes do not decode to original UTF-8 string"
         );
+    }
+
+    #[test]
+    fn timed_out_writer_does_not_join_again_in_drop() {
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+        let handle = std::thread::spawn(move || {
+            let _ = release_rx.recv();
+            Ok(())
+        });
+        let writer = WriterThread {
+            handle: Some(handle),
+            sync: WriterSync::new(),
+        };
+        let started = std::time::Instant::now();
+        assert_eq!(
+            writer
+                .join_within(std::time::Duration::from_millis(10))
+                .unwrap(),
+            WriterJoin::TimedOut
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        let _ = release_tx.send(());
     }
 }

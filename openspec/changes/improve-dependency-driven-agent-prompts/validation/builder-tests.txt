@@ -1,0 +1,12 @@
+running 9 tests
+test builder::tests::build_task_description_builtin_includes_tools ... ok
+test builder::tests::build_task_description_shadowed_builtin_uses_user_desc ... ok
+test builder::tests::build_task_description_user_entry_is_raw ... ok
+test builder::tests::build_task_description_user_template_syntax_verbatim ... ok
+test builder::tests::build_task_description_contains_header_and_footer ... ok
+test builder::tests::build_task_description_contains_resume_from_guidance ... ok
+test builder::tests::build_task_description_handles_empty_model_catalog ... ok
+test builder::tests::build_task_description_uses_template_variables ... ok
+test builder::tests::build_task_description_lists_public_model_slugs ... ok
+
+test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 468 filtered out; finished in 0.01s

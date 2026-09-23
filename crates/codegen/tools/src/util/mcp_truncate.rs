@@ -466,4 +466,39 @@ mod tests {
         };
         assert_eq!(s.content, "anything", "passthrough leaves content intact");
     }
+
+    #[tokio::test]
+    async fn mcp_typed_image_survives_text_truncation_without_raw_json_leak() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = cfg_with_folder(dir.path().to_path_buf(), 100);
+        let image = crate::util::base64_images::ExtractedImage {
+            data: "A".repeat(2048),
+            mime_type: "image/png".to_owned(),
+        };
+        let output = ToolOutput::MCP(
+            crate::types::output::MCPOutput::okay_output(
+                "tool".to_owned(),
+                "server".to_owned(),
+                "x".repeat(5_000),
+            )
+            .with_extracted_images(vec![image]),
+        );
+        let out = truncate_tool_output(output, &cfg).await;
+        let ToolOutput::MCP(mcp) = &out else {
+            panic!("expected MCP output");
+        };
+        assert!(matches!(mcp.output(), MCPOutputDetails::OkayOutput(t) if t.contains("truncated")));
+        assert_eq!(mcp.extracted_images().len(), 1);
+        assert!(
+            !serde_json::to_string(&out)
+                .unwrap()
+                .contains(&"A".repeat(2048))
+        );
+        assert_eq!(
+            tokio::fs::read_to_string(dir.path().join("mcp/call-test.txt"))
+                .await
+                .unwrap(),
+            "x".repeat(5_000)
+        );
+    }
 }

@@ -1,0 +1,32 @@
+running 27 tests
+test task::tests::format_wait_cap_ms_derives_its_unit_and_rounds_down ... ok
+test task::tests::builtin_subagent_by_name_finds_builtins_only ... ok
+test task::tests::is_terminal_by_status ... ok
+test task::tests::kill_task_subagent_only_toolbox ... ok
+test task::tests::kill_task_matches_cli_default_posix ... ok
+test task::tests::is_terminal_not_found_and_multi ... ok
+test task::tests::kill_task_matches_cli_default_windows ... ok
+test task::tests::subagent_capability_default_is_read_write ... ok
+test task::tests::subagent_capability_intersection_is_the_delegation_meet ... ok
+task description (two test agents, literal names): 2103 bytes
+test task::tests::kill_task_description_tracks_renamed_task_id ... ok
+test task::tests::task_output_description_tracks_renamed_params ... ok
+task output description (CLI default): 878 bytes
+test task::tests::build_task_description_substitutes_names_and_lists_agents ... ok
+test task::tests::prompt_templates_reference_tools_via_by_kind_placeholders ... ok
+test task::tests::build_task_description_preserves_template_placeholders ... ok
+test task::tests::builtin_subagent_catalog_names_and_descriptor_conversion ... ok
+test task::tests::build_task_description_includes_isolation_paragraph ... ok
+test task::tests::sanitize_optional_arg_moves_when_no_trim ... ok
+test task::tests::render_tools_substitutes_naming_with_bare_kind_fallback ... ok
+test task::tests::task_output_matches_cli_default ... ok
+test task::tests::task_output_subagent_only_toolbox ... ok
+test task::tests::task_tool_input_defaults_background_true ... ok
+test task::tests::task_tool_input_model_none_skips_serialize ... ok
+test task::tests::task_tool_input_model_omitted_is_none ... ok
+test task::tests::task_tool_input_model_parses_explicit ... ok
+test task::tests::task_output_input_requires_canonical_plural_array ... ok
+test task::tests::task_output_input_schema_is_exact ... ok
+test task::tests::render_prompt_resolves_tools_and_conditionals ... ok
+
+test result: ok. 27 passed; 0 failed; 0 ignored; 0 measured; 75 filtered out; finished in 0.00s

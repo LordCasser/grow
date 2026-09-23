@@ -17,6 +17,7 @@ fn item_kind_str(item: &ConversationItem) -> &'static str {
         ConversationItem::User(_) => "user",
         ConversationItem::Assistant(_) => "assistant",
         ConversationItem::ToolResult(_) => "tool_result",
+        ConversationItem::AgentMessage(_) => "agent_message",
         ConversationItem::BackendToolCall(_) => "backend_tool_call",
         ConversationItem::Reasoning(_) => "reasoning",
     }
@@ -24,7 +25,7 @@ fn item_kind_str(item: &ConversationItem) -> &'static str {
 
 fn message_cause(item: &ConversationItem) -> Result<MessageCause, crate::TimelineError> {
     match item {
-        ConversationItem::System(_) => Err(crate::TimelineError::InvalidMessageShape),
+        ConversationItem::System(_) | ConversationItem::AgentMessage(_) => Err(crate::TimelineError::InvalidMessageShape),
         ConversationItem::User(user)
             if matches!(
                 user.synthetic_reason.as_ref(),
@@ -895,8 +896,9 @@ impl ChatStateActor {
         self.send_event(ChatStateEvent::ContextPressureUpdated { projected_tokens });
     }
 
-    /// Commit paired image descriptions as one acknowledged Surface mutation.
-    /// Original images remain available; request assembly selects their form.
+    /// Commit typed per-group image projections as one acknowledged Surface
+    /// mutation. Description/OCR shadows retain the image and add reusable
+    /// text; unsupported-model shadows remove the image from the Surface.
     pub(super) async fn record_image_projection(
         &mut self,
         projection: crate::ImageProjectionEvent,
@@ -925,7 +927,15 @@ impl ChatStateActor {
         }
         let mut report = crate::commands::ImageProjectionReport::default();
         for shadow in projection.shadows {
-            report.described_images += shadow.image_count;
+            match shadow.provenance {
+                crate::ImageShadowSource::UnsupportedModel => {
+                    report.removed_images += shadow.image_count;
+                }
+                crate::ImageShadowSource::Description { .. }
+                | crate::ImageShadowSource::LocalOcr { .. } => {
+                    report.described_images += shadow.image_count;
+                }
+            }
         }
         Ok(report)
     }

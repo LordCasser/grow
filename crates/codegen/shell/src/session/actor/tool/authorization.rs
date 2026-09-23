@@ -120,6 +120,7 @@ pub(super) fn project_call_access(
         | ToolInput::GetInquiry(_)
         | ToolInput::GetGoal(_) => ToolAccess::Read,
         ToolInput::SearchReplace(_) | ToolInput::HashlineEdit(_) => ToolAccess::ReadWrite,
+        ToolInput::SendSubagentMessage(input) if input.reply_to.is_some() => ToolAccess::None,
         ToolInput::Write(_) | ToolInput::SendSubagentMessage(_) => ToolAccess::Write,
         ToolInput::Bash(input) => shell_required_access(&input.command),
         ToolInput::Monitor(input) => shell_required_access(&input.command),
@@ -214,6 +215,43 @@ pub(super) fn hash_canonical_json(value: &serde_json::Value) -> String {
     let mut canonical = String::new();
     write(value, &mut canonical);
     blake3::hash(canonical.as_bytes()).to_hex().to_string()
+}
+
+const WRITE_PERMISSION_PREVIEW_BYTES: usize = 1_024;
+
+/// Capture review evidence from the frozen wire identity and parsed arguments.
+/// The operation payload is deliberately bounded and remains untrusted model
+/// content; it explains the proposed effect but grants no authority.
+pub(super) fn permission_call_evidence(
+    tool_name: &str,
+    parsed_args: &serde_json::Value,
+    input: &ToolInput,
+) -> workspace::permission::types::PermissionCallEvidence {
+    let operation = match input {
+        ToolInput::Write(write) => {
+            let truncated = write.content.len() > WRITE_PERMISSION_PREVIEW_BYTES;
+            let preview = tools::util::truncate_str_with_marker(
+                &write.content,
+                WRITE_PERMISSION_PREVIEW_BYTES,
+            )
+            .into_owned();
+            Some(json!({
+                "operation": "replace_entire_file",
+                "path": write.file_path,
+                "content_bytes": write.content.len(),
+                "content_blake3": blake3::hash(write.content.as_bytes()).to_hex().to_string(),
+                "content_preview": preview,
+                "content_preview_truncated": truncated,
+                "content_preview_max_bytes": WRITE_PERMISSION_PREVIEW_BYTES,
+            }))
+        }
+        _ => None,
+    };
+    workspace::permission::types::PermissionCallEvidence {
+        tool_name: tool_name.to_owned(),
+        canonical_args_hash: hash_canonical_json(parsed_args),
+        operation,
+    }
 }
 
 impl ToolCallPermit {
@@ -671,4 +709,48 @@ pub(super) async fn read_plan_artifact_async(
     })
     .await
     .map_err(std::io::Error::other)?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn write_permission_evidence_is_exact_canonical_and_bounded() {
+        let content = "你".repeat(500);
+        let parsed = json!({
+            "content": content,
+            "file_path": "src/important.rs",
+        });
+        let input = ToolInput::Write(tools::implementations::grow_build::WriteInput {
+            file_path: "src/important.rs".to_owned(),
+            content: "你".repeat(500),
+        });
+
+        let evidence = permission_call_evidence("write", &parsed, &input);
+        assert_eq!(evidence.tool_name, "write");
+        assert_eq!(
+            evidence.canonical_args_hash,
+            hash_canonical_json(&json!({
+                "file_path": "src/important.rs",
+                "content": "你".repeat(500),
+            }))
+        );
+        let operation = evidence.operation.expect("write operation summary");
+        assert_eq!(operation["operation"], "replace_entire_file");
+        assert_eq!(operation["path"], "src/important.rs");
+        assert_eq!(operation["content_bytes"], 1_500);
+        assert_eq!(operation["content_preview_truncated"], true);
+        assert_eq!(operation["content_preview_max_bytes"], 1_024);
+        assert!(
+            operation["content_blake3"]
+                .as_str()
+                .is_some_and(|v| v.len() == 64)
+        );
+        assert!(
+            operation["content_preview"]
+                .as_str()
+                .is_some_and(|v| v.len() <= WRITE_PERMISSION_PREVIEW_BYTES && v.ends_with('…'))
+        );
+    }
 }

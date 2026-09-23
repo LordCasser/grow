@@ -58,11 +58,12 @@ pub struct ModelMetadata {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ImageProjectionReport {
     pub described_images: usize,
+    pub removed_images: usize,
 }
 
 impl ImageProjectionReport {
     pub fn total_images(self) -> usize {
-        self.described_images
+        self.described_images + self.removed_images
     }
 }
 
@@ -271,10 +272,13 @@ pub enum ChatStateCommand {
     /// a portable fallback request is rebuilt.
     ResetContinuation { reply: oneshot::Sender<()> },
 
-    /// Enable the current Responses route's narrow portable reasoning replay
+    /// Enable the current route's backend-specific portable reasoning replay
     /// after the provider explicitly requires it. Replies true only when the
     /// route projection changed.
-    EnablePortableResponsesReasoning { reply: oneshot::Sender<bool> },
+    EnablePortableReasoning {
+        backend: sampling_types::ApiBackend,
+        reply: oneshot::Sender<bool>,
+    },
 
     /// Track that the agent edited a file path.
     RecordAgentEditedPath { path: String },

@@ -63,7 +63,13 @@ impl ChildRunner for TestRunner {
                 subagent_task_name: None,
                 target_session_id: None,
                 id: request.id,
-                status: "answered".into(),
+                status: if request.receipt_only {
+                    "receipt_only"
+                } else {
+                    "answered"
+                }
+                .into(),
+                receipt_id: None,
                 answer: Some(format!(
                     "{}->{target}:{subagent_task_name}",
                     request.source_session_id
@@ -748,28 +754,41 @@ async fn workflow_cancel_waits_for_drain_and_hides_owned_children() {
     assert!(harness.backend.inspect("workflow-active").await.is_some());
     assert!(harness.backend.inspect("workflow-pending").await.is_some());
     assert!(harness.backend.list_running("parent").await.is_empty());
-    for action in [
-        super::super::interaction::AgentInteraction::Ask {
-            question: "status?".into(),
-        },
-        super::super::interaction::AgentInteraction::Send {
-            message: "change direction".into(),
-            interrupt: true,
-        },
-    ] {
-        assert!(
-            parent_backend(&harness)
-                .interact(
-                    "workflow-intervention".into(),
-                    Some("workflow-active".into()),
-                    action,
-                    CancellationToken::new(),
-                )
-                .await
-                .is_err(),
-            "Workflow-owned children remain outside manual parent control"
-        );
-    }
+    assert!(
+        parent_backend(&harness)
+            .interact(
+                "workflow-inquiry".into(),
+                Some("workflow-active".into()),
+                super::super::interaction::AgentInteraction::Ask {
+                    question: "status?".into(),
+                },
+                CancellationToken::new(),
+            )
+            .await
+            .is_err(),
+        "Workflow-owned children remain outside manual parent control"
+    );
+    let workflow_send = parent_backend(&harness)
+        .interact(
+            "workflow-intervention".into(),
+            Some("workflow-active".into()),
+            super::super::interaction::AgentInteraction::Send {
+                message: "change direction".into(),
+                interrupt: true,
+                reply_to: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("send preflight rejection is typed");
+    assert_eq!(workflow_send.status, "rejected");
+    assert_eq!(
+        workflow_send
+            .error
+            .as_ref()
+            .map(|error| error.code.as_str()),
+        Some("no_direct_route")
+    );
     let (list_respond_to, list_response_rx) = oneshot::channel();
     harness
         .backend
@@ -1851,6 +1870,23 @@ async fn interactions_use_direct_lineage_and_do_not_block_foreground_spawns() {
         .unwrap();
         assert_eq!(result.answer.as_deref(), Some(expected));
     }
+    let reply = child
+        .interact(
+            "reply".into(),
+            None,
+            AgentInteraction::Send {
+                message: "follow-up".into(),
+                interrupt: false,
+                reply_to: Some(sampling_types::AgentMessageRef {
+                    source_session_id: "parent".into(),
+                    message_id: "parent-call".into(),
+                }),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(reply.answer.as_deref(), Some("child->parent:test child"));
     assert!(
         !spawn.is_finished(),
         "sideband routing must not need child completion"
@@ -1875,19 +1911,23 @@ async fn interactions_use_direct_lineage_and_do_not_block_foreground_spawns() {
                 .is_err()
         );
     }
-    assert!(
-        child
-            .interact(
-                "upward".into(),
-                None,
-                AgentInteraction::Send {
-                    message: "no".into(),
-                    interrupt: true
-                },
-                CancellationToken::new()
-            )
-            .await
-            .is_err()
+    let upward = child
+        .interact(
+            "upward".into(),
+            None,
+            AgentInteraction::Send {
+                message: "no".into(),
+                interrupt: true,
+                reply_to: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("preflight rejection is a typed send outcome");
+    assert_eq!(upward.status, "rejected");
+    assert_eq!(
+        upward.error.as_ref().map(|error| error.code.as_str()),
+        Some("no_direct_route")
     );
     assert!(
         h.backend
@@ -1933,5 +1973,139 @@ async fn interactions_use_direct_lineage_and_do_not_block_foreground_spawns() {
     );
     spawn.abort();
     nested.abort();
+    h.actor.abort();
+}
+
+#[tokio::test]
+async fn send_keeps_ack_receiver_alive_when_cancellation_is_ready() {
+    use super::super::interaction::{AgentInteraction, AgentInteractionOutput};
+
+    let (tx, mut events) = mpsc::unbounded_channel();
+    let backend = ChannelBackend::for_session(tx, "parent");
+    let cancellation = CancellationToken::new();
+    let call = tokio::spawn({
+        let backend = backend.clone();
+        let cancellation = cancellation.clone();
+        async move {
+            backend
+                .interact(
+                    "send".into(),
+                    Some("child".into()),
+                    AgentInteraction::Send {
+                        message: "message".into(),
+                        interrupt: false,
+                        reply_to: None,
+                    },
+                    cancellation,
+                )
+                .await
+        }
+    });
+
+    let Some(SubagentEvent::Interact(request)) =
+        tokio::time::timeout(std::time::Duration::from_secs(2), events.recv())
+            .await
+            .expect("bound send reaches coordinator")
+    else {
+        panic!("send should reach the coordinator before waiting for its ACK");
+    };
+    cancellation.cancel();
+    request
+        .respond_to
+        .send(Ok(AgentInteractionOutput::message_received(
+            "send",
+            "receipt-1",
+        )))
+        .expect("caller should still be waiting for the send ACK");
+
+    let output = call
+        .await
+        .expect("send task should finish")
+        .expect("a ready durable ACK wins cancellation");
+    assert_eq!(output.status, "received");
+    assert_eq!(output.receipt_id.as_deref(), Some("receipt-1"));
+}
+
+#[tokio::test]
+async fn completed_direct_send_uses_readonly_receipt_route() {
+    let mut h = harness_with_options(
+        false,
+        true,
+        CoordinatorConfig {
+            foreground_budget: std::time::Duration::from_secs(60),
+            ..CoordinatorConfig::default()
+        },
+    );
+    let parent = parent_backend(&h);
+    let spawn = tokio::spawn({
+        let backend = parent.clone();
+        async move { backend.spawn(request("child", true)).await }
+    });
+    assert_eq!(h.started.recv().await.as_deref(), Some("child"));
+
+    assert!(matches!(
+        parent.cancel("child").await,
+        SubagentCancelOutcome::Cancelled
+    ));
+    let _ = h.finish.send(());
+    tokio::time::timeout(std::time::Duration::from_secs(1), spawn)
+        .await
+        .expect("cancelled child should finish")
+        .expect("spawn task should join")
+        .expect("child result should be delivered");
+
+    let retry = parent
+        .interact(
+            "retry-old-send".into(),
+            Some("child".into()),
+            super::super::interaction::AgentInteraction::Send {
+                message: "same operation".into(),
+                interrupt: true,
+                reply_to: None,
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("known completed child should allow receipt-only lookup");
+    assert_eq!(retry.status, "receipt_only");
+    h.actor.abort();
+}
+
+#[tokio::test]
+async fn completed_reply_uses_readonly_receipt_route() {
+    use super::super::interaction::AgentInteraction;
+
+    let mut h = harness(false, std::time::Duration::from_secs(60));
+    let parent = parent_backend(&h);
+    let spawn = tokio::spawn({
+        let backend = parent.clone();
+        async move { backend.spawn(request("child", true)).await }
+    });
+    assert_eq!(h.started.recv().await.as_deref(), Some("child"));
+    let _ = h.finish.send(());
+    tokio::time::timeout(std::time::Duration::from_secs(1), spawn)
+        .await
+        .expect("completed child should finish")
+        .expect("spawn task should join")
+        .expect("child result should be delivered");
+
+    let child = ChannelBackend::for_session(h.backend.sender(), "child");
+    let reply = child
+        .interact(
+            "reply-after-complete".into(),
+            None,
+            AgentInteraction::Send {
+                message: "late opinion".into(),
+                interrupt: false,
+                reply_to: Some(sampling_types::AgentMessageRef {
+                    source_session_id: "parent".into(),
+                    message_id: "parent-call".into(),
+                }),
+            },
+            CancellationToken::new(),
+        )
+        .await
+        .expect("known completed child should allow receipt-only lookup");
+    assert_eq!(reply.status, "receipt_only");
     h.actor.abort();
 }

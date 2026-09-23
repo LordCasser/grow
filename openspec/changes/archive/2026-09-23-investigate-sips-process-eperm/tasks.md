@@ -1,0 +1,3 @@
+- [x] Record the failure and bounded reproduction attempts without suppressing errors.
+- [x] Attempt stage attribution with bounded reproduction; record that EPERM did not recur and its originating stage remains unknown.
+- [x] Conclude that no code fix is justified from available evidence; validate and archive without claiming a root cause.

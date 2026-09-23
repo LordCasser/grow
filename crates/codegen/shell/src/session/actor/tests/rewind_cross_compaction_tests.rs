@@ -119,6 +119,12 @@ async fn run_rewind_scenario() {
     actor.session_info.id = acp::SessionId::new(format!("rw-e2e-{unique}"));
 
     seed_compacted_timeline(&actor).await;
+    actor.compaction.pending_async_notice.set(Some(
+        crate::session::compaction_config::PendingAsyncCompactionNotice {
+            tokens_before: 120_000,
+            elapsed_ms: 10,
+        },
+    ));
 
     let resp = actor
         .handle_rewind(RewindRequest {
@@ -129,6 +135,10 @@ async fn run_rewind_scenario() {
         .await
         .expect("handle_rewind ok");
     assert!(resp.success, "rewind should succeed: {resp:?}");
+    assert!(
+        actor.compaction.pending_async_notice.get().is_none(),
+        "conversation rewind supersedes the pending async notice"
+    );
 
     let conv = actor.chat_state_handle.get_conversation().await;
     let texts: Vec<String> = conv.iter().map(|c| c.text_content()).collect();
@@ -168,6 +178,12 @@ async fn run_files_only_bound_scenario() {
 
     record_test_prompt(&actor, "P0").await;
     record_test_prompt(&actor, "P1").await;
+    actor.compaction.pending_async_notice.set(Some(
+        crate::session::compaction_config::PendingAsyncCompactionNotice {
+            tokens_before: 120_000,
+            elapsed_ms: 10,
+        },
+    ));
 
     // Out-of-range FilesOnly: exempt → reverts nothing (no snapshots) but
     // succeeds.
@@ -184,6 +200,10 @@ async fn run_files_only_bound_scenario() {
         "out-of-range FilesOnly must no-op succeed: {oor:?}"
     );
     assert!(oor.reverted_files.is_empty());
+    assert!(
+        actor.compaction.pending_async_notice.get().is_some(),
+        "files-only rewind does not supersede the pending context notice"
+    );
 
     // In-range FilesOnly also succeeds.
     let in_range = actor

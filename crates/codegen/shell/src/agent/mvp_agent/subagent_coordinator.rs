@@ -31,15 +31,16 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
                 .cloned()
                 .or_else(|| agent.active_child_sessions.borrow().get(&id).cloned())
         };
-        let endpoints = lookup(&request.source_session_id).zip(lookup(&target_id));
+        let source = lookup(&request.source_session_id);
+        let target = lookup(&target_id);
         tokio::task::spawn_local(async move {
-            let Some((source, target)) = endpoints else {
+            let Some(source) = source else {
                 let _ = request
                     .respond_to
                     .send(Err("Agent endpoint is no longer running".into()));
                 return;
             };
-            interaction::run(request, source, target, subagent_task_name).await;
+            interaction::run(request, source, target, target_id, subagent_task_name).await;
         });
     }
     fn run(

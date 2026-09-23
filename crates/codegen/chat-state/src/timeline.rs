@@ -101,15 +101,23 @@ pub struct SurfaceRange {
     pub shadowed: Vec<SurfaceId>,
 }
 
+/// Typed per-group provenance and apply disposition.
+///
+/// `Description` and `LocalOcr` retain the image and attach reusable text;
+/// `UnsupportedModel` records that the primary model confirmed it cannot
+/// accept images and that the group must leave the materialized Surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ImageShadowSource {
     Description { result_ref: crate::TimelineRangeRef },
     LocalOcr { engine: String },
+    UnsupportedModel,
 }
 
-/// A durable description paired with an image-bearing Surface item. Acceptance
-/// advances the Surface identity while retaining both image and description.
+/// Durable per-group projection paired with an image-bearing Surface item.
+/// Acceptance advances the Surface identity while the disposition decides
+/// whether the original image is retained beside reused text or removed from
+/// the model-visible Surface.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ImageShadow {
@@ -760,6 +768,12 @@ pub enum PlanHandoffKind {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NotificationSource {
+    /// A non-interrupting opinion, authorized by a receipt in the sender's inbox.
+    AgentReply {
+        source_session_id: String,
+        message_id: String,
+        reply_to: sampling_types::AgentMessageRef,
+    },
     ParentMessage {
         parent_session_id: String,
         message_id: String,
@@ -804,6 +818,10 @@ pub enum NotificationSource {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum NotificationSourceIdentity {
+    AgentReply {
+        source_session_id: String,
+        message_id: String,
+    },
     ParentMessage {
         parent_session_id: String,
         message_id: String,
@@ -834,9 +852,29 @@ enum NotificationSourceIdentity {
 }
 
 impl NotificationSource {
+    /// Runtime-attributed communication metadata; never human authorization.
+    pub fn agent_message(
+        &self,
+    ) -> Option<(&str, &str, Option<&sampling_types::AgentMessageRef>, bool)> {
+        match self {
+            Self::ParentMessage {
+                parent_session_id,
+                message_id,
+                interrupt,
+            } => Some((parent_session_id, message_id, None, *interrupt)),
+            Self::AgentReply {
+                source_session_id,
+                message_id,
+                reply_to,
+            } => Some((source_session_id, message_id, Some(reply_to), false)),
+            _ => None,
+        }
+    }
     fn subject_id(&self) -> &str {
         match self {
-            Self::ParentMessage { message_id, .. } => message_id,
+            Self::ParentMessage { message_id, .. } | Self::AgentReply { message_id, .. } => {
+                message_id
+            }
             Self::MonitorProgress { task_id, .. }
             | Self::TaskStillRunning { task_id, .. }
             | Self::TaskCompleted { task_id, .. } => task_id,
@@ -861,7 +899,9 @@ impl NotificationSource {
                 artifact_revision: *artifact_revision,
                 handoff: *handoff,
             },
-            Self::WorkflowHandoff { .. } | Self::ParentMessage { .. } => NotificationOwner::Session,
+            Self::WorkflowHandoff { .. } | Self::ParentMessage { .. } | Self::AgentReply { .. } => {
+                NotificationOwner::Session
+            }
         }
     }
 
@@ -873,13 +913,22 @@ impl NotificationSource {
             Self::SubagentCompleted { owner, .. } => *owner = notification_owner,
             Self::PlanHandoff { .. }
             | Self::WorkflowHandoff { .. }
-            | Self::ParentMessage { .. } => {}
+            | Self::ParentMessage { .. }
+            | Self::AgentReply { .. } => {}
         }
         self
     }
 
     fn identity(&self) -> NotificationSourceIdentity {
         match self {
+            Self::AgentReply {
+                source_session_id,
+                message_id,
+                ..
+            } => NotificationSourceIdentity::AgentReply {
+                source_session_id: source_session_id.clone(),
+                message_id: message_id.clone(),
+            },
             Self::ParentMessage {
                 parent_session_id,
                 message_id,
@@ -1938,7 +1987,11 @@ impl Timeline {
             .received_notifications
             .iter()
             .filter(|((source, _), _)| {
-                matches!(source, NotificationSourceIdentity::ParentMessage { .. })
+                matches!(
+                    source,
+                    NotificationSourceIdentity::ParentMessage { .. }
+                        | NotificationSourceIdentity::AgentReply { .. }
+                )
             })
             .filter_map(|(_, seq)| self.events.get(seq.get() as usize).cloned())
             .collect::<Vec<_>>();
@@ -1954,14 +2007,15 @@ impl Timeline {
             .map(|notification| notification.payload_ref.blake3.clone())
             .collect::<BTreeSet<_>>();
         for ((source, _), seq) in &self.received_notifications {
-            if matches!(source, NotificationSourceIdentity::ParentMessage { .. })
-                && let Some(TimelineEvent {
-                    kind:
-                        TimelineEventKind::Notification(NotificationEvent::Received {
-                            payload_ref, ..
-                        }),
-                    ..
-                }) = self.events.get(seq.get() as usize)
+            if matches!(
+                source,
+                NotificationSourceIdentity::ParentMessage { .. }
+                    | NotificationSourceIdentity::AgentReply { .. }
+            ) && let Some(TimelineEvent {
+                kind:
+                    TimelineEventKind::Notification(NotificationEvent::Received { payload_ref, .. }),
+                ..
+            }) = self.events.get(seq.get() as usize)
             {
                 hashes.insert(payload_ref.blake3.clone());
             }
@@ -2025,6 +2079,37 @@ impl Timeline {
 
     pub fn surface_ids(&self) -> &[SurfaceId] {
         &self.surface_ids
+    }
+
+    /// Whether an already-validated event can canonically own this historical
+    /// Surface coordinate. The item need not remain on the current Surface.
+    pub(crate) fn owns_surface_id(&self, id: SurfaceId) -> bool {
+        usize::try_from(id.event.get())
+            .ok()
+            .and_then(|index| self.events.get(index))
+            .is_some_and(|event| {
+                if event.seq != id.event {
+                    return false;
+                }
+                let item = usize::try_from(id.item).ok();
+                match &event.kind {
+                    TimelineEventKind::Messages(messages) => {
+                        item.is_some_and(|item| item < messages.items.len())
+                    }
+                    TimelineEventKind::Input(InputEvent::Consumed { .. }) => id.item == 0,
+                    TimelineEventKind::Notification(NotificationEvent::Consumed {
+                        input: Some(_),
+                        ..
+                    }) => id.item == 0,
+                    TimelineEventKind::ImageProjection(projection) => {
+                        item.is_some_and(|item| item < projection.shadows.len())
+                    }
+                    TimelineEventKind::Control(control) => {
+                        item.is_some_and(|item| item < control.model_contexts.len())
+                    }
+                    _ => false,
+                }
+            })
     }
 
     /// Effective model context for each Control layer, whether or not its
@@ -3193,16 +3278,8 @@ impl Timeline {
                     let Some(index) = surface_index_by_leaf.get(&shadow.source).copied() else {
                         continue;
                     };
-                    let projected = sampling_types::conversation::attach_item_image_description(
-                        &mut self.surface[index],
-                        &shadow.replacement,
-                    );
-                    let derived_redacted =
-                        sampling_types::conversation::redact_projected_image_compaction_references(
-                            &mut self.surface[index],
-                            source_leaf,
-                            &shadow.replacement,
-                        );
+                    let (projected, derived_redacted) =
+                        apply_image_shadow(&mut self.surface[index], source_leaf, shadow);
                     if projected > 0 || derived_redacted {
                         if projected > 0 {
                             debug_assert_eq!(projected, shadow.image_count);
@@ -3412,6 +3489,7 @@ impl Timeline {
                         self.pending_notifications.insert(id.clone(), notification);
                     }
                     NotificationSource::ParentMessage { .. }
+                    | NotificationSource::AgentReply { .. }
                     | NotificationSource::SubagentCompleted { .. }
                     | NotificationSource::PlanHandoff { .. }
                     | NotificationSource::WorkflowHandoff { .. } => {
@@ -3562,7 +3640,7 @@ impl Timeline {
                 {
                     return Err(TimelineError::InvalidImageProjection);
                 }
-                let valid_ref = match &shadow.provenance {
+                let valid_provenance = match &shadow.provenance {
                     ImageShadowSource::Description { result_ref } => result_ref.validate().is_ok()
                         && result_ref.first_seq == result_ref.last_seq
                         && self.events.iter().any(|event| {
@@ -3578,8 +3656,14 @@ impl Timeline {
                             )
                         }),
                     ImageShadowSource::LocalOcr { engine } => engine == "tesseract",
+                    // A removal carries no provider text, so the only accepted
+                    // replacement is the canonical capability-loss statement.
+                    ImageShadowSource::UnsupportedModel => {
+                        shadow.replacement
+                            == sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT
+                    }
                 };
-                if !valid_ref {
+                if !valid_provenance {
                     return Err(TimelineError::InvalidImageProjection);
                 }
                 if let Some(tool_call) = group.and_then(|group| group.tool_call.as_ref()) {
@@ -3973,6 +4057,8 @@ impl Timeline {
                     || !valid_blake3(&payload_ref.blake3)
                     || !valid_notification_source_version(source, source_version)
                     || !valid_notification_owner(&source.owner())
+                    || matches!(source, NotificationSource::AgentReply { source_session_id, reply_to, .. }
+                        if source_session_id == owner_session_id || reply_to.source_session_id != *owner_session_id)
                     || notification_id(owner_session_id, source, source_version)
                         .ok()
                         .as_deref()
@@ -4013,7 +4099,38 @@ impl Timeline {
                         return Err(TimelineError::NotificationAlreadyConsumed(id.clone()));
                     }
                 }
-                if let Some(input) = input
+                if notification_ids.iter().any(|id| {
+                    matches!(
+                        self.pending_notifications[id].source,
+                        NotificationSource::AgentReply { .. }
+                    )
+                }) && !matches!(input, Some(ConversationItem::AgentMessage(_)))
+                {
+                    return Err(TimelineError::InvalidNotification);
+                }
+                if let Some(ConversationItem::AgentMessage(batch)) = input {
+                    if batch.messages.len() != notification_ids.len() || batch.messages.is_empty() {
+                        return Err(TimelineError::InvalidNotification);
+                    }
+                    for (id, message) in notification_ids.iter().zip(&batch.messages) {
+                        let receipt = &self.pending_notifications[id];
+                        let Some((source, operation, reply_to, _)) = receipt.source.agent_message()
+                        else {
+                            return Err(TimelineError::InvalidNotification);
+                        };
+                        if message.receipt_id != *id
+                            || message.source_session_id != source
+                            || message.target_session_id != receipt.owner_session_id
+                            || message.message_id != operation
+                            || message.reply_to.as_ref() != reply_to
+                            || message.message.len() as u64 != receipt.payload_ref.bytes
+                            || blake3::hash(message.message.as_bytes()).to_hex().as_str()
+                                != receipt.payload_ref.blake3
+                        {
+                            return Err(TimelineError::InvalidNotification);
+                        }
+                    }
+                } else if let Some(input) = input
                     && valid_notification_input(input)
                 {
                     let plan_receipts = notification_ids
@@ -5953,6 +6070,20 @@ fn valid_notification_source_version(
 ) -> bool {
     match (source, version) {
         (
+            NotificationSource::AgentReply {
+                source_session_id,
+                message_id,
+                reply_to,
+            },
+            NotificationSourceVersion::Ordinal { value },
+        ) => {
+            *value == PARENT_MESSAGE_SOURCE_VERSION
+                && valid_notification_identifier(source_session_id)
+                && valid_notification_identifier(message_id)
+                && valid_notification_identifier(&reply_to.source_session_id)
+                && valid_notification_identifier(&reply_to.message_id)
+        }
+        (
             NotificationSource::ParentMessage {
                 parent_session_id,
                 message_id,
@@ -6173,6 +6304,36 @@ struct BranchProvenance {
     leaves: Vec<SurfaceId>,
 }
 
+/// One decision point for applying an image shadow, shared by live accept and
+/// bulk replay: the typed disposition selects both the pure item
+/// transformation and its matching derived compaction-reference redaction.
+/// Returns the number of transformed image parts and whether a derived
+/// compaction summary reference changed.
+fn apply_image_shadow(
+    item: &mut ConversationItem,
+    source: &ConversationItem,
+    shadow: &ImageShadow,
+) -> (usize, bool) {
+    match shadow.provenance {
+        ImageShadowSource::Description { .. } | ImageShadowSource::LocalOcr { .. } => (
+            sampling_types::conversation::attach_item_image_description(item, &shadow.replacement),
+            sampling_types::conversation::redact_projected_image_compaction_references(
+                item,
+                source,
+                &shadow.replacement,
+            ),
+        ),
+        ImageShadowSource::UnsupportedModel => (
+            sampling_types::conversation::remove_item_images_with_text(item, &shadow.replacement),
+            sampling_types::conversation::redact_removed_image_compaction_references(
+                item,
+                source,
+                &shadow.replacement,
+            ),
+        ),
+    }
+}
+
 #[derive(Default)]
 struct BranchFold {
     surface: Vec<BranchProvenance>,
@@ -6281,10 +6442,8 @@ fn fold_branch_provenance(timeline: &Timeline) -> BranchFold {
                         continue;
                     };
                     let mut projected_leaf = source_leaf.clone();
-                    let removed = sampling_types::conversation::attach_item_image_description(
-                        &mut projected_leaf,
-                        &shadow.replacement,
-                    );
+                    let (removed, _) =
+                        apply_image_shadow(&mut projected_leaf, &source_leaf, shadow);
                     debug_assert_eq!(removed, shadow.image_count);
                     let replacement_id = SurfaceId {
                         event: event.seq,
@@ -6309,15 +6468,8 @@ fn fold_branch_provenance(timeline: &Timeline) -> BranchFold {
                                 *leaf = replacement_id;
                             }
                         }
-                        let projected = sampling_types::conversation::attach_item_image_description(
-                            &mut entry.value,
-                            &shadow.replacement,
-                        );
-                        let derived_redacted = sampling_types::conversation::redact_projected_image_compaction_references(
-                            &mut entry.value,
-                            &source_leaf,
-                            &shadow.replacement,
-                        );
+                        let (projected, derived_redacted) =
+                            apply_image_shadow(&mut entry.value, &source_leaf, shadow);
                         if projected > 0 || derived_redacted {
                             if projected > 0 {
                                 debug_assert_eq!(projected, shadow.image_count);
@@ -11099,6 +11251,332 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_model_removal_requires_the_canonical_replacement() {
+        use sampling_types::conversation::{ContentPart, UserItem, conversation_image_groups};
+
+        let image = ConversationItem::User(UserItem {
+            content: vec![
+                ContentPart::Text {
+                    text: "before".into(),
+                },
+                ContentPart::Image {
+                    description: None,
+                    url: "data:image/png;base64,first".into(),
+                },
+                ContentPart::Text {
+                    text: "between".into(),
+                },
+                ContentPart::Image {
+                    description: None,
+                    url: "data:image/png;base64,second".into(),
+                },
+            ],
+            ..Default::default()
+        });
+        let mut timeline = Timeline::from_seed(vec![image.clone()]).unwrap();
+        let before_revision = timeline.surface_revision();
+        let group = conversation_image_groups(timeline.surface()).remove(0);
+        assert_eq!(group.image_count(), 2);
+        let source = timeline.surface_ids()[0];
+
+        assert!(matches!(
+            timeline.record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+                trigger_runtime: sampling_types::ModelImageInputKey::new(
+                    "glm-5.2",
+                    "chat_completions",
+                    "endpoint",
+                ),
+                source_revision: before_revision,
+                shadows: vec![ImageShadow {
+                    source,
+                    fingerprint: group.fingerprint.clone(),
+                    image_count: group.image_count(),
+                    replacement: "an arbitrary unproven sentence".into(),
+                    provenance: ImageShadowSource::UnsupportedModel,
+                }],
+                tool_calls: vec![],
+            })),
+            Err(TimelineError::InvalidImageProjection)
+        ));
+
+        timeline
+            .record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+                trigger_runtime: sampling_types::ModelImageInputKey::new(
+                    "glm-5.2",
+                    "chat_completions",
+                    "endpoint",
+                ),
+                source_revision: before_revision,
+                shadows: vec![ImageShadow {
+                    source,
+                    fingerprint: group.fingerprint.clone(),
+                    image_count: group.image_count(),
+                    replacement: sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT
+                        .to_owned(),
+                    provenance: ImageShadowSource::UnsupportedModel,
+                }],
+                tool_calls: vec![],
+            }))
+            .unwrap();
+
+        assert_eq!(timeline.surface_revision(), before_revision + 1);
+        assert!(conversation_image_groups(timeline.surface()).is_empty());
+        let ConversationItem::User(user) = &timeline.surface()[0] else {
+            panic!("expected user item");
+        };
+        assert!(matches!(
+            user.content.as_slice(),
+            [
+                ContentPart::Text { text: before },
+                ContentPart::Text { text: replacement },
+                ContentPart::Text { text: between },
+            ] if before.as_ref() == "before"
+                && replacement.as_ref()
+                    == sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT
+                && between.as_ref() == "between"
+        ));
+        assert_ne!(timeline.surface_ids()[0], source);
+
+        let raw_source = timeline.events()[0]
+            .messages()
+            .expect("seed is immutable raw evidence");
+        assert_eq!(
+            serde_json::to_vec(&raw_source.items).unwrap(),
+            serde_json::to_vec(std::slice::from_ref(&image)).unwrap(),
+        );
+
+        let durable = serde_json::to_value(timeline.events().last().unwrap()).unwrap();
+        assert_eq!(
+            durable["event"]["shadows"][0]["provenance"]["kind"],
+            "unsupported_model"
+        );
+        let restored = serde_json::from_value::<crate::TimelineEvent>(durable.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&restored).unwrap(), durable);
+
+        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert_eq!(
+            serde_json::to_value(replayed.surface()).unwrap(),
+            serde_json::to_value(timeline.surface()).unwrap()
+        );
+        assert_eq!(replayed.surface_ids(), timeline.surface_ids());
+    }
+
+    #[test]
+    fn unsupported_model_removal_redacts_image_tool_paths_and_carriers() {
+        use sampling_types::conversation::{ContentPart, ToolCall, conversation_image_groups};
+
+        let seed = vec![
+            ConversationItem::Reasoning(sampling_types::conversation::synthesized_reasoning_item(
+                "Reading /secret/from-reasoning.png",
+            )),
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: "call_image".into(),
+                name: "read_file".into(),
+                arguments: r#"{"target_file":"/secret/from-assistant.png","query":"keep-query"}"#
+                    .into(),
+            }]),
+            ConversationItem::tool_result_with_images(
+                "call_image",
+                "Read /secret/from-assistant.png; extracted text",
+                vec![
+                    ContentPart::Text {
+                        text: "metadata retained".into(),
+                    },
+                    ContentPart::Image {
+                        description: None,
+                        url: "data:image/png;base64,first".into(),
+                    },
+                    ContentPart::Image {
+                        description: None,
+                        url: "data:image/png;base64,second".into(),
+                    },
+                ],
+            ),
+        ];
+        let mut timeline = Timeline::from_seed(seed).unwrap();
+        let group = conversation_image_groups(timeline.surface()).remove(0);
+        assert_eq!(group.image_count(), 2);
+        assert_eq!(
+            group.tool_call.as_ref().map(|call| call.item_index),
+            Some(1)
+        );
+        let assistant_source = timeline.surface_ids()[1];
+        timeline
+            .record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+                trigger_runtime: sampling_types::ModelImageInputKey::new(
+                    "glm-5.2",
+                    "chat_completions",
+                    "endpoint",
+                ),
+                source_revision: timeline.surface_revision(),
+                shadows: vec![ImageShadow {
+                    source: timeline.surface_ids()[group.item_index],
+                    fingerprint: group.fingerprint.clone(),
+                    image_count: group.image_count(),
+                    replacement: sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT
+                        .to_owned(),
+                    provenance: ImageShadowSource::UnsupportedModel,
+                }],
+                tool_calls: vec![ImageToolCallShadow {
+                    source: assistant_source,
+                    tool_call_ids: vec!["call_image".into()],
+                    carrier_sources: vec![timeline.surface_ids()[0]],
+                }],
+            }))
+            .unwrap();
+
+        let ConversationItem::ToolResult(result) = &timeline.surface()[2] else {
+            panic!("expected tool result");
+        };
+        assert!(matches!(
+            result.images.as_slice(),
+            [ContentPart::Text { text }] if text.as_ref() == "metadata retained"
+        ));
+        assert!(
+            result
+                .content
+                .contains(sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT)
+        );
+        assert!(!result.content.contains("/secret/from-assistant.png"));
+        let ConversationItem::Assistant(assistant) = &timeline.surface()[1] else {
+            panic!("expected assistant");
+        };
+        assert_eq!(assistant.tool_calls[0].id.as_ref(), "call_image");
+        assert!(!assistant.tool_calls[0].arguments.contains("keep-query"));
+        assert_eq!(
+            assistant.content.as_ref(),
+            "[Image-associated assistant text projected to durable text.]"
+        );
+        let ConversationItem::Assistant(carrier) = &timeline.surface()[0] else {
+            panic!("expected replaced carrier");
+        };
+        assert_eq!(
+            carrier.content.as_ref(),
+            "[Image-associated response carrier projected to durable text.]"
+        );
+
+        let surface = serde_json::to_string(timeline.surface()).unwrap();
+        assert!(!surface.contains("/secret/from-assistant.png"));
+        assert!(!surface.contains("data:image/png;base64,first"));
+        let branch = serde_json::to_string(&timeline.branch_transcript()).unwrap();
+        assert!(!branch.contains("/secret/from-assistant.png"));
+        let raw_events = serde_json::to_string(timeline.events()).unwrap();
+        assert!(raw_events.contains("/secret/from-assistant.png"));
+        assert!(raw_events.contains("data:image/png;base64,first"));
+
+        let request = timeline.branch_transcript();
+        assert!(conversation_image_groups(&request).is_empty());
+        assert!(
+            request
+                .iter()
+                .all(|item| !item.text_content().contains("/secret/from-assistant.png"))
+        );
+
+        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert_eq!(
+            serde_json::to_value(replayed.surface()).unwrap(),
+            serde_json::to_value(timeline.surface()).unwrap()
+        );
+        assert_eq!(replayed.surface_ids(), timeline.surface_ids());
+    }
+
+    #[test]
+    fn mixed_description_and_removal_shadows_apply_atomically() {
+        use sampling_types::conversation::{ContentPart, UserItem, conversation_image_groups};
+
+        let seed = vec![
+            ConversationItem::User(UserItem {
+                content: vec![
+                    ContentPart::Text {
+                        text: "described group".into(),
+                    },
+                    ContentPart::Image {
+                        description: None,
+                        url: "data:image/png;base64,described".into(),
+                    },
+                ],
+                ..Default::default()
+            }),
+            ConversationItem::User(UserItem {
+                content: vec![
+                    ContentPart::Text {
+                        text: "removed group".into(),
+                    },
+                    ContentPart::Image {
+                        description: None,
+                        url: "data:image/png;base64,removed-a".into(),
+                    },
+                    ContentPart::Image {
+                        description: None,
+                        url: "data:image/png;base64,removed-b".into(),
+                    },
+                ],
+                ..Default::default()
+            }),
+        ];
+        let mut timeline = Timeline::from_seed(seed).unwrap();
+        let groups = conversation_image_groups(timeline.surface());
+        assert_eq!(groups.len(), 2);
+        timeline
+            .record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+                trigger_runtime: sampling_types::ModelImageInputKey::new(
+                    "glm-5.2",
+                    "chat_completions",
+                    "endpoint",
+                ),
+                source_revision: timeline.surface_revision(),
+                shadows: vec![
+                    ImageShadow {
+                        source: timeline.surface_ids()[groups[0].item_index],
+                        fingerprint: groups[0].fingerprint.clone(),
+                        image_count: groups[0].image_count(),
+                        replacement: "described in order".into(),
+                        provenance: ImageShadowSource::LocalOcr {
+                            engine: "tesseract".into(),
+                        },
+                    },
+                    ImageShadow {
+                        source: timeline.surface_ids()[groups[1].item_index],
+                        fingerprint: groups[1].fingerprint.clone(),
+                        image_count: groups[1].image_count(),
+                        replacement: sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT
+                            .to_owned(),
+                        provenance: ImageShadowSource::UnsupportedModel,
+                    },
+                ],
+                tool_calls: vec![],
+            }))
+            .unwrap();
+
+        let described_group = conversation_image_groups(&timeline.surface()[0..1]);
+        assert_eq!(described_group.len(), 1);
+        assert_eq!(
+            sampling_types::conversation::item_image_description(&timeline.surface()[0]),
+            Some("described in order")
+        );
+        assert!(conversation_image_groups(&timeline.surface()[1..]).is_empty());
+        let ConversationItem::User(removed) = &timeline.surface()[1] else {
+            panic!("expected user item");
+        };
+        assert!(matches!(
+            removed.content.as_slice(),
+            [
+                ContentPart::Text { text: heading },
+                ContentPart::Text { text: replacement },
+            ] if heading.as_ref() == "removed group"
+                && replacement.as_ref()
+                    == sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT
+        ));
+
+        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert_eq!(
+            serde_json::to_value(replayed.surface()).unwrap(),
+            serde_json::to_value(timeline.surface()).unwrap()
+        );
+        assert_eq!(replayed.surface_ids(), timeline.surface_ids());
+    }
+
+    #[test]
     fn image_projection_atomically_redacts_parallel_tool_call_paths() {
         use sampling_types::conversation::{
             BackendToolCallItem, ContentPart, ToolCall, conversation_image_groups,
@@ -11782,6 +12260,97 @@ mod tests {
             timeline.surface()[0].text_content()
         );
         assert!(!replayed.surface()[0].text_content().contains(asset));
+    }
+
+    #[test]
+    fn unsupported_model_removal_scrubs_asset_paths_from_completed_compaction_summary() {
+        use sampling_types::conversation::{ContentPart, UserItem, conversation_image_groups};
+
+        let asset = "/sessions/example/assets/removed-image.png";
+        let image = ConversationItem::User(UserItem {
+            content: vec![
+                ContentPart::Text {
+                    text: format!("<image_files>\n1. {asset}\n</image_files>\ninspect this").into(),
+                },
+                ContentPart::Image {
+                    description: None,
+                    url: "data:image/png;base64,original".into(),
+                },
+            ],
+            ..Default::default()
+        });
+        let mut timeline = Timeline::from_seed(vec![image]).unwrap();
+        let original_source = timeline.surface_ids()[0];
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
+                id: "compact-removed-image".into(),
+                source_items: 1,
+                prompt_index: 0,
+            }))
+            .unwrap();
+        let target = record_compaction_summary(&mut timeline, "compact-removed-image");
+        timeline
+            .replace_compaction_range(
+                target,
+                vec![ConversationItem::user_meta(format!(
+                    "Keep the architecture notes. The image remains at {asset}."
+                ))],
+            )
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Completed {
+                id: "compact-removed-image".into(),
+                source_items: 1,
+                result_items: 1,
+                duration_ms: 1,
+            }))
+            .unwrap();
+
+        let group = conversation_image_groups(&timeline.branch_transcript()).remove(0);
+        timeline
+            .record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+                trigger_runtime: sampling_types::ModelImageInputKey::new(
+                    "glm-5.2",
+                    "chat_completions",
+                    "endpoint",
+                ),
+                source_revision: timeline.surface_revision(),
+                shadows: vec![ImageShadow {
+                    source: original_source,
+                    fingerprint: group.fingerprint.clone(),
+                    image_count: group.image_count(),
+                    replacement: sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT
+                        .to_owned(),
+                    provenance: ImageShadowSource::UnsupportedModel,
+                }],
+                tool_calls: vec![],
+            }))
+            .unwrap();
+
+        let summary = timeline.surface()[0].text_content();
+        assert!(summary.contains("Keep the architecture notes."));
+        assert!(!summary.contains(asset));
+        assert!(summary.contains(&format!(
+            "[Projected image removal: {}]",
+            sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT
+        )));
+        assert!(
+            timeline
+                .branch_transcript()
+                .iter()
+                .all(|item| !item.text_content().contains(asset))
+        );
+        assert!(conversation_image_groups(&timeline.branch_transcript()).is_empty());
+
+        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert_eq!(
+            replayed.surface()[0].text_content(),
+            timeline.surface()[0].text_content()
+        );
+        assert!(!replayed.surface()[0].text_content().contains(asset));
+        let raw_events = serde_json::to_string(timeline.events()).unwrap();
+        assert!(raw_events.contains(asset));
     }
 
     #[test]
@@ -12876,6 +13445,66 @@ mod tests {
     }
 
     #[test]
+    fn agent_message_consumption_is_exact_atomic_and_one_surface_coordinate() {
+        let mut timeline = Timeline::default();
+        let source = NotificationSource::AgentReply {
+            source_session_id: "child".into(),
+            message_id: "reply-1".into(),
+            reply_to: sampling_types::AgentMessageRef {
+                source_session_id: "session-1".into(),
+                message_id: "original".into(),
+            },
+        };
+        let body = "**Opinion**\tkeep it local.\r\n";
+        let id = receive_notification(
+            &mut timeline,
+            source.clone(),
+            NotificationSourceVersion::Ordinal {
+                value: PARENT_MESSAGE_SOURCE_VERSION,
+            },
+            body,
+        );
+        assert!(timeline.surface().is_empty(), "Received is not yet context");
+        let turn = TurnId(1);
+        start_notification_turn(&mut timeline, turn);
+        let mut input = ConversationItem::received_agent_message(sampling_types::AgentMessage {
+            receipt_id: id.clone(),
+            source_session_id: "child".into(),
+            target_session_id: "session-1".into(),
+            message_id: "reply-1".into(),
+            reply_to: source.agent_message().unwrap().2.cloned(),
+            message: body.into(),
+        });
+        input.set_prompt_index(0);
+        let consume = |input| {
+            TimelineEventKind::Notification(NotificationEvent::Consumed {
+                notification_ids: vec![id.clone()],
+                turn,
+                input,
+            })
+        };
+        assert!(timeline.record(consume(None)).is_err());
+        let mut tampered = input.clone();
+        let ConversationItem::AgentMessage(batch) = &mut tampered else {
+            unreachable!()
+        };
+        batch.messages[0].message = "changed opinion".into();
+        assert!(timeline.record(consume(Some(tampered))).is_err());
+        assert_eq!(timeline.pending_notifications().len(), 1);
+        timeline.record(consume(Some(input))).unwrap();
+        assert_eq!(timeline.surface().len(), 1);
+        assert_eq!(timeline.surface_ids().len(), 1);
+        assert_eq!(timeline.surface()[0].text_content(), body);
+        assert!(!crate::compaction_utils::is_real_user_turn(
+            &timeline.surface()[0]
+        ));
+        let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+        assert!(replayed.pending_notifications().is_empty());
+        assert_eq!(replayed.surface()[0].text_content(), body);
+        assert_eq!(replayed.parent_message_receipts().len(), 1);
+    }
+
+    #[test]
     fn notification_inbox_replays_from_received_minus_consumed() {
         let mut timeline = Timeline::default();
         let source = NotificationSource::TaskCompleted {
@@ -12943,6 +13572,217 @@ mod tests {
             )),
             Err(TimelineError::NotificationAlreadyConsumed(_))
         ));
+    }
+
+    #[test]
+    fn sideband_parent_validation_accepts_consumed_surface_coordinates() {
+        let mut parent = Timeline::default();
+        submit_human_input(&mut parent, "input-1", InputIntent::Prompt);
+        allow_input(&mut parent, "input-1");
+        let input_turn = TurnId(1);
+        parent
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: input_turn,
+                input_ids: vec!["input-1".into()],
+                identity: TurnIdentity {
+                    origin: "user".into(),
+                    turn_kind: "user".into(),
+                    goal_id: None,
+                    goal_definition_revision: None,
+                    stage_id: None,
+                },
+                model_id: "model".into(),
+                input_message_count: 0,
+                prompt_index: 0,
+                prompt_text: "hello".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        parent
+            .record(TimelineEventKind::Input(InputEvent::Consumed {
+                input_ids: vec!["input-1".into()],
+                turn: input_turn,
+                item: ConversationItem::user("hello"),
+            }))
+            .unwrap();
+        let consumed_input = *parent.surface_ids().last().unwrap();
+        end_turn(&mut parent, input_turn);
+
+        let source = NotificationSource::TaskCompleted {
+            task_id: "task-1".into(),
+            task_kind: NotificationTaskKind::Task,
+            owner: NotificationOwner::Session,
+        };
+        let version = NotificationSourceVersion::Ordinal { value: 1 };
+        let notification_id = receive_notification(&mut parent, source, version, "done");
+        let received_notification = SurfaceId {
+            event: parent.events().last().unwrap().seq,
+            item: 0,
+        };
+        let notification_turn = TurnId(2);
+        start_notification_turn(&mut parent, notification_turn);
+        let mut notification_input = ConversationItem::task_completed("done");
+        let ConversationItem::User(user) = &mut notification_input else {
+            unreachable!()
+        };
+        user.prompt_index = Some(1);
+        parent
+            .record(TimelineEventKind::Notification(
+                NotificationEvent::Consumed {
+                    notification_ids: vec![notification_id],
+                    turn: notification_turn,
+                    input: Some(notification_input),
+                },
+            ))
+            .unwrap();
+        let consumed_notification = *parent.surface_ids().last().unwrap();
+
+        assert!(parent.owns_surface_id(consumed_input));
+        assert!(parent.owns_surface_id(consumed_notification));
+        assert!(!parent.owns_surface_id(received_notification));
+        assert!(!parent.owns_surface_id(SurfaceId {
+            item: 1,
+            ..consumed_input
+        }));
+
+        let source_ref = crate::TimelineRangeRef {
+            timeline_id: "parent".into(),
+            first_seq: 0,
+            last_seq: parent.events().last().unwrap().seq.get(),
+        };
+        let sideband_id = uuid::Uuid::now_v7().to_string();
+        let spawn = SidebandSpawnEvent {
+            sideband_id: sideband_id.clone(),
+            purpose: crate::SidebandPurpose::CompactionSummary,
+            source_refs: vec![source_ref.clone()],
+        };
+        let spawn_event = parent
+            .record(TimelineEventKind::Sideband(spawn.clone()))
+            .unwrap();
+        let mut sideband = crate::SidebandTimeline::new(sideband_id.clone()).unwrap();
+        for kind in [
+            crate::SidebandEventKind::Request(crate::SidebandRequest {
+                purpose: crate::SidebandPurpose::CompactionSummary,
+                prompt: "summarize".into(),
+                source_refs: vec![source_ref.clone()],
+                budget_policy: crate::SidebandBudgetPolicy {
+                    max_attempts: 1,
+                    max_input_tokens_per_attempt: 8,
+                    max_output_tokens_per_attempt: Some(8),
+                },
+                route: crate::SidebandRoute {
+                    model: "test-model".into(),
+                    backend: sampling_types::ApiBackend::Responses,
+                },
+                initiator_ref: format!("t:parent/sideband:{sideband_id}"),
+                executor: "main".into(),
+                output_schema: None,
+            }),
+            crate::SidebandEventKind::Attempt(crate::SidebandAttempt {
+                attempt_no: 1,
+                input_refs: vec![source_ref],
+                assembly_manifest: crate::SidebandAssemblyManifest {
+                    strategy: "compaction-range".into(),
+                    strategy_version: 1,
+                    source_revision: Some(parent.surface_revision()),
+                    context_surface_ids: Vec::new(),
+                    selected_surface_ids: vec![consumed_input, consumed_notification],
+                    materialized_input_tokens: 8,
+                    max_output_tokens: Some(8),
+                },
+                feedback: None,
+            }),
+        ] {
+            let event = sideband.prepare(kind).unwrap();
+            sideband.accept(event).unwrap();
+        }
+
+        sideband
+            .validate_parent("parent", &parent, spawn_event.seq.get(), &spawn)
+            .unwrap();
+    }
+
+    #[test]
+    fn canonical_surface_coordinate_producers_are_complete() {
+        let messages = Timeline::from_seed(vec![ConversationItem::user("message")]).unwrap();
+        let message = messages.surface_ids()[0];
+        assert!(messages.owns_surface_id(message));
+        assert!(!messages.owns_surface_id(SurfaceId { item: 1, ..message }));
+
+        let original =
+            ConversationItem::user_with_parts(vec![sampling_types::ContentPart::Image {
+                url: "data:image/png;base64,original".into(),
+                description: None,
+            }]);
+        let mut projection = Timeline::from_seed(vec![original]).unwrap();
+        let group =
+            sampling_types::conversation::conversation_image_groups(projection.surface()).remove(0);
+        projection
+            .record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+                trigger_runtime: sampling_types::ModelImageInputKey::new(
+                    "model", "messages", "endpoint",
+                ),
+                source_revision: projection.surface_revision(),
+                shadows: vec![ImageShadow {
+                    source: projection.surface_ids()[0],
+                    fingerprint: group.fingerprint,
+                    image_count: 1,
+                    replacement: "OCR".into(),
+                    provenance: ImageShadowSource::LocalOcr {
+                        engine: "tesseract".into(),
+                    },
+                }],
+                tool_calls: Vec::new(),
+            }))
+            .unwrap();
+        let projected = SurfaceId {
+            event: projection.events().last().unwrap().seq,
+            item: 0,
+        };
+        assert!(projection.owns_surface_id(projected));
+        assert!(!projection.owns_surface_id(SurfaceId {
+            item: 1,
+            ..projected
+        }));
+
+        let mut control = Timeline::from_seed(vec![ConversationItem::system("system")]).unwrap();
+        control
+            .record(TimelineEventKind::Control(ControlEvent {
+                revision: 1,
+                snapshot: serde_json::json!({ "revision": 1 }),
+                retired_context_layers: Vec::new(),
+                model_contexts: vec![ControlContext {
+                    layer: ControlContextLayer::AgentRole,
+                    activation: ControlContextActivation::Transition,
+                    item: ConversationItem::system_reminder("role"),
+                }],
+            }))
+            .unwrap();
+        let control_id = SurfaceId {
+            event: control.events().last().unwrap().seq,
+            item: 0,
+        };
+        assert!(control.owns_surface_id(control_id));
+        assert!(!control.owns_surface_id(SurfaceId {
+            item: 1,
+            ..control_id
+        }));
+
+        let mut observation = Timeline::default();
+        observation
+            .record(TimelineEventKind::Observation(ObservationEvent {
+                scope: "test".into(),
+                name: "not-surface".into(),
+                turn: None,
+                step: None,
+                data: None,
+            }))
+            .unwrap();
+        assert!(!observation.owns_surface_id(SurfaceId {
+            event: observation.events().last().unwrap().seq,
+            item: 0,
+        }));
     }
 
     #[test]

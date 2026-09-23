@@ -385,9 +385,12 @@ impl ChatStateHandle {
 
     /// Acknowledged current-route compatibility update. `None` means the
     /// actor was unavailable; `Some(false)` means no state changed.
-    pub async fn enable_portable_responses_reasoning(&self) -> Option<bool> {
-        self.query("EnablePortableResponsesReasoning", |reply| {
-            ChatStateCommand::EnablePortableResponsesReasoning { reply }
+    pub async fn enable_portable_reasoning(
+        &self,
+        backend: sampling_types::ApiBackend,
+    ) -> Option<bool> {
+        self.query("EnablePortableReasoning", |reply| {
+            ChatStateCommand::EnablePortableReasoning { backend, reply }
         })
         .await
     }

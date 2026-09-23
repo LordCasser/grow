@@ -216,6 +216,7 @@ impl SessionActor {
                     | chat_state::NotificationSource::TaskStillRunning { .. }
                     | chat_state::NotificationSource::PlanHandoff { .. }
                     | chat_state::NotificationSource::ParentMessage { .. }
+                    | chat_state::NotificationSource::AgentReply { .. }
                     | chat_state::NotificationSource::WorkflowHandoff { .. } => None,
                     chat_state::NotificationSource::TaskCompleted { task_id, .. } => Some(task_id),
                     chat_state::NotificationSource::SubagentCompleted { subagent_id, .. } => {
@@ -657,15 +658,10 @@ impl SessionActor {
                     .into_iter()
                     .map(|img| agent_client_protocol::schema::v1::ImageContent::new(img.data, img.mime_type))
                     .collect();
-                let nr = crate::session::image_normalize::normalize_images(acp_imgs).await;
-                if !nr.re_encode_fallbacks.is_empty() {
-                    tracing::warn!(
-                        session_id = %self.session_info.id,
-                        notes = %nr.re_encode_fallbacks.join(" "),
-                        "Extracted user query image kept original after re-encode failure",
-                    );
-                }
-                (cleaned_text, nr.images)
+                let images = self
+                    .normalize_images_with_notices(&mut context, acp_imgs)
+                    .await;
+                (cleaned_text, images)
             };
             let permission_text = query.trim().to_owned();
             let assembled = crate::session::prompt_parser::ParsedPrompt::assemble_parts_with_skills(

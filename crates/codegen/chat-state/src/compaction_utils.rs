@@ -8,9 +8,11 @@ use std::collections::BTreeSet;
 
 /// Return the exclusive end index of every causally complete user turn.
 ///
-/// A turn begins with one or more consecutive User items and is complete only
-/// after at least one Assistant item and every tool call emitted by each
-/// Assistant has a matching ToolResult before the next Assistant or User.
+/// A turn begins with one or more consecutive User/runtime items and is
+/// complete only after at least one Assistant item and every tool call emitted
+/// by each Assistant has a matching ToolResult before the next prompt
+/// coordinate. Runtime items with the active prompt coordinate can arrive
+/// after a response without opening another human turn.
 /// Reasoning, backend-tool projections, and unmatched historical ToolResults
 /// are transparent. Once a malformed or incomplete turn is reached, later
 /// items are not considered independently complete.
@@ -23,26 +25,71 @@ pub fn complete_turn_ends<'a>(items: impl IntoIterator<Item = &'a ConversationIt
     let mut index = 0;
 
     while index < items.len() {
-        while index < items.len() && !matches!(items[index], ConversationItem::User(_)) {
+        while index < items.len()
+            && !matches!(
+                items[index],
+                ConversationItem::User(_) | ConversationItem::AgentMessage(_)
+            )
+        {
             index += 1;
         }
         if index == items.len() {
             break;
         }
-        while index < items.len() && matches!(items[index], ConversationItem::User(_)) {
+        let input_start = index;
+        let mut input_prompt_index = None;
+        while index < items.len()
+            && matches!(
+                items[index],
+                ConversationItem::User(_) | ConversationItem::AgentMessage(_)
+            )
+        {
+            let prompt_index = items[index].prompt_index();
+            if let (Some(previous), Some(current)) = (input_prompt_index, prompt_index)
+                && previous != current
+            {
+                break;
+            }
+            input_prompt_index = input_prompt_index.or(prompt_index);
             index += 1;
         }
 
         let mut saw_assistant = false;
         let mut pending_tool_calls = std::collections::HashSet::<&str>::new();
         let mut malformed = false;
-        while index < items.len()
-            && !matches!(
-                items[index],
-                ConversationItem::User(_) | ConversationItem::System(_)
-            )
-        {
+        let turn_prompt_index = items[input_start..index]
+            .iter()
+            .find_map(|item| item.prompt_index());
+        while index < items.len() {
             match items[index] {
+                ConversationItem::AgentMessage(batch)
+                    if matches!(
+                        (turn_prompt_index, batch.prompt_index),
+                        (Some(left), Some(right)) if left == right
+                    ) =>
+                {
+                    // Runtime deliveries sharing the active prompt coordinate
+                    // belong to this turn even when a model response sits
+                    // between them or while a model tool batch is open. They
+                    // are one canonical input fact each, not human turns.
+                    index += 1;
+                    continue;
+                }
+                ConversationItem::User(_)
+                    if pending_tool_calls.is_empty()
+                        && matches!(
+                            (turn_prompt_index, items[index].prompt_index()),
+                            (Some(left), Some(right)) if left == right
+                        ) =>
+                {
+                    index += 1;
+                    continue;
+                }
+                ConversationItem::User(_)
+                | ConversationItem::AgentMessage(_)
+                | ConversationItem::System(_) => {
+                    break;
+                }
                 ConversationItem::Assistant(assistant) => {
                     if !pending_tool_calls.is_empty() {
                         malformed = true;
@@ -60,7 +107,6 @@ pub fn complete_turn_ends<'a>(items: impl IntoIterator<Item = &'a ConversationIt
                     pending_tool_calls.remove(result.tool_call_id.as_str());
                 }
                 ConversationItem::Reasoning(_) | ConversationItem::BackendToolCall(_) => {}
-                ConversationItem::User(_) | ConversationItem::System(_) => unreachable!(),
             }
             index += 1;
         }
@@ -261,6 +307,15 @@ fn truncate_item_to_tokens(item: ConversationItem, max_tokens: u64) -> Conversat
             }
             ConversationItem::User(u)
         }
+        ConversationItem::AgentMessage(mut batch) => {
+            let per_message = max_bytes / batch.messages.len().max(1);
+            for message in &mut batch.messages {
+                if let Some(s) = truncate_text_to_bytes(&message.message, per_message) {
+                    message.message = s;
+                }
+            }
+            ConversationItem::AgentMessage(batch)
+        }
         other => other,
     }
 }
@@ -455,12 +510,15 @@ pub fn plan_compaction_range(
     let range_tokens = |start: usize, end: usize| {
         suffix_tokens[start].saturating_sub(suffix_tokens[end.saturating_add(1)])
     };
+    let mut previous_prompt_index = None;
     let prompt_turns = surface
         .iter()
         .enumerate()
         .filter_map(|(index, item)| {
-            matches!(item, ConversationItem::User(user) if user.prompt_index.is_some())
-                .then_some(index)
+            let prompt_index = item.prompt_index()?;
+            let is_new = previous_prompt_index != Some(prompt_index);
+            previous_prompt_index = Some(prompt_index);
+            is_new.then_some(index)
         })
         .collect::<Vec<_>>();
     let first_prompt = *prompt_turns.first()?;
@@ -555,6 +613,11 @@ pub fn fit_compaction_range_to_budget(
                     break;
                 }
             }
+            ConversationItem::AgentMessage(_) if !pending_calls.is_empty() => {
+                if is_new_prompt_boundary(surface, index) {
+                    break;
+                }
+            }
             item => {
                 if !pending_calls.is_empty() {
                     break;
@@ -578,12 +641,31 @@ pub fn fit_compaction_range_to_budget(
             )
             && (index == end
                 || is_response_group_start(surface, start, next)
-                || matches!(surface[next], ConversationItem::User(_)));
+                || is_new_prompt_boundary(surface, next));
         if closed && tokens >= min_source_tokens {
             best = range_plan(surface_ids, start, index, tokens);
         }
     }
     best
+}
+
+/// A repeated runtime batch with the same prompt coordinate remains part of
+/// the active turn. Only a new coordinate opens a compaction boundary.
+fn is_new_prompt_boundary(surface: &[ConversationItem], index: usize) -> bool {
+    match &surface[index] {
+        ConversationItem::User(_) => true,
+        ConversationItem::AgentMessage(batch) => {
+            let Some(prompt_index) = batch.prompt_index else {
+                return true;
+            };
+            surface[..index]
+                .iter()
+                .rev()
+                .find_map(ConversationItem::prompt_index)
+                .is_none_or(|previous| previous != prompt_index)
+        }
+        _ => false,
+    }
 }
 
 fn is_response_group_start(surface: &[ConversationItem], body_start: usize, index: usize) -> bool {
@@ -1065,6 +1147,69 @@ mod tests {
             name: name.into(),
             arguments: arguments.into(),
         }
+    }
+
+    fn agent_message(receipt_id: &str, message_id: &str, body: &str) -> ConversationItem {
+        ConversationItem::received_agent_message(sampling_types::AgentMessage {
+            receipt_id: receipt_id.into(),
+            source_session_id: "source-session".into(),
+            target_session_id: "target-session".into(),
+            message_id: message_id.into(),
+            reply_to: None,
+            message: body.into(),
+        })
+    }
+
+    #[test]
+    fn repeated_runtime_messages_with_one_prompt_index_share_a_turn() {
+        let mut user = ConversationItem::user("prompt");
+        user.set_prompt_index(4);
+        let mut first = agent_message("receipt-1", "message-1", "first");
+        first.set_prompt_index(4);
+        let mut second = agent_message("receipt-2", "message-2", "second");
+        second.set_prompt_index(4);
+        let items = vec![
+            user,
+            ConversationItem::assistant("response one"),
+            first,
+            ConversationItem::assistant("response two"),
+            second,
+        ];
+
+        assert_eq!(complete_turn_ends(items.iter()).as_slice(), &[5]);
+
+        let mut pending_user = ConversationItem::user("tool prompt");
+        pending_user.set_prompt_index(4);
+        let mut pending_message = agent_message("receipt-3", "message-3", "during tool");
+        pending_message.set_prompt_index(4);
+        let pending_tool_items = vec![
+            pending_user,
+            ConversationItem::assistant_tool_calls(vec![tool_call("call-1", "inspect", "{}")]),
+            pending_message,
+            ConversationItem::tool_result("call-1", "done"),
+        ];
+        assert_eq!(
+            complete_turn_ends(pending_tool_items.iter()).as_slice(),
+            &[4]
+        );
+
+        let mut distinct_user = ConversationItem::user("prompt");
+        distinct_user.set_prompt_index(4);
+        let mut distinct_first = agent_message("receipt-1", "message-1", "first");
+        distinct_first.set_prompt_index(4);
+        let mut next_turn = agent_message("receipt-4", "message-4", "next turn");
+        next_turn.set_prompt_index(5);
+        let distinct_prompt_items = vec![
+            distinct_user,
+            distinct_first,
+            ConversationItem::assistant("response"),
+            next_turn,
+            ConversationItem::assistant("next response"),
+        ];
+        assert_eq!(
+            complete_turn_ends(distinct_prompt_items.iter()).as_slice(),
+            &[3, 5]
+        );
     }
 
     #[test]

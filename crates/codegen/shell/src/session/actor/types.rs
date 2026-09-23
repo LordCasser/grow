@@ -30,10 +30,10 @@ pub(crate) enum SamplerFailureRecovery {
     /// not been changed yet; the outer loop must reset it with acknowledgement
     /// and rebuild a portable request without notifying the user.
     ResetContinuationAndResubmit,
-    /// The current Responses route explicitly requires visible reasoning in
+    /// The current route explicitly requires visible reasoning in
     /// portable tool history. ChatState has acknowledged the route-local
     /// projection update; rebuild under the same logical sampling budget.
-    EnablePortableResponsesReasoningAndResubmit,
+    EnablePortableReasoningAndResubmit,
     /// A BYOK helper or newly available configured key replaced the credential.
     /// `credential` records what the rejected request actually sent so retry
     /// accounting can distinguish a missing header from a rejected key.
@@ -56,7 +56,7 @@ pub(crate) enum SamplerTurnOutcome {
     CompactAndResubmit(compaction::AutoCompactTriggerInfo),
     ImageInputUnsupportedAndResubmit,
     ResetContinuationAndResubmit,
-    EnablePortableResponsesReasoningAndResubmit,
+    EnablePortableReasoningAndResubmit,
     RefreshByokAndResubmit {
         credential: sampling_types::SentCredential,
     },

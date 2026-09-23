@@ -7,6 +7,12 @@ use tools::types::tool::ToolKind;
 
 pub(crate) const CAPABILITY_CATALOG_TAG: &str = "subagent-capability-catalog";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct NativeCapability {
+    max_access: tool_protocol::ToolAccess,
+    review: tool_protocol::SubagentReviewPolicy,
+}
+
 /// Project live inherited transports through the currently selected Agent.
 /// The input is already bounded by the child's immutable creation ceiling;
 /// every Agent switch and transport-generation refresh must use this same
@@ -58,11 +64,11 @@ struct CapabilityAuthority {
     authorization_epoch: u64,
     initial_mode: tool_types::SubagentCapabilityMode,
     /// Every native tool visible to the model, keyed by exact wire identity.
-    visible_native: HashMap<String, (ToolKind, tool_protocol::ToolAccess)>,
+    visible_native: HashMap<String, (ToolKind, NativeCapability)>,
     /// Current Agent harness eligibility. An explicit user Agent selection may
     /// replace this catalog, while `initial_mode` remains the immutable RWX
     /// ceiling for the lifetime of the child.
-    eligible_native: HashMap<String, tool_protocol::ToolAccess>,
+    eligible_native: HashMap<String, NativeCapability>,
     /// Live upstream membership/tool authority for inherited MCP transports.
     mcp_eligibility: Option<mcp::servers::SharedMcpEligibility>,
     bound_mcp_client_ids: HashMap<String, u64>,
@@ -79,6 +85,7 @@ fn native_descriptor_is_eligible(
     authored: bool,
     kind: ToolKind,
     max_access: tool_protocol::ToolAccess,
+    review: tool_protocol::SubagentReviewPolicy,
 ) -> bool {
     let intrinsic_control = matches!(
         kind,
@@ -96,7 +103,35 @@ fn native_descriptor_is_eligible(
     // `None` is not an automatic grant: framework controls need either an
     // authored identity or the narrow intrinsic allowlist above. This keeps
     // Task hard-forbidden at max depth.
-    authored || max_access == tool_protocol::ToolAccess::Read || intrinsic_control
+    authored
+        || review == tool_protocol::SubagentReviewPolicy::Required
+        || max_access == tool_protocol::ToolAccess::Read
+        || intrinsic_control
+}
+
+/// Return the capability projected into a child's model-facing catalog.
+/// `send_subagent_message` is injected into some read-only children even when
+/// it was absent from the authored tool snapshot, but only its frozen reply
+/// form has `ToolAccess::None`; an initial send remains a Write call.
+fn native_catalog_capability(
+    name: &str,
+    authored: bool,
+    kind: ToolKind,
+    max_access: tool_protocol::ToolAccess,
+    review: tool_protocol::SubagentReviewPolicy,
+) -> Option<NativeCapability> {
+    let received_reply_only = !authored && name == "send_subagent_message";
+    if !received_reply_only && !native_descriptor_is_eligible(authored, kind, max_access, review) {
+        return None;
+    }
+    Some(NativeCapability {
+        max_access: if received_reply_only {
+            tool_protocol::ToolAccess::None
+        } else {
+            max_access
+        },
+        review,
+    })
 }
 
 impl SubagentCapabilityState {
@@ -104,16 +139,20 @@ impl SubagentCapabilityState {
         bridge: &tools::bridge::ToolBridge,
         authored_tools: &tools::registry::types::ToolServerConfig,
     ) -> (
-        HashMap<String, (ToolKind, tool_protocol::ToolAccess)>,
-        HashMap<String, tool_protocol::ToolAccess>,
+        HashMap<String, (ToolKind, NativeCapability)>,
+        HashMap<String, NativeCapability>,
     ) {
         let authored_names = bridge.authored_native_tool_names(authored_tools);
         let mut visible_native = HashMap::new();
         let mut eligible_native = HashMap::new();
-        for (name, kind, max_access) in bridge.native_tool_descriptors() {
-            visible_native.insert(name.clone(), (kind, max_access));
-            if native_descriptor_is_eligible(authored_names.contains(&name), kind, max_access) {
-                eligible_native.insert(name, max_access);
+        for (name, kind, max_access, review) in bridge.native_tool_descriptors() {
+            let authored = authored_names.contains(&name);
+            let descriptor = NativeCapability { max_access, review };
+            visible_native.insert(name.clone(), (kind, descriptor));
+            if let Some(capability) =
+                native_catalog_capability(&name, authored, kind, max_access, review)
+            {
+                eligible_native.insert(name, capability);
             }
         }
         (visible_native, eligible_native)
@@ -207,7 +246,7 @@ impl SubagentCapabilityState {
             .read()
             .eligible_native
             .get(tool_name)
-            .is_some_and(|max| max.covers(required_access))
+            .is_some_and(|capability| capability.max_access.covers(required_access))
     }
 
     /// Whether immutable initial RWX already covers this eligible call.
@@ -217,10 +256,14 @@ impl SubagentCapabilityState {
         required_access: tool_protocol::ToolAccess,
     ) -> bool {
         let state = self.0.read();
-        state.eligible_native.get(tool_name).is_some_and(|max| {
-            max.covers(required_access)
-                && Self::effective_access_locked(&state).covers(required_access)
-        })
+        state
+            .eligible_native
+            .get(tool_name)
+            .is_some_and(|capability| {
+                capability.review != tool_protocol::SubagentReviewPolicy::Required
+                    && capability.max_access.covers(required_access)
+                    && Self::effective_access_locked(&state).covers(required_access)
+            })
     }
 
     pub(crate) fn mcp_server_eligible(&self, server: &str) -> bool {
@@ -283,8 +326,8 @@ impl SubagentCapabilityState {
 
     fn render_native_catalog_prompt(
         initial_mode: tool_types::SubagentCapabilityMode,
-        visible_native: &HashMap<String, (ToolKind, tool_protocol::ToolAccess)>,
-        eligible_native: &HashMap<String, tool_protocol::ToolAccess>,
+        visible_native: &HashMap<String, (ToolKind, NativeCapability)>,
+        eligible_native: &HashMap<String, NativeCapability>,
     ) -> String {
         let initial = Self::mode_access(initial_mode);
         let mut lines = vec![
@@ -293,9 +336,18 @@ impl SubagentCapabilityState {
         ];
         let mut available = Vec::new();
         let mut call_projected = Vec::new();
-        for (name, max_access) in eligible_native {
-            let rendered = format!("{name}({max_access:?})");
-            if initial.covers(*max_access) {
+        let mut approval_required = Vec::new();
+        for (name, capability) in eligible_native {
+            let rendered = if name == "send_subagent_message"
+                && capability.max_access == tool_protocol::ToolAccess::None
+            {
+                format!("{name}(received reply only)")
+            } else {
+                format!("{name}({:?})", capability.max_access)
+            };
+            if capability.review == tool_protocol::SubagentReviewPolicy::Required {
+                approval_required.push(rendered);
+            } else if initial.covers(capability.max_access) {
                 available.push(rendered);
             } else {
                 call_projected.push(rendered);
@@ -303,6 +355,7 @@ impl SubagentCapabilityState {
         }
         available.sort();
         call_projected.sort();
+        approval_required.sort();
         if !available.is_empty() {
             lines.push(format!(
                 "- available native tools: {}",
@@ -315,6 +368,12 @@ impl SubagentCapabilityState {
                 call_projected.join(", ")
             ));
         }
+        if !approval_required.is_empty() {
+            lines.push(format!(
+                "- approval-required native tools (invoke the exact call; the configured permission Gate decides every invocation even when initial RWX covers it): {}",
+                approval_required.join(", ")
+            ));
+        }
         let mut forbidden = visible_native
             .keys()
             .filter(|name| !eligible_native.contains_key(*name))
@@ -323,7 +382,7 @@ impl SubagentCapabilityState {
         forbidden.sort();
         if !forbidden.is_empty() {
             lines.push(format!(
-                "- forbidden native tools (visible for truthful discovery, never permit-able): {}",
+                "- forbidden native tools (visible but outside current authored eligibility or immutable child policy; they cannot be approved for this child, so use ask_parent to report a concrete need): {}",
                 forbidden.join(", ")
             ));
         }
@@ -354,14 +413,22 @@ mod tests {
     ) -> SubagentCapabilityState {
         let eligible_native = eligible_native
             .into_iter()
-            .map(|(name, access)| (name.to_owned(), access))
+            .map(|(name, access)| {
+                (
+                    name.to_owned(),
+                    NativeCapability {
+                        max_access: access,
+                        review: tool_protocol::SubagentReviewPolicy::Inherit,
+                    },
+                )
+            })
             .collect::<HashMap<_, _>>();
         SubagentCapabilityState(Arc::new(parking_lot::RwLock::new(CapabilityAuthority {
             authorization_epoch: 0,
             initial_mode,
             visible_native: eligible_native
                 .iter()
-                .map(|(name, access)| (name.clone(), (ToolKind::Other, *access)))
+                .map(|(name, capability)| (name.clone(), (ToolKind::Other, *capability)))
                 .collect(),
             eligible_native,
             mcp_eligibility: None,
@@ -421,6 +488,160 @@ mod tests {
     }
 
     #[test]
+    fn descriptor_review_admits_but_never_fast_paths_a_native_tool() {
+        let reviewed = NativeCapability {
+            max_access: tool_protocol::ToolAccess::Write,
+            review: tool_protocol::SubagentReviewPolicy::Required,
+        };
+        let authority =
+            SubagentCapabilityState(Arc::new(parking_lot::RwLock::new(CapabilityAuthority {
+                authorization_epoch: 0,
+                initial_mode: tool_types::SubagentCapabilityMode::All,
+                visible_native: HashMap::from([("write".to_owned(), (ToolKind::Other, reviewed))]),
+                eligible_native: HashMap::from([("write".to_owned(), reviewed)]),
+                mcp_eligibility: None,
+                bound_mcp_client_ids: HashMap::new(),
+                observed_mcp_generation: 0,
+            })));
+
+        assert!(authority.native_call_eligible("write", tool_protocol::ToolAccess::Write));
+        assert!(!authority.native_call_available("write", tool_protocol::ToolAccess::Write));
+        let catalog = authority.native_catalog_prompt();
+        assert!(catalog.contains("approval-required native tools"));
+        assert!(catalog.contains("write(Write)"));
+        assert!(!catalog.contains("forbidden native tools"));
+    }
+
+    #[test]
+    fn unauthored_send_message_is_cataloged_only_for_received_replies() {
+        let reply_only = native_catalog_capability(
+            "send_subagent_message",
+            false,
+            ToolKind::Other,
+            tool_protocol::ToolAccess::Write,
+            tool_protocol::SubagentReviewPolicy::Inherit,
+        )
+        .expect("the injected reply path remains discoverable");
+        assert_eq!(reply_only.max_access, tool_protocol::ToolAccess::None);
+
+        let authority =
+            SubagentCapabilityState(Arc::new(parking_lot::RwLock::new(CapabilityAuthority {
+                authorization_epoch: 0,
+                initial_mode: tool_types::SubagentCapabilityMode::ReadOnly,
+                visible_native: HashMap::from([(
+                    "send_subagent_message".to_owned(),
+                    (
+                        ToolKind::Other,
+                        NativeCapability {
+                            max_access: tool_protocol::ToolAccess::Write,
+                            review: tool_protocol::SubagentReviewPolicy::Inherit,
+                        },
+                    ),
+                )]),
+                eligible_native: HashMap::from([("send_subagent_message".to_owned(), reply_only)]),
+                mcp_eligibility: None,
+                bound_mcp_client_ids: HashMap::new(),
+                observed_mcp_generation: 0,
+            })));
+
+        assert!(
+            authority
+                .native_call_eligible("send_subagent_message", tool_protocol::ToolAccess::None)
+        );
+        assert!(
+            authority
+                .native_call_available("send_subagent_message", tool_protocol::ToolAccess::None)
+        );
+        assert!(
+            !authority
+                .native_call_eligible("send_subagent_message", tool_protocol::ToolAccess::Write)
+        );
+        assert!(
+            !authority
+                .native_call_available("send_subagent_message", tool_protocol::ToolAccess::Write)
+        );
+
+        let catalog = authority.native_catalog_prompt();
+        assert!(catalog.contains("send_subagent_message(received reply only)"));
+        assert!(!catalog.contains("send_subagent_message(Write)"));
+    }
+
+    #[test]
+    fn authored_send_message_retains_write_capability_and_other_names_do_not_match() {
+        let authored = native_catalog_capability(
+            "send_subagent_message",
+            true,
+            ToolKind::Other,
+            tool_protocol::ToolAccess::Write,
+            tool_protocol::SubagentReviewPolicy::Inherit,
+        )
+        .expect("authored send capability");
+        assert_eq!(authored.max_access, tool_protocol::ToolAccess::Write);
+        assert!(
+            native_catalog_capability(
+                "other",
+                false,
+                ToolKind::Other,
+                tool_protocol::ToolAccess::None,
+                tool_protocol::SubagentReviewPolicy::Inherit,
+            )
+            .is_none()
+        );
+
+        let authority =
+            SubagentCapabilityState(Arc::new(parking_lot::RwLock::new(CapabilityAuthority {
+                authorization_epoch: 0,
+                initial_mode: tool_types::SubagentCapabilityMode::All,
+                visible_native: HashMap::from([(
+                    "send_subagent_message".to_owned(),
+                    (ToolKind::Other, authored),
+                )]),
+                eligible_native: HashMap::from([("send_subagent_message".to_owned(), authored)]),
+                mcp_eligibility: None,
+                bound_mcp_client_ids: HashMap::new(),
+                observed_mcp_generation: 0,
+            })));
+
+        assert!(
+            authority
+                .native_call_eligible("send_subagent_message", tool_protocol::ToolAccess::Write)
+        );
+        assert!(
+            authority
+                .native_call_available("send_subagent_message", tool_protocol::ToolAccess::Write)
+        );
+        let catalog = authority.native_catalog_prompt();
+        assert!(catalog.contains("send_subagent_message(Write)"));
+        assert!(!catalog.contains("received reply only"));
+    }
+
+    #[test]
+    fn forbidden_catalog_explains_that_parent_coordination_is_not_approval() {
+        let capability = NativeCapability {
+            max_access: tool_protocol::ToolAccess::Write,
+            review: tool_protocol::SubagentReviewPolicy::Inherit,
+        };
+        let authority =
+            SubagentCapabilityState(Arc::new(parking_lot::RwLock::new(CapabilityAuthority {
+                authorization_epoch: 0,
+                initial_mode: tool_types::SubagentCapabilityMode::All,
+                visible_native: HashMap::from([(
+                    "unscoped_write".to_owned(),
+                    (ToolKind::Other, capability),
+                )]),
+                eligible_native: HashMap::new(),
+                mcp_eligibility: None,
+                bound_mcp_client_ids: HashMap::new(),
+                observed_mcp_generation: 0,
+            })));
+
+        let catalog = authority.native_catalog_prompt();
+        assert!(catalog.contains("forbidden native tools"));
+        assert!(catalog.contains("cannot be approved for this child"));
+        assert!(catalog.contains("use ask_parent to report a concrete need"));
+    }
+
+    #[test]
     fn task_needs_authored_identity_but_owner_cleanup_is_intrinsic() {
         use tool_protocol::ToolAccess;
 
@@ -428,16 +649,25 @@ mod tests {
             true,
             ToolKind::Task,
             ToolAccess::None,
+            tool_protocol::SubagentReviewPolicy::Inherit,
         ));
         assert!(!native_descriptor_is_eligible(
             false,
             ToolKind::Task,
             ToolAccess::None,
+            tool_protocol::SubagentReviewPolicy::Inherit,
         ));
         assert!(native_descriptor_is_eligible(
             false,
             ToolKind::KillTaskAction,
             ToolAccess::None,
+            tool_protocol::SubagentReviewPolicy::Inherit,
+        ));
+        assert!(native_descriptor_is_eligible(
+            false,
+            ToolKind::Other,
+            ToolAccess::Write,
+            tool_protocol::SubagentReviewPolicy::Required,
         ));
     }
 }

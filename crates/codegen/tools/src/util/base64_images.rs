@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use std::fmt::Write as _;
 use std::sync::LazyLock;
 
+use base64::Engine as _;
 use regex::Regex;
 
 /// One base64 image lifted out of tool result or file content. The session
@@ -27,7 +28,42 @@ const MIN_PAYLOAD_LEN: usize = 1024;
 const MAX_PAYLOAD_LEN: usize = 10 * 1024 * 1024;
 
 /// Cap per tool result to avoid flooding the context with vision tokens.
-const MAX_IMAGES: usize = 5;
+pub const MAX_IMAGES: usize = 5;
+
+/// Apply the same limits as data-URI extraction before an MCP image enters
+/// the runtime-only attachment path. Image decoding is checked later by the
+/// session normalizer; this validates the transport encoding first.
+pub fn admit_typed_image(
+    mime_type: &str,
+    data: &str,
+    admitted_count: usize,
+) -> Result<ExtractedImage, &'static str> {
+    if admitted_count >= MAX_IMAGES {
+        return Err("additional image omitted: image count limit reached");
+    }
+    if !matches!(
+        mime_type.to_ascii_lowercase().as_str(),
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp" | "image/bmp" | "image/tiff"
+    ) {
+        return Err("image omitted: unsupported MIME type");
+    }
+    if data.len() < MIN_PAYLOAD_LEN {
+        return Err("image omitted: encoded payload is too small");
+    }
+    if data.len() > MAX_PAYLOAD_LEN {
+        return Err("image omitted: encoded payload exceeds the 10 MiB limit");
+    }
+    if base64::engine::general_purpose::STANDARD
+        .decode(data)
+        .is_err()
+    {
+        return Err("image omitted: invalid base64 payload");
+    }
+    Ok(ExtractedImage {
+        data: data.to_owned(),
+        mime_type: mime_type.to_owned(),
+    })
+}
 
 /// Prefix regex for `data:<mime>;base64,`. The payload is scanned manually
 /// from prefix end so line-wrapped producers (Python `base64.encodebytes`,
@@ -187,7 +223,7 @@ fn strip_pdf_data_uris(text: &str) -> Option<String> {
 /// capturing the payload bytes for downstream multimodal injection.
 ///
 /// Returns `None` when nothing was modified.
-fn scan_and_extract(s: &str) -> Option<(String, Vec<ExtractedImage>)> {
+fn scan_and_extract(s: &str, max_images: usize) -> Option<(String, Vec<ExtractedImage>)> {
     if !s.contains("data:image") {
         return None;
     }
@@ -223,7 +259,7 @@ fn scan_and_extract(s: &str) -> Option<(String, Vec<ExtractedImage>)> {
 
         if payload_len > MAX_PAYLOAD_LEN {
             result.push_str("[large image removed]");
-        } else if images.len() >= MAX_IMAGES {
+        } else if images.len() >= max_images {
             result.push_str("[additional image omitted]");
         } else {
             let data = match cleaned {
@@ -256,7 +292,13 @@ fn scan_and_extract(s: &str) -> Option<(String, Vec<ExtractedImage>)> {
 /// stripped first. Owned-input convenience over [`try_extract_base64_images`]
 /// — when nothing matched, the original `text` is returned unmodified.
 pub fn extract_base64_images(text: String) -> ExtractionResult {
-    try_extract_base64_images(&text).unwrap_or_else(|| ExtractionResult {
+    extract_base64_images_with_budget(text, MAX_IMAGES)
+}
+
+/// Like [`extract_base64_images`], but share an existing result's remaining
+/// image budget across multiple ordered MCP content blocks.
+pub fn extract_base64_images_with_budget(text: String, max_images: usize) -> ExtractionResult {
+    try_extract_base64_images_with_budget(&text, max_images).unwrap_or_else(|| ExtractionResult {
         text,
         images: Vec::new(),
     })
@@ -267,9 +309,16 @@ pub fn extract_base64_images(text: String) -> ExtractionResult {
 /// on the no-op fast path so callers (e.g. the per-line scan inside
 /// `extract_file_content_lines`) can avoid an allocation.
 pub fn try_extract_base64_images(text: &str) -> Option<ExtractionResult> {
+    try_extract_base64_images_with_budget(text, MAX_IMAGES)
+}
+
+fn try_extract_base64_images_with_budget(
+    text: &str,
+    max_images: usize,
+) -> Option<ExtractionResult> {
     let after_pdf = strip_pdf_data_uris(text);
     let input = after_pdf.as_deref().unwrap_or(text);
-    match scan_and_extract(input) {
+    match scan_and_extract(input, max_images) {
         Some((cleaned, images)) => Some(ExtractionResult {
             text: cleaned,
             images,

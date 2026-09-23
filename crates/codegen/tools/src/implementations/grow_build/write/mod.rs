@@ -79,6 +79,7 @@ impl tool_runtime::Tool for WriteTool {
     fn capabilities(&self) -> tool_protocol::ToolCapabilities {
         tool_protocol::ToolCapabilities {
             max_access: tool_protocol::ToolAccess::Write,
+            subagent_review: tool_protocol::SubagentReviewPolicy::Required,
             ..Default::default()
         }
     }
@@ -297,6 +298,11 @@ mod tests {
         assert_eq!(tool_runtime::Tool::id(&tool).as_str(), "write");
         assert!(matches!(tool.kind(), ToolKind::Write));
         assert!(matches!(tool.tool_namespace(), ToolNamespace::Grow));
+        let capabilities = tool_runtime::Tool::capabilities(&tool);
+        assert_eq!(
+            capabilities.subagent_review,
+            tool_protocol::SubagentReviewPolicy::Required
+        );
     }
 
     // ── Serde roundtrip ────────────────────────────────────────

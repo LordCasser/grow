@@ -575,6 +575,11 @@ impl PtyHarness {
         self.screen.scrollback_text()
     }
 
+    /// Native selection projection of scrollback (soft-wrapped rows join).
+    pub fn scrollback_copy_text(&self) -> String {
+        self.screen.scrollback_copy_text()
+    }
+
     /// Scrollback history + the visible screen, joined oldest→newest. Use for
     /// minimal-mode assertions: a committed block may be on-screen or scrolled
     /// above the pinned viewport depending on how much has accumulated.

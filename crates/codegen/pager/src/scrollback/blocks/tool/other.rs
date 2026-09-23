@@ -5,6 +5,7 @@ use ratatui::text::{Line, Span};
 use crate::appearance::AppearanceConfig;
 use crate::render::wrapping::word_wrap_lines;
 use crate::scrollback::block::BlockContent;
+use crate::scrollback::blocks::communication::CommunicationBody;
 use crate::scrollback::types::{
     AccentStyle, BlockBackground, BlockContext, BlockLine, BlockOutput, DisplayMode,
 };
@@ -40,6 +41,11 @@ pub struct OtherToolCallBlock {
     /// The complete message/question remains in `output` for expansion and
     /// copy, while this field keeps the collapsed row useful at a glance.
     communication_preview: Option<String>,
+    /// Markdown-backed communication sections. The typed source is retained
+    /// separately from the renderer's expanded-tab source for raw/copy views.
+    communication_body: Option<CommunicationBody>,
+    /// Complete protocol result/input data shown only in the detail viewer.
+    communication_data: Option<String>,
     /// Image references detected in the tool output.
     image_refs: Vec<crate::prompt_images::ScrollbackImageRef>,
 }
@@ -96,6 +102,8 @@ impl OtherToolCallBlock {
             elapsed_ms: None,
             coordination: None,
             communication_preview: None,
+            communication_body: None,
+            communication_data: None,
             image_refs: Vec::new(),
         }
     }
@@ -122,6 +130,35 @@ impl OtherToolCallBlock {
             self.communication_preview = Some(preview);
         }
         self
+    }
+
+    pub(crate) fn with_communication_body(mut self, body: CommunicationBody) -> Self {
+        if !body.is_empty() {
+            self.communication_body = Some(body);
+        }
+        self
+    }
+
+    pub(crate) fn with_communication_data(mut self, data: impl Into<String>) -> Self {
+        let data = data.into();
+        if !data.is_empty() {
+            self.communication_data = Some(data);
+        }
+        self
+    }
+
+    pub(crate) fn communication_body(&self) -> Option<&CommunicationBody> {
+        self.communication_body.as_ref()
+    }
+
+    pub(crate) fn communication_data(&self) -> Option<&str> {
+        self.communication_data.as_deref()
+    }
+
+    pub(crate) fn set_raw_mode(&mut self, raw: bool) {
+        if let Some(body) = &mut self.communication_body {
+            body.set_raw_mode(raw);
+        }
     }
 
     /// Set or replace the output text.
@@ -156,7 +193,8 @@ impl OtherToolCallBlock {
     }
 
     fn is_communication(&self) -> bool {
-        self.communication_preview.is_some()
+        self.communication_body.is_some()
+            || self.communication_preview.is_some()
             || self.name.starts_with("ask_session → ")
             || self.name.starts_with("get_inquiry → ")
             || self.name.starts_with("ask_parent → ")
@@ -390,18 +428,28 @@ impl BlockContent for OtherToolCallBlock {
                     ]
                 };
                 if let Some(preview) = &self.communication_preview {
-                    lines.extend(Self::communication_preview_lines(
-                        preview,
-                        content_width,
-                        theme.primary(),
-                        theme.muted(),
-                    ));
+                    if self.communication_body.is_none() {
+                        lines.extend(Self::communication_preview_lines(
+                            preview,
+                            content_width,
+                            theme.primary(),
+                            theme.muted(),
+                        ));
+                    }
+                }
+                if let Some(body) = &self.communication_body {
+                    lines.extend(body.preview(content_width).lines);
                 }
                 BlockOutput { lines }
             }
             DisplayMode::Truncated | DisplayMode::Expanded => {
                 let mut lines: Vec<BlockLine> =
                     vec![self.collapsed_line(&theme, false, None).into()];
+
+                if let Some(body) = &self.communication_body {
+                    lines.extend(body.expanded(width).lines);
+                    return BlockOutput { lines };
+                }
 
                 if let Some(error) = &self.error {
                     lines.extend(
@@ -507,11 +555,11 @@ impl BlockContent for OtherToolCallBlock {
     }
 
     fn has_raw_mode(&self) -> bool {
-        false
+        self.communication_body.is_some()
     }
 
     fn is_foldable(&self) -> bool {
-        self.output.is_some() || self.error.is_some()
+        self.communication_body.is_some() || self.output.is_some() || self.error.is_some()
     }
 
     fn default_display_mode(&self) -> DisplayMode {

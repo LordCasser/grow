@@ -90,8 +90,12 @@ async fn dispatch_local_mcp(
         tool_runtime::ToolError::invalid_arguments(format!("invalid tool name: '{tool_name}'"))
     })?;
     let typed = dispatch.0.call_terminal(tool_id, tool_input, ctx).await?;
-    serde_json::from_value(typed.value)
-        .map_err(|e| tool_runtime::ToolError::custom("output_decoding", e.to_string()))
+    let output: ToolOutput = serde_json::from_value(typed.value)
+        .map_err(|e| tool_runtime::ToolError::custom("output_decoding", e.to_string()))?;
+    Ok(crate::types::output::restore_mcp_images(
+        output,
+        typed.model_output,
+    ))
 }
 
 fn normalize_mcp_arguments(input: serde_json::Value) -> serde_json::Value {
@@ -250,9 +254,12 @@ mod tests {
         ) -> tool_runtime::ToolStream<tool_runtime::TypedToolOutput> {
             assert_eq!(tool_id.as_str(), self.expected_tool_name);
             let value = serde_json::to_value(self.return_output.clone()).unwrap();
-            tool_runtime::terminal_only(Ok(tool_runtime::TypedToolOutput::from_value(
-                tool_id, value,
-            )))
+            let mut typed = tool_runtime::TypedToolOutput::from_value(tool_id, value);
+            let rich = tool_runtime::ToolOutput::model_output(&self.return_output);
+            if !rich.is_empty() {
+                typed.model_output = rich;
+            }
+            tool_runtime::terminal_only(Ok(typed))
         }
     }
 
@@ -329,6 +336,87 @@ mod tests {
         let mut ctx = new_ctx();
         ctx.extensions.insert(InnerDispatch(Arc::new(dispatch)));
         ctx
+    }
+
+    #[derive(Debug)]
+    struct ErasedMcpImageTool;
+
+    impl tool_runtime::Tool for ErasedMcpImageTool {
+        type Args = serde_json::Value;
+        type Output = ToolOutput;
+
+        fn id(&self) -> tool_protocol::ToolId {
+            tool_protocol::ToolId::new("server__image").unwrap()
+        }
+
+        fn description(&self, _: &tool_runtime::ListToolsContext) -> tool_types::ToolDescription {
+            tool_types::ToolDescription::new("server__image", "test image tool")
+        }
+
+        async fn run(
+            &self,
+            _: tool_runtime::ToolCallContext,
+            _: serde_json::Value,
+        ) -> Result<ToolOutput, tool_runtime::ToolError> {
+            Ok(ToolOutput::MCP(
+                crate::types::output::MCPOutput::okay_output(
+                    "image".to_owned(),
+                    "server".to_owned(),
+                    "[image content will be provided separately]".to_owned(),
+                )
+                .with_extracted_images(vec![
+                    crate::util::base64_images::ExtractedImage {
+                        data: "A".repeat(2048),
+                        mime_type: "image/png".to_owned(),
+                    },
+                ]),
+            ))
+        }
+    }
+
+    #[tokio::test]
+    async fn erased_local_registry_tool_emits_image_in_typed_model_output() {
+        let registry = tool_runtime::LocalRegistry::new();
+        registry.register(ErasedMcpImageTool);
+        let id = tool_protocol::ToolId::new("server__image").unwrap();
+        let handle = registry.find(&id).unwrap();
+        let typed = crate::registry::types::drain_terminal_stream(
+            handle.execute(new_ctx(), serde_json::json!({})).await,
+        )
+        .await
+        .unwrap();
+        assert!(typed.model_output.iter().any(|block| matches!(
+            block,
+            tool_runtime::ContentBlock::Image { data, .. } if data == &"A".repeat(2048)
+        )));
+        assert!(!typed.value.to_string().contains(&"A".repeat(2048)));
+    }
+
+    #[tokio::test]
+    async fn inner_mcp_dispatch_preserves_runtime_image_across_json_value() {
+        let image = crate::util::base64_images::ExtractedImage {
+            data: "A".repeat(2048),
+            mime_type: "image/png".to_owned(),
+        };
+        let ctx = ctx_with_dispatch(MockToolDispatch {
+            expected_tool_name: "server__image".to_owned(),
+            return_output: ToolOutput::MCP(
+                crate::types::output::MCPOutput::okay_output(
+                    "image".to_owned(),
+                    "server".to_owned(),
+                    "[image content will be provided separately]".to_owned(),
+                )
+                .with_extracted_images(vec![image]),
+            ),
+        });
+        let output = dispatch_mcp_tool(&ctx, "server__image", serde_json::json!({}), "use_tool")
+            .await
+            .unwrap();
+        let ToolOutput::MCP(mcp) = output else {
+            panic!("expected MCP output");
+        };
+        assert_eq!(mcp.extracted_images().len(), 1);
+        assert_eq!(mcp.extracted_images()[0].data, "A".repeat(2048));
     }
 
     #[tokio::test]

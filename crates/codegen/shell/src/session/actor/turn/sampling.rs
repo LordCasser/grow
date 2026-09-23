@@ -202,11 +202,20 @@ impl SessionActor {
         }
     }
 
+    /// One aggregated notice for an acknowledged projection. Described groups
+    /// keep their image for other routes; removed groups are gone from the
+    /// current Surface while the original payload stays in the Timeline.
     fn image_recovery_notification(report: chat_state::ImageProjectionReport) -> Option<String> {
-        match report.described_images {
-            0 => None,
-            described => Some(format!(
+        match (report.described_images, report.removed_images) {
+            (0, 0) => None,
+            (described, 0) => Some(format!(
                 "已生成 {described} 张图片的文字描述；当前模型使用描述发送，原图保留供其他模型尝试。"
+            )),
+            (0, removed) => Some(format!(
+                "当前模型不支持多模态，{removed} 张图片无法生成文字描述，已从当前会话中删除；原图仍保留在会话历史记录中。"
+            )),
+            (described, removed) => Some(format!(
+                "已生成 {described} 张图片的文字描述；{removed} 张图片无法生成描述，已从当前会话中删除。"
             )),
         }
     }
@@ -549,17 +558,27 @@ impl SessionActor {
             }
         }
 
-        let unresolved = groups
-            .iter()
-            .map(|group| group.image_count())
-            .sum::<usize>()
-            .saturating_sub(shadows.iter().map(|shadow| shadow.image_count).sum());
-        if unresolved > 0 {
-            return Err(chat_state::TimelineWriteError::ImageDescriptionUnavailable(
-                format!(
-                    "{unresolved} image(s) remain untranslated; refusing a lossy image fallback"
-                ),
-            ));
+        // Every remaining group becomes a typed unsupported-model removal: the
+        // primary model already confirmed it cannot accept images, so keeping
+        // them on the Surface would poison every later request. Original
+        // payloads stay in the immutable Timeline evidence.
+        for group in &groups {
+            let source = materialized.transcript_ids[group.item_index];
+            if shadows.iter().any(|shadow| shadow.source == source) {
+                continue;
+            }
+            tracing::warn!(
+                item_index = group.item_index,
+                image_count = group.image_count(),
+                "no textual fallback for image group; removing it from the current Surface"
+            );
+            shadows.push(chat_state::ImageShadow {
+                source,
+                fingerprint: group.fingerprint.clone(),
+                image_count: group.image_count(),
+                replacement: sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT.to_owned(),
+                provenance: chat_state::ImageShadowSource::UnsupportedModel,
+            });
         }
 
         let shadow_sources = shadows
@@ -1716,21 +1735,20 @@ impl SessionActor {
                 return Ok(SamplerFailureRecovery::CompactAndResubmit(trigger_info));
             }
         }
-        if error.portable_responses_reasoning_required {
+        if let Some(backend) = error.portable_reasoning_required.clone() {
             match self
                 .chat_state_handle
-                .enable_portable_responses_reasoning()
+                .enable_portable_reasoning(backend)
                 .await
             {
                 Some(true) => {
-                    tracing::info!(
-                        "provider requires portable Responses reasoning; rebuilding context"
-                    );
-                    return Ok(SamplerFailureRecovery::EnablePortableResponsesReasoningAndResubmit);
+                    tracing::info!("provider requires portable reasoning; rebuilding context");
+                    return Ok(SamplerFailureRecovery::EnablePortableReasoningAndResubmit);
                 }
                 Some(false) => {}
                 None => {
-                    let message = "portable Responses reasoning could not be enabled; sampling was not resumed";
+                    let message =
+                        "portable reasoning could not be enabled; sampling was not resumed";
                     self.log_terminal_failure(
                         "portable_reasoning_update_failed",
                         error.status_code,
@@ -2119,8 +2137,8 @@ impl SessionActor {
                     SamplerFailureRecovery::ResetContinuationAndResubmit => {
                         Ok(SamplerTurnOutcome::ResetContinuationAndResubmit)
                     }
-                    SamplerFailureRecovery::EnablePortableResponsesReasoningAndResubmit => {
-                        Ok(SamplerTurnOutcome::EnablePortableResponsesReasoningAndResubmit)
+                    SamplerFailureRecovery::EnablePortableReasoningAndResubmit => {
+                        Ok(SamplerTurnOutcome::EnablePortableReasoningAndResubmit)
                     }
                     SamplerFailureRecovery::RefreshByokAndResubmit { credential } => {
                         Ok(SamplerTurnOutcome::RefreshByokAndResubmit { credential })
@@ -2308,78 +2326,134 @@ mod image_input_rejection_tests {
     async fn explicit_reasoning_replay_rejection_updates_once_then_stops() {
         tokio::task::LocalSet::new()
             .run_until(async {
-                let (gateway_tx, _gateway_rx) =
-                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-                let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
-                tokio::spawn(async move { while persistence_rx.recv().await.is_some() {} });
-                let actor = super::super::super::tests::support::create_test_actor(
-                    0,
-                    256_000,
-                    85,
-                    gateway_tx,
-                    persistence_tx,
-                )
-                .await;
-                let mut responses_config =
-                    actor.chat_state_handle.get_sampling_config().await.unwrap();
-                responses_config.api_backend = sampling_types::ApiBackend::Responses;
-                responses_config.model = "responses-reasoning-replay".into();
-                actor.chat_state_handle.push_assistant_response(
-                    sampling_types::ConversationItem::Reasoning(
-                        sampling_types::synthesized_reasoning_item("reasoning to replay"),
+                for (backend, field, has_reasoning) in [
+                    (
+                        sampling_types::ApiBackend::Responses,
+                        "reasoning_text",
+                        true,
                     ),
-                );
-                actor.chat_state_handle.push_assistant_response(
-                    sampling_types::ConversationItem::assistant_tool_calls(vec![
-                        sampling_types::ToolCall {
-                            id: "reasoning-replay-call".into(),
-                            name: "read_file".into(),
-                            arguments: r#"{"path":"a"}"#.into(),
-                        },
-                    ]),
-                );
-                actor.chat_state_handle.push_tool_result(
-                    sampling_types::ConversationItem::tool_result("reasoning-replay-call", "done"),
-                );
-                actor
-                    .chat_state_handle
-                    .replace_sampling_route(responses_config);
-                let actor = std::sync::Arc::new(actor);
-                let error = sampler::SamplingErrorInfo::from(&sampling_types::SamplingError::Api {
-                    status: reqwest::StatusCode::BAD_REQUEST,
-                    message:
-                        "The `reasoning_text` in the thinking mode must be passed back to the API."
-                            .into(),
-                    model_metadata: None,
-                    retry_after_secs: None,
-                    should_retry: Some(false),
-                });
-                assert!(error.portable_responses_reasoning_required);
-
-                let first = actor
-                    .handle_sampling_failure(error.clone(), 0, None, false)
-                    .await
-                    .unwrap();
-                assert!(matches!(
-                    first,
-                    SamplerFailureRecovery::EnablePortableResponsesReasoningAndResubmit
-                ));
-                let request = actor
-                    .chat_state_handle
-                    .build_request("reasoning-recovery", vec![], None, None, None)
-                    .await
-                    .unwrap();
-                let wire = serde_json::to_value(sampling_types::rs::CreateResponse::from(&request))
-                    .unwrap();
-                assert!(wire.to_string().contains("reasoning to replay"));
-
-                assert!(
+                    (
+                        sampling_types::ApiBackend::ChatCompletions,
+                        "reasoning_content",
+                        true,
+                    ),
+                    (
+                        sampling_types::ApiBackend::ChatCompletions,
+                        "reasoning_content",
+                        false,
+                    ),
+                ] {
+                    let (gateway_tx, _gateway_rx) =
+                        tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                    let (persistence_tx, mut persistence_rx) =
+                        tokio::sync::mpsc::unbounded_channel();
+                    tokio::spawn(async move { while persistence_rx.recv().await.is_some() {} });
+                    let actor = super::super::super::tests::support::create_test_actor(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await;
+                    let mut responses_config =
+                        actor.chat_state_handle.get_sampling_config().await.unwrap();
+                    responses_config.api_backend = backend.clone();
+                    responses_config.model = "responses-reasoning-replay".into();
+                    if has_reasoning {
+                        actor.chat_state_handle.push_assistant_response(
+                            sampling_types::ConversationItem::Reasoning(
+                                sampling_types::synthesized_reasoning_item("reasoning to replay"),
+                            ),
+                        );
+                    }
+                    actor.chat_state_handle.push_assistant_response(
+                        sampling_types::ConversationItem::assistant_tool_calls(vec![
+                            sampling_types::ToolCall {
+                                id: "reasoning-replay-call".into(),
+                                name: "read_file".into(),
+                                arguments: r#"{"path":"a"}"#.into(),
+                            },
+                        ]),
+                    );
+                    actor.chat_state_handle.push_tool_result(
+                        sampling_types::ConversationItem::tool_result(
+                            "reasoning-replay-call",
+                            "done",
+                        ),
+                    );
                     actor
-                        .handle_sampling_failure(error, 0, None, false)
+                        .chat_state_handle
+                        .replace_sampling_route(responses_config);
+                    let actor = std::sync::Arc::new(actor);
+                    let error =
+                        sampler::SamplingErrorInfo::from(&sampling_types::SamplingError::Api {
+                            status: reqwest::StatusCode::BAD_REQUEST,
+                            message: format!(
+                                "The `{field}` in the thinking mode must be passed back to the API."
+                            ),
+                            model_metadata: None,
+                            retry_after_secs: None,
+                            should_retry: Some(false),
+                        });
+                    assert_eq!(error.portable_reasoning_required, Some(backend.clone()));
+
+                    let first = actor
+                        .handle_sampling_failure(error.clone(), 0, None, false)
                         .await
-                        .is_err(),
-                    "the same rejection must not reopen the compatibility recovery"
-                );
+                        .unwrap();
+                    assert!(matches!(
+                        first,
+                        SamplerFailureRecovery::EnablePortableReasoningAndResubmit
+                    ));
+                    let request = actor
+                        .chat_state_handle
+                        .build_request("reasoning-recovery", vec![], None, None, None)
+                        .await
+                        .unwrap();
+                    let wire = match backend {
+                        sampling_types::ApiBackend::Responses => {
+                            serde_json::to_value(sampling_types::rs::CreateResponse::from(&request))
+                                .unwrap()
+                        }
+                        _ => serde_json::to_value(sampling_types::ChatCompletionRequest::from(
+                            request,
+                        ))
+                        .unwrap(),
+                    };
+                    assert_eq!(
+                        wire.to_string().contains("reasoning to replay"),
+                        has_reasoning
+                    );
+                    if backend == sampling_types::ApiBackend::ChatCompletions {
+                        let assistant = wire["messages"]
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .find(|message| {
+                                message["tool_calls"]
+                                    .as_array()
+                                    .is_some_and(|calls| !calls.is_empty())
+                            })
+                            .unwrap();
+                        assert_eq!(
+                            assistant["reasoning_content"],
+                            if has_reasoning {
+                                "reasoning to replay"
+                            } else {
+                                ""
+                            }
+                        );
+                    }
+
+                    assert!(
+                        actor
+                            .handle_sampling_failure(error, 0, None, false)
+                            .await
+                            .is_err(),
+                        "the same rejection must not reopen the compatibility recovery"
+                    );
+                }
             })
             .await;
     }
@@ -2429,7 +2503,7 @@ mod image_input_rejection_tests {
             credential: sampling_types::SentCredential::Unknown,
             usage: None,
             cost_usd_ticks: None,
-            portable_responses_reasoning_required: false,
+            portable_reasoning_required: None,
         }
     }
 

@@ -1127,6 +1127,7 @@ impl PermissionHandle {
                 within_capability_fence: false,
                 execution_cwd: None,
                 classifier_turns: None,
+                call_evidence: None,
             },
         )
         .await
@@ -1594,17 +1595,20 @@ fn spawn_permission_manager_inner(
                             .or_default(),
                         None => &mut root_auto_runtime,
                     };
+                    let call_evidence = context.call_evidence.clone();
                     if let Some(turns) = context.classifier_turns {
                         auto_runtime.classifier_turns = turns;
                     }
-                    // Tool name is the single source of truth shared with the
-                    // prompter's permission diagnostics. access_kind / access_detail
-                    // feed BOTH the locally recorded PermissionEvent and the auto-mode classifier
-                    // (`clf.classify(..., classifier_access_detail, ...)` below).
-                    // The event retains the complete live detail for its modal;
-                    // classifier input and durable audit use separate bounded or
-                    // redacted projections.
-                    let tool_name = crate::permission::prompter::tool_name_for_access(&access);
+                    // Frozen Shell evidence owns exact child tool identity.
+                    // Internal/non-Shell callers without evidence retain the
+                    // historical AccessKind-derived fallback. AccessKind and
+                    // access_detail still feed policy and UI presentation;
+                    // classifier input and durable audit use separate bounded
+                    // or redacted projections.
+                    let tool_name = call_evidence.as_ref().map_or_else(
+                        || crate::permission::prompter::tool_name_for_access(&access),
+                        |evidence| evidence.tool_name.clone(),
+                    );
                     let (access_kind_str, access_detail) = match &access {
                         AccessKind::Read(path) => ("read".to_string(), path.clone()),
                         AccessKind::Grep { path, glob: _ } => ("grep".to_string(), path.clone()),
@@ -2048,6 +2052,7 @@ fn spawn_permission_manager_inner(
                                             execution_cwd: Some(
                                                 request_cwd.to_string_lossy().into_owned(),
                                             ),
+                                            call_evidence: call_evidence.clone(),
                                         },
                                     );
                                     tokio::select! {
@@ -3612,6 +3617,7 @@ mod tests {
             within_capability_fence: false,
             execution_cwd: None,
             classifier_turns: Some(turns),
+            call_evidence: None,
         }
     }
 
@@ -3724,6 +3730,125 @@ mod tests {
         )
     }
 
+    struct ExactCallCapturingClassifier {
+        seen: Arc<std::sync::Mutex<Vec<(String, crate::permission::auto_mode::ClassifierContext)>>>,
+    }
+
+    impl crate::permission::auto_mode::PermissionClassifier for ExactCallCapturingClassifier {
+        fn classify<'a>(
+            &'a self,
+            tool_name: &'a str,
+            _access: &'a AccessKind,
+            _access_detail: Option<&'a str>,
+            context: crate::permission::auto_mode::ClassifierContext,
+        ) -> std::pin::Pin<
+            Box<
+                dyn std::future::Future<Output = crate::permission::auto_mode::ClassifierOutcome>
+                    + Send
+                    + 'a,
+            >,
+        > {
+            self.seen
+                .lock()
+                .unwrap()
+                .push((tool_name.to_owned(), context));
+            Box::pin(async { crate::permission::auto_mode::ClassifierVerdict::Allow.into() })
+        }
+    }
+
+    #[tokio::test]
+    async fn frozen_call_identity_drives_child_classifier_and_audit() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let (manager, mut events) = test_manager(&cwd, PermissionMode::Ask);
+                let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+                manager.set_classifier(Some(Arc::new(ExactCallCapturingClassifier {
+                    seen: seen.clone(),
+                })));
+                let evidence = crate::permission::types::PermissionCallEvidence {
+                    tool_name: "write".into(),
+                    canonical_args_hash: "args-hash".into(),
+                    operation: Some(serde_json::json!({
+                        "operation": "replace_entire_file",
+                        "path": "src/lib.rs",
+                    })),
+                };
+
+                let decision = manager
+                    .request_with_context(
+                        AccessKind::Edit("src/lib.rs".into()),
+                        tool_call(),
+                        None,
+                        PermissionRequestContext {
+                            source: PermissionRequestSource::Child {
+                                session_id: "child-write".into(),
+                                subagent_type: Some("coder".into()),
+                                subagent_description: Some("implement the requested fix".into()),
+                            },
+                            request_mode: Some(RequestPermissionMode::Auto),
+                            within_capability_fence: false,
+                            execution_cwd: Some(cwd.as_path().to_path_buf()),
+                            classifier_turns: Some(vec![]),
+                            call_evidence: Some(evidence.clone()),
+                        },
+                    )
+                    .await;
+
+                assert!(matches!(decision, Decision::Allow));
+                let seen = seen.lock().unwrap();
+                assert_eq!(seen.len(), 1);
+                assert_eq!(seen[0].0, "write");
+                assert_eq!(seen[0].1.call_evidence.as_ref(), Some(&evidence));
+                drop(seen);
+                let event = events.recv().await.expect("permission audit event");
+                assert_eq!(event.tool_name, "write");
+                assert_eq!(event.access_kind, "edit");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn missing_frozen_call_evidence_keeps_access_kind_name_fallback() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let tmp = tempfile::tempdir().unwrap();
+                let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+                let (manager, mut events) = test_manager(&cwd, PermissionMode::Ask);
+                let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+                manager.set_classifier(Some(Arc::new(ExactCallCapturingClassifier {
+                    seen: seen.clone(),
+                })));
+
+                let decision = manager
+                    .request_with_context(
+                        AccessKind::Edit("src/lib.rs".into()),
+                        tool_call(),
+                        None,
+                        PermissionRequestContext {
+                            source: PermissionRequestSource::Child {
+                                session_id: "child-legacy-edit".into(),
+                                subagent_type: Some("coder".into()),
+                                subagent_description: Some("edit one file".into()),
+                            },
+                            request_mode: Some(RequestPermissionMode::Auto),
+                            within_capability_fence: false,
+                            execution_cwd: Some(cwd.as_path().to_path_buf()),
+                            classifier_turns: Some(vec![]),
+                            call_evidence: None,
+                        },
+                    )
+                    .await;
+
+                assert!(matches!(decision, Decision::Allow));
+                assert_eq!(seen.lock().unwrap()[0].0, "search_replace");
+                let event = events.recv().await.expect("permission audit event");
+                assert_eq!(event.tool_name, "search_replace");
+            })
+            .await;
+    }
+
     #[tokio::test]
     async fn child_auto_context_is_atomic_and_source_local() {
         use crate::permission::auto_mode::{ClassifierTurn, ClassifierVerdict};
@@ -3756,6 +3881,7 @@ mod tests {
                                 classifier_turns: Some(vec![ClassifierTurn::UserText(
                                     session_id.to_owned(),
                                 )]),
+                                call_evidence: None,
                             },
                         )
                         .await;
@@ -3818,6 +3944,7 @@ mod tests {
                                 within_capability_fence: false,
                                 execution_cwd: Some(cwd.as_path().to_path_buf()),
                                 classifier_turns: Some(vec![]),
+                                call_evidence: None,
                             },
                         )
                         .await;
@@ -3875,6 +4002,7 @@ mod tests {
                                 within_capability_fence: true,
                                 execution_cwd: Some(cwd.as_path().to_path_buf()),
                                 classifier_turns: Some(vec![]),
+                                call_evidence: None,
                             },
                         )
                         .await;
@@ -3926,6 +4054,7 @@ mod tests {
                     within_capability_fence: true,
                     execution_cwd: Some(cwd.as_path().to_path_buf()),
                     classifier_turns: Some(vec![]),
+                    call_evidence: None,
                 };
 
                 for mode in [
@@ -3996,6 +4125,7 @@ mod tests {
                             within_capability_fence: false,
                             execution_cwd: Some(cwd.as_path().to_path_buf()),
                             classifier_turns: Some(vec![]),
+                            call_evidence: None,
                         },
                     )
                     .await;
@@ -4147,6 +4277,7 @@ mod tests {
                             within_capability_fence: false,
                             execution_cwd: Some(cwd.as_path().to_path_buf()),
                             classifier_turns: Some(vec![]),
+                            call_evidence: None,
                         },
                     )
                     .await;
@@ -5994,6 +6125,7 @@ mod tests {
                                 within_capability_fence: true,
                                 execution_cwd: Some(cwd.as_path().to_path_buf()),
                                 classifier_turns: Some(vec![]),
+                                call_evidence: None,
                             },
                         )
                         .await

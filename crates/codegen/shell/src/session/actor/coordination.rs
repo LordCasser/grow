@@ -1061,6 +1061,39 @@ mod tests {
             route.sampling_config.api_backend = sampling_types::ApiBackend::ChatCompletions;
             actor.model_route.replace(route.model_id, route.sampling_config);
             crate::session::actor::tests::support::begin_test_active_causal_turn(&actor).await;
+            actor.chat_state_handle.record_timeline_event_durably(
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
+                    chat_state::SubagentSpawnEvent {
+                        subagent_id: "active-child".into(),
+                        child_session_id: "child-session".into(),
+                        security_parent_session_id: actor.session_info.id.to_string(),
+                        subagent_type: "explore".into(),
+                        description: "keep running in the background".into(),
+                        prompt: "inspect the target".into(),
+                        context_source: chat_state::SubagentContextSource::New,
+                        source_ref: None,
+                        context_normalized: false,
+                        resumed_from: None,
+                        parent_prompt_id: None,
+                        capability_mode: None,
+                        permission_mode: None,
+                        effective_permission_mode: None,
+                        workflow_run_id: None,
+                        goal_id: None,
+                        goal_definition_revision: None,
+                        surface_completion: true,
+                        child_cwd: actor.session_info.cwd.clone(),
+                        worktree_path: None,
+                        effective_model_id: "test-model".into(),
+                        model_transport_key: sampling_types::ModelImageInputKey::new(
+                            "test-model",
+                            "chat_completions",
+                            "test-endpoint",
+                        ),
+                        reasoning_effort: None,
+                    },
+                )),
+            ).await.unwrap();
             actor.notifications.gateway_enabled.store(false, std::sync::atomic::Ordering::Release);
             let before = serde_json::to_value(actor.chat_state_handle.get_conversation().await).unwrap();
             let (mut question, response) = inquiry(7);
@@ -1089,6 +1122,12 @@ mod tests {
             assert!(receipts.iter().all(|(key, _)| key == &id), "all UI lifecycle updates must use one inquiry row identity");
             assert!(receipts.last().unwrap().1.outcome.is_some());
             assert!(events.iter().any(|event| matches!(&event.kind, chat_state::TimelineEventKind::Sideband(spawn) if spawn.purpose == chat_state::SidebandPurpose::InfoRequest)));
+            assert!(events.iter().any(|event| matches!(&event.kind,
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn))
+                    if spawn.subagent_id == "active-child")));
+            assert!(!events.iter().any(|event| matches!(&event.kind,
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(ended))
+                    if ended.subagent_id == "active-child")));
             chat_state::Timeline::from_events(events).unwrap();
             server.abort();
         }).await;

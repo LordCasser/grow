@@ -434,7 +434,7 @@ impl SidebandTimeline {
                 .context_surface_ids
                 .iter()
                 .chain(&attempt.assembly_manifest.selected_surface_ids)
-                .any(|id| !surface_id_exists(parent, *id))
+                .any(|id| !parent.owns_surface_id(*id))
             {
                 return Err(SidebandError::InvalidSurfaceSelection);
             }
@@ -723,33 +723,6 @@ fn range_covers(outer: &TimelineRangeRef, inner: &TimelineRangeRef) -> bool {
 
 fn surface_ids_are_unique(ids: &[crate::SurfaceId]) -> bool {
     ids.iter().copied().collect::<BTreeSet<_>>().len() == ids.len()
-}
-
-fn surface_id_exists(parent: &crate::Timeline, id: crate::SurfaceId) -> bool {
-    usize::try_from(id.event.get())
-        .ok()
-        .and_then(|index| parent.events().get(index))
-        .is_some_and(|event| {
-            if event.seq != id.event {
-                return false;
-            }
-            match &event.kind {
-                crate::TimelineEventKind::Messages(messages) => usize::try_from(id.item)
-                    .ok()
-                    .is_some_and(|item| item < messages.items.len()),
-                crate::TimelineEventKind::ImageProjection(projection) => usize::try_from(id.item)
-                    .ok()
-                    .is_some_and(|item| item < projection.shadows.len()),
-                // Control transitions and re-projections are first-class
-                // Surface facts, one synthetic item per context.
-                crate::TimelineEventKind::Control(crate::ControlEvent {
-                    model_contexts, ..
-                }) => usize::try_from(id.item)
-                    .ok()
-                    .is_some_and(|item| item < model_contexts.len()),
-                _ => false,
-            }
-        })
 }
 
 pub fn validate_sideband_id(id: &str) -> Result<(), SidebandError> {

@@ -45,6 +45,7 @@ serde_path_to_error = { workspace = true }
 tool-runtime = { workspace = true }
 tool-types = { workspace = true }
 tool-protocol = { workspace = true }
+sampling-types = { path = "../sampling-types" }
 
 futures = { workspace = true }
 similar = { workspace = true }

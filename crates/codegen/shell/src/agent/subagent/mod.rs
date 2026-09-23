@@ -455,7 +455,6 @@ impl ChildControl for ShellChildRuntime {
             pause_goal: false,
             trigger: None,
         });
-        let _ = self.child_handle.cmd_tx.send(SessionCommand::Shutdown);
     }
 }
 #[derive(Default)]
@@ -877,7 +876,7 @@ fn seed_child_system_head(
     verbatim_fork: bool,
     conversation: &mut Vec<ConversationItem>,
     prefix_len: &mut Option<usize>,
-    child_system_head: &str,
+    child_system_head: Option<&str>,
 ) -> Result<(), String> {
     if verbatim_fork && !matches!(source, InitialContextSource::Forked) {
         return Err("verbatim child context is not a fork".to_string());
@@ -888,6 +887,8 @@ fn seed_child_system_head(
             .then_some(())
             .ok_or_else(|| "inherited child Surface has no stable System head".to_string());
     }
+    let child_system_head = child_system_head
+        .ok_or_else(|| "failed to render the stable child System head".to_string())?;
 
     match conversation.first_mut() {
         Some(ConversationItem::System(system)) => {
@@ -1264,6 +1265,58 @@ fn resume_inherited_cwd(source: Option<&ResumeSourceData>) -> Option<&str> {
     }
     Some(source.child_cwd.as_str())
 }
+
+/// Validate an existing non-worktree cwd without making a removed historical
+/// directory a permanent resume blocker. A missing path safely falls back to
+/// the current parent workspace in [`resume_inherited_cwd`]; every other
+/// observation must prove that the source is a directory confined below the
+/// parent workspace.
+fn validate_resume_non_worktree_cwd(source_cwd: &str, parent_cwd: &Path) -> Result<(), String> {
+    let source = Path::new(source_cwd);
+    match std::fs::metadata(source) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            tracing::warn!(
+                source_cwd = %source.display(),
+                parent_cwd = %parent_cwd.display(),
+                "resume source cwd is missing; falling back to the parent workspace"
+            );
+            return Ok(());
+        }
+        Err(error) => {
+            return Err(format!(
+                "Cannot resume child cwd '{}': failed to inspect the path: {error}",
+                source.display()
+            ));
+        }
+        Ok(metadata) if !metadata.is_dir() => {
+            return Err(format!(
+                "Cannot resume child cwd '{}': the path is not a directory",
+                source.display()
+            ));
+        }
+        Ok(_) => {}
+    }
+    let child = dunce::canonicalize(source).map_err(|error| {
+        format!(
+            "Cannot resume child cwd '{}': failed to resolve the path: {error}",
+            source.display()
+        )
+    })?;
+    let parent = dunce::canonicalize(parent_cwd).map_err(|error| {
+        format!(
+            "Cannot resume child cwd: failed to resolve parent workspace '{}': {error}",
+            parent_cwd.display()
+        )
+    })?;
+    if !child.starts_with(&parent) {
+        return Err(format!(
+            "Cannot resume child cwd '{}': it is outside the parent workspace '{}'",
+            child.display(),
+            parent.display()
+        ));
+    }
+    Ok(())
+}
 /// Select the cwd override for a child: a resume inherits the source's cwd
 /// (never its own `request.cwd`); a fresh spawn uses `request.cwd`.
 fn select_override_cwd<'a>(
@@ -1280,7 +1333,7 @@ fn durable_resume_source_for(
     id: &str,
     parent_session_id: &str,
     requester_security_parent_session_id: &str,
-) -> Option<DurableResumeSource> {
+) -> Result<DurableResumeSource, DurableResumeSourceError> {
     let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(
         crate::util::grow_home::grow_home(),
     );
@@ -1288,39 +1341,102 @@ fn durable_resume_source_for(
     // delegation cwd is a workspace confinement input, never part of that
     // durable identity; nested children may legitimately run in a subdir or
     // worktree while their spawn fact remains in the root Timeline.
-    let parent = storage.open_session_by_id(parent_session_id).ok()??;
-    let timeline = parent.validated_timeline(parent_session_id).ok()?.timeline;
+    let parent = storage
+        .open_session_by_id(parent_session_id)
+        .map_err(|error| DurableResumeSourceError::ParentOpen(error.to_string()))?
+        .ok_or(DurableResumeSourceError::ParentMissing)?;
+    let timeline = parent
+        .validated_timeline(parent_session_id)
+        .map_err(|error| DurableResumeSourceError::ParentTimeline(error.to_string()))?
+        .timeline;
     let (spawn_seq, spawn, terminal) = resume_source_facts_from_timeline(&timeline, id)?;
     if !resume_security_parent_allows(
         parent_session_id,
         requester_security_parent_session_id,
         &spawn.security_parent_session_id,
     ) {
-        return None;
+        return Err(DurableResumeSourceError::SecurityParentMismatch);
     }
-    let child_session = storage.open_session_by_id(&spawn.child_session_id).ok()??;
+    let child_session = storage
+        .open_session_by_id(&spawn.child_session_id)
+        .map_err(|error| DurableResumeSourceError::ChildOpen(error.to_string()))?
+        .ok_or(DurableResumeSourceError::ChildMissing)?;
     let summary = child_session.summary();
-    if summary.parent_session_id.as_deref() != Some(parent_session_id)
+    if summary.info.id.0.as_ref() != spawn.child_session_id
+        || summary.parent_session_id.as_deref() != Some(parent_session_id)
         || !summary
             .session_kind
             .as_deref()
             .is_some_and(|kind| kind.starts_with("subagent"))
     {
-        return None;
+        return Err(DurableResumeSourceError::ChildIdentityMismatch);
     }
     let child = child_session
         .validated_timeline(&spawn.child_session_id)
-        .ok()?
+        .map_err(|error| DurableResumeSourceError::ChildTimeline(error.to_string()))?
         .timeline;
     child
         .validate_subagent_result_link(parent_session_id, spawn_seq, spawn, terminal)
-        .ok()?;
+        .map_err(|error| DurableResumeSourceError::ResultLink(error.to_string()))?;
     let mut data = resume_source_from_facts(spawn, terminal);
     data.child_cwd = summary.info.cwd.clone();
-    Some(DurableResumeSource {
+    Ok(DurableResumeSource {
         data,
         session: child_session,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+enum DurableResumeSourceError {
+    #[error("parent session is missing")]
+    ParentMissing,
+    #[error("parent session could not be opened: {0}")]
+    ParentOpen(String),
+    #[error("parent Timeline is invalid: {0}")]
+    ParentTimeline(String),
+    #[error("canonical spawn is missing")]
+    SpawnMissing,
+    #[error("canonical terminal has not committed")]
+    TerminalMissing,
+    #[error("source is unavailable to the current security parent")]
+    SecurityParentMismatch,
+    #[error("child session is missing")]
+    ChildMissing,
+    #[error("child session could not be opened: {0}")]
+    ChildOpen(String),
+    #[error("child session identity does not match the parent spawn")]
+    ChildIdentityMismatch,
+    #[error("child Timeline is invalid: {0}")]
+    ChildTimeline(String),
+    #[error("canonical child result link is invalid: {0}")]
+    ResultLink(String),
+}
+
+impl DurableResumeSourceError {
+    fn user_message(&self, id: &str) -> String {
+        let detail = match self {
+            Self::SecurityParentMismatch | Self::SpawnMissing => {
+                "the source is unavailable to the current parent".to_owned()
+            }
+            Self::TerminalMissing => {
+                "the canonical terminal has not committed; the source may still be settling"
+                    .to_owned()
+            }
+            Self::ParentMissing | Self::ChildMissing => {
+                "the source session is unavailable in local storage".to_owned()
+            }
+            Self::ParentOpen(_)
+            | Self::ParentTimeline(_)
+            | Self::ChildOpen(_)
+            | Self::ChildTimeline(_) => {
+                format!("the source session could not be loaded or validated: {self}")
+            }
+            Self::ChildIdentityMismatch | Self::ResultLink(_) => {
+                format!("the canonical source linkage is invalid: {self}")
+            }
+        };
+        format!("Cannot resume from subagent '{id}': {detail}.")
+    }
 }
 
 fn resume_security_parent_allows(
@@ -1348,11 +1464,14 @@ impl std::ops::Deref for DurableResumeSource {
 fn resume_source_facts_from_timeline<'a>(
     timeline: &'a chat_state::Timeline,
     id: &str,
-) -> Option<(
-    chat_state::EventSeq,
-    &'a chat_state::SubagentSpawnEvent,
-    &'a chat_state::SubagentTerminalEvent,
-)> {
+) -> Result<
+    (
+        chat_state::EventSeq,
+        &'a chat_state::SubagentSpawnEvent,
+        &'a chat_state::SubagentTerminalEvent,
+    ),
+    DurableResumeSourceError,
+> {
     let (spawn_seq, spawn) =
         timeline
             .events()
@@ -1362,7 +1481,8 @@ fn resume_source_facts_from_timeline<'a>(
                     spawn,
                 )) if spawn.subagent_id == id => Some((event.seq, spawn)),
                 _ => None,
-            })?;
+            })
+            .ok_or(DurableResumeSourceError::SpawnMissing)?;
     let terminal =
         timeline
             .events()
@@ -1372,8 +1492,9 @@ fn resume_source_facts_from_timeline<'a>(
                     terminal,
                 )) if terminal.subagent_id == id => Some(terminal),
                 _ => None,
-            })?;
-    Some((spawn_seq, spawn, terminal))
+            })
+            .ok_or(DurableResumeSourceError::TerminalMissing)?;
+    Ok((spawn_seq, spawn, terminal))
 }
 
 fn resume_source_from_facts(
@@ -1398,7 +1519,7 @@ fn resume_source_from_timeline(
     timeline: &chat_state::Timeline,
     id: &str,
 ) -> Option<ResumeSourceData> {
-    let (_, spawn, terminal) = resume_source_facts_from_timeline(timeline, id)?;
+    let (_, spawn, terminal) = resume_source_facts_from_timeline(timeline, id).ok()?;
     Some(resume_source_from_facts(spawn, terminal))
 }
 /// Resolve the MCP pool a child subagent should import from its parent.
@@ -1631,17 +1752,13 @@ fn resolve_subagent_source_repo(ctx: &SubagentSpawnContext) -> std::path::PathBu
     let source_cwd = parent_source_cwd(ctx);
     workspace::session::git::find_main_repo_root_from_path(&source_cwd).unwrap_or(source_cwd)
 }
-enum SubagentWaitOutcome {
-    Cancelled,
-    TurnResult(Box<Result<SubagentPromptTurnResult, oneshot::error::RecvError>>),
-}
 async fn await_subagent_turn_or_cancellation(
-    prompt_rx: oneshot::Receiver<SubagentPromptTurnResult>,
+    mut prompt_rx: oneshot::Receiver<SubagentPromptTurnResult>,
     cancel_token: CancellationToken,
-) -> SubagentWaitOutcome {
+) -> Box<Result<SubagentPromptTurnResult, oneshot::error::RecvError>> {
     tokio::select! {
-        _ = cancel_token.cancelled() => SubagentWaitOutcome::Cancelled,
-        turn_result = prompt_rx => SubagentWaitOutcome::TurnResult(Box::new(turn_result)),
+        turn_result = &mut prompt_rx => Box::new(turn_result),
+        _ = cancel_token.cancelled() => Box::new(prompt_rx.await),
     }
 }
 /// Fallback for cancelled/errored paths where TurnDeltaSnapshot is unavailable.

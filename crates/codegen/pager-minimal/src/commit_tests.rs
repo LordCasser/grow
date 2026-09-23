@@ -11,6 +11,71 @@ use pager::scrollback::entry::ScrollbackEntry;
 use pager::scrollback::state::ScrollbackState;
 use ratatui::style::Color;
 
+#[test]
+fn semantic_rows_drop_layout_padding_but_keep_wide_glyphs_and_shading() {
+    use ratatui::buffer::Buffer;
+
+    let mut buf = Buffer::empty(Rect::new(0, 0, 6, 3));
+    buf.set_string(0, 0, "key:", Style::default());
+    buf.set_string(0, 1, "世界", Style::default());
+    buf.set_style(Rect::new(0, 2, 6, 1), Style::default().bg(Color::Blue));
+    let rows = buffer_to_semantic_rows(&buf, &[], &[false; 3], &[None; 3]);
+    assert_eq!(rows.len(), 3);
+    assert!(rows[0].ansi.contains("key:"));
+    assert!(!rows[0].ansi.contains("key:  "));
+    assert!(rows[1].ansi.contains("世界"));
+    assert_eq!(rows[1].ansi.matches('世').count(), 1);
+    assert!(!rows[1].fills_width);
+    assert!(rows[2].ansi.contains("      "));
+    assert!(rows[2].fills_width);
+}
+
+#[test]
+fn semantic_rows_keep_source_trailing_spaces_before_layout_pad() {
+    use ratatui::buffer::Buffer;
+
+    let mut buf = Buffer::empty(Rect::new(0, 0, 8, 1));
+    buf.set_string(0, 0, "a  ", Style::default());
+    let rows = buffer_to_semantic_rows(&buf, &[], &[false], &[Some(3)]);
+    assert!(rows[0].ansi.contains("a  \x1b[0m"), "{:?}", rows[0]);
+    assert!(!rows[0].ansi.contains("a       "));
+}
+
+#[test]
+fn semantic_wrap_keeps_link_state_until_continuation_is_painted() {
+    use ratatui::buffer::Buffer;
+
+    let mut buf = Buffer::empty(Rect::new(0, 0, 4, 2));
+    buf.set_string(0, 0, "abcd", Style::default());
+    buf.set_string(0, 1, "ef", Style::default());
+    let url: std::sync::Arc<str> = "file:///full/unshortened/path".into();
+    let links = [
+        LinkSpan {
+            row: 0,
+            col_start: 0,
+            col_end: 4,
+            url: url.clone(),
+            id: Some(42),
+        },
+        LinkSpan {
+            row: 1,
+            col_start: 0,
+            col_end: 2,
+            url,
+            id: Some(42),
+        },
+    ];
+    let rows = buffer_to_semantic_rows(&buf, &links, &[true, false], &[None; 2]);
+    assert!(rows[0].fills_width && rows[0].soft_wrap);
+    assert!(
+        rows[0]
+            .ansi
+            .contains("\x1b]8;id=42;file:///full/unshortened/path\x07")
+    );
+    assert!(!rows[0].ansi.contains("\x1b]8;;\x07"));
+    assert!(rows[1].ansi.contains("ef\x1b]8;;\x07"));
+}
+
 fn test_cwd() -> &'static std::path::Path {
     std::path::Path::new("/test/session")
 }
@@ -944,7 +1009,9 @@ fn large_commit_is_capped_with_footer() {
     // A tall block: a fenced code block keeps each line on its own row
     // (markdown would otherwise join soft-wrapped prose into one paragraph),
     // so the block is comfortably taller than the cap.
-    let lines: Vec<String> = (0..60).map(|i| format!("line {i}")).collect();
+    let lines: Vec<String> = (0..60)
+        .map(|i| format!("line {i:02} {}", "z".repeat(60)))
+        .collect();
     let body = format!("```\n{}\n```", lines.join("\n"));
     let mut entry = ScrollbackEntry::new(RenderBlock::agent_message(body));
     entry.set_display_mode(minimal_commit_display_mode(&entry.block, &appearance));
@@ -967,6 +1034,10 @@ fn large_commit_is_capped_with_footer() {
         .collect();
     assert!(last.contains("more lines"), "footer row: {last:?}");
     assert!(last.contains("/transcript"), "footer row: {last:?}");
+    assert!(
+        last.trim_end().ends_with("view"),
+        "clipped content leaked after footer: {last:?}"
+    );
     // A hidden-line count is present (full_h minus the kept content rows).
     let hidden = full_h - (cap - 1);
     assert!(

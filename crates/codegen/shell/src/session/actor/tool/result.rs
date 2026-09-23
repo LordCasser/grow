@@ -199,6 +199,7 @@ impl SessionActor {
                 | chat_state::NotificationSource::TaskStillRunning { .. }
                 | chat_state::NotificationSource::PlanHandoff { .. }
                 | chat_state::NotificationSource::ParentMessage { .. }
+                | chat_state::NotificationSource::AgentReply { .. }
                 | chat_state::NotificationSource::WorkflowHandoff { .. } => false,
             })
             .map(|notification| notification.id)
@@ -404,7 +405,7 @@ impl SessionActor {
         let mut inline_images: Vec<ContentPart> = Vec::new();
         let extraction = if !matches!(
             result.output,
-            ToolsToolOutput::ReadFile(ReadFileOutput::ImageContent(_))
+            ToolsToolOutput::ReadFile(ReadFileOutput::ImageContent(_)) | ToolsToolOutput::MCP(_)
         ) {
             tools::util::base64_images::extract_base64_images(prompt_text)
         } else {
@@ -414,9 +415,19 @@ impl SessionActor {
             }
         };
         let mut extracted_images = extraction.images;
-        let prompt_text = extraction.text;
+        let mut prompt_text = extraction.text;
         if let ToolsToolOutput::ReadFile(ReadFileOutput::FileContent(ref fc)) = result.output {
             extracted_images.extend(fc.extracted_images.iter().cloned());
+        }
+        if let ToolsToolOutput::MCP(ref mcp) = result.output {
+            let room =
+                tools::util::base64_images::MAX_IMAGES.saturating_sub(extracted_images.len());
+            let admitted = mcp.extracted_images().len().min(room);
+            extracted_images.extend(mcp.extracted_images().iter().take(admitted).cloned());
+            if admitted < mcp.extracted_images().len() {
+                prompt_text
+                    .push_str("\n[additional MCP images omitted: image count limit reached]");
+            }
         }
         let mut prompt_text = maybe_rewrite(path_rewriter.as_ref(), prompt_text);
         if let ToolsToolOutput::ReadFile(ReadFileOutput::ImageContent(ref image_content)) =

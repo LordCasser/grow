@@ -2077,6 +2077,7 @@ fn dashboard_attach_subagent_lazily_replays_deferred_transcript() {
         .join(shell::util::grow_home::encode_cwd_dirname("/tmp"))
         .join(&child_sid);
     std::fs::create_dir_all(&session_dir).unwrap();
+    std::fs::write(session_dir.join("timeline.jsonl"), "").unwrap();
     let info = shell::session::info::Info {
         id: acp::SessionId::new(child_sid.clone()),
         cwd: "/tmp".into(),

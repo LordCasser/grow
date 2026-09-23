@@ -472,12 +472,18 @@ mod tests {
             "hashline guidance should still be present"
         );
     }
+    // Budget the assembled foundation, audience (including capability
+    // authority and coordination guidance), standard and session extensions.
+    // Authored roles are covered by the discovery/composition test below.
+    const CHILD_GUIDANCE_BUDGET_BYTES: usize = 8 * 1024;
+    const READ_ONLY_GUIDANCE_BUDGET_BYTES: usize = 7680;
+
     #[test]
     fn child_rendered_template_is_compact() {
         let rendered = render_subagent_template(base_template_ctx());
         assert!(
-            rendered.len() < 5000,
-            "rendered child template too large: {} chars",
+            rendered.len() < CHILD_GUIDANCE_BUDGET_BYTES,
+            "rendered child template too large: {} bytes",
             rendered.len()
         );
     }
@@ -505,8 +511,8 @@ mod tests {
     fn rendered_prompt_size_general_purpose() {
         let rendered = render_subagent_template(base_template_ctx());
         assert!(
-            rendered.len() < 5000,
-            "general-purpose rendered prompt: {} chars (ceiling 5000)",
+            rendered.len() < CHILD_GUIDANCE_BUDGET_BYTES,
+            "general-purpose rendered prompt: {} bytes (ceiling {CHILD_GUIDANCE_BUDGET_BYTES})",
             rendered.len()
         );
     }
@@ -526,8 +532,8 @@ mod tests {
         };
         let rendered = render_subagent_template(ctx);
         assert!(
-            rendered.len() < 4500,
-            "read-only rendered prompt: {} chars (ceiling 4500)",
+            rendered.len() < READ_ONLY_GUIDANCE_BUDGET_BYTES,
+            "read-only rendered prompt: {} bytes (ceiling {READ_ONLY_GUIDANCE_BUDGET_BYTES})",
             rendered.len()
         );
         let full = render_subagent_template(base_template_ctx());
@@ -644,6 +650,59 @@ mod tests {
         assert!(extend_role.contains("Work with the user"));
         assert!(!full_role.contains("Work with the user"));
         assert!(full_role.contains("ROLE_LAYER_SENTINEL"));
+    }
+
+    #[test]
+    fn discovered_builtin_roles_preserve_audience_across_composition() {
+        // Exercise the production Markdown definitions, not the legacy Rust
+        // prompt constants. Built-ins resolve before user-level definitions.
+        let renderer = TemplateRenderer::new(Default::default(), Default::default());
+        for audience in [PromptAudience::Primary, PromptAudience::Subagent] {
+            let mut ctx = PromptContext {
+                audience,
+                ..test_context()
+            };
+            let head = ctx.render_with_renderer(&renderer).unwrap();
+            for name in ["general-purpose", "explore"] {
+                let definition = crate::discovery::by_name(name).unwrap();
+                let body = definition.prompt_body.unwrap();
+                assert!(!body.contains("<audience>"));
+                assert!(!body.contains("<capability_authority>"));
+                if name == "explore" {
+                    assert!(body.contains("Do not create, modify, or delete files"));
+                    assert!(body.contains("Stop when the evidence is sufficient"));
+                } else {
+                    assert!(body.contains("smallest coherent change"));
+                }
+                ctx.prompt_body = Some(body.clone());
+                for composition in [PromptComposition::Extend, PromptComposition::Full] {
+                    ctx.prompt_composition = composition.clone();
+                    // Neither switching roles nor Full composition can erase
+                    // audience ownership or the child's capability authority.
+                    assert_eq!(ctx.render_with_renderer(&renderer).unwrap(), head);
+                    let role = ctx.render_role_with_renderer(&renderer).unwrap();
+                    assert!(role.contains(&body));
+                    assert_eq!(
+                        role.contains("Work with the user"),
+                        composition == PromptComposition::Extend
+                    );
+                    assert!(!role.contains("<audience>"));
+                    assert!(!head.contains(&body));
+                    assert!(!head.contains("${{"));
+                    assert!(!role.contains("${{"));
+                    assert!(head.len() + role.len() < 16_384);
+                    println!(
+                        "{audience:?}/{name}/{composition:?}: head={} role={} bytes",
+                        head.len(),
+                        role.len()
+                    );
+                }
+            }
+            assert_eq!(
+                head.contains("<capability_authority>"),
+                audience == PromptAudience::Subagent
+            );
+        }
     }
     /// Verify that AGENTS.md file paths rewritten to the display cwd are
     /// rendered into the system prompt correctly. When `AgentConfigFile.file_path`

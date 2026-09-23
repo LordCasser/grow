@@ -507,46 +507,41 @@ pub struct UiNotice {
 /// Structured view of a committed parent receipt. Delivery remains in Timeline.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct ParentMessageNotice {
-    pub parent_session_id: String,
+pub struct AgentMessageNotice {
+    #[serde(alias = "parentSessionId")]
+    pub source_session_id: String,
     pub message_id: String,
     pub interrupt: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<sampling_types::AgentMessageRef>,
     /// Missing only when historical presentation data cannot be recovered.
     pub message: Option<String>,
 }
 
-impl ParentMessageNotice {
-    pub const SUBJECT: &str = "parent message received";
+impl AgentMessageNotice {
+    pub const SUBJECT: &str = "agent message received";
 
     pub fn from_notice(notice: &UiNotice) -> Option<Self> {
         if notice.category != UiNoticeCategory::Coordination
-            || notice.subject.as_deref() != Some(Self::SUBJECT)
+            || !matches!(
+                notice.subject.as_deref(),
+                Some(Self::SUBJECT | "parent message received")
+            )
             || notice.correlation_id.is_empty()
         {
             return None;
         }
         let data: Self = serde_json::from_str(notice.details.as_deref()?).ok()?;
-        (!data.parent_session_id.is_empty() && !data.message_id.is_empty()).then_some(data)
-    }
-
-    pub fn delivery_mode(&self) -> &'static str {
-        if self.interrupt {
-            "Safe interruption requested"
-        } else {
-            "Include at the next safe step"
-        }
+        (!data.source_session_id.is_empty() && !data.message_id.is_empty()).then_some(data)
     }
 
     pub fn display_details(&self, receipt_id: &str) -> String {
         format!(
-            "Source: parent agent (session {})\nMessage ID: {}\nReceipt ID: {}\nDelivery: {}\n\nMessage:\n{}",
-            self.parent_session_id,
+            "Source: {}\nMessage ID: {}\nReceipt ID: {}\n\n{}",
+            self.source_session_id,
             self.message_id,
             receipt_id,
-            self.delivery_mode(),
-            self.message
-                .as_deref()
-                .unwrap_or("Message body could not be recovered")
+            self.message.as_deref().unwrap_or("Message unavailable")
         )
     }
 }
@@ -685,7 +680,9 @@ pub enum SessionUpdate {
         async_compact: bool,
         /// Tokens used before compaction.
         tokens_before: u64,
-        /// Tokens used after compaction
+        /// Tokens used after compaction. Async completions report the next
+        /// materialized ordinary request projection; synchronous completions
+        /// report the immediate post-compaction projection.
         tokens_after: u64,
         /// How long the compaction took (milliseconds)
         #[serde(skip_serializing_if = "Option::is_none")]

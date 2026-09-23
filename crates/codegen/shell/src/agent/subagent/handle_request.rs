@@ -333,27 +333,29 @@ pub(crate) async fn run_shell_child(
         .as_deref()
         .filter(|s| is_valid_resume_id(s))
     {
+        if reporter
+            .source_is_active(resume_id, &ctx.security_parent_session_id)
+            .await
+        {
+            let msg = format!(
+                "Cannot resume from subagent '{resume_id}': it is still running or settling. \
+                 Wait for its canonical terminal before resuming."
+            );
+            return child_run_output(failure_result(&request, &msg), completion_data);
+        }
         match durable_resume_source_for(
             resume_id,
             &ctx.parent_session_id,
             &ctx.security_parent_session_id,
         ) {
-            Some(info) => Some(info),
-            None if reporter
-                .source_is_active(resume_id, &ctx.security_parent_session_id)
-                .await =>
-            {
-                let msg = format!(
-                    "Cannot resume from subagent '{resume_id}': it is still running. \
-                     Wait for it to complete before resuming."
+            Ok(info) => Some(info),
+            Err(error) => {
+                tracing::warn!(
+                    resume_source_id = resume_id,
+                    error = %error,
+                    "subagent durable resume source rejected"
                 );
-                return child_run_output(failure_result(&request, &msg), completion_data);
-            }
-            None => {
-                let msg = format!(
-                    "Cannot resume from subagent '{resume_id}': no completed canonical lifecycle \
-                     was found."
-                );
+                let msg = error.user_message(resume_id);
                 return child_run_output(failure_result(&request, &msg), completion_data);
             }
         }
@@ -374,20 +376,11 @@ pub(crate) async fn run_shell_child(
         ) {
             return child_run_output(failure_result(&request, &e.to_string()), completion_data);
         }
-        if source.worktree_path.is_none() {
-            let confined = dunce::canonicalize(&source.child_cwd)
-                .ok()
-                .zip(dunce::canonicalize(&ctx.parent_cwd).ok())
-                .is_some_and(|(child, parent)| child.is_dir() && child.starts_with(parent));
-            if !confined {
-                return child_run_output(
-                    failure_result(
-                        &request,
-                        "Cannot resume a child whose cwd is outside the parent workspace",
-                    ),
-                    completion_data,
-                );
-            }
+        if source.worktree_path.is_none()
+            && let Err(message) =
+                validate_resume_non_worktree_cwd(&source.child_cwd, &ctx.parent_cwd)
+        {
+            return child_run_output(failure_result(&request, &message), completion_data);
         }
     }
     if !request.owner.is_workflow() {
@@ -750,22 +743,23 @@ pub(crate) async fn run_shell_child(
     };
     let verbatim_mirror_fork =
         context_source == InitialContextSource::Forked && context_verbatim_fork;
-    let Some(child_system_head) = (agent::PromptContext {
-        audience: agent::prompt::context::PromptAudience::Subagent,
-        ..Default::default()
-    })
-    .render() else {
-        return child_run_output(
-            failure_result(&request, "failed to render the stable child System head"),
-            completion_data,
-        );
+    let preserves_source_head =
+        matches!(context_source, InitialContextSource::Resumed) || verbatim_mirror_fork;
+    let child_system_head = if preserves_source_head {
+        None
+    } else {
+        (agent::PromptContext {
+            audience: agent::prompt::context::PromptAudience::Subagent,
+            ..Default::default()
+        })
+        .render()
     };
     if let Err(message) = seed_child_system_head(
         &context_source,
         verbatim_mirror_fork,
         &mut forked_conversation,
         &mut inherited_prefix_len,
-        &child_system_head,
+        child_system_head.as_deref(),
     ) {
         return child_run_output(failure_result(&request, &message), completion_data);
     }
@@ -1509,6 +1503,7 @@ pub(crate) async fn run_shell_child(
         ctx.parent_cmd_tx.as_ref(),
     );
     completion_data.spawned_notification_emitted = true;
+    let mut launch_error = None;
     // SubagentSpawned creates the Pager child view. Publish the child's
     // authoritative control snapshot before admitting its first prompt so
     // subsequent step-boundary controls cannot race an unseeded view.
@@ -1521,125 +1516,111 @@ pub(crate) async fn run_shell_child(
         .is_err()
         || control_ack_rx.await.is_err()
     {
-        tracing::warn!(
-            child_session_id = %child_session_id.0,
-            "child ended before its initial control state was published"
+        launch_error = Some(
+            "Derived child launch failed before first-prompt admission: initial control state was not published"
+                .to_owned(),
         );
     }
-    spawn_progress_publisher(
-        child_handle.signals_handle.clone(),
-        gateway.clone(),
-        ctx.parent_session_id.clone(),
-        request.id.clone(),
-        child_session_id.0.to_string(),
-        start,
-        cancel_token.clone(),
-    );
-    if let Some(snapshot) = request.goal_context.clone() {
-        let _ = child_handle
+    if launch_error.is_none() {
+        spawn_progress_publisher(
+            child_handle.signals_handle.clone(),
+            gateway.clone(),
+            ctx.parent_session_id.clone(),
+            request.id.clone(),
+            child_session_id.0.to_string(),
+            start,
+            cancel_token.clone(),
+        );
+    }
+    if launch_error.is_none()
+        && let Some(snapshot) = request.goal_context.clone()
+        && child_handle
             .cmd_tx
-            .send(SessionCommand::SetGoalContextSnapshot { snapshot });
+            .send(SessionCommand::SetGoalContextSnapshot { snapshot })
+            .is_err()
+    {
+        launch_error = Some(
+            "Derived child launch failed before first-prompt admission: Goal context snapshot was not installed"
+                .to_owned(),
+        );
     }
     let (prompt_tx, prompt_rx) = oneshot::channel();
     let prompt_text = task_prompt_text;
     let child_prompt_id = uuid::Uuid::now_v7().to_string();
     let (prompt_origin, turn_kind) = child_task_prompt_identity();
-    let _ = child_handle.cmd_tx.send(SessionCommand::QueuePrompt {
-        prompt_id: child_prompt_id.clone(),
-        prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(prompt_text))],
-        origin: prompt_origin,
-        turn_kind,
-        client_identifier: None,
-        screen_mode: None,
-        verbatim: true,
-        json_schema: request.runtime_overrides.output_schema.clone(),
-        respond_to: prompt_tx,
-        persist_ack: None,
-    });
-    let wait_outcome = await_subagent_turn_or_cancellation(prompt_rx, cancel_token.clone()).await;
+    if launch_error.is_none() && !cancel_token.is_cancelled() {
+        let (persist_ack_tx, persist_ack_rx) = oneshot::channel();
+        if child_handle
+            .cmd_tx
+            .send(SessionCommand::QueuePrompt {
+                prompt_id: child_prompt_id.clone(),
+                prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(prompt_text))],
+                origin: prompt_origin,
+                turn_kind,
+                client_identifier: None,
+                screen_mode: None,
+                verbatim: true,
+                json_schema: request.runtime_overrides.output_schema.clone(),
+                respond_to: prompt_tx,
+                persist_ack: Some(persist_ack_tx),
+            })
+            .is_err()
+        {
+            launch_error = Some(
+                "Derived child launch failed before first-prompt admission: child actor rejected the prompt"
+                    .to_owned(),
+            );
+        } else if persist_ack_rx.await.is_err() {
+            launch_error = Some(
+                "Derived child launch failed during first-prompt admission: the prompt was not durably acknowledged"
+                    .to_owned(),
+            );
+            let _ = child_handle.cmd_tx.send(SessionCommand::Cancel {
+                cancel_subagents: true,
+                kill_background_tasks: true,
+                rewind_if_pristine: false,
+                pause_goal: false,
+                trigger: None,
+            });
+        }
+    } else {
+        drop(prompt_tx);
+    }
+    let turn_result = await_subagent_turn_or_cancellation(prompt_rx, cancel_token.clone()).await;
     let duration_ms = start.elapsed().as_millis() as u64;
     let mut cancellation_may_hide_usage = false;
-    let mut result = match wait_outcome {
-        SubagentWaitOutcome::Cancelled => {
-            let (tool_calls, turns) = signals_snapshot_counts(&child_handle).await;
-            cancellation_may_hide_usage = turns > 0 || tool_calls > 0;
-            SubagentResult {
-                success: false,
-                cancelled: true,
-                error: Some("Subagent was cancelled".to_string()),
-                subagent_id: request.id.clone(),
-                child_session_id: child_session_id.0.to_string(),
-                tool_calls,
-                turns,
-                duration_ms,
-                worktree_path: worktree_path
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().to_string()),
-                ..Default::default()
-            }
-        }
-        SubagentWaitOutcome::TurnResult(turn_result) => {
-            let was_cancelled = cancel_token.is_cancelled();
-            let (tool_calls, turns) = match &*turn_result {
-                Ok(Ok(crate::session::commands::PromptTurnOk {
-                    turn_snapshot: Some(snapshot),
-                    ..
-                })) => (
-                    snapshot.current.tool_call_count,
-                    snapshot.current.turn_count,
-                ),
-                _ => signals_snapshot_counts(&child_handle).await,
-            };
-            let final_text = child_handle
-                .chat_state_handle
-                .get_last_assistant_text()
-                .await
-                .unwrap_or_default();
-            let result_tokens = child_handle.chat_state_handle.get_projected_tokens().await;
-            match *turn_result {
-                Ok(Ok(crate::session::commands::PromptTurnOk {
-                    completion_kind: PromptCompletionKind::Cancelled { category, context },
-                    ..
-                })) => {
-                    cancellation_may_hide_usage = true;
-                    let reason = cancellation_error_message(category, context.as_ref());
-                    SubagentResult {
-                        success: false,
-                        cancelled: true,
-                        error: Some(reason),
-                        output: if final_text.is_empty() {
-                            std::sync::Arc::from(format!(
-                                "Subagent '{}' ({}) was cancelled. {} tool calls, {} turns.",
-                                request.description, request.subagent_type, tool_calls, turns
-                            ))
-                        } else {
-                            std::sync::Arc::from(final_text)
-                        },
-                        subagent_id: request.id.clone(),
-                        child_session_id: child_session_id.0.to_string(),
-                        tool_calls,
-                        turns,
-                        duration_ms,
-                        tokens_used: result_tokens,
-                        output_tokens_used: 0,
-                        output_usage_incomplete: true,
-                        total_tokens_used: 0,
-                        worktree_path: worktree_path
-                            .as_ref()
-                            .map(|p| p.to_string_lossy().to_string()),
-                        backgrounded: false,
-                    }
-                }
-                Ok(Ok(crate::session::commands::PromptTurnOk {
-                    completion_kind: PromptCompletionKind::MaxTurnsReached { limit },
-                    ..
-                })) => SubagentResult {
+    let mut result = {
+        let was_cancelled = cancel_token.is_cancelled();
+        let (tool_calls, turns) = match &*turn_result {
+            Ok(Ok(crate::session::commands::PromptTurnOk {
+                turn_snapshot: Some(snapshot),
+                ..
+            })) => (
+                snapshot.current.tool_call_count,
+                snapshot.current.turn_count,
+            ),
+            _ => signals_snapshot_counts(&child_handle).await,
+        };
+        let final_text = child_handle
+            .chat_state_handle
+            .get_last_assistant_text()
+            .await
+            .unwrap_or_default();
+        let result_tokens = child_handle.chat_state_handle.get_projected_tokens().await;
+        match *turn_result {
+            Ok(Ok(crate::session::commands::PromptTurnOk {
+                completion_kind: PromptCompletionKind::Cancelled { category, context },
+                ..
+            })) => {
+                cancellation_may_hide_usage = true;
+                let reason = cancellation_error_message(category, context.as_ref());
+                SubagentResult {
                     success: false,
                     cancelled: true,
-                    error: Some(format!("max turns reached (limit: {limit})")),
+                    error: Some(reason),
                     output: if final_text.is_empty() {
                         std::sync::Arc::from(format!(
-                            "Subagent '{}' ({}) hit max-turns limit ({limit}). {} tool calls, {} turns.",
+                            "Subagent '{}' ({}) was cancelled. {} tool calls, {} turns.",
                             request.description, request.subagent_type, tool_calls, turns
                         ))
                     } else {
@@ -1658,102 +1639,137 @@ pub(crate) async fn run_shell_child(
                         .as_ref()
                         .map(|p| p.to_string_lossy().to_string()),
                     backgrounded: false,
+                }
+            }
+            Ok(Ok(crate::session::commands::PromptTurnOk {
+                completion_kind: PromptCompletionKind::MaxTurnsReached { limit },
+                ..
+            })) => SubagentResult {
+                success: false,
+                cancelled: true,
+                error: Some(format!("max turns reached (limit: {limit})")),
+                output: if final_text.is_empty() {
+                    std::sync::Arc::from(format!(
+                        "Subagent '{}' ({}) hit max-turns limit ({limit}). {} tool calls, {} turns.",
+                        request.description, request.subagent_type, tool_calls, turns
+                    ))
+                } else {
+                    std::sync::Arc::from(final_text)
                 },
-                Ok(Ok(crate::session::commands::PromptTurnOk {
-                    structured_output, ..
-                })) => {
-                    let wanted_schema = request.runtime_overrides.output_schema.is_some();
-                    let (success, error, output) = match (wanted_schema, structured_output) {
-                        (true, Some(Ok(value))) => {
-                            (true, None, std::sync::Arc::from(value.to_string()))
-                        }
-                        (true, Some(Err(e))) => (
-                            false,
-                            Some(format!("structured output validation failed: {e}")),
-                            std::sync::Arc::from(final_text),
-                        ),
-                        (true, None) => (
-                            false,
-                            Some("structured output requested but none produced".to_string()),
-                            std::sync::Arc::from(final_text),
-                        ),
-                        (false, _) => (
-                            true,
-                            None,
-                            if final_text.is_empty() {
-                                std::sync::Arc::from(format!(
-                                    "Subagent '{}' ({}) completed successfully. {} tool calls, {} turns.",
-                                    request.description, request.subagent_type, tool_calls, turns
-                                ))
-                            } else {
-                                std::sync::Arc::from(final_text)
-                            },
-                        ),
-                    };
-                    SubagentResult {
-                        success,
-                        error,
-                        output,
-                        subagent_id: request.id.clone(),
-                        child_session_id: child_session_id.0.to_string(),
-                        tool_calls,
-                        turns,
-                        duration_ms,
-                        tokens_used: result_tokens,
-                        output_tokens_used: 0,
-                        output_usage_incomplete: true,
-                        total_tokens_used: 0,
-                        worktree_path: worktree_path
-                            .as_ref()
-                            .map(|p| p.to_string_lossy().to_string()),
-                        ..Default::default()
+                subagent_id: request.id.clone(),
+                child_session_id: child_session_id.0.to_string(),
+                tool_calls,
+                turns,
+                duration_ms,
+                tokens_used: result_tokens,
+                output_tokens_used: 0,
+                output_usage_incomplete: true,
+                total_tokens_used: 0,
+                worktree_path: worktree_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
+                backgrounded: false,
+            },
+            Ok(Ok(crate::session::commands::PromptTurnOk {
+                structured_output, ..
+            })) => {
+                let wanted_schema = request.runtime_overrides.output_schema.is_some();
+                let (success, error, output) = match (wanted_schema, structured_output) {
+                    (true, Some(Ok(value))) => {
+                        (true, None, std::sync::Arc::from(value.to_string()))
                     }
-                }
-                Ok(Err(e)) => {
-                    cancellation_may_hide_usage = was_cancelled;
-                    SubagentResult {
-                        success: false,
-                        cancelled: was_cancelled,
-                        error: Some(if was_cancelled {
-                            "Subagent was cancelled".to_string()
+                    (true, Some(Err(e))) => (
+                        false,
+                        Some(format!("structured output validation failed: {e}")),
+                        std::sync::Arc::from(final_text),
+                    ),
+                    (true, None) => (
+                        false,
+                        Some("structured output requested but none produced".to_string()),
+                        std::sync::Arc::from(final_text),
+                    ),
+                    (false, _) => (
+                        true,
+                        None,
+                        if final_text.is_empty() {
+                            std::sync::Arc::from(format!(
+                                "Subagent '{}' ({}) completed successfully. {} tool calls, {} turns.",
+                                request.description, request.subagent_type, tool_calls, turns
+                            ))
                         } else {
-                            format!("Session error: {e}")
-                        }),
-                        subagent_id: request.id.clone(),
-                        child_session_id: child_session_id.0.to_string(),
-                        tool_calls,
-                        turns,
-                        duration_ms,
-                        worktree_path: worktree_path
-                            .as_ref()
-                            .map(|p| p.to_string_lossy().to_string()),
-                        ..Default::default()
-                    }
+                            std::sync::Arc::from(final_text)
+                        },
+                    ),
+                };
+                SubagentResult {
+                    success,
+                    error,
+                    output,
+                    subagent_id: request.id.clone(),
+                    child_session_id: child_session_id.0.to_string(),
+                    tool_calls,
+                    turns,
+                    duration_ms,
+                    tokens_used: result_tokens,
+                    output_tokens_used: 0,
+                    output_usage_incomplete: true,
+                    total_tokens_used: 0,
+                    worktree_path: worktree_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string()),
+                    ..Default::default()
                 }
-                Err(_) => {
-                    cancellation_may_hide_usage = was_cancelled;
-                    SubagentResult {
-                        success: false,
-                        cancelled: was_cancelled,
-                        error: Some(if was_cancelled {
-                            "Subagent was cancelled".to_string()
-                        } else {
-                            "Child session dropped unexpectedly".to_string()
-                        }),
-                        subagent_id: request.id.clone(),
-                        child_session_id: child_session_id.0.to_string(),
-                        tool_calls,
-                        turns,
-                        duration_ms,
-                        worktree_path: worktree_path
-                            .as_ref()
-                            .map(|p| p.to_string_lossy().to_string()),
-                        ..Default::default()
-                    }
+            }
+            Ok(Err(e)) => {
+                cancellation_may_hide_usage = was_cancelled;
+                SubagentResult {
+                    success: false,
+                    cancelled: was_cancelled,
+                    error: Some(if was_cancelled {
+                        "Subagent was cancelled".to_string()
+                    } else {
+                        format!("Session error: {e}")
+                    }),
+                    subagent_id: request.id.clone(),
+                    child_session_id: child_session_id.0.to_string(),
+                    tool_calls,
+                    turns,
+                    duration_ms,
+                    worktree_path: worktree_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string()),
+                    ..Default::default()
+                }
+            }
+            Err(_) => {
+                cancellation_may_hide_usage = was_cancelled;
+                SubagentResult {
+                    success: false,
+                    cancelled: was_cancelled,
+                    error: Some(if was_cancelled {
+                        "Subagent was cancelled".to_string()
+                    } else {
+                        "Child session dropped unexpectedly".to_string()
+                    }),
+                    subagent_id: request.id.clone(),
+                    child_session_id: child_session_id.0.to_string(),
+                    tool_calls,
+                    turns,
+                    duration_ms,
+                    worktree_path: worktree_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string()),
+                    ..Default::default()
                 }
             }
         }
     };
+    if let Some(error) = launch_error {
+        result.success = false;
+        result.cancelled = false;
+        result.error = Some(error);
+        result.output = std::sync::Arc::from("");
+    }
     let snapshot_dispose_enabled = ctx.resolve_subagent_worktree_snapshot_enabled();
     let diagnostics_tokens = if result.tool_calls > 0 || result.success {
         child_handle.chat_state_handle.get_projected_tokens().await

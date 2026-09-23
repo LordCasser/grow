@@ -1048,6 +1048,10 @@ mod sampling_blob_tests {
             data: Some(json!({"owner": {"request_id": "request"}, "kind": "response", "metadata": {}, "chunks": [{"blake3": hash, "bytes": raw.len()}], "bytes": raw.len()})),
         })).unwrap();
         timeline.accept(event).unwrap();
+        timeline.record(chat_state::TimelineEventKind::Observation(chat_state::ObservationEvent {
+            scope: "sampling_evidence".into(), name: "recovery_stop".into(), turn: None, step: None,
+            data: Some(json!({"owner": {"request_id": "request"}, "kind": "recovery_stop", "metadata": {"decision": "Fatal", "attempt": 1}, "bytes": 0, "chunks": []})),
+        })).unwrap();
         crate::session::sampling_evidence::verify(&directory, &timeline).unwrap();
         let blobs = read_entity_blobs(&directory, &timeline).unwrap();
         let key = format!("sampling/{hash}");

@@ -184,7 +184,10 @@ fn decode_record(observation: &chat_state::ObservationEvent) -> io::Result<Recor
     if record.bytes > LIMIT
         || record.chunks.len() as u64 != expected_chunks
         || record.kind != observation.name
-        || !matches!(record.kind.as_str(), "request" | "response" | "retry")
+        || !matches!(
+            record.kind.as_str(),
+            "request" | "response" | "retry" | "recovery_stop"
+        )
         || record.chunks.iter().enumerate().any(|(index, chunk)| {
             let expected_bytes =
                 (record.bytes - index as u64 * CHUNK_BYTES as u64).min(CHUNK_BYTES as u64);
@@ -237,4 +240,81 @@ fn append_only_request_bodies_reuse_prefix_chunks() {
         })
         .collect();
     assert_eq!(reconstructed, body);
+}
+
+#[cfg(test)]
+#[test]
+fn decode_record_rejects_invalid_sampling_evidence_references() {
+    let valid_hash = "0".repeat(64);
+    let chunks_for = |bytes: u64| {
+        (0..bytes.div_ceil(CHUNK_BYTES as u64))
+            .map(|index| BodyChunk {
+                blake3: valid_hash.clone(),
+                bytes: (bytes - index * CHUNK_BYTES as u64).min(CHUNK_BYTES as u64),
+            })
+            .collect::<Vec<_>>()
+    };
+    let observation = |name: &str, kind: &str, bytes: u64, chunks| chat_state::ObservationEvent {
+        scope: SCOPE.into(),
+        name: name.into(),
+        turn: None,
+        step: None,
+        data: Some(
+            serde_json::to_value(Record {
+                owner: Value::Null,
+                kind: kind.into(),
+                metadata: Value::Null,
+                bytes,
+                chunks,
+            })
+            .unwrap(),
+        ),
+    };
+    let cases = vec![
+        (
+            "unknown kind",
+            observation("unknown", "unknown", 0, chunks_for(0)),
+        ),
+        (
+            "observation name mismatch",
+            observation("retry", "response", 0, chunks_for(0)),
+        ),
+        (
+            "chunk count",
+            observation("response", "response", 1, chunks_for(0)),
+        ),
+        (
+            "chunk length",
+            observation(
+                "response",
+                "response",
+                1,
+                vec![BodyChunk {
+                    blake3: valid_hash.clone(),
+                    bytes: 2,
+                }],
+            ),
+        ),
+        (
+            "chunk hash",
+            observation(
+                "response",
+                "response",
+                1,
+                vec![BodyChunk {
+                    blake3: "bad".into(),
+                    bytes: 1,
+                }],
+            ),
+        ),
+        (
+            "over limit",
+            observation("response", "response", LIMIT + 1, chunks_for(LIMIT + 1)),
+        ),
+    ];
+
+    for (label, observation) in cases {
+        let error = decode_record(&observation).err().expect(label);
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData, "{label}");
+    }
 }

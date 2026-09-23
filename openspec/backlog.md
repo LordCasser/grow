@@ -2,16 +2,20 @@
 
 > **定位**：本文件只记录长期计划，不是当前版本待办或实现授权。任何条目都不会自动进入实现；即使成熟度或验收条件已经满足，也必须由用户另行明确启动。
 
-- **内置工具展示覆盖约束**：2026-09-14 的 [通信展示排查](changes/improve-agent-communication-presentation/design.md) 确认 `send_tool_call_start` 的通配分支会把已注册父子工具降为 `Tool call`，而 `acp_tool_update` 仍有 `_ => None`，新类型漏接不能由编译器发现。本次提案只覆盖 agent 通信；其余工具尚未穷举审计。后续独立核对注册工具的开始/终态/原始输入与渲染覆盖，以生产开始事件贯穿测试证明实际工具身份可见，不能用手工正确标题掩盖漏接，也不预设要新建通用展示框架。
+- **内置工具展示覆盖约束**：2026-09-14 的 [通信展示排查](changes/archive/2026-09-14-improve-agent-communication-presentation/design.md) 确认 `send_tool_call_start` 的通配分支会把已注册父子工具降为 `Tool call`，而 `acp_tool_update` 仍有 `_ => None`，新类型漏接不能由编译器发现。本次提案只覆盖 agent 通信；其余工具尚未穷举审计。后续独立核对注册工具的开始/终态/原始输入与渲染覆盖，以生产开始事件贯穿测试证明实际工具身份可见，不能用手工正确标题掩盖漏接，也不预设要新建通用展示框架。
 
 Grow 的配置保持本地化：全局配置位于 `$GROW_HOME/config.toml`，项目配置位于项目内的
 `.grow/config.toml`。项目配置只影响当前项目，并按现有解析策略覆盖全局配置。
 
 远程配置管理、deployment-config 服务、签名策略同步及其专用 CLI 不在规划范围内。
 
-## Recap 与压缩摘要的工具证据保留（已完成）
+## 子 Agent 工具用途与覆盖审核（核心闭环已完成，诊断与冲突保护仍待处理）
 
-2026-09-17 排查确认 recap 会删除完整工具尾部；压缩的 Fitted/Simplified 会裁减来源而仍替换原 target，simplified 还会删除工具结果。用户已授权与阈值附近压缩失败一起处理，已完成有界选区与真实 target 对齐、显式输入/输出预算、跨 turn 大小失败恢复及 recap 工具证据保留；验证见 [fix-compaction-budget-recovery](changes/archive/2026-09-17-fix-compaction-budget-recovery/verification.md)。原始审计见 [压缩输入核对](changes/archive/2026-09-17-audit-compaction-sideband-evidence/verification.md)。
+2026-09-20 已由 [fix-subagent-reviewed-tools](changes/archive/2026-09-20-fix-subagent-reviewed-tools/verification.md) 增加与 RWX 正交的 descriptor review policy：runtime `write` 在最终过滤后可发现但逐次进入现有 Gate，`search_replace` 保持普通编辑路径；审核保留真实 tool identity、冻结参数 hash 和有界整文件摘要，最终仍由 one-shot permit 执行。原始证据与边界见 [审计记录](changes/archive/2026-09-23-review-grow-architecture/reviews/subagent-tool-assembly-2026-09-20.md)。
+
+剩余诊断债务不重新打开上述授权缺口：目录目前把 visible hard-forbidden 统一解释为 authored eligibility / immutable child policy，没有携带深度、ownership、配置来源等 typed reason；被最终 Agent filter 移除的 identity 则按设计不可见。若未来需要细粒度诊断，应让目录、preflight 和策略解析共享同一个 reason 结果，但不得让 reason 或 `ask_parent` 回复本身成为 grant。
+
+独立处理文件冲突保护：`search_replace` 新建路径把所有 read 错误视为不存在，并采用 read→无条件 write；普通替换也缺跨 child/外部写者的版本提交约束。后续区分读取失败与 NotFound，验证检查后创建、并发更新、路径别名及不同 filesystem 的提交语义，不能用批内 mutex 或普通 rename 冒充跨进程 CAS。另需明确 native 用途策略是否逐级继承；当前 delegated ceiling 只固定 RWX 与 MCP binding，没有 native identity 集合，不能无证据地称为漏洞或宣称覆盖所有后代工具策略。
 
 ## Memory flush 摘要输入的工具证据
 
@@ -22,41 +26,21 @@ Grow 的配置保持本地化：全局配置位于 `$GROW_HOME/config.toml`，�
 审查覆盖当前工作树的会话恢复、用量校验、客户端投影、Workflow 和内部依赖。原始证据、批次与验收条件见 [审查方案](changes/archive/2026-09-12-review-global-architecture-2026-09-12/review.md)。用户随后批准首批实施：已完成已知用量事实的恢复冲突校验、Context 异步结果的 session/epoch/nonce 归属检查，并去掉 Timeline 冷恢复的重复 fold 与 Grow-only 扫描中的 ACP typed decode。具体结果见 [首批实施复核](changes/archive/2026-09-12-reuse-validated-resume-timeline/implementation-review.md)。后续债务保持独立，不由本条自动授权。
 
 - **resume 完整加载与可交互时间（P1，继续跟踪）**：actor 阶段在受限合成样本上约减少 19%；128 turns 完整 load 中位数仅约 2% 变化，512 turns 单次无改善，不能认定用户体感问题已解决。分批 drain 方案使总耗时变差，已撤回。需要真实长会话的首屏历史、按键回显、Pager handler/布局/终端写入与最终响应分阶段 trace；覆盖长文本、密集工具、多子会话、resident/cursor，验证输入回显 p95 ≤ 100 ms。保留已有输入公平性、虚拟化和加载屏障，不以提前清除 loading 状态伪造完成。当前 normal 按键/队列 reducer 与实际 --continue PTY 已通过，但不代表延迟目标达成。
-- **第二轮恢复布局（已完成局部优化）**：Pager batch 保留既有布局，并将新增/dirty 历史文本的精确渲染限制在可见区。128/256 turns 的进程内总工作中位数约减少 33%/41%，256 turns 布局约减少 55%；最终 7,201 项 Pager 回归和真实 --continue PTY 通过。Shell 两个局部优化候选未证实全链路收益，已撤回。数据、限制与磁盘记录见 [第二轮验证](changes/archive/2026-09-12-accelerate-session-replay/verification.md)。真实长会话的终端输入 p95、密集工具和多子会话性能仍由上一条跟踪，不把阶段测量当作体验目标已达成。
-- **第三轮恢复边界与依赖（已实施）**：普通观察与 writer repair 分离；Messages 对不同原始工具 ID 作无碰撞编码；Workflow cap 按有效恢复项计数；移除 sampling-types/grow-http/pager-render/update 的五条反向直接依赖，并在现有 CI 中守住边界。分为四个独立 change，复用已有类型和配置所有者。见 [整体验证](changes/archive/2026-09-13-remove-runtime-dependencies-from-leaf-crates/verification.md)。
 - **保留独立设计的事项（P2）**：Workflow Forgotten 事实与进度 checkpoint、跨编码/估算/证据的请求投影共同遍历，以及有测量依据的在线 Timeline append/领域封装。既有 portable_prefix_end 和恢复 fold 已共享/优化，不重复建立新框架；这些事项先确认持久化语义或性能证据。
 
-## 行动预告后任务提前结束（尊重原生终止，来源分离）
+## 行动预告后端点自然终止
 
 用户确认中文冒号处停顿跨端点存在。`audit-provider-stop-provenance` 复核发现：Grow 确实会自行把 Turn 终态标为 end_turn，不能拿这个标签反推端点响应；但原 session 的三份 HTTP 原始 body 也明确包含 end_turn/message_stop。补充 DeepSeek Responses 会话的两处已定位中文冒号片段实际带 commentary 和工具调用，随后继续，仍需用户指出其观察的具体停顿。证据见 [来源审计](changes/archive/2026-09-10-audit-provider-stop-provenance/investigation.md)。
 
 此前 `require-explicit-turn-completion` 强制使用 FinishTurn 纠正行动预告，审查发现它不能证明任务完成，也引入了等待调度、插话计数和端点能力问题。`respect-provider-termination-provenance` 按用户修正整体撤下该协议：普通无工具响应尊重原生终止，正文冒号不触发额外调用；Goal、真实等待依赖、结构化输出仍遵循各自契约。原始暂停的 provider 本身确实可能自然结束，这种模型行为不能宣称已被宿主消除。
 
-本次实现分离原生终止与 Turn 生命周期来源，并修复审计中有工具时覆盖拒绝/截断的 P1 问题；拒绝不会派发业务工具。FinishTurn 的等待标签、连续违约计数和全局工具依赖随协议删除，不能继续作为待修机制保留。审查基线见 [状态机审查](changes/archive/2026-09-10-review-turn-completion-state-machine/review.md)；本次验证见 [来源分离验证](changes/archive/2026-09-10-respect-provider-termination-provenance/verification.md)。
-
 - **Responses phase 的 portable 保留**：原生片段保留 phase，中性 Assistant 投影仍丢失其阶段和消息边界。当前自然终止判定不依赖该字段，跨模型完整阶段保留需要单独定义中性消息契约及恢复/压缩验证，不混入本次 Turn 终止修复。
 
-## 压缩后的 portable 工具历史（已完成）
+## 压缩后的结构化 portable tail
 
 2026-09-10 核对 session `01a08910-219a-78f1-a45c-98b448764a05`：局部压缩保留了 tail identity，但 `finish_surface_replacement` 重置整个 native epoch 后，`project_portable_history` 把最新的成对工具调用/结果也转换成 Historical tool exchange 文本。已观察到压缩后模型只给出行动预告便合法 stop，因果强度仍受单样本限制。本次修复历史摘要范围与下一 Step 续接；结构化 portable tail 单独立项。
 
-2026-09-10 由 `preserve-portable-tool-exchanges` 完成：portable 投影保留配对的中性工具协议，继续清除旧 native reasoning/签名。三 backend、六方向模型切换、恢复、局部压缩及真实 between-step 工具执行回归通过；工具附件中的图片淘汰文本也完整编码。没有新增按冒号/短句重采样或历史工具重放。验证见 [记录](changes/archive/2026-09-10-preserve-portable-tool-exchanges/verification.md)，不据此声称所有线上模型都不会提前结束。
-
-## 无签名 Messages 回退切断工具往返（已完成）
-
-2026-09-10 审计 session `01a08906-7afd-70e2-af4e-5ff9ea4db84c`：原始请求 seq 49616、49659 只有最新 tool_result，没有对应 tool_use；Timeline 中调用及执行结果完整。当前 2.1.6 的 `push_response_durably` 在 unsigned thinking 导致 native 缺失时，把 portable prefix 固定在 assistant 之后、尚未追加的结果之前。`request_segments` 分别投影两侧，prefix 内的调用因无结果被删除，后缀结果却继续以原生协议发送。审计与本地复现见 `changes/archive/2026-09-10-audit-session-colon-stop/`。
-
-- 范围：这是跨层请求配对缺口，区别于上述完整工具历史被文本化的问题；不能因服务端接受了请求就认定配对有效。
-- 限制：三次行动预告后均收到合法 end_turn，其中首个请求没有孤立结果，不能把所有提前结束归因于本缺口。
-- 2026-09-10 由 `preserve-portable-tool-exchanges` 完成：共享 prefix 闭合逻辑吸收后追加的工具结果，wire、token 估算及来源证据使用同一范围，不越过新消息或 native span。真实 unsigned thinking → 工具执行 → 下一请求回归在旧实现失败、修复后通过，调用/结果各一次；多结果跨切点也保持配对。验证见 [记录](changes/archive/2026-09-10-preserve-portable-tool-exchanges/verification.md)。
-
-## 工具关联 ID 的目标编码
-
-2026-09-10 发布审查核对 `sampling-types/src/conversation.rs::build_messages_request`：既有 ID 清洗器把非字母数字/下划线/连字符替换成 `_`，因此中性历史中不同的 `a.b` 与 `a/b` 会得到相同目标 ID。此次真实会话的 ID 没有触发该情况，当前配对修复不扩展到 ID 编码重构。后续单独定义无碰撞的目标映射，并同时验证 live、portable 与完整 native span 的调用/结果身份，避免单改结果 ID 破坏原生 continuation。
-
-`review-turn-completion-state-machine` 的真实请求编码器探针已确认调用和结果都变为重复的 `a_b`。这是切换到 Messages 的明确风险；修复仍按独立身份映射 change 处理。
-
-2026-09-13 由 [encode-messages-tool-identities](changes/archive/2026-09-13-encode-messages-tool-identities/verification.md) 完成不同原始 ID 的目标编码，覆盖所有 portable 切点、native 预留、Unicode、长 ID 与结果归属；原生签名和原始 Timeline 不改写。
+## 重复工具 ID 的中性/原生歧义
 
 独立债务：相同原始 ID 被两个独立 neutral/native exchange 复用时，现有投影只在 neutral 区域统计歧义，native span 不参与；源码允许该既有歧义进入 wire。需在请求投影所有者明确全局拒绝或按 exchange 区分身份，覆盖 native 调用后的合法中性结果，不能在编码器里无差别重写原生 ID。当前编码修复只保证不同原始 ID 不被编码合并，不声称治理了相同原始身份的历史歧义。
 
@@ -112,8 +96,6 @@ Worktree 生命周期、复用与安全边界继续等待上游稳定。它不�
 
 这些条目只登记，不在本次文档迁移中修改代码。
 
-- **Memory 注释漂移**：`crates/codegen/memory/src/lib.rs` 示例仍写纯 hash 目录，而 `storage.rs::new_inner` 使用 `compute_workspace_hash` 的实际结果。后续以实现及路径测试统一注释；本次 spec 只约束 root/工作区隔离，不复制过时格式。
-- **Goal 架构文章版本漂移**：`docs/architecture/goal-continuation.md` 标题仍为 v9，`goal_tracker.rs` 声明版本 10 且实现连续阻塞审计。后续更新机制解释时核对整个生命周期，当前要求见 behavior-goal。
 - **规范细粒度扩展**：当前规范覆盖核心边界，未穷举编辑工具算法、所有 slash 参数、渲染布局和每个平台的系统调用。触及这些行为时补充对应 delta 和实际测试，不据此发起全仓重构。
 - **迁移前进行中的审计**：`docs/architecture/continuous-feature-audit.md`、`project-review-2026-09-07.md`、`trajectory-review-2026-09-07.md` 与根目录临时候选文件属于用户已有未提交工作。此次保留原文，不标记完成；后续继续时先将相关记录纳入独立 change，避免覆盖原工作。
 
@@ -121,34 +103,6 @@ Worktree 生命周期、复用与安全边界继续等待上游稳定。它不�
 
 - **长会话在线追加的生命周期复制开销**：本次仅移除私有批量恢复中的累计 `LifecycleFold` 克隆；在线 `Timeline::prepare/accept` 仍通过克隆保障失败原子性。后续若优化在线追加，应先测量长历史写入延迟，再设计不削弱拒绝原子性的最小变更；不能直接复用遇错会丢弃整个 fold 的恢复路径。恢复中的 JSON 解析、重复重建和 artifact 校验也需分别测量，不能以跳过校验换取速度。见 [accelerate-long-timeline-replay](changes/archive/2026-09-10-accelerate-long-timeline-replay/verification.md) 的验证记录。
 
-- **更新目录的多平台保留语义（已完成）**：已修正为保留当前版本和最高其他版本的全部已识别平台产物，包含回退与多平台真实目录回归。见 [fix-update-version-group-retention](changes/archive/2026-09-07-fix-update-version-group-retention/verification.md)。
-
-- **LSP inspect 同名来源展示（已完成）**：允许来源与被禁用的同名项目定义现分别展示，并共享报告的信任结果。见 [fix-inspect-lsp-fallback-display](changes/archive/2026-09-07-fix-inspect-lsp-fallback-display/verification.md)。
-
-- **LSP inspect 插件启用状态（已完成）**：允许来源使用 registry.active_plugins，禁用和未信任插件声明分别标记并单列，不能遮蔽活动来源。见 [fix-inspect-lsp-plugin-status](changes/archive/2026-09-07-fix-inspect-lsp-plugin-status/verification.md)。
-
-- **web_fetch 缓存容量（已完成）**：零容量不保存条目，满容量更新已有 URL 不再误删其他页面；新增 URL 保留最早插入淘汰策略。见 [fix-web-fetch-cache-capacity](changes/archive/2026-09-07-fix-web-fetch-cache-capacity/verification.md)。
-
-- **web_fetch 跳转授权传播（已完成）**：全部跳转返回目标，由新的工具调用经过现有授权，不再将初始 URL 许可扩大到同主机的其他路径或端口。见 [fix-web-fetch-redirect-authorization](changes/archive/2026-09-07-fix-web-fetch-redirect-authorization/verification.md)。
-
-- **MCP 恢复配置探测的取消边界（已完成）**：stdio/HTTP 调度与循环的配置探测等待现监听取消，取消不推送 Disabled，已取得标记释放。见 [fix-mcp-config-probe-cancellation](changes/archive/2026-09-07-fix-mcp-config-probe-cancellation/verification.md)。
-
-- **MCP dispatcher 强制终止的取消通知（已完成）**：dispatcher future 持有 CancellationToken drop guard，fatal/超时 abort 也通知恢复取消，正常 drain 保留。见 [fix-mcp-dispatcher-abort-cancellation](changes/archive/2026-09-07-fix-mcp-dispatcher-abort-cancellation/verification.md)。
-
-- **MCP 迟到工具错误的恢复身份（已完成）**：可恢复错误绑定失败服务，旧错误不再重置新 Ready，见 [fix-mcp-stale-tool-error-recovery](changes/archive/2026-09-07-fix-mcp-stale-tool-error-recovery/verification.md)。
-- **MCP 迟到工具超时的 reset 身份（已完成）**：超时 reset 在同一状态锁内核对失败服务，保留新 Ready/进行中握手且不重放工具。见 [fix-mcp-stale-tool-timeout-reset](changes/archive/2026-09-07-fix-mcp-stale-tool-timeout-reset/verification.md)。
-
-- **MCP HTTP 恢复最后提交边界（已完成）**：成功/失败均在最后状态锁内核对客户端身份和 HTTP 配置，Superseded 停止旧循环，不重试替代连接。见 [fix-mcp-http-recovery-identity](changes/archive/2026-09-07-fix-mcp-http-recovery-identity/verification.md)。
-
-- **MCP 初始化取消时锁竞争（已完成）**：ClientState 私有短同步锁确保取消清理在锁竞争后完成；Empty/Pending 跨线程回归与真实初始化取消通过。见 [fix-mcp-init-cancellation-contention](changes/archive/2026-09-07-fix-mcp-init-cancellation-contention/verification.md)。stdio 取消也已收敛至 Empty，见 [fix-mcp-stdio-init-cancellation](changes/archive/2026-09-07-fix-mcp-stdio-init-cancellation/verification.md)。
-
-- **HTTP Hook 请求边界（已完成）**：已分别完成 [DNS 地址绑定](changes/archive/2026-09-07-fix-http-hook-dns-binding/verification.md)、[正文容量限制](changes/archive/2026-09-07-fix-http-hook-response-limit/verification.md) 和 [共享总超时](changes/archive/2026-09-07-fix-http-hook-total-timeout/verification.md)。各项验证限制见记录，不据此声明所有 Hook 行为已审计完毕。
-
-- **Hook 成功状态下的结构化输出错误（已完成）**：共享对象解析和结构化错误分类，未知字段/类型错误/截断对象/数组不再混同日志；普通文本保留既有规则。见 [fix-hook-structured-output-errors](changes/archive/2026-09-07-fix-hook-structured-output-errors/verification.md)。
-
-- **Hook 相对命令的去重身份（已完成）**：直接相对命令键包含 source_dir，shell/绝对路径保持原规则，执行与去重共享路由判定。见 [fix-hook-relative-command-dedup](changes/archive/2026-09-07-fix-hook-relative-command-dedup/verification.md)。
-
-- **Hook 匹配器派生状态恢复边界（已完成）**：registry 的 serde/append/dedup 统一按配置重建，None 清缓存，无效 Never；workspace 不再手工修复并有真实匹配往返断言。见 [fix-hook-registry-matcher-boundary](changes/archive/2026-09-07-fix-hook-registry-matcher-boundary/verification.md)。
 
 - **Discovery 重读收敛**：Pager 新目录事件的额外 AdvertiseCommands 已移除，见 fix-pager-duplicate-discovery-advertisement（静态验证，未执行 Pager 构建）；ReloadSkills 自行负责发布。已进一步核对扫描函数内部同步完成，尚未证实旧扫描晚提交覆盖；发现的同路径元数据协调缺陷已单独立项 fix-skill-baseline-metadata-reconciliation。证据见 audit-discovery-reload-fanout；与目录实体注册修复分开。
 
@@ -172,32 +126,25 @@ Worktree 生命周期、复用与安全边界继续等待上游稳定。它不�
 
 - **技能 allowed-tools 执行语义**：audit-skill-allowed-tools-consumers 确认当前仅解析/序列化/详情展示，未发现权限判定消费者；用户指南已说明。若要升级为执行约束，需先定义技能调用起止、多技能合并与会话权限上限，不能与 CLI disallowed_tools 混同。解析错误类型丢字段属于元数据质量问题，另行处理；现阶段不据字段名称宣称权限漏洞。
 
-- **技能展开诊断的成功时点（已处理）**：fix-plugin-skill-use-outcome 将 admission 的 PluginUsed.success 与逐引用正文加载结果对齐。SlashCommandUsed/SkillDispatched 仍表示尝试/派发，active_skill 与 skill.activated 保留 turn 归属含义；不将这些事件等同于加载成功。
 
-- **剪贴板统计单位（已处理）**：fix-clipboard-character-stats 将共享 clipboard_stats_suffix 改为 Unicode 标量计数并处理 char/chars 单复数，保留 str::lines 行数规则；复制、TUI/CLI 导出共用此函数。
 - **复制/导出剩余响应性**：background-transcript-file-writes 已将显式文件 I/O 移入应用内有限串行后台队列，并验证顺序和原会话反馈。正文渲染及剪贴板/默认备份仍同步，大文稿仍可能产生长帧；需单独测量，不能宣称整个命令已完全非阻塞。队列只限制请求数量，不限制单请求字节数。
 
-- **复制文件原子提交（已处理）**：fix-atomic-copy-file 已改为同目录私有临时文件完整写入后提交，保留失败前的旧内容和权限，成功目标为 Unix 0600；显式路径及默认备份共用实现。显式文件已由后台队列处理，默认备份仍同步。
 
 - **外部分页器剩余响应性**：fix-private-pager-transcripts 处理临时快照权限和所有权；普通 Markdown 渲染、minimal 完成后的快照写入仍同步。后续应测量慢文件系统影响，独立处理，不把本次私有文件修复描述为后台写入。崩溃清理需要额外生命周期策略，本次不新增常驻清理机制。
 
 - **外部分页器失败反馈（已处理）**：fix-pager-process-feedback 保留启动错误和退出状态，恢复界面后显示失败原因；原有临时文件所有权和超时重试保留。fix-pager-quoted-arguments 进一步修复引号参数边界，保持直接启动；排队请求跨视图来源关联仍需独立审计。原始证据：verify-cli-transcript-files。
 
-- **Minimal transcript 重连截短（已处理）**：fix-transcript-reload-restart 在生产重连入口使旧构建失效，reload 期间等待，完成后从最终正文重取 ID 并清空旧前缀。回归覆盖完整 replay、cursor 恢复、失败回滚及两帧间完成的 reload；保留无关 agent 和标签切换。原审计：audit-transcript-reload-boundary。
 
 - **滚动记录器运行边界**：默认关闭；启用后首条记录 lazy-open，同步 BufWriter 写入并在 finalize flush。fix-scroll-log-default-collision 处理默认同秒路径覆盖。fix-scroll-log-failure-state 已修复 Disabled 后状态误报及重试需两次切换。后续需独立检查日志增长上限、慢文件系统对输入的影响及显式文件路径覆盖语义。不因诊断功能可选而直接删除。
 
-- **Minimal FPS HUD 缺失（已处理）**：fix-minimal-fps-hud 对 minimal draw hook 计时并在 viewport 顶部预留两行读数，空间不足优先保留正文，禁用不新增采样或计时器。旧 FrameMetrics/dev overlay 说明已纠正；采样仍不等于后台 PTY 完成或屏幕绘制延迟。
 
 - **分页器反馈来源（已处理）**：audit-transcript-feedback-origin 确认成功文件交接只保留 path/ANSI，等待和进程失败按当前视图发布。fix-pager-feedback-origin 已将文件、ANSI 和原 root/child 会话身份绑定到同一请求，重试保留来源，失效来源走独立可见通知，不写入新会话正文。Minimal 子 agent 的输入/绘制/导出目标一致性仍待单独验证，不混入通知修复。
 
-- **词选择提示退场测试误报（已处理）**：fix-word-select-tip-retirement 的诊断显示 key=clipboard_image_tip、prompt=a、snapshot=None，词选择提示实际已正常退出。测试现在关闭 image_input 探测，避免读取主机剪贴板，并断言词选择提示身份退出而非要求任何提示都不存在；root 1270 项全通过，无产品行为修改。
 
 - **剪贴板元数据原生调用边界**：fix-clipboard-tip-probe-contention 去除 UI 等待原生读图锁，但首次 AppKit OnceLock/dlopen 和持锁后的原生消息仍无总超时。fix-clipboard-metadata-snapshot 已在分类前后核对版本并拒绝类型不可用结果，纠正“单次调用即原子快照”的注释；这只检测采样期间观察到的版本变化，返回后的外部复制及原生调用总超时仍不在保证范围。
 
 - **AppleScript 剪贴板回退剩余边界**：fix-private-clipboard-probe-files 已消除固定临时路径冲突并显式以 0700 创建目录。fix-clipboard-applescript-path-arguments 已将三条图片脚本的路径改为 argv，实测特殊字符参数往返与脚本编译；bound-clipboard-applescript 已将三条图片脚本限制为5秒及每流1MiB并回收拥有的进程组，清理失败显式报告；pbpaste、原生调用和原生/回退图片文件读取及解码仍需后续核对执行与字节上限。不在临时目录修复中混入进程生命周期与内容预算。
 
-- **TUI doctor 同步采集（已处理）**：audit-doctor-execution-boundary 确认 report 和 fix 均在 dispatcher 同步收集报告，随后才后台规划；background-doctor-report 已将 report/list/fix 的采集移入单许可后台执行，保留会话绑定与修复确认；取消等待者不会提前释放仍运行的采集名额。bound-tmux-diagnostic-output 已限制 stdout/stderr 各64 KiB，超限终止进程树并返回错误；真实子进程提前结束与边界回归通过。
 
 - **托管配置回滚与并发编辑（已处理可观察冲突）**：transaction::rollback 仅校验父目录，随后直接 rename 原内容或 remove 新目标。发布后、校验/同步失败前发生外部编辑时，恢复路径可能覆盖该编辑；现有 CorruptTemp 测试要求恢复任何字节变化，不能区分外部修改与本事务损坏。需独立建立所有权/冲突契约，保留恢复材料，并测试原有目标与新目标。不得把 optimistic revalidate 宣称为对非协作写入者的原子 CAS。
 
@@ -233,7 +180,7 @@ Worktree 生命周期、复用与安全边界继续等待上游稳定。它不�
 
   bound-sips-process-lifetime 已限制sips子进程执行10秒，使用现有ProcessGroup在退出/错误/超时回收组并reap直接子进程，16项终端图片测试通过。输出文件实际读取预算仍未处理；系统不可中断等待、逃逸进程组或拒绝终止不能由执行期限保证回收。
 
-  bound-sips-output-reads 已将sips结果限制为非空普通文件、100,000,000编码字节，实际读取limit+1；Unix拒绝symlink/FIFO，超限仍清理目录。最终20项终端图片回归通过。验证期间正常退出进程测试偶发EPERM，未定位，已独立立项 investigate-sips-process-eperm；不能用后续通过宣称该问题消失。写入磁盘前的产物大小和Rust回退编码器仍不在此读取预算内。
+  bound-sips-output-reads 已将sips结果限制为非空普通文件、100,000,000编码字节，实际读取limit+1；Unix拒绝symlink/FIFO，超限仍清理目录。最终20项终端图片回归通过；一次正常退出进程测试曾见EPERM，后续2,000次实际runner退出未复现，生产阶段错误已有处理。若再次出现，仅记录带stage标签的错误以保留复现证据；不据此推断根因或新增修复。写入磁盘前的产物大小和Rust回退编码器仍不在此读取预算内。
 
 - **图片查看器真实入口同步加载**：audit-image-viewer-entrypoints 证实 prompt ImagePreview 调用同步open，后台链仅由测试构造loading状态触发。已立项 defer-live-image-viewer-loading 连接真实入口、内存/磁盘源、终端协议快照和逐次打开owner身份。open_from_path仅有测试调用，作为R20等待删除确认；不能将待接线后台链一并删除。同步/后台路径当前fs::read的文件字节预算需随后独立审计，异步化本身不提供该预算。
 
@@ -321,7 +268,6 @@ Worktree 生命周期、复用与安全边界继续等待上游稳定。它不�
 
   make-image-assets-retry-safe已实现有序内容批次目录、独占stage/no-replace发布与逐文件验证复用；重试不重新写文件，并发只发布一批，失败只清stage，21项图片描述/资产测试通过。ACK错误不删除已发布批次的原接纳逻辑保留（源码核对，未加完整ACK丢失注入）。旧UUID资产、不再引用的不同批次以及崩溃stage回收仍未处理，跨批次单图去重也不作保证。
 
-- 同进程 close/load writer lease 退出边界已由 `join-session-persistence-owner` 修复；验证记录见归档 change。
 - 跨重启 catalog endpoint/provider identity 变化与模型链连续性：当前只投影 model ID/effort，transport fingerprint 不能重建原 route。需明确 durable route 变化的记录策略，不能靠跳过 continuity 校验处理。
 - SessionThread 最后 owner 的 Drop/reaper 停机路由已由 `stop-persistence-in-session-reaper` 补齐；析构只请求 eventual stop，完整 writer 释放确认仍由显式 drain 提供。
 
@@ -358,360 +304,37 @@ Worktree 生命周期、复用与安全边界继续等待上游稳定。它不�
 
 `third_party/nono`同时提供能力清单schema/codegen、Landlock/Seatbelt/Windows等平台实现、命令与文件描述符策略、环境变量和资源限制。39条静态契约已登记，但未运行平台沙箱、build.rs生成或跨平台权限矩阵；后续需按平台后端、manifest编译和进程执行边界拆分动态验证，本轮不改第三方实现。
 
-## 待拆分：Pager router测试覆盖多域完成和控制token
+## Pager 待验证：具体行为与契约缺口
 
-`app/root/dispatch/tests/router.rs`集中路由、控制token、会话/子代理、模型/Agent、权限、dashboard和任务结果分支。15条静态契约已登记，后续按协议路由、身份围栏和视图副作用拆分并补动态dispatch验证；本轮不改router。
+本段只保留有触发条件、影响边界和后续验收入口的 Pager 问题；仅凭文件规模、职责混合、fixture 组织或断言风格提出的重构建议已删除。
 
-## 待拆分：Pager nav混合滚动、可见性和wrapped-line映射
+- **进程全局状态与测试隔离**：`setup_grow_home_in_tempdir`/`isolate_grow_home` 会修改进程级 `GROW_HOME`，主题、鼠标捕获和 `NO_COLOR` 也依赖手工 reset；并行测试或 panic 可能把临时路径/外观状态泄漏给其他用例。需用并行运行和异常退出验证隔离边界。
+- **持久化结果与协议容错**：`WithRollback`/`BestEffort` 的通知、回滚和 `TaskResult` 语义可能被调用方混用而报告错误的 persisted 状态；stringly JSON key、wrapped/top-level fallback 与缺省值可能把字段缺失或协议漂移静默降成空数据。需覆盖旧完成结果、未知 key、缺字段和坏形状。
+- **布局前置不变量**：pane 对 prepared cache、paint range 使用 runtime `expect`；需验证失效 layout 或越界 range 的生产路径不会 panic 或复用旧数据。
+- **搜索 worker 资源与身份**：`SearchDaemon`/history daemon 使用 detached 或未 join 的 worker、unbounded channel 和隐式 Stop；需验证关闭、重建、连续输入和队列增长的资源上限。搜索结果同时以 generation/raw query 识别，`clear_context` 未清理部分 selection/hover/scroll 状态；需验证迟到结果不会覆盖新查询或旧交互状态。
+- **picker 与 action 身份**：picker 的原始 entry index、命中 index/offset、分组顺序和 `EntryId`/turn preview 由多个坐标模型维护；task action eligibility 从 session map 重建，扩展结果还依赖 row-index arithmetic。需验证过滤、删除、恢复、排序和列表刷新后 action/detail/selection 仍指向同一实体。
+- **异步状态归属**：picker request sequence、welcome/deep-search counters、session-load effect ordering、reconnect 对无 session-id view 的 descendant traversal、selection reanchor 和 cwd scope 都由不同 dispatcher/view 路径维护。需用旧请求、会话切换、重连和 cwd transition 验证迟到结果不会投影到新 surface。
+- **媒体与诊断资源**：inline-media CPU cache 与 Kitty GPU id 的生命周期、首 key 淘汰策略、manual render revision 和 Mermaid affordance/source index 可能在 replay/resize/streaming 后复用旧数据或消费 stale click；native image opening 仍无可观察失败 effect。需覆盖主题/宽度变化、重复图表、无效 index、缓存淘汰和启动失败。
+- **媒体/复制诊断一致性**：filesystem retry、image preparation、native opening 和 clipboard copying 使用不同错误路径，copy/export 也各自格式化 notice；需验证同一失败能保留结构化关联并给出一致可见结果，input-log dump 还需覆盖目录失败、collision 和 retention 边界。
+- **Prompt/Markdown 坐标与缓存**：`UserPromptBlock`/token styling 同时使用 UTF-8 byte range、span index 和 display column；截断、ellipsis、LinkSource、Selectable span 与 post-wrap insertion 依赖同一帧映射，`MIN_CONTENT_WIDTH=60` 和手工 `RENDER_REVISION` 可能造成错误折叠或旧 PNG。需用 Unicode、宽度变化、样式行重排、选择和 cache revision 变化验证。
+- **当前 turn 与文本协议**：current-turn 由 reverse scan 推断，memory/parser 输入是 permissive text protocol，坏 marker 可能变成空/零字段，path shortening 使用 textual prefix。需覆盖多 prompt、坏输入、非 UTF-8/相似路径和 replay，确认实体归属不会漂移。
+- **协调/sideband 行身份**：`merge_coordination_rows_from_tail` 会忽略无原始 identity 的 tail-only inquiry，生产 coordination identity 仍有 `expect`，passive row 生命周期依赖 generic running/finish 字段。需验证通知乱序、缺 identity、重放和 child/parent 交替时不丢行、不 panic、不重复消费。
+- **授权 provenance 与细节边界**：`SubagentPermissionBlock` 的 epoch 可被 unrestricted push/extend，`access_detail`/`classifier_reason` 没有统一 bounds/redaction，permission closed requester 只有 toast；selection dispatch、root/child ownership、MCP/bash fallback 仍依赖 raw session strings/defensive assumptions。需覆盖旧 epoch、过长/敏感 detail、关闭 requester、child ownership 和 malformed request。
+- **任务/工具状态语义**：BgTask 的 killed-signal allowlist、compact/preamble newline 规则、`has_bullet`/finished mode ownership 和 timing fields 分散在调用方；需覆盖平台 signal、空 description、running→finished/error/replay 以及 elapsed overflow，确认状态和用户文案一致。
+- **列表/弹窗几何**：ListLayoutCache 越界返回 0/1，Fixed/Variable 增量更新 runtime panic，prefix sum 未检查累加，cached width 依赖外部失效；dialog Unicode width、viewport byte/display-column 与 header byte width 也未在边界处统一。需覆盖空列表、极端宽度、Unicode、resize、旧 selected index 和 stale cache。
+- **session picker 作用域**：picker sequence 的递增与校验分散在 dispatch，notification cache 使用 `app.cwd` 而 selection anchor 使用 agent session cwd；loaded/failed handler 直接改 view 且返回空 effects。需验证 stale response、cwd 切换和加载失败不会污染当前 modal 或吞掉必要副作用。
+- **Hook 展示边界**：Hook detail/output 的字符/行预算与 phase 校验仍由多个渲染分支维护；需验证超长、未知 phase、成功/失败/blocked 和恢复时的截断与状态 glyph 一致。
 
-`scrollback/state/nav.rs`同时处理turn/response导航、分页滚动、follow/page-flip、sticky header、可见性、搜索reveal、折叠展开和wrapped-line映射。11条静态契约已登记，后续按导航状态、布局映射和滚动策略拆分并补真实终端验证；本轮不改导航行为。
+## Pager 覆盖缺口
 
-## 待拆分：Pager Mermaid worker混合线程、缓存和渲染回退
+以下是明确的用户可见或运行时覆盖缺口，保留为测试入口而非文件拆分建议：
 
-`app/agent_view/mermaid_worker.rs`同时处理Mermaid后台线程、主题/尺寸、状态轮询、缓存、渲染消息和失败回退。14条静态契约已登记，后续需按后台任务生命周期、缓存一致性和渲染适配拆分并补真实渲染验证；本轮不改worker行为。
+- 默认套件仍忽略 minimal thinking visual、pager suspend/restore、multi-client leader、N-client fan-out、parked-plan scrollback、`/new` session transition、`/transcript` integration、resize、queue promotion、read-header/expand、Escape cancellation 和 idle Ctrl+C confirmation；应按各自实体/状态断言补最小回归。
+- `PAGER=cat` 绕过 interactive pager/alternate-screen 路径，不能证明完整 suspend/restore 生命周期；需单独覆盖真实 pager 子进程退出与恢复。
+- 多个端到端场景只检查宽泛文本 sentinel，无法区分同名 banner、重复重放和真正的 block/session identity；补结构化 identity/frame 断言时保留现有失败场景。
 
-## 待拆分：Pager dashboard row混合状态投影和渲染字段
-
-`views/dashboard/row.rs`同时构造dashboard行模型、状态/可见性、身份和渲染字段投影。6条静态契约已登记，后续需按状态模型、身份索引和渲染适配拆分并补真实dashboard验证；本轮不改行模型。
-
-## 待拆分：Pager list pane methods耦合状态变更与布局失效
-
-`views/list_pane/state/methods.rs`集中列表状态方法、选择/过滤、布局缓存、滚动和输入操作。静态事实已登记，后续需按状态变更、布局失效和输入动作拆分并补真实列表交互验证；本轮不改实现。
-
-## 待拆分：Pager agent view混合列表、会话状态和工作区摘要
-
-`views/agent.rs`同时承载Agent列表/面板、工作区摘要、会话/子Agent状态和渲染投影。静态事实已登记，后续需按实体列表、会话状态和展示投影拆分并补真实Agent视图验证；本轮不改视图行为。
-
-## 待拆分：Pager app模块聚合生命周期、输入和渲染协调
-
-`app/mod.rs`集中App状态、生命周期、输入/渲染协调和测试辅助边界。11条静态契约已登记，后续需按生命周期、输入路由和渲染协调拆分并补真实终端验证；本轮不改App行为。
-
-## 待拆分：Pager workflows视图耦合运行状态与列表交互
-
-`views/workflows.rs`同时处理workflow列表/状态、选择、过滤、渲染和输入投影。静态事实已登记，后续需按运行状态模型和列表交互拆分并补真实Workflow视图验证；本轮不改视图行为。
-
-## 待拆分：Pager scrollback block混合数据模型、折叠和渲染入口
-
-`scrollback/block.rs`同时承载滚动块模型、折叠/展开、渲染入口、选择和条目元数据。10条静态契约已登记，后续需按数据模型、布局状态和渲染适配拆分并补真实终端验证；本轮不改block行为。
-
-## 待拆分：Pager modal window混合布局、滚动和输入命中
-
-`views/modal_window.rs`同时处理modal尺寸/布局、标题/边框、滚动、焦点和鼠标/键盘输入投影。12条静态契约已登记，后续需按布局模型、焦点状态和命中测试拆分并补真实终端验证；本轮不改modal行为。
-
-## 待拆分：Pager entry renderer混合块包装和工具状态投影
-
-`scrollback/wrappers/entry_renderer.rs`同时承载entry渲染包装、块/工具状态投影、文本布局和测试辅助边界。静态事实已登记，后续需按渲染包装、状态投影和布局拆分并补真实终端验证；本轮不改renderer行为。
-
-## 待拆分：Pager announcements混合内容加载、布局和CTA交互
-
-`views/announcements.rs`同时处理announcement加载/关闭、CTA、布局、缓存、权限和提示状态。8条静态契约已登记，后续需按内容状态、布局命中和CTA路由拆分并补真实终端验证；本轮不改announcement行为。
-
-## 待拆分：Pager line viewer混合文件搜索、命中高亮和滚动定位
-
-`views/file_search/line_viewer.rs`同时处理文件搜索行查看、匹配高亮、滚动定位和命中投影。3条静态契约已登记，后续需按搜索结果模型、布局高亮和滚动定位拆分并补真实文件搜索验证；本轮不改viewer行为。
-
-## 待拆分：Pager block viewer混合内容查看、布局和选择状态
-
-`views/block_viewer.rs`同时处理block查看器、滚动/布局、文本选择和输入状态投影。9条静态契约已登记，后续需按内容查看、布局和选择状态拆分并补真实终端验证；本轮不改viewer行为。
-
-## 待拆分：Pager list pane render混合窗口布局和选择视觉
-
-`views/list_pane/render.rs`同时处理列表行渲染、滚动窗口、选择/过滤、视觉状态和剪贴板提示。7条静态契约已登记，后续需按布局窗口、选择视觉和提示拆分并补真实终端验证；本轮不改render行为。
-
-## 待拆分：Pager turn dispatch测试混合终态、控制和压缩
-
-`app/root/dispatch/tests/turn.rs`集中turn完成/失败、prompt队列、压缩、行为/模型控制和终态通知。14条静态契约已登记，后续需按turn终态、控制确认和压缩协议拆分并补动态验证；本轮不改turn处理。
-
-## 待拆分：Pager prompt模块混合编辑、发送和队列状态
-
-`app/agent_view/prompt.rs`同时处理prompt编辑/发送、队列状态、快捷动作和输入投影。静态事实已登记，后续需按编辑模型、提交协议和队列状态拆分并补真实输入验证；本轮不改prompt行为。
-
-## 待拆分：Pager agent viewer混合查看状态、滚动和内容投影
-
-`app/agent_view/viewer.rs`同时处理viewer状态、滚动/布局和内容投影。9条静态契约已登记，后续需按查看模型、布局状态和内容投影拆分并补真实终端验证；本轮不改viewer行为。
-
-## 待拆分：Pager agent session混合绑定、子Agent身份和工作区投影
-
-`app/agent_view/session.rs`同时处理会话绑定/解绑定、子Agent身份、cwd/工作区投影和状态清理。静态事实已登记，后续需按会话身份、工作区投影和清理生命周期拆分并补真实会话验证；本轮不改session行为。
-
-## 待拆分：Pager session lifecycle测试混合恢复、绑定和持久化终态
-
-`app/root/dispatch/tests/session/lifecycle.rs`集中session生命周期、绑定/解绑、恢复、删除、重命名、终态通知和失败回滚。7条静态契约已登记，后续需按生命周期事务、身份绑定和持久化终态拆分并补动态存储验证；本轮不改session协议。
-
-## 待拆分：Pager prompt dispatch混合队列、输入和权限路由
-
-`app/root/dispatch/prompt.rs`同时处理prompt dispatch、队列/输入控制、权限和会话路由边界。14条静态契约已登记，后续需按队列协议、输入准入和权限路由拆分并补动态验证；本轮不改prompt dispatch。
-
-## 待拆分：Pager session lifecycle跨越创建、trust、deferred control和picker
-
-第二轮细化表明`session/lifecycle.rs`还同时覆盖session创建、worktree、deferred control、workspace trust、project picker、删除/退出和dashboard stop。新增12条静态契约已登记，后续需按创建事务、信任准入、延迟控制和picker状态拆分；本轮不改实现。
-
-## 待拆分：Pager tasks pane混合任务身份、状态控制和列表渲染
-
-`views/tasks_pane.rs`同时处理任务/Workflow列表、运行状态、选择、停止/取消、过滤、排序和提示投影。12条静态契约已登记，后续需按任务身份、运行控制和列表渲染拆分并补真实任务运行验证；本轮不改tasks pane。
-
-## 待拆分：Pager scrollback state聚合导航、折叠和过滤状态
-
-第二轮复核确认`scrollback/state/mod.rs`聚合导航、折叠、过滤、选择和布局状态。既有契约来源已补齐，后续需按状态域拆分并补真实终端矩阵；本轮不改scrollback state。
-
-## 待拆分：Pager scrollback state还包含终端marker和stop hook折叠
-
-第二轮核对补出`terminal marker stop hook stash identity folding`契约，说明scrollback state还承担终端marker、stop hook和stash identity折叠。后续需将该生命周期与普通滚动状态分离验证；本轮不改实现。
-
-## 待拆分：Pager router混合Action路由和Effect分派
-
-`app/root/dispatch/router.rs`集中Action路由、Effect分派和边界错误。12条静态契约已登记，后续需按路由表、effect执行和错误策略拆分并补动态验证；本轮不改router。
-
-## 待拆分：Pager task-result dispatch混合结果投影和副作用
-
-`app/root/dispatch/task_result.rs`集中TaskResult分支、完成/失败投影和副作用边界。9条静态契约已登记，后续需按结果协议、状态投影和副作用执行拆分并补动态验证；本轮不改task result。
-
-## 待拆分：Pager modal模块混合通用布局、焦点和命中
-
-`views/modal.rs`同时处理通用modal尺寸/布局、焦点、滚动、鼠标命中和边框/标题投影。6条静态契约已登记，后续需按布局、焦点状态和命中路由拆分并补真实终端验证；本轮不改modal行为。
-
-## 待拆分：Pager agent mouse混合拖拽、滚轮、链接和overlay命中
-
-`app/agent_view/mouse.rs`同时处理鼠标事件路由、拖拽、滚轮、链接和overlay命中。6条静态契约已登记，后续需按输入路由、命中几何和拖拽状态拆分并补真实终端验证；本轮不改mouse行为。
-
-## 待拆分：Pager session load混合恢复、损坏处理和状态投影
-
-`app/root/dispatch/tests/session/load.rs`同时处理session加载、恢复、损坏/缺失数据、绑定和状态投影。10条静态契约已登记，后续需按恢复事务、错误分类和状态投影拆分并补动态存储验证；本轮不改load行为。
-
-- Pager 审计债务：Effects helpers mix wire parsing, persistence policy and UI projection：One effects module and helper file contain ACP JSON shapes, filesystem persistence, permission notification policy, session picker mapping, model/status formatting and task result construction, so changes can cross transport and UI boundaries without a type-level contract.
-- Pager 审计债务：Test fixtures mutate process-global environment：setup_grow_home_in_tempdir changes GROW_HOME with unsafe process-global state; parallel tests or unrelated code can observe the temporary path unless the surrounding runner serializes access.
-- Pager 审计债务：Best-effort persistence has policy encoded in result variants：WithRollback and BestEffort differ in notification, rollback and TaskResult semantics; callers must preserve the distinction or can report a false persisted state.
-- Pager 审计债务：Session picker parsing and roster projection duplicate identity policy：UpdatedAt/title filtering, restore metadata and dormant roster mapping are spread across parsing helpers and dispatch consumers, leaving canonical session identity and display policy distributed.
-- Pager 审计债务：Wire-shape compatibility relies on stringly typed JSON keys：screenMode, askUserQuestion, permissionMode, grow/listScope, codeRestore and ACP outcome kinds are validated by ad hoc JSON parsing and tests rather than a shared typed schema.
-- Pager 审计债务：render_with_scratch still carries a TODO to make rendering pure after layout preparation; the immutable state signature is present, but the planned PureWidget-style abstraction is not implemented.
-- Pager 审计债务：render_content has a large argument surface and performs delegation, selection post-paint and selection-box derivation in one method; splitting those responsibilities would be a separate refactor.
-- Pager 审计债务：The pane relies on runtime expect calls for prepared caches and paint-range bounds; callers must preserve the prepare_layout invariant.
-- Pager 审计债务：Sticky header rendering uses a reusable scratch buffer only for clipped headers while other content allocation and delegated work remain outside this file; frame-level allocation/performance is not established here.
-- Pager 审计债务：The nested end-to-end module mutates internal CTA state directly to arrange phases, which keeps scenarios deterministic but leaves a gap between public user actions and some reducer preconditions.
-- Pager 审计债务：Test setup is duplicated across many top-level cases; shared builders could reduce fixture drift, but that refactor is outside this audit.
-- Pager 审计债务：isolate_grow_home uses a process-global OnceLock and unsafe environment mutation, so test isolation depends on the first caller and process-wide environment state.
-- Pager 审计债务：MCP polling and dismissal behavior is verified through synthetic TaskResult dispatches rather than a controllable scheduler or clock, leaving timing contracts partially indirect.
-- Pager 审计债务：The suite contains both focused dispatch checks and nested composed flows with overlapping success/error coverage; the ownership boundary between unit and end-to-end evidence could be made clearer.
-- Pager 审计债务：The modes suite mixes tip, behavior, permission, modal snapshot and theme concerns in one dispatch test module, which makes ownership boundaries harder to discover.
-- Pager 审计债务：Several security-critical tests build large PermissionViewState fixtures inline; a stable fixture builder could reduce duplication, but its semantics would need to remain explicit.
-- Pager 审计债务：Tests mutate process-level appearance and theme caches, so isolation relies on manual restoration and helper environment scoping rather than an injected settings/cache dependency.
-- Pager 审计债务：The always-approve contract is asserted through reducer effects and synthetic response channels; a clock/scheduler and shell contract harness would provide stronger integration evidence for queued transitions.
-- Pager 审计债务：Behavior confirmation tests arrange a warning directly on the agent, leaving the code path that creates and expires that warning covered elsewhere.
-- Pager 审计债务：SearchDaemon owns a detached JoinHandle and communicates through an unbounded channel; this avoids blocking input but leaves lifecycle and queue-growth policy implicit.
-- Pager 审计债务：ScrollbackSearchIndex rebuilds every searchable entry whenever content_generation changes; per-entry incremental indexing is deferred until profiling justifies added state.
-- Pager 审计债务：Stale-result rejection compares both generation and raw query, duplicating identity across editor, request and snapshot; a single typed request identity could make the contract easier to audit.
-- Pager 审计债务：The search state performs synchronous matcher compilation for immediate UI feedback and repeats matcher compilation on the daemon, trading responsiveness for duplicate work.
-- Pager 审计债务：Tests reach private daemon snapshots/channel messages directly, which provides precise regression coverage but couples the suite to implementation details of the coalescing protocol.
-- Pager 审计债务：A single module owns filtering, map-index semantics, selection persistence, delete confirmation, worktree selection and row presentation, so changes to one coordinate space can affect several consumers.
-- Pager 审计债务：PickerItem uses separate implicit index namespaces (original entry index versus content hit index plus a numeric offset); a typed backing-key model would reduce reliance on the constant offset.
-- Pager 审计债务：The same grouping/order logic is shared by map and rendering, but the contract is maintained by convention rather than one returned grouped model.
-- Pager 审计债务：build_content_entry_data_at repeatedly calls filtered_indices.contains, making content-row construction linear in hit count times filtered-entry count for the common path.
-- Pager 审计债务：Relative-time strings are computed during row-data construction and depend on the sampled clock, which can make snapshot stability and cross-surface rendering harder without an injected time source.
-- Pager 审计债务：helpers.rs 将图片物料化、prompt 日志、MCP/CTA、session restore、错误清理、timeline 读取、picker/roster、全部设置写入、permission 通知、task kill 解析和 active-session 注册集中在一个 1030 行模块，职责边界高度耦合。
-- Pager 审计债务：persist_setting 通过字符串 SettingKey 的大型 match 维护键到 writer 的重复类型映射；新增设置需要同时更新 registry、setter、rollback 与此处分派，编译器不会保证穷尽同步。
-- Pager 审计债务：permission persistence 和通用 setting rollback 没有 request generation/revision 判定，旧完成结果可能覆盖较新的乐观状态；这是既有 delta 明确记录的未版本化语义。
-- Pager 审计债务：多处 JSON 解析采用 wrapped-result/top-level fallback 或缺省值，兼容性便利会把协议漂移和字段缺失压低为静默空数据。
-- Pager 审计债务：生产 helpers 没有同文件测试，行为证据分散在 effects/tests.rs、dispatch tests 与调用方，重构时容易出现契约与局部实现脱节。
-- Pager 审计债务：UserPromptBlock 同时承载数据模型、非可信 replay 元数据校验、Unicode wrapping、主题样式、选择坐标、折叠估算和 BlockContent 能力，职责跨度较大。
-- Pager 审计债务：token_styled_line 依赖 lines() 返回 self.text 子切片并用指针差恢复 byte offset，虽有 debug_assert，仍把实现安全性绑定到该切片不变量。
-- Pager 审计债务：截断路径需先按样式行重排再拼接 ellipsis，并手工维护 LinkSource、Selectable span 和 source_column，布局与选择元数据耦合度高。
-- Pager 审计债务：is_foldable 的固定 MIN_CONTENT_WIDTH=60 与真实 ctx.width 分离，在宽终端上可能提前进入可折叠状态；这是源码主动接受的保守策略。
-- Pager 审计债务：Skill token range 使用 UTF-8 byte range，而测试和渲染同时依赖 span 索引与显示列宽，后续扩展复杂 token 或 grapheme 交互时存在多坐标体系维护成本。
-- Pager 审计债务：模块同时维护 Markdown 检测、缓存键协议、用户设置显示策略、按钮文案/几何和输出行插入，检测层与交互呈现层耦合。
-- Pager 审计债务：缓存文件名依赖手工 RENDER_REVISION=3；渲染行为变化若遗漏递增会复用旧 PNG，编译器无法约束。
-- Pager 审计债务：按钮宽度和三列 gap 由静态标签与 UnicodeWidthStr 计算，绘制/命中虽共享 AffordanceRow，但国际化或文案变更仍需同步协议与测试。
-- Pager 审计债务：post-wrap 插入通过 source_for 索引、insert_at+k 和反向插入维护文档顺序，调用方必须保持 prewrap_ranges 与 output.lines 同一帧映射。
-- Pager 审计债务：MermaidContent 明确不保存 per-diagram render state，所有异步状态由 AgentView worker 层维护，跨模块状态边界清晰但重构成本较高。
-- Pager 审计债务：One AgentView module centralizes search, todo, task, catalog, modal, viewer, question, dropdown, and base-pane routing; adding another pane increases precedence coupling and makes ownership review harder.
-- Pager 审计债务：handle_scroll clones workflow view and synthesizes MouseEvent values for prompt scrolling, while the same method directly mutates many modal-specific offsets; scroll ownership is split across heterogeneous APIs.
-- Pager 审计债务：Task action eligibility is reconstructed from session maps in the router, so display identity and action identity can drift if TasksPane projections change without updating this module.
-- Pager 审计债务：Search paste has a separate route from key handling and deliberately consumes browse-mode paste as Unchanged; this implicit ownership contract is only covered by one inline test.
-- Pager 审计债务：This dispatcher combines startup gating, AgentView construction, picker state cleanup, deep-search generation, restoration projection, error recovery, and reconnect control replay; further session behavior increases cross-domain coupling in one file.
-- Pager 审计债务：Picker invalidation is centralized but relies on separate welcome list and deep-search counters, with surface liveness inferred from ActiveView and modal presence; this makes stale-response reasoning dependent on callers preserving those invariants.
-- Pager 审计债务：Session-load success emits many unrelated effects and performs substantial state projection inline, so ordering between queue draining, metadata fetches, extension refresh, registration, notification, and descendant restoration is difficult to audit in isolation.
-- Pager 审计债务：Reconnection traversal returns early when a view has no session id and therefore does not recurse into its descendants; this may be intentional ownership gating but should remain an explicit invariant when child views can outlive parent identity.
-- Pager 审计债务：Selection reanchoring accepts a generic Option map but encodes grouped-header semantics locally; the same anchor policy can drift from picker rendering or input navigation unless a shared state helper owns it.
-- Pager 审计债务：One dispatcher mixes user-facing clipboard/export/file I/O, viewer construction, extensions modal lifecycle, asynchronous result reconciliation, and diagnostics dump persistence, creating broad ownership and review coupling.
-- Pager 审计债务：The extension fetch set and result handlers encode tab ordering and marketplace row-index arithmetic in dispatch code; renderer/navigation changes can drift from these local index assumptions.
-- Pager 审计债务：Copy and export each format delivery notices independently while sharing lower-level providers, so wording, fallback semantics, and toast timing can diverge across entry points.
-- Pager 审计债务：The input-log dump writes a timestamped file using a best-effort directory creation and no retention or collision policy; diagnostic persistence concerns are embedded in UI dispatch.
-- Pager 审计债务：The block viewer constructor match is a growing RenderBlock taxonomy switch; new block variants require editing this dispatcher to preserve fullscreen/viewer coverage.
-- Pager 审计债务：The shared module is a broad fixture registry spanning nearly every dispatch domain, so changes to AppView, AgentSession, modal state, ACP DTOs, and global settings all converge here and increase test coupling.
-- Pager 审计债务：test_app manually initializes the full AppView field set; although make_test_agent_session centralizes session construction, root fixture changes still require editing a large literal and can obscure which defaults each test relies on.
-- Pager 审计债务：Several helpers duplicate production assumptions (dashboard focusables, picker modal field layout, permission option classification) rather than exposing reusable production-owned builders, allowing test mirrors to drift.
-- Pager 审计债务：Global theme and mouse-capture state require manual lock/reset conventions. A panic inside the callback or a test bypassing the helper can leak process state into unrelated tests.
-- Pager 审计债务：Helpers use panic-on-invalid-fixture semantics for convenience (`expect`, direct indexing, and explicit assertions), which makes setup failures clear but limits reuse for negative-path tests.
-- Pager 审计债务：The file combines loader lifecycle, protocol serialization, cache policy, media-link indexing, hit testing, Mermaid actions, native OS opening, clipboard dispatch, and gboom input; each new media surface increases cross-domain coupling.
-- Pager 审计债务：Inline media CPU cache and Kitty GPU-id lifetime intentionally diverge, requiring reset and draw cleanup coordination that is easy to break when session/replay boundaries change.
-- Pager 审计债务：The cache eviction policy removes the first map key rather than an explicit LRU/age record, so insertion order is an implicit policy and memory pressure behavior is not visible in the type.
-- Pager 审计债务：Mermaid affordance layout/hit registration and action execution are split between rendering-owned vectors and this dispatcher-owned source table; stale or malformed indices degrade to an empty source while still consuming the click.
-- Pager 审计债务：Filesystem retry, image preparation, native opening, and clipboard copying use separate error/reporting paths, producing inconsistent user-visible diagnostics and limited structured correlation.
-- Pager 审计债务：History indexing, background-thread lifecycle, nucleo query state, UI activation, pointer hover, keyboard navigation, and selection projection are combined in one module, increasing coupling between matching policy and input state.
-- Pager 审计债务：The daemon owns an optional JoinHandle but Drop performs only a nonblocking Stop send and does not join the worker; shutdown completion and worker lifetime are therefore implicit.
-- Pager 审计债务：SetItems/SetQuery coalescing is implemented as an ad hoc message rewrite state machine; adding another history mutation requires preserving its atomicity and latest-query semantics manually.
-- Pager 审计债务：The selected() API still returns Option<&HistoryEntry> even though snapshots contain HistoryMatchResult and the implementation always returns None; selected_text/result_at are the real APIs, leaving a compatibility-shaped dead surface.
-- Pager 审计债务：The source order assumption and reverse-at-display policy are encoded in publish_matches rather than represented in a named history-order type, so an upstream ordering change can silently invert the UI.
-- Pager 审计债务：view.rs combines snapshot normalization, terminal capability interpretation, clipboard policy, warning-to-finding conversion, remediation prose, and probe-note projection; changes in any diagnostic domain require editing one high-coupling module.
-- Pager 审计债务：ClipboardRecovery retains legacy fix strings inside the view while manual findings carry separate guidance, so the compatibility facts field and user-facing remediation can drift.
-- Pager 审计债务：RuntimeEvidence::Unavailable and sentinel-like Available(None) are interpreted in several local branches, making evidence completeness policy implicit rather than represented by a dedicated report-state type.
-- Pager 审计债务：Stable DiagnosticId mapping and long remediation strings are hard-coded beside report assembly, which couples schema identity and copy text to the Rust control flow.
-- Pager 审计债务：The WezTerm newline suppression guard depends on wezterm_shape plus runtime evidence availability and duplicates terminal-specific policy with other startup/formatter layers; cross-layer changes can silently alter which fallback is shown.
-- Pager 审计债务：The block combines content lifecycle, elapsed-time policy, rendering, style policy, fold/display semantics, selection preamble, and appearance affordances, increasing coupling between data and presentation concerns.
-- Pager 审计债务：EXPAND_HINT duplicates the literal key chord used by an input interceptor instead of consulting the keybinding registry, so remapped controls can advertise the wrong shortcut.
-- Pager 审计债务：Replay timing is split between this block and ScrollbackState::finish_running_with_time, with implicit precedence between local Instant and server elapsed values.
-- Pager 审计债务：Body de-emphasis is implemented as a style patch after MarkdownContent output and uses global legacy-console detection, leaving palette blending, terminal SGR support, and block styling policy distributed across layers.
-- Pager 审计债务：The implementation returns finished_display_mode Some(Collapsed) while running and finished transitions are interpreted by outer entry/state code; this mode ownership is easy to desynchronize when new display modes are introduced.
-- Pager 审计债务：Exact human output strings are concentrated in one large test module, so copy changes require broad fixture edits and provide limited structured coverage of individual formatter fields.
-- Pager 审计债务：Most fixtures construct full probe snapshots manually, coupling formatter tests to low-level probe DTO shape and making it harder to isolate presentation behavior from snapshot assembly.
-- Pager 审计债务：Runtime merge tests call view and runtime collection before format_doctor, while the legacy clipboard test mutates facts after view; the suite therefore spans multiple ownership layers and can obscure which layer owns a regression.
-- Pager 审计债务：Several tests assert remediation prose, config paths, and command strings together with semantic IDs; stable IDs and user-facing copy have different change lifecycles but are locked in the same snapshots.
-- Pager 审计债务：The formatter contract relies on exact section ordering and literal labels while runtime findings are assembled from separate modules, leaving ordering policy distributed between collection and formatting paths.
-- Pager 审计债务：FileSearchState combines context parsing orchestration, background matcher lifecycle, generation fencing, dropdown interaction, and text replacement policy, coupling filesystem search timing to prompt editing semantics.
-- Pager 审计债务：The daemon is deliberately built on the first @ use on the UI thread, so thread-spawn cost and EAGAIN risk are shifted to an input edge rather than isolated behind a startup/runtime service.
-- Pager 审计债务：min_generation is a local floor incremented for every query while the matcher maintains its own generation; correctness depends on undocumented alignment between these counters and can be fragile across daemon recreation.
-- Pager 审计债务：clear_context does not reset selected, hovered, scroll_offset, or min_generation, leaving latent interaction state that is masked by visibility and later start_query resets.
-- Pager 审计债务：try_replace encodes prompt terminator handling, directory commit/dismiss semantics, cursor byte arithmetic, and path normalization in one pure method; changes to prompt element/undo contracts must be coordinated manually.
-- Pager 审计债务：The hard cap of 1000 is embedded in the view state and passed to the workspace matcher, so result-volume policy is not represented as configuration or a named UI contract.
-- Pager 审计债务：The event combines authorization provenance, access payloads, classifier explanations, latency, replay-safe text, and terminal rendering in one block module, coupling audit data schema to presentation text.
-- Pager 审计债务：SubagentPermissionBlock stores epoch metadata but its mutation API permits unrestricted push/extend, leaving primary-turn/epoch integrity entirely dependent on outer ScrollbackState orchestration.
-- Pager 审计债务：Full access_detail and classifier_reason are rendered without bounds or redaction while compact/searchable paths separately omit some fields; callers must choose the correct projection to avoid exposing verbose/sensitive data.
-- Pager 审计债务：Outcome aggregation duplicates verb/cardinality/styling decisions from other scrollback grouping components and identifies children by raw session strings rather than a shared child identity type.
-- Pager 审计债务：The compact line and aggregated header both claim selection range Some(0), while member-level click/detail mapping is implemented elsewhere; this distributed geometry contract can drift when rows or prefixes change.
-- Pager 审计债务：BgTaskBlock combines lifecycle state, compact user-facing wording, terminal styling, preamble wrapping, and central-store identity, coupling task execution semantics to scrollback presentation.
-- Pager 审计债务：Task termination policy is encoded as a small string allowlist for killed signals; new signal spellings or platform-specific outcomes can silently render as failed with misleading detail.
-- Pager 审计债务：Description normalization differs by surface: compact rows replace newlines with spaces while preambles preserve lines and collapse blanks, leaving cross-surface text consistency to duplicated local rules.
-- Pager 审计债务：Preamble rendering reuses permission_view::render_bash_command_display_lines, creating a cross-block dependency for shell wrapping and making viewer layout behavior sensitive to permission-panel changes.
-- Pager 审计债务：The `has_bullet` contract always returns true while bullet returns None for a finished Started block after running; the outer renderer must supply the intended default gray bullet without a single explicit state representation.
-- Pager 审计债务：Mermaid detection and image-reference extraction are duplicated lifecycle caches that remain stale for streaming chunks until finish; callers must respect that finalization boundary.
-- Pager 审计债务：output() and diagram_affordances() independently rebuild rendered_output for diagram messages, trading deterministic consistency for repeated work on each frame.
-- Pager 审计债务：The block couples presentation to process-global appearance and terminal-image flags, making pure rendering isolation and test parallelism harder.
-- Pager 审计债务：The Mermaid affordance row carries source text but no render state or path; action/render lifecycle remains split across block, renderer, worker, and input layers.
-- Pager 审计债务：The collector API passes many independently computed facts through large snapshot structs and a high-arity collect_standalone_from constructor, increasing assembly drift risk.
-- Pager 审计债务：Startup and doctor collection duplicate display-server/native-tool and host probing decisions, while standalone collection uses a separate path with different availability semantics.
-- Pager 审计债务：Targeted fix probing is keyed by diagnostic IDs in this low-level collector, coupling probe selection to diagnostics policy constants rather than a typed probe plan.
-- Pager 审计债务：RuntimeEvidence and TmuxProbeResult represent availability at different layers; downstream conversion must preserve distinctions manually, leaving room for inconsistent unavailable/error presentation.
-- Pager 审计债务：Each paint reconstructs dense output for every candidate entry and then flattens lines, with no per-width or per-generation cache in this module.
-- Pager 审计债务：The painter duplicates policy boundaries from full ScrollbackPane: no sticky headers, padding, gaps, or accent chrome are intentionally hard-coded here, so visual behavior can drift when shared layout rules change.
-- Pager 审计债务：Current-turn selection is inferred by reverse scanning for the last user prompt rather than consuming an authoritative turn range, leaving prompt identity and turn projection coupled to block classification.
-- Pager 审计债务：Global thinking visibility and process-global Theme::current are read during pure-looking projection, which complicates deterministic rendering and parallel tests.
-- Pager 审计债务：The parser is a permissive ad-hoc text protocol coupled to exact Markdown marker strings, with malformed input silently converted to empty/zero fields.
-- Pager 审计债务：Path shortening recomputes a display string from config.grow_home on every result and uses textual prefix matching instead of a path-aware component comparison.
-- Pager 审计债务：Structured result parsing and UI presentation are coupled through MemoryResult fields while searchable_text and tool dispatch live elsewhere, spreading the memory-search contract across modules.
-- Pager 审计债务：Timing state is duplicated across each concrete tool block and relies on caller-set started_at; this file provides completion timing but cannot enforce start/finish lifecycle ordering.
-- Pager 审计债务：The fixture repeats manual transcript construction and fixed layout preparation across tests, so changes to turn/materialization setup can invalidate many cases at once.
-- Pager 审计债务：Jump picker lifecycle is coordinated by root dispatch, AgentView input, rewind, inline edit, reload, and ScrollbackState restore paths; this test file exposes the cross-module coupling but no single lifecycle owner.
-- Pager 审计债务：The tests use EntryId stability at the selection boundary while picker entries also retain turn previews and restore state, leaving two identity/position models that require careful synchronization.
-- Pager 审计债务：Overlay refusal and hidden-picker cleanup are tested through a narrow cancel-turn stand-in; adding a new input owner requires updating multiple precedence and teardown paths.
-- Pager 审计债务：The dispatch tests combine block-viewer media routing and plugin-modal delivery in one transcript module, so coverage ownership is split across unrelated UI surfaces.
-- Pager 审计债务：Native image opening is fire-and-forget from the dispatcher and has no observable effect contract in these tests, leaving launch failures outside the in-memory verification boundary.
-- Pager 审计债务：The plugin collapse invariant is represented by a modal boolean/set seed flag and is verified only through repeated delivery; a dedicated modal-level contract could reduce coupling to dispatcher fixtures.
-- Pager 审计债务：Passive coordination state is represented by OtherToolCallBlock and inferred through a coordination field, coupling sideband identity and ordinary tool rendering instead of using a dedicated row type.
-- Pager 审计债务：merge_coordination_rows_from_tail silently ignores coordination rows with no matching original identity, so a caller must separately define the policy for tail-only inquiry events.
-- Pager 审计债务：The module relies on a production expect for coordination identity; malformed upstream notices therefore remain a panic boundary rather than an explicit error path.
-- Pager 审计债务：Timing and replay semantics are encoded through the generic running/finish fields, which leaves passive-row lifecycle rules distributed across ScrollbackState and OtherToolCallBlock.
-- Pager 审计债务：Hook rendering owns outcome counting, status glyphs, detail truncation, and output truncation in one helper module, coupling semantic presentation policy to ratatui styling.
-- Pager 审计债务：The repeated 120-character and three-line limits are hard-coded in both Blocked/Failed detail paths and output handling rather than represented by a shared rendering budget.
-- Pager 审计债务：The module has no local tests despite being a central presentation boundary; current OpenSpec evidence is indirect through entry/session-event composition requirements.
-- Pager 审计债务：HookPhase is a data enum in this file but rendering receives separate vectors and does not use the phase value directly, leaving phase validation to callers.
-- Pager 审计债务：Permission response delivery reports a closed requester only through a UI toast and has no typed result for callers or telemetry.
-- Pager 审计债务：Selection dispatch combines queue mutation, sticky cursor persistence, MCP/bash metadata projection, and AlwaysApprove mode transition, making the per-request response path carry several policy concerns.
-- Pager 审计债务：Root/child ownership is inferred from session-id strings in a shared queue; the queue does not expose a dedicated ownership abstraction to this module.
-- Pager 审计债务：The no-prefix MCP server fallback and bash highlight slicing are defensive assumptions embedded in dispatch rather than validated request types.
-- Pager 审计债务：This test module combines extension modal fetch admission, new-session questions, session close cleanup, project-picker creation, and marketplace request coalescing, making ownership boundaries broad for a single fixture module.
-- Pager 审计债务：Extension fetch coalescing is represented by mutable modal flags and effect counting; there is no typed request generation or observable correlation in these tests.
-- Pager 审计债务：Close cleanup mixes view switching, session unregister effect construction, map removal, fork-reference repair, and memory release in one dispatcher path.
-- Pager 审计债务：The tests depend on global or shared test-support state for memory-release counting and filesystem/git fixture assumptions, which can make isolation and failure diagnosis harder.
-- Pager 审计债务：ListLayoutCache::virtual_y and item_height silently return zero/one for out-of-range indices, which can mask stale visible-index callers instead of exposing an explicit invalid-state result.
-- Pager 审计债务：The FixedHeight/Variable mode contract is enforced by a runtime panic in extend_heights rather than a type-level API that makes invalid incremental updates impossible.
-- Pager 审计债务：Prefix sums use usize while source heights are u16 without checked accumulation, leaving extreme aggregate-height behavior implicit.
-- Pager 审计债务：The cached width is metadata only in this module; correctness depends on ListPaneState to invalidate the cache whenever width or wrapping inputs change.
-- Pager 审计债务：The dialog shell is painted cell by cell with manual border glyphs and repeated theme/style literals instead of a reusable popup chrome primitive.
-- Pager 审计债务：dialog_width_for casts the aggregate Unicode display-width calculation to u16 before clamping, leaving extreme-width behavior implicit.
-- Pager 审计债务：Rendering couples directly to NewWorktreeDialogState::viewport and its byte range/display-column representation, so the view contract depends on editor internals without a local invariant check.
-- Pager 审计债务：The Unicode cursor test asserts only that some highlighted cell exists, allowing a misplaced cursor to pass while still meeting the test predicate.
-- Pager 审计债务：Timing lifecycle is manually duplicated across set_error, finish, and elapsed_ms with public Option fields, allowing callers to mutate started_at/elapsed_ms without a type-level state transition.
-- Pager 审计债务：Elapsed duration is cast from as_millis() to i64 without checked conversion, leaving extreme-duration behavior implicit.
-- Pager 审计债务：Header width budgeting uses byte lengths for the ASCII prefix and suffix and delegates path shortening separately, so display-cell width invariants are not expressed at this boundary.
-- Pager 审计债务：The production module has only two narrow header tests; core output modes, selection metadata, timing, style, and fold contracts can regress without local evidence.
-- Pager 审计债务：The modal and welcome paths are manually constructed twice at the call sites; the PickerSurface abstraction reduces field plumbing but still requires duplicated current-repository and grouped-mode setup.
-- Pager 审计债务：session_picker_list_seq is validated here but advanced elsewhere, leaving request invalidation ownership split across dispatch handlers and making the freshness contract non-local.
-- Pager 审计债务：The relaxed notification latch is a PathBuf equality cache coupled to app.cwd while selection anchoring uses the agent session cwd for modal surfaces, so notification and picker repository scopes can diverge during cwd transitions.
-- Pager 审计债务：Loaded and failed handlers always return empty effect vectors and mutate the view directly, so data reconciliation, notice production, and side effects are coupled in one dispatcher boundary.
-- Pager 审计债务：No inline tests exist in this module despite multiple race and surface-routing branches; the contract depends on external dispatch tests and integration paths.
-- Pager 审计债务：The test depends on long wall-clock waits and sentinel polling, making failure diagnosis and runtime stability dependent on PTY scheduling and model-fixture timing.
-- Pager 审计债务：Visual distinction is asserted through one hard-coded Unicode rail and DIM/ITALIC flags, coupling the test to presentation details instead of a semantic style contract.
-- Pager 审计债务：The fixture writes configuration files directly and selects NO_COLOR through process environment, so configuration precedence and color initialization are exercised implicitly rather than through an explicit test seam.
-- Pager 审计债务：Both end-to-end tests are ignored, leaving the minimal thinking visual and collapse/reopen behavior outside routine automated coverage.
-- Pager 审计债务：The collapse test uses raw byte 0x05 for Ctrl+E and substring-based full_text checks; neither expresses the key binding or fold target as a typed contract.
-- Pager 审计债务：MAX_DROPDOWN_ROWS is exported but render_dropdown uses the supplied Rect height, while AgentView::draw independently applies MAX_DROPDOWN_ROWS and dropdown_height is not used by that caller; the row-cap and height contract is duplicated.
-- Pager 审计债务：dropdown_height includes a separator row although render_dropdown explicitly renders only result rows, so its caller contract depends on undocumented panel arithmetic outside this module.
-- Pager 审计债务：Fuzzy matching indices are consumed against the normalized display path without a local invariant tying them to that transformed string; a path normalization change could silently shift accent positions.
-- Pager 审计债务：The manual cell-by-cell renderer mixes byte indexing, Unicode scalar widths, u16 coordinate arithmetic, and wide-character continuation handling without dedicated property tests in this file.
-- Pager 审计债务：The public height helper and the row renderer have no local tests, leaving visibility, truncation, scrollbar reservation, and styling regressions dependent on higher-level coverage.
-- Pager 审计债务：ListOverlay::height, visible_rows, scroll_offset, row_at, and render encode the shared geometry in one place, but the three-row reservation and the extra padding row remain implicit numeric constants rather than named layout roles.
-- Pager 审计债务：scroll_offset assumes selected is a valid list index and does not clamp the computed offset to len - visible_rows; invalid caller state can produce an empty render window even though row_at remains safe.
-- Pager 审计债务：The renderer uses manual Rect arithmetic and direct cell painting for the accent bar and row background while row content uses Line; this split has no render-level regression tests.
-- Pager 审计债务：Theme::current is read inside the renderer rather than passed as an explicit dependency, making deterministic style testing and cross-frame theme ownership less direct.
-- Pager 审计债务：The shared abstraction covers geometry but still leaves caller closures to independently truncate and style content, so visual consistency across jump and rewind remains partly distributed.
-- Pager 审计债务：The regression is ignored, leaving the user-visible pager suspend/restore path outside routine automated coverage.
-- Pager 审计债务：The test depends on a real external `less` binary and fixed wall-clock sleeps, making reproducibility and CI diagnostics sensitive to host installation and scheduler load.
-- Pager 审计债务：The 40 ms frame delay is passed through an environment variable and the test infers the race from final text; there is no explicit writer-drain or frame-order observation seam.
-- Pager 审计债务：Visual correctness is represented by hard-coded substrings, occurrence counts, and a column-zero bracket heuristic rather than a structured live-region or terminal-frame contract.
-- Pager 审计债务：The scenario combines inference setup, minimal startup, paced editing, slash command dispatch, external pager lifecycle, repaint settling, and shutdown in one large end-to-end test, so failures have a broad diagnosis surface.
-- Pager 审计债务：The model mixes raw evidence, compatibility projections, user findings, and remediation references in one report graph; consumers must understand which fields are authoritative for a given surface.
-- Pager 审计债务：DiagnosticReport::issue_count contains a special clipboard fallback keyed to two concrete IDs, coupling aggregate counting to finding identity constants and making future delivery dispositions easy to double-count or omit.
-- Pager 审计债务：Probe names are unrestricted static strings and live-TUI classification is a string match, so adding or renaming a probe has no compiler-checked relationship to probe collection.
-- Pager 审计债务：ClipboardFacts retains the legacy optional fix string beside named findings, leaving two remediation representations that can diverge unless view consumers keep them synchronized.
-- Pager 审计债务：The large aggregate structs have no local constructors or invariants; callers assemble public fields directly and can create contradictory combinations that remain Eq/PartialEq-valid.
-- Pager 审计债务：The sole regression test is ignored and requires serialized explicit invocation, leaving multi-client leader behavior outside routine automated coverage.
-- Pager 审计债务：Long 240-second and 120-second waits plus repeated wheel bursts make the test expensive and sensitive to host scheduling, PTY throughput, and suite contention.
-- Pager 审计债务：Exactly-once and liveness contracts are encoded as hard-coded text counts and a `panicked` substring check instead of structured session/replay/frame evidence.
-- Pager 审计债务：The test combines leader startup, replay, bidirectional streaming, viewport expansion, scrolling recovery, and leader-survival lifecycle in one scenario, so failures have a broad diagnosis surface.
-- Pager 审计债务：The wheel/ESC fallback depends on terminal event routing and focus behavior; its local retry helper can mask whether scrolling, focus changes, or event cadence actually caused the recovery.
-- Pager 审计债务：The only N-client regression test is ignored and requires serialized explicit invocation, leaving scaled leader fan-out outside routine automated coverage.
-- Pager 审计债务：Long 240-second and 120-second waits and per-viewer settle/update pumps make runtime sensitive to host scheduling, PTY throughput, and suite contention.
-- Pager 审计债务：Fan-out correctness is encoded as hard-coded sentinel occurrence counts and a `panicked` substring check rather than structured session/replay/frame evidence.
-- Pager 审计债务：VIEWERS, Tokio worker-thread count, and post-driver pump duration are coupled by comments and manual tuning rather than a typed scaling budget or parameterized stress harness.
-- Pager 审计债务：The test combines shared setup, replay, live broadcast, delayed-frame duplicate detection, process lifecycle, and cleanup in one scenario, broadening the failure diagnosis surface.
-- Pager 审计债务：The regression test is ignored, leaving minimal parked-plan scrollback behavior outside routine automated coverage.
-- Pager 审计债务：Plan correctness relies on hard-coded generated sentinel substrings and occurrence counts rather than a structured scrollback block identity or native-history assertion.
-- Pager 审计债务：The test registers AgentTurnExpectation handles but drops them without awaiting satisfaction, so the UI path and scripted backend path are only loosely synchronized.
-- Pager 审计债务：Fixed 100 ms update loops, a 60-second parking wait, a 40-second first-turn wait, and a 20x100 geometry make the scenario sensitive to scheduler and PTY timing.
-- Pager 审计债务：One test combines filesystem seeding, initial session creation, two tool calls, revision input, approval, scrollback completeness, duplicate detection, and shutdown, giving failures a broad diagnosis surface.
-- Pager 审计债务：The regression test is ignored, leaving minimal /new session transition behavior outside routine automated coverage.
-- Pager 审计债务：The test identifies a new session with a broad `Grow` substring count rather than a typed welcome-card marker or session identity, so unrelated banner text could satisfy the condition.
-- Pager 审计债务：History preservation and frontier reset are inferred from text reachability and a second banner; the test has no structured session snapshot or committed-frontier assertion.
-- Pager 审计债务：Fixed tall-response generation, polling loops, and long waits make the scenario sensitive to terminal scheduling and content/render timing.
-- Pager 审计债务：One end-to-end test combines tall markdown rendering, native scrollback entry, slash command pacing, session creation, history preservation, fresh streaming, panic detection, and shutdown, broadening the failure diagnosis surface.
-- Pager 审计债务：The transcript pager regression is ignored, leaving the minimal /transcript integration path outside routine automated coverage.
-- Pager 审计债务：Pager execution is inferred from a broad response-sentinel count instead of a structured child-process, temp-file, or transcript artifact signal.
-- Pager 审计债务：PAGER=cat avoids the interactive pager path that motivated the related restore tests, so the primary full-screen/alternate-screen lifecycle remains unexercised here.
-- Pager 审计债务：Fixed polling deadlines and 100 ms updates make the test timing-sensitive while providing no explicit frame-drain or child-exit synchronization.
-- Pager 审计债务：The test combines mock setup, session startup, prompt submission, slash input pacing, transcript export, restore, panic scanning, and shutdown in one scenario, broadening failure diagnosis.
-- Pager 审计债务：The resize regression is ignored, leaving minimal committed-history resize behavior outside routine automated coverage.
-- Pager 审计债务：History preservation is inferred from one sentinel substring without a structured block identity, line-count, or duplicate assertion, so wiping and reprinting can be hard to distinguish.
-- Pager 审计债务：The source comments specify forbidden production mechanisms, but the test has no instrumentation or static guard proving those paths are absent.
-- Pager 审计债务：Fixed 40-second/30-second waits and an 800 ms settle interval make the scenario timing-sensitive while providing no explicit frame or resize completion barrier.
-- Pager 审计债务：The test combines tall markdown rendering, native scrollback entry, a two-dimensional resize, screen health, post-resize streaming, and shutdown in one scenario, broadening failure diagnosis.
-- Pager 审计债务：The queue regression is ignored, leaving minimal queue UX and promotion outside routine automated coverage.
-- Pager 审计债务：Queue correctness is inferred from hard-coded status and snapshot substrings rather than structured queue state or turn identity assertions.
-- Pager 审计债务：The test registers AgentTurnExpectation values but never awaits their satisfaction, coupling backend fixture setup to UI substring waits without a terminal barrier.
-- Pager 审计债务：Fixed stream chunk delay and wall-clock waits make the race window and promotion timing sensitive to scheduler/PTY load.
-- Pager 审计债务：One scenario combines slow inference, prompt queue admission, status rendering, slash inspection, snapshot commit, promotion, panic detection, and shutdown, broadening failure diagnosis.
-- Pager 审计债务：The regression test is ignored, leaving minimal read-header and expand behavior outside routine suite coverage.
-- Pager 审计债务：The contract is inferred from hard-coded text substrings and one control byte rather than a structured read-block identity and exact collapsed/expanded state assertion.
-- Pager 审计债务：The test creates a must_use AgentTurnExpectation but does not await or assert it, allowing the UI text path to be the only synchronization barrier for tool-call correctness.
-- Pager 审计债务：The broad scenario couples filesystem fixture creation, inference scripting, permission/trust bootstrap, read-header projection, keyboard expansion, panic detection, and shutdown, so failures have coarse diagnosis boundaries.
-- Pager 审计债务：The regression is #[ignore], so minimal Escape cancellation is outside default automated coverage.
-- Pager 审计债务：Timing and literal text assertions leave the cancellation contract indirectly specified and diagnosis coarse.
-- Pager 审计债务：The regression is #[ignore], so minimal Escape cancellation is outside default automated coverage.
-- Pager 审计债务：Timing and literal text assertions leave the cancellation contract indirectly specified and diagnosis coarse.
-- Pager 审计债务：端到端设置 modal 流程仍依赖 UI 文案 sentinel，且打开、关闭、健康检查和清理集中在一个 PTY 场景中；可补充结构化 modal/focus probe 和更细粒度测试。
-- Pager 审计债务：The regression is #[ignore], so minimal idle Ctrl+C quit confirmation is outside default automated coverage.
-- Pager 审计债务：Literal text matching and acceptance of PendingStatus leave the command-state and clean-exit contracts indirect.
-- Pager 审计债务：25个模块名手工维护，缺少目录与声明同步校验；集成拓扑依赖注释和 shared helper 约定。
-- Markdown 审计债务：README 与 target 的 syntect 覆盖矩阵存在漂移；fuzz target 是 crash-oriented，缺少输出差分与结构化属性检查。
-- **Bracketed paste 与后续按键归属**：preserve-paste-across-input-batches 核对发现 `coalesce_rapid_keys` 在同一 drain 同时出现 Event::Paste 和普通按键时调用 `merge_paste_fragments`，后者会合并 Enter/字符并丢弃非文本按键。现有测试把它视为 Windows 终端碎片恢复，但完整 bracketed paste 后的真实输入缺少可靠边界证据。需独立复核 Crossterm 的平台事件保证，覆盖粘贴后立即 Enter、方向键、Ctrl+C 和连续两次独立粘贴；不在本次未括号粘贴的 5,000 事件截断修复中混入平台协议重写。
+- **Markdown 审计债务**：README 与 target 的 syntect 覆盖矩阵存在漂移；fuzz target 是 crash-oriented，缺少输出差分与结构化属性检查。
+- **Bracketed paste 与后续按键归属**：`coalesce_rapid_keys` 在同一 drain 同时出现 `Event::Paste` 和普通按键时调用 `merge_paste_fragments`，可能合并 Enter/字符并丢弃非文本按键。需覆盖粘贴后立即 Enter、方向键、Ctrl+C 和连续两次独立粘贴，并先取得 Crossterm 平台事件边界证据。
 
 ## 审计债务：跨 resume 的会话用量账本
 
@@ -722,6 +345,7 @@ Worktree 生命周期、复用与安全边界继续等待上游稳定。它不�
 
 - **断线中的活跃候选前缀补传**：`unify-sampling-attempt-recovery` 隔离并清理未接纳预览，`updates.jsonl` 只包含已接纳内容。现有 root load 与子视图按需回放不能据此保证完整补传断线期间仍在生成的候选前缀。若需要不中断地恢复完整实时展示，应独立核对 leader 的 load cutoff、当前候选快照和子会话历史水位，在同一 session/attempt 归属下补传并去重；不得把临时预览重新写成接纳历史，也不能把该 UI 能力等同于重新执行 provider。
 
-- **会话读取与 Summary 投影修复的边界（已完成）**：由 [keep-session-observation-read-only](changes/archive/2026-09-13-keep-session-observation-read-only/verification.md) 分离。普通 full/light 读取只派生内存 Summary，显式 writer load 才持久修复；live writer 持锁、滞后 title/model、sideband 不变、接管修复及冲突拒绝均通过。macOS 已验证，Windows runner 尚未在本机执行。
 
 - **Hook 恢复快照的传输规模与历史顺序**：`fix-hook-resume-projection` 修复工具归属和尾部刷屏，但 `Timeline::completed_hook_projections` / `SessionActor::publish_completed_hook_projections` 仍在每次加载时复制并发送所有完成 Hook，成本随历史量增长；无工具锚点的事实也没有跨 Timeline/updates 的可证明 UI 全序。本次未测出性能故障，先保留为独立评估项。未来应先测量大历史加载的 CPU、字节数和延迟，再确定有界/增量查询及顺序契约，覆盖冷恢复、resident reconnect、多客户端、重复快照和 live overlap；不能把 UI transport 改成第二个 Hook 事实源。
+
+- **ACP 反向 MCP 桥的取消通知传递**：`mcp/src/acp_transport.rs` 目前丢弃无 JSON-RPC id 的消息，包含 `notifications/cancelled`。`cancel-abandoned-mcp-tool-requests` 只保证 stdio/Streamable HTTP peer 可发送匹配 request id 的取消，不改变半双工 ACP bridge。若需要 ACP SDK 托管 server 实际收到取消，应单独核对 bridge 与 SDK 双向通知能力、request id 映射、断线/替换身份和重复发送边界，并以真实 ACP/MCP 对端验证；不能把宿主发出通知等同于远端已经停止或撤销副作用。

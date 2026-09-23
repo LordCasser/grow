@@ -1275,6 +1275,114 @@ async fn all_endpoints_ignore_custom_frames_without_hiding_failure_or_extending_
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn named_flat_sse_errors_reach_all_backends_without_retry_or_admission() {
+    for (backend, path) in [
+        (ApiBackend::ChatCompletions, "/v1/chat/completions"),
+        (ApiBackend::Responses, "/v1/responses"),
+        (ApiBackend::Messages, "/v1/messages"),
+    ] {
+        let attempts = Arc::new(AtomicU32::new(0));
+        let attempts_handler = Arc::clone(&attempts);
+        let app = Router::new().route(
+            path,
+            post(move || {
+                let attempts = Arc::clone(&attempts_handler);
+                async move {
+                    attempts.fetch_add(1, Ordering::SeqCst);
+                    let events = vec![Event::default().event("error").data(
+                        r#"{"request_id":"req-stream-123","code":"InvalidParameter","message":"Output data may contain inappropriate content."}"#,
+                    )];
+                    Sse::new(stream::iter(
+                        events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                    ))
+                }
+            }),
+        );
+        let server = MockServer::spawn(app).await;
+        let mut cfg = test_config(server.base_url(), "test-model");
+        cfg.api_backend = backend.clone();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let handle = SamplerActor::spawn(cfg, RetryPolicy::default(), event_tx);
+        let error = handle
+            .submit_and_collect(RequestId::from("named-error"), user_request("hi"))
+            .await
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("InvalidParameter"),
+            "{backend:?}: {error:?}"
+        );
+        assert!(error.to_string().contains("inappropriate content"));
+        assert!(error.to_string().contains("req-stream-123"));
+        let events = drain_until_terminal(&mut event_rx, Duration::from_secs(1)).await;
+        assert!(matches!(
+            events.last(),
+            Some(SamplingEvent::Failed { error, .. })
+                if error.kind == SamplingErrorKind::Api && error.status_code == Some(400)
+        ));
+        assert!(!events.iter().any(|event| matches!(
+            event,
+            SamplingEvent::Retrying { .. } | SamplingEvent::Completed { .. }
+        )));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1, "{backend:?}");
+        server.shutdown();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn messages_named_error_discards_a_partial_tool_candidate() {
+    let attempts = Arc::new(AtomicU32::new(0));
+    let attempts_handler = Arc::clone(&attempts);
+    let app = Router::new().route(
+        "/v1/messages",
+        post(move || {
+            let attempts = Arc::clone(&attempts_handler);
+            async move {
+                attempts.fetch_add(1, Ordering::SeqCst);
+                let start = sse::messages_api_events("unused", "test-model", "end_turn")
+                    .into_iter()
+                    .next()
+                    .unwrap();
+                let events = vec![
+                    start,
+                    Event::default().data(
+                        r#"{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tool-1","name":"write","input":{}}}"#,
+                    ),
+                    Event::default().event("error").data(
+                        r#"{"request_id":"req-partial","code":"InvalidParameter","message":"Output data may contain inappropriate content."}"#,
+                    ),
+                ];
+                Sse::new(stream::iter(
+                    events.into_iter().map(Ok::<_, std::convert::Infallible>),
+                ))
+            }
+        }),
+    );
+    let server = MockServer::spawn(app).await;
+    let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+    let handle = SamplerActor::spawn(
+        messages_config(server.base_url()),
+        RetryPolicy::default(),
+        event_tx,
+    );
+    let error = handle
+        .submit_and_collect(RequestId::from("partial-tool"), user_request("hi"))
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("InvalidParameter"), "{error:?}");
+    let events = drain_until_terminal(&mut event_rx, Duration::from_secs(1)).await;
+    assert!(matches!(
+        events.last(),
+        Some(SamplingEvent::Failed { error, .. }) if error.kind == SamplingErrorKind::Api
+    ));
+    assert!(!events.iter().any(|event| matches!(
+        event,
+        SamplingEvent::Retrying { .. } | SamplingEvent::Completed { .. }
+    )));
+    assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    server.shutdown();
+}
+
 /// Server-reported doom-loop triggers flow through the actor rung onto the
 /// completed response, without retries. The trigger is non-confident
 /// (`@response` channel), so the recovery — which resamples only confident

@@ -1,4 +1,5 @@
 use super::*;
+use crate::scrollback::blocks::communication::{CommunicationBody, CommunicationSectionKind};
 use crate::scrollback::blocks::{NoticeCategory, NoticeTone};
 use shell::sampling::error::format_rate_limited_user_message;
 
@@ -21,19 +22,27 @@ fn ui_notice_block(
         shell::extensions::notification::UiNoticeCategory::Lifecycle => NoticeCategory::Lifecycle,
     };
     let mut metadata = Vec::new();
-    if matches!(category, NoticeCategory::Coordination) {
+    let communication_notice = notice.subject.as_deref().is_some_and(|subject| {
+        matches!(
+            subject,
+            "agent message received" | "parent message received"
+        )
+    });
+    if matches!(category, NoticeCategory::Coordination) && !communication_notice {
         metadata.push(format!("Inquiry ID: {}", notice.correlation_id));
     }
     if let Some(subject) = notice.subject {
-        metadata.push(match category {
-            NoticeCategory::Command => format!("Command: {subject}"),
-            _ => format!("Subject: {subject}"),
-        });
+        if !communication_notice {
+            metadata.push(match category {
+                NoticeCategory::Command => format!("Command: {subject}"),
+                _ => format!("Subject: {subject}"),
+            });
+        }
     }
-    if let Some(description) = notice.description {
+    if !communication_notice && let Some(description) = notice.description {
         metadata.push(description);
     }
-    if let Some(details) = notice.details {
+    if !communication_notice && let Some(details) = notice.details {
         metadata.push(details);
     }
     let details = (!metadata.is_empty()).then(|| metadata.join("\n"));
@@ -55,12 +64,12 @@ fn ui_notice_block(
 /// source tools own their UI; target events update one passive tool-style row.
 pub(crate) fn apply_ui_notice(
     agent: &mut AgentView,
-    mut notice: shell::extensions::notification::UiNotice,
+    notice: shell::extensions::notification::UiNotice,
     event_id: Option<String>,
     is_replay: bool,
 ) -> bool {
     use crate::scrollback::blocks::tool::{CoordinationRow, OtherToolCallBlock};
-    use shell::extensions::notification::ParentMessageNotice;
+    use shell::extensions::notification::AgentMessageNotice;
     if notice.tone == shell::extensions::notification::UiNoticeTone::Progress {
         if is_replay
             || agent.session.loading_replay
@@ -83,7 +92,7 @@ pub(crate) fn apply_ui_notice(
     }
     let scrollback = &mut agent.scrollback;
     if notice.category == shell::extensions::notification::UiNoticeCategory::Coordination {
-        if let Some(data) = ParentMessageNotice::from_notice(&notice) {
+        if let Some(data) = AgentMessageNotice::from_notice(&notice) {
             let receipt_id = notice.correlation_id.clone();
             // The passive live projection intentionally has no transport
             // eventId. Replays may carry a different cache eventId, so the
@@ -93,8 +102,26 @@ pub(crate) fn apply_ui_notice(
             let RenderBlock::Notice(block) = &mut render_block else {
                 unreachable!()
             };
-            block.details = Some(data.display_details(&receipt_id));
-            block.set_communication_preview(data.message);
+            block.text = if data.reply_to.is_some() {
+                format!("Reply from {}", data.source_session_id)
+            } else {
+                format!("Message from {}", data.source_session_id)
+            };
+            let mut body = CommunicationBody::new();
+            if let Some(message) = &data.message {
+                body.push(CommunicationSectionKind::Message, message.clone());
+            } else {
+                body.push(CommunicationSectionKind::Error, "Message unavailable");
+            }
+            block.details = None;
+            block.set_communication_body(body);
+            block.set_communication_data(
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "receipt_id": receipt_id,
+                    "notice": data,
+                }))
+                .unwrap_or_else(|_| "{}".into()),
+            );
             scrollback.push_block(render_block);
             return true;
         }
@@ -114,15 +141,28 @@ pub(crate) fn apply_ui_notice(
                     inquiry_id: notice.correlation_id.clone(),
                     terminal,
                 };
-                notice.details = Some(audit.display_details());
+                let raw_details = notice.details.clone();
                 let failed = terminal
                     && notice.tone != shell::extensions::notification::UiNoticeTone::Success;
                 let RenderBlock::Notice(notice) = ui_notice_block(notice, event_id) else {
                     unreachable!()
                 };
+                let mut body = CommunicationBody::new();
+                body.push(CommunicationSectionKind::Question, audit.question.clone());
+                if let Some(outcome) = &audit.outcome {
+                    if let Some(answer) = &outcome.answer {
+                        body.push(CommunicationSectionKind::Answer, answer.clone());
+                    }
+                    if let Some(error) = &outcome.error {
+                        body.push(
+                            CommunicationSectionKind::Error,
+                            serde_json::to_string(error).unwrap_or_else(|_| format!("{error:?}")),
+                        );
+                    }
+                }
                 let mut block = OtherToolCallBlock::new(notice.text, "")
-                    .with_output(notice.details.unwrap_or_default())
-                    .with_communication_preview(audit.question.clone());
+                    .with_communication_body(body)
+                    .with_communication_data(raw_details.unwrap_or_default());
                 if failed {
                     block.error = Some(block.name.clone());
                 }

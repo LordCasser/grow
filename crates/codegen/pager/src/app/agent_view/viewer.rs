@@ -923,6 +923,14 @@ impl AgentView {
             }
         }
 
+        if viewer.data_toggle_pending {
+            viewer.data_toggle_pending = false;
+            viewer.data_mode = !viewer.data_mode;
+            if let Some(entry) = self.scrollback.get_by_id(viewer.entry_id) {
+                viewer.rebuild_items(entry);
+            }
+        }
+
         // Process pending copy actions (logic lives in BlockViewerPane)
         let entry_id = viewer.entry_id;
         if let Some(entry) = self.scrollback.get_by_id(entry_id)

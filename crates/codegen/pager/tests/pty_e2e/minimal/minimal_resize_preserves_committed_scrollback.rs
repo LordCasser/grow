@@ -13,6 +13,8 @@ use crate::common::*;
 #[ignore]
 async fn minimal_resize_preserves_committed_scrollback() {
     let content = ContentController::start().await.expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
+    content.seed_llm_config().expect("seed mock LLM config");
     // Sentinel on the first rendered row; 80 code-block rows >> screen, so the
     // head scrolls into native scrollback once the block commits. (Prose would
     // markdown-reflow into one short on-screen paragraph — see `tall_response`.)
@@ -20,6 +22,9 @@ async fn minimal_resize_preserves_committed_scrollback() {
 
     let mut harness = spawn_minimal(&content);
     wait_minimal_ready(&mut harness);
+    harness
+        .wait_for_text("128K (", Duration::from_secs(30))
+        .expect("mock session fully loaded");
     harness
         .inject_keys(format!("{PROMPT}\r").as_bytes())
         .expect("submit prompt");

@@ -498,7 +498,10 @@ fn chat_completions_request_count(server: &MockInferenceServer) -> usize {
 #[test]
 fn provider_completion_preserves_native_stops_and_tool_authority_on_all_backends() {
     run_with_session_stack(|| {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(tokio::task::LocalSet::new().run_until(async {
             use sampling_types::{ApiBackend, ProviderTerminal};
             for backend in [ApiBackend::Messages, ApiBackend::ChatCompletions, ApiBackend::Responses] {
@@ -591,7 +594,10 @@ fn provider_completion_preserves_native_stops_and_tool_authority_on_all_backends
 #[test]
 fn provider_completion_keeps_original_request_source_across_endpoint_switch() {
     run_with_session_stack(|| {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(tokio::task::LocalSet::new().run_until(async {
             let first_server = MockInferenceServer::start().await.unwrap();
             let second_server = MockInferenceServer::start().await.unwrap();
@@ -653,7 +659,10 @@ fn provider_completion_keeps_original_request_source_across_endpoint_switch() {
 #[test]
 fn provider_completion_cannot_finish_new_interjections() {
     run_with_session_stack(|| {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(tokio::task::LocalSet::new().run_until(async {
             let server = MockInferenceServer::start().await.unwrap();
             let mut first = server.expect_response_blocked(
@@ -671,9 +680,13 @@ fn provider_completion_cannot_finish_new_interjections() {
                 actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
             *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
             let (result, ()) = tokio::join!(run_user_turn(&actor, "completion-steering"), async {
-                tokio::time::timeout(std::time::Duration::from_secs(5), first.wait_blocked()).await.unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), first.wait_blocked())
+                    .await
+                    .unwrap();
                 actor.pending_interjections.push(PendingInterjection {
-                    text: "还需要解释验证结果。".into(), attachments: vec![], requeue: None,
+                    text: "还需要解释验证结果。".into(),
+                    attachments: vec![],
+                    requeue: None,
                 });
                 first.release();
             });
@@ -695,7 +708,10 @@ fn provider_completion_cannot_finish_new_interjections() {
 #[test]
 fn provider_completion_respects_schema_refusal_and_goal_budget_terminals() {
     run_with_session_stack(|| {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(tokio::task::LocalSet::new().run_until(async {
             let schema = json!({"type":"object","properties":{"answer":{"type":"string"}},
                 "required":["answer"],"additionalProperties":false});
@@ -728,15 +744,29 @@ fn provider_completion_respects_schema_refusal_and_goal_budget_terminals() {
                 };
                 server.enqueue_response(path, response);
                 let (actor, _) = actor_with_sampler(&server, backend).await;
-                let result = run_user_turn_with_schema(&actor, "completion-schema", Some(schema.clone())).await.unwrap();
+                let result =
+                    run_user_turn_with_schema(&actor, "completion-schema", Some(schema.clone()))
+                        .await
+                        .unwrap();
                 assert!(result.structured_output.as_ref().unwrap().is_ok());
                 assert_eq!(server.requests().len(), 1);
-                assert!(!server.request_bodies()[0]["tools"].to_string().contains("FinishTurn"));
+                assert!(
+                    !server.request_bodies()[0]["tools"]
+                        .to_string()
+                        .contains("FinishTurn")
+                );
             }
             let server = MockInferenceServer::start().await.unwrap();
             server.enqueue_response("/v1/messages", messages_turn(&[], "refusal"));
-            let (actor, _) = actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
-            assert_eq!(run_user_turn(&actor, "completion-refusal").await.unwrap().stop_reason, acp::StopReason::Refusal);
+            let (actor, _) =
+                actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
+            assert_eq!(
+                run_user_turn(&actor, "completion-refusal")
+                    .await
+                    .unwrap()
+                    .stop_reason,
+                acp::StopReason::Refusal
+            );
             assert_eq!(server.requests().len(), 1);
 
             let server = MockInferenceServer::start().await.unwrap();
@@ -762,7 +792,11 @@ fn provider_completion_respects_schema_refusal_and_goal_budget_terminals() {
                 .select_behavior(tool_types::BehaviorId::Goal);
             actor.sync_goal_usage_window();
             run_user_turn(&actor, "completion-budget").await.unwrap();
-            assert_eq!(server.requests().len(), 1, "budget exhaustion forbids completion recovery sampling");
+            assert_eq!(
+                server.requests().len(),
+                1,
+                "budget exhaustion forbids completion recovery sampling"
+            );
             let events = actor.chat_state_handle.timeline_events().await.unwrap();
             assert!(events.iter().any(|event| matches!(&event.kind,
                 chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended { terminal, .. })
@@ -774,7 +808,10 @@ fn provider_completion_respects_schema_refusal_and_goal_budget_terminals() {
 #[test]
 fn provider_completion_does_not_resume_after_user_cancel() {
     run_with_session_stack(|| {
-        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
         rt.block_on(tokio::task::LocalSet::new().run_until(async {
             let server = MockInferenceServer::start().await.unwrap();
             let mut first = server.expect_response_blocked(
@@ -787,16 +824,23 @@ fn provider_completion_does_not_resume_after_user_cancel() {
             let (actor, _) =
                 actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
             let (result, ()) = tokio::join!(run_user_turn(&actor, "completion-cancel"), async {
-                tokio::time::timeout(std::time::Duration::from_secs(5), first.wait_blocked()).await.unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), first.wait_blocked())
+                    .await
+                    .unwrap();
                 *actor.current_prompt_id.lock().unwrap() = Some("completion-cancel".into());
-                actor.cancel_running_task(false, false, false, Some("esc".into())).await.unwrap();
+                actor
+                    .cancel_running_task(false, false, false, Some("esc".into()))
+                    .await
+                    .unwrap();
                 first.release();
             });
             // This direct fixture installs a foreground stub, not the task
             // itself. Production cancellation revokes that stub's ownership;
             // the still-polled test future must fail its terminal admission.
             let error = result.expect_err("cancelled direct fixture has lost foreground ownership");
-            assert!(crate::session::commands::is_fatal_turn_boundary_error(&error));
+            assert!(crate::session::commands::is_fatal_turn_boundary_error(
+                &error
+            ));
             assert_eq!(server.requests().len(), 1);
         }));
     });
@@ -960,6 +1004,154 @@ fn response_projection_fatal_boundary_blocks_tool_dispatch_and_recovery() {
                 &event.kind,
                 chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Completed { .. })
             )));
+        }));
+    });
+}
+
+#[test]
+fn response_projection_physical_ack_loss_blocks_tool_dispatch_and_recovery() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            use crate::extensions::notification::{SamplingAttemptState, SessionUpdate as GrowUpdate};
+            use crate::session::info::Info;
+            use crate::session::persistence::default_model_id;
+            use crate::session::replay_events::SessionNotification;
+            use crate::session::storage::{JsonlStorageAdapter, StorageAdapter};
+
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response(
+                "/v1/messages",
+                messages_turn(
+                    &[tool_use_block(
+                        "physical-projection-call",
+                        "todo_write",
+                        r#"{"todos":[{"id":"physical-projection-todo","content":"must not execute","status":"completed"}]}"#,
+                    )],
+                    "tool_use",
+                ),
+            );
+            server.enqueue_response(
+                "/v1/messages",
+                messages_turn(&[text_block("illegal continuation")], END_TURN),
+            );
+
+            let root = tempfile::tempdir().unwrap();
+            let info = Info {
+                id: acp::SessionId::new("test-actor"),
+                cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            };
+            let storage = std::sync::Arc::new(JsonlStorageAdapter::with_root(
+                root.path().to_path_buf(),
+            ));
+            storage.init_session(&info, default_model_id()).await.unwrap();
+
+            let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+            let persistence_storage = storage.clone();
+            let persistence_info = info.clone();
+            let persistence_task = tokio::task::spawn_local(async move {
+                while let Some(message) = persistence_rx.recv().await {
+                    match message {
+                        PersistenceMsg::CommitResponseProjection {
+                            projection,
+                            respond_to,
+                        } => {
+                            persistence_storage
+                                .commit_response_projection(&persistence_info, &projection)
+                                .await
+                                .expect("physical projection must be committed before ACK loss");
+                            drop(respond_to);
+                        }
+                        PersistenceMsg::SidebandDurablyAndAck { respond_to, .. } => {
+                            let _ = respond_to.send(Ok(()));
+                        }
+                        _ => {}
+                    }
+                }
+            });
+
+            let (gateway_tx, gateway_rx) = mpsc::unbounded_channel();
+            let (actor, events) = create_test_actor_ex_with_physical_projection(
+                0,
+                256_000,
+                85,
+                gateway_tx,
+                persistence_tx,
+            )
+            .await;
+            let (actor, _, mut events) = configure_actor_with_sampler(
+                &server,
+                sampling_types::ApiBackend::Messages,
+                sampler::OutputDelivery::Irreversible,
+                actor,
+                gateway_rx,
+                events,
+            )
+            .await;
+            *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
+
+            let error = run_user_turn(&actor, "physical-projection-boundary")
+                .await
+                .expect_err("lost projection ACK must fail the turn");
+            assert!(crate::session::commands::is_fatal_turn_boundary_error(&error));
+            assert_eq!(
+                error
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("phase"))
+                    .and_then(serde_json::Value::as_str),
+                Some("response-projection")
+            );
+            assert_eq!(server.requests().len(), 1, "ACK loss forbids recovery");
+
+            let mut attempts = Vec::new();
+            while let Ok(event) = events.try_recv() {
+                if let SessionEvent::Notification(SessionNotification::Grow(notification)) = event
+                    && let GrowUpdate::SamplingAttempt { state, .. } = notification.update
+                {
+                    attempts.push(state);
+                }
+            }
+            assert!(!attempts.contains(&SamplingAttemptState::Accepted));
+
+            let conversation = actor.chat_state_handle.get_conversation().await;
+            assert!(conversation.iter().any(|item| matches!(
+                item,
+                ConversationItem::Assistant(assistant)
+                    if assistant.tool_calls.iter().any(|call| call.id.as_ref() == "physical-projection-call")
+            )));
+            assert!(!conversation
+                .iter()
+                .any(|item| matches!(item, ConversationItem::ToolResult(_))));
+            let timeline = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert!(!timeline.iter().any(|event| matches!(
+                &event.kind,
+                chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Completed { .. })
+            )));
+
+            let updates_path = storage
+                .open_session(&info)
+                .unwrap()
+                .directory()
+                .display_path()
+                .join("updates.jsonl");
+            let physical = std::fs::read_to_string(updates_path).unwrap();
+            let projection_count = physical
+                .lines()
+                .filter(|line| {
+                    serde_json::from_str::<serde_json::Value>(line)
+                        .ok()
+                        .and_then(|value| value.get("method").and_then(serde_json::Value::as_str).map(str::to_owned))
+                        .as_deref()
+                        == Some(crate::session::response_projection::RESPONSE_REPLAY_PROJECTION_METHOD)
+                })
+                .count();
+            assert_eq!(projection_count, 1, "physical projection is committed exactly once");
+            assert!(!physical.contains("samplingRequestId"));
+            persistence_task.abort();
         }));
     });
 }
@@ -1358,6 +1550,69 @@ fn protocol_invalid_tools_do_not_execute_and_the_next_turn_recovers() {
                 assert_eq!(server.requests().iter().filter(|request| request.path == path).count(), 2);
                 assert!(assistant_texts(&actor.chat_state_handle.get_conversation().await).iter().any(|text| text.contains("continued safely")));
             }
+        }));
+    });
+}
+
+#[test]
+fn messages_named_error_rejects_partial_tool_without_retry_or_execution() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            let failure = ScriptedResponse::sse(vec![
+                SseEvent::data(json!({
+                    "type": "message_start",
+                    "message": {
+                        "id": "msg_rejected", "type": "message", "role": "assistant",
+                        "content": [], "model": "test-model", "stop_reason": null,
+                        "usage": {
+                            "input_tokens": 10, "output_tokens": 0,
+                            "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0
+                        }
+                    }
+                }).to_string()),
+                SseEvent::data(json!({
+                    "type": "content_block_start", "index": 0,
+                    "content_block": {"type": "tool_use", "id": "call_rejected", "name": "todo_write", "input": {}}
+                }).to_string()),
+                SseEvent::data(json!({
+                    "type": "content_block_delta", "index": 0,
+                    "delta": {"type": "input_json_delta", "partial_json": "{}"}
+                }).to_string()),
+                SseEvent::data(json!({"type": "content_block_stop", "index": 0}).to_string()),
+                SseEvent::with_event("error", json!({
+                    "request_id": "req-rejected", "code": "InvalidParameter",
+                    "message": "Output data may contain inappropriate content."
+                }).to_string()),
+            ]);
+            server.enqueue_response("/v1/messages", failure);
+            server.enqueue_response(
+                "/v1/messages",
+                messages_turn(&[text_block("continued safely")], END_TURN),
+            );
+            let (actor, _gateway) =
+                actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
+            let error = run_user_turn(&actor, "trigger rejected output")
+                .await
+                .expect_err("named stream error must reject the candidate");
+            let rendered = format!("{error:?}");
+            assert!(rendered.contains("InvalidParameter"), "{rendered}");
+            assert!(rendered.contains("req-rejected"), "{rendered}");
+            assert_eq!(server.requests().iter().filter(|r| r.path == "/v1/messages").count(), 1);
+            assert_eq!(
+                actor.chat_state_handle.try_get_session_usage().await.unwrap().totals.model_calls,
+                0,
+                "message_start usage is not final usage"
+            );
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert!(!events.iter().any(|event| matches!(event.kind, chat_state::TimelineEventKind::Tool(_))));
+            actor.state.lock().await.foreground = ForegroundState::Idle;
+            run_user_turn(&actor, "continue").await.expect("later turn should run");
+            assert_eq!(server.requests().iter().filter(|r| r.path == "/v1/messages").count(), 2);
         }));
     });
 }

@@ -3,7 +3,7 @@ use crate::scrollback::block::BlockContent;
 use crate::scrollback::blocks::{OtherToolCallBlock, ToolCallBlock};
 use crate::scrollback::types::DisplayMode;
 use shell::extensions::notification::{
-    ParentMessageNotice, UiNotice, UiNoticeCategory, UiNoticeTone,
+    AgentMessageNotice, UiNotice, UiNoticeCategory, UiNoticeTone,
 };
 
 fn notice(id: &str, subject: &str, message: &str, tone: UiNoticeTone) -> GrowSessionUpdate {
@@ -30,16 +30,17 @@ fn notice(id: &str, subject: &str, message: &str, tone: UiNoticeTone) -> GrowSes
 }
 
 fn parent_message_notice(receipt_id: &str, message: Option<&str>) -> GrowSessionUpdate {
-    let data = ParentMessageNotice {
-        parent_session_id: "parent-session".into(),
+    let data = AgentMessageNotice {
+        source_session_id: "parent-session".into(),
         message_id: "message-1".into(),
         interrupt: true,
+        reply_to: None,
         message: message.map(str::to_owned),
     };
     GrowSessionUpdate::UiNotice(UiNotice {
         correlation_id: receipt_id.into(),
         category: UiNoticeCategory::Coordination,
-        subject: Some(ParentMessageNotice::SUBJECT.into()),
+        subject: Some(AgentMessageNotice::SUBJECT.into()),
         description: None,
         message: if data.message.is_some() {
             "Parent guidance received".into()
@@ -188,6 +189,7 @@ fn coordination_source_tools_keep_normal_running_rows_and_full_return_values() {
                     error: None,
                     subagent_task_name: None,
                     target_session_id: None,
+                    receipt_id: None,
                 },
             ),
         ),
@@ -295,18 +297,21 @@ fn coordination_target_start_approval_and_end_update_one_row_in_place() {
         .scrollback
         .push_block(RenderBlock::notice("unrelated later activity"));
 
-    assert!(handle(
-        make_ext_session_notification(
-            "target",
-            notice(
-                "inquiry-1",
-                "inquiry approval",
-                "Answering session peer",
-                UiNoticeTone::Success,
-            )
+    assert!(
+        handle(
+            make_ext_session_notification(
+                "target",
+                notice(
+                    "inquiry-1",
+                    "inquiry approval",
+                    "Answering session peer",
+                    UiNoticeTone::Success,
+                )
+            ),
+            &mut app
         ),
-        &mut app
-    ));
+        "approval metadata must refresh the existing row's Data view"
+    );
     let agent = app.agents.get_mut(&AgentId(0)).unwrap();
     agent.session.finish_turn(&mut agent.scrollback);
     assert!(
@@ -343,18 +348,12 @@ fn coordination_target_start_approval_and_end_update_one_row_in_place() {
     let block = tool_row(&app, 0);
     assert_eq!(block.name, "Answered session peer");
     assert!(block.coordination.as_ref().unwrap().terminal);
-    let details = block.output.as_deref().unwrap();
-    for expected in [
-        "Inquiry ID: inquiry-1",
-        "Source workspace: /tmp/work",
-        "Status?",
-        "Working on tests",
-    ] {
-        assert!(
-            details.contains(expected),
-            "missing audit detail: {expected}"
-        );
-    }
+    let body = block.communication_body().expect("typed coordination body");
+    assert_eq!(body.raw_text(), "Status?\n\nWorking on tests");
+    let audit: shell::coordination::IncomingInquiryAudit =
+        serde_json::from_str(block.communication_data().expect("typed coordination data")).unwrap();
+    assert_eq!(audit.source_cwd, "/tmp/work");
+    assert_eq!(block.coordination.as_ref().unwrap().inquiry_id, "inquiry-1");
 }
 
 #[test]
@@ -383,9 +382,16 @@ fn coordination_target_uses_persisted_subagent_task_title() {
         block.name,
         "Answered subagent TS registry workload presentation"
     );
-    assert!(block.output.as_deref().is_some_and(|details| {
-        details.contains("Subagent task: TS registry workload presentation")
-    }));
+    let audit: shell::coordination::IncomingInquiryAudit = serde_json::from_str(
+        block
+            .communication_data()
+            .expect("typed coordination metadata"),
+    )
+    .unwrap();
+    assert_eq!(
+        audit.delegated_subagent_task_name.as_deref(),
+        Some("TS registry workload presentation")
+    );
 }
 
 #[test]
@@ -411,9 +417,27 @@ fn coordination_child_receiving_parent_inquiry_names_parent() {
     ));
     let block = tool_row(&app, 0);
     assert_eq!(block.name, "Answered parent agent");
-    let details = block.output.as_deref().unwrap();
-    assert!(details.contains("Direction: parent_to_child"));
-    assert!(details.contains("Subagent task: TS registry workload presentation"));
+    assert_eq!(
+        block
+            .communication_body()
+            .expect("typed parent-message body")
+            .raw_text(),
+        "Status?\n\nWorking on tests"
+    );
+    let audit: shell::coordination::IncomingInquiryAudit = serde_json::from_str(
+        block
+            .communication_data()
+            .expect("typed coordination metadata"),
+    )
+    .unwrap();
+    assert_eq!(
+        audit.direction,
+        shell::coordination::InquiryDirection::ParentToChild
+    );
+    assert_eq!(
+        audit.delegated_subagent_task_name.as_deref(),
+        Some("TS registry workload presentation")
+    );
 }
 
 #[test]
@@ -566,12 +590,22 @@ fn delegated_question_updates_one_primary_view_row() {
             .unwrap()
             .is_running
     );
-    assert!(
+    assert_eq!(
         tool_row(&app, 0)
-            .output
-            .as_ref()
-            .unwrap()
-            .contains("Working on tests")
+            .communication_body()
+            .expect("typed delegated inquiry body")
+            .raw_text(),
+        "Status?\n\nWorking on tests"
+    );
+    let audit: shell::coordination::IncomingInquiryAudit = serde_json::from_str(
+        tool_row(&app, 0)
+            .communication_data()
+            .expect("typed delegated inquiry metadata"),
+    )
+    .unwrap();
+    assert_eq!(
+        audit.delegated_subagent_task_name.as_deref(),
+        Some("TS registry workload presentation")
     );
     assert_eq!(
         tool_row(&app, 0).name,
@@ -603,14 +637,21 @@ fn parent_message_live_and_replay_share_receipt_identity() {
         panic!("expected parent message NoticeBlock");
     };
     assert_eq!(notice.event_id.as_deref(), Some("parent-message:receipt-1"));
-    assert!(
+    assert_eq!(
         notice
-            .details
-            .as_deref()
-            .unwrap()
-            .contains("Receipt ID: receipt-1")
+            .communication_body()
+            .expect("typed parent-message body")
+            .raw_text(),
+        "first line\nsecond line\nthird line"
     );
-    assert!(!notice.details.as_deref().unwrap().contains("Inquiry ID:"));
+    let data: serde_json::Value = serde_json::from_str(
+        notice
+            .communication_data()
+            .expect("typed parent-message metadata"),
+    )
+    .unwrap();
+    assert_eq!(data["receipt_id"], "receipt-1");
+    assert!(notice.details.is_none());
 }
 
 #[test]
@@ -662,8 +703,8 @@ fn parent_message_routes_to_nested_child_without_switching_view() {
     else {
         unreachable!()
     };
-    let mut data = ParentMessageNotice::from_notice(&notice).unwrap();
-    data.parent_session_id = "child-session".into();
+    let mut data = AgentMessageNotice::from_notice(&notice).unwrap();
+    data.source_session_id = "child-session".into();
     notice.details = Some(serde_json::to_string(&data).unwrap());
     handle(
         make_ext_session_notification("grandchild-session", GrowSessionUpdate::UiNotice(notice)),
@@ -694,11 +735,18 @@ fn parent_message_routes_to_existing_child_view_and_handles_missing_body() {
         panic!("expected missing-body NoticeBlock");
     };
     assert_eq!(notice.event_id.as_deref(), Some("parent-message:receipt-2"));
-    assert!(
+    assert_eq!(
         notice
-            .details
-            .as_deref()
-            .unwrap()
-            .contains("Message body could not be recovered")
+            .communication_body()
+            .expect("typed missing-body body")
+            .raw_text(),
+        "Message unavailable"
     );
+    let data: serde_json::Value = serde_json::from_str(
+        notice
+            .communication_data()
+            .expect("typed missing-body metadata"),
+    )
+    .unwrap();
+    assert_eq!(data["receipt_id"], "receipt-2");
 }

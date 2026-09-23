@@ -1,0 +1,7 @@
+# Verification and disposition
+
+The intermittent `PermissionDenied` during `sips_runner_preserves_exit_status` has not recurred in bounded tests of the actual Rust runner: the original retry module passed, a 200-command normal/nonzero-exit sequence passed, and four concurrent 500-command workers all exited normally. A separate 100-child Python probe used a different spawn path and cannot establish the Rust cause. These observations do not identify whether the original failure arose at spawn/detach, process-group attachment, wait, or cleanup.
+
+The independent archived change `attribute-sips-process-errors` subsequently made production runner errors report their stage. Its injected startup EPERM only proves the diagnostic can label one stage; it does not explain the original incident. There is no repeatable failure to fix or evidence for suppressing EPERM, changing process-group semantics, or retrying a conversion. The investigation closes inconclusive. If EPERM recurs, capture the stage-tagged error and process conditions, then start a focused behavior change if the cause is inside Grow.
+
+No product behavior or main specification changes in this investigation. Current-tree validation on 2026-09-23: `cargo test --locked -p pager-render --lib terminal::image -- --test-threads=4` passed 22/22, including the normal/nonzero-exit runner and injected startup EPERM. `openspec validate investigate-sips-process-eperm --strict --no-interactive` passed, and `git diff --check` was clean. This green run is not evidence that the intermittent original EPERM is fixed.

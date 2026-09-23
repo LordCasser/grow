@@ -313,8 +313,15 @@ impl SessionActor {
             ),
             ToolInput::SendSubagentMessage(ref message) => (
                 format!(
-                    "send_subagent_message → subagent「{}」",
-                    message.subagent_id
+                    "send_subagent_message → {}",
+                    message
+                        .subagent_id
+                        .as_deref()
+                        .or_else(|| message
+                            .reply_to
+                            .as_ref()
+                            .map(|reference| reference.source_session_id.as_str()))
+                        .unwrap_or("agent")
                 ),
                 acp::ToolKind::Other,
                 vec![],
@@ -566,7 +573,11 @@ impl SessionActor {
                 |target| capabilities.mcp_tool_eligible(target),
             );
             if !hard_eligible {
-                let message = "Rejected: this exact tool identity is outside the subagent's authored eligibility ceiling or its inherited MCP transport is no longer eligible.";
+                let message = if mcp_target.is_some() {
+                    "Rejected: this exact MCP target is outside the subagent's inherited transport eligibility or the live binding changed; it cannot be approved on this child. Use ask_parent to report the concrete dependency."
+                } else {
+                    "Rejected: this exact tool identity is outside the subagent's authored eligibility ceiling or immutable child policy; it cannot be approved on this child. Use ask_parent to report the concrete need so the parent can handle it or reassign the task."
+                };
                 self.handle_tool_not_executed(&call.id, &tool_call_id, message.to_owned())
                     .await?;
                 return Ok(ToolPreflight::resolved(ToolLoop::Continue));
@@ -869,6 +880,13 @@ impl SessionActor {
                                 self.session_info.cwd.as_str(),
                             )),
                             classifier_turns,
+                            call_evidence: self.startup_hints.is_subagent.then(|| {
+                                permission_call_evidence(
+                                    &call.function.name,
+                                    &raw_input,
+                                    &tool_input,
+                                )
+                            }),
                         },
                     )
                     .await
@@ -1529,7 +1547,8 @@ mod coordination_tool_start_tests {
                     ToolInput::SendSubagentMessage(
                         tools::implementations::grow_build::task::interaction::
                             SendSubagentMessageInput {
-                                subagent_id: "child-7".into(),
+                                subagent_id: Some("child-7".into()),
+                                reply_to: None,
                                 message: "Continue at the next safe boundary.".into(),
                                 interrupt: true,
                             },

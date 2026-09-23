@@ -294,6 +294,7 @@ impl SubagentBackend for ChannelBackend {
         let source_session_id = self
             .parent_session_id()
             .ok_or("Unbound agent communication source")?;
+        let wait_for_send = matches!(&action, super::interaction::AgentInteraction::Send { .. });
         let (respond_to, response) = oneshot::channel();
         self.tx
             .send(SubagentEvent::Interact(
@@ -302,11 +303,23 @@ impl SubagentBackend for ChannelBackend {
                     target_child_id,
                     id,
                     action,
+                    receipt_only: false,
                     cancellation: cancellation.clone(),
                     respond_to,
                 },
             ))
             .map_err(|_| "Subagent coordinator closed")?;
+
+        // Send owns its cancellation/receipt race in the host runner. It must
+        // keep the response receiver alive so a durable ACK that is ready at
+        // the same time as cancellation can win, and so the runner can do its
+        // bounded read-only receipt check after a lost ACK. Ask is a sideband
+        // query and may still return promptly when its caller is cancelled.
+        if wait_for_send {
+            return response
+                .await
+                .map_err(|_| "Agent interaction endpoint closed")?;
+        }
         tokio::select! {
             biased;
             _ = cancellation.cancelled() => Err("Agent interaction cancelled".into()),

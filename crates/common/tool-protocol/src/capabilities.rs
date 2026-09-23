@@ -44,6 +44,27 @@ pub struct ToolCapabilities {
     /// and actor eligibility are both present.
     #[serde(default)]
     pub max_access: ToolAccess,
+
+    /// Whether a child agent must send every invocation through its configured
+    /// permission gate even when the child's initial RWX covers the call.
+    ///
+    /// `Required` is also an explicit, descriptor-owned admission for a
+    /// runtime-injected native tool to enter child hard eligibility. It never
+    /// grants the call: final tool/policy filtering, the permission decision,
+    /// and the call-bound permit remain authoritative.
+    #[serde(default)]
+    pub subagent_review: SubagentReviewPolicy,
+}
+
+/// Child-specific review policy declared by a concrete native tool.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubagentReviewPolicy {
+    /// Use authored exact identity and the child's initial RWX normally.
+    #[default]
+    Inherit,
+    /// Admit the finalized identity only through an exact-call permission gate.
+    Required,
 }
 
 /// How a tool streams partial results. Declared once in
@@ -164,7 +185,7 @@ impl ToolAccess {
 
 #[cfg(test)]
 mod tests {
-    use super::ToolAccess;
+    use super::{SubagentReviewPolicy, ToolAccess, ToolCapabilities};
 
     #[test]
     fn access_union_and_coverage_form_the_rwx_lattice() {
@@ -181,5 +202,18 @@ mod tests {
     #[test]
     fn unknown_capabilities_fail_closed() {
         assert_eq!(ToolAccess::default(), ToolAccess::All);
+    }
+
+    #[test]
+    fn subagent_review_defaults_to_inherited_behavior() {
+        let default = ToolCapabilities::default();
+        assert_eq!(default.subagent_review, SubagentReviewPolicy::Inherit);
+
+        let decoded: ToolCapabilities = serde_json::from_value(serde_json::json!({
+            "max_access": "write",
+            "subagent_review": "required"
+        }))
+        .unwrap();
+        assert_eq!(decoded.subagent_review, SubagentReviewPolicy::Required);
     }
 }

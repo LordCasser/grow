@@ -125,10 +125,7 @@ impl ChatStateActor {
             sampling_types::NativeContinuationProjection {
                 portable_prefix_len: items.len(),
                 spans: Vec::new(),
-                replay_portable_responses_reasoning: self
-                    .state
-                    .continuation
-                    .replays_portable_responses_reasoning(),
+                portable_reasoning_backend: self.state.continuation.portable_reasoning_backend(),
             }
         });
         let epoch_nonce = self.state.continuation.epoch_nonce().to_owned();
@@ -149,8 +146,8 @@ impl ChatStateActor {
                 },
                 "continuation_epoch": epoch_nonce,
                 "portable_prefix_len": native_continuation.as_ref().and_then(|value| value.portable_prefix_end(&items)),
-                "replay_portable_responses_reasoning": native_continuation.as_ref()
-                    .is_some_and(|value| value.replay_portable_responses_reasoning),
+                "portable_reasoning_backend": native_continuation.as_ref()
+                    .and_then(|value| value.portable_reasoning_backend.as_ref()),
                 "native_spans": native_continuation.as_ref().map(|value| value.spans.iter()
                     .map(|span| [span.start, span.end]).collect::<Vec<_>>()),
             })),

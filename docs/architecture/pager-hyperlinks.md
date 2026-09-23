@@ -47,6 +47,8 @@ Fullscreen、minimal 的 `EntryRenderer`、`/btw` panel 共用 `collect_content_
 `LinkOverlay` 同时供 OSC 8 与应用内点击使用，不维护另一份目标解释。
 路径只有在单个显示片段完整呈现时才能保留 `SelfResolvingPath`；换行、截断或裁剪得到的片段使用 `Opaque`，不能把半截路径交给 VS Code Remote 的原生路径识别。
 
+Minimal 的已完成条目先以 `EntryRenderer` 离屏绘制，再把 cell、`BlockLine.content` 的占用终点与 `LinkOverlay` 投影为原生历史语义行。`BlockLine.joiner == Some("")` 才可能软接续；恰好占满终端宽度不代表应该把下一行拼在一起。引用竖线或编辑路径缩进等重复装饰前缀会污染原生复制，所以保守保留硬行，不假称无损拼接。序列化只去掉源内容/背景/链接之外的右侧布局空白，保留生产者已交付的末尾源空格、宽字占列、语义背景和完整 OSC 8 URL/id。`ratatui-inline` 语义插入时显式建立 DECAWM=on，在满宽软接续时让终端原生 autowrap 写入 WRAPLINE；满宽硬行短暂关闭 autowrap，退出时保持 on，避免误拼。这个路径只改变已提交的原生历史，不改变独立的 `/transcript` 生成。行为契约见 [Minimal 原生历史](../../openspec/specs/client-surfaces/spec.md#requirement-minimal-native-scrollback-preserves-semantic-lines-and-links)。
+
 ## 验证与独立缺口
 
 回归测试检查完整目标和点击范围，不只检查下划线外观：中文分隔、Unicode 空白、样式切分、流式切分、显式链接、长链接缩略、查询嵌套 URL、折叠往返、截断尾部、用户输入缩进、视口裁剪、超长来源列，以及 fullscreen/minimal/`btw` 入口。

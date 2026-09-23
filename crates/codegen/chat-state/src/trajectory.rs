@@ -548,6 +548,24 @@ fn row(
 }
 
 fn event_relation_ids(kind: &TimelineEventKind, primary: Option<&str>) -> Vec<String> {
+    if let TimelineEventKind::Messages(MessageEvent { items, .. }) = kind {
+        let agent_receipts = items
+            .iter()
+            .filter_map(|item| match item {
+                sampling_types::ConversationItem::AgentMessage(batch) => Some(
+                    batch
+                        .messages
+                        .iter()
+                        .map(|message| message.receipt_id.clone()),
+                ),
+                _ => None,
+            })
+            .flatten()
+            .collect::<Vec<_>>();
+        if !agent_receipts.is_empty() {
+            return agent_receipts;
+        }
+    }
     let ids = match kind {
         TimelineEventKind::Notification(NotificationEvent::Consumed {
             notification_ids, ..
@@ -778,6 +796,9 @@ fn message_dimensions(
         Some(sampling_types::ConversationItem::Assistant(_))
         | Some(sampling_types::ConversationItem::Reasoning(_)) => {
             ("assistant", "model", "assistant.message")
+        }
+        Some(sampling_types::ConversationItem::AgentMessage(_)) => {
+            ("agent.runtime", "runtime", "agent.message")
         }
         Some(sampling_types::ConversationItem::ToolResult(result)) => {
             let producer = tool_scopes
@@ -1334,6 +1355,7 @@ fn describe(
 fn notification_source_label(source: &NotificationSource) -> &'static str {
     match source {
         NotificationSource::ParentMessage { .. } => "parent message",
+        NotificationSource::AgentReply { .. } => "agent reply",
         NotificationSource::MonitorProgress { .. } => "monitor progress",
         NotificationSource::TaskStillRunning { .. } => "task still running",
         NotificationSource::TaskCompleted { .. } => "task completed",
@@ -1565,6 +1587,10 @@ fn describe_message(event: &MessageEvent) -> ReturnTuple {
     };
     let correlation_id = event.items.iter().find_map(|item| match item {
         sampling_types::ConversationItem::ToolResult(result) => Some(result.tool_call_id.clone()),
+        sampling_types::ConversationItem::AgentMessage(batch) => batch
+            .messages
+            .first()
+            .map(|message| message.receipt_id.clone()),
         sampling_types::ConversationItem::BackendToolCall(_) => None,
         _ => None,
     });
@@ -2939,6 +2965,41 @@ mod tests {
             .unwrap();
         assert_eq!(result.producer, "tool:read_file");
         assert_eq!(result.correlation_id.as_deref(), Some("call-pair"));
+    }
+
+    #[test]
+    fn agent_message_rows_export_exact_body_and_keep_source_details() {
+        let body = "source opinion\tkeep this\r\nsecond line";
+        let item = ConversationItem::received_agent_message(sampling_types::AgentMessage {
+            receipt_id: "receipt-1".into(),
+            source_session_id: "source-session".into(),
+            target_session_id: "target-session".into(),
+            message_id: "message-1".into(),
+            reply_to: None,
+            message: body.into(),
+        });
+        let event = MessageEvent {
+            cause: MessageCause::User,
+            items: vec![item],
+            surface: SurfaceOp::Append,
+            response_admission: None,
+        };
+        let (layer, class, producer, kind) = message_dimensions(&event, &BTreeMap::new());
+        assert_eq!(layer, "agent.runtime");
+        assert_eq!(class, "message");
+        assert_eq!(producer, "runtime");
+        assert_eq!(kind, "agent.message");
+        let described = describe_message(&event);
+        assert_eq!(described.5.as_deref(), Some("receipt-1"));
+        assert_eq!(described.7, body);
+        let relation_kind = TimelineEventKind::Messages(event.clone());
+        assert_eq!(
+            event_relation_ids(&relation_kind, Some("ignored-primary")),
+            vec!["receipt-1"]
+        );
+        let details = serde_json::to_string(&event).unwrap();
+        assert!(details.contains("source-session"));
+        assert!(details.contains("message-1"));
     }
 
     #[test]

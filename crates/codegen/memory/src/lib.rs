@@ -2,15 +2,16 @@
 //!
 //! This crate provides a markdown-based memory storage layer that allows
 //! Grow to persist important information across sessions. Memory files are
-//! stored under `~/.grow/memory/` with workspace-scoped subdirectories
-//! keyed by a blake3 hash of the workspace path.
+//! stored under `~/.grow/memory/` with workspace-scoped subdirectories named
+//! `{project-slug}-{hash8}`. The hash uses the normalized repository identity
+//! when available and falls back to the canonical workspace path.
 //!
 //! ## Data Layout
 //!
 //! ```text
 //! ~/.grow/memory/
 //!   ├── MEMORY.md                         # Global curated knowledge
-//!   └── {workspace_hash}/                 # Per-workspace (blake3(cwd)[..16])
+//!   └── {project-slug}-{hash8}/           # Per-workspace identity directory
 //!       ├── MEMORY.md                     # Project-level curated knowledge
 //!       └── sessions/
 //!           └── YYYY-MM-DD-{slug}-{sid8}.md  # Session logs

@@ -1746,43 +1746,43 @@ that same pre-mutation validity check.
 
 ### Requirement: Agent communication tools expose their intent and result
 
-通信工具的发送侧 SHALL 从开始到终态显示具体工具身份、实际目标、消息或问题预览及结果语义。展开 SHALL 保留完整正文、相关身份、投递模式与错误。工具行 SHALL 使用其原始调用身份原位更新，不能另加重复发送通知。
+通信工具 SHALL 在同一发送工具行显示实际工具身份、参与方、简短状态和有界正文。固定 UI 文案 SHALL 使用英文，消息正文 SHALL 保持原语言。常规列表、展开与正文详情 SHALL NOT 增加 Sideband、主上下文去向或投递模式的解释行；完整身份、原始参数和回执数据 SHALL 在按需详情中可检查。状态 SHALL 来自结构化事实，不通过错误文案猜测投递结果。
 
 #### Scenario: Parent sends queued guidance
-- **WHEN** 父 agent 调用非中断 `send_subagent_message`，随后收到 durable receipt
-- **THEN** 同一行从发送中更新为已接收，并展示工具名、目标子任务、原文预览及下个安全步骤加入上下文的模式，不显示已读或任务完成。
+- **WHEN** agent 发送消息并收到 durable receipt
+- **THEN** 原工具行由 Sending 更新为 Received，显示目标和正文；不另加 ACK 行，不显示已读、已生效或任务完成，也不追加投递机制解释。
 
 #### Scenario: Immediate guidance and uncertain acknowledgement
-- **WHEN** 父消息请求安全中断，或者等待回执超时而消息可能已持久接收
-- **THEN** 展示分别说明请求安全中断或投递状态未知，不推断非中断工具已停止，不自动重发消息。
+- **WHEN** 父消息请求安全中断，或已派发的消息因超时、断连或取消无法确认接收
+- **THEN** 安全中断参数在按需数据中保留且不推断不可中断工具已停止；无法确认时原行显示 Unconfirmed 和简短原因，不将其当作未送达，不自动重发。
 
 #### Scenario: Parent child or peer inquiry
-- **WHEN** `ask_parent`、`ask_subagent` 或 `ask_session` 开始并结束
-- **THEN** 同一发送工具行展示实际对端、问题预览和回答或失败，细阶段缺失时只显示等待回答，展开保留原问题与完整结果。
+- **WHEN** ask 得到 Sideband 答案
+- **THEN** 原行显示 Answered、问题摘要和答案摘要，接收侧身份准确，完整问答可展开。
 
 #### Scenario: Inquiry state lookup
-- **WHEN** `get_inquiry` 查询成功且返回一个失败的 inquiry
-- **THEN** UI 区分查询完成和 inquiry 失败，不把已查询到的失败结果冒充查询工具调用失败。
+- **WHEN** get_inquiry 成功查询到失败的 inquiry
+- **THEN** 查询成功与 inquiry 失败分别表达，不将两者状态合并。
 
 ### Requirement: Parent message receipt appears in its child view
 
-子 agent SHALL 在父消息持久接收后显示一条具有稳定事件身份的系统接收通知，包含父 agent 来源、投递模式与原始消息。通知 SHALL 属于实际接收 session，且不得作为人类输入、子 agent 自己的工具调用或额外模型上下文。接收通知 SHALL 不依赖消息被消费或当前视图是否选中。
+子 agent SHALL 在父消息持久接收后显示一条有稳定 receipt 身份的接收记录，保留来源和原文。常规 UI SHALL 使用英文简洁标题，不强制展示投递模式；原始参数可在按需数据中查看。接收记录 SHALL NOT 冒充人类输入、接收方主动发送工具或额外模型消费。
 
 #### Scenario: Receipt while the child is busy
-- **WHEN** child 持久接收父消息而仍在执行当前步骤
-- **THEN** child TUI 可见一条接收通知和正文预览；当前工作继续遵循原投递模式，UI 不抢焦点。
+- **WHEN** child 持久接收消息但尚未消费
+- **THEN** 所属视图显示 Message from parent 及正文，不抢焦点，不声称已经执行。
 
 #### Scenario: Duplicate or replayed receipt
-- **WHEN** 同一收件事实重试、重连回放或已消费后冷恢复
-- **THEN** 接收视图保留恰好一条可读收件通知，不重新消费消息或重新触发通知副作用。
+- **WHEN** 同一 receipt 在重试、重连或消费后冷恢复中再次投影
+- **THEN** UI 保持一条记录，不重复消费或触发副作用。
 
 #### Scenario: Receipt projection fails after commit
-- **WHEN** inbox 已持久接收而 UI 投影未成功发布
-- **THEN** 投递回执仍反映真实接收，重载可从持久事实重建通知，不因此重复发送消息。
+- **WHEN** durable commit 成功但 UI 发布失败
+- **THEN** 回执仍有效，恢复从持久事实补显示，不重复发送。
 
 #### Scenario: Normal and minimal history
-- **WHEN** 父消息送往未选中的子视图，随后在 normal 或 minimal 模式查看或恢复
-- **THEN** 接收记录在所属子视图可见，minimal 原生历史追加该不可变收件事实一次，主 turn 结束不影响独立问答接收行的生命周期。
+- **WHEN** 在 normal/minimal 或未选中的子视图接收消息
+- **THEN** 记录属于正确 Session，Minimal 只打印一次不可变收件事实，主 turn 完成不终止独立 inquiry 行。
 
 ### Requirement: Communication presentation preserves readable text
 
@@ -1878,3 +1878,148 @@ Resident reconnect SHALL 不越过尚未由其 Timeline snapshot 覆盖的 respo
 
 - **WHEN** Timeline snapshot 已包含 response，初次回放合成它，而物理 projection 稍后追加
 - **THEN** delta 不重复展示该 response，后继独立更新仍交付。
+
+### Requirement: Communication bodies support Markdown and lossless source access
+
+通信记录的消息、问题与回答 SHALL 支持正文 Markdown 展示，并与方向、身份、状态和错误等界面字段分开渲染。折叠记录 SHALL 按状态提供以显示宽度计算的有界预览：等待询问最多两行问题，已回答最多一行问题加两行答案，询问失败最多一行问题加两行原因，父消息最多两行消息；投递未知 SHALL 保留原因预览。展开正文和详情 SHALL 保留全文浏览、选择及原始 Markdown 复制入口，原始协议数据 SHALL 可单独查看，默认正文 SHALL NOT 重复附上整份 JSON。查看模式 SHALL NOT 改写存储原文、模型输入或原始工具结果。
+
+#### Scenario: Answer becomes visible without opening details
+- **WHEN** 等待中的询问完成并返回答案
+- **THEN** 同一默认行保留问题摘要并展示答案摘要；预览直接派生自已有正文，不启动额外模型总结，失败时在同一位置显示实际原因。
+
+#### Scenario: Markdown question and answer
+- **WHEN** 询问的问题或回答含标题、列表、引用、行内代码、代码块、链接或表格
+- **THEN** 详情将问题与回答分为独立正文区域并使用现有 Markdown 能力展示，原文视图和复制保留 Markdown 源文本及代码缩进。
+
+#### Scenario: Exact source differs from rendered Markdown
+- **WHEN** 问题、答案或消息含 tab、CRLF、soft break、围栏或复杂链接语法
+- **THEN** 原文复制保留实际接收的正文字符串，不从展开 tab、合并 soft break 或添加元信息的渲染结果重建。
+
+#### Scenario: Parent message and incoming inquiry use the same body behavior
+- **WHEN** 同样的 Markdown 出现在父消息接收通知、询问发送行或询问接收行
+- **THEN** 三个入口提供一致的正文展示、原文访问和复制行为，图片路径或 Markdown 图片引用不替代整条文字记录。
+
+#### Scenario: Body cannot override communication metadata
+- **WHEN** 正文含看似“已接收”“来自父 Agent”的标题，或任务名含 Markdown 控制字符
+- **THEN** 界面元信息仍由结构化事实产生并与正文分区，正文不改变真实参与方、交互模式和状态。
+
+#### Scenario: Full source after clipping and resize
+- **WHEN** 中文、emoji、长代码行或表格在小宽度下被预览截断并随后调整终端宽度
+- **THEN** 正文重新排版，截断有明确标记，全文和复制不丢失；两个不同正文区之间不发生代码围栏或表格结构串扰。
+
+#### Scenario: Replay and minimal rendering
+- **WHEN** 通信记录通过 normal、minimal 或重连回放展示
+- **THEN** 各入口保持相同语义及原文，Minimal 仍只在询问自身终态后追加接收行，父消息不可变收件通知仍仅追加一次，显示切换不触发新的消费或 Hook。
+
+#### Scenario: Keyboard reading preserves established navigation
+- **WHEN** 用户从选中的通信记录进入详情，切换正文/原文/数据并返回
+- **THEN** 现有展开、详情、搜索、选择、换行和关闭操作保持可用，输入状态不误触查看动作，Tab 不被改成详情分页；退出恢复原记录的焦点和位置。
+
+#### Scenario: Result arrives during reading
+- **WHEN** 新的终态内容到达而用户已滚动离开底部或正在选择正文
+- **THEN** 状态更新仍关联原记录，不抢焦点或跳到其他 Session，不以新内容替换正在复制的选区；显示更新后仍可查看最新完整结果。
+
+### Requirement: Accepted response history is rebuilt from Timeline authority
+
+每个带 response admission identity 的 canonical assistant response SHALL 具有 versioned、可校验、可重建的 replay projection。`updates.jsonl` SHALL 只保存该 projection 的 cache record，不得把 provisional provider chunks 或 public SamplingAttempt lifecycle 当作第二份 response authority。所有 production replay 入口 SHALL 在建立 replay snapshot、cursor cutoff 或释放 buffered live events前，以 Timeline identity、event 与 digest 校验并补齐缺失 projection。
+
+#### Scenario: Process stops after Timeline admission
+
+- **WHEN** Timeline 已 durable 接纳 response，但进程在 projection record 提交或 public Accepted 前停止
+- **THEN** cold load 从同一 Timeline response 合成并展示恰好一份 accepted history；不得调用 provider、继续 truncation/pause-turn 或执行工具。
+
+#### Scenario: Projection append acknowledgment is lost
+
+- **WHEN** projection record 可能已提交但 ACK 丢失
+- **THEN** 系统按 response identity、Timeline event、digest 和 projection version exact reconcile；同内容不重复，不同内容 typed conflict 并 fail closed。
+
+#### Scenario: Candidate output precedes durable projection
+
+- **WHEN** text、reasoning 或 fallback candidate 已向支持撤回的 live client 发布，但 projection durable ACK 尚未返回
+- **THEN** candidate 仍可撤回且不作为 accepted cache；ACK 前不发布 Accepted，不开始后续 provider request、工具或 Turn success。
+
+#### Scenario: Quarantined response is replayed
+
+- **WHEN** Timeline admission 的 deterministic quarantine result 非零
+- **THEN** projection 记录已处理/Discarded disposition，不把 raw malformed tool preview 重建成 accepted 或 executable history；现有安全 repair/diagnostic 语义保持。
+
+#### Scenario: Tool-bearing response has later tool history
+
+- **WHEN** accepted response 包含工具调用且 cache 中存在后续 ToolCall/ToolCallUpdate 或 tool result 展示
+- **THEN** response projection boundary 在这些记录之前恢复，reconciliation 不重新 dispatch 工具，既有工具结果只显示一次。
+
+#### Scenario: Earlier attempt was discarded
+
+- **WHEN** 同一 request 的较早 attempt 只有 transient candidate，而较后 attempt 具有 Timeline response admission
+- **THEN** 只按 exact `{request_id, attempt}` 重建较后 response；较早 candidate 不进入 replay。
+
+#### Scenario: Rewind or legacy response
+
+- **WHEN** identity-bearing response 已被 rewind 切出当前 branch，或历史 response 没有 admission identity
+- **THEN** reconciliation 不复活 rewound response，也不通过文本、位置或邻近 request 猜测 legacy projection。
+
+#### Scenario: Direct replay without writer authority
+
+- **WHEN** 子任务视图、导出或其他 read-only production reader 读取存在缺失 projection 的会话
+- **THEN** 使用同一 Timeline-derived projector 在内存中返回完整去重历史，不获取 writer lease或修改持久数据。
+
+#### Scenario: Cursor intersects one projection record
+
+- **WHEN** reconnect cursor 位于一个可展开为多条 ACP update 的 response projection 内部，且无法证明其余 update 已应用
+- **THEN** replay 回退为完整历史替换，不跳过半个 response，也不在 later event 之后补发缺失前件。
+
+### Requirement: Minimal native scrollback preserves semantic lines and links
+
+Grow minimal 模式将稳定条目提交到原生终端 scrollback 时 SHALL 以本次渲染的源行 provenance 区分软接续和硬换行，去除无语义的布局尾部填充，并保留已在 `BlockLine.content` 中的源末尾空格、可见文本、必要背景、宽字和 OSC 8 链接目标。生产者在生成 `BlockLine` 前已丢弃的源空白不属于可恢复范围。提交仍 SHALL 遵守现有 print-once frontier：终端写入报告成功后才标记条目已提交；失败时条目保持 live、布局重新测量。不承诺部分终端写入后的重试恰好一次。
+
+#### Scenario: Short structured text has no copied layout padding
+- **WHEN** 短 YAML/Markdown 条目比终端宽度短并被提交
+- **THEN** 原生复制内容不包含为布局填充的右侧空格或额外空行，必要的源空白仍保留。
+
+#### Scenario: Long logical token wraps naturally
+- **WHEN** 长路径或链接所在的下一渲染行由空 joiner 软接续、无重复可见装饰前缀，且前一行确实满宽
+- **THEN** 终端在原生 scrollback 产生软折行，复制可得到未插入换行或补空格的原 token，即使折链跨过内部屏高分块。
+
+#### Scenario: Decorated continuation cannot be losslessly native-wrapped
+- **WHEN** 空 joiner 的续行重复绘制引用竖线、编辑路径缩进或其他不可选择的可见前缀
+- **THEN** 提交保留该视觉行但保守使用硬换行，不把装饰前缀伪装成原 token 的无缝续接；该类复制不会承诺还原完整逻辑 token。
+
+#### Scenario: Full-width source hard break is not joined
+- **WHEN** 代码行刚好满宽但下一行来自硬换行，或 joiner 为一个空格/换行
+- **THEN** 后一行不与前一行作为无分隔软接续，硬换行及源分隔语义保持。
+
+#### Scenario: Wide glyph and truncation footer
+- **WHEN** 行含 CJK/emoji 宽字或提交高度上限产生 footer
+- **THEN** 宽字仅输出一次、列位置准确；footer 与前一行硬隔离，不继承被覆盖行的软折标记或链接。
+
+#### Scenario: Linked text crosses a row boundary
+- **WHEN** OSC 8 链接跨软折行、在边界结束或后面紧跟无链接文本
+- **THEN** 终端可见字形与完整 URL/id 对齐，链接及时关闭且不泄漏到后续文字；pending wrap 不因中间控制序列丢失。
+
+#### Scenario: Commit meets resize or writer failure
+- **WHEN** 本次提交过程中终端尺寸改变，或 native writer 报错
+- **THEN** 已开始的条目以一致的起始宽度计算行语义；失败条目不越过 frontier 且下一帧 live tail 重测，viewport/prompt 不多滚或跳行。
+
+### Requirement: Kitty keyboard teardown has an owned reply fence
+
+Grow 在正常终端退出中 SHALL 先确认输入 reader 不再消费 TTY，并收束已接受的渲染输出，然后发出已推入 Kitty keyboard flags 的 pop。仅当确实推入过 flags、输出可写且当前进程独占 TTY 输入时，SHALL 在仍为 raw mode 的状态下向该终端发送 DA1 查询，有界消费输入直至收到完整 DA1 回复，再关闭 raw mode。fence 的超时或 I/O 错误 SHALL 不阻止 best-effort 终端恢复；不得通过与存活 reader 并发读取来假装完成屏障。
+
+#### Scenario: Late Kitty release on normal quit
+- **WHEN** flags 已推入、用户正常退出，终端在旧 10 ms drain 窗口之后、DA1 回复之前发送 keyboard release
+- **THEN** writer 帧先于 teardown，pop 先于 DA1；fence 消费 release 并在完整 DA1 后恢复 raw mode，release 不留给 shell。
+
+#### Scenario: Silent or malformed DA1
+- **WHEN** 终端不回复、只回复部分序列，或回复 DA2/CSI-u 而非完整 DA1
+- **THEN** 不将其判为 fence 完成；到固定有限期限后仍关闭 raw mode、显示光标并返回，不无限等待。
+
+#### Scenario: No Kitty flags
+- **WHEN** 会话未成功推入 Kitty keyboard flags
+- **THEN** 退出不发 pop 或 DA1，沿既有恢复路径结束。
+
+#### Scenario: Input or output ownership cannot be established
+- **WHEN** reader 停止确认超时、writer 无法安全收束、查询写入失败，或没有可用 TTY
+- **THEN** 不与 reader 并发读 stdin，不执行不可靠的回复读取；仍执行可行的终端恢复并记录降级原因，退出不因 fence 增加无界等待。
+
+#### Scenario: Forced exit remains fast
+- **WHEN** 首次受控退出信号转为正常 quit，或 panic/第二次信号走强制退出
+- **THEN** 前者在条件满足时经过正常 fence；后者只做快速 best-effort teardown，不等待 reader、writer 或 DA1。

@@ -49,8 +49,8 @@ const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
 /// passes through unchanged.
 #[cfg(test)]
 fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
-    let mut event = serde_json::from_str::<rs::ResponseStreamEvent>(data)
-        .map_err(SamplingError::from)?;
+    let mut event =
+        serde_json::from_str::<rs::ResponseStreamEvent>(data).map_err(SamplingError::from)?;
     apply_terminal_event_overrides(&mut event, data);
     Ok(event)
 }
@@ -1026,26 +1026,30 @@ impl SamplingClient {
         let mut is_first = true;
         let audit = crate::audit::AttemptEvidence::current();
         let end_audit = audit.clone();
-        let byte_stream = response.bytes_stream().map(Some)
+        let byte_stream = response
+            .bytes_stream()
+            .map(Some)
             .chain(futures_util::stream::once(async move {
-                if let Some(audit) = &end_audit { audit.stream_end("body_eof"); }
+                if let Some(audit) = &end_audit {
+                    audit.stream_end("body_eof");
+                }
                 None
             }))
             .filter_map(std::future::ready)
             .map(move |result| {
-            result.map_err(|error| error.to_string()).and_then(|bytes| {
-                if let Some(audit) = &audit {
-                    audit.response(&bytes)?;
-                }
-                if is_first {
-                    is_first = false;
-                    if bytes.starts_with(UTF8_BOM) {
-                        return Ok(bytes.slice(UTF8_BOM.len()..));
+                result.map_err(|error| error.to_string()).and_then(|bytes| {
+                    if let Some(audit) = &audit {
+                        audit.response(&bytes)?;
                     }
-                }
-                Ok(bytes)
-            })
-        });
+                    if is_first {
+                        is_first = false;
+                        if bytes.starts_with(UTF8_BOM) {
+                            return Ok(bytes.slice(UTF8_BOM.len()..));
+                        }
+                    }
+                    Ok(bytes)
+                })
+            });
 
         // Turn raw bytes into SSE events
         let event_stream = byte_stream.eventsource();
@@ -1064,7 +1068,9 @@ impl SamplingClient {
                     Ok(event) => {
                         let data = &event.data;
                         if data == "[DONE]" {
-                            if let Some(audit) = crate::audit::AttemptEvidence::current() { audit.stream_end("sse_done"); }
+                            if let Some(audit) = crate::audit::AttemptEvidence::current() {
+                                audit.stream_end("sse_done");
+                            }
                             return std::future::ready(None);
                         }
 
@@ -1075,7 +1081,7 @@ impl SamplingClient {
                             data = %data,
                         );
 
-                        if let Some(stream_error) = try_parse_stream_error(data) {
+                        if let Some(stream_error) = try_parse_stream_error(&event.event, data) {
                             Some(Some(Err(stream_error)))
                         } else {
                             Some(decode_chat_chunk(data).transpose())
@@ -1083,7 +1089,9 @@ impl SamplingClient {
                     }
                     Err(e) => {
                         *had_transport_error = true;
-                        if let Some(audit) = crate::audit::AttemptEvidence::current() { audit.stream_end("transport_error"); }
+                        if let Some(audit) = crate::audit::AttemptEvidence::current() {
+                            audit.stream_end("transport_error");
+                        }
                         Some(Some(Err(SamplingError::EventStreamError(e.to_string()))))
                     }
                 };
@@ -1363,26 +1371,30 @@ impl SamplingClient {
         let mut is_first = true;
         let audit = crate::audit::AttemptEvidence::current();
         let end_audit = audit.clone();
-        let byte_stream = response.bytes_stream().map(Some)
+        let byte_stream = response
+            .bytes_stream()
+            .map(Some)
             .chain(futures_util::stream::once(async move {
-                if let Some(audit) = &end_audit { audit.stream_end("body_eof"); }
+                if let Some(audit) = &end_audit {
+                    audit.stream_end("body_eof");
+                }
                 None
             }))
             .filter_map(std::future::ready)
             .map(move |result| {
-            result.map_err(|error| error.to_string()).and_then(|bytes| {
-                if let Some(audit) = &audit {
-                    audit.response(&bytes)?;
-                }
-                if is_first {
-                    is_first = false;
-                    if bytes.starts_with(UTF8_BOM) {
-                        return Ok(bytes.slice(UTF8_BOM.len()..));
+                result.map_err(|error| error.to_string()).and_then(|bytes| {
+                    if let Some(audit) = &audit {
+                        audit.response(&bytes)?;
                     }
-                }
-                Ok(bytes)
-            })
-        });
+                    if is_first {
+                        is_first = false;
+                        if bytes.starts_with(UTF8_BOM) {
+                            return Ok(bytes.slice(UTF8_BOM.len()..));
+                        }
+                    }
+                    Ok(bytes)
+                })
+            });
 
         // Turn raw bytes into SSE events
         let event_stream = byte_stream.eventsource();
@@ -1401,7 +1413,9 @@ impl SamplingClient {
                     Ok(event) => {
                         let data = &event.data;
                         if data == "[DONE]" {
-                            if let Some(audit) = crate::audit::AttemptEvidence::current() { audit.stream_end("sse_done"); }
+                            if let Some(audit) = crate::audit::AttemptEvidence::current() {
+                                audit.stream_end("sse_done");
+                            }
                             return std::future::ready(None);
                         }
 
@@ -1424,7 +1438,9 @@ impl SamplingClient {
                         };
                         if swallow {
                             Some(None)
-                        } else if let Some(stream_error) = try_parse_stream_error(data) {
+                        } else if let Some(stream_error) =
+                            try_parse_stream_error(&event.event, data)
+                        {
                             Some(Some(Err(stream_error)))
                         } else {
                             Some(decode_response_event(data).transpose())
@@ -1432,7 +1448,9 @@ impl SamplingClient {
                     }
                     Err(e) => {
                         *had_transport_error = true;
-                        if let Some(audit) = crate::audit::AttemptEvidence::current() { audit.stream_end("transport_error"); }
+                        if let Some(audit) = crate::audit::AttemptEvidence::current() {
+                            audit.stream_end("transport_error");
+                        }
                         Some(Some(Err(SamplingError::EventStreamError(e.to_string()))))
                     }
                 };
@@ -1662,26 +1680,30 @@ impl SamplingClient {
         let mut is_first = true;
         let audit = crate::audit::AttemptEvidence::current();
         let end_audit = audit.clone();
-        let byte_stream = response.bytes_stream().map(Some)
+        let byte_stream = response
+            .bytes_stream()
+            .map(Some)
             .chain(futures_util::stream::once(async move {
-                if let Some(audit) = &end_audit { audit.stream_end("body_eof"); }
+                if let Some(audit) = &end_audit {
+                    audit.stream_end("body_eof");
+                }
                 None
             }))
             .filter_map(std::future::ready)
             .map(move |result| {
-            result.map_err(|error| error.to_string()).and_then(|bytes| {
-                if let Some(audit) = &audit {
-                    audit.response(&bytes)?;
-                }
-                if is_first {
-                    is_first = false;
-                    if bytes.starts_with(UTF8_BOM) {
-                        return Ok(bytes.slice(UTF8_BOM.len()..));
+                result.map_err(|error| error.to_string()).and_then(|bytes| {
+                    if let Some(audit) = &audit {
+                        audit.response(&bytes)?;
                     }
-                }
-                Ok(bytes)
-            })
-        });
+                    if is_first {
+                        is_first = false;
+                        if bytes.starts_with(UTF8_BOM) {
+                            return Ok(bytes.slice(UTF8_BOM.len()..));
+                        }
+                    }
+                    Ok(bytes)
+                })
+            });
 
         // Turn raw bytes into SSE events
         let event_stream = byte_stream.eventsource();
@@ -1698,7 +1720,9 @@ impl SamplingClient {
                     Ok(event) => {
                         let data = &event.data;
                         if data == "[DONE]" {
-                            if let Some(audit) = crate::audit::AttemptEvidence::current() { audit.stream_end("sse_done"); }
+                            if let Some(audit) = crate::audit::AttemptEvidence::current() {
+                                audit.stream_end("sse_done");
+                            }
                             return std::future::ready(None);
                         }
 
@@ -1709,7 +1733,7 @@ impl SamplingClient {
                             data = %data,
                         );
 
-                        if let Some(stream_error) = try_parse_stream_error(data) {
+                        if let Some(stream_error) = try_parse_stream_error(&event.event, data) {
                             Some(Some(Err(stream_error)))
                         } else {
                             Some(
@@ -1720,7 +1744,9 @@ impl SamplingClient {
                     }
                     Err(e) => {
                         *had_transport_error = true;
-                        if let Some(audit) = crate::audit::AttemptEvidence::current() { audit.stream_end("transport_error"); }
+                        if let Some(audit) = crate::audit::AttemptEvidence::current() {
+                            audit.stream_end("transport_error");
+                        }
                         Some(Some(Err(SamplingError::EventStreamError(e.to_string()))))
                     }
                 };
@@ -2672,7 +2698,7 @@ mod tests {
         ));
         let data =
             r#"{"type":"error","error":{"type":"authentication_error","message":"test failure"}}"#;
-        assert!(try_parse_stream_error(data).is_some());
+        assert!(try_parse_stream_error("error", data).is_some());
         assert!(matches!(
             decode_tagged_event::<messages::MessageStreamEvent>(data).unwrap(),
             Some(messages::MessageStreamEvent::Error { .. })

@@ -8,8 +8,10 @@
 //! in the live region until it finalizes.
 
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
+use ratatui_inline::{LinkSpan, SemanticRow};
+use unicode_width::UnicodeWidthStr as _;
 
 use pager::app::PagerTerminal;
 use pager::app::root::{ActiveView, AppView};
@@ -396,33 +398,40 @@ fn insert_committed(
     // Propagated (not swallowed): the caller must NOT mark the entry committed
     // when the terminal write failed — print-once means a marked-but-unprinted
     // block can never be emitted again (bugbot).
+    let area = Rect::new(0, 0, width, commit_h);
+    let mut buf = ratatui::buffer::Buffer::empty(area);
+    paint_committed(&mut buf, &renderer, width, full_h, footer_style);
     let route = pager::hyperlink_route::hyperlink_route();
-    terminal.insert_before_with_links(commit_h, move |buf, links| {
-        if route.emit_osc8 {
-            let area = Rect {
-                x: buf.area.x,
-                y: buf.area.y,
-                width,
-                height: full_h,
-            };
-            // A capped commit replaces its final buffer row with the
-            // `/transcript` footer. Do not leave a semantic link from the
-            // clipped content underneath that replacement row.
-            let linked_bottom = if commit_h < full_h {
-                buf.area.bottom().saturating_sub(1)
-            } else {
-                buf.area.bottom()
-            };
-            links.extend(
-                renderer
-                    .link_overlay(area, media_paths)
-                    .resolved_spans(route.emit_id)
-                    .into_iter()
-                    .filter(|span| span.row < linked_bottom),
-            );
-        }
-        paint_committed(buf, &renderer, width, full_h, footer_style);
-    })?;
+    let links = if route.emit_osc8 {
+        let render_area = Rect::new(0, 0, width, full_h);
+        let linked_bottom = if commit_h < full_h {
+            commit_h.saturating_sub(1)
+        } else {
+            commit_h
+        };
+        renderer
+            .link_overlay(render_area, media_paths)
+            .resolved_spans(route.emit_id)
+            .into_iter()
+            .filter(|span| span.row < linked_bottom)
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let (mut wraps, mut source_ends) = renderer.native_row_provenance(width, commit_h);
+    if commit_h < full_h
+        && commit_h >= 2
+        && let Some(last_content) = wraps.get_mut(usize::from(commit_h - 2))
+    {
+        *last_content = false;
+    }
+    if commit_h < full_h
+        && let Some(footer) = source_ends.last_mut()
+    {
+        *footer = None;
+    }
+    let rows = buffer_to_semantic_rows(&buf, &links, &wraps, &source_ends);
+    terminal.insert_before_rows(&rows)?;
     insert_gap(terminal);
     Ok(())
 }
@@ -470,11 +479,118 @@ fn paint_committed(
         };
         // Dim default-fg chrome (not hard-coded DarkGray) under terminal-native.
         let style = footer_style.bg(Color::Reset);
-        // Clear any clipped content that landed on the footer row first.
-        buf.set_style(row, style);
+        // Clear clipped glyphs as well as style: the semantic serializer must
+        // not emit a hidden tail after the shorter footer label.
+        for x in row.left()..row.right() {
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_char(' ');
+                cell.set_style(style);
+            }
+        }
         let text = format!("\u{2026} {hidden} more lines \u{2014} /transcript to view");
         buf.set_span(buf.area.x, y, &Span::styled(text, style), width);
     }
+}
+
+/// Project painted cells to native history rows without the buffer's right
+/// padding. The separate link layer remains keyed by painted columns, so a
+/// compact display label never truncates the OSC 8 activation target.
+fn buffer_to_semantic_rows(
+    buf: &ratatui::buffer::Buffer,
+    links: &[LinkSpan],
+    wraps: &[bool],
+    source_ends: &[Option<u16>],
+) -> Vec<SemanticRow> {
+    let area = buf.area;
+    let row_end = |y| {
+        (area.x..area.right()).rev().find(|&x| {
+            buf.cell((x, y)).is_some_and(|cell| {
+                (!cell.symbol().is_empty() && cell.symbol() != " ")
+                    || cell.bg != Color::Reset
+                    || links
+                        .iter()
+                        .any(|link| link.row == y && link.col_start <= x && x < link.col_end)
+            })
+        })
+    };
+    let ends: Vec<_> = (area.y..area.bottom())
+        .enumerate()
+        .map(|(index, y)| {
+            let painted = row_end(y);
+            let source = source_ends
+                .get(index)
+                .copied()
+                .flatten()
+                .and_then(|end| end.checked_sub(1));
+            painted.max(source)
+        })
+        .collect();
+    let mut rows = Vec::with_capacity(usize::from(area.height));
+    let mut active_link: Option<&LinkSpan> = None;
+    for (index, end) in ends.iter().copied().enumerate() {
+        let y = area.y + u16::try_from(index).unwrap_or(u16::MAX);
+        let mut ansi = String::new();
+        let mut fills_width = false;
+        if let Some(last_x) = end {
+            let mut style: Option<(Color, Color, Modifier)> = None;
+            let mut sgr = String::new();
+            let mut skip = 0usize;
+            for x in area.x..=last_x {
+                if skip > 0 {
+                    skip -= 1;
+                    continue;
+                }
+                let Some(cell) = buf.cell((x, y)) else {
+                    continue;
+                };
+                let glyph = cell.symbol();
+                if glyph.is_empty() {
+                    continue;
+                }
+                let width = glyph.width();
+                skip = width.saturating_sub(1);
+                fills_width = x.saturating_add(u16::try_from(width).unwrap_or(0)) >= area.right();
+                let link = links
+                    .iter()
+                    .find(|link| link.row == y && link.col_start <= x && x < link.col_end);
+                if active_link.map(|link| (&link.url, link.id))
+                    != link.map(|link| (&link.url, link.id))
+                {
+                    if active_link.is_some() {
+                        ansi.push_str("\x1b]8;;\x07");
+                    }
+                    if let Some(link) = link {
+                        super::full_view::push_osc8_open(&mut ansi, &link.url, link.id);
+                    }
+                    active_link = link;
+                }
+                let next_style = (cell.fg, cell.bg, cell.modifier);
+                if style != Some(next_style) {
+                    super::full_view::cell_sgr(next_style.0, next_style.1, next_style.2, &mut sgr);
+                    ansi.push_str(&sgr);
+                    style = Some(next_style);
+                }
+                ansi.push_str(glyph);
+            }
+        }
+        let soft_wrap = wraps.get(index).copied().unwrap_or(false);
+        let continues =
+            soft_wrap && fills_width && ends.get(index + 1).is_some_and(Option::is_some);
+        if !continues {
+            if active_link.take().is_some() {
+                ansi.push_str("\x1b]8;;\x07");
+            }
+            if end.is_some() {
+                ansi.push_str("\x1b[0m");
+            }
+        }
+        rows.push(SemanticRow {
+            ansi,
+            fills_width,
+            soft_wrap,
+        });
+    }
+    rows
 }
 
 /// Commit the active agent's newly-finalized blocks into native scrollback.
