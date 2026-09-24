@@ -1030,6 +1030,9 @@ pub(super) async fn run_session(
                                 }
                             }
                         }
+                        SessionEvent::PreviewDrained { respond_to } => {
+                            let _ = respond_to.send(());
+                        }
                         SessionEvent::ForegroundWake => {
                             let (terminating, regular) = {
                                 let state = session.state.lock().await;
@@ -1074,6 +1077,7 @@ pub(super) async fn run_session(
                             }
                             if should_resume {
                                 arbitrate_idle_wake(session.clone(), completion_tx.clone()).await;
+                                session.send_available_commands_update_if_idle().await;
                                 session.emit_session_idle_if_idle().await;
                             }
                         }
@@ -1243,6 +1247,7 @@ pub(super) async fn run_session(
                         .handle_turn_end(&prompt_id, suppress_goal_continuation)
                         .await;
                 }
+                session.send_available_commands_update_if_idle().await;
                 session.emit_session_idle_if_idle().await;
                 // Layer-3 LazinessDetector: spawn an idle-triggered
                 // classifier dispatch. The method is a no-op when the
@@ -1823,25 +1828,18 @@ pub(super) async fn run_session(
                     } => {
                         session.record_goal_owned_task_ids(&goal_id, definition_revision, task_ids);
                     }
-                    SessionCommand::RemoveQueuedPrompt { id, expected_version, owner } => {
-                        session.handle_remove_queued_prompt(&id, expected_version, owner.as_deref()).await;
-                    }
                     SessionCommand::ReorderQueue { ordered_ids } => {
                         session.handle_reorder_queue(&ordered_ids).await;
                     }
                     SessionCommand::ClearQueue { owner } => {
                         session.handle_clear_queue(owner.as_deref()).await;
                     }
-                    SessionCommand::EditQueuedPrompt { id, new_text, editor } => {
-                        session.handle_edit_queued_prompt(&id, new_text, editor.as_deref()).await;
+                    SessionCommand::QueueControl { request, respond_to } => {
+                        let result = session.handle_queue_control(request).await;
+                        let _ = respond_to.send(result);
                     }
-                    SessionCommand::HoldCombineEdit { id } => {
-                        let mut state = session.state.lock().await;
-                        state.combine_edit_holds.insert(id);
-                    }
-                    SessionCommand::ReleaseCombineEdit { id } => {
-                        let mut state = session.state.lock().await;
-                        state.combine_edit_holds.remove(&id);
+                    SessionCommand::ReleaseQueueHoldsForClient { leader_client_id } => {
+                        session.release_queue_holds_for_client(leader_client_id).await;
                     }
                     SessionCommand::SteerQueuedPrompt { expected_turn_id, id, expected_version, owner, new_text } => {
                         session.handle_steer_queued_prompt(&expected_turn_id, &id, expected_version, owner.as_deref(), new_text.as_deref()).await;
@@ -1928,6 +1926,7 @@ pub(super) async fn run_session(
                         // idle arbiter used by normal completion so an Active
                         // Goal cannot become dormant after Stop Turn Only.
                         session.idle_arbiter.notify_one();
+                        session.send_available_commands_update_if_idle().await;
                     }
                     SessionCommand::CompactSession { user_context, respond_to } => {
                         session
@@ -2065,9 +2064,12 @@ pub(super) async fn run_session(
                     SessionCommand::GetRewindFileCounts { respond_to } => {
                         let _ = respond_to.send(session.rewind_file_counts().await);
                     }
-                    SessionCommand::GrowSessionNotification { notification } => {
+                    SessionCommand::GrowSessionNotification {
+                        notification,
+                        forward_to_gateway,
+                    } => {
                         if let Err(error) = session
-                            .handle_grow_session_notification(notification)
+                            .handle_grow_session_notification(notification, forward_to_gateway)
                             .await
                         {
                             tracing::error!(%error, "subagent hook lifecycle was not durable");
@@ -2624,7 +2626,7 @@ pub(super) async fn run_session(
                         bridge.update_resource(backend).await;
                         let _ = respond_to.send(());
                     }
-                    SessionCommand::Recap { auto } => {
+                    SessionCommand::Recap { auto, away_period_id } => {
                         let s = session.clone();
                         let activity = session
                             .session_activities
@@ -2632,7 +2634,7 @@ pub(super) async fn run_session(
                             .expect("command activity admission is open while mailbox is serviced");
                         tokio::task::spawn_local(async move {
                             let _activity = activity;
-                            s.handle_recap(auto).await;
+                            s.handle_recap(auto, away_period_id).await;
                         });
                     }
                     SessionCommand::AISuggest { prefix, cwd, model_override, respond_to } => {

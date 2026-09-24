@@ -105,6 +105,11 @@ impl SessionNotification {
 #[derive(Debug)]
 pub(crate) enum SessionEvent {
     Notification(SessionNotification),
+    /// The sampler drainer holds fragment credits until earlier translated
+    /// notifications have been consumed from this FIFO.
+    PreviewDrained {
+        respond_to: oneshot::Sender<()>,
+    },
     /// A deferred task completion became ready outside the
     /// actor mailbox. Wakes the actor so an idle session can synthesize a
     /// model turn; an active turn drains it at its next safe boundary.
@@ -146,6 +151,27 @@ impl SessionEvent {
             rx,
         )
     }
+}
+
+/// Release one sampler fragment's credits only after its translated events
+/// have passed the session actor's event FIFO. A stopped actor closes the
+/// budget so a provider waiting on capacity exits.
+pub(crate) async fn release_preview_after_actor(
+    event_tx: &mpsc::UnboundedSender<SessionEvent>,
+    budget: &sampler::PreviewEventBudget,
+    cost: u32,
+) -> Result<(), ()> {
+    let (respond_to, ack) = oneshot::channel();
+    if event_tx
+        .send(SessionEvent::PreviewDrained { respond_to })
+        .is_err()
+        || ack.await.is_err()
+    {
+        budget.close();
+        return Err(());
+    }
+    budget.release_cost(cost);
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -200,5 +226,54 @@ mod tests {
                 rx.await.expect("ack should be received");
             })
             .await;
+    }
+
+    #[tokio::test]
+    async fn preview_credits_wait_for_actor_fence_and_close_on_lost_ack() {
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel::<SessionEvent>();
+        let budget = sampler::PreviewEventBudget::default();
+        let permit = budget.acquire(4096).await.unwrap();
+        permit.forget();
+        event_tx.send(SessionEvent::ForegroundWake).unwrap();
+
+        let release = tokio::spawn({
+            let event_tx = event_tx.clone();
+            let budget = budget.clone();
+            async move { release_preview_after_actor(&event_tx, &budget, 4096).await }
+        });
+        assert!(matches!(
+            event_rx.recv().await,
+            Some(SessionEvent::ForegroundWake)
+        ));
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), budget.acquire(1))
+                .await
+                .is_err()
+        );
+        let SessionEvent::PreviewDrained { respond_to } = event_rx.recv().await.unwrap() else {
+            panic!("expected preview fence");
+        };
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), budget.acquire(1))
+                .await
+                .is_err()
+        );
+        respond_to.send(()).unwrap();
+        assert!(release.await.unwrap().is_ok());
+        drop(budget.acquire(1).await.unwrap());
+
+        let permit = budget.acquire(4096).await.unwrap();
+        permit.forget();
+        let release = tokio::spawn({
+            let event_tx = event_tx.clone();
+            let budget = budget.clone();
+            async move { release_preview_after_actor(&event_tx, &budget, 4096).await }
+        });
+        let SessionEvent::PreviewDrained { respond_to } = event_rx.recv().await.unwrap() else {
+            panic!("expected preview fence");
+        };
+        drop(respond_to);
+        assert!(release.await.unwrap().is_err());
+        assert!(budget.acquire(1).await.is_err());
     }
 }

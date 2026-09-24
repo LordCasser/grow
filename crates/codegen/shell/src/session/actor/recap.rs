@@ -219,7 +219,7 @@ impl SessionActor {
     /// Best-effort: a failed or empty generation is logged and dropped — a
     ///
     /// missing recap must never disrupt the session.
-    pub(super) async fn handle_recap(&self, auto: bool) {
+    pub(super) async fn handle_recap(&self, auto: bool, away_period_id: Option<uuid::Uuid>) {
         use crate::session::helpers::session_recap;
 
         // Snapshot before the first await so a prompt accepted while we await
@@ -487,7 +487,11 @@ impl SessionActor {
             return;
         }
         self.send_grow_notification(
-            crate::extensions::notification::SessionUpdate::SessionRecap { summary, auto },
+            crate::extensions::notification::SessionUpdate::SessionRecap {
+                summary,
+                auto,
+                away_period_id,
+            },
         )
         .await;
     }
@@ -593,56 +597,63 @@ impl SessionActor {
             .ok()?;
         let result = match sampling_client.api_backend() {
             crate::sampling::ApiBackend::ChatCompletions => {
-                let (raw, meta) = match sideband
-                    .run_provider(sampling_client.conversation_stream(request))
+                sideband
+                    .run_provider(async {
+                        let (raw, meta) = sampling_client
+                            .conversation_stream(request)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        let events =
+                            sampler::stream_chat_completions(raw, meta, request_id, idle_timeout);
+                        sampler::collect_response(events)
+                            .await
+                            .map_err(|error| error.message)
+                    })
                     .await
-                    .ok()?
-                {
-                    Ok(stream) => stream,
-                    Err(error) => {
-                        let _ = sideband
-                            .fail(chat_state::SidebandOutcome::Failed, error.to_string())
-                            .await;
-                        return None;
-                    }
-                };
-                let events = sampler::stream_chat_completions(raw, meta, request_id, idle_timeout);
-                sampler::collect_response(events).await
             }
             crate::sampling::ApiBackend::Responses => {
-                let (raw, meta, doom_loop) = match sideband
-                    .run_provider(sampling_client.conversation_stream_responses(request))
+                sideband
+                    .run_provider(async {
+                        let (raw, meta, doom_loop) = sampling_client
+                            .conversation_stream_responses(request)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        let events = sampler::stream_responses(
+                            raw,
+                            meta,
+                            request_id,
+                            idle_timeout,
+                            doom_loop,
+                        );
+                        sampler::collect_response(events)
+                            .await
+                            .map_err(|error| error.message)
+                    })
                     .await
-                    .ok()?
-                {
-                    Ok(stream) => stream,
-                    Err(error) => {
-                        let _ = sideband
-                            .fail(chat_state::SidebandOutcome::Failed, error.to_string())
-                            .await;
-                        return None;
-                    }
-                };
-                let events =
-                    sampler::stream_responses(raw, meta, request_id, idle_timeout, doom_loop);
-                sampler::collect_response(events).await
             }
             crate::sampling::ApiBackend::Messages => {
-                let (raw, meta) = match sideband
-                    .run_provider(sampling_client.conversation_stream_messages(request))
+                sideband
+                    .run_provider(async {
+                        let (raw, meta) = sampling_client
+                            .conversation_stream_messages(request)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        let events = sampler::stream_messages(raw, meta, request_id, idle_timeout);
+                        sampler::collect_response(events)
+                            .await
+                            .map_err(|error| error.message)
+                    })
                     .await
-                    .ok()?
-                {
-                    Ok(stream) => stream,
-                    Err(error) => {
-                        let _ = sideband
-                            .fail(chat_state::SidebandOutcome::Failed, error.to_string())
-                            .await;
-                        return None;
-                    }
-                };
-                let events = sampler::stream_messages(raw, meta, request_id, idle_timeout);
-                sampler::collect_response(events).await
+            }
+        };
+
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = sideband
+                    .fail(chat_state::SidebandOutcome::Failed, error.to_string())
+                    .await;
+                return None;
             }
         };
 
@@ -671,10 +682,8 @@ impl SessionActor {
                 }
             }
             Err(e) => {
-                tracing::debug!(error = %e.message, "AI suggest inference failed");
-                let _ = sideband
-                    .fail(chat_state::SidebandOutcome::Failed, e.message)
-                    .await;
+                tracing::debug!(error = %e, "AI suggest inference failed");
+                let _ = sideband.fail(chat_state::SidebandOutcome::Failed, e).await;
                 None
             }
         }

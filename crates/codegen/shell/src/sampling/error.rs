@@ -75,11 +75,15 @@ pub fn map_sampling_err_to_acp(err: SamplingError) -> acp::Error {
     match err {
         SamplingError::Auth { message, .. } => acp::Error::auth_required().data(message),
         SamplingError::InvalidConfiguration(msg) => acp::Error::invalid_params().data(msg),
-        SamplingError::Persistence(_) | SamplingError::IncompleteStream { .. } | SamplingError::Lifecycle(_) => acp::Error::internal_error().data(err.to_string()),
+        SamplingError::Persistence(_)
+        | SamplingError::IncompleteStream { .. }
+        | SamplingError::Lifecycle(_) => acp::Error::internal_error().data(err.to_string()),
         SamplingError::Http(e) => {
             acp::Error::internal_error().data(format!("http client init failed: {e}"))
         }
-        SamplingError::InvalidToolArguments(_) => acp::Error::internal_error().data(err.to_string()),
+        SamplingError::InvalidToolArguments(_) => {
+            acp::Error::internal_error().data(err.to_string())
+        }
         SamplingError::Serialization(_) => acp::Error::invalid_params().data(err.to_string()),
         SamplingError::Api {
             status, message, ..

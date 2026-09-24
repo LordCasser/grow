@@ -3379,7 +3379,10 @@ impl McpClient {
             }
             // No state guard can cross this wait. A parked caller has already
             // subscribed, so a concurrent completion cannot lose its wakeup.
-            if tokio::time::timeout(inflight_wait, notified.as_mut()).await.is_err() {
+            if tokio::time::timeout(inflight_wait, notified.as_mut())
+                .await
+                .is_err()
+            {
                 return Err(McpError::ClientError(format!(
                     "MCP client {} init still in progress after {}s",
                     self.server_name,
@@ -7271,13 +7274,16 @@ mod tests {
                 let notify = Notify::new();
                 let target = if restorable {
                     ClientState::Pending(PendingTransport::Http(HttpConfig {
-                        url: "http://localhost:1".into(), headers: vec![],
+                        url: "http://localhost:1".into(),
+                        headers: vec![],
                     }))
                 } else {
                     ClientState::Empty
                 };
                 let guard = InitGuard {
-                    state: &worker_state, init_done: &notify, restore: Some(target),
+                    state: &worker_state,
+                    init_done: &notify,
+                    restore: Some(target),
                 };
                 started_tx.send(()).unwrap();
                 drop(guard);
@@ -7287,7 +7293,10 @@ mod tests {
             let completed_while_locked = done_rx.recv_timeout(std::time::Duration::from_millis(20));
             drop(lock);
             worker.join().unwrap();
-            assert!(completed_while_locked.is_err(), "cleanup discarded its target under contention");
+            assert!(
+                completed_while_locked.is_err(),
+                "cleanup discarded its target under contention"
+            );
             let state = state.lock();
             assert!(if restorable {
                 matches!(*state, ClientState::Pending(_))
@@ -7303,8 +7312,13 @@ mod tests {
         let mut config = acp::McpServerStdio::new("cancel-test", PathBuf::from("/bin/sleep"));
         config.args = vec!["60".into()];
         let client = start_mcp_server(
-            acp::McpServer::Stdio(config), None, None, &McpSpawnCtx::session_less(),
-        ).await.unwrap();
+            acp::McpServer::Stdio(config),
+            None,
+            None,
+            &McpSpawnCtx::session_less(),
+        )
+        .await
+        .unwrap();
         let mut initializing = Box::pin(client.ensure_initialized());
         assert!(futures::poll!(initializing.as_mut()).is_pending());
         assert!(matches!(*client.state.lock(), ClientState::Initializing));
@@ -7340,7 +7354,11 @@ mod tests {
             ..Default::default()
         };
         let client = McpClient::new_acp(
-            "test".into(), "id".into(), Arc::new(PendingInvoker), Some(&overrides), None,
+            "test".into(),
+            "id".into(),
+            Arc::new(PendingInvoker),
+            Some(&overrides),
+            None,
         );
         let mut initializing = Box::pin(client.ensure_initialized());
         assert!(futures::poll!(initializing.as_mut()).is_pending());
@@ -7355,7 +7373,10 @@ mod tests {
             let premature = done_rx.recv_timeout(std::time::Duration::from_millis(20));
             drop(lock);
             worker.join().unwrap();
-            assert!(premature.is_err(), "cancelled future skipped state restoration");
+            assert!(
+                premature.is_err(),
+                "cancelled future skipped state restoration"
+            );
         });
         assert!(matches!(*client.state.lock(), ClientState::Pending(_)));
     }
@@ -8214,10 +8235,7 @@ mod tests {
         };
         let client = McpClient::new_http("pending".to_string(), config, None, None);
         // `new_http` constructs with `ClientState::Pending(_)`.
-        assert!(matches!(
-            *client.state.lock(),
-            ClientState::Pending(_)
-        ));
+        assert!(matches!(*client.state.lock(), ClientState::Pending(_)));
         assert!(!client.is_healthy().await);
         assert_eq!(client.state_kind().await, ClientStateKind::Pending);
     }

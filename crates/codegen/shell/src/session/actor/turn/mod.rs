@@ -122,6 +122,49 @@ impl TurnSpanTotals {
 /// (notification drain) are hidden by the *pager* via the
 /// `hideFromScrollback` chunk meta, not by omitting the persisted line.
 impl SessionActor {
+    async fn confirm_preview_before_admission(
+        &self,
+        request_id: &str,
+        attempt: u32,
+    ) -> Result<(), acp::Error> {
+        crate::session::replay_events::flush_replay_actor(&self.event_tx)
+            .await
+            .map_err(|error| {
+                crate::session::commands::response_projection_error(format!(
+                    "preview event flush failed: {error:?}"
+                ))
+            })?;
+        let (barrier_tx, barrier_rx) = tokio::sync::oneshot::channel();
+        // Auxiliary senders use this same preview lock while reserving and
+        // enqueueing, so the barrier has an unambiguous ordered cut.
+        let preview_guard = self.sampling_preview.lock();
+        let sent = self.notifications.persistence_tx.send(
+            crate::session::persistence::PersistenceMsg::SamplingBarrier {
+                request_id: request_id.to_owned(),
+                attempt,
+                respond_to: barrier_tx,
+            },
+        );
+        drop(preview_guard);
+        sent.map_err(|_| {
+            crate::session::commands::response_projection_error(
+                "preview persistence channel closed",
+            )
+        })?;
+        barrier_rx
+            .await
+            .map_err(|_| {
+                crate::session::commands::response_projection_error(
+                    "preview persistence acknowledgement lost",
+                )
+            })?
+            .map_err(|error| {
+                crate::session::commands::response_projection_error(format!(
+                    "preview persistence failed: {error}"
+                ))
+            })
+    }
+
     /// Wait for turn-blocking subagents (up to 120s on the turn task),
     /// snapshot, clear sticky. Background children never gate the drain: the
     /// prompt report is marked incomplete immediately and their spend reaches
@@ -1582,19 +1625,23 @@ impl SessionActor {
                 request_id: response_request_id.clone(),
                 attempt: latency.attempts,
             };
+            Box::pin(self.confirm_preview_before_admission(&response_request_id, latency.attempts))
+                .await?;
+            let assistant_messages = response_items
+                .iter()
+                .filter(|item| matches!(item, sampling_types::ConversationItem::Assistant(_)))
+                .count();
             let quarantined = self
                 .chat_state_handle
                 .push_response_durably_with_identity(
-                    response_items.clone(),
+                    response_items,
                     admission_identity.clone(),
-                    native_continuation.clone(),
+                    native_continuation,
                 )
                 .await
                 .map_err(crate::session::commands::response_admission_error)?;
-            for item in &response_items {
-                if matches!(item, sampling_types::ConversationItem::Assistant(_)) {
-                    self.signals_handle().record_assistant_message();
-                }
+            for _ in 0..assistant_messages {
+                self.signals_handle().record_assistant_message();
             }
             if quarantined == 0
                 && let Some(text) = fallback_text.clone()
@@ -1611,24 +1658,10 @@ impl SessionActor {
                 )
                 .await;
             }
-            let timeline_events =
-                self.chat_state_handle
-                    .timeline_events()
-                    .await
-                    .ok_or_else(|| {
-                        crate::session::commands::response_projection_error(
-                            "Timeline query acknowledgement lost",
-                        )
-                    })?;
-            let timeline = chat_state::Timeline::from_events(timeline_events).map_err(|error| {
-                crate::session::commands::response_projection_error(format!(
-                    "invalid Timeline fold: {error}"
-                ))
-            })?;
-            let admitted = timeline
-                .admitted_responses()
-                .into_iter()
-                .find(|candidate| candidate.identity == admission_identity)
+            let admitted = self
+                .chat_state_handle
+                .admitted_response(admission_identity.clone())
+                .await
                 .ok_or_else(|| {
                     crate::session::commands::response_projection_error(
                         "admitted response is absent from active branch",

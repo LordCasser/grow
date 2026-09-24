@@ -572,6 +572,9 @@ async fn create_test_actor_ex_inner(
                     });
                     let _ = respond_to.send(Ok(()));
                 }
+                PersistenceMsg::SamplingBarrier { respond_to, .. } => {
+                    let _ = respond_to.send(Ok(()));
+                }
                 PersistenceMsg::ReplaceRewindPointsAndAck { respond_to, .. } => {
                     let _ = respond_to.send(Ok(()));
                 }
@@ -606,6 +609,7 @@ async fn create_test_actor_ex_inner(
         pending_step_controls: PendingStepControls::default(),
         applying_step_control: None,
         behavior_control_revision: 0,
+        behavior_availability_revision: 0,
         pending_behavior_control: None,
         applying_behavior_control: None,
         behavior_control_worker_active: false,
@@ -613,7 +617,7 @@ async fn create_test_actor_ex_inner(
         control_intents: std::collections::HashMap::new(),
         terminal_preemption_pending: false,
         pending_inputs: VecDeque::new(),
-        combine_edit_holds: std::collections::HashSet::new(),
+        queue_edit_holds: std::collections::HashMap::new(),
         notifications_suppressed: false,
         rewindable: false,
         nudges_used_this_session: 0,
@@ -753,6 +757,7 @@ async fn create_test_actor_ex_inner(
             gateway: GatewaySender::new(gateway_tx),
             gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
             persistence_tx,
+            preview_gateway_budget: sampler::PreviewEventBudget::default(),
         },
         permissions: workspace::permission::PermissionHandle::allow_all(),
         tool_context,
@@ -931,7 +936,7 @@ async fn create_test_actor_ex_inner(
         recap_epoch: std::cell::Cell::new(0),
         session_turn_active: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         turn_stream_drained: parking_lot::Mutex::new(None),
-        sampling_preview: parking_lot::Mutex::new(None),
+        sampling_preview: std::sync::Arc::new(parking_lot::Mutex::new(None)),
         sampler_handle: sampler::SamplerHandle::noop(),
         sampler_owner: std::cell::RefCell::new(None),
         sampler_event_drainer: TaskSlot::new(),

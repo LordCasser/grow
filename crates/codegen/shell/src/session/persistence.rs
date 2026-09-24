@@ -89,7 +89,7 @@ pub(crate) fn session_version_mismatch_from_error<'a>(
     None
 }
 
-/// Build the canonical Timeline fact for a user-visible model selection.
+/// Build the canonical Timeline fact for a model route selection.
 ///
 /// The catalog IDs are the stable session selection; provider model names are
 /// retained as diagnostics because one catalog entry can change its wire
@@ -132,7 +132,14 @@ pub(crate) fn model_change_event(
 /// facts fail session load instead of silently trusting a stale summary.
 pub(crate) fn latest_model_selection(
     events: &[chat_state::TimelineEvent],
-) -> io::Result<Option<(crate::agent::models::ModelId, Option<ReasoningEffort>)>> {
+) -> io::Result<
+    Option<(
+        crate::agent::models::ModelId,
+        Option<ReasoningEffort>,
+        String,
+        sampling_types::ModelImageInputKey,
+    )>,
+> {
     let mut latest: Option<(
         String,
         Option<ReasoningEffort>,
@@ -233,7 +240,14 @@ pub(crate) fn latest_model_selection(
         }
         latest = Some((to_model, to_effort, to_provider, to_transport));
     }
-    Ok(latest.map(|(model, effort, _, _)| (crate::agent::models::ModelId::new(model), effort)))
+    Ok(latest.map(|(model, effort, provider, transport)| {
+        (
+            crate::agent::models::ModelId::new(model),
+            effort,
+            provider,
+            transport,
+        )
+    }))
 }
 
 pub(crate) fn durable_model_control_receipts(
@@ -342,9 +356,52 @@ pub enum PersistenceMsg {
     Stop,
     /// A session update (ACP update or Grow extension update)
     Update(SessionUpdate),
+    /// A Goal or Workflow UI snapshot, charged until its durable append ends.
+    AuxiliaryGrow {
+        notification: crate::extensions::notification::SessionNotification,
+        permit: tokio::sync::OwnedSemaphorePermit,
+        preview: Option<(String, u32)>,
+        respond_to: Option<
+            tokio::sync::oneshot::Sender<Result<(), crate::session::storage::AppendUpdateError>>,
+        >,
+    },
+    /// A bounded auxiliary sender could not reserve or serialize its UI copy.
+    AuxiliaryPreviewFailure {
+        request_id: String,
+        attempt: u32,
+        reason: String,
+    },
+    /// One payload-free ordering anchor for an attempt. Candidate content is
+    /// delivered live but never enters this persistence queue.
+    SamplingCandidate {
+        request_id: String,
+        attempt: u32,
+        event_id: String,
+    },
+    /// An independent ACP or Grow notification during sampling. The emitter
+    /// waits for this append, so this producer cannot fill the queue.
+    PreviewIndependent {
+        request_id: String,
+        attempt: u32,
+        update: SessionUpdate,
+        respond_to:
+            tokio::sync::oneshot::Sender<Result<(), crate::session::storage::AppendUpdateError>>,
+    },
+    /// A live gateway reservation failed; the ordered admission barrier must
+    /// reject this attempt even though candidate text was never persisted.
+    SamplingPreviewFailure {
+        request_id: String,
+        attempt: u32,
+        reason: String,
+    },
+    /// Confirms all preview ordering records before canonical Timeline admission.
+    SamplingBarrier {
+        request_id: String,
+        attempt: u32,
+        respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
+    },
     /// Ordered lifecycle boundary for a retractable sampling preview. This
-    /// controls the in-memory ACP candidate buffer and is never written as a
-    /// second history record.
+    /// controls constant-size attempt state and is not written as history.
     SamplingAttempt {
         request_id: String,
         attempt: u32,
@@ -395,6 +452,8 @@ pub enum PersistenceMsg {
     WorkflowRunState(crate::session::workflow::store::WorkflowRunManifest),
     WorkflowRunStateAndAck {
         manifest: crate::session::workflow::store::WorkflowRunManifest,
+        corrupt_sidecar_fingerprint:
+            Option<crate::session::workflow::store::WorkflowManifestFingerprint>,
         respond_to: tokio::sync::oneshot::Sender<io::Result<()>>,
     },
     DeleteWorkflowRunState(String),
@@ -1846,15 +1905,14 @@ struct SessionPersistence {
     storage: Arc<dyn StorageAdapter>,
     /// Pending ACP notification for merging consecutive text chunks
     pending_notification: Option<acp::SessionNotification>,
-    /// ACP preview notifications held until their attempt is accepted. The
-    /// lifecycle boundary itself is transient; only accepted ACP content is
-    /// allowed to enter the persisted replay cache.
-    pending_sampling: Option<(SamplingAttemptKey, Vec<PendingSamplingNotification>)>,
+    /// Constant-size attempt state. The first candidate's payload-free anchor
+    /// and independent notifications are written directly to storage.
+    sampling_anchor: Option<SamplingAnchorState>,
     sampling_attempt: Option<SamplingAttemptKey>,
     /// The last terminal boundary is retained only as a bounded late-event
     /// fence. It is deliberately not a history of every request: one
     /// producer owns this queue and a newer active attempt rejects older
-    /// same-request ordinals before they can be staged.
+    /// same-request ordinals before they can be written.
     terminal_sampling_attempt: Option<(
         SamplingAttemptKey,
         crate::extensions::notification::SamplingAttemptState,
@@ -1873,9 +1931,21 @@ struct SamplingAttemptKey {
     attempt: u32,
 }
 
-struct PendingSamplingNotification {
-    notification: acp::SessionNotification,
-    candidate: bool,
+struct SamplingAnchorState {
+    key: SamplingAttemptKey,
+    write_error: Option<String>,
+}
+
+const MAX_MERGED_ACP_TEXT_BYTES: usize = 16 * 1024;
+
+pub(crate) fn sampling_attempt_key(
+    notification: &acp::SessionNotification,
+) -> Option<(String, u32)> {
+    let meta = notification.meta.as_ref()?;
+    Some((
+        meta.get("samplingRequestId")?.as_str()?.to_owned(),
+        u32::try_from(meta.get("samplingAttempt")?.as_u64()?).ok()?,
+    ))
 }
 
 impl SessionPersistence {
@@ -1885,7 +1955,9 @@ impl SessionPersistence {
                 if prev_text.annotations.is_none()
                     && prev_text.meta.is_none()
                     && new_text.annotations.is_none()
-                    && new_text.meta.is_none() =>
+                    && new_text.meta.is_none()
+                    && prev_text.text.len().saturating_add(new_text.text.len())
+                        <= MAX_MERGED_ACP_TEXT_BYTES =>
             {
                 prev_text.text.push_str(&new_text.text);
                 true
@@ -1908,14 +1980,6 @@ impl SessionPersistence {
         }
     }
 
-    fn sampling_attempt_key(notification: &acp::SessionNotification) -> Option<SamplingAttemptKey> {
-        let meta = notification.meta.as_ref()?;
-        Some(SamplingAttemptKey {
-            request_id: meta.get("samplingRequestId")?.as_str()?.to_owned(),
-            attempt: u32::try_from(meta.get("samplingAttempt")?.as_u64()?).ok()?,
-        })
-    }
-
     fn sampling_attempt_rejected(&self, key: &SamplingAttemptKey) -> bool {
         self.terminal_sampling_attempt
             .as_ref()
@@ -1928,80 +1992,25 @@ impl SessionPersistence {
             })
     }
 
-    fn stage_sampling_notification(
-        &mut self,
-        key: SamplingAttemptKey,
-        notification: acp::SessionNotification,
-        candidate: bool,
-    ) {
-        if let Some((pending_key, notifications)) = &mut self.pending_sampling
-            && *pending_key == key
+    fn mark_sampling_anchor(&mut self, key: SamplingAttemptKey) {
+        if let Some(window) = &self.sampling_anchor
+            && window.key == key
         {
-            if !candidate
-                && let Some(previous) = notifications.last_mut()
-                && !previous.candidate
-                && Self::try_merge_staged_text(&mut previous.notification, &notification)
-            {
-                return;
-            }
-            notifications.push(PendingSamplingNotification {
-                notification,
-                candidate,
-            });
             return;
         }
-        self.pending_sampling = Some((
+        self.sampling_anchor = Some(SamplingAnchorState {
             key,
-            vec![PendingSamplingNotification {
-                notification,
-                candidate,
-            }],
-        ));
+            write_error: None,
+        });
     }
 
-    /// Preserve the normal untagged text coalescing while retaining the first
-    /// notification's outer metadata (event identity included). Candidate
-    /// previews deliberately never use this helper: their upstream replay
-    /// buffer owns any coalescing before the persistence boundary.
-    fn try_merge_staged_text(
-        previous: &mut acp::SessionNotification,
-        incoming: &acp::SessionNotification,
-    ) -> bool {
-        match (&mut previous.update, &incoming.update) {
-            (
-                acp::SessionUpdate::AgentMessageChunk(previous_chunk),
-                acp::SessionUpdate::AgentMessageChunk(incoming_chunk),
-            )
-            | (
-                acp::SessionUpdate::AgentThoughtChunk(previous_chunk),
-                acp::SessionUpdate::AgentThoughtChunk(incoming_chunk),
-            ) => Self::try_merge_text(&mut previous_chunk.content, &incoming_chunk.content),
-            _ => false,
-        }
-    }
-
-    /// Flush a sampling window while optionally admitting its tagged preview.
-    /// Untagged ACP entries are always retained so an interleaved external
-    /// event keeps its original position and metadata when the candidate is
-    /// discarded.
-    async fn flush_sampling_candidate(&mut self, key: &SamplingAttemptKey, admit_candidate: bool) {
-        let Some((pending_key, notifications)) = self.pending_sampling.take() else {
-            return;
-        };
-        if &pending_key != key {
-            self.pending_sampling = Some((pending_key, notifications));
-            return;
-        }
-        for entry in notifications {
-            if entry.candidate && !admit_candidate {
-                continue;
-            }
-            if let Err(error) = self
-                .write_update(&SessionUpdate::Acp(Box::new(entry.notification)))
-                .await
-            {
-                tracing::warn!(%error, "failed to write accepted sampling preview");
-            }
+    fn clear_sampling_anchor(&mut self, key: &SamplingAttemptKey) {
+        if self
+            .sampling_anchor
+            .as_ref()
+            .is_some_and(|window| &window.key == key)
+        {
+            self.sampling_anchor = None;
         }
     }
 
@@ -2018,22 +2027,35 @@ impl SessionPersistence {
         };
         match state {
             SamplingAttemptState::Started => {
-                self.flush_pending().await;
+                let prior_error = self
+                    .drain_pending()
+                    .await
+                    .err()
+                    .map(|error| error.to_string());
                 if self.sampling_attempt_rejected(&key) {
                     return;
                 }
                 if self.sampling_attempt.as_ref() == Some(&key) {
+                    if let Some(window) = &mut self.sampling_anchor
+                        && let Some(error) = prior_error
+                    {
+                        window.write_error.get_or_insert(error);
+                    }
                     return;
                 }
                 if let Some(active) = self.sampling_attempt.take() {
-                    self.flush_sampling_candidate(&active, false).await;
+                    self.clear_sampling_anchor(&active);
                 }
+                self.sampling_anchor = Some(SamplingAnchorState {
+                    key: key.clone(),
+                    write_error: prior_error,
+                });
                 self.sampling_attempt = Some(key);
             }
             SamplingAttemptState::Discarded => {
                 self.flush_pending().await;
                 if self.sampling_attempt.as_ref() == Some(&key) {
-                    self.flush_sampling_candidate(&key, false).await;
+                    self.clear_sampling_anchor(&key);
                     self.sampling_attempt = None;
                     self.terminal_sampling_attempt = Some((key, SamplingAttemptState::Discarded));
                 }
@@ -2178,56 +2200,22 @@ impl SessionPersistence {
             request_id: projection.request_id.clone(),
             attempt: projection.attempt,
         };
-        let pending = self
-            .pending_sampling
-            .as_ref()
-            .filter(|(pending_key, _)| pending_key == &key)
-            .map(|(_, notifications)| {
-                notifications
-                    .iter()
-                    .map(|entry| (entry.notification.clone(), entry.candidate))
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        let first_candidate = pending.iter().position(|(_, candidate)| *candidate);
+        if let Some(window) = &self.sampling_anchor
+            && window.key == key
+            && let Some(error) = &window.write_error
+        {
+            return Err(crate::session::storage::AppendUpdateError::NotCommitted(
+                io::Error::other(format!(
+                    "sampling anchor or update was not confirmed: {error}"
+                )),
+            ));
+        }
 
         for attempt in 0..2 {
-            let result = async {
-                match first_candidate {
-                    Some(first_candidate) => {
-                        for (notification, candidate) in pending.iter().take(first_candidate) {
-                            if !candidate {
-                                self.storage
-                                    .append_acp_event_exact(&self.info, notification)
-                                    .await?;
-                            }
-                        }
-                    }
-                    None => {
-                        for (notification, candidate) in &pending {
-                            if !candidate {
-                                self.storage
-                                    .append_acp_event_exact(&self.info, notification)
-                                    .await?;
-                            }
-                        }
-                    }
-                }
-                self.storage
-                    .commit_response_projection(&self.info, &projection)
-                    .await?;
-                if let Some(first_candidate) = first_candidate {
-                    for (notification, candidate) in pending.iter().skip(first_candidate + 1) {
-                        if !candidate {
-                            self.storage
-                                .append_acp_event_exact(&self.info, notification)
-                                .await?;
-                        }
-                    }
-                }
-                Ok(())
-            }
-            .await;
+            let result = self
+                .storage
+                .commit_response_projection(&self.info, &projection)
+                .await;
             match result {
                 Ok(()) => break,
                 Err(error) if attempt == 0 && Self::retryable_projection_error(&error) => continue,
@@ -2235,11 +2223,11 @@ impl SessionPersistence {
             }
         }
         if self
-            .pending_sampling
+            .sampling_anchor
             .as_ref()
-            .is_some_and(|(pending_key, _)| pending_key == &key)
+            .is_some_and(|window| window.key == key)
         {
-            self.pending_sampling = None;
+            self.sampling_anchor = None;
         }
         let terminal = match projection.disposition {
             crate::session::response_projection::ResponseReplayDisposition::Admitted => {
@@ -2278,9 +2266,9 @@ impl SessionPersistence {
             match msg {
                 PersistenceMsg::Stop => {
                     if let Some(active) = self.sampling_attempt.take() {
-                        self.flush_sampling_candidate(&active, false).await;
+                        self.clear_sampling_anchor(&active);
                     } else {
-                        self.pending_sampling = None;
+                        self.sampling_anchor = None;
                     }
                     self.rx.close();
                 }
@@ -2294,21 +2282,33 @@ impl SessionPersistence {
                 PersistenceMsg::Update(update) => {
                     match update {
                         SessionUpdate::Acp(notification) => {
-                            if let Some(key) = Self::sampling_attempt_key(&notification) {
-                                if self.sampling_attempt_rejected(&key)
-                                    || self.sampling_attempt.as_ref() != Some(&key)
-                                {
-                                    continue;
-                                }
-                                self.flush_pending().await;
-                                self.stage_sampling_notification(key, *notification, true);
+                            if sampling_attempt_key(&notification).is_some() {
+                                // A tagged Update sent internally is still provisional.
+                                // It must never become durable replay content.
                                 continue;
                             }
-                            if let Some(key) =
-                                self.pending_sampling.as_ref().map(|(key, _)| key.clone())
+                            if let Some(key) = self
+                                .sampling_anchor
+                                .as_ref()
+                                .map(|window| window.key.clone())
                             {
-                                self.flush_pending().await;
-                                self.stage_sampling_notification(key, *notification, false);
+                                let mut notification = *notification;
+                                crate::util::event_id::ensure_event_id_meta(
+                                    &self.info.id.0,
+                                    &mut notification.meta,
+                                );
+                                let result = self
+                                    .storage
+                                    .append_acp_event_exact(&self.info, &notification)
+                                    .await;
+                                if let Err(error) = result {
+                                    tracing::warn!(%error, "failed to persist independent sampling update");
+                                    if let Some(window) = &mut self.sampling_anchor
+                                        && window.key == key
+                                    {
+                                        window.write_error.get_or_insert_with(|| error.to_string());
+                                    }
+                                }
                                 continue;
                             }
                             // ACP notifications use merging to coalesce consecutive text chunks
@@ -2332,6 +2332,182 @@ impl SessionPersistence {
                             }
                         }
                     }
+                }
+                PersistenceMsg::AuxiliaryGrow {
+                    notification,
+                    permit: _permit,
+                    preview,
+                    respond_to,
+                } => {
+                    let result = self
+                        .handle_durable_append(SessionUpdate::Grow(Box::new(notification)))
+                        .await;
+                    if let Err(error) = &result {
+                        tracing::warn!(%error, "failed to persist auxiliary Grow notification");
+                        if let Some(window) = &mut self.sampling_anchor
+                            && preview.as_ref().is_some_and(|(request_id, attempt)| {
+                                window.key.request_id == *request_id
+                                    && window.key.attempt == *attempt
+                            })
+                        {
+                            window.write_error.get_or_insert_with(|| error.to_string());
+                        }
+                    }
+                    if let Some(respond_to) = respond_to {
+                        let _ = respond_to.send(result);
+                    }
+                }
+                PersistenceMsg::AuxiliaryPreviewFailure {
+                    request_id,
+                    attempt,
+                    reason,
+                } => {
+                    if let Some(window) = &mut self.sampling_anchor
+                        && window.key.request_id == request_id
+                        && window.key.attempt == attempt
+                    {
+                        window.write_error.get_or_insert(reason);
+                    }
+                }
+                PersistenceMsg::SamplingCandidate {
+                    request_id,
+                    attempt,
+                    event_id,
+                } => {
+                    let key = SamplingAttemptKey {
+                        request_id: request_id.clone(),
+                        attempt,
+                    };
+                    if self.sampling_attempt_rejected(&key)
+                        || self.sampling_attempt.as_ref() != Some(&key)
+                    {
+                        continue;
+                    }
+                    let prior_error = self
+                        .drain_pending()
+                        .await
+                        .err()
+                        .map(|error| error.to_string());
+                    self.mark_sampling_anchor(key);
+                    if let Some(window) = &mut self.sampling_anchor
+                        && let Some(prior_error) = prior_error
+                    {
+                        window.write_error.get_or_insert(prior_error);
+                    }
+                    let marker = acp::SessionNotification::new(
+                        self.info.id.clone(),
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            acp::ContentBlock::Text(acp::TextContent::new("")),
+                        )),
+                    )
+                    .meta(
+                        serde_json::json!({
+                            "eventId": event_id,
+                            "samplingRequestId": request_id,
+                            "samplingAttempt": attempt,
+                        })
+                        .as_object()
+                        .cloned(),
+                    );
+                    if let Err(error) = self
+                        .storage
+                        .append_acp_event_exact(&self.info, &marker)
+                        .await
+                    {
+                        tracing::warn!(%error, "failed to persist sampling anchor");
+                        if let Some(window) = &mut self.sampling_anchor {
+                            window.write_error.get_or_insert_with(|| error.to_string());
+                        }
+                    }
+                }
+                PersistenceMsg::PreviewIndependent {
+                    request_id,
+                    attempt,
+                    update,
+                    respond_to,
+                } => {
+                    let key = SamplingAttemptKey {
+                        request_id,
+                        attempt,
+                    };
+                    let result = match self.drain_pending().await {
+                        Err(error) => Err(error),
+                        Ok(()) => match update {
+                            SessionUpdate::Acp(notification) => {
+                                self.storage
+                                    .append_acp_event_exact(&self.info, &notification)
+                                    .await
+                            }
+                            SessionUpdate::Grow(notification) => {
+                                self.storage
+                                    .append_update_durable_commit_aware(
+                                        &self.info,
+                                        &SessionUpdate::Grow(notification),
+                                    )
+                                    .await
+                            }
+                            SessionUpdate::ResponseReplayProjection(_) => {
+                                Err(crate::session::storage::AppendUpdateError::NotCommitted(
+                                    io::Error::new(
+                                        io::ErrorKind::InvalidInput,
+                                        "projection is not an independent preview update",
+                                    ),
+                                ))
+                            }
+                        },
+                    };
+                    if let Err(error) = &result {
+                        if let Some(window) = &mut self.sampling_anchor
+                            && window.key == key
+                        {
+                            window.write_error.get_or_insert_with(|| error.to_string());
+                        }
+                    }
+                    let _ = respond_to.send(result);
+                }
+                PersistenceMsg::SamplingPreviewFailure {
+                    request_id,
+                    attempt,
+                    reason,
+                } => {
+                    let key = SamplingAttemptKey {
+                        request_id,
+                        attempt,
+                    };
+                    if let Some(window) = &mut self.sampling_anchor
+                        && window.key == key
+                    {
+                        window.write_error.get_or_insert(reason);
+                    }
+                }
+                PersistenceMsg::SamplingBarrier {
+                    request_id,
+                    attempt,
+                    respond_to,
+                } => {
+                    let key = SamplingAttemptKey {
+                        request_id,
+                        attempt,
+                    };
+                    let mut result = if self.sampling_attempt.as_ref() != Some(&key) {
+                        Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "sampling attempt is not active at admission barrier",
+                        ))
+                    } else {
+                        self.drain_pending().await.map_err(|error| {
+                            io::Error::other(format!("sampling update was not confirmed: {error}"))
+                        })
+                    };
+                    if let Some(window) = &self.sampling_anchor
+                        && window.key == key
+                        && let Some(error) = &window.write_error
+                    {
+                        result = Err(io::Error::other(format!(
+                            "sampling anchor or update was not confirmed: {error}"
+                        )));
+                    }
+                    let _ = respond_to.send(result);
                 }
                 PersistenceMsg::SamplingAttempt {
                     request_id,
@@ -2425,12 +2601,25 @@ impl SessionPersistence {
                 }
                 PersistenceMsg::WorkflowRunStateAndAck {
                     manifest,
+                    corrupt_sidecar_fingerprint,
                     respond_to,
                 } => {
-                    let result = self
-                        .storage
-                        .write_workflow_run_state(&self.info, &manifest)
-                        .await;
+                    let result = match corrupt_sidecar_fingerprint {
+                        Some(fingerprint) => {
+                            self.storage
+                                .repair_corrupt_workflow_run_state(
+                                    &self.info,
+                                    &manifest,
+                                    fingerprint,
+                                )
+                                .await
+                        }
+                        None => {
+                            self.storage
+                                .write_workflow_run_state(&self.info, &manifest)
+                                .await
+                        }
+                    };
                     if let Err(error) = &result {
                         tracing::warn!(run_id = %manifest.state.run_id, ?error, "failed to write acknowledged workflow run state");
                     }
@@ -2489,7 +2678,7 @@ impl SessionPersistence {
         // Drain any untagged entries interleaved with a candidate before
         // dropping the unaccepted candidate on channel close.
         if let Some(active) = self.sampling_attempt.take() {
-            self.flush_sampling_candidate(&active, false).await;
+            self.clear_sampling_anchor(&active);
         }
         // Drain the merge buffer on channel close.
         self.flush_pending().await;
@@ -2681,7 +2870,7 @@ pub(crate) async fn new(
             info: info_clone,
             storage: storage.clone(),
             pending_notification: None,
-            pending_sampling: None,
+            sampling_anchor: None,
             sampling_attempt: None,
             terminal_sampling_attempt: None,
             rx,
@@ -2743,7 +2932,7 @@ pub(crate) async fn new_child(
             info: info_clone,
             storage: storage.clone(),
             pending_notification: None,
-            pending_sampling: None,
+            sampling_anchor: None,
             sampling_attempt: None,
             terminal_sampling_attempt: None,
             rx,
@@ -2833,7 +3022,7 @@ pub(crate) async fn load_light(
             info: loaded_info,
             storage: storage.clone(),
             pending_notification: None,
-            pending_sampling: None,
+            sampling_anchor: None,
             sampling_attempt: None,
             terminal_sampling_attempt: None,
             rx,

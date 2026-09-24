@@ -5,33 +5,23 @@
 
 use crate::session::SessionCommand;
 
-/// Parse a `grow/queue/{remove,reorder,clear,edit,interject}` ext-notification's
-/// params into the corresponding [`SessionCommand`].
-/// `owner` is the resolved attribution (params `owner`/`clientIdentifier`) used
-/// to scope remove/clear to the requesting client's own items, and recorded as
-/// `last_editor` for in-place text edits. Returns `None` for unrecognized
-/// methods or for `edit` when `newText` is missing.
-pub(super) fn parse_queue_edit_command(
+pub(super) fn is_queue_notification_method(method: &str) -> bool {
+    matches!(
+        method,
+        "grow/queue/reorder" | "grow/queue/clear" | "grow/queue/interject"
+    )
+}
+
+/// Parse retained queue operation notifications into their corresponding
+/// [`SessionCommand`].
+/// `owner` scopes clear and describes the client that initiated an interject.
+/// Returns `None` for unrecognized methods or malformed interject requests.
+pub(super) fn parse_queue_notification_command(
     method: &str,
     params: &serde_json::Value,
     owner: Option<String>,
 ) -> Option<SessionCommand> {
     match method {
-        "grow/queue/remove" => {
-            let id = params.get("id").and_then(|v| v.as_str())?.to_string();
-            // The client supplies the version it last saw; the handler removes
-            // only on an exact match (stale = benign no-op + rebroadcast).
-            // Default 0 covers never-edited prompts (the common case).
-            let expected_version = params
-                .get("expectedVersion")
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            Some(SessionCommand::RemoveQueuedPrompt {
-                id,
-                expected_version,
-                owner,
-            })
-        }
         "grow/queue/reorder" => {
             let ordered_ids = params
                 .get("orderedIds")
@@ -73,26 +63,6 @@ pub(super) fn parse_queue_edit_command(
                 new_text,
             })
         }
-        "grow/queue/edit" => {
-            let id = params.get("id").and_then(|v| v.as_str())?.to_string();
-            let new_text = params.get("newText").and_then(|v| v.as_str())?.to_string();
-            // `owner` is the resolved attribution; for edit it represents the
-            // most recent editor (recorded as `last_editor`), not the original
-            // enqueuer.
-            Some(SessionCommand::EditQueuedPrompt {
-                id,
-                new_text,
-                editor: owner,
-            })
-        }
-        "grow/queue/hold_edit" => {
-            let id = params.get("id").and_then(|v| v.as_str())?.to_string();
-            Some(SessionCommand::HoldCombineEdit { id })
-        }
-        "grow/queue/release_edit" => {
-            let id = params.get("id").and_then(|v| v.as_str())?.to_string();
-            Some(SessionCommand::ReleaseCombineEdit { id })
-        }
         _ => None,
     }
 }
@@ -101,39 +71,33 @@ pub(super) fn parse_queue_edit_command(
 mod tests {
     use super::*;
 
-    /// Each `grow/queue/*` ext-notification maps to the
-    /// correct versioned/idempotent `SessionCommand`.
+    /// Only reorder, clear, and interject remain on the notification path;
+    /// item edit controls use the dedicated request method.
     #[test]
-    fn parse_queue_edit_command_maps_each_method() {
-        // remove: id + expectedVersion + owner.
-        let p = serde_json::json!({
-            "sessionId": "s1", "id": "p7", "expectedVersion": 3
-        });
-        match parse_queue_edit_command("grow/queue/remove", &p, Some("grow-tui".into())) {
-            Some(SessionCommand::RemoveQueuedPrompt {
-                id,
-                expected_version,
-                owner,
-            }) => {
-                assert_eq!(id, "p7");
-                assert_eq!(expected_version, 3);
-                assert_eq!(owner.as_deref(), Some("grow-tui"));
-            }
-            _ => panic!("expected RemoveQueuedPrompt"),
+    fn parse_retained_queue_notifications_and_reject_legacy_controls() {
+        for method in [
+            "grow/queue/reorder",
+            "grow/queue/clear",
+            "grow/queue/interject",
+        ] {
+            assert!(is_queue_notification_method(method));
         }
-
-        // remove without expectedVersion defaults to 0.
-        let p = serde_json::json!({ "sessionId": "s1", "id": "p8" });
-        match parse_queue_edit_command("grow/queue/remove", &p, None) {
-            Some(SessionCommand::RemoveQueuedPrompt {
-                expected_version, ..
-            }) => assert_eq!(expected_version, 0),
-            _ => panic!("expected RemoveQueuedPrompt"),
+        for method in [
+            "grow/queue/remove",
+            "grow/queue/edit",
+            "grow/queue/hold_edit",
+            "grow/queue/release_edit",
+            "grow/queue/unknown",
+        ] {
+            assert!(!is_queue_notification_method(method));
+            assert!(
+                parse_queue_notification_command(method, &serde_json::json!({}), None).is_none()
+            );
         }
 
         // reorder: orderedIds array.
         let p = serde_json::json!({ "sessionId": "s1", "orderedIds": ["a", "b", "c"] });
-        match parse_queue_edit_command("grow/queue/reorder", &p, None) {
+        match parse_queue_notification_command("grow/queue/reorder", &p, None) {
             Some(SessionCommand::ReorderQueue { ordered_ids }) => {
                 assert_eq!(ordered_ids, vec!["a", "b", "c"]);
             }
@@ -141,7 +105,7 @@ mod tests {
         }
 
         // clear: owner-scoped.
-        match parse_queue_edit_command(
+        match parse_queue_notification_command(
             "grow/queue/clear",
             &serde_json::json!({ "sessionId": "s1" }),
             Some("grow-tui".into()),
@@ -152,62 +116,14 @@ mod tests {
             _ => panic!("expected ClearQueue"),
         }
 
-        // edit: id + newText + editor (resolved via owner/clientIdentifier).
-        let p = serde_json::json!({
-            "sessionId": "s1", "id": "p9", "newText": "replacement text"
-        });
-        match parse_queue_edit_command("grow/queue/edit", &p, Some("grow-vscode".into())) {
-            Some(SessionCommand::EditQueuedPrompt {
-                id,
-                new_text,
-                editor,
-            }) => {
-                assert_eq!(id, "p9");
-                assert_eq!(new_text, "replacement text");
-                assert_eq!(editor.as_deref(), Some("grow-vscode"));
-            }
-            _ => panic!("expected EditQueuedPrompt"),
-        }
-
-        // edit without editor (no owner/clientIdentifier) → editor: None.
-        match parse_queue_edit_command(
-            "grow/queue/edit",
-            &serde_json::json!({ "sessionId": "s1", "id": "p9", "newText": "x" }),
-            None,
-        ) {
-            Some(SessionCommand::EditQueuedPrompt { editor, .. }) => {
-                assert!(editor.is_none());
-            }
-            _ => panic!("expected EditQueuedPrompt"),
-        }
-
-        // edit without newText → None (can't replace text we don't have).
-        assert!(
-            parse_queue_edit_command(
-                "grow/queue/edit",
-                &serde_json::json!({ "sessionId": "s1", "id": "p9" }),
-                None,
-            )
-            .is_none()
-        );
-
-        // edit without id → None (can't target an entry).
-        assert!(
-            parse_queue_edit_command(
-                "grow/queue/edit",
-                &serde_json::json!({ "sessionId": "s1", "newText": "x" }),
-                None,
-            )
-            .is_none()
-        );
-
         // Steer atomically moves one queued row into the active turn. The
         // expected turn id prevents a late UI action from steering a newer
         // foreground turn.
         let p = serde_json::json!({
             "sessionId": "s1", "id": "p10", "expectedTurnId": "turn-1", "expectedVersion": 2
         });
-        match parse_queue_edit_command("grow/queue/interject", &p, Some("grow-tui".into())) {
+        match parse_queue_notification_command("grow/queue/interject", &p, Some("grow-tui".into()))
+        {
             Some(SessionCommand::SteerQueuedPrompt {
                 id,
                 expected_turn_id,
@@ -228,7 +144,7 @@ mod tests {
         let p = serde_json::json!({
             "sessionId": "s1", "id": "p10", "expectedTurnId": "turn-1", "expectedVersion": 2, "newText": "edited"
         });
-        match parse_queue_edit_command("grow/queue/interject", &p, None) {
+        match parse_queue_notification_command("grow/queue/interject", &p, None) {
             Some(SessionCommand::SteerQueuedPrompt { new_text, .. }) => {
                 assert_eq!(new_text.as_deref(), Some("edited"));
             }
@@ -239,7 +155,7 @@ mod tests {
         let p = serde_json::json!({
             "sessionId": "s1", "id": "p10", "expectedTurnId": "turn-1", "expectedVersion": 2, "newText": "   "
         });
-        match parse_queue_edit_command("grow/queue/interject", &p, None) {
+        match parse_queue_notification_command("grow/queue/interject", &p, None) {
             Some(SessionCommand::SteerQueuedPrompt { new_text, .. }) => {
                 assert_eq!(new_text, None, "blank override must be dropped");
             }
@@ -247,7 +163,7 @@ mod tests {
         }
 
         // Steer without expectedVersion defaults to 0.
-        match parse_queue_edit_command(
+        match parse_queue_notification_command(
             "grow/queue/interject",
             &serde_json::json!({ "sessionId": "s1", "id": "p11", "expectedTurnId": "turn-1" }),
             None,
@@ -260,7 +176,7 @@ mod tests {
 
         // Steer without id or without the expected foreground owner → None.
         assert!(
-            parse_queue_edit_command(
+            parse_queue_notification_command(
                 "grow/queue/interject",
                 &serde_json::json!({ "expectedTurnId": "turn-1" }),
                 None
@@ -268,21 +184,12 @@ mod tests {
             .is_none()
         );
         assert!(
-            parse_queue_edit_command(
+            parse_queue_notification_command(
                 "grow/queue/interject",
                 &serde_json::json!({ "id": "p11" }),
                 None
             )
             .is_none()
-        );
-
-        // unknown method → None.
-        assert!(
-            parse_queue_edit_command("grow/queue/bogus", &serde_json::json!({}), None).is_none()
-        );
-        // remove without id → None (can't target an entry).
-        assert!(
-            parse_queue_edit_command("grow/queue/remove", &serde_json::json!({}), None).is_none()
         );
     }
 }

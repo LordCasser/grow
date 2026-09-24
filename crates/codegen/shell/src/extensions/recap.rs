@@ -25,9 +25,15 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         session_id: String,
         #[serde(default)]
         auto: bool,
+        #[serde(default)]
+        away_period_id: Option<uuid::Uuid>,
     }
 
     let req: RecapRequest = parse_params(args)?;
+    if req.auto != req.away_period_id.is_some() {
+        return Err(acp::Error::invalid_params()
+            .data("awayPeriodId is required for automatic recap and forbidden for manual recap"));
+    }
     tracing::info!(auto = req.auto, "handling /recap request");
 
     // Feature gate: remote setting / `[features] session_recap`
@@ -52,7 +58,10 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     // notification. We only ack that the request was accepted.
     session
         .cmd_tx
-        .send(SessionCommand::Recap { auto: req.auto })
+        .send(SessionCommand::Recap {
+            auto: req.auto,
+            away_period_id: req.away_period_id,
+        })
         .map_err(|_| acp::Error::internal_error().data("session command channel closed"))?;
 
     to_ext_response(Ok(serde_json::json!({ "ok": true })))

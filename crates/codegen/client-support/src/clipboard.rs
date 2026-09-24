@@ -17,16 +17,12 @@
 //! (`changeCount` / `types`) — never content reads — so they stay
 //! sub-millisecond and out of macOS 15.4+ pasteboard privacy alerts.
 //!
-//! Paste-time image reads ([`get_image`] / [`get_attachments`]) use the same
-//! lazily loaded AppKit to read raster bytes in-process (`dataForType:`) on
-//! the unambiguous hot path (raster advertised, no file-URL type alongside),
-//! skipping the ~0.5–0.9 s `osascript` + temp-file round trip.
-//! Content is only ever read at an explicit user paste — the same user-intent
-//! boundary where the `osascript`/`pbpaste` subprocesses read the pasteboard —
-//! and every other pasteboard shape (file URLs, text→furl coercions, AppKit
-//! unavailable, read failure) falls back to the unchanged subprocess path.
-//! `GROW_CLIPBOARD_NO_NATIVE_READ=1` disables the in-process read entirely
-//! (kill switch if a future macOS gates `dataForType:` behind a prompt).
+//! Paste-time image reads ([`get_image`] / [`get_attachments`]) use an
+//! `osascript` subprocess and private temporary file. This keeps AppKit image
+//! materialization outside Grow's address space; Grow then applies its bounded
+//! file read. The subprocess adds roughly 0.5–0.9 s to a simple image paste and
+//! its own memory use is not bounded by Grow. Native AppKit access remains
+//! metadata-only (`changeCount` / `types`).
 //!
 //! On Linux and Windows, `arboard` is used directly (it does not link AppKit on
 //! those platforms).
@@ -148,8 +144,8 @@ pub fn clipboard_image_probe_supported() -> bool {
 
 /// Trigger the one-time lazy AppKit `dlopen` — the expensive part of the macOS
 /// probe (it loads the framework and its GPU init) — WITHOUT reading the
-/// pasteboard, so a later synchronous [`clipboard_image_snapshot`] is just the
-/// cheap metadata read. The load is memoised, and since this touches no
+/// pasteboard, so a later [`clipboard_image_snapshot`] skips framework setup.
+/// The load is memoised, and since this touches no
 /// pasteboard it is sound to call from a background thread. No-op off-macOS.
 pub fn clipboard_prewarm() {
     platform::clipboard_prewarm();
@@ -177,39 +173,6 @@ fn image_pasteable_from_types<'a>(types: impl IntoIterator<Item = &'a [u8]>) -> 
         }
     }
     has_image
-}
-
-/// Raster pasteboard UTIs in read-priority order with their MIME types.
-///
-/// Mirrors the `osascript` probes' coercion order (`PNGf` → `TIFF` → `JPEG`)
-/// so the native in-process read yields the same class the subprocess path
-/// would have picked for the same pasteboard.
-#[cfg(any(target_os = "macos", test))]
-const NATIVE_IMAGE_TYPES: &[(&[u8], &str)] = &[
-    (b"public.png", "image/png"),
-    (b"public.tiff", "image/tiff"),
-    (b"public.jpeg", "image/jpeg"),
-];
-
-/// Pick which advertised raster type the native read should request.
-///
-/// `None` unless the advertised type list classifies as a pasteable image
-/// under [`image_pasteable_from_types`] (raster present, no file-URL type
-/// alongside — file URLs win and route through the `osascript` furl path).
-/// Pure so the routing rule is unit-tested on every platform.
-#[cfg(any(target_os = "macos", test))]
-fn native_image_type_from_types(
-    types: &[impl AsRef<[u8]>],
-) -> Option<(&'static [u8], &'static str)> {
-    if !image_pasteable_from_types(types.iter().map(|t| t.as_ref())) {
-        return None;
-    }
-    for (uti, mime) in NATIVE_IMAGE_TYPES {
-        if types.iter().any(|t| t.as_ref() == *uti) {
-            return Some((uti, mime));
-        }
-    }
-    None
 }
 
 /// Map an image MIME type to a file extension.
@@ -361,8 +324,52 @@ pub fn wayland_data_control_supported() -> bool {
 }
 
 #[cfg(any(test, not(target_os = "macos")))]
+const MAX_CLIPBOARD_RGBA_PIXELS: usize = 16_000_000;
+#[cfg(any(test, not(target_os = "macos")))]
+const MAX_CLIPBOARD_ENCODED_IMAGE_BYTES: usize = 50_000_000;
+
+#[cfg(any(test, not(target_os = "macos")))]
+struct BoundedPngOutput {
+    bytes: Vec<u8>,
+    limit: usize,
+    failed: bool,
+}
+
+#[cfg(any(test, not(target_os = "macos")))]
+impl std::io::Write for BoundedPngOutput {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if buf.len() > self.limit.saturating_sub(self.bytes.len()) {
+            self.failed = true;
+            return Err(std::io::Error::other(
+                "clipboard PNG exceeds encoded-data limit",
+            ));
+        }
+        self.bytes.try_reserve_exact(buf.len()).map_err(|error| {
+            self.failed = true;
+            std::io::Error::other(error)
+        })?;
+        self.bytes.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(any(test, not(target_os = "macos")))]
 /// Encode raw RGBA pixels into PNG bytes.
 fn encode_rgba_to_png(rgba: &[u8], width: usize, height: usize) -> anyhow::Result<Vec<u8>> {
+    encode_rgba_to_png_with_limit(rgba, width, height, MAX_CLIPBOARD_ENCODED_IMAGE_BYTES)
+}
+
+#[cfg(any(test, not(target_os = "macos")))]
+fn encode_rgba_to_png_with_limit(
+    rgba: &[u8],
+    width: usize,
+    height: usize,
+    max_output_bytes: usize,
+) -> anyhow::Result<Vec<u8>> {
     use image::codecs::png::PngEncoder;
     use image::{ColorType, ImageEncoder};
 
@@ -371,9 +378,15 @@ fn encode_rgba_to_png(rgba: &[u8], width: usize, height: usize) -> anyhow::Resul
         u32::try_from(width).map_err(|_| anyhow::anyhow!("RGBA width exceeds PNG dimensions"))?;
     let png_height =
         u32::try_from(height).map_err(|_| anyhow::anyhow!("RGBA height exceeds PNG dimensions"))?;
-    let expected_len = width
+    let pixels = width
         .checked_mul(height)
-        .and_then(|area| area.checked_mul(4))
+        .ok_or_else(|| anyhow::anyhow!("RGBA pixel count overflows addressable memory"))?;
+    anyhow::ensure!(
+        pixels <= MAX_CLIPBOARD_RGBA_PIXELS,
+        "clipboard RGBA exceeds {MAX_CLIPBOARD_RGBA_PIXELS} pixel limit"
+    );
+    let expected_len = pixels
+        .checked_mul(4)
         .ok_or_else(|| anyhow::anyhow!("RGBA byte length overflows addressable memory"))?;
     if rgba.len() < expected_len {
         anyhow::bail!(
@@ -390,10 +403,17 @@ fn encode_rgba_to_png(rgba: &[u8], width: usize, height: usize) -> anyhow::Resul
         "RGBA buffer too long: expected {expected_len} bytes for {width}x{height}, got {}",
         rgba.len()
     );
-    let mut png_buf = Vec::with_capacity(expected_len / 4);
-    let encoder = PngEncoder::new(&mut png_buf);
+    let mut output = BoundedPngOutput {
+        bytes: Vec::new(),
+        limit: max_output_bytes,
+        failed: false,
+    };
+    let encoder = PngEncoder::new(&mut output);
     encoder.write_image(rgba, png_width, png_height, ColorType::Rgba8.into())?;
-    Ok(png_buf)
+    if output.failed {
+        anyhow::bail!("clipboard PNG exceeds encoded-data limit");
+    }
+    Ok(output.bytes)
 }
 
 /// Error from [`wait_with_deadline`] when the deadline expired (child killed).
@@ -654,16 +674,9 @@ mod platform {
 
     /// Serializes every in-process NSPasteboard touch.
     ///
-    /// The metadata-only design held "no concurrent in-process pasteboard
-    /// access" by construction: all probes ran on the single UI thread and
-    /// content reads were subprocesses. The paste-time native read
-    /// ([`native_image_read`]) runs on a blocking-pool thread (the deferred
-    /// probe effect) and can overlap the UI thread's focus/tick metadata
-    /// probes — and AppKit reached via a bare `dlopen` (no NSApplication)
-    /// is NOT safe against concurrent pasteboard messaging (parallel probe
-    /// smoke tests crash with SIGSEGV/SIGABRT). The invariant is therefore
-    /// now held by lock: every native pasteboard entry point takes this
-    /// mutex for the duration of its autoreleasepool.
+    /// Metadata calls may overlap on Pager and background workers, and AppKit
+    /// reached via a bare `dlopen` (no NSApplication) is not safe against
+    /// concurrent pasteboard messaging. Keep native access serialized.
     static PASTEBOARD_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
     /// The general pasteboard as a runtime-messaged object, or `None` when
@@ -684,8 +697,10 @@ mod platform {
     }
 
     pub(super) fn clipboard_image_snapshot() -> (Option<u64>, bool) {
-        // Metadata is opportunistic: never stall the UI behind a native image read.
-        let Some(_guard) = PASTEBOARD_LOCK.try_lock() else { return (None, false); };
+        // Metadata is opportunistic: never stall the UI behind another probe.
+        let Some(_guard) = PASTEBOARD_LOCK.try_lock() else {
+            return (None, false);
+        };
         objc2::rc::autoreleasepool(|_| {
             let Some(pb) = general_pasteboard() else {
                 return (None, false);
@@ -693,9 +708,11 @@ mod platform {
             // SAFETY: changeCount returns NSInteger; pb stays retained for both reads.
             metadata_snapshot(
                 || unsafe { objc2::msg_send![&*pb, changeCount] },
-                || advertised_types(&pb).map(|advertised| {
-                    super::image_pasteable_from_types(advertised.iter().map(|t| t.as_slice()))
-                }),
+                || {
+                    advertised_types(&pb).map(|advertised| {
+                        super::image_pasteable_from_types(advertised.iter().map(|t| t.as_slice()))
+                    })
+                },
             )
         })
     }
@@ -717,7 +734,10 @@ mod platform {
     fn metadata_snapshot_rejects_changed_or_unknown_types() {
         for has_image in [Some(false), Some(true), None] {
             let mut versions = [41, 42].into_iter();
-            assert_eq!(metadata_snapshot(|| versions.next().unwrap(), || has_image), (None, false));
+            assert_eq!(
+                metadata_snapshot(|| versions.next().unwrap(), || has_image),
+                (None, false)
+            );
         }
         assert_eq!(metadata_snapshot(|| 42, || None), (None, false));
     }
@@ -727,8 +747,14 @@ mod platform {
         for has_image in [false, true] {
             let calls = std::cell::RefCell::new(Vec::new());
             let result = metadata_snapshot(
-                || { calls.borrow_mut().push("version"); 42 },
-                || { calls.borrow_mut().push("types"); Some(has_image) },
+                || {
+                    calls.borrow_mut().push("version");
+                    42
+                },
+                || {
+                    calls.borrow_mut().push("types");
+                    Some(has_image)
+                },
             );
             assert_eq!(result, (Some(42), has_image));
             assert_eq!(*calls.borrow(), ["version", "types", "version"]);
@@ -787,78 +813,6 @@ mod platform {
         Some(advertised)
     }
 
-    /// In-process pasteboard image read via the lazily `dlopen`ed AppKit.
-    ///
-    /// The paste hot path: when a raster type is advertised with no
-    /// file-URL type alongside (`native_image_type_from_types`), read the
-    /// encoded bytes with `-[NSPasteboard dataForType:]` — no subprocess, no
-    /// temp file, no AppleScript coercion. Returns `Ok(None)` for every other
-    /// pasteboard shape (file URLs present, no raster, AppKit unavailable,
-    /// nil/empty data) so callers fall back to the unchanged `osascript`
-    /// path, and `Ok(None)` when `GROW_CLIPBOARD_NO_NATIVE_READ` is set (kill
-    /// switch if a future macOS gates `dataForType:` behind a privacy
-    /// prompt; the focus/tick probes stay metadata-only either way).
-    ///
-    /// An oversized encoded image returns an error before Rust allocation;
-    /// callers propagate it instead of retrying through AppleScript.
-    ///
-    /// Thread-safety basis matches [`general_pasteboard`]: NSPasteboard is
-    /// not MainThreadOnly, and only `types` + `dataForType:` are messaged.
-    /// The deferred paste probe calls this from a blocking-pool thread, the
-    /// same off-main pattern `clipboard_prewarm` already established.
-    pub(super) fn native_image_read() -> anyhow::Result<Option<super::ImageData>> {
-        if std::env::var_os("GROW_CLIPBOARD_NO_NATIVE_READ").is_some() {
-            return Ok(None);
-        }
-        let _guard = PASTEBOARD_LOCK.lock();
-        objc2::rc::autoreleasepool(|_| {
-            let pb = general_pasteboard()?;
-            let advertised = advertised_types(&pb)?;
-            let (uti, mime) = super::native_image_type_from_types(&advertised)?;
-            let uti_cstring = std::ffi::CString::new(uti).ok()?;
-            let cls = objc2::runtime::AnyClass::get(c"NSString")?;
-            // SAFETY: +[NSString stringWithUTF8String:] takes a NUL-terminated
-            // C string (valid for the duration of the call) and returns a
-            // nullable autoreleased NSString.
-            let ns_type: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> =
-                unsafe { objc2::msg_send![cls, stringWithUTF8String: uti_cstring.as_ptr()] };
-            let ns_type = ns_type?;
-            // SAFETY: -[NSPasteboard dataForType:] takes an NSPasteboardType
-            // (NSString) and returns a nullable NSData; only requested for a
-            // type the pasteboard itself advertised.
-            let data: Option<objc2::rc::Retained<objc2::runtime::AnyObject>> =
-                unsafe { objc2::msg_send![&*pb, dataForType: &*ns_type] };
-            let data = data?;
-            // SAFETY: -[NSData length] returns NSUInteger.
-            let len: usize = unsafe { objc2::msg_send![&*data, length] };
-            if len == 0 {
-                return None;
-            }
-            if let Err(error) = check_clipboard_image_length(len) {
-                return Some(Err(error));
-            }
-            // SAFETY: -[NSData bytes] returns a pointer valid for `len` bytes
-            // while `data` is retained (it is, until the end of this scope);
-            // the bytes are copied out immediately.
-            let bytes_ptr: *const std::os::raw::c_void = unsafe { objc2::msg_send![&*data, bytes] };
-            if bytes_ptr.is_null() {
-                return None;
-            }
-            let mut buf = vec![0u8; len];
-            // SAFETY: source is valid for `len` reads (NSData contract),
-            // destination is a fresh Vec of exactly `len` bytes, and the
-            // regions cannot overlap.
-            unsafe {
-                std::ptr::copy_nonoverlapping(bytes_ptr as *const u8, buf.as_mut_ptr(), len);
-            }
-            Some(Ok(super::ImageData {
-                data: buf,
-                mime_type: mime.to_owned(),
-            }))
-        })
-        .transpose()
-    }
-
     pub(super) fn checked_command_stdout(
         label: &str,
         output: std::io::Result<std::process::Output>,
@@ -871,13 +825,15 @@ mod platform {
         Ok(output.stdout)
     }
 
-    fn attachments_probe_temp_paths() -> anyhow::Result<(tempfile::TempDir, [std::path::PathBuf; 3])> {
+    fn attachments_probe_temp_paths() -> anyhow::Result<(tempfile::TempDir, [std::path::PathBuf; 3])>
+    {
         use std::os::unix::fs::PermissionsExt;
         let directory = tempfile::Builder::new()
             .prefix("grow-clipboard-probe-")
             .permissions(std::fs::Permissions::from_mode(0o700))
             .tempdir()?;
-        let paths = ["image.png", "image.tiff", "image.jpg"].map(|name| directory.path().join(name));
+        let paths =
+            ["image.png", "image.tiff", "image.jpg"].map(|name| directory.path().join(name));
         Ok((directory, paths))
     }
 
@@ -887,18 +843,44 @@ mod platform {
         let (first, first_paths) = attachments_probe_temp_paths().unwrap();
         let (second, second_paths) = attachments_probe_temp_paths().unwrap();
         assert_ne!(first.path(), second.path());
-        assert_ne!(first_paths, second_paths, "clipboard requests must not share transfer files");
+        assert_ne!(
+            first_paths, second_paths,
+            "clipboard requests must not share transfer files"
+        );
         for directory in [&first, &second] {
-            assert_eq!(std::fs::metadata(directory.path()).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(
+                std::fs::metadata(directory.path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
         }
-        for path in &first_paths { std::fs::write(path, b"first").unwrap(); }
-        for path in &second_paths { std::fs::write(path, b"second").unwrap(); }
-        let image = read_clipboard_image_from_class("PNGf", &first_paths[0], &first_paths[1], &first_paths[2]).unwrap().unwrap();
+        for path in &first_paths {
+            std::fs::write(path, b"first").unwrap();
+        }
+        for path in &second_paths {
+            std::fs::write(path, b"second").unwrap();
+        }
+        let image = read_clipboard_image_from_class(
+            "PNGf",
+            &first_paths[0],
+            &first_paths[1],
+            &first_paths[2],
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(image.data, b"first");
         assert!(!first_paths[0].exists());
         drop(first);
-        assert!(first_paths.iter().all(|path| !path.exists()), "all fallback leftovers must be cleaned");
-        for path in &second_paths { assert_eq!(std::fs::read(path).unwrap(), b"second"); }
+        assert!(
+            first_paths.iter().all(|path| !path.exists()),
+            "all fallback leftovers must be cleaned"
+        );
+        for path in &second_paths {
+            assert_eq!(std::fs::read(path).unwrap(), b"second");
+        }
         drop(second);
         assert!(second_paths.iter().all(|path| !path.exists()));
     }
@@ -918,14 +900,6 @@ mod platform {
     }
 
     const MAX_CLIPBOARD_IMAGE_BYTES: usize = 50_000_000;
-
-    fn check_clipboard_image_length(len: usize) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            len <= MAX_CLIPBOARD_IMAGE_BYTES,
-            "clipboard image exceeds the 50 MB encoded-data limit"
-        );
-        Ok(())
-    }
 
     fn read_clipboard_image_bytes(
         reader: impl std::io::Read,
@@ -970,16 +944,6 @@ mod platform {
     }
 
     #[test]
-    fn clipboard_native_length_budget_rejects_before_buffer_allocation() {
-        for size in [0, 1, MAX_CLIPBOARD_IMAGE_BYTES] {
-            assert!(check_clipboard_image_length(size).is_ok());
-        }
-        for size in [MAX_CLIPBOARD_IMAGE_BYTES + 1, usize::MAX] {
-            assert!(check_clipboard_image_length(size).is_err());
-        }
-    }
-
-    #[test]
     fn clipboard_oversized_temp_image_is_rejected_and_removed() {
         let (directory, paths) = attachments_probe_temp_paths().unwrap();
         let root = directory.path().to_owned();
@@ -988,8 +952,13 @@ mod platform {
         // fifty megabytes of fixture data to disk.
         file.set_len(MAX_CLIPBOARD_IMAGE_BYTES as u64 + 1).unwrap();
         drop(file);
-        let error = read_clipboard_image_from_class("PNGf", &paths[0], &paths[1], &paths[2]).unwrap_err();
-        assert!(error.to_string().contains("50000000-byte encoded-data limit"));
+        let error =
+            read_clipboard_image_from_class("PNGf", &paths[0], &paths[1], &paths[2]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("50000000-byte encoded-data limit")
+        );
         assert!(!paths[0].exists());
         drop(directory);
         assert!(!root.exists());
@@ -1042,6 +1011,30 @@ mod platform {
 
     const SCRIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
     const SCRIPT_OUTPUT_LIMIT: u64 = 1024 * 1024;
+    const CLIPBOARD_TRANSFER_FILE_LIMIT: u64 = 50_000_000;
+
+    fn set_child_file_size_limit(command: &mut Command, limit: u64) {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: getrlimit/setrlimit only touch child-local process state in
+        // the post-fork, pre-exec hook. Lower both ceilings so the child cannot
+        // raise its soft limit while writing clipboard transfer files.
+        unsafe {
+            command.pre_exec(move || {
+                let requested = libc::rlim_t::try_from(limit).map_err(std::io::Error::other)?;
+                let mut current = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+                if libc::getrlimit(libc::RLIMIT_FSIZE, current.as_mut_ptr()) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let mut current = current.assume_init();
+                current.rlim_cur = current.rlim_cur.min(requested);
+                current.rlim_max = current.rlim_max.min(requested);
+                if libc::setrlimit(libc::RLIMIT_FSIZE, &current) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
 
     fn run_clipboard_script(
         mut command: Command,
@@ -1059,6 +1052,7 @@ mod platform {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        set_child_file_size_limit(&mut command, CLIPBOARD_TRANSFER_FILE_LIMIT);
         // The caller must use clipboard_osascript_command (or detach a test
         // command) so the child leads an independently owned process group.
         #[allow(clippy::disallowed_methods)] // bounded owned clipboard script
@@ -1182,6 +1176,41 @@ mod platform {
     }
 
     #[test]
+    fn clipboard_script_limits_transfer_file_size_and_cleanup() {
+        use std::time::Duration;
+
+        for (bytes, succeeds) in [(16, true), (17, false)] {
+            let (directory, paths) = attachments_probe_temp_paths().unwrap();
+            let root = directory.path().to_owned();
+            let script = format!("head -c {bytes} /dev/zero > \"$1\"");
+            let mut command = Command::new("/bin/sh");
+            command
+                .arg("-c")
+                .arg(script)
+                .arg("clipboard-test")
+                .arg(&paths[0]);
+            set_child_file_size_limit(&mut command, 16);
+            tty_utils::detach_std_command(&mut command);
+            let output = run_clipboard_script(command, Duration::from_secs(2)).unwrap();
+            assert_eq!(output.status.success(), succeeds, "size={bytes}");
+            assert_eq!(
+                std::fs::metadata(&paths[0]).unwrap().len(),
+                bytes.min(16) as u64
+            );
+            let result = checked_command_stdout("osascript", Ok(output));
+            assert_eq!(result.is_ok(), succeeds, "size={bytes}");
+            if result.is_err() {
+                remove_attachment_probe_temps(&paths[0], &paths[1], &paths[2]);
+            }
+            drop(directory);
+            assert!(
+                !root.exists(),
+                "private transfer directory survived cleanup"
+            );
+        }
+    }
+
+    #[test]
     fn clipboard_script_reaps_hung_and_exited_leader_groups() {
         use std::time::{Duration, Instant};
         for leader_exits in [false, true] {
@@ -1214,9 +1243,14 @@ mod platform {
 
     fn clipboard_osascript_command(body: &str, paths: &[&std::path::Path]) -> Command {
         let mut command = Command::new("osascript");
-        command.arg("-e").arg(format!("on run argv\n{body}\nend run"))
-            .arg("--").args(paths)
-            .stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        command
+            .arg("-e")
+            .arg(format!("on run argv\n{body}\nend run"))
+            .arg("--")
+            .args(paths)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
         tty_utils::detach_std_command(&mut command);
         command
     }
@@ -1231,9 +1265,16 @@ mod platform {
             "-leading-option",
             "\" & (do shell script \"false\") & \"",
         ] {
-            let mut command = clipboard_osascript_command("return item 1 of argv", &[std::path::Path::new(&value)]);
+            let mut command = clipboard_osascript_command(
+                "return item 1 of argv",
+                &[std::path::Path::new(&value)],
+            );
             let output = command.output().unwrap();
-            assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
             assert_eq!(output.stdout, format!("{value}\n").as_bytes());
         }
     }
@@ -1241,12 +1282,54 @@ mod platform {
     #[test]
     fn clipboard_osascript_attachment_body_compiles_without_clipboard_access() {
         let directory = tempfile::tempdir().unwrap();
-        let command = clipboard_osascript_command(&attachments_osascript(), &[]);
-        let script = command.get_args().nth(1).unwrap();
-        let output = Command::new("/usr/bin/osacompile")
-            .arg("-o").arg(directory.path().join("probe.scpt"))
-            .arg("-e").arg(script).stdin(Stdio::null()).output().unwrap();
-        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+        for (name, body) in [
+            ("attachments", attachments_osascript()),
+            ("image", clipboard_image_osascript()),
+        ] {
+            let command = clipboard_osascript_command(&body, &[]);
+            let script = command.get_args().nth(1).unwrap();
+            let output = Command::new("/usr/bin/osacompile")
+                .arg("-o")
+                .arg(directory.path().join(format!("{name}.scpt")))
+                .arg("-e")
+                .arg(script)
+                .stdin(Stdio::null())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{name}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        assert_clipboard_image_write_errors_escape_coercion_fallback(&attachments_osascript());
+        assert_clipboard_image_write_errors_escape_coercion_fallback(&clipboard_image_osascript());
+    }
+
+    #[cfg(test)]
+    fn assert_clipboard_image_write_errors_escape_coercion_fallback(script: &str) {
+        let image_script = &script[script.find("set imgData to missing value").unwrap()..];
+        for class in ["PNGf", "TIFF", "JPEG"] {
+            let coercion = format!("set imgData to the clipboard as «class {class}»");
+            let coercion_start = image_script.find(&coercion).unwrap();
+            let try_start = image_script[..coercion_start].rfind("try").unwrap();
+            let fallback_end = image_script[coercion_start..]
+                .find("end try")
+                .map(|offset| coercion_start + offset + "end try".len())
+                .unwrap();
+            let write = image_script[fallback_end..]
+                .find("write imgData to fRef")
+                .map(|offset| fallback_end + offset)
+                .unwrap();
+            assert!(
+                try_start < coercion_start,
+                "{class} coercion must be caught"
+            );
+            assert!(
+                fallback_end < write,
+                "{class} file writes must escape the catch"
+            );
+        }
     }
 
     fn attachments_osascript() -> String {
@@ -1279,36 +1362,47 @@ mod platform {
              end try\n\
              set imageOut to \"NONE\"\n\
              if furlOut is \"none\" then\n\
+             set imgData to missing value\n\
              try\n\
              set imgData to the clipboard as \u{00AB}class PNGf\u{00BB}\n\
+             on error\n\
+             end try\n\
+             if imgData is not missing value then\n\
              set filePath to POSIX file (item 1 of argv) as text\n\
              set fRef to open for access file filePath with write permission\n\
              set eof of fRef to 0\n\
              write imgData to fRef\n\
              close access fRef\n\
              set imageOut to \"PNGf\"\n\
-             on error\n\
+             else\n\
+             set imgData to missing value\n\
              try\n\
              set imgData to the clipboard as \u{00AB}class TIFF\u{00BB}\n\
+             on error\n\
+             end try\n\
+             if imgData is not missing value then\n\
              set filePath to POSIX file (item 2 of argv) as text\n\
              set fRef to open for access file filePath with write permission\n\
              set eof of fRef to 0\n\
              write imgData to fRef\n\
              close access fRef\n\
              set imageOut to \"TIFF\"\n\
-             on error\n\
+             else\n\
+             set imgData to missing value\n\
              try\n\
              set imgData to the clipboard as \u{00AB}class JPEG\u{00BB}\n\
+             on error\n\
+             end try\n\
+             if imgData is not missing value then\n\
              set filePath to POSIX file (item 3 of argv) as text\n\
              set fRef to open for access file filePath with write permission\n\
              set eof of fRef to 0\n\
              write imgData to fRef\n\
              close access fRef\n\
              set imageOut to \"JPEG\"\n\
-             on error\n\
-             end try\n\
-             end try\n\
-             end try\n\
+             end if\n\
+             end if\n\
+             end if\n\
              end if\n\
              return \"{furl_marker}\" & linefeed & furlOut & linefeed & \"{image_marker}\" & linefeed & \"IMAGE:\" & imageOut",
             furl_marker = FURL_MARKER,
@@ -1326,31 +1420,20 @@ mod platform {
         let script = attachments_osascript();
 
         let cmd = clipboard_osascript_command(&script, &[path_png, path_tiff, path_jpg]);
-        let stdout = match checked_command_stdout("osascript", run_clipboard_script(cmd, SCRIPT_TIMEOUT)) {
-            Ok(stdout) => stdout,
-            Err(error) => {
-                remove_attachment_probe_temps(&path_png, &path_tiff, &path_jpg);
-                return Err(error);
-            }
-        };
+        let stdout =
+            match checked_command_stdout("osascript", run_clipboard_script(cmd, SCRIPT_TIMEOUT)) {
+                Ok(stdout) => stdout,
+                Err(error) => {
+                    remove_attachment_probe_temps(&path_png, &path_tiff, &path_jpg);
+                    return Err(error);
+                }
+            };
         Ok(String::from_utf8_lossy(&stdout).into_owned())
     }
 
-    /// Unified furl-then-image pasteboard probe.
-    ///
-    /// Hot path first: a raster advertised with no file-URL type is read
-    /// in-process (`native_image_read`, no subprocess / temp file). This is
-    /// reachable only when the pasteboard text was empty or unactionable, so
-    /// the text→`furl` coercions the AppleScript performs cannot apply — a
-    /// furl can only come from an advertised file-URL type, which routes to
-    /// the `osascript` below exactly as before.
+    /// Unified furl-then-image pasteboard probe. All image bytes are obtained
+    /// through the bounded AppleScript temporary-file transfer path.
     pub fn get_attachments() -> anyhow::Result<ClipboardAttachments> {
-        if let Some(image) = native_image_read()? {
-            return Ok(ClipboardAttachments {
-                file_urls: None,
-                image: Some(image),
-            });
-        }
         let (_directory, [path_png, path_tiff, path_jpg]) = attachments_probe_temp_paths()?;
         let raw = run_attachments_osascript(&path_png, &path_tiff, &path_jpg)?;
         if raw.trim().is_empty() {
@@ -1387,7 +1470,7 @@ mod platform {
             .stdout(Stdio::piped())
             .stderr(Stdio::null());
         tty_utils::detach_std_command(&mut cmd);
-        let stdout = checked_command_stdout("pbpaste", cmd.output())?;
+        let stdout = checked_command_stdout("pbpaste", run_clipboard_script(cmd, SCRIPT_TIMEOUT))?;
         if stdout.is_empty() {
             return Ok(None);
         }
@@ -1434,68 +1517,73 @@ mod platform {
     /// Read an image from the macOS clipboard via `osascript`.
     ///
     /// Probes PNG, TIFF, then JPEG in a single `osascript` invocation
-    /// using nested `try` blocks. This avoids spawning up to 3 separate
-    /// subprocesses when no image is present, reducing worst-case latency
-    /// from ~300-600 ms to ~100-200 ms.
+    /// with coercion-only format fallbacks. Simple image paste pays the subprocess and
+    /// temporary-file transfer cost (typically ~0.5–0.9 seconds).
     ///
-    /// Uses a temp file as the transfer medium to avoid brittle hex
-    /// parsing of AppleScript output.
-    pub fn get_image() -> anyhow::Result<Option<ImageData>> {
-        // Hot path: raster advertised with no file-URL type — in-process
-        // read, no subprocess. Any other shape (including the Copy-Image
-        // caption case where only legacy raster spellings are advertised)
-        // falls through to the AppleScript coercion below unchanged.
-        if let Some(image) = native_image_read()? {
-            return Ok(Some(image));
-        }
-
-        let (_directory, [path_png, path_tiff, path_jpg]) = attachments_probe_temp_paths()?;
-        remove_attachment_probe_temps(&path_png, &path_tiff, &path_jpg);
-
-        // Image-only AppleScript (ImageOnly paste route). Unicode guillemets
-        // (\u{AB}/\u{BB}) are required for `«class …»` in `osascript -e`.
-        let script = format!(
-            "try\n\
+    /// Uses a temp file to avoid brittle hex parsing and keep pasteboard image
+    /// materialization outside Grow's process.
+    fn clipboard_image_osascript() -> String {
+        format!(
+            "set imgData to missing value\n\
+             try\n\
              set imgData to the clipboard as \u{00AB}class PNGf\u{00BB}\n\
+             on error\n\
+             end try\n\
+             if imgData is not missing value then\n\
              set filePath to POSIX file (item 1 of argv) as text\n\
              set fRef to open for access file filePath with write permission\n\
              set eof of fRef to 0\n\
              write imgData to fRef\n\
              close access fRef\n\
              return \"PNGf\"\n\
-             on error\n\
+             end if\n\
+             set imgData to missing value\n\
              try\n\
              set imgData to the clipboard as \u{00AB}class TIFF\u{00BB}\n\
+             on error\n\
+             end try\n\
+             if imgData is not missing value then\n\
              set filePath to POSIX file (item 2 of argv) as text\n\
              set fRef to open for access file filePath with write permission\n\
              set eof of fRef to 0\n\
              write imgData to fRef\n\
              close access fRef\n\
              return \"TIFF\"\n\
-             on error\n\
+             end if\n\
+             set imgData to missing value\n\
              try\n\
              set imgData to the clipboard as \u{00AB}class JPEG\u{00BB}\n\
+             on error\n\
+             end try\n\
+             if imgData is not missing value then\n\
              set filePath to POSIX file (item 3 of argv) as text\n\
              set fRef to open for access file filePath with write permission\n\
              set eof of fRef to 0\n\
              write imgData to fRef\n\
              close access fRef\n\
              return \"JPEG\"\n\
-             on error\n\
-             return \"none\"\n\
-             end try\n\
-             end try\n\
-             end try",
-        );
+             end if\n\
+             return \"none\"",
+        )
+    }
+
+    pub fn get_image() -> anyhow::Result<Option<ImageData>> {
+        let (_directory, [path_png, path_tiff, path_jpg]) = attachments_probe_temp_paths()?;
+        remove_attachment_probe_temps(&path_png, &path_tiff, &path_jpg);
+
+        // Image-only AppleScript (ImageOnly paste route). Unicode guillemets
+        // (\u{AB}/\u{BB}) are required for `«class …»` in `osascript -e`.
+        let script = clipboard_image_osascript();
 
         let cmd = clipboard_osascript_command(&script, &[&path_png, &path_tiff, &path_jpg]);
-        let stdout = match checked_command_stdout("osascript", run_clipboard_script(cmd, SCRIPT_TIMEOUT)) {
-            Ok(stdout) => stdout,
-            Err(error) => {
-                remove_attachment_probe_temps(&path_png, &path_tiff, &path_jpg);
-                return Err(error);
-            }
-        };
+        let stdout =
+            match checked_command_stdout("osascript", run_clipboard_script(cmd, SCRIPT_TIMEOUT)) {
+                Ok(stdout) => stdout,
+                Err(error) => {
+                    remove_attachment_probe_temps(&path_png, &path_tiff, &path_jpg);
+                    return Err(error);
+                }
+            };
         let class = String::from_utf8_lossy(&stdout);
         let class = class.trim();
         if class == "none" {
@@ -1693,6 +1781,27 @@ mod platform {
     /// harmless while the lease keeps the shared backend alive.
     const ARBOARD_READ_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
 
+    static ARBOARD_IMAGE_ACTIVE: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+
+    struct ArboardImagePermit;
+
+    impl ArboardImagePermit {
+        fn try_acquire() -> anyhow::Result<Self> {
+            use std::sync::atomic::Ordering;
+            ARBOARD_IMAGE_ACTIVE
+                .compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+                .map_err(|_| anyhow::anyhow!("arboard image read already active"))?;
+            Ok(Self)
+        }
+    }
+
+    impl Drop for ArboardImagePermit {
+        fn drop(&mut self) {
+            ARBOARD_IMAGE_ACTIVE.store(false, std::sync::atomic::Ordering::Release);
+        }
+    }
+
     fn arboard_read_with_deadline<T: Send + 'static>(
         op: impl FnOnce(&mut arboard::Clipboard) -> anyhow::Result<T> + Send + 'static,
     ) -> anyhow::Result<T> {
@@ -1746,18 +1855,17 @@ mod platform {
     }
 
     fn arboard_get_image() -> anyhow::Result<Option<ImageData>> {
-        arboard_read_with_deadline(|clipboard| {
+        let permit = ArboardImagePermit::try_acquire()?;
+        arboard_read_with_deadline(move |clipboard| {
+            let _permit = permit;
             let img_data = match clipboard.get_image() {
                 Ok(data) => data,
                 Err(arboard::Error::ContentNotAvailable) => return Ok(None),
                 Err(err) => return Err(err.into()),
             };
 
-            let png_bytes = super::encode_rgba_to_png(
-                &img_data.bytes,
-                img_data.width,
-                img_data.height,
-            )?;
+            let png_bytes =
+                super::encode_rgba_to_png(&img_data.bytes, img_data.width, img_data.height)?;
 
             Ok(Some(ImageData {
                 data: png_bytes,
@@ -1927,7 +2035,7 @@ mod platform {
     pub(super) fn wayland_data_control_supported() -> bool {
         static CACHE: parking_lot::Mutex<ProbeCache> = parking_lot::Mutex::new(ProbeCache::new());
         // Env gates are runtime-constant: no lock and no probe. The kill
-        // switch (precedent: GROW_CLIPBOARD_NO_NATIVE_READ) and non-Wayland
+        // switch and non-Wayland
         // sessions are always "no data-control".
         if data_control_kill_switch_set() || !env_present("WAYLAND_DISPLAY") {
             return false;
@@ -2194,6 +2302,7 @@ mod platform {
     fn run_capture_out_with_status(
         argv: &[&str],
         deadline: std::time::Duration,
+        max_bytes: Option<usize>,
     ) -> anyhow::Result<(std::process::ExitStatus, Vec<u8>)> {
         let (bin, args) = argv.split_first().expect("argv non-empty");
         let mut cmd = Command::new(bin);
@@ -2210,20 +2319,31 @@ mod platform {
         // without deadlocking on a full pipe; the kill EOFs the pipe and the
         // reader exits on its own.
         let mut stdout = child.stdout.take().expect("stdout piped");
-        let reader = std::thread::spawn(move || {
+        let reader = std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
             use std::io::Read;
             let mut buf = Vec::new();
-            let _ = stdout.read_to_end(&mut buf);
-            buf
+            if let Some(limit) = max_bytes {
+                stdout.take((limit as u64) + 1).read_to_end(&mut buf)?;
+                if buf.len() > limit {
+                    return Err(std::io::Error::other(format!(
+                        "clipboard image exceeds the {limit}-byte encoded-data limit"
+                    )));
+                }
+            } else {
+                stdout.read_to_end(&mut buf)?;
+            }
+            Ok(buf)
         });
         let status = super::wait_with_deadline(&mut child, deadline)?;
-        let stdout = reader.join().unwrap_or_default();
+        let stdout = reader
+            .join()
+            .map_err(|_| anyhow::anyhow!("clipboard output reader panicked"))??;
         Ok((status, stdout))
     }
 
     #[cfg(target_os = "linux")]
     fn run_capture_out(argv: &[&str], deadline: std::time::Duration) -> anyhow::Result<Vec<u8>> {
-        let (status, stdout) = run_capture_out_with_status(argv, deadline)?;
+        let (status, stdout) = run_capture_out_with_status(argv, deadline, None)?;
         if !status.success() {
             return Ok(Vec::new());
         }
@@ -2234,8 +2354,9 @@ mod platform {
     fn run_capture_out_checked(
         argv: &[&str],
         deadline: std::time::Duration,
+        max_bytes: Option<usize>,
     ) -> anyhow::Result<Vec<u8>> {
-        let (status, stdout) = run_capture_out_with_status(argv, deadline)?;
+        let (status, stdout) = run_capture_out_with_status(argv, deadline, max_bytes)?;
         if !status.success() {
             let bin = argv.first().copied().unwrap_or("clipboard tool");
             anyhow::bail!("{bin} exited with status {status}");
@@ -2375,7 +2496,7 @@ mod platform {
         }
         #[cfg(target_os = "linux")]
         if let Some(spec) = linux_tool_spec() {
-            let bytes = run_capture_out_checked(spec.read_text, CLI_READ_WAIT)?;
+            let bytes = run_capture_out_checked(spec.read_text, CLI_READ_WAIT, None)?;
             return Ok(if bytes.is_empty() {
                 None
             } else {
@@ -2399,7 +2520,7 @@ mod platform {
         match read_x11_primary_with_tools(
             display_env_present,
             x11_primary_tool_available,
-            |_, argv| run_capture_out_checked(argv, CLI_READ_WAIT),
+            |_, argv| run_capture_out_checked(argv, CLI_READ_WAIT, None),
         ) {
             PrimaryCliRead::Text(text) => return Ok(Some(text)),
             PrimaryCliRead::Empty => return Ok(None),
@@ -2490,7 +2611,11 @@ mod platform {
         if let Some(spec) = linux_tool_spec()
             && let Some(argv) = spec.read_png
         {
-            let bytes = run_capture_out_checked(argv, CLI_READ_WAIT)?;
+            let bytes = run_capture_out_checked(
+                argv,
+                CLI_READ_WAIT,
+                Some(super::MAX_CLIPBOARD_ENCODED_IMAGE_BYTES),
+            )?;
             if !bytes.is_empty() {
                 let mime = super::mime_from_bytes(&bytes);
                 return Ok(Some(ImageData {
@@ -2546,7 +2671,6 @@ mod platform {
             anyhow::bail!("image clipboard not supported on this platform")
         }
     }
-
 
     pub fn get_attachments() -> anyhow::Result<super::ClipboardAttachments> {
         let file_urls = get_file_urls()?;
@@ -2616,12 +2740,44 @@ mod platform {
             });
             assert_eq!(result, Err(RecvTimeoutError::Disconnected));
         }
+
+        #[test]
+        fn timed_out_image_worker_retains_permit_until_it_exits() {
+            let permit = ArboardImagePermit::try_acquire().unwrap();
+            let (release, wait) = std::sync::mpsc::channel();
+            let (finished, done) = std::sync::mpsc::channel();
+            let result =
+                spawn_with_deadline("test-image-permit", Duration::from_millis(30), move || {
+                    let _permit = permit;
+                    wait.recv().unwrap();
+                    drop(_permit);
+                    finished.send(()).unwrap();
+                });
+            assert_eq!(result, Err(RecvTimeoutError::Timeout));
+            assert!(ArboardImagePermit::try_acquire().is_err());
+            release.send(()).unwrap();
+            done.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert!(ArboardImagePermit::try_acquire().is_ok());
+        }
     }
 
     #[cfg(all(test, target_os = "linux"))]
     mod linux_tests {
         use super::*;
         use crate::clipboard::WaylandDataControlProbe;
+
+        #[test]
+        fn image_helper_capture_accepts_exact_limit_and_rejects_overflow() {
+            let argv = ["sh", "-c", "printf abcd"];
+            let (_, exact) =
+                run_capture_out_with_status(&argv, std::time::Duration::from_secs(1), Some(4))
+                    .unwrap();
+            assert_eq!(exact, b"abcd");
+            let error =
+                run_capture_out_with_status(&argv, std::time::Duration::from_secs(1), Some(3))
+                    .unwrap_err();
+            assert!(error.to_string().contains("encoded-data limit"));
+        }
 
         #[test]
         fn primary_read_argv_targets_x11_primary_exactly() {
@@ -3318,7 +3474,7 @@ mod tests {
     // -----------------------------------------------------------------------
 
     mod rgba_encoding {
-        use super::super::encode_rgba_to_png;
+        use super::super::{encode_rgba_to_png, encode_rgba_to_png_with_limit};
         use super::*;
 
         #[test]
@@ -3329,7 +3485,10 @@ mod tests {
             // Verify it starts with PNG magic
             assert_eq!(mime_from_bytes(&png), "image/png");
             assert!(png.len() > 8, "PNG output too short");
-            assert_eq!(image::load_from_memory(&png).unwrap().to_rgba8().into_raw(), rgba);
+            assert_eq!(
+                image::load_from_memory(&png).unwrap().to_rgba8().into_raw(),
+                rgba
+            );
         }
 
         #[test]
@@ -3349,7 +3508,11 @@ mod tests {
                 (vec![], 1, 0),
             ] {
                 let result = std::panic::catch_unwind(|| encode_rgba_to_png(&rgba, width, height));
-                assert!(result.is_ok(), "encoder panicked for {width}x{height}, {} bytes", rgba.len());
+                assert!(
+                    result.is_ok(),
+                    "encoder panicked for {width}x{height}, {} bytes",
+                    rgba.len()
+                );
                 assert!(result.unwrap().is_err());
             }
         }
@@ -3357,8 +3520,18 @@ mod tests {
         #[test]
         fn encode_dimensions_are_not_truncated() {
             if let Some(width) = (u32::MAX as usize).checked_add(1) {
-                assert!(encode_rgba_to_png(&[], width, 1).unwrap_err().to_string().contains("width"));
-                assert!(encode_rgba_to_png(&[], 1, width).unwrap_err().to_string().contains("height"));
+                assert!(
+                    encode_rgba_to_png(&[], width, 1)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("width")
+                );
+                assert!(
+                    encode_rgba_to_png(&[], 1, width)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("height")
+                );
             }
         }
 
@@ -3373,6 +3546,23 @@ mod tests {
                 msg.contains("RGBA buffer too short"),
                 "unexpected error: {msg}"
             );
+        }
+
+        #[test]
+        fn oversized_pixels_are_rejected_before_encoding() {
+            let error = encode_rgba_to_png(&[], 4_001, 4_000).unwrap_err();
+            assert!(error.to_string().contains("pixel limit"));
+        }
+
+        #[test]
+        fn png_output_accepts_exact_limit_and_rejects_one_less_byte() {
+            let rgba = [255u8, 0, 0, 255];
+            let png = encode_rgba_to_png(&rgba, 1, 1).unwrap();
+            assert_eq!(
+                encode_rgba_to_png_with_limit(&rgba, 1, 1, png.len()).unwrap(),
+                png
+            );
+            assert!(encode_rgba_to_png_with_limit(&rgba, 1, 1, png.len() - 1).is_err());
         }
     }
 
@@ -3613,53 +3803,6 @@ mod tests {
         ])));
         assert!(!image_pasteable_from_types(types(&[])));
     }
-
-    // -----------------------------------------------------------------------
-    // Native paste-time read type selection (native_image_type_from_types)
-    // -----------------------------------------------------------------------
-
-    /// The native read requests raster types in the osascript coercion
-    /// order — PNG first, TIFF, then JPEG — regardless of advertised order.
-    #[test]
-    fn native_type_priority_matches_osascript_order() {
-        assert_eq!(
-            native_image_type_from_types(&[b"public.tiff".as_slice(), b"public.png"]),
-            Some((b"public.png".as_slice(), "image/png")),
-        );
-        assert_eq!(
-            native_image_type_from_types(&[b"public.jpeg".as_slice(), b"public.tiff"]),
-            Some((b"public.tiff".as_slice(), "image/tiff")),
-        );
-        assert_eq!(
-            native_image_type_from_types(&[b"public.jpeg".as_slice()]),
-            Some((b"public.jpeg".as_slice(), "image/jpeg")),
-        );
-    }
-
-    /// File-URL advertisements force the osascript furl path (`None`):
-    /// the native read must never swallow a Finder file copy as raster.
-    #[test]
-    fn native_type_defers_to_furl_path() {
-        assert_eq!(
-            native_image_type_from_types(&[b"public.file-url".as_slice(), b"public.png"]),
-            None,
-        );
-        assert_eq!(
-            native_image_type_from_types(&[b"public.png".as_slice(), b"NSFilenamesPboardType"]),
-            None,
-        );
-    }
-
-    /// Raster-less boards (text, empty) never native-read.
-    #[test]
-    fn native_type_none_without_raster() {
-        assert_eq!(
-            native_image_type_from_types(&[b"public.utf8-plain-text".as_slice()]),
-            None,
-        );
-        let empty: [&[u8]; 0] = [];
-        assert_eq!(native_image_type_from_types(&empty), None);
-    }
 }
 
 #[cfg(all(test, target_os = "macos"))]
@@ -3679,27 +3822,5 @@ mod macos_probe_smoke {
             change_count.is_some(),
             "changeCount probe should resolve on a real macOS session"
         );
-    }
-
-    /// The native paste-time read must agree with the snapshot classification
-    /// on whatever is currently on the pasteboard: snapshot says no pasteable
-    /// raster ⇒ the native read returns None; snapshot says raster ⇒ the
-    /// native read yields non-empty encoded bytes (both read the same
-    /// advertised type list). Non-mutating — safe to run on a dev machine.
-    #[test]
-    #[ignore = "requires a real pasteboard; run manually on macOS"]
-    fn probe_smoke_native_read_consistent_with_snapshot() {
-        let (_change_count, has_image) = clipboard_image_snapshot();
-        let native = platform::native_image_read().expect("native read budget");
-        if has_image {
-            let img = native.expect("snapshot reported a pasteable raster");
-            assert!(!img.data.is_empty(), "native read returned empty bytes");
-            assert!(img.mime_type.starts_with("image/"));
-        } else {
-            assert!(
-                native.is_none(),
-                "native read must not fire when the snapshot rules out a raster"
-            );
-        }
     }
 }

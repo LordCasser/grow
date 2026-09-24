@@ -220,7 +220,7 @@ impl MvpAgent {
                 std::time::Duration::from_secs(600),
             ),
         };
-        tokio::task::spawn_local(
+        self.spawn_owned_local(
             tools::implementations::grow_build::task::coordinator::SubagentCoordinator::new(
                 rx, runner, config,
             )

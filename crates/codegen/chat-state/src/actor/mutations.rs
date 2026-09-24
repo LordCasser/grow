@@ -6,7 +6,10 @@ use sampling_types::{
 
 use super::ChatStateActor;
 use crate::MessageCause;
-use crate::actor::state::{AttemptUsageSettlement, SubagentUsageSettlement};
+use crate::actor::state::{
+    AttemptUsageSettlement, AuxiliaryAttemptKey, AuxiliaryAttemptSettlement, AuxiliaryAttemptStart,
+    SubagentUsageSettlement,
+};
 use crate::events::ChatStateEvent;
 
 /// Static string label for tracing on `ConversationItem` (avoids pulling
@@ -25,7 +28,9 @@ fn item_kind_str(item: &ConversationItem) -> &'static str {
 
 fn message_cause(item: &ConversationItem) -> Result<MessageCause, crate::TimelineError> {
     match item {
-        ConversationItem::System(_) | ConversationItem::AgentMessage(_) => Err(crate::TimelineError::InvalidMessageShape),
+        ConversationItem::System(_) | ConversationItem::AgentMessage(_) => {
+            Err(crate::TimelineError::InvalidMessageShape)
+        }
         ConversationItem::User(user)
             if matches!(
                 user.synthetic_reason.as_ref(),
@@ -168,10 +173,11 @@ impl ChatStateActor {
                 .as_ref()
                 .expect("response admission lookup always has metadata")
                 .quarantined_tool_exchanges;
-            let mut repaired = self.state.timeline.surface().to_vec();
-            let repaired_count =
-                crate::compaction_utils::quarantine_malformed_tool_exchanges(&mut repaired);
-            if repaired_count > 0 {
+            if crate::compaction_utils::has_malformed_tool_identity(self.state.timeline.surface()) {
+                let mut repaired = self.state.timeline.surface().to_vec();
+                let repaired_count =
+                    crate::compaction_utils::quarantine_malformed_tool_exchanges(&mut repaired);
+                debug_assert!(repaired_count > 0);
                 self.replace_conversation_durably(repaired, MessageCause::IntegrityRepair)
                     .await?;
             }
@@ -180,10 +186,19 @@ impl ChatStateActor {
 
         let first_new_index = self.state.timeline.surface_len();
         let tokens = super::state::estimate_conversation_tokens(&items);
-        let mut candidate = self.state.timeline.surface().to_vec();
-        candidate.extend(items.iter().cloned());
-        let quarantined =
-            crate::compaction_utils::quarantine_malformed_tool_exchanges(&mut candidate);
+        let repair = if crate::compaction_utils::has_malformed_tool_identity(
+            self.state.timeline.surface().iter().chain(&items),
+        ) {
+            let mut candidate = self.state.timeline.surface().to_vec();
+            candidate.extend(items.iter().cloned());
+            let quarantined =
+                crate::compaction_utils::quarantine_malformed_tool_exchanges(&mut candidate);
+            debug_assert!(quarantined > 0);
+            Some((candidate, quarantined))
+        } else {
+            None
+        };
+        let quarantined = repair.as_ref().map_or(0, |(_, count)| *count);
         let event = self
             .state
             .timeline
@@ -199,7 +214,7 @@ impl ChatStateActor {
         self.commit_timeline_event(event).await?;
         self.apply_projected_token_delta(0, tokens);
 
-        if quarantined > 0 {
+        if let Some((candidate, _)) = repair {
             self.replace_conversation_durably(candidate, MessageCause::IntegrityRepair)
                 .await?;
             return Ok(quarantined);
@@ -618,6 +633,143 @@ impl ChatStateActor {
         self.state
             .settled_model_attempts
             .insert(settlement.attempt_key.clone(), settlement);
+        self.publish_session_usage();
+        Ok(true)
+    }
+
+    pub(super) async fn begin_auxiliary_attempt_usage(
+        &mut self,
+        sideband_id: String,
+        attempt_no: u32,
+        model_id: String,
+        captured_prompt_index: Option<usize>,
+    ) -> Result<bool, crate::commands::TimelineWriteError> {
+        let start = AuxiliaryAttemptStart {
+            key: AuxiliaryAttemptKey {
+                sideband_id,
+                attempt_no,
+            },
+            model_id,
+            captured_prompt_index,
+        };
+        start
+            .validate()
+            .map_err(crate::commands::TimelineWriteError::InvalidAuxiliaryUsage)?;
+        match self.state.auxiliary_attempts.get(&start.key) {
+            Some((existing, _)) if existing == &start => return Ok(false),
+            Some(_) => return Err(crate::commands::TimelineWriteError::AttemptUsageConflict),
+            None => {}
+        }
+        if !self.state.timeline.events().iter().any(|event| matches!(
+            &event.kind,
+            crate::TimelineEventKind::Sideband(spawn) if spawn.sideband_id == start.key.sideband_id
+        )) {
+            return Err(crate::commands::TimelineWriteError::InvalidAuxiliaryUsage("Sideband has no durable spawn".into()));
+        }
+        let segment_index = self.state.session_usage.current_segment_index();
+        let event = self
+            .state
+            .timeline
+            .prepare(crate::TimelineEventKind::Observation(
+                crate::ObservationEvent {
+                    scope: "sampling_usage".into(),
+                    name: "aux_attempt_started".into(),
+                    turn: None,
+                    step: None,
+                    data: Some(serde_json::to_value(&start).expect("auxiliary start serializable")),
+                },
+            ))?;
+        self.commit_timeline_event(event).await?;
+        self.state
+            .auxiliary_attempts
+            .insert(start.key.clone(), (start, segment_index));
+        Ok(true)
+    }
+
+    pub(super) async fn settle_auxiliary_attempt_usage(
+        &mut self,
+        sideband_id: String,
+        attempt_no: u32,
+        usage: Option<TokenUsage>,
+        cost_usd_ticks: Option<i64>,
+        api_duration_ms: Option<u64>,
+    ) -> Result<bool, crate::commands::TimelineWriteError> {
+        let settlement = AuxiliaryAttemptSettlement {
+            key: AuxiliaryAttemptKey {
+                sideband_id,
+                attempt_no,
+            },
+            usage,
+            cost_usd_ticks,
+            api_duration_ms,
+        };
+        settlement
+            .validate()
+            .map_err(crate::commands::TimelineWriteError::InvalidAuxiliaryUsage)?;
+        if let Some(existing) = self.state.settled_auxiliary_attempts.get(&settlement.key) {
+            if existing.matches(&settlement) {
+                return Ok(false);
+            }
+            return Err(crate::commands::TimelineWriteError::AttemptUsageConflict);
+        }
+        let Some((start, segment_index)) =
+            self.state.auxiliary_attempts.get(&settlement.key).cloned()
+        else {
+            return Err(crate::commands::TimelineWriteError::InvalidAuxiliaryUsage(
+                "attempt has no durable start".into(),
+            ));
+        };
+        let event = self
+            .state
+            .timeline
+            .prepare(crate::TimelineEventKind::Observation(
+                crate::ObservationEvent {
+                    scope: "sampling_usage".into(),
+                    name: "aux_attempt_settled".into(),
+                    turn: None,
+                    step: None,
+                    data: Some(
+                        serde_json::to_value(&settlement)
+                            .expect("auxiliary settlement serializable"),
+                    ),
+                },
+            ))?;
+        self.commit_timeline_event(event).await?;
+        let current_prompt = start.captured_prompt_index.is_some()
+            && self.state.timeline.current_prompt_index() == start.captured_prompt_index;
+        if let Some(usage) = settlement.usage.as_ref() {
+            self.state.session_usage.record_auxiliary_call_at(
+                segment_index,
+                &start.model_id,
+                usage,
+                settlement.api_duration_ms,
+                settlement.cost_usd_ticks,
+            );
+            if current_prompt {
+                self.state
+                    .prompt_usage
+                    .get_or_insert_default()
+                    .record_auxiliary_call(
+                        &start.model_id,
+                        usage,
+                        settlement.api_duration_ms,
+                        settlement.cost_usd_ticks,
+                    );
+            }
+        } else {
+            self.state
+                .session_usage
+                .mark_segment_incomplete(segment_index);
+            if current_prompt {
+                self.state
+                    .prompt_usage
+                    .get_or_insert_default()
+                    .mark_incomplete();
+            }
+        }
+        self.state
+            .settled_auxiliary_attempts
+            .insert(settlement.key.clone(), settlement);
         self.publish_session_usage();
         Ok(true)
     }

@@ -1639,6 +1639,9 @@ impl SessionActor {
             None,
         ));
         drop(state);
+        // Goal continuations install a regular foreground directly instead
+        // of passing through the user-prompt queue promotion path.
+        self.send_available_commands_update().await;
         self.publish_turn_scope_resources(prompt_id, &origin, tool_types::BehaviorId::Goal)
             .await;
         let _ = start_tx.send(());

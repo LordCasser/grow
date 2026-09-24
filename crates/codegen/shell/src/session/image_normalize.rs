@@ -2,11 +2,14 @@
 //! [`MAX_ENCODE_PIXELS`], or [`MAX_ENCODE_SIDE_PX`] to fit the conversation
 //! caps. The primary dimension limit is the v9 pixel-area budget
 //! ([`MAX_ENCODE_PIXELS`]); [`MAX_ENCODE_SIDE_PX`] is a model-agnostic side
-//! clamp. Blocking work uses cancellation-safe, single-worker admission.
+//! clamp. Each complete image pipeline uses cancellation-safe, single-worker
+//! admission.
 use agent_client_protocol::schema::v1::ImageContent;
 use base64::Engine as _;
 use bytes::Bytes;
 use std::borrow::Cow;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tools::util::image_compress::{FilterType, ReEncodeParams, re_encode_under_limit};
 #[derive(Debug)]
 enum NormalizedEntry {
@@ -23,6 +26,44 @@ enum NormalizedEntry {
 struct NormalizeError(String);
 
 static NORMALIZE_WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+static NORMALIZE_ENCODED_BYTES: AtomicUsize = AtomicUsize::new(0);
+const MAX_NORMALIZE_BATCH_IMAGES: usize = 25;
+const MAX_NORMALIZE_BATCH_ENCODED_BYTES: usize = 80_000_000;
+const MAX_NORMALIZE_INFLIGHT_ENCODED_BYTES: usize = 160_000_000;
+
+/// A reservation is shared with the blocking closure so cancellation cannot
+/// admit another batch while that closure still owns an encoded image.
+struct EncodedReservation {
+    counter: &'static AtomicUsize,
+    bytes: usize,
+}
+
+impl Drop for EncodedReservation {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
+fn try_reserve_encoded(
+    counter: &'static AtomicUsize,
+    bytes: usize,
+    limit: usize,
+) -> Option<Arc<EncodedReservation>> {
+    counter
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+            current.checked_add(bytes).filter(|total| *total <= limit)
+        })
+        .ok()?;
+    Some(Arc::new(EncodedReservation { counter, bytes }))
+}
+
+fn reserve_normalize_bytes(bytes: usize) -> Option<Arc<EncodedReservation>> {
+    try_reserve_encoded(
+        &NORMALIZE_ENCODED_BYTES,
+        bytes,
+        MAX_NORMALIZE_INFLIGHT_ENCODED_BYTES,
+    )
+}
 
 /// Admit one image compute at a time; cancellation cannot release a running
 /// worker's permit. Maps `JoinError` to [`NormalizeError`].
@@ -68,13 +109,9 @@ const MAX_ENCODE_SIDE_PX: u32 = 2000;
 const MIN_ENCODE_SIDE_PX: u32 = 512;
 const DOWNSCALE_FILTER: FilterType = FilterType::CatmullRom;
 const JPEG_QUALITY_STEPS: &[u8] = &[88, 80, 72, 64, 56, 48, 40, 32];
-/// Upper bound on decoded pixel count before refusing to decode. Matches
-/// the API ceiling ([`MAX_VISION_TOTAL_PX`]) so any image the API would
-/// accept can be decoded for the downscale re-encode — a 20-48 Mpx camera
-/// photo must not be refused client-side (it downscales to the wire caps
-/// anyway). Worst case is a transient ~716 MB RGBA bitmap inside
-/// `spawn_blocking`, one image at a time.
-const MAX_DECODE_PIXELS: u64 = MAX_VISION_TOTAL_PX;
+/// Client compute budget, independent of the larger provider-side image
+/// validity ceiling. A 48 Mpx camera image still downscales to the wire caps.
+const MAX_DECODE_PIXELS: u64 = 50_000_000;
 /// Bounded ICO decode for load-time verification: real icons are far
 /// smaller; bytes claiming more are kept un-verified rather than decoded
 /// on the session-load path.
@@ -158,14 +195,58 @@ pub struct NormalizeResult {
     /// identical reasons instead of repeating one sentence per image.
     pub dropped: Vec<DroppedImage>,
 }
+fn stage_normalize_batch(
+    images: Vec<ImageContent>,
+    max_images: usize,
+    max_bytes: usize,
+) -> (Vec<Result<ImageContent, String>>, usize, usize) {
+    // Release rejected payloads before the first await: otherwise a caller can
+    // retain an unbounded vector of encoded images while awaiting the worker.
+    let mut admitted_count = 0;
+    let mut admitted_bytes = 0;
+    let staged = images
+        .into_iter()
+        .map(|image| {
+            if admitted_count >= max_images {
+                Err("normalization batch image count limit reached".to_owned())
+            } else if image.data.len() > max_bytes.saturating_sub(admitted_bytes) {
+                Err("normalization batch encoded-byte limit reached".to_owned())
+            } else {
+                admitted_count += 1;
+                admitted_bytes += image.data.len();
+                Ok(image)
+            }
+        })
+        .collect::<Vec<_>>();
+    (staged, admitted_count, admitted_bytes)
+}
+
 pub async fn normalize_images(images: Vec<ImageContent>) -> NormalizeResult {
+    let (staged, admitted_count, admitted_bytes) = stage_normalize_batch(
+        images,
+        MAX_NORMALIZE_BATCH_IMAGES,
+        MAX_NORMALIZE_BATCH_ENCODED_BYTES,
+    );
+    let reservation = (admitted_count > 0)
+        .then(|| reserve_normalize_bytes(admitted_bytes))
+        .flatten();
     let mut result = NormalizeResult {
-        images: Vec::with_capacity(images.len()),
+        images: Vec::with_capacity(admitted_count),
         ..Default::default()
     };
-    for (i, image) in images.into_iter().enumerate() {
+    for (i, item) in staged.into_iter().enumerate() {
         let index = i + 1;
-        result.push_outcome(index, normalize_one(image, index).await);
+        let outcome = match (item, reservation.as_ref()) {
+            (Ok(image), Some(reservation)) => {
+                normalize_one_reserved(image, index, Arc::clone(reservation)).await
+            }
+            (Ok(_), None) => fail(
+                index,
+                "normalization encoded-byte capacity exhausted".into(),
+            ),
+            (Err(error), _) => fail(index, error),
+        };
+        result.push_outcome(index, outcome);
     }
     result
 }
@@ -387,23 +468,50 @@ enum Outcome {
         error: String,
     },
 }
+#[cfg(test)]
 async fn normalize_one(img: ImageContent, index: usize) -> Outcome {
-    let raw_bytes = match base64::engine::general_purpose::STANDARD.decode(&img.data) {
-        Ok(b) => b,
-        Err(e) => return fail(index, format!("base64 decode: {e}")),
+    let Some(reservation) = reserve_normalize_bytes(img.data.len()) else {
+        return fail(
+            index,
+            "normalization encoded-byte capacity exhausted".into(),
+        );
     };
+    normalize_one_reserved(img, index, reservation).await
+}
+
+async fn normalize_one_reserved(
+    img: ImageContent,
+    index: usize,
+    reservation: Arc<EncodedReservation>,
+) -> Outcome {
+    match run_blocking(move || {
+        let _reservation = reservation;
+        normalize_one_blocking(img, index)
+    })
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(error) => fail(index, error.0),
+    }
+}
+
+/// Entire per-image pipeline. Keep all encoded staging and pixel work inside
+/// one admitted closure so a later image cannot overlap its allocations.
+fn normalize_one_blocking(img: ImageContent, index: usize) -> Result<Outcome, NormalizeError> {
+    let raw_bytes = base64::engine::general_purpose::STANDARD
+        .decode(&img.data)
+        .map_err(|e| NormalizeError(format!("base64 decode: {e}")))?;
     use tools::util::image_validate as iv;
     let (img, raw_bytes) = if iv::needs_endpoint_transcode(&raw_bytes) {
-        let png = match run_blocking(move || match iv::transcode_to_endpoint_png(&raw_bytes) {
-            Some(r) => r.map_err(|e| NormalizeError(format!("non-native image transcode: {e}"))),
-            None => Err(NormalizeError(
-                "non-native image transcode: format no longer needs conversion".to_owned(),
-            )),
-        })
-        .await
-        {
-            Ok(png) => png,
-            Err(e) => return fail(index, e.0),
+        let png = match iv::transcode_to_endpoint_png(&raw_bytes) {
+            Some(result) => {
+                result.map_err(|e| NormalizeError(format!("non-native image transcode: {e}")))?
+            }
+            None => {
+                return Err(NormalizeError(
+                    "non-native image transcode: format no longer needs conversion".to_owned(),
+                ));
+            }
         };
         let converted = ImageContent::new(
             base64::engine::general_purpose::STANDARD.encode(&png),
@@ -416,11 +524,8 @@ async fn normalize_one(img: ImageContent, index: usize) -> Outcome {
     } else {
         (img, raw_bytes)
     };
-    let entry_res = compute_normalized(raw_bytes, index).await;
-    match entry_res {
-        Ok(entry) => entry_to_outcome(img, entry, index),
-        Err(error) => fail(index, error.0),
-    }
+    let entry = compute_normalized_blocking(raw_bytes, &NORMALIZE_PARAMS, index)?;
+    Ok(entry_to_outcome(img, entry, index))
 }
 fn entry_to_outcome(orig: ImageContent, entry: NormalizedEntry, index: usize) -> Outcome {
     match entry {
@@ -439,12 +544,6 @@ fn entry_to_outcome(orig: ImageContent, entry: NormalizedEntry, index: usize) ->
         NormalizedEntry::ReEncodingOversized => Outcome::ReEncodingOversized(orig),
         NormalizedEntry::Unchanged => Outcome::Unchanged(orig),
     }
-}
-async fn compute_normalized(
-    raw_bytes: Vec<u8>,
-    index: usize,
-) -> Result<NormalizedEntry, NormalizeError> {
-    run_blocking(move || compute_normalized_blocking(raw_bytes, &NORMALIZE_PARAMS, index)).await
 }
 /// CPU-bound normalize work. Tests inject `max_bytes = 0` to drive the
 /// `ReEncodingOversized` branch.
@@ -534,6 +633,68 @@ fn format_bytes(bytes: usize) -> String {
 mod tests {
     use super::*;
     use image::DynamicImage;
+
+    #[test]
+    fn normalize_batch_releases_excess_payloads_before_compute() {
+        let images = [5, 4, 3, 2]
+            .map(|len| ImageContent::new("A".repeat(len), "image/png"))
+            .to_vec();
+        let (staged, count, bytes) = stage_normalize_batch(images, 2, 8);
+        assert_eq!((count, bytes), (2, 8));
+        assert_eq!(staged.len(), 4);
+        assert_eq!(staged[0].as_ref().unwrap().data.len(), 5);
+        assert!(staged[1].as_ref().unwrap_err().contains("encoded-byte"));
+        assert_eq!(staged[2].as_ref().unwrap().data.len(), 3);
+        assert!(staged[3].as_ref().unwrap_err().contains("count"));
+    }
+
+    #[test]
+    fn encoded_reservations_enforce_shared_limit_and_worker_lifetime() {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let first = try_reserve_encoded(&COUNTER, 6, 10).expect("first reservation");
+        assert!(try_reserve_encoded(&COUNTER, 5, 10).is_none());
+        let second = try_reserve_encoded(&COUNTER, 4, 10).expect("remaining capacity");
+        assert_eq!(COUNTER.load(Ordering::Acquire), 10);
+        let worker = Arc::clone(&first);
+        drop(first);
+        assert_eq!(COUNTER.load(Ordering::Acquire), 10);
+        drop(worker);
+        assert_eq!(COUNTER.load(Ordering::Acquire), 4);
+        drop(second);
+        assert_eq!(COUNTER.load(Ordering::Acquire), 0);
+    }
+
+    #[tokio::test]
+    async fn canceled_normalize_waiter_keeps_encoded_reservation_until_worker_exits() {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let reservation = try_reserve_encoded(&COUNTER, 5, 10).expect("reserve encoded input");
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let waiter = tokio::spawn(async move {
+            run_blocking(move || {
+                let _reservation = reservation;
+                let _ = started_tx.send(());
+                release_rx.recv().expect("release worker");
+                Ok::<(), NormalizeError>(())
+            })
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(60), started_rx)
+            .await
+            .expect("normalization worker started")
+            .expect("worker start signal");
+        waiter.abort();
+        assert!(waiter.await.is_err(), "the async waiter was canceled");
+        assert_eq!(COUNTER.load(Ordering::Acquire), 5);
+        release_tx.send(()).expect("release worker");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while COUNTER.load(Ordering::Acquire) != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("running worker released its reservation");
+    }
     use image::codecs::jpeg::JpegEncoder;
     #[tokio::test]
     async fn canceled_waiter_retains_running_worker_admission() {
@@ -1172,6 +1333,52 @@ mod tests {
                 assert!(!content.data.is_empty());
             }
             other => panic!("expected Compressed, got {other:?}"),
+        }
+    }
+    /// Manual RSS probe at the upper end of current camera resolutions.
+    #[tokio::test]
+    #[ignore = "manual 48 MP image-normalization memory measurement"]
+    async fn forty_eight_megapixel_photo_is_compressed() {
+        use image::codecs::jpeg::JpegEncoder;
+        use image::{DynamicImage, ImageBuffer, Rgb};
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_pixel(8000, 6000, Rgb([90, 120, 150]));
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 85)
+            .encode_image(&DynamicImage::ImageRgb8(img))
+            .unwrap();
+        let img = ImageContent::new(
+            base64::engine::general_purpose::STANDARD.encode(&jpeg),
+            "image/jpeg",
+        );
+        assert!(matches!(
+            normalize_one(img, 0).await,
+            Outcome::Compressed { .. }
+        ));
+    }
+    #[tokio::test]
+    async fn above_client_decode_budget_is_rejected_before_pixel_decode() {
+        use image::codecs::jpeg::JpegEncoder;
+        use image::{DynamicImage, ImageBuffer, Rgb};
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_pixel(64, 64, Rgb([1, 2, 3]));
+        let mut jpeg = Vec::new();
+        JpegEncoder::new_with_quality(&mut jpeg, 85)
+            .encode_image(&DynamicImage::ImageRgb8(img))
+            .unwrap();
+        let sof = jpeg
+            .windows(2)
+            .position(|w| w == [0xFF, 0xC0])
+            .expect("baseline SOF0 present");
+        // 8192×8192 exceeds the client 50 MP compute budget but remains below
+        // the provider's 178.9 MP persisted-image validity ceiling.
+        jpeg[sof + 5..sof + 9].copy_from_slice(&[0x20, 0x00, 0x20, 0x00]);
+        let img = ImageContent::new(
+            base64::engine::general_purpose::STANDARD.encode(&jpeg),
+            "image/jpeg",
+        );
+        match normalize_one(img, 0).await {
+            Outcome::Failed { error, .. } => assert!(error.contains("50000000 px decode limit")),
+            other => panic!("expected Failed, got {other:?}"),
         }
     }
     /// Above the API ceiling the decode is still refused (the API would

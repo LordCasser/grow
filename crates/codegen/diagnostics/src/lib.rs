@@ -1,6 +1,5 @@
 //! Local diagnostics and structured logging for Grow.
 
-mod appender;
 pub mod context;
 pub mod debug_log;
 pub mod enums;

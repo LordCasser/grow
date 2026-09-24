@@ -915,9 +915,14 @@ fn spawn_with_argv(
 
             #[cfg(target_os = "linux")]
             if sandbox::should_restrict_child_network() {
-                // SAFETY: single prctl syscall (async-signal-safe).
+                // SAFETY: after fork and before exec; descriptor admission and
+                // seccomp installation run before untrusted child code.
                 unsafe {
-                    cmd.pre_exec(|| sandbox::child_net::install_child_network_filter());
+                    cmd.pre_exec(|| {
+                        sandbox::child_net::install_child_network_filter(
+                            sandbox::child_net::ChildFdAllowance::StdioOnly,
+                        )
+                    });
                 }
             }
         });

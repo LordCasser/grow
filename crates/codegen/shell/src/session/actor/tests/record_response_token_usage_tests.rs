@@ -91,45 +91,45 @@ async fn sampling_usage_sink_deduplicates_known_usage_and_debits_output_grant_on
                 .expect("current prompt index");
             let sink = actor.sampling_usage_sink("test-model".into(), captured_prompt_index);
 
-    sink(sampler::AttemptUsage::Known {
-        attempt_key: "same-attempt".into(),
-        cost_usd_ticks: None,
-        api_duration_ms: None,
-        scope: None,
-        usage: usage_with_completion_tokens(4),
-    })
-    .await
-    .unwrap();
-    sink(sampler::AttemptUsage::Known {
-        attempt_key: "second-attempt".into(),
-        cost_usd_ticks: None,
-        api_duration_ms: None,
-        scope: None,
-        usage: usage_with_completion_tokens(3),
-    })
-    .await
-    .unwrap();
-    assert_eq!(budget.remaining(), Some(3));
+            sink(sampler::AttemptUsage::Known {
+                attempt_key: "same-attempt".into(),
+                cost_usd_ticks: None,
+                api_duration_ms: None,
+                scope: None,
+                usage: usage_with_completion_tokens(4),
+            })
+            .await
+            .unwrap();
+            sink(sampler::AttemptUsage::Known {
+                attempt_key: "second-attempt".into(),
+                cost_usd_ticks: None,
+                api_duration_ms: None,
+                scope: None,
+                usage: usage_with_completion_tokens(3),
+            })
+            .await
+            .unwrap();
+            assert_eq!(budget.remaining(), Some(3));
 
-    // Replayed settlement is idempotent across both ledgers and the output
-    // grant, so it cannot reopen capacity for another provider request.
-    sink(sampler::AttemptUsage::Known {
-        attempt_key: "same-attempt".into(),
-        cost_usd_ticks: None,
-        api_duration_ms: None,
-        scope: None,
-        usage: usage_with_completion_tokens(4),
-    })
-    .await
-    .unwrap();
-    assert_eq!(budget.remaining(), Some(3));
-    let usage = actor
-        .chat_state_handle
-        .try_get_session_usage()
-        .await
-        .unwrap();
-    assert_eq!(usage.totals.model_calls, 2);
-    assert_eq!(usage.totals.output_tokens, 7);
+            // Replayed settlement is idempotent across both ledgers and the output
+            // grant, so it cannot reopen capacity for another provider request.
+            sink(sampler::AttemptUsage::Known {
+                attempt_key: "same-attempt".into(),
+                cost_usd_ticks: None,
+                api_duration_ms: None,
+                scope: None,
+                usage: usage_with_completion_tokens(4),
+            })
+            .await
+            .unwrap();
+            assert_eq!(budget.remaining(), Some(3));
+            let usage = actor
+                .chat_state_handle
+                .try_get_session_usage()
+                .await
+                .unwrap();
+            assert_eq!(usage.totals.model_calls, 2);
+            assert_eq!(usage.totals.output_tokens, 7);
             assert!(!usage.incomplete);
         })
         .await;
@@ -152,26 +152,26 @@ async fn sampling_usage_sink_marks_unknown_usage_and_exhausts_output_grant() {
                 .expect("current prompt index");
             let sink = actor.sampling_usage_sink("test-model".into(), captured_prompt_index);
 
-    sink(sampler::AttemptUsage::Incomplete {
-        attempt_key: "unknown-attempt".into(),
-        scope: None,
-    })
-    .await
-    .unwrap();
-    assert_eq!(budget.remaining(), Some(0));
-    assert_eq!(budget.usage(), (10, true));
-    let prompt = actor
-        .chat_state_handle
-        .try_get_prompt_usage()
-        .await
-        .unwrap()
-        .expect("prompt ledger");
-    let session = actor
-        .chat_state_handle
-        .try_get_session_usage()
-        .await
-        .unwrap();
-    assert!(prompt.incomplete);
+            sink(sampler::AttemptUsage::Incomplete {
+                attempt_key: "unknown-attempt".into(),
+                scope: None,
+            })
+            .await
+            .unwrap();
+            assert_eq!(budget.remaining(), Some(0));
+            assert_eq!(budget.usage(), (10, true));
+            let prompt = actor
+                .chat_state_handle
+                .try_get_prompt_usage()
+                .await
+                .unwrap()
+                .expect("prompt ledger");
+            let session = actor
+                .chat_state_handle
+                .try_get_session_usage()
+                .await
+                .unwrap();
+            assert!(prompt.incomplete);
             assert!(session.incomplete);
         })
         .await;

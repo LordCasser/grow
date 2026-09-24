@@ -625,7 +625,7 @@ async fn fork_reconciles_and_expands_response_projection_into_child_history() {
     append_response_projection_production_timeline(&adapter, &source_info, &timeline).await;
     let candidate = response_projection_production_update(
         &source_info,
-        "candidate",
+        "",
         serde_json::json!({
             "samplingRequestId": "fork-projection-request",
             "samplingAttempt": 2,
@@ -875,6 +875,66 @@ async fn response_projection_production_cold_writer_repairs_once_after_timeline_
 }
 
 #[tokio::test]
+async fn cold_writer_repairs_projection_at_a_payload_free_anchor_after_admission_crash() {
+    let root = TempDir::new().unwrap();
+    let info = create_test_info();
+    let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    writer.init_session(&info, default_model_id()).await.unwrap();
+    writer
+        .append_update(
+            &info,
+            &response_projection_production_update(
+                &info,
+                "",
+                serde_json::json!({
+                    "eventId": "anchor-event",
+                    "samplingRequestId": "anchor-request",
+                    "samplingAttempt": 1,
+                })
+                .as_object()
+                .cloned()
+                .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    writer
+        .append_update(
+            &info,
+            &response_projection_production_update(
+                &info,
+                "later independent",
+                serde_json::json!({"eventId": "later-event"})
+                    .as_object()
+                    .cloned()
+                    .unwrap(),
+            ),
+        )
+        .await
+        .unwrap();
+    let timeline = response_projection_production_timeline("anchor-request", 1, "canonical");
+    append_response_projection_production_timeline(&writer, &info, &timeline).await;
+    drop(writer);
+
+    let replacement = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    replacement
+        .load_session_for_write_without_updates(&info)
+        .await
+        .unwrap();
+    drop(replacement);
+    let replay = crate::session::storage::load_updates_for_replay_at(
+        info.id.0.as_ref(),
+        root.path(),
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        response_projection_production_texts(replay),
+        ["canonical", "later independent"]
+    );
+}
+
+#[tokio::test]
 async fn response_projection_production_read_only_cores_synthesize_without_writer_authority() {
     let root = TempDir::new().unwrap();
     let info = create_test_info();
@@ -888,7 +948,7 @@ async fn response_projection_production_read_only_cores_synthesize_without_write
     append_response_projection_production_timeline(&writer, &info, &timeline).await;
     writer.append_update(&info, &response_projection_production_update(
         &info,
-        "candidate",
+        "",
         serde_json::json!({
             "samplingRequestId": request_id,
             "samplingAttempt": attempt,
@@ -2059,13 +2119,7 @@ async fn workflow_restore_rebuilds_missing_and_invalid_manifests_from_timeline()
         std::fs::write(script_revision_path(&run_dir, 0), "complete(\"ok\");").unwrap();
         std::fs::write(run_dir.join("args.json"), "{}").unwrap();
         if invalid_sidecar {
-            let mut legacy_sidecar = manifest.clone();
-            legacy_sidecar.version = WORKFLOW_RUN_MANIFEST_VERSION - 1;
-            std::fs::write(
-                run_dir.join("state.json"),
-                serde_json::to_vec(&legacy_sidecar).unwrap(),
-            )
-            .unwrap();
+            std::fs::write(run_dir.join("state.json"), b"{broken workflow json").unwrap();
         }
     }
 
@@ -2083,6 +2137,25 @@ async fn workflow_restore_rebuilds_missing_and_invalid_manifests_from_timeline()
             .workflow_runs
             .iter()
             .all(|run| run.script == "complete(\"ok\");")
+    );
+    assert!(
+        loaded
+            .workflow_runs
+            .iter()
+            .all(|run| run.manifest.state.agent_usage_incomplete),
+        "a Timeline seed does not prove cumulative agent usage"
+    );
+    assert_eq!(
+        loaded.workflow_runs[0].corrupt_sidecar_fingerprint,
+        None,
+        "missing sidecar remains on the existing repair path"
+    );
+    assert_eq!(
+        loaded.workflow_runs[1].corrupt_sidecar_fingerprint,
+        Some(crate::session::workflow::store::WorkflowManifestFingerprint::of(
+            b"{broken workflow json"
+        )),
+        "restore carries a fixed-size compare-and-swap identity for corrupt bytes"
     );
 }
 
@@ -4084,6 +4157,7 @@ fn fork_filter_consecutive_users_with_tool_calls() {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
             ConversationItem::tool_result("tc1", "output"),
             ConversationItem::user("follow-up"),
@@ -4111,6 +4185,7 @@ fn fork_filter_preserves_complete_tool_turn() {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
             ConversationItem::tool_result("tc1", "output"),
         ];
@@ -4134,6 +4209,7 @@ fn fork_filter_strips_incomplete_tool_turn() {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
             // Missing tool result — incomplete
         ];
@@ -4318,6 +4394,7 @@ fn fork_filter_keeps_multi_tool_cycle_turn_with_reasoning() {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
             ConversationItem::tool_result("tc1", "output"),
             ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item(
@@ -4364,6 +4441,7 @@ fn fork_filter_keeps_multi_tool_turn_with_reasoning_between_results() {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
             ConversationItem::tool_result("tc1", "out1"),
             ConversationItem::Reasoning(sampling_types::synthesized_reasoning_item("mid")),
@@ -4563,6 +4641,39 @@ fn scan_opened_sessions_returns_empty_when_no_sessions_dir() {
     let tmp = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
     assert!(adapter.scan_opened_sessions(None, |opened| opened).unwrap().is_empty());
+}
+#[test]
+fn search_index_artifacts_are_not_session_directories() {
+    let recognized = [
+        "session_search.sqlite",
+        "session_search.sqlite-wal",
+        "session_search.sqlite-shm",
+        "session_search.sqlite-journal",
+        "session_search.h-host-1.sqlite",
+        "session_search.h-host-1.sqlite-wal",
+        "session_search.h-host-1.sqlite-shm",
+        "session_search.h-host-1.sqlite-journal",
+    ];
+    for name in recognized {
+        assert!(
+            JsonlStorageAdapter::is_session_search_index_artifact(std::ffi::OsStr::new(name)),
+            "expected {name} to be recognized as a search index artifact"
+        );
+    }
+
+    let candidates = [
+        "session_search.sqlite.tmp",
+        "session_search.h-.sqlite",
+        "session_search.h-host_1.sqlite",
+        "session_search.h-host-1.sqlite.tmp",
+        "other.sqlite",
+    ];
+    for name in candidates {
+        assert!(
+            !JsonlStorageAdapter::is_session_search_index_artifact(std::ffi::OsStr::new(name)),
+            "must not broadly ignore {name} as a search index artifact"
+        );
+    }
 }
 #[test]
 fn scan_opened_sessions_finds_all_identity_checked_sessions() {

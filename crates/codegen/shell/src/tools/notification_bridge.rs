@@ -51,6 +51,10 @@ pub struct NotificationBridgeConfig {
     /// `task.output_file` even when no polling tool is available. Same
     /// write-once-read-many lifecycle as `task_output_tool_name`.
     pub read_tool_name: Arc<std::sync::OnceLock<Option<String>>>,
+    /// Shared credit budget for tool-origin Grow presentation snapshots.
+    pub preview_gateway_budget: sampler::PreviewEventBudget,
+    /// Exact active attempt, shared with the session actor's admission barrier.
+    pub sampling_preview: Arc<parking_lot::Mutex<Option<(String, u32, bool)>>>,
 }
 /// Snapshot a shared `OnceLock` tool-name slot as a borrowed `&str`.
 /// Returns `None` if the slot is still unset (toolset not yet finalized)
@@ -383,17 +387,15 @@ async fn handle_notification_with_ack(
                 stamp_event_id(config, &mut meta_map);
                 notification.meta = meta_map.map(serde_json::Value::Object);
             }
-            let _ = config.persistence.tx.send(PersistenceMsg::Update(
-                crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone())),
-            ));
-            let params = serde_json::to_value(&notification)
-                .and_then(|v| serde_json::value::to_raw_value(&v))
-                .ok();
-            if let Some(params) = params {
-                let ext_notification =
-                    acp::ExtNotification::new("grow/task_backgrounded", params.into());
-                config.gateway.forward_fire_and_forget(ext_notification);
-            }
+            crate::session::notifications::dispatch_auxiliary_grow(
+                &config.gateway,
+                &config.persistence.tx,
+                &config.preview_gateway_budget,
+                &config.sampling_preview,
+                "grow/task_backgrounded",
+                notification,
+                true,
+            );
         }
         ToolNotification::FileWritten(written) => {
             let prompt_index = *config.prompt_index.lock().await;
@@ -475,10 +477,14 @@ async fn handle_notification_with_ack(
                         .map(|_| ())?;
                 }
             }
+            // Full background output remains in the task file and bounded
+            // model receipt; the Grow row only consumes completion metadata.
+            let mut projection_snapshot = task_snapshot;
+            projection_snapshot.output.clear();
             let mut notification = crate::extensions::notification::SessionNotification {
                 session_id: config.session_id.clone(),
                 update: crate::extensions::notification::SessionUpdate::TaskCompleted {
-                    task_snapshot,
+                    task_snapshot: projection_snapshot,
                 },
                 meta: None,
             };
@@ -487,27 +493,68 @@ async fn handle_notification_with_ack(
                 stamp_event_id(config, &mut meta_map);
                 notification.meta = meta_map.map(serde_json::Value::Object);
             }
-            let update =
-                crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone()));
             if require_durable_ack {
-                durable_append_landed(
-                    config.persistence.append_update_durably(update).await,
-                    "task completion UI projection",
-                )?;
+                let bytes = serde_json::value::to_raw_value(&notification)
+                    .map_err(|error| {
+                        format!("task completion UI projection serialization failed: {error}")
+                    })?
+                    .get()
+                    .len();
+                let owner_guard = config.sampling_preview.lock();
+                let owner = owner_guard
+                    .as_ref()
+                    .map(|(request_id, attempt, _)| (request_id.clone(), *attempt));
+                let permit = match config.preview_gateway_budget.try_acquire_bytes(bytes) {
+                    Ok(permit) => permit,
+                    Err(error) => {
+                        if let Some((request_id, attempt)) = owner {
+                            let _ = config.persistence.tx.send(
+                                PersistenceMsg::AuxiliaryPreviewFailure {
+                                    request_id,
+                                    attempt,
+                                    reason: error.to_string(),
+                                },
+                            );
+                        }
+                        return Err(format!(
+                            "task completion UI projection was not budgeted: {error}"
+                        ));
+                    }
+                };
+                let (respond_to, response) = tokio::sync::oneshot::channel();
+                let sent = config.persistence.tx.send(PersistenceMsg::AuxiliaryGrow {
+                    notification: notification.clone(),
+                    permit,
+                    preview: owner,
+                    respond_to: Some(respond_to),
+                });
+                drop(owner_guard);
+                sent.map_err(|_| {
+                    "session persistence stopped before task completion UI projection".to_owned()
+                })?;
+                let append = response.await.map_err(|_| {
+                    "task completion UI projection acknowledgement was lost".to_owned()
+                })?;
+                durable_append_landed(append.map_err(Into::into), "task completion UI projection")?;
+                crate::session::notifications::dispatch_auxiliary_grow(
+                    &config.gateway,
+                    &config.persistence.tx,
+                    &config.preview_gateway_budget,
+                    &config.sampling_preview,
+                    "grow/task_completed",
+                    notification,
+                    false,
+                );
             } else {
-                config
-                    .persistence
-                    .tx
-                    .send(PersistenceMsg::Update(update))
-                    .map_err(|_| "session persistence stopped".to_owned())?;
-            }
-            let params = serde_json::to_value(&notification)
-                .and_then(|v| serde_json::value::to_raw_value(&v))
-                .ok();
-            if let Some(params) = params {
-                let notification: acp::ExtNotification =
-                    acp::ExtNotification::new("grow/task_completed", params.into());
-                config.gateway.forward_fire_and_forget(notification);
+                crate::session::notifications::dispatch_auxiliary_grow(
+                    &config.gateway,
+                    &config.persistence.tx,
+                    &config.preview_gateway_budget,
+                    &config.sampling_preview,
+                    "grow/task_completed",
+                    notification,
+                    true,
+                );
             }
             let _ = config
                 .session_cmd_tx
@@ -565,16 +612,15 @@ async fn handle_notification_with_ack(
                 },
                 meta: meta.map(serde_json::Value::Object),
             };
-            if let Ok(params) =
-                serde_json::to_value(&fired_notif).and_then(|v| serde_json::value::to_raw_value(&v))
-            {
-                config
-                    .gateway
-                    .forward_fire_and_forget(acp::ExtNotification::new(
-                        "grow/scheduled_task_fired",
-                        params.into(),
-                    ));
-            }
+            crate::session::notifications::dispatch_auxiliary_grow(
+                &config.gateway,
+                &config.persistence.tx,
+                &config.preview_gateway_budget,
+                &config.sampling_preview,
+                "grow/scheduled_task_fired",
+                fired_notif,
+                false,
+            );
         }
         ToolNotification::MonitorEvent(event) => {
             let my_session = config.session_id.0.as_ref();
@@ -607,17 +653,15 @@ async fn handle_notification_with_ack(
                 },
                 meta: None,
             };
-            let params = serde_json::to_value(&notification)
-                .and_then(|v| serde_json::value::to_raw_value(&v))
-                .ok();
-            if let Some(params) = params {
-                config
-                    .gateway
-                    .forward_fire_and_forget(acp::ExtNotification::new(
-                        "grow/monitor_event",
-                        params.into(),
-                    ));
-            }
+            crate::session::notifications::dispatch_auxiliary_grow(
+                &config.gateway,
+                &config.persistence.tx,
+                &config.preview_gateway_budget,
+                &config.sampling_preview,
+                "grow/monitor_event",
+                notification,
+                false,
+            );
             let _ = config
                 .session_cmd_tx
                 .send(SessionCommand::ReceiveNotification {
@@ -651,19 +695,15 @@ async fn handle_notification_with_ack(
                 },
                 meta: meta.map(serde_json::Value::Object),
             };
-            let _ = config.persistence.tx.send(PersistenceMsg::Update(
-                crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone())),
-            ));
-            if let Ok(params) = serde_json::to_value(&notification)
-                .and_then(|v| serde_json::value::to_raw_value(&v))
-            {
-                config
-                    .gateway
-                    .forward_fire_and_forget(acp::ExtNotification::new(
-                        "grow/scheduled_task_created",
-                        params.into(),
-                    ));
-            }
+            crate::session::notifications::dispatch_auxiliary_grow(
+                &config.gateway,
+                &config.persistence.tx,
+                &config.preview_gateway_budget,
+                &config.sampling_preview,
+                "grow/scheduled_task_created",
+                notification,
+                true,
+            );
         }
     }
     Ok(())
@@ -769,6 +809,8 @@ mod tests {
             session_cmd_tx,
             task_output_tool_name: Arc::new(std::sync::OnceLock::new()),
             read_tool_name: Arc::new(std::sync::OnceLock::new()),
+            preview_gateway_budget: sampler::PreviewEventBudget::default(),
+            sampling_preview: Arc::new(parking_lot::Mutex::new(None)),
         };
         (config, gateway_rx, persistence_rx, session_cmd_rx)
     }
@@ -941,8 +983,10 @@ mod tests {
                 panic!("expected acknowledged completion admission");
             };
             respond_to.send(Ok("notification-1".into())).unwrap();
-            let PersistenceMsg::AppendUpdateDurablyAndAck { respond_to, .. } =
-                persistence_rx.recv().await.expect("durable UI projection")
+            let PersistenceMsg::AuxiliaryGrow {
+                respond_to: Some(respond_to),
+                ..
+            } = persistence_rx.recv().await.expect("durable UI projection")
             else {
                 panic!("expected durable task completion projection");
             };
@@ -1006,8 +1050,10 @@ mod tests {
         ));
         let mut persisted = false;
         while let Ok(message) = persistence_rx.try_recv() {
-            if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(update)) =
-                message
+            if let PersistenceMsg::AuxiliaryGrow {
+                notification: update,
+                ..
+            } = message
                 && matches!(
                     &update.update,
                     crate::extensions::notification::SessionUpdate::TaskCompleted { .. }
@@ -1125,8 +1171,10 @@ mod tests {
         assert!(cmd_rx.try_recv().is_err());
         let mut persisted_completion = false;
         while let Ok(message) = persistence_rx.try_recv() {
-            if let PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(update)) =
-                message
+            if let PersistenceMsg::AuxiliaryGrow {
+                notification: update,
+                ..
+            } = message
                 && matches!(
                     &update.update,
                     crate::extensions::notification::SessionUpdate::TaskCompleted { .. }
@@ -1214,7 +1262,10 @@ mod tests {
             .try_recv()
             .expect("scheduled_task_created must be persisted");
         match msg {
-            PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(notif)) => {
+            PersistenceMsg::AuxiliaryGrow {
+                notification: notif,
+                ..
+            } => {
                 assert!(matches!(
                     &notif.update,
                     crate::extensions::notification::SessionUpdate::ScheduledTaskCreated { .. }
@@ -1232,7 +1283,7 @@ mod tests {
                     "persisted Grow bridge lines must carry an eventId"
                 );
             }
-            _ => panic!("expected PersistenceMsg::Update(Grow(ScheduledTaskCreated))"),
+            _ => panic!("expected bounded ScheduledTaskCreated Grow append"),
         }
     }
     /// Persisted⇒stamped contract at the bridge's highest-frequency emitter:
@@ -1389,7 +1440,10 @@ mod tests {
                 if goal_id == "goal-1" && definition_revision == 1 && task_ids == vec!["task-bg"]
         ));
         match persistence_rx.try_recv().expect("must persist") {
-            PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(notif)) => {
+            PersistenceMsg::AuxiliaryGrow {
+                notification: notif,
+                ..
+            } => {
                 assert!(grow_persisted_event_id(&notif).is_some());
             }
             _ => panic!("expected Grow update"),
@@ -1407,11 +1461,80 @@ mod tests {
         )
         .await;
         match persistence_rx.try_recv().expect("must persist") {
-            PersistenceMsg::Update(crate::session::storage::SessionUpdate::Grow(notif)) => {
+            PersistenceMsg::AuxiliaryGrow {
+                notification: notif,
+                ..
+            } => {
                 assert!(grow_persisted_event_id(&notif).is_some());
             }
             _ => panic!("expected Grow update"),
         }
+    }
+    #[tokio::test]
+    async fn task_completion_grow_copies_only_metadata() {
+        let (config, mut gateway_rx, mut persistence_rx, _cmd_rx) = make_test_config_full();
+        let mut snapshot = make_task_snapshot("large-background", TaskKind::Bash);
+        snapshot.block_waited = true;
+        snapshot.output = "x".repeat(1024 * 1024);
+        let mut offsets = HashMap::new();
+        handle_notification(
+            &config,
+            ToolNotification::TaskCompleted(snapshot),
+            &mut offsets,
+        )
+        .await;
+        let PersistenceMsg::AuxiliaryGrow { notification, .. } = persistence_rx
+            .try_recv()
+            .expect("bounded completion append")
+        else {
+            panic!("expected bounded Grow append");
+        };
+        let crate::extensions::notification::SessionUpdate::TaskCompleted { task_snapshot } =
+            notification.update
+        else {
+            panic!("expected task completion projection");
+        };
+        assert!(task_snapshot.output.is_empty());
+        let acp_transport::AcpClientMessage::ExtNotification(live) =
+            gateway_rx.try_recv().expect("live completion")
+        else {
+            panic!("expected live Grow projection");
+        };
+        let live: crate::extensions::notification::SessionNotification =
+            serde_json::from_str(live.request.params.get()).unwrap();
+        let crate::extensions::notification::SessionUpdate::TaskCompleted { task_snapshot } =
+            live.update
+        else {
+            panic!("expected live task completion");
+        };
+        assert!(task_snapshot.output.is_empty());
+    }
+    #[tokio::test]
+    async fn monitor_live_delivery_exhaustion_marks_exact_preview() {
+        let (config, mut gateway_rx, mut persistence_rx, mut cmd_rx) = make_test_config_full();
+        *config.sampling_preview.lock() = Some(("request".into(), 3, false));
+        let held = config.preview_gateway_budget.acquire(4096).await.unwrap();
+        let mut offsets = HashMap::new();
+        handle_notification(
+            &config,
+            make_monitor_event_notification("monitor-budget", Some("test-session")),
+            &mut offsets,
+        )
+        .await;
+        assert!(gateway_rx.try_recv().is_err());
+        assert!(matches!(
+            persistence_rx.try_recv(),
+            Ok(PersistenceMsg::AuxiliaryPreviewFailure { request_id, attempt: 3, .. })
+                if request_id == "request"
+        ));
+        assert!(matches!(
+            cmd_rx.try_recv(),
+            Ok(SessionCommand::ReceiveNotification {
+                source: chat_state::NotificationSource::MonitorProgress { .. },
+                ..
+            })
+        ));
+        drop(held);
     }
     #[tokio::test]
     async fn current_mode_update_persisted_line_is_stamped() {

@@ -179,13 +179,26 @@ fn project_from_ledger_never_drops_incomplete_flag() {
         None,
         None,
     );
+    ledger.record_auxiliary_call(
+        "recap",
+        &sampling_types::TokenUsage {
+            prompt_tokens: 7,
+            completion_tokens: 2,
+            total_tokens: 9,
+            ..Default::default()
+        },
+        None,
+        None,
+    );
     let complete = PromptUsage::project_from_ledger(Some(&ledger), false).unwrap();
     assert!(!complete.usage_is_incomplete);
-    assert_eq!(complete.totals.input_tokens, 3);
+    assert_eq!(complete.totals.input_tokens, 10);
+    assert_eq!(complete.totals.output_tokens, 3);
+    assert_eq!(complete.num_turns, 1);
 
     let marked = PromptUsage::project_from_ledger(Some(&ledger), true).unwrap();
     assert!(marked.usage_is_incomplete);
-    assert_eq!(marked.totals.input_tokens, 3);
+    assert_eq!(marked.totals.input_tokens, 10);
 }
 
 #[tokio::test(flavor = "current_thread")]

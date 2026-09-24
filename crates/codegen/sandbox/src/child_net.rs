@@ -39,6 +39,9 @@ mod child_network {
         libc::SYS_io_uring_register as u32,
     ];
 
+    const FILTER_LEN: usize =
+        5 + BLOCKED_SYSCALLS.len() * 2 + if cfg!(target_arch = "x86_64") { 2 } else { 0 };
+
     fn stmt(code: u32, k: u32) -> sock_filter {
         sock_filter {
             code: code as u16,
@@ -63,24 +66,39 @@ mod child_network {
     /// unexpected/compat architecture is denied rather than interpreting its
     /// syscall table as the native one. x86_64 additionally rejects the x32
     /// syscall marker before exact syscall comparisons.
-    pub(super) fn build_child_network_filter() -> Vec<sock_filter> {
+    pub(super) fn build_child_network_filter() -> [sock_filter; FILTER_LEN] {
         use libc::{BPF_ABS, BPF_JEQ, BPF_JMP, BPF_JSET, BPF_K, BPF_LD, BPF_RET, BPF_W};
 
-        let mut filter = Vec::with_capacity(4 + BLOCKED_SYSCALLS.len() * 2 + 3);
-        filter.push(stmt(BPF_LD | BPF_W | BPF_ABS, OFF_ARCH));
-        filter.push(jump(BPF_JMP | BPF_JEQ | BPF_K, EXPECTED_ARCH, 1, 0));
-        filter.push(stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM_VAL));
-        filter.push(stmt(BPF_LD | BPF_W | BPF_ABS, OFF_NR));
+        let empty = sock_filter {
+            code: 0,
+            jt: 0,
+            jf: 0,
+            k: 0,
+        };
+        let mut filter = [empty; FILTER_LEN];
+        let mut len = 0;
+        macro_rules! push {
+            ($instruction:expr) => {{
+                filter[len] = $instruction;
+                len += 1;
+            }};
+        }
+
+        push!(stmt(BPF_LD | BPF_W | BPF_ABS, OFF_ARCH));
+        push!(jump(BPF_JMP | BPF_JEQ | BPF_K, EXPECTED_ARCH, 1, 0));
+        push!(stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM_VAL));
+        push!(stmt(BPF_LD | BPF_W | BPF_ABS, OFF_NR));
         #[cfg(target_arch = "x86_64")]
         {
-            filter.push(jump(BPF_JMP | BPF_JSET | BPF_K, X32_SYSCALL_BIT, 0, 1));
-            filter.push(stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM_VAL));
+            push!(jump(BPF_JMP | BPF_JSET | BPF_K, X32_SYSCALL_BIT, 0, 1));
+            push!(stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM_VAL));
         }
         for &syscall in BLOCKED_SYSCALLS {
-            filter.push(jump(BPF_JMP | BPF_JEQ | BPF_K, syscall, 0, 1));
-            filter.push(stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM_VAL));
+            push!(jump(BPF_JMP | BPF_JEQ | BPF_K, syscall, 0, 1));
+            push!(stmt(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | EPERM_VAL));
         }
-        filter.push(stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+        push!(stmt(BPF_RET | BPF_K, SECCOMP_RET_ALLOW));
+        debug_assert_eq!(len, FILTER_LEN);
         filter
     }
 
@@ -228,12 +246,56 @@ mod ns_lockdown {
     }
 }
 
-/// # Safety
-/// After fork / before exec.
+/// Extra pipes deliberately mapped by Grow before the network restriction hook.
+/// The mapping producers create OS pipes; callers cannot pass an arbitrary fd.
 #[cfg(target_os = "linux")]
-pub unsafe fn install_child_network_filter() -> std::io::Result<()> {
+#[derive(Debug, Clone, Copy)]
+pub enum ChildFdAllowance {
+    StdioOnly,
+    StateInputPipe,
+    StateInputAndOutputPipes,
+}
+
+#[cfg(target_os = "linux")]
+fn admit_child_descriptors(allowance: ChildFdAllowance) -> std::io::Result<()> {
+    // CLOEXEC keeps the stdlib's private exec-error pipe alive until exec while
+    // ensuring every unknown descriptor disappears from the new process image.
+    let rc = unsafe {
+        libc::syscall(
+            libc::SYS_close_range,
+            3 as libc::c_uint,
+            libc::c_uint::MAX,
+            libc::CLOSE_RANGE_CLOEXEC,
+        )
+    };
+    if rc != 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+
+    let pipes: &[libc::c_int] = match allowance {
+        ChildFdAllowance::StdioOnly => &[],
+        ChildFdAllowance::StateInputPipe => &[3],
+        ChildFdAllowance::StateInputAndOutputPipes => &[3, 4],
+    };
+    for &fd in pipes {
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        if flags < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        if unsafe { libc::fcntl(fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// # Safety
+/// After fork / before exec, after any deliberate fd mappings.
+#[cfg(target_os = "linux")]
+pub unsafe fn install_child_network_filter(allowance: ChildFdAllowance) -> std::io::Result<()> {
     use libc::{PR_SET_NO_NEW_PRIVS, PR_SET_SECCOMP, SECCOMP_MODE_FILTER, prctl, sock_fprog};
 
+    admit_child_descriptors(allowance)?;
     let mut filter = child_network::build_child_network_filter();
     let prog = sock_fprog {
         len: filter.len() as u16,
@@ -293,6 +355,152 @@ mod tests {
     use super::child_network;
     use super::ns_lockdown::*;
     use libc::{SYS_clone, SYS_setns, SYS_unshare, sock_filter};
+
+    #[test]
+    fn restricted_child_exec_closes_connected_socket_and_keeps_state_pipes() {
+        use std::io::{Read as _, Write as _};
+        use std::net::{TcpListener, TcpStream, UdpSocket};
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+        use std::os::unix::process::CommandExt as _;
+        use std::process::Command;
+
+        const CHILD: &str = "GROW_SANDBOX_FD_EXEC_CHILD";
+        const SOCKET_FD: &str = "GROW_SANDBOX_FD_EXEC_SOCKET";
+        const UDP_FD: &str = "GROW_SANDBOX_FD_EXEC_UDP";
+        const MODE: &str = "GROW_SANDBOX_FD_EXEC_MODE";
+        if std::env::var_os(CHILD).is_some() {
+            let socket_fd: libc::c_int = std::env::var(SOCKET_FD).unwrap().parse().unwrap();
+            let udp_fd: libc::c_int = std::env::var(UDP_FD).unwrap().parse().unwrap();
+            let message = [b'!'];
+            if std::env::var(MODE).unwrap() == "control" {
+                assert_eq!(
+                    unsafe { libc::write(socket_fd, message.as_ptr().cast(), 1) },
+                    1,
+                    "the control spawn must really inherit the connected socket"
+                );
+                assert_eq!(
+                    unsafe { libc::write(udp_fd, message.as_ptr().cast(), 1) },
+                    1
+                );
+                return;
+            }
+            let mut input = [0u8; 1];
+            assert_eq!(unsafe { libc::read(3, input.as_mut_ptr().cast(), 1) }, 1);
+            assert_eq!(input, [b'x']);
+            let output = [b'y'];
+            assert_eq!(unsafe { libc::write(4, output.as_ptr().cast(), 1) }, 1);
+            assert_eq!(
+                unsafe { libc::write(socket_fd, message.as_ptr().cast(), 1) },
+                -1,
+                "a pre-connected socket must not survive exec"
+            );
+            assert_eq!(
+                unsafe { libc::write(udp_fd, message.as_ptr().cast(), 1) },
+                -1
+            );
+            return;
+        }
+
+        fn pipe() -> (OwnedFd, OwnedFd) {
+            let mut fds = [0; 2];
+            assert_eq!(unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+            (unsafe { OwnedFd::from_raw_fd(fds[0]) }, unsafe {
+                OwnedFd::from_raw_fd(fds[1])
+            })
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let client = TcpStream::connect(listener.local_addr().unwrap()).unwrap();
+        let (mut server, _) = listener.accept().unwrap();
+        // F_DUPFD deliberately produces a non-CLOEXEC descriptor outside the
+        // stdio/state-pipe range. It models a connected parent socket leaked by
+        // an unrelated subsystem.
+        let raw_socket = unsafe { libc::fcntl(client.as_raw_fd(), libc::F_DUPFD, 64) };
+        assert!(raw_socket >= 64);
+        let socket = unsafe { OwnedFd::from_raw_fd(raw_socket) };
+        let udp_receiver = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let udp_sender = UdpSocket::bind("127.0.0.1:0").unwrap();
+        udp_sender
+            .connect(udp_receiver.local_addr().unwrap())
+            .unwrap();
+        let raw_udp = unsafe { libc::fcntl(udp_sender.as_raw_fd(), libc::F_DUPFD, 64) };
+        assert!(raw_udp >= 64);
+        let udp = unsafe { OwnedFd::from_raw_fd(raw_udp) };
+        let child_exe = std::env::current_exe().unwrap();
+        let child_test =
+            "child_net::tests::restricted_child_exec_closes_connected_socket_and_keeps_state_pipes";
+        // Prove the fixture is a real inherited connection. Otherwise a child
+        // that never inherited it could make the restricted branch pass vacuously.
+        let control = Command::new(&child_exe)
+            .args(["--exact", child_test])
+            .env(CHILD, "1")
+            .env(MODE, "control")
+            .env(SOCKET_FD, raw_socket.to_string())
+            .env(UDP_FD, raw_udp.to_string())
+            .status()
+            .unwrap();
+        assert!(control.success());
+        server
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut control_byte = [0u8; 1];
+        server.read_exact(&mut control_byte).unwrap();
+        assert_eq!(control_byte, [b'!']);
+        udp_receiver
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .unwrap();
+        let mut udp_control = [0u8; 1];
+        let (n, _) = udp_receiver.recv_from(&mut udp_control).unwrap();
+        assert_eq!((n, udp_control), (1, [b'!']));
+
+        let (state_in_read, state_in_write) = pipe();
+        let (state_out_read, state_out_write) = pipe();
+        let mut state_in_write = std::fs::File::from(state_in_write);
+        let mut state_out_read = std::fs::File::from(state_out_read);
+        state_in_write.write_all(b"x").unwrap();
+        drop(state_in_write);
+
+        let mut command = Command::new(child_exe);
+        command
+            .args(["--exact", child_test])
+            .env(CHILD, "1")
+            .env(MODE, "restricted")
+            .env(SOCKET_FD, raw_socket.to_string())
+            .env(UDP_FD, raw_udp.to_string());
+        let input_fd = state_in_read.as_raw_fd();
+        let output_fd = state_out_write.as_raw_fd();
+        unsafe {
+            // The real launch registers command_fds mappings before this hook.
+            command.pre_exec(move || {
+                if libc::dup2(input_fd, 3) < 0 || libc::dup2(output_fd, 4) < 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+            command.pre_exec(|| {
+                super::install_child_network_filter(
+                    super::ChildFdAllowance::StateInputAndOutputPipes,
+                )
+            });
+        }
+
+        let status = command.status().unwrap();
+        assert!(status.success());
+        drop(command);
+        drop(state_out_write);
+        let mut reply = [0u8; 1];
+        state_out_read.read_exact(&mut reply).unwrap();
+        assert_eq!(reply, [b'y']);
+        drop(socket);
+        drop(client);
+        drop(udp);
+        drop(udp_sender);
+        server
+            .set_read_timeout(Some(std::time::Duration::from_millis(100)))
+            .unwrap();
+        let mut leak = [0u8; 1];
+        assert_eq!(server.read(&mut leak).unwrap(), 0);
+    }
 
     fn child_filter_is_eperm(filter: &[sock_filter], arch: u32, nr: u32) -> bool {
         eval_filter(filter, arch, nr, 0)

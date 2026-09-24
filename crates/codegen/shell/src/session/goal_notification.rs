@@ -10,6 +10,8 @@ pub(crate) struct GoalNotifySender {
     session_id: agent_client_protocol::schema::v1::SessionId,
     gateway: acp_transport::AcpAgentGatewaySender,
     persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
+    budget: sampler::PreviewEventBudget,
+    preview: std::sync::Arc<parking_lot::Mutex<Option<(String, u32, bool)>>>,
 }
 
 impl GoalNotifySender {
@@ -17,11 +19,15 @@ impl GoalNotifySender {
         session_id: agent_client_protocol::schema::v1::SessionId,
         gateway: acp_transport::AcpAgentGatewaySender,
         persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
+        budget: sampler::PreviewEventBudget,
+        preview: std::sync::Arc<parking_lot::Mutex<Option<(String, u32, bool)>>>,
     ) -> Self {
         Self {
             session_id,
             gateway,
             persistence_tx,
+            budget,
+            preview,
         }
     }
 
@@ -40,20 +46,15 @@ impl GoalNotifySender {
             update,
             meta: meta.map(serde_json::Value::Object),
         };
-        let raw = serde_json::to_value(&notification)
-            .and_then(|value| serde_json::value::to_raw_value(&value))
-            .ok();
-        let _ = self.persistence_tx.send(PersistenceMsg::Update(
-            crate::session::storage::SessionUpdate::Grow(Box::new(notification)),
-        ));
-        if let Some(raw) = raw {
-            self.gateway.forward_fire_and_forget(
-                agent_client_protocol::schema::v1::ExtNotification::new(
-                    "grow/session_notification",
-                    raw.into(),
-                ),
-            );
-        }
+        crate::session::notifications::dispatch_auxiliary_grow(
+            &self.gateway,
+            &self.persistence_tx,
+            &self.budget,
+            &self.preview,
+            "grow/session_notification",
+            notification,
+            true,
+        );
     }
 }
 

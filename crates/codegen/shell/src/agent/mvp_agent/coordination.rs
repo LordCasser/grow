@@ -25,7 +25,7 @@ impl MvpAgent {
             .take_inquiry_receiver()
             .expect("coordination inquiry receiver is taken once with the publisher");
         let inquiry_agent = LocalRef::new(self);
-        tokio::task::spawn_local(async move {
+        self.spawn_owned_local(async move {
             while let Some(inquiry) = inquiry_rx.recv().await {
                 let target_id = acp::SessionId::new(inquiry.target_session_id.clone());
                 let target = inquiry_agent
@@ -50,7 +50,7 @@ impl MvpAgent {
             }
         });
         let agent_ref = LocalRef::new(self);
-        tokio::task::spawn_local(async move {
+        self.spawn_owned_local(async move {
             loop {
                 tokio::select! {
                     _ = agent_ref.get().coordination.cancelled() => break,

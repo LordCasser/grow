@@ -195,7 +195,7 @@ impl SessionActor {
         // Settle the exact foreground owner first. An internal Goal turn is
         // intentionally absent from `pending_inputs`, so FIFO membership can
         // never be used as the ownership test.
-        let (settled_input, broadcast_queue, turn_origin, turn_kind) = {
+        let (settled_input, broadcast_queue, turn_origin, turn_kind, entered_settling) = {
             let mut state = self.state.lock().await;
             if state.running_prompt_id() != Some(prompt_id.as_str()) {
                 tracing::warn!("Received completion for unknown prompt: {prompt_id}");
@@ -209,16 +209,16 @@ impl SessionActor {
                 );
                 return;
             }
-            let (turn_origin, turn_kind) = match state.foreground.settling_identity(&prompt_id) {
-                Some(identity) => identity,
-                None => {
-                    let task = state
-                        .foreground
-                        .begin_settling()
-                        .expect("running prompt id implies a regular or settling foreground task");
-                    (task.origin.clone(), task.turn_kind)
-                }
-            };
+            let (turn_origin, turn_kind, entered_settling) =
+                match state.foreground.settling_identity(&prompt_id) {
+                    Some((origin, kind)) => (origin, kind, false),
+                    None => {
+                        let task = state.foreground.begin_settling().expect(
+                            "running prompt id implies a regular or settling foreground task",
+                        );
+                        (task.origin.clone(), task.turn_kind, true)
+                    }
+                };
             let input = state
                 .pending_inputs
                 .front()
@@ -226,8 +226,12 @@ impl SessionActor {
                 .then(|| state.pending_inputs.pop_front())
                 .flatten();
             let broadcast = input.as_ref().is_some_and(|item| item.queue_meta.is_some());
-            (input, broadcast, turn_origin, turn_kind)
+            (input, broadcast, turn_origin, turn_kind, entered_settling)
         };
+
+        if entered_settling {
+            self.send_available_commands_update().await;
+        }
 
         // Terminal fence for exact-turn steering. The sampler drains at its
         // safe points; anything left here arrived too late to belong to the

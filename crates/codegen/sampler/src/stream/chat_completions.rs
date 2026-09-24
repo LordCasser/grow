@@ -403,6 +403,7 @@ pub fn stream_chat_completions<'a>(
                 model_fingerprint,
                 // Chat Completions does not echo the applied reasoning effort.
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             };
             let mut native_message = sampling_types::conversation_item_to_chat_message(
                 ConversationItem::Assistant(assistant.clone()),

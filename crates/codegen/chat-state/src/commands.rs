@@ -17,8 +17,13 @@ use crate::{MessageCause, TimelineEventKind, TrajectorySnapshot};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TimelineWriteError {
+    /// Direct Timeline record requests return this only when preparation fails
+    /// before any persistence attempt.
     #[error("timeline event violates the causal fold: {0}")]
     Invalid(#[from] crate::TimelineError),
+    /// The writer acknowledged the event, but the actor could not project it.
+    #[error("durable timeline event could not be applied to actor state: {0}")]
+    CommittedProjectionInvalid(crate::TimelineError),
     #[error("timeline event was not durably committed: {0}")]
     Persistence(#[source] std::io::Error),
     #[error("timeline persistence acknowledgement was lost")]
@@ -37,6 +42,8 @@ pub enum TimelineWriteError {
     ImageDescriptionUnavailable(String),
     #[error("model attempt usage was submitted with a conflicting payload")]
     AttemptUsageConflict,
+    #[error("invalid auxiliary attempt usage: {0}")]
+    InvalidAuxiliaryUsage(String),
     #[error("subagent usage was submitted with a conflicting payload")]
     SubagentUsageConflict,
     #[error("invalid persisted usage observation at event {seq} ({scope}/{name}): {reason}")]
@@ -240,6 +247,22 @@ pub enum ChatStateCommand {
         reply: oneshot::Sender<Result<bool, TimelineWriteError>>,
     },
 
+    BeginAuxiliaryAttemptUsage {
+        sideband_id: String,
+        attempt_no: u32,
+        model_id: String,
+        captured_prompt_index: Option<usize>,
+        reply: oneshot::Sender<Result<bool, TimelineWriteError>>,
+    },
+    SettleAuxiliaryAttemptUsage {
+        sideband_id: String,
+        attempt_no: u32,
+        usage: Option<TokenUsage>,
+        cost_usd_ticks: Option<i64>,
+        api_duration_ms: Option<u64>,
+        reply: oneshot::Sender<Result<bool, TimelineWriteError>>,
+    },
+
     /// Subagent usage into session (and prompt when attributable). Replies when applied.
     RecordSubagentUsage {
         subagent_id: String,
@@ -410,6 +433,12 @@ pub enum ChatStateCommand {
     /// Clone the canonical event ledger for recovery/reconciliation logic.
     GetTimelineEvents {
         reply: oneshot::Sender<Vec<crate::TimelineEvent>>,
+    },
+
+    /// Clone one active-branch response for live replay projection.
+    GetAdmittedResponse {
+        identity: crate::ResponseAdmissionIdentity,
+        reply: oneshot::Sender<Option<crate::AdmittedResponse>>,
     },
 
     GetPendingNotifications {

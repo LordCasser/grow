@@ -29,7 +29,10 @@ pub struct AttemptAdmission {
 
 impl From<Option<String>> for AttemptAdmission {
     fn from(scope: Option<String>) -> Self {
-        Self { scope, max_output_tokens: None }
+        Self {
+            scope,
+            max_output_tokens: None,
+        }
     }
 }
 
@@ -110,7 +113,7 @@ impl SamplerHandle {
             scope_capture: None,
             usage_sink: None,
             evidence_sink: None,
-                recovery: None,
+            recovery: None,
         });
     }
 
@@ -133,7 +136,7 @@ impl SamplerHandle {
             scope_capture: None,
             usage_sink: None,
             evidence_sink: None,
-                recovery: None,
+            recovery: None,
         });
     }
 
@@ -186,7 +189,9 @@ impl SamplerHandle {
         request: ConversationRequest,
     ) -> Result<(ConversationResponse, InferenceLatencyStats), SamplingError> {
         if !self.accepting.load(Ordering::Acquire) {
-            return Err(SamplingError::Lifecycle("sampler actor is shutting down".into()));
+            return Err(SamplingError::Lifecycle(
+                "sampler actor is shutting down".into(),
+            ));
         }
         // RAII guard: when this future is dropped (cancel, panic, or normal return),
         // tell the sampler actor to cancel the in-flight request_id. No-op if the
@@ -226,7 +231,9 @@ impl SamplerHandle {
                 request_id: cancel_id,
             });
         completion_rx.await.unwrap_or_else(|_| {
-            Err(SamplingError::Lifecycle("sampler actor dropped before completion".into()))
+            Err(SamplingError::Lifecycle(
+                "sampler actor dropped before completion".into(),
+            ))
         })
     }
 
@@ -243,7 +250,9 @@ impl SamplerHandle {
         recovery: crate::recovery::RecoveryBudget,
     ) -> Result<(sampling_types::ConversationResponse, InferenceLatencyStats), SamplingError> {
         if !self.accepting.load(Ordering::Acquire) {
-            return Err(SamplingError::Lifecycle("sampler actor is shutting down".into()));
+            return Err(SamplingError::Lifecycle(
+                "sampler actor is shutting down".into(),
+            ));
         }
         struct CancelOnDrop {
             cmd_tx: mpsc::UnboundedSender<SamplerCommand>,
@@ -276,7 +285,9 @@ impl SamplerHandle {
                 request_id: cancel_id,
             });
         completion_rx.await.unwrap_or_else(|_| {
-            Err(SamplingError::Lifecycle("sampler actor dropped before completion".into()))
+            Err(SamplingError::Lifecycle(
+                "sampler actor dropped before completion".into(),
+            ))
         })
     }
 }

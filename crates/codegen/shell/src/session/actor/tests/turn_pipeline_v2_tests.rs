@@ -49,6 +49,60 @@ async fn completed_runner_keeps_foreground_fenced_until_terminal_settlement() {
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn settled_idle_session_publishes_fresh_behavior_availability() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway_tx, gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            tokio::spawn(async move { while persistence_rx.recv().await.is_some() {} });
+            let (actor, mut event_rx) =
+                create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            actor
+                .behavior
+                .lock()
+                .select_behavior(tool_types::BehaviorId::Plan);
+            begin_test_active_causal_turn(&actor).await;
+
+            actor
+                .handle_completion(
+                    "test-active-turn".into(),
+                    Err(acp::Error::internal_error().data("fixture completion")),
+                )
+                .await;
+            assert!(actor.state.lock().await.foreground.is_idle());
+
+            assert!(actor.send_available_commands_update_if_idle().await);
+            let mut published = None;
+            while let Ok(event) = event_rx.try_recv() {
+                let crate::session::replay_events::SessionEvent::Notification(
+                    crate::session::replay_events::SessionNotification::Acp(notification),
+                ) = event
+                else {
+                    continue;
+                };
+                if let acp::SessionUpdate::AvailableCommandsUpdate(update) = notification.update {
+                    published = update
+                        .meta
+                        .and_then(|meta| meta.get("grow/behaviorAvailability").cloned());
+                }
+            }
+            let published: tool_types::BehaviorAvailability = serde_json::from_value(
+                published.expect("idle settlement must publish Behavior availability"),
+            )
+            .unwrap();
+            assert_eq!(
+                published
+                    .choice(tool_types::BehaviorId::Normal)
+                    .unwrap()
+                    .disposition,
+                tool_types::BehaviorAvailabilityDisposition::ConfirmationRequired
+            );
+            drop(gateway_rx);
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn goal_failure_keeps_its_origin_across_terminalization() {
     tokio::task::LocalSet::new()
         .run_until(async {
@@ -675,56 +729,87 @@ fn goal_runtime_requires_the_local_task_planner() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn delegated_goal_turn_uses_inherited_owner_revision() {
-    tokio::task::LocalSet::new().run_until(async {
-        for (delegated, matching) in [(true, true), (true, false), (false, true)] {
-            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
-            let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
-            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
-            actor.startup_hints.is_subagent = true;
-            actor.startup_hints.delegated_goal = delegated;
-            let actor = std::sync::Arc::new(actor);
-            actor.goal_usage_window.sync(Some("root-goal".into()));
-            assert!(actor.goal_tracker.lock().snapshot().is_none());
-            let bridge = actor.agent.borrow().tool_bridge().clone();
-            use tools::implementations::grow_build::update_goal::{GoalContextSnapshotResource, GoalContextSnapshot, GoalView};
-            if delegated {
-            bridge.update_resource(GoalContextSnapshotResource(Some(GoalContextSnapshot {
-                view: GoalView {
-                    goal_id: if matching { "root-goal" } else { "other-goal" }.into(),
-                    definition_revision: 7,
-                    objective: "delegate work".into(), status: "active".into(), token_budget: None,
-                    tokens_used: 0, usage_incomplete: false, elapsed_ms: 0,
-                    created_at: "now".into(), updated_at: "now".into(), status_message: None,
-                },
-            }))).await;
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for (delegated, matching) in [(true, true), (true, false), (false, true)] {
+                let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                actor.startup_hints.is_subagent = true;
+                actor.startup_hints.delegated_goal = delegated;
+                let actor = std::sync::Arc::new(actor);
+                actor.goal_usage_window.sync(Some("root-goal".into()));
+                assert!(actor.goal_tracker.lock().snapshot().is_none());
+                let bridge = actor.agent.borrow().tool_bridge().clone();
+                use tools::implementations::grow_build::update_goal::{
+                    GoalContextSnapshot, GoalContextSnapshotResource, GoalView,
+                };
+                if delegated {
+                    bridge
+                        .update_resource(GoalContextSnapshotResource(Some(GoalContextSnapshot {
+                            view: GoalView {
+                                goal_id: if matching { "root-goal" } else { "other-goal" }.into(),
+                                definition_revision: 7,
+                                objective: "delegate work".into(),
+                                status: "active".into(),
+                                token_budget: None,
+                                tokens_used: 0,
+                                usage_incomplete: false,
+                                elapsed_ms: 0,
+                                created_at: "now".into(),
+                                updated_at: "now".into(),
+                                status_message: None,
+                            },
+                        })))
+                        .await;
+                }
+                install_test_foreground(&actor, "delegated-turn").await;
+                let result = actor
+                    .handle_prompt(
+                        "delegated-turn",
+                        admit_test_human_input(&actor, "delegated-turn").await,
+                        crate::session::PromptOrigin::User,
+                        Vec::new(),
+                        crate::session::TurnKind::User,
+                        vec![acp::ContentBlock::Text(acp::TextContent::new("/context"))],
+                        tool_types::BehaviorId::Normal,
+                        None,
+                        None,
+                        true,
+                        None,
+                        None,
+                    )
+                    .await;
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                let identity = events.iter().find_map(|event| match &event.kind {
+                    chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started {
+                        identity,
+                        ..
+                    }) => Some(identity),
+                    _ => None,
+                });
+                if !delegated {
+                    assert!(
+                        result.is_ok(),
+                        "ordinary Task must not acquire a partial Goal owner: {result:?}"
+                    );
+                    let identity = identity.expect("durable ordinary child turn");
+                    assert_eq!(identity.goal_id, None);
+                    assert_eq!(identity.goal_definition_revision, None);
+                } else if matching {
+                    assert!(
+                        result.is_ok(),
+                        "child must pass durable turn admission: {result:?}"
+                    );
+                    let identity = identity.expect("durable child turn");
+                    assert_eq!(identity.goal_id.as_deref(), Some("root-goal"));
+                    assert_eq!(identity.goal_definition_revision, Some(7));
+                } else {
+                    assert!(result.is_err());
+                    assert!(identity.is_none(), "mismatched owner cannot enter Timeline");
+                }
+                assert!(actor.goal_tracker.lock().snapshot().is_none());
             }
-            install_test_foreground(&actor, "delegated-turn").await;
-            let result = actor.handle_prompt(
-                "delegated-turn", admit_test_human_input(&actor, "delegated-turn").await,
-                crate::session::PromptOrigin::User, Vec::new(), crate::session::TurnKind::User,
-                vec![acp::ContentBlock::Text(acp::TextContent::new("/context"))],
-                tool_types::BehaviorId::Normal, None, None, true, None, None,
-            ).await;
-            let events = actor.chat_state_handle.timeline_events().await.unwrap();
-            let identity = events.iter().find_map(|event| match &event.kind {
-                chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started { identity, .. }) => Some(identity),
-                _ => None,
-            });
-            if !delegated {
-                assert!(result.is_ok(), "ordinary Task must not acquire a partial Goal owner: {result:?}");
-                let identity = identity.expect("durable ordinary child turn");
-                assert_eq!(identity.goal_id, None);
-                assert_eq!(identity.goal_definition_revision, None);
-            } else if matching {
-                assert!(result.is_ok(), "child must pass durable turn admission: {result:?}");
-                let identity = identity.expect("durable child turn");
-                assert_eq!(identity.goal_id.as_deref(), Some("root-goal"));
-                assert_eq!(identity.goal_definition_revision, Some(7));
-            } else {
-                assert!(result.is_err());
-                assert!(identity.is_none(), "mismatched owner cannot enter Timeline");
-            }
-            assert!(actor.goal_tracker.lock().snapshot().is_none());
-        }
-    }).await;
+        })
+        .await;
 }

@@ -43,7 +43,7 @@ impl Drop for SamplingPreviewGuard<'_> {
 impl SessionActor {
     pub(super) fn finish_sampling_preview(&self, accepted: bool) {
         use crate::extensions::notification::SamplingAttemptState;
-        if let Some((request_id, attempt)) = self.sampling_preview.lock().take() {
+        if let Some((request_id, attempt, _)) = self.sampling_preview.lock().take() {
             let notification = GrowSessionNotification {
                 session_id: self.session_info.id.clone(),
                 update: GrowSessionUpdate::SamplingAttempt {
@@ -69,12 +69,23 @@ impl SessionActor {
         self.sampling_preview
             .lock()
             .as_ref()
-            .map(|(request_id, attempt)| {
+            .map(|(request_id, attempt, _)| {
                 json!({"samplingRequestId": request_id, "samplingAttempt": attempt})
                     .as_object()
                     .cloned()
                     .expect("object literal")
             })
+    }
+
+    fn report_preview_delivery_failure(&self, request_id: String, attempt: u32, reason: String) {
+        let _ = self
+            .notifications
+            .persistence_tx
+            .send(PersistenceMsg::SamplingPreviewFailure {
+                request_id,
+                attempt,
+                reason,
+            });
     }
     /// Apply subagent usage. `Ok` after chat-state acked; `Err` if apply failed.
     pub(super) async fn record_subagent_usage(
@@ -358,15 +369,49 @@ impl SessionActor {
                     .notifications
                     .gateway_enabled
                     .load(std::sync::atomic::Ordering::Relaxed)
-                    && let Ok(value) = serde_json::to_value(&*n)
-                    && let Ok(params) = serde_json::value::to_raw_value(&value)
                 {
-                    self.notifications
-                        .gateway
-                        .forward_fire_and_forget(acp::ExtNotification::new(
-                            "grow/session_notification",
-                            params.into(),
-                        ));
+                    let params = match serde_json::value::to_raw_value(&*n) {
+                        Ok(params) => params,
+                        Err(error) => {
+                            if let Some((request_id, attempt, _)) =
+                                self.sampling_preview.lock().as_ref()
+                            {
+                                self.report_preview_delivery_failure(
+                                    request_id.clone(),
+                                    *attempt,
+                                    error.to_string(),
+                                );
+                            }
+                            tracing::warn!(%error, "failed to serialize Grow notification");
+                            return;
+                        }
+                    };
+                    let outbound =
+                        acp::ExtNotification::new("grow/session_notification", params.into());
+                    let preview = self
+                        .sampling_preview
+                        .lock()
+                        .as_ref()
+                        .map(|(id, attempt, _)| (id.clone(), *attempt));
+                    if let Some((request_id, attempt)) = preview {
+                        match self.notifications.reserve_preview_delivery(&outbound) {
+                            Ok(permit) => {
+                                let completed =
+                                    self.notifications.gateway.forward_with_completion(outbound);
+                                tokio::spawn(async move {
+                                    let _ = completed.await;
+                                    drop(permit);
+                                });
+                            }
+                            Err(error) => self.report_preview_delivery_failure(
+                                request_id,
+                                attempt,
+                                error.to_string(),
+                            ),
+                        }
+                    } else {
+                        self.notifications.gateway.forward_fire_and_forget(outbound);
+                    }
                 }
             }
         }
@@ -425,25 +470,98 @@ impl SessionActor {
             &mut notification.meta,
         );
         self.log_outbound_notification(&notification);
+        let active_preview = self
+            .sampling_preview
+            .lock()
+            .as_ref()
+            .map(|(request_id, attempt, _)| (request_id.clone(), *attempt));
         if !matches!(
             notification.update,
             acp::SessionUpdate::AvailableCommandsUpdate(_)
         ) {
-            let _ = self
-                .notifications
-                .persistence_tx
-                .send(PersistenceMsg::Update(
-                    crate::session::storage::SessionUpdate::Acp(Box::new(notification.clone())),
-                ));
+            if let Some((request_id, attempt)) =
+                crate::session::persistence::sampling_attempt_key(&notification)
+            {
+                let mut preview = self.sampling_preview.lock();
+                let already_sent = preview.as_ref().is_some_and(|(id, ordinal, sent)| {
+                    id == &request_id && *ordinal == attempt && *sent
+                });
+                if !already_sent {
+                    let event_id = notification
+                        .meta
+                        .as_ref()
+                        .and_then(|meta| meta.get("eventId"))
+                        .and_then(serde_json::Value::as_str)
+                        .expect("candidate event ID was stamped")
+                        .to_owned();
+                    let message = PersistenceMsg::SamplingCandidate {
+                        request_id: request_id.clone(),
+                        attempt,
+                        event_id,
+                    };
+                    if let Some((id, ordinal, sent)) = preview.as_mut()
+                        && id == &request_id
+                        && *ordinal == attempt
+                    {
+                        *sent = true;
+                    }
+                    let _ = self.notifications.persistence_tx.send(message);
+                }
+            } else if let Some((request_id, attempt)) = &active_preview {
+                let (respond_to, ack) = tokio::sync::oneshot::channel();
+                let sent =
+                    self.notifications
+                        .persistence_tx
+                        .send(PersistenceMsg::PreviewIndependent {
+                            request_id: request_id.clone(),
+                            attempt: *attempt,
+                            update: crate::session::storage::SessionUpdate::Acp(Box::new(
+                                notification.clone(),
+                            )),
+                            respond_to,
+                        });
+                if sent.is_err() || !matches!(ack.await, Ok(Ok(()))) {
+                    tracing::warn!(
+                        request_id,
+                        attempt,
+                        "independent preview update was not confirmed"
+                    );
+                }
+            } else {
+                let _ = self
+                    .notifications
+                    .persistence_tx
+                    .send(PersistenceMsg::Update(
+                        crate::session::storage::SessionUpdate::Acp(Box::new(notification.clone())),
+                    ));
+            }
         }
         if self
             .notifications
             .gateway_enabled
             .load(std::sync::atomic::Ordering::Relaxed)
         {
-            self.notifications
-                .gateway
-                .forward_fire_and_forget(notification);
+            if let Some((request_id, attempt)) = active_preview {
+                match self.notifications.reserve_preview_delivery(&notification) {
+                    Ok(permit) => {
+                        let completed = self
+                            .notifications
+                            .gateway
+                            .forward_with_completion(notification);
+                        tokio::spawn(async move {
+                            let _ = completed.await;
+                            drop(permit);
+                        });
+                    }
+                    Err(error) => {
+                        self.report_preview_delivery_failure(request_id, attempt, error.to_string())
+                    }
+                }
+            } else {
+                self.notifications
+                    .gateway
+                    .forward_fire_and_forget(notification);
+            }
         }
     }
     /// Send a notification to the live client **without persisting** it.
@@ -600,6 +718,7 @@ impl SessionActor {
     pub(super) async fn handle_grow_session_notification(
         self: &std::sync::Arc<Self>,
         mut notification: GrowSessionNotification,
+        forward_to_gateway: bool,
     ) -> Result<(), chat_state::TimelineWriteError> {
         if !matches!(
             notification.update,
@@ -615,12 +734,7 @@ impl SessionActor {
             crate::util::event_id::ensure_event_id_meta(&self.session_info.id.0, &mut meta_map);
             notification.meta = meta_map.map(serde_json::Value::Object);
         }
-        let _ = self
-            .notifications
-            .persistence_tx
-            .send(PersistenceMsg::Update(
-                crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone())),
-            ));
+        self.persist_grow_notification(&notification).await;
         if let GrowSessionUpdate::SubagentSpawned {
             subagent_id,
             subagent_type,
@@ -663,6 +777,9 @@ impl SessionActor {
                 return Ok(());
             }
             _ => {}
+        }
+        if forward_to_gateway {
+            self.forward_grow_notification_unhooked(notification);
         }
         Ok(())
     }
@@ -969,13 +1086,44 @@ impl SessionActor {
     ) {
         self.close_rewind_window().await;
         let notification = self.build_grow_notification(update, extra_meta);
-        let _ = self
-            .notifications
-            .persistence_tx
-            .send(PersistenceMsg::Update(
-                crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone())),
-            ));
+        self.persist_grow_notification(&notification).await;
         self.forward_grow_notification(notification).await;
+    }
+
+    async fn persist_grow_notification(&self, notification: &GrowSessionNotification) {
+        let preview = self
+            .sampling_preview
+            .lock()
+            .as_ref()
+            .map(|(request_id, attempt, _)| (request_id.clone(), *attempt));
+        if let Some((request_id, attempt)) = &preview {
+            let (respond_to, ack) = tokio::sync::oneshot::channel();
+            let sent = self
+                .notifications
+                .persistence_tx
+                .send(PersistenceMsg::PreviewIndependent {
+                    request_id: request_id.clone(),
+                    attempt: *attempt,
+                    update: crate::session::storage::SessionUpdate::Grow(Box::new(
+                        notification.clone(),
+                    )),
+                    respond_to,
+                });
+            if sent.is_err() || !matches!(ack.await, Ok(Ok(()))) {
+                tracing::warn!(
+                    request_id,
+                    attempt,
+                    "independent Grow update was not confirmed"
+                );
+            }
+        } else {
+            let _ = self
+                .notifications
+                .persistence_tx
+                .send(PersistenceMsg::Update(
+                    crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone())),
+                ));
+        }
     }
 
     pub(super) fn build_grow_notification(
@@ -1008,12 +1156,47 @@ impl SessionActor {
     }
 
     fn forward_grow_notification_unhooked(&self, notification: GrowSessionNotification) {
-        let params = serde_json::to_value(&notification)
-            .and_then(|v| serde_json::value::to_raw_value(&v))
-            .ok();
-        if let Some(params) = params {
-            let ext_notification =
-                acp::ExtNotification::new("grow/session_notification", params.into());
+        let params = match serde_json::value::to_raw_value(&notification) {
+            Ok(params) => params,
+            Err(error) => {
+                if let Some((request_id, attempt, _)) = self.sampling_preview.lock().as_ref() {
+                    self.report_preview_delivery_failure(
+                        request_id.clone(),
+                        *attempt,
+                        error.to_string(),
+                    );
+                }
+                tracing::warn!(%error, "failed to serialize Grow notification");
+                return;
+            }
+        };
+        let ext_notification =
+            acp::ExtNotification::new("grow/session_notification", params.into());
+        let preview = self
+            .sampling_preview
+            .lock()
+            .as_ref()
+            .map(|(id, attempt, _)| (id.clone(), *attempt));
+        if let Some((request_id, attempt)) = preview {
+            match self
+                .notifications
+                .reserve_preview_delivery(&ext_notification)
+            {
+                Ok(permit) => {
+                    let completed = self
+                        .notifications
+                        .gateway
+                        .forward_with_completion(ext_notification);
+                    tokio::spawn(async move {
+                        let _ = completed.await;
+                        drop(permit);
+                    });
+                }
+                Err(error) => {
+                    self.report_preview_delivery_failure(request_id, attempt, error.to_string())
+                }
+            }
+        } else {
             self.notifications
                 .gateway
                 .forward_fire_and_forget(ext_notification);
@@ -1405,7 +1588,7 @@ mod grow_event_id_stamping_tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let (gateway_tx, _gateway_rx) =
+                let (gateway_tx, mut gateway_rx) =
                     tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
                 let (persistence_tx, mut prx) =
                     tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
@@ -1423,23 +1606,52 @@ mod grow_event_id_stamping_tests {
                     .await;
                 let own_id = persisted_grow_event_id(&mut prx).await;
                 assert!(own_id.starts_with("test-actor-"));
+                let _ = gateway_rx.recv().await.expect("own live notification");
                 actor
-                    .handle_grow_session_notification(GrowSessionNotification {
-                        session_id: acp::SessionId::new("test-actor"),
-                        update: GrowSessionUpdate::RetryState(
-                            crate::extensions::notification::RetryState::Retrying {
-                                attempt: 1,
-                                max_retries: 2,
-                                reason: "inbound".into(),
-                            },
-                        ),
-                        meta: None,
-                    })
+                    .handle_grow_session_notification(
+                        GrowSessionNotification {
+                            session_id: acp::SessionId::new("test-actor"),
+                            update: GrowSessionUpdate::RetryState(
+                                crate::extensions::notification::RetryState::Retrying {
+                                    attempt: 1,
+                                    max_retries: 2,
+                                    reason: "inbound".into(),
+                                },
+                            ),
+                            meta: None,
+                        },
+                        false,
+                    )
                     .await
                     .unwrap();
                 let inbound_id = persisted_grow_event_id(&mut prx).await;
                 assert!(inbound_id.starts_with("test-actor-"));
                 assert_ne!(own_id, inbound_id);
+                assert!(
+                    gateway_rx.try_recv().is_err(),
+                    "client-origin update must not echo"
+                );
+                actor
+                    .handle_grow_session_notification(
+                        GrowSessionNotification {
+                            session_id: acp::SessionId::new("test-actor"),
+                            update: GrowSessionUpdate::MemoryFlushStarted,
+                            meta: Some(serde_json::json!({"eventId": "child-event-1"})),
+                        },
+                        true,
+                    )
+                    .await
+                    .unwrap();
+                let child_id = persisted_grow_event_id(&mut prx).await;
+                assert_eq!(child_id, "child-event-1");
+                let acp_transport::AcpClientMessage::ExtNotification(live) =
+                    gateway_rx.recv().await.expect("child live notification")
+                else {
+                    panic!("expected child Grow notification");
+                };
+                let wire: serde_json::Value =
+                    serde_json::from_str(live.request.params.get()).unwrap();
+                assert_eq!(wire["_meta"]["eventId"], child_id);
                 actor.persist_update_only(GrowSessionUpdate::RetryState(
                     crate::extensions::notification::RetryState::Retrying {
                         attempt: 1,
@@ -1450,6 +1662,48 @@ mod grow_event_id_stamping_tests {
                 let persist_only_id = persisted_grow_event_id(&mut prx).await;
                 assert!(persist_only_id.starts_with("test-actor-"));
                 assert_ne!(inbound_id, persist_only_id);
+            })
+            .await;
+    }
+    #[tokio::test]
+    async fn buffered_and_direct_grow_forwarding_keep_the_same_wire_payload() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let (gateway_tx, mut gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                let notification = GrowSessionNotification {
+                    session_id: acp::SessionId::new("test-actor"),
+                    update: GrowSessionUpdate::ToolCallDeltaChunk {
+                        tool_call_id: Some("call-1".into()),
+                        tool_index: 0,
+                        name: Some("example".into()),
+                        arguments_delta: Some("{\"value\":".into()),
+                    },
+                    meta: Some(serde_json::json!({"eventId": "event-1"})),
+                };
+                actor.forward_grow_notification_unhooked(notification.clone());
+                actor
+                    .emit_buffered(SessionNotification::Grow(Box::new(notification)))
+                    .await;
+
+                let payload = |message| {
+                    let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
+                        panic!("expected Grow extension notification");
+                    };
+                    assert_eq!(args.request.method.as_ref(), "grow/session_notification");
+                    serde_json::from_str::<serde_json::Value>(args.request.params.get()).unwrap()
+                };
+                let direct = payload(gateway_rx.try_recv().unwrap());
+                let buffered = payload(gateway_rx.try_recv().unwrap());
+                assert_eq!(direct, buffered);
+                assert_eq!(direct["sessionId"], "test-actor");
+                assert_eq!(direct["update"]["sessionUpdate"], "tool_call_delta_chunk");
+                assert_eq!(direct["update"]["arguments_delta"], "{\"value\":");
+                assert_eq!(direct["_meta"]["eventId"], "event-1");
             })
             .await;
     }
@@ -1489,6 +1743,291 @@ mod grow_event_id_stamping_tests {
                     }
                     _ => panic!("expected Acp update"),
                 }
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn sampling_candidate_payload_bypasses_persistence_queue() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, mut gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, mut persistence_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                *actor.sampling_preview.lock() = Some(("request".into(), 2, false));
+                actor
+                    .emit_notification_direct(
+                        acp::SessionNotification::new(
+                            acp::SessionId::new("test-actor"),
+                            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                                acp::ContentBlock::Text(acp::TextContent::new("provisional")),
+                            )),
+                        )
+                        .meta(
+                            serde_json::json!({
+                                "samplingRequestId": "request",
+                                "samplingAttempt": 2,
+                            })
+                            .as_object()
+                            .cloned(),
+                        ),
+                    )
+                    .await;
+                assert!(matches!(
+                    persistence_rx.recv().await.unwrap(),
+                    PersistenceMsg::SamplingCandidate { request_id, attempt, .. }
+                        if request_id == "request" && attempt == 2
+                ));
+                let acp_transport::AcpClientMessage::SessionNotification(live) =
+                    gateway_rx.recv().await.unwrap()
+                else {
+                    panic!("candidate must reach the live gateway");
+                };
+                assert!(matches!(
+                    &live.request.update,
+                    acp::SessionUpdate::AgentMessageChunk(chunk)
+                        if matches!(&chunk.content, acp::ContentBlock::Text(text) if text.text == "provisional")
+                ));
+                actor
+                    .emit_notification_direct(
+                        acp::SessionNotification::new(
+                            acp::SessionId::new("test-actor"),
+                            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                                acp::ContentBlock::Text(acp::TextContent::new("next fragment")),
+                            )),
+                        )
+                        .meta(
+                            serde_json::json!({
+                                "samplingRequestId": "request",
+                                "samplingAttempt": 2,
+                            })
+                            .as_object()
+                            .cloned(),
+                        ),
+                    )
+                    .await;
+                assert!(persistence_rx.try_recv().is_err(), "one anchor per attempt");
+                assert!(gateway_rx.try_recv().is_ok(), "all fragments stay live");
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn slow_gateway_exhaustion_rejects_preview_before_enqueue() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, mut gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, mut persistence_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                *actor.sampling_preview.lock() = Some(("request".into(), 2, false));
+                let reserved = actor
+                    .notifications
+                    .preview_gateway_budget
+                    .acquire(4095)
+                    .await
+                    .unwrap();
+                let candidate = || {
+                    acp::SessionNotification::new(
+                        acp::SessionId::new("test-actor"),
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            acp::ContentBlock::Text(acp::TextContent::new("candidate")),
+                        )),
+                    )
+                    .meta(
+                        serde_json::json!({
+                            "samplingRequestId": "request",
+                            "samplingAttempt": 2,
+                        })
+                        .as_object()
+                        .cloned(),
+                    )
+                };
+                actor.emit_notification_direct(candidate()).await;
+                assert!(matches!(
+                    persistence_rx.recv().await.unwrap(),
+                    PersistenceMsg::SamplingCandidate { .. }
+                ));
+                let held = gateway_rx.recv().await.unwrap();
+                actor.emit_notification_direct(candidate()).await;
+                assert!(matches!(
+                    persistence_rx.recv().await.unwrap(),
+                    PersistenceMsg::SamplingPreviewFailure { request_id, attempt, .. }
+                        if request_id == "request" && attempt == 2
+                ));
+                assert!(gateway_rx.try_recv().is_err());
+                drop(held);
+                drop(reserved);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn active_preview_waits_for_independent_persistence_ack() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, mut gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, mut persistence_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                *actor.sampling_preview.lock() = Some(("request".into(), 2, false));
+                let task = tokio::task::spawn_local(async move {
+                    actor
+                        .emit_notification_direct(acp::SessionNotification::new(
+                            acp::SessionId::new("test-actor"),
+                            acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new(
+                                acp::SessionModeId::new("plan"),
+                            )),
+                        ))
+                        .await;
+                });
+                let PersistenceMsg::PreviewIndependent { respond_to, .. } =
+                    persistence_rx.recv().await.unwrap()
+                else {
+                    panic!("independent update must request an exact append");
+                };
+                assert!(!task.is_finished());
+                assert!(gateway_rx.try_recv().is_err());
+                respond_to.send(Ok(())).unwrap();
+                task.await.unwrap();
+                assert!(gateway_rx.try_recv().is_ok());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn active_preview_grow_waits_for_persistence_ack_and_gateway_credit() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, mut gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, mut persistence_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                *actor.sampling_preview.lock() = Some(("request".into(), 2, false));
+                let reserved = actor
+                    .notifications
+                    .preview_gateway_budget
+                    .acquire(4096)
+                    .await
+                    .unwrap();
+                let task = tokio::task::spawn_local(async move {
+                    actor
+                        .send_grow_notification_with_extra_meta(
+                            GrowSessionUpdate::AutoCompactStarted {
+                                tokens_used: 1,
+                                context_window: 2,
+                                percentage: 50,
+                                reason: "test".into(),
+                            },
+                            None,
+                        )
+                        .await;
+                });
+                let PersistenceMsg::PreviewIndependent {
+                    update: crate::session::storage::SessionUpdate::Grow(_),
+                    respond_to,
+                    ..
+                } = persistence_rx.recv().await.unwrap()
+                else {
+                    panic!("Grow update must wait for a durable append");
+                };
+                assert!(!task.is_finished());
+                assert!(gateway_rx.try_recv().is_err());
+                respond_to.send(Ok(())).unwrap();
+                task.await.unwrap();
+                assert!(matches!(
+                    persistence_rx.recv().await.unwrap(),
+                    PersistenceMsg::SamplingPreviewFailure { request_id, attempt, .. }
+                        if request_id == "request" && attempt == 2
+                ));
+                assert!(gateway_rx.try_recv().is_err());
+                drop(reserved);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn inbound_grow_notification_waits_for_active_preview_append() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, mut persistence_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor = std::sync::Arc::new(
+                    create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
+                );
+                *actor.sampling_preview.lock() = Some(("request".into(), 2, false));
+                let task = tokio::task::spawn_local(async move {
+                    actor
+                        .handle_grow_session_notification(
+                            GrowSessionNotification {
+                                session_id: acp::SessionId::new("test-actor"),
+                                update: GrowSessionUpdate::MemoryFlushStarted,
+                                meta: None,
+                            },
+                            false,
+                        )
+                        .await
+                        .unwrap();
+                });
+                let PersistenceMsg::PreviewIndependent {
+                    update: crate::session::storage::SessionUpdate::Grow(_),
+                    respond_to,
+                    ..
+                } = persistence_rx.recv().await.unwrap()
+                else {
+                    panic!("inbound Grow update must wait for an append");
+                };
+                assert!(!task.is_finished());
+                respond_to.send(Ok(())).unwrap();
+                task.await.unwrap();
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn buffered_independent_grow_obeys_preview_gateway_budget() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, mut gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, mut persistence_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                *actor.sampling_preview.lock() = Some(("request".into(), 2, false));
+                let reserved = actor
+                    .notifications
+                    .preview_gateway_budget
+                    .acquire(4096)
+                    .await
+                    .unwrap();
+                actor
+                    .emit_buffered(SessionNotification::Grow(Box::new(
+                        GrowSessionNotification {
+                            session_id: acp::SessionId::new("test-actor"),
+                            update: GrowSessionUpdate::AutoCompactStarted {
+                                tokens_used: 1,
+                                context_window: 2,
+                                percentage: 50,
+                                reason: "test".into(),
+                            },
+                            meta: None,
+                        },
+                    )))
+                    .await;
+                assert!(matches!(
+                    persistence_rx.recv().await.unwrap(),
+                    PersistenceMsg::SamplingPreviewFailure { request_id, attempt, .. }
+                        if request_id == "request" && attempt == 2
+                ));
+                assert!(gateway_rx.try_recv().is_err());
+                drop(reserved);
             })
             .await;
     }

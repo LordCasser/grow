@@ -131,6 +131,13 @@ impl SessionActor {
                 Vec::new(),
             ),
             ToolInput::Grep(gs) => (gs.pattern.clone(), acp::ToolKind::Search, vec![], vec![]),
+            ToolInput::Lsp(lsp) => {
+                let title = match &lsp.file_path {
+                    Some(path) => format!("Code intelligence: {} `{path}`", lsp.operation),
+                    None => format!("Code intelligence: {}", lsp.operation),
+                };
+                (title, acp::ToolKind::Other, vec![], vec![])
+            }
             ToolInput::MCPTool(mcp_tool) => (
                 mcp_tool.tool_name.to_owned(),
                 acp::ToolKind::Other,
@@ -152,12 +159,7 @@ impl SessionActor {
                 vec![],
                 vec![],
             ),
-            ToolInput::Dynamic(_) => (
-                "Dynamic tool call".to_string(),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
+            ToolInput::Dynamic(_) => (wire_name.to_string(), acp::ToolKind::Other, vec![], vec![]),
             ToolInput::MemorySearch(ms) => {
                 let end = ms
                     .query
@@ -335,13 +337,6 @@ impl SessionActor {
             ),
             ToolInput::GetInquiry(ref inquiry) => (
                 format!("get_inquiry: {}", inquiry.inquiry_id),
-                acp::ToolKind::Other,
-                vec![],
-                vec![],
-            ),
-            #[allow(unreachable_patterns)]
-            _ => (
-                "Tool call".to_string(),
                 acp::ToolKind::Other,
                 vec![],
                 vec![],
@@ -1556,6 +1551,42 @@ mod coordination_tool_start_tests {
                     &["send_subagent_message", "child-7"],
                     tool_protocol::ToolAccess::Write,
                     &[("subagent_id", "child-7")],
+                )
+                .await;
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lsp_and_dynamic_tool_starts_keep_specific_identity() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                assert_tool_start(
+                    &actor,
+                    "lsp-call",
+                    "lsp",
+                    ToolInput::Lsp(tools::implementations::lsp::LspToolInput {
+                        operation: tools::implementations::lsp::LspOperation::Hover,
+                        file_path: Some("/tmp/main.rs".into()),
+                        line: Some(3),
+                        character: Some(4),
+                        query: None,
+                    }),
+                    &["Code intelligence", "hover", "/tmp/main.rs"],
+                    tool_protocol::ToolAccess::Read,
+                    &[],
+                )
+                .await;
+                assert_tool_start(
+                    &actor,
+                    "dynamic-call",
+                    "custom_lookup",
+                    ToolInput::Dynamic(serde_json::json!({"query": "x"})),
+                    &["custom_lookup"],
+                    tool_protocol::ToolAccess::Read,
+                    &[],
                 )
                 .await;
             })

@@ -581,6 +581,7 @@ impl MvpAgent {
             workspace_ops: RefCell::new(None),
             session_live_state: RefCell::new(HashMap::new()),
             supervisor_started: std::cell::Cell::new(false),
+            owned_local_tasks: RefCell::new(Vec::new()),
             #[cfg(test)]
             roster_delta_spy: RefCell::new(Vec::new()),
             #[cfg(test)]

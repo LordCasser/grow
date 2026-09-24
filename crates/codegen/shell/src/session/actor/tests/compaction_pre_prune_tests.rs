@@ -575,7 +575,9 @@ async fn actor_with_sampler_cw_ex(
     tokio::task::spawn_local(async move {
         while let Some(message) = persistence_rx.recv().await {
             if let PersistenceMsg::SidebandDurablyAndAck { event, respond_to } = message {
-                if let Some(evidence) = &evidence { evidence.lock().unwrap().push(event); }
+                if let Some(evidence) = &evidence {
+                    evidence.lock().unwrap().push(event);
+                }
                 let _ = respond_to.send(Ok(()));
             }
         }
@@ -591,7 +593,9 @@ async fn actor_with_sampler_cw_ex(
     if let Some(mut cfg) = actor.chat_state_handle.get_sampling_config().await {
         cfg.base_url = server.url();
         cfg.api_backend = api_backend.clone();
-        if bounded_output_test { cfg.output_limit = Some(131_072); }
+        if bounded_output_test {
+            cfg.output_limit = Some(131_072);
+        }
         actor.chat_state_handle.replace_sampling_route(cfg);
     }
     let sampler_config = sampler::SamplerConfig {
@@ -1736,7 +1740,6 @@ fn prune_rewrites_history_snapshot_without_updates_or_ui_events() {
         );
     }));
 }
-
 
 /// The actual summary wire, frozen Sideband selection and committed target
 /// agree after a provider rejects the first (locally fitting) request.

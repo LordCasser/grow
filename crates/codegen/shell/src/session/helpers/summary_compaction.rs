@@ -233,13 +233,10 @@ impl CompactionSampler for ShellCompactionSampler {
         // a transient/degenerate retry can overtake the durable Goal budget
         // transition produced by the preceding response.
         let usage = observed_usage.lock().unwrap().take().unwrap_or(None);
-        let tokens = usage
-            .as_ref()
-            .map(crate::session::goal_tracker::GoalTokenUsage::from);
         self.sideband
             .lock()
             .await
-            .settle_goal_attempt(tokens)
+            .settle_compaction_attempt(usage.as_ref())
             .await
             .map_err(|error| self.sideband_error(error))?;
 

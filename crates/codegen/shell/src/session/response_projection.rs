@@ -3,8 +3,10 @@ use acp_transport::protocol as acp;
 use chat_state::AdmittedResponse;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use std::io::{self, Write};
+use std::sync::Arc;
 
-pub(crate) const RESPONSE_REPLAY_PROJECTION_VERSION: u16 = 1;
+pub(crate) const RESPONSE_REPLAY_PROJECTION_VERSION: u16 = 2;
 pub(crate) const RESPONSE_REPLAY_PROJECTION_METHOD: &str = "_grow/response-replay-projection";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -14,16 +16,24 @@ pub enum ResponseReplayDisposition {
     Discarded,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "channel", content = "text", rename_all = "snake_case")]
+pub enum ProjectedText {
+    Assistant(Arc<str>),
+    Reasoning(Arc<str>),
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResponseReplayProjection {
     pub version: u16,
+    pub session_id: SessionId,
     pub request_id: String,
     pub attempt: u32,
     pub timeline_event: u64,
     pub digest: String,
     pub disposition: ResponseReplayDisposition,
-    pub updates: Vec<acp::SessionNotification>,
+    pub updates: Vec<ProjectedText>,
 }
 
 #[derive(Serialize)]
@@ -36,19 +46,36 @@ struct DigestInput<'a> {
     items: &'a [sampling_types::ConversationItem],
 }
 
+struct Sha256Writer(Sha256);
+
+impl Write for Sha256Writer {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0.update(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
 pub(crate) fn project_admitted_response(
     session_id: &SessionId,
     response: &AdmittedResponse,
 ) -> Result<ResponseReplayProjection, serde_json::Error> {
-    let digest_bytes = serde_json::to_vec(&DigestInput {
-        version: RESPONSE_REPLAY_PROJECTION_VERSION,
-        request_id: &response.identity.request_id,
-        attempt: response.identity.attempt,
-        timeline_event: response.event_seq.get(),
-        quarantined_tool_exchanges: response.quarantined_tool_exchanges,
-        items: &response.items,
-    })?;
-    let digest = format!("{:x}", Sha256::digest(digest_bytes));
+    let mut digest_writer = Sha256Writer(Sha256::new());
+    serde_json::to_writer(
+        &mut digest_writer,
+        &DigestInput {
+            version: RESPONSE_REPLAY_PROJECTION_VERSION,
+            request_id: &response.identity.request_id,
+            attempt: response.identity.attempt,
+            timeline_event: response.event_seq.get(),
+            quarantined_tool_exchanges: response.quarantined_tool_exchanges,
+            items: &response.items,
+        },
+    )?;
+    let digest = format!("{:x}", digest_writer.0.finalize());
     let disposition = if response.quarantined_tool_exchanges == 0 {
         ResponseReplayDisposition::Admitted
     } else {
@@ -57,42 +84,24 @@ pub(crate) fn project_admitted_response(
     let mut updates = Vec::new();
     if disposition == ResponseReplayDisposition::Admitted {
         for item in &response.items {
-            let (kind, text) = match item {
+            let chunk = match item {
                 sampling_types::ConversationItem::Reasoning(reasoning) => {
-                    (true, reasoning.text.as_ref())
+                    ProjectedText::Reasoning(Arc::clone(&reasoning.text))
                 }
                 sampling_types::ConversationItem::Assistant(assistant) => {
-                    (false, assistant.content.as_ref())
+                    ProjectedText::Assistant(Arc::clone(&assistant.content))
                 }
                 _ => continue,
             };
-            if text.is_empty() {
+            if chunk.text().is_empty() {
                 continue;
             }
-            let update = acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(
-                text.to_owned(),
-            )));
-            let update = if kind {
-                acp::SessionUpdate::AgentThoughtChunk(update)
-            } else {
-                acp::SessionUpdate::AgentMessageChunk(update)
-            };
-            let mut notification = acp::SessionNotification::new(session_id.clone(), update);
-            notification.meta = Some(
-                serde_json::json!({
-                    "responseProjection": true,
-                    "samplingRequestId": response.identity.request_id,
-                    "samplingAttempt": response.identity.attempt,
-                })
-                .as_object()
-                .cloned()
-                .expect("object literal"),
-            );
-            updates.push(notification);
+            updates.push(chunk);
         }
     }
     Ok(ResponseReplayProjection {
         version: RESPONSE_REPLAY_PROJECTION_VERSION,
+        session_id: session_id.clone(),
         request_id: response.identity.request_id.clone(),
         attempt: response.identity.attempt,
         timeline_event: response.event_seq.get(),
@@ -100,6 +109,14 @@ pub(crate) fn project_admitted_response(
         disposition,
         updates,
     })
+}
+
+impl ProjectedText {
+    pub fn text(&self) -> &Arc<str> {
+        match self {
+            Self::Assistant(text) | Self::Reasoning(text) => text,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -317,6 +334,44 @@ fn candidate_identity(notification: &acp::SessionNotification) -> Option<(String
 }
 
 impl ResponseReplayProjection {
+    /// Materialize owned ACP text only when a replay or fork emits the cache.
+    pub(crate) fn into_notifications(self) -> Vec<acp::SessionNotification> {
+        let Self {
+            session_id,
+            request_id,
+            attempt,
+            updates,
+            ..
+        } = self;
+        updates
+            .into_iter()
+            .map(|chunk| {
+                let (reasoning, text) = match chunk {
+                    ProjectedText::Assistant(text) => (false, text),
+                    ProjectedText::Reasoning(text) => (true, text),
+                };
+                let content = acp::ContentChunk::new(acp::ContentBlock::Text(
+                    acp::TextContent::new(text.to_string()),
+                ));
+                let update = if reasoning {
+                    acp::SessionUpdate::AgentThoughtChunk(content)
+                } else {
+                    acp::SessionUpdate::AgentMessageChunk(content)
+                };
+                acp::SessionNotification::new(session_id.clone(), update).meta(Some(
+                    serde_json::json!({
+                        "responseProjection": true,
+                        "samplingRequestId": request_id,
+                        "samplingAttempt": attempt,
+                    })
+                    .as_object()
+                    .cloned()
+                    .expect("object literal"),
+                ))
+            })
+            .collect()
+    }
+
     pub(crate) fn same_key(&self, other: &Self) -> bool {
         self.request_id == other.request_id
             && self.attempt == other.attempt
@@ -326,6 +381,7 @@ impl ResponseReplayProjection {
     pub(crate) fn exact_match(&self, other: &Self) -> bool {
         self.same_key(other)
             && self.version == other.version
+            && self.session_id == other.session_id
             && self.digest == other.digest
             && self.disposition == other.disposition
             && self.updates == other.updates
@@ -362,13 +418,57 @@ mod tests {
 
         assert_eq!(projection.disposition, ResponseReplayDisposition::Admitted);
         assert_eq!(projection.updates.len(), 1);
-        let acp::SessionUpdate::AgentMessageChunk(chunk) = &projection.updates[0].update else {
-            panic!("expected canonical assistant message projection");
+        assert!(matches!(
+            &projection.updates[0],
+            ProjectedText::Assistant(text) if text.as_ref() == "canonical"
+        ));
+        let sampling_types::ConversationItem::Assistant(assistant) = &response.items[0] else {
+            panic!("expected canonical assistant");
         };
-        let acp::ContentBlock::Text(text) = &chunk.content else {
-            panic!("expected canonical assistant text projection");
+        assert!(Arc::ptr_eq(
+            &assistant.content,
+            projection.updates[0].text()
+        ));
+    }
+
+    #[test]
+    fn projection_shares_reasoning_and_assistant_text_until_replay() {
+        let response = admitted(
+            vec![
+                sampling_types::ConversationItem::Reasoning(
+                    sampling_types::synthesized_reasoning_item("reasoning"),
+                ),
+                sampling_types::ConversationItem::assistant("answer"),
+            ],
+            0,
+        );
+        let projection =
+            project_admitted_response(&SessionId::new("session-1"), &response).unwrap();
+        let sampling_types::ConversationItem::Reasoning(reasoning) = &response.items[0] else {
+            panic!("expected reasoning");
         };
-        assert_eq!(text.text, "canonical");
+        let sampling_types::ConversationItem::Assistant(assistant) = &response.items[1] else {
+            panic!("expected assistant");
+        };
+        assert!(Arc::ptr_eq(&reasoning.text, projection.updates[0].text()));
+        assert!(Arc::ptr_eq(
+            &assistant.content,
+            projection.updates[1].text()
+        ));
+        let encoded = serde_json::to_vec(&projection).unwrap();
+        let decoded: ResponseReplayProjection = serde_json::from_slice(&encoded).unwrap();
+        assert!(decoded.exact_match(&projection));
+        let notifications = decoded.into_notifications();
+        assert!(matches!(
+            &notifications[0].update,
+            acp::SessionUpdate::AgentThoughtChunk(chunk)
+                if matches!(&chunk.content, acp::ContentBlock::Text(text) if text.text == "reasoning")
+        ));
+        assert!(matches!(
+            &notifications[1].update,
+            acp::SessionUpdate::AgentMessageChunk(chunk)
+                if matches!(&chunk.content, acp::ContentBlock::Text(text) if text.text == "answer")
+        ));
     }
 
     #[test]
@@ -401,6 +501,33 @@ mod tests {
     }
 
     #[test]
+    fn streaming_projection_digest_matches_serialized_digest_input() {
+        let response = admitted(
+            vec![
+                sampling_types::ConversationItem::Reasoning(
+                    sampling_types::synthesized_reasoning_item("thought"),
+                ),
+                sampling_types::ConversationItem::assistant("answer"),
+            ],
+            0,
+        );
+        let serialized = serde_json::to_vec(&DigestInput {
+            version: RESPONSE_REPLAY_PROJECTION_VERSION,
+            request_id: &response.identity.request_id,
+            attempt: response.identity.attempt,
+            timeline_event: response.event_seq.get(),
+            quarantined_tool_exchanges: response.quarantined_tool_exchanges,
+            items: &response.items,
+        })
+        .unwrap();
+        let expected = format!("{:x}", Sha256::digest(serialized));
+
+        let projection =
+            project_admitted_response(&SessionId::new("session-1"), &response).unwrap();
+        assert_eq!(projection.digest, expected);
+    }
+
+    #[test]
     fn healthy_projection_is_deterministic_and_has_no_live_event_ids() {
         let response = admitted(
             vec![
@@ -417,7 +544,7 @@ mod tests {
         assert!(first.exact_match(&second));
         assert_eq!(first.disposition, ResponseReplayDisposition::Admitted);
         assert_eq!(first.updates.len(), 2);
-        assert!(first.updates.iter().all(|notification| {
+        assert!(first.into_notifications().iter().all(|notification| {
             notification
                 .meta
                 .as_ref()
@@ -647,7 +774,7 @@ mod tests {
         let response = timeline.admitted_responses().pop().unwrap();
         let projection = project_admitted_response(&session_id, &response).unwrap();
         let updates = vec![
-            candidate_update(&session_id, "request-1", 2, "preview"),
+            candidate_update(&session_id, "request-1", 2, ""),
             independent_update(&session_id, "independent"),
             tool_update(&session_id),
             response_projection_update(projection.clone()),

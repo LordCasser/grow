@@ -680,6 +680,14 @@ impl SessionActor {
             if state.pending_inputs.is_empty() {
                 return;
             }
+            if state
+                .pending_inputs
+                .front()
+                .and_then(|item| item.queue_meta.as_ref())
+                .is_some_and(|meta| state.queue_edit_holds.contains_key(&meta.id))
+            {
+                return;
+            }
             // A merge needs 2+ queued prompts; sample here so the common
             // single-prompt promote skips the config disk read below.
             may_combine = state.pending_inputs.len() >= 2;
@@ -703,24 +711,30 @@ impl SessionActor {
         {
             return;
         }
+        if state
+            .pending_inputs
+            .front()
+            .and_then(|item| item.queue_meta.as_ref())
+            .is_some_and(|meta| state.queue_edit_holds.contains_key(&meta.id))
+        {
+            return;
+        }
 
         // Note: Auto-compact is now handled inline during process_conversation_turn,
         // so we no longer need to check for queued auto-compact here.
 
-        // GC stale edit-holds: an id that is no longer queued (promoted,
-        // removed, or whose fire-and-forget `release_edit` was dropped) can
-        // never be edited again, so drop it to bound the set over a long session.
-        if !state.combine_edit_holds.is_empty() {
+        // A removed row cannot retain a transient hold across arbitration.
+        if !state.queue_edit_holds.is_empty() {
             let live: std::collections::HashSet<String> = state
                 .pending_inputs
                 .iter()
                 .map(|i| i.prompt_id.clone())
                 .collect();
-            state.combine_edit_holds.retain(|id| live.contains(id));
+            state.queue_edit_holds.retain(|id, _| live.contains(id));
         }
 
         if combine_queued {
-            let holds: Vec<String> = state.combine_edit_holds.iter().cloned().collect();
+            let holds: Vec<String> = state.queue_edit_holds.keys().cloned().collect();
             let skip: Vec<&str> = holds.iter().map(String::as_str).collect();
             SessionActor::combine_front_pending_inputs(&mut state.pending_inputs, &skip);
         }
@@ -818,6 +832,11 @@ impl SessionActor {
             persist_ack,
         ));
         drop(state);
+
+        // The idle projection may have allowed a Plan exit confirmation. Once
+        // this turn owns foreground, publish the newly assessed availability
+        // before the model-facing task starts.
+        self.send_available_commands_update().await;
 
         // The installed task waits on `start_rx`, so it cannot observe stale
         // turn-scoped ownership while these resources are published.
@@ -1438,6 +1457,109 @@ impl SessionActor {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Match the debug session thread stack: prompt promotion reaches the
+    /// same deep admission poll frames as a live Shell turn.
+    fn run_with_session_stack(body: impl FnOnce() + Send + 'static) {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(body)
+            .unwrap()
+            .join()
+            .unwrap_or_else(|payload| std::panic::resume_unwind(payload));
+    }
+
+    #[test]
+    fn queued_prompt_promotion_publishes_fresh_behavior_availability() {
+        run_with_session_stack(|| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            let local = tokio::task::LocalSet::new();
+            runtime.block_on(local.run_until(async {
+                let (gateway_tx, gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                tokio::spawn(async move { while persistence_rx.recv().await.is_some() {} });
+                let (actor, mut event_rx) =
+                    crate::session::actor::tests::support::create_test_actor_ex(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await;
+                let actor = std::sync::Arc::new(actor);
+                actor
+                    .behavior
+                    .lock()
+                    .select_behavior(tool_types::BehaviorId::Plan);
+                let idle_projection = actor.behavior_availability_projection().await;
+                assert_eq!(
+                    idle_projection
+                        .choice(tool_types::BehaviorId::Normal)
+                        .unwrap()
+                        .disposition,
+                    tool_types::BehaviorAvailabilityDisposition::ConfirmationRequired
+                );
+
+                actor.state.lock().await.pending_inputs.push_back(
+                    crate::session::actor::tests::support::user_item(
+                        "availability-promotion",
+                        "test-client",
+                    ),
+                );
+                let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    actor.clone().maybe_start_running_task(completion_tx),
+                )
+                .await
+                .expect("prompt promotion should durably admit the turn");
+
+                let mut published = None;
+                while let Ok(event) = event_rx.try_recv() {
+                    let crate::session::replay_events::SessionEvent::Notification(
+                        crate::session::replay_events::SessionNotification::Acp(notification),
+                    ) = event
+                    else {
+                        continue;
+                    };
+                    if let acp::SessionUpdate::AvailableCommandsUpdate(update) = notification.update
+                    {
+                        published = update
+                            .meta
+                            .and_then(|meta| meta.get("grow/behaviorAvailability").cloned());
+                    }
+                }
+                let published: tool_types::BehaviorAvailability = serde_json::from_value(
+                    published.expect("prompt promotion must publish availability"),
+                )
+                .unwrap();
+                assert!(published.revision > idle_projection.revision);
+                assert_eq!(
+                    published
+                        .choice(tool_types::BehaviorId::Normal)
+                        .unwrap()
+                        .disposition,
+                    tool_types::BehaviorAvailabilityDisposition::Unavailable
+                );
+
+                if let Some(task) = actor
+                    .state
+                    .lock()
+                    .await
+                    .foreground
+                    .regular()
+                    .map(|task| task.handle.clone())
+                {
+                    task.abort();
+                }
+                drop(gateway_rx);
+            }));
+        });
+    }
 
     #[test]
     fn workflow_wake_identity_includes_the_terminal_boundary() {

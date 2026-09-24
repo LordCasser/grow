@@ -14,7 +14,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::commands::SamplerCommand;
 use crate::config::{RetryPolicy, SamplerConfig};
-use crate::events::SamplingEvent;
+use crate::events::{PreviewEventBudget, SamplingEvent};
 use crate::handle::SamplerHandle;
 use state::{ActiveRequest, ActorState};
 
@@ -27,6 +27,7 @@ use crate::types::RequestId;
 pub struct SamplerActor {
     cmd_rx: mpsc::UnboundedReceiver<SamplerCommand>,
     event_tx: mpsc::UnboundedSender<SamplingEvent>,
+    preview_budget: Option<PreviewEventBudget>,
     state: ActorState,
     /// Per-request tasks. The actor's run loop selects on
     /// `cmd_rx.recv()` and `tasks.join_next()`; when a task finishes
@@ -113,11 +114,32 @@ impl SamplerActor {
         retry_policy: RetryPolicy,
         event_tx: mpsc::UnboundedSender<SamplingEvent>,
     ) -> SamplerOwner {
+        Self::spawn_owned_inner(config, retry_policy, event_tx, None)
+    }
+
+    /// Spawn a session sampler whose fine-grained preview events apply
+    /// backpressure when its client/persistence drainer falls behind.
+    pub fn spawn_owned_with_preview_budget(
+        config: SamplerConfig,
+        retry_policy: RetryPolicy,
+        event_tx: mpsc::UnboundedSender<SamplingEvent>,
+        preview_budget: PreviewEventBudget,
+    ) -> SamplerOwner {
+        Self::spawn_owned_inner(config, retry_policy, event_tx, Some(preview_budget))
+    }
+
+    fn spawn_owned_inner(
+        config: SamplerConfig,
+        retry_policy: RetryPolicy,
+        event_tx: mpsc::UnboundedSender<SamplingEvent>,
+        preview_budget: Option<PreviewEventBudget>,
+    ) -> SamplerOwner {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
         let handle = SamplerHandle::new(cmd_tx);
         let actor = Self {
             cmd_rx,
             event_tx,
+            preview_budget,
             state: ActorState::new(config, retry_policy),
             tasks: JoinSet::new(),
         };
@@ -210,6 +232,7 @@ impl SamplerActor {
                     .map(|b| *b)
                     .unwrap_or_else(|| self.state.config.clone());
                 let event_tx = self.event_tx.clone();
+                let preview_budget = self.preview_budget.clone();
                 let retry_policy = self.state.retry_policy.clone();
                 let request_inner = *request;
                 self.tasks.spawn(request_task::run_request_task(
@@ -224,6 +247,7 @@ impl SamplerActor {
                     usage_sink,
                     evidence_sink,
                     recovery,
+                    preview_budget,
                 ));
             }
             SamplerCommand::Cancel { request_id } => {

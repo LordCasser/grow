@@ -1068,6 +1068,9 @@ fn response_projection_physical_ack_loss_blocks_tool_dispatch_and_recovery() {
                         PersistenceMsg::SidebandDurablyAndAck { respond_to, .. } => {
                             let _ = respond_to.send(Ok(()));
                         }
+                        PersistenceMsg::SamplingBarrier { respond_to, .. } => {
+                            let _ = respond_to.send(Ok(()));
+                        }
                         _ => {}
                     }
                 }

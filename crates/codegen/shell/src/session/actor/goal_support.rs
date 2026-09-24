@@ -984,6 +984,8 @@ impl SessionActor {
             self.session_info.id.clone(),
             self.notifications.gateway.clone(),
             self.notifications.persistence_tx.clone(),
+            self.notifications.preview_gateway_budget.clone(),
+            self.sampling_preview.clone(),
         )
     }
 
@@ -1866,7 +1868,8 @@ mod tests {
                             .lock()
                             .snapshot()
                             .unwrap()
-                            .usage_breakdown.unwrap_or_default(),
+                            .usage_breakdown
+                            .unwrap_or_default(),
                         GoalTokenUsage::default()
                     );
                     assert!(
@@ -1922,7 +1925,10 @@ mod tests {
                         serde_json::from_value(durable).unwrap();
                     assert_eq!(goal.tokens_used, charge.unwrap_or_default().total());
                     assert_eq!(goal.usage_incomplete, charge.is_none());
-                    assert_eq!(goal.usage_breakdown.unwrap_or_default(), charge.unwrap_or_default());
+                    assert_eq!(
+                        goal.usage_breakdown.unwrap_or_default(),
+                        charge.unwrap_or_default()
+                    );
                     assert!(
                         actor
                             .goal_usage_window
@@ -1937,33 +1943,75 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn late_unknown_usage_preserves_stopped_goal_status() {
         use crate::session::goal_tracker::GoalStatus;
-        tokio::task::LocalSet::new().run_until(async {
-            for status in [GoalStatus::Complete, GoalStatus::Blocked, GoalStatus::BudgetLimited, GoalStatus::Paused] {
-                let (actor, _gateway_rx) = build_actor().await;
-                actor.goal_tracker.lock().create_goal("late-goal".into(), "finish".into(), Some(100), "now".into()).unwrap();
-                actor.sync_goal_usage_window();
-                let attempt = actor.goal_usage_window.begin_model_attempt(&actor.session_id_string(), 0, Some("late-goal")).await.unwrap().unwrap();
-                let previous = actor.goal_tracker.lock().snapshot().cloned().unwrap();
-                let mut stopped = previous.clone();
-                stopped.status = status;
-                actor.goal_tracker.lock().restore_runtime_snapshot(stopped);
-                actor.commit_goal_stop_or_restore(previous).await.unwrap();
-                assert!(actor.goal_usage_window.claim_attempt_settlement(&attempt, None));
-                let outcome = actor.settle_claimed_goal_usage_attempt_outcome(&attempt).await.unwrap();
-                assert_eq!(actor.goal_tracker.lock().status(), Some(status));
-                assert_eq!(outcome, GoalUsageIncompleteApply::Recorded);
-                assert!(actor.goal_tracker.lock().snapshot().unwrap().usage_incomplete);
-                assert!(actor.goal_usage_window.attempt_settlement(&attempt).is_none());
-                let events = actor.chat_state_handle.timeline_events().await.unwrap();
-                let persisted = events.iter().rev().find_map(|event| match &event.kind {
-                    chat_state::TimelineEventKind::Control(control) => control.snapshot.get("goal").cloned(),
-                    _ => None,
-                }).unwrap();
-                let restored: crate::session::goal_tracker::GoalState = serde_json::from_value(persisted).unwrap();
-                assert_eq!(restored.status, status);
-                assert!(restored.usage_incomplete);
-            }
-        }).await;
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                for status in [
+                    GoalStatus::Complete,
+                    GoalStatus::Blocked,
+                    GoalStatus::BudgetLimited,
+                    GoalStatus::Paused,
+                ] {
+                    let (actor, _gateway_rx) = build_actor().await;
+                    actor
+                        .goal_tracker
+                        .lock()
+                        .create_goal("late-goal".into(), "finish".into(), Some(100), "now".into())
+                        .unwrap();
+                    actor.sync_goal_usage_window();
+                    let attempt = actor
+                        .goal_usage_window
+                        .begin_model_attempt(&actor.session_id_string(), 0, Some("late-goal"))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    let previous = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+                    let mut stopped = previous.clone();
+                    stopped.status = status;
+                    actor.goal_tracker.lock().restore_runtime_snapshot(stopped);
+                    actor.commit_goal_stop_or_restore(previous).await.unwrap();
+                    assert!(
+                        actor
+                            .goal_usage_window
+                            .claim_attempt_settlement(&attempt, None)
+                    );
+                    let outcome = actor
+                        .settle_claimed_goal_usage_attempt_outcome(&attempt)
+                        .await
+                        .unwrap();
+                    assert_eq!(actor.goal_tracker.lock().status(), Some(status));
+                    assert_eq!(outcome, GoalUsageIncompleteApply::Recorded);
+                    assert!(
+                        actor
+                            .goal_tracker
+                            .lock()
+                            .snapshot()
+                            .unwrap()
+                            .usage_incomplete
+                    );
+                    assert!(
+                        actor
+                            .goal_usage_window
+                            .attempt_settlement(&attempt)
+                            .is_none()
+                    );
+                    let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                    let persisted = events
+                        .iter()
+                        .rev()
+                        .find_map(|event| match &event.kind {
+                            chat_state::TimelineEventKind::Control(control) => {
+                                control.snapshot.get("goal").cloned()
+                            }
+                            _ => None,
+                        })
+                        .unwrap();
+                    let restored: crate::session::goal_tracker::GoalState =
+                        serde_json::from_value(persisted).unwrap();
+                    assert_eq!(restored.status, status);
+                    assert!(restored.usage_incomplete);
+                }
+            })
+            .await;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2638,45 +2686,70 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn descendant_sync_preserves_root_goal_admission() {
-        tokio::task::LocalSet::new().run_until(async {
-            let (mut actor, _gateway_rx) = build_actor().await;
-            let child = std::sync::Arc::get_mut(&mut actor).unwrap();
-            child.startup_hints.is_subagent = true;
-            let (root_tx, _root_rx) = tokio::sync::mpsc::unbounded_channel();
-            let window = GoalUsageWindow::new(root_tx, Some("root-goal".into()));
-            child.goal_usage_window = window.clone();
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (mut actor, _gateway_rx) = build_actor().await;
+                let child = std::sync::Arc::get_mut(&mut actor).unwrap();
+                child.startup_hints.is_subagent = true;
+                let (root_tx, _root_rx) = tokio::sync::mpsc::unbounded_channel();
+                let window = GoalUsageWindow::new(root_tx, Some("root-goal".into()));
+                child.goal_usage_window = window.clone();
 
-            // This is the synchronization performed at the end of child startup.
-            actor.sync_goal_usage_window();
-            assert_eq!(window.active_goal_id().as_deref(), Some("root-goal"));
-            for owner in ["root", "child"] {
-                let attempt = window.begin_model_attempt(owner, 0, Some("root-goal"))
-                    .await.unwrap().unwrap();
-                assert_eq!(window.attempt_goal_id(&attempt).as_deref(), Some("root-goal"));
-                assert!(window.finish_attempt(&attempt));
-            }
-
-            // Even a local active tracker must not reopen a closed root window.
-            actor.goal_tracker.lock().create_goal(
-                "child-local".into(), "local state".into(), None, "now".into(),
-            ).unwrap();
-            for (exhausted, incomplete, message) in [
-                (true, false, "exhausted its token budget"),
-                (false, true, "incomplete token usage"),
-            ] {
-                window.sync_with_goal_state(Some("root-goal".into()), exhausted, incomplete);
+                // This is the synchronization performed at the end of child startup.
                 actor.sync_goal_usage_window();
-                assert!(window.provider_admission_closed());
-                let error = window.begin_model_attempt("root", 0, Some("root-goal"))
-                    .await.unwrap_err();
-                assert!(error.contains(message), "{error}");
-            }
-            window.sync(None);
-            actor.sync_goal_usage_window();
-            assert_eq!(window.active_goal_id(), None);
-            assert!(window.begin_model_attempt("root", 0, Some("root-goal")).await.is_err());
-            assert_eq!(window.begin_model_attempt("root", 0, None).await.unwrap(), None);
-        }).await;
+                assert_eq!(window.active_goal_id().as_deref(), Some("root-goal"));
+                for owner in ["root", "child"] {
+                    let attempt = window
+                        .begin_model_attempt(owner, 0, Some("root-goal"))
+                        .await
+                        .unwrap()
+                        .unwrap();
+                    assert_eq!(
+                        window.attempt_goal_id(&attempt).as_deref(),
+                        Some("root-goal")
+                    );
+                    assert!(window.finish_attempt(&attempt));
+                }
+
+                // Even a local active tracker must not reopen a closed root window.
+                actor
+                    .goal_tracker
+                    .lock()
+                    .create_goal(
+                        "child-local".into(),
+                        "local state".into(),
+                        None,
+                        "now".into(),
+                    )
+                    .unwrap();
+                for (exhausted, incomplete, message) in [
+                    (true, false, "exhausted its token budget"),
+                    (false, true, "incomplete token usage"),
+                ] {
+                    window.sync_with_goal_state(Some("root-goal".into()), exhausted, incomplete);
+                    actor.sync_goal_usage_window();
+                    assert!(window.provider_admission_closed());
+                    let error = window
+                        .begin_model_attempt("root", 0, Some("root-goal"))
+                        .await
+                        .unwrap_err();
+                    assert!(error.contains(message), "{error}");
+                }
+                window.sync(None);
+                actor.sync_goal_usage_window();
+                assert_eq!(window.active_goal_id(), None);
+                assert!(
+                    window
+                        .begin_model_attempt("root", 0, Some("root-goal"))
+                        .await
+                        .is_err()
+                );
+                assert_eq!(
+                    window.begin_model_attempt("root", 0, None).await.unwrap(),
+                    None
+                );
+            })
+            .await;
     }
 
     #[tokio::test(flavor = "current_thread")]

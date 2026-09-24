@@ -12,6 +12,55 @@ pub use ::prompt_queue::{
 // Outbound method for broadcast_queue_changed. An ACP routing concern, not a queue concern.
 pub const QUEUE_CHANGED_METHOD: &str = "grow/queue/changed";
 
+#[derive(Debug, Clone, Copy, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QueueControlOperation {
+    Hold,
+    Save,
+    Release,
+    Remove,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueControlRequest {
+    pub session_id: String,
+    pub operation: QueueControlOperation,
+    pub id: String,
+    pub expected_version: u64,
+    pub edit_id: Option<String>,
+    pub new_text: Option<String>,
+    pub leader_client_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueControlResult {
+    pub applied: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
+}
+
+impl QueueControlResult {
+    pub fn applied(version: Option<u64>) -> Self {
+        Self {
+            applied: true,
+            version,
+            reason: None,
+        }
+    }
+
+    pub fn rejected(reason: &'static str) -> Self {
+        Self {
+            applied: false,
+            version: None,
+            reason: Some(reason),
+        }
+    }
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum PromptStatus {

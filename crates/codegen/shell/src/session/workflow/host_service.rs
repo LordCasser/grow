@@ -964,6 +964,8 @@ mod tests {
             agent_client_protocol::schema::v1::SessionId::new("test-session"),
             acp_transport::AcpAgentGatewaySender::new(gateway_tx),
             persist_tx,
+            sampler::PreviewEventBudget::default(),
+            Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
         );
         let (subagent_tx, mut subagent_rx) = mpsc::unbounded_channel();
@@ -1087,6 +1089,8 @@ mod tests {
             agent_client_protocol::schema::v1::SessionId::new("test-session"),
             acp_transport::AcpAgentGatewaySender::new(gateway_tx),
             persist_tx,
+            sampler::PreviewEventBudget::default(),
+            Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
         );
         let (subagent_tx, _subagent_rx) = mpsc::unbounded_channel();
@@ -1163,6 +1167,8 @@ mod tests {
             agent_client_protocol::schema::v1::SessionId::new("test-session"),
             acp_transport::AcpAgentGatewaySender::new(gateway_tx),
             persist_tx,
+            sampler::PreviewEventBudget::default(),
+            Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
         );
         let (subagent_tx, _subagent_rx) = mpsc::unbounded_channel();

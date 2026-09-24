@@ -6,6 +6,10 @@ use agent::prompt::skills::{SkillInfo, SkillsConfig, list_skills_with_plugins};
 
 use super::ExtResult;
 
+pub(super) static DISCOVERY_SLOTS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
+pub(super) const DISCOVERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// Generic params for methods that only need an optional `cwd`.
 #[derive(Debug)]
 struct CwdParams {
@@ -63,7 +67,7 @@ pub struct SkillsRemoveRequest {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SkillsRemoveResponse {
-    /// The path that was removed.
+    /// The resolved path requested for removal.
     pub path: String,
     /// Full updated skill list after reload.
     pub skills: Vec<SkillInfo>,
@@ -133,14 +137,13 @@ async fn reload_skills(
     cwd: &str,
     plugin_registry: Option<&agent::plugins::PluginRegistry>,
 ) -> Result<Vec<SkillInfo>, acp::Error> {
-    static SLOTS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
-        std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
     let cwd = cwd.to_owned();
     let registry = plugin_registry.cloned();
     let runtime = tokio::runtime::Handle::current();
-    run_skill_reload(
-        SLOTS.clone(),
-        std::time::Duration::from_secs(5),
+    run_bounded_discovery(
+        DISCOVERY_SLOTS.clone(),
+        DISCOVERY_TIMEOUT,
+        "skill discovery",
         move || {
             runtime.block_on(async {
                 let config = cli_config::load_config().await.skills;
@@ -152,11 +155,12 @@ async fn reload_skills(
     .map_err(|error| acp::Error::internal_error().data(format!("Skills reload failed: {error}")))
 }
 
-async fn run_skill_reload(
+pub(super) async fn run_bounded_discovery<T: Send + 'static>(
     slots: std::sync::Arc<tokio::sync::Semaphore>,
     timeout: std::time::Duration,
-    scan: impl FnOnce() -> Vec<SkillInfo> + Send + 'static,
-) -> anyhow::Result<Vec<SkillInfo>> {
+    operation: &'static str,
+    scan: impl FnOnce() -> T + Send + 'static,
+) -> anyhow::Result<T> {
     tokio::time::timeout(timeout, async move {
         let permit = slots.acquire_owned().await?;
         tokio::task::spawn_blocking(move || {
@@ -169,7 +173,19 @@ async fn run_skill_reload(
         .map_err(anyhow::Error::from)
     })
     .await
-    .map_err(|_| anyhow::anyhow!("timed out waiting for skill discovery"))?
+    .map_err(|_| anyhow::anyhow!("timed out waiting for {operation}"))?
+}
+
+async fn list_workflows_bounded(
+    cwd: std::path::PathBuf,
+) -> anyhow::Result<Vec<crate::session::workflow::registry::WorkflowListing>> {
+    run_bounded_discovery(
+        DISCOVERY_SLOTS.clone(),
+        DISCOVERY_TIMEOUT,
+        "workflow discovery",
+        move || crate::session::workflow::registry::list_workflows(Some(&cwd)),
+    )
+    .await
 }
 
 fn saved_skill_reload_error(error: acp::Error) -> acp::Error {
@@ -203,10 +219,12 @@ fn add_skill_path(config: &mut SkillsConfig, p: String) {
     }
 }
 
-fn remove_skill_path(config: &mut SkillsConfig, path: &str) {
+fn remove_skill_path(config: &mut SkillsConfig, path: &str) -> bool {
+    let previous_len = config.paths.len();
     config
         .paths
         .retain(|i| resolve_config_skill_path(i) != path);
+    config.paths.len() != previous_len
 }
 
 // Settings edits contain raw TOML strings; expand only their comparison values.
@@ -252,6 +270,23 @@ fn resolve_skill_path(raw: &str, cwd: &str) -> String {
         .unwrap_or(absolute)
         .to_string_lossy()
         .to_string()
+}
+
+async fn validate_skill_request_cwd(cwd: &str) -> Result<(), acp::Error> {
+    let path = tokio::fs::canonicalize(cwd).await.map_err(|error| {
+        acp::Error::invalid_params().data(format!(
+            "skill cwd {cwd:?} is not an accessible directory: {error}"
+        ))
+    })?;
+    let mut entries = tokio::fs::read_dir(path).await.map_err(|error| {
+        acp::Error::invalid_params().data(format!(
+            "skill cwd {cwd:?} is not a readable directory: {error}"
+        ))
+    })?;
+    entries.next_entry().await.map_err(|error| {
+        acp::Error::invalid_params().data(format!("skill cwd {cwd:?} cannot be read: {error}"))
+    })?;
+    Ok(())
 }
 
 /// Collect auto-discovered skill source directories and their counts.
@@ -336,6 +371,7 @@ pub async fn handle(
         "grow/skills/add" => {
             let req: SkillsAddRequest = serde_json::from_str(args.params.get())?;
             let cwd = req.cwd.as_deref().unwrap_or(".");
+            validate_skill_request_cwd(cwd).await?;
 
             // Resolve to absolute path so config entries work from any cwd.
             let resolved = resolve_skill_path(&req.path, cwd);
@@ -386,13 +422,15 @@ pub async fn handle(
         "grow/skills/remove" => {
             let req: SkillsRemoveRequest = serde_json::from_str(args.params.get())?;
             let cwd = req.cwd.as_deref().unwrap_or(".");
+            validate_skill_request_cwd(cwd).await?;
 
             // Resolve so relative/tilde paths match what was saved by add.
             let resolved = resolve_skill_path(&req.path, cwd);
 
             let p = resolved.clone();
+            let mut removed = false;
             if let Err(e) = cli_config::update_config(|cfg| {
-                remove_skill_path(&mut cfg.skills, &p);
+                removed = remove_skill_path(&mut cfg.skills, &p);
             })
             .await
             {
@@ -408,15 +446,24 @@ pub async fn handle(
                 .await
                 .map_err(saved_skill_reload_error)?;
             let total = skills.len();
-            let message = format!(
-                "Removed path {}. {} skill{} remaining.",
-                resolved,
-                total,
-                if total == 1 { "" } else { "s" },
-            );
+            let message = if removed {
+                format!(
+                    "Removed path {}. {} skill{} remaining.",
+                    resolved,
+                    total,
+                    if total == 1 { "" } else { "s" },
+                )
+            } else {
+                format!(
+                    "No configured skill path matched {}. {} skill{} remaining.",
+                    resolved,
+                    total,
+                    if total == 1 { "" } else { "s" },
+                )
+            };
 
             ::diagnostics::session_ctx::log_event(::diagnostics::events::SkillRemoved {
-                success: true,
+                success: removed,
             });
             super::to_ext_response(Ok(SkillsRemoveResponse {
                 path: resolved,
@@ -463,9 +510,12 @@ pub async fn handle(
             };
             let (launches_enabled, _management_available) = handle.workflow_catalog_state().await;
             let workflows = if launches_enabled {
-                crate::session::workflow::registry::list_workflows(Some(
-                    handle.tool_context.cwd.as_path(),
-                ))
+                list_workflows_bounded(handle.tool_context.cwd.as_path().to_path_buf())
+                    .await
+                    .map_err(|error| {
+                        acp::Error::internal_error()
+                            .data(format!("Workflow listing failed: {error}"))
+                    })?
             } else {
                 Vec::new()
             };
@@ -483,7 +533,20 @@ pub async fn handle(
             let skills = reload_skills(cwd, plugin_registry).await?;
             let total_skills = skills.len();
 
-            let auto_sources = discover_auto_sources(cwd, &skills);
+            let source_cwd = cwd.to_owned();
+            let (skills, auto_sources) = run_bounded_discovery(
+                DISCOVERY_SLOTS.clone(),
+                DISCOVERY_TIMEOUT,
+                "skill source discovery",
+                move || {
+                    let sources = discover_auto_sources(&source_cwd, &skills);
+                    (skills, sources)
+                },
+            )
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!("Skill source summary failed: {error}"))
+            })?;
 
             let mut msg = String::new();
 
@@ -824,6 +887,57 @@ mod tests {
             assert_eq!(config.paths, [resolved]);
         }
     }
+
+    #[test]
+    fn missing_skill_path_keeps_parent_component_after_missing_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("missing/../future-skill");
+        let resolved = resolve_skill_path("missing/../future-skill", temp.path().to_str().unwrap());
+        assert_eq!(std::path::Path::new(&resolved), path);
+        assert!(
+            std::path::Path::new(&resolved)
+                .components()
+                .any(|component| component == std::path::Component::ParentDir)
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn removed_symlink_does_not_reidentify_its_former_target() {
+        let temp = tempfile::tempdir().unwrap();
+        let real = temp.path().join("real");
+        let alias = temp.path().join("alias");
+        std::fs::create_dir(&real).unwrap();
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let saved_path = resolve_skill_path(alias.to_str().unwrap(), ".");
+        let mut config = SkillsConfig::default();
+        add_skill_path(&mut config, saved_path.clone());
+
+        std::fs::remove_file(&alias).unwrap();
+        let stale_alias = resolve_skill_path(alias.to_str().unwrap(), ".");
+        assert_ne!(stale_alias, saved_path);
+        assert!(!remove_skill_path(&mut config, &stale_alias));
+        assert_eq!(config.paths, [saved_path.clone()]);
+        assert!(remove_skill_path(&mut config, &saved_path));
+        assert!(config.paths.is_empty());
+    }
+
+    #[tokio::test]
+    async fn skill_request_rejects_unavailable_cwd() {
+        let temp = tempfile::tempdir().unwrap();
+        let file = temp.path().join("file");
+        std::fs::write(&file, "not a directory").unwrap();
+        let missing = temp.path().join("missing");
+        for cwd in [&file, &missing] {
+            let error = validate_skill_request_cwd(cwd.to_str().unwrap())
+                .await
+                .unwrap_err();
+            assert_eq!(error.code, acp::Error::invalid_params().code);
+        }
+        validate_skill_request_cwd(temp.path().to_str().unwrap())
+            .await
+            .unwrap();
+    }
     #[test]
     fn optional_cwd_rejects_invalid_params_and_accepts_defaults() {
         for raw in [
@@ -844,7 +958,7 @@ mod tests {
         assert_eq!(params.cwd.as_deref(), Some("/project"));
     }
     #[tokio::test]
-    async fn reload_timeout_retains_slot_until_worker_exits() {
+    async fn bounded_discovery_timeout_retains_slot_until_worker_exits() {
         use std::sync::{
             Arc,
             atomic::{AtomicBool, Ordering},
@@ -853,25 +967,34 @@ mod tests {
         let slots = Arc::new(tokio::sync::Semaphore::new(1));
         let (started, start) = tokio::sync::oneshot::channel();
         let (release, released) = std::sync::mpsc::channel();
-        let first = tokio::spawn(run_skill_reload(
+        let first = tokio::spawn(run_bounded_discovery(
             slots.clone(),
             Duration::from_millis(50),
+            "discovery",
             move || {
                 let _ = started.send(());
                 let _ = released.recv();
-                vec![]
+                Vec::<SkillInfo>::new()
             },
         ));
         start.await.unwrap();
-        assert!(first.await.unwrap().is_err());
+        assert_eq!(
+            first.await.unwrap().unwrap_err().to_string(),
+            "timed out waiting for discovery"
+        );
         assert_eq!(slots.available_permits(), 0);
         let ran = Arc::new(AtomicBool::new(false));
         let observed = ran.clone();
         assert!(
-            run_skill_reload(slots.clone(), Duration::from_millis(10), move || {
-                observed.store(true, Ordering::SeqCst);
-                vec![]
-            })
+            run_bounded_discovery(
+                slots.clone(),
+                Duration::from_millis(10),
+                "discovery",
+                move || {
+                    observed.store(true, Ordering::SeqCst);
+                    Vec::<SkillInfo>::new()
+                },
+            )
             .await
             .is_err()
         );
@@ -886,19 +1009,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn reload_empty_success_and_worker_failure_are_distinct() {
+    async fn bounded_discovery_empty_success_and_worker_failure_are_distinct() {
         use std::{sync::Arc, time::Duration};
         let slots = Arc::new(tokio::sync::Semaphore::new(1));
         assert!(
-            run_skill_reload(slots.clone(), Duration::from_secs(2), Vec::new)
-                .await
-                .unwrap()
-                .is_empty()
+            run_bounded_discovery(
+                slots.clone(),
+                Duration::from_secs(2),
+                "discovery",
+                Vec::<SkillInfo>::new,
+            )
+            .await
+            .unwrap()
+            .is_empty()
         );
         assert!(
-            run_skill_reload(slots.clone(), Duration::from_secs(2), || panic!(
-                "scan failed"
-            ))
+            run_bounded_discovery::<Vec<SkillInfo>>(
+                slots.clone(),
+                Duration::from_secs(2),
+                "discovery",
+                || panic!("scan failed"),
+            )
             .await
             .is_err()
         );
@@ -906,7 +1037,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn canceled_reload_waiter_does_not_start_scan() {
+    async fn canceled_discovery_waiter_does_not_start_scan() {
         use std::{
             sync::{
                 Arc,
@@ -918,12 +1049,13 @@ mod tests {
         let permit = slots.clone().acquire_owned().await.unwrap();
         let ran = Arc::new(AtomicBool::new(false));
         let observed = ran.clone();
-        let waiter = tokio::spawn(run_skill_reload(
+        let waiter = tokio::spawn(run_bounded_discovery(
             slots.clone(),
             Duration::from_secs(2),
+            "discovery",
             move || {
                 observed.store(true, Ordering::SeqCst);
-                vec![]
+                Vec::<SkillInfo>::new()
             },
         ));
         tokio::task::yield_now().await;

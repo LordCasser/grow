@@ -11,7 +11,7 @@ fn permission_audit_text(value: Option<String>) -> Option<String> {
     value
         .map(|value| value.split_whitespace().collect::<Vec<_>>().join(" "))
         .filter(|value| !value.is_empty())
-        .map(|value| tools::util::truncate_line(&value, 240).into_owned())
+        .map(|value| tools::util::truncate_str_with_marker(&value, 240).into_owned())
 }
 
 /// Project one permission request into durable/UI audit data without copying
@@ -22,28 +22,11 @@ fn permission_audit_access_summary(
     event: &workspace::permission::PermissionEvent,
 ) -> Option<String> {
     let summary = match event.access_kind.as_str() {
-        "read" | "grep" | "edit" => event
-            .access_detail
-            .as_ref()
-            .map(|_| "path details redacted".to_owned()),
+        "read" | "grep" | "edit" => Some("path details redacted".to_owned()),
         "bash" => Some("command details redacted".to_owned()),
-        "mcp" => event
-            .access_detail
-            .as_deref()
-            .and_then(|detail| detail.split_whitespace().next())
-            .filter(|name| !name.is_empty())
-            .map(|name| format!("{name} (arguments redacted)")),
-        "web_fetch" => event.access_detail.as_deref().map(|raw| {
-            let Ok(mut url) = url::Url::parse(raw) else {
-                return "URL details redacted".to_owned();
-            };
-            let _ = url.set_username("");
-            let _ = url.set_password(None);
-            url.set_path("");
-            url.set_query(None);
-            url.set_fragment(None);
-            url.to_string()
-        }),
+        "mcp" => Some(format!("{} (arguments redacted)", event.tool_name)),
+        "web_fetch" => Some("URL details redacted".to_owned()),
+        "internal_control" => Some("control details redacted".to_owned()),
         _ => None,
     };
     permission_audit_text(summary)
@@ -81,16 +64,13 @@ fn subagent_permission_updates(
     // only harness-owned reason codes; detailed evidence remains in the
     // ephemeral permission manager event.
     let reason = permission_audit_text(event.decision_reason.clone());
-    let live_access_detail = event.access_detail.clone();
-    let live_reason = event.decision_reason.clone();
-    let live_classifier_reason = event.classifier_reason.clone();
     let child_session_id = event.subagent_session_id?;
     let durable = GrowSessionUpdate::SubagentPermissionDecision {
         child_session_id,
         subagent_type: event.subagent_type,
         description: event.subagent_description,
         tool_call_id: event.tool_id,
-        tool_name: event.tool_name,
+        tool_name: tools::util::truncate_str_with_marker(&event.tool_name, 128).into_owned(),
         access_kind: event.access_kind,
         access_summary,
         access_detail: None,
@@ -100,18 +80,7 @@ fn subagent_permission_updates(
         classifier_reason: None,
         latency_ms: event.classifier_latency_ms.or(event.wait_ms),
     };
-    let mut live = durable.clone();
-    if let GrowSessionUpdate::SubagentPermissionDecision {
-        access_detail,
-        reason,
-        classifier_reason,
-        ..
-    } = &mut live
-    {
-        *access_detail = live_access_detail;
-        *reason = live_reason;
-        *classifier_reason = live_classifier_reason;
-    }
+    let live = durable.clone();
     Some((durable, live))
 }
 
@@ -126,7 +95,6 @@ mod permission_audit_tests {
             tool_id: "tool-1".into(),
             tool_name: "run_terminal_command".into(),
             access_kind: "bash".into(),
-            access_detail: Some("cargo test -p shell".into()),
             auto_approved: decision == "allow",
             user_prompted: false,
             decision: decision.into(),
@@ -143,7 +111,6 @@ mod permission_audit_tests {
             decision_reason: Some("auto_classifier_allow".into()),
             classifier_source: Some("llm".into()),
             classifier_verdict: Some("allow".into()),
-            classifier_reason: Some("required by the primary task".into()),
             classifier_latency_ms: Some(18),
             auto_denials_consecutive: Some(0),
             auto_denials_total: Some(0),
@@ -160,6 +127,7 @@ mod permission_audit_tests {
             outcome,
             source,
             latency_ms,
+            access_summary,
             access_detail,
             classifier_reason,
             ..
@@ -171,9 +139,11 @@ mod permission_audit_tests {
         assert_eq!(outcome, SubagentPermissionOutcome::Approved);
         assert_eq!(source, "main_agent");
         assert_eq!(latency_ms, Some(18));
+        assert_eq!(access_summary.as_deref(), Some("command details redacted"));
         assert_eq!(access_detail, None);
         assert_eq!(classifier_reason, None);
         let GrowSessionUpdate::SubagentPermissionDecision {
+            access_summary: live_access_summary,
             access_detail,
             classifier_reason,
             ..
@@ -181,11 +151,9 @@ mod permission_audit_tests {
         else {
             panic!("unexpected live update")
         };
-        assert_eq!(access_detail.as_deref(), Some("cargo test -p shell"));
-        assert_eq!(
-            classifier_reason.as_deref(),
-            Some("required by the primary task")
-        );
+        assert_eq!(live_access_summary, access_summary);
+        assert_eq!(access_detail, None);
+        assert_eq!(classifier_reason, None);
     }
 
     #[test]
@@ -193,7 +161,6 @@ mod permission_audit_tests {
         let mut unavailable = event("reject");
         unavailable.classifier_verdict = Some("unavailable".into());
         unavailable.classifier_source = Some("timeout".into());
-        unavailable.classifier_reason = Some("permission judgment timed out".into());
         let GrowSessionUpdate::SubagentPermissionDecision { outcome, .. } =
             subagent_permission_updates(unavailable)
                 .expect("unavailable update")
@@ -232,8 +199,7 @@ mod permission_audit_tests {
 
     #[test]
     fn durable_audit_summary_never_copies_tool_secrets() {
-        let mut bash = event("allow");
-        bash.access_detail = Some("TOKEN=top-secret cargo test --password hunter2".into());
+        let bash = event("allow");
         let bash_json =
             serde_json::to_string(&subagent_permission_updates(bash).unwrap().0).unwrap();
         assert!(bash_json.contains("command details redacted"));
@@ -242,8 +208,6 @@ mod permission_audit_tests {
 
         let mut path = event("allow");
         path.access_kind = "read".into();
-        path.access_detail = Some("/private/TOKEN-top-secret/report.md".into());
-        path.classifier_reason = Some("Allowed because TOKEN=top-secret is valid".into());
         let path_json =
             serde_json::to_string(&subagent_permission_updates(path).unwrap().0).unwrap();
         assert!(path_json.contains("path details redacted"));
@@ -253,9 +217,7 @@ mod permission_audit_tests {
 
         let mut mcp = event("allow");
         mcp.access_kind = "mcp".into();
-        mcp.access_detail = Some(
-            r#"linear__create_issue {"Authorization":"Bearer secret","password":"hunter2"}"#.into(),
-        );
+        mcp.tool_name = "linear__create_issue".into();
         let mcp_json = serde_json::to_string(&subagent_permission_updates(mcp).unwrap().0).unwrap();
         assert!(mcp_json.contains("linear__create_issue (arguments redacted)"));
         assert!(!mcp_json.contains("Bearer secret"));
@@ -263,11 +225,8 @@ mod permission_audit_tests {
 
         let mut web = event("allow");
         web.access_kind = "web_fetch".into();
-        web.access_detail = Some(
-            "https://user:password@example.test/docs?token=query-secret#fragment-secret".into(),
-        );
         let web_json = serde_json::to_string(&subagent_permission_updates(web).unwrap().0).unwrap();
-        assert!(web_json.contains("https://example.test/"));
+        assert!(web_json.contains("URL details redacted"));
         for secret in ["user", "password", "query-secret", "fragment-secret"] {
             assert!(!web_json.contains(secret), "audit leaked {secret}");
         }
@@ -1097,7 +1056,7 @@ pub(crate) async fn spawn_session_actor(
         foreground: ForegroundState::Idle,
         termination: TerminationState::Open,
         pending_inputs: VecDeque::new(),
-        combine_edit_holds: std::collections::HashSet::new(),
+        queue_edit_holds: std::collections::HashMap::new(),
         notifications_suppressed: false,
         rewindable: false,
         nudges_used_this_session: 0,
@@ -1106,6 +1065,7 @@ pub(crate) async fn spawn_session_actor(
         pending_step_controls: PendingStepControls::default(),
         applying_step_control: None,
         behavior_control_revision: 0,
+        behavior_availability_revision: 0,
         pending_behavior_control: None,
         applying_behavior_control: None,
         behavior_control_worker_active: false,
@@ -1186,6 +1146,8 @@ pub(crate) async fn spawn_session_actor(
     };
     let task_output_tool_name = Arc::new(std::sync::OnceLock::new());
     let read_tool_name = Arc::new(std::sync::OnceLock::new());
+    let preview_gateway_budget = sampler::PreviewEventBudget::default();
+    let sampling_preview = Arc::new(parking_lot::Mutex::new(None));
     let tools_notification_handle = crate::tools::notification_bridge::spawn_notification_bridge(
         crate::tools::notification_bridge::NotificationBridgeConfig {
             gateway: gateway.clone(),
@@ -1201,6 +1163,8 @@ pub(crate) async fn spawn_session_actor(
             session_cmd_tx: cmd_tx.clone(),
             task_output_tool_name: task_output_tool_name.clone(),
             read_tool_name: read_tool_name.clone(),
+            preview_gateway_budget: preview_gateway_budget.clone(),
+            sampling_preview: sampling_preview.clone(),
         },
     );
     let tool_context_for_handle = tool_context.clone();
@@ -1664,10 +1628,12 @@ pub(crate) async fn spawn_session_actor(
         configure_session_sampler_retry(max_retries, tool_context.sampling_output_delivery);
     let (sampler_event_tx, sampler_event_rx) =
         tokio::sync::mpsc::unbounded_channel::<sampler::SamplingEvent>();
-    let sampler_owner = sampler::SamplerActor::spawn_owned(
+    let sampler_event_budget = sampler::PreviewEventBudget::default();
+    let sampler_owner = sampler::SamplerActor::spawn_owned_with_preview_budget(
         sampler_config_initial,
         sampler_retry_policy,
         sampler_event_tx,
+        sampler_event_budget.clone(),
     );
     let sampler_handle = sampler_owner.handle();
     let mut hook_discovery_errors: Vec<::hooks::error::HookError> = Vec::new();
@@ -1706,13 +1672,19 @@ pub(crate) async fn spawn_session_actor(
         tools::implementations::grow_build::update_goal::GoalCommand,
     >();
     let workflow_session_directory = session_directory.clone();
-    let (workflow_store, workflow_snapshots) =
+    let (workflow_store, workflow_snapshots, corrupt_sidecar_repairs) =
         crate::session::workflow::store::WorkflowRunStore::from_restored(
             Some(workflow_session_directory.clone()),
             persistence.tx.clone(),
             persisted_workflow_runs,
             &restored_workflow_lifecycles,
         );
+    for (state, fingerprint) in corrupt_sidecar_repairs {
+        workflow_store
+            .repair_corrupt_sidecar_ack(&state, fingerprint)
+            .await
+            .map_err(agent::AgentBuildError::IoError)?;
+    }
     let restored_behavior = behavior.lock().behavior();
     let public_workflow_active = workflow_snapshots
         .iter()
@@ -1745,6 +1717,8 @@ pub(crate) async fn spawn_session_actor(
         session_info.id.clone(),
         gateway.clone(),
         persistence.tx.clone(),
+        preview_gateway_budget.clone(),
+        sampling_preview.clone(),
         workflow_store.clone(),
     );
     for state in workflow_tracker.lock().snapshot() {
@@ -2365,6 +2339,7 @@ pub(crate) async fn spawn_session_actor(
             gateway: gateway.clone(),
             gateway_enabled: gateway_enabled.clone(),
             persistence_tx: persistence.tx.clone(),
+            preview_gateway_budget,
         },
         permissions,
         tool_context,
@@ -2575,7 +2550,7 @@ pub(crate) async fn spawn_session_actor(
         recap_epoch: std::cell::Cell::new(0),
         session_turn_active: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         turn_stream_drained: parking_lot::Mutex::new(None),
-        sampling_preview: parking_lot::Mutex::new(None),
+        sampling_preview: sampling_preview.clone(),
         sampler_handle,
         sampler_owner: std::cell::RefCell::new(Some(sampler_owner)),
         sampler_event_drainer: TaskSlot::new(),
@@ -2627,6 +2602,34 @@ pub(crate) async fn spawn_session_actor(
             .map_err(|error| {
                 agent::AgentBuildError::IoError(std::io::Error::other(format!(
                     "initial model context was not durably recorded: {error}"
+                )))
+            })?;
+        let route = session.model_route.snapshot();
+        let sampling = &route.sampling_config;
+        let transport = sampling_types::model_image_input_key_from_parts(
+            &sampling.model,
+            &sampling.api_backend,
+            &sampling.base_url,
+            &sampling.query_params,
+        );
+        session
+            .chat_state_handle
+            .record_timeline_event_durably(crate::session::persistence::model_change_event(
+                &route.model_id,
+                &route.model_id,
+                sampling.reasoning_effort,
+                sampling.reasoning_effort,
+                &sampling.model,
+                &sampling.model,
+                &transport,
+                &transport,
+                "session_start_route_baseline",
+                None,
+            ))
+            .await
+            .map_err(|error| {
+                agent::AgentBuildError::IoError(std::io::Error::other(format!(
+                    "initial model route was not durably recorded: {error}"
                 )))
             })?;
         true
@@ -2736,7 +2739,19 @@ pub(crate) async fn spawn_session_actor(
         let mut sampler_event_rx = sampler_event_rx;
         let drainer = tokio::task::spawn_local(async move {
             while let Some(event) = sampler_event_rx.recv().await {
+                let cost = sampler::PreviewEventBudget::credit_cost(&event);
                 drainer_session.handle_sampling_event(event).await;
+                if cost > 0
+                    && crate::session::replay_events::release_preview_after_actor(
+                        &drainer_session.event_tx,
+                        &sampler_event_budget,
+                        cost,
+                    )
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
             }
             tracing::debug!("sampler event drainer exiting (channel closed)");
         });
@@ -3020,6 +3035,7 @@ pub(crate) async fn spawn_session_actor(
             tokio::join!(
                 session.reconcile_notification_payloads(&shutdown),
                 session.reconcile_input_payloads(&shutdown),
+                session.reconcile_user_image_assets(&shutdown),
             );
         });
         session.notification_reconciliation_worker.arm(worker);

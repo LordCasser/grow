@@ -208,6 +208,13 @@ impl TerminationState {
     }
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct QueueEditHold {
+    pub(crate) version: u64,
+    pub(crate) edit_id: String,
+    pub(crate) leader_client_id: Option<u64>,
+}
+
 struct AdmissionState {
     /// The sole owner of foreground execution. Goal's future continuation
     /// right is not foreground work and therefore cannot block user admission.
@@ -233,6 +240,10 @@ struct AdmissionState {
     /// admission/confirmation state machine but shares the typed projection
     /// protocol with Sampling and Agent.
     behavior_control_revision: u64,
+    /// Monotonic ordering for Shell-built Behavior availability projections.
+    /// Reserved with the admission snapshot before asynchronous projection
+    /// reads so Pager can discard a late older build.
+    behavior_availability_revision: u64,
     /// Newest Behavior request not yet claimed by the dedicated worker.
     pending_behavior_control: Option<PendingBehaviorSelection>,
     /// Behavior request currently owned by the dedicated worker. A newer
@@ -259,8 +270,9 @@ struct AdmissionState {
     /// until that exact turn reaches its terminal.
     terminal_preemption_pending: bool,
     pub(crate) pending_inputs: VecDeque<InputItem>,
-    /// Prompt ids held out of combine-on-promote (composer edit in progress).
-    pub(crate) combine_edit_holds: std::collections::HashSet<String>,
+    /// Transient holds keyed by admitted queue identity. Promotion and every
+    /// queue mutation share the step-control gate with these leases.
+    pub(crate) queue_edit_holds: std::collections::HashMap<String, QueueEditHold>,
     /// When true, notifications are buffered but not drained until genuine
     /// user re-engagement. Set by interactive Ctrl+C, cleared by a user prompt.
     pub(crate) notifications_suppressed: bool,
@@ -1477,7 +1489,8 @@ pub(crate) struct SessionActor {
     /// and post-commit reclamation so a same-content receipt cannot race an
     /// in-flight content-addressed payload deletion.
     pub(crate) notification_artifact_gate: TokioMutex<()>,
-    /// Serializes immutable input artifacts with admission and orphan sweep.
+    /// Serializes immutable input artifacts and published user-image assets
+    /// with their Timeline admission and orphan sweeps.
     pub(crate) input_artifact_gate: TokioMutex<()>,
     /// ACP method selected for this BYOK-only session.
     pub(crate) auth_method_id: crate::agent::auth_method::SharedAuthMethodId,
@@ -1813,10 +1826,10 @@ pub(crate) struct SessionActor {
     /// To keep all of a turn's `eventId`s in stream order, `run_turn_via_sampler`
     /// installs a sender here before submitting and awaits the receiver after the
     /// response arrives; the drainer fires it the moment it processes the
-    /// terminal `SamplingEvent::Completed` (every text/thought chunk has been
+    /// terminal `SamplingEvent::RequestCompleted` (every text/thought chunk has been
     /// `send_update`d by then). `None` between turns.
     pub(crate) turn_stream_drained: parking_lot::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-    pub(crate) sampling_preview: parking_lot::Mutex<Option<(String, u32)>>,
+    pub(crate) sampling_preview: Arc<parking_lot::Mutex<Option<(String, u32, bool)>>>,
     /// Handle to the per-session `sampler` actor.
     ///
     /// Live sessions get a real handle from `spawn_session_actor`;

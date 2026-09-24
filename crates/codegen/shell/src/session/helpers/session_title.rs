@@ -83,7 +83,11 @@ pub(crate) fn title_fallback_from_user_text(user_message: &str) -> String {
         "New session".to_string()
     } else {
         // Match Timeline's Unicode-scalar limit, including unbroken CJK/URLs.
-        s.chars().take(160).collect::<String>().trim_end().to_owned()
+        s.chars()
+            .take(160)
+            .collect::<String>()
+            .trim_end()
+            .to_owned()
     }
 }
 

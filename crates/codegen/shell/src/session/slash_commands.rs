@@ -1887,6 +1887,7 @@ mod tests {
     fn build_tools_meta_serialises_tool_names() {
         let names = vec!["scheduler_create".to_string(), "web_fetch".to_string()];
         let behavior_availability = tool_types::BehaviorAvailability {
+            revision: 0,
             current: tool_types::BehaviorId::Normal,
             choices: Vec::new(),
         };

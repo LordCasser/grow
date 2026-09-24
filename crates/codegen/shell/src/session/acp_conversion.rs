@@ -431,6 +431,24 @@ pub fn acp_tool_update(
                 )]))
                 .raw_output(raw_output_json(output, rewriter)),
         )),
+        ToolOutput::ContextRecall(recall) => Some(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from(tool_call_id)),
+            acp::ToolCallUpdateFields::new()
+                .status(Some(acp::ToolCallStatus::Completed))
+                .content(Some(vec![acp::ToolCallContent::from(
+                    acp::ContentBlock::Text(acp::TextContent::new(recall.text.clone())),
+                )]))
+                .raw_output(raw_output_json(output, rewriter)),
+        )),
+        ToolOutput::Dynamic(_) => Some(acp::ToolCallUpdate::new(
+            acp::ToolCallId::new(Arc::from(tool_call_id)),
+            acp::ToolCallUpdateFields::new()
+                .status(Some(acp::ToolCallStatus::Completed))
+                .content(Some(vec![acp::ToolCallContent::from(
+                    acp::ContentBlock::Text(acp::TextContent::new(output.to_prompt_format())),
+                )]))
+                .raw_output(raw_output_json(output, rewriter)),
+        )),
         ToolOutput::ListActiveSessions(_)
         | ToolOutput::AgentInteraction(_)
         | ToolOutput::CoordinationInquiry(_)
@@ -502,11 +520,6 @@ pub fn acp_tool_update(
                 .status(Some(acp::ToolCallStatus::Completed))
                 .raw_output(raw_output_json(output, rewriter)),
         )),
-        // Internal tools (open_page, browse_page, etc.) are not used in the
-        // shell — they are server-only.  This arm covers variants that appear
-        // when Cargo unifies the optional web-tools feature across the workspace.
-        #[allow(unreachable_patterns)]
-        _ => None,
     }
 }
 
@@ -578,6 +591,32 @@ mod tests {
                 update.fields.raw_output,
                 Some(serde_json::to_value(output).unwrap())
             );
+        }
+    }
+
+    #[test]
+    fn context_recall_and_dynamic_outputs_complete_their_tool_rows() {
+        let outputs = [
+            ToolOutput::ContextRecall(
+                tools::implementations::context_recall::ContextRecallOutput {
+                    text: "Recalled fact".into(),
+                    frozen_surface_revision: 7,
+                    context_window: 100,
+                    max_result_tokens: 25,
+                },
+            ),
+            ToolOutput::Dynamic(serde_json::json!({"answer": 42}).into()),
+        ];
+        for output in outputs {
+            let update = acp_tool_update(&output, "result-call", None, None)
+                .expect("registered result must close its tool row");
+            assert_eq!(update.tool_call_id.0.as_ref(), "result-call");
+            assert_eq!(update.fields.status, Some(acp::ToolCallStatus::Completed));
+            assert_eq!(
+                update.fields.raw_output,
+                Some(serde_json::to_value(&output).unwrap())
+            );
+            assert!(update.fields.content.is_some());
         }
     }
 

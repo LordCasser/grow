@@ -99,7 +99,10 @@ async fn handle_points(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         .map_err(|_| acp::Error::internal_error().data("failed to send command"))?;
     let result = rx
         .await
-        .map_err(|_| acp::Error::internal_error().data("session failed to respond"))?;
+        .map_err(|_| acp::Error::internal_error().data("session failed to respond"))?
+        .map_err(|error| {
+            acp::Error::internal_error().data(format!("Rewind points failed: {error}"))
+        })?;
     to_raw_response(&result)
 }
 fn response_id_from_req(req: &RewindSessionRequest) -> Option<&str> {

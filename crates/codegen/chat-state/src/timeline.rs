@@ -1910,6 +1910,31 @@ impl Timeline {
         })
     }
 
+    /// Clone only the requested identity-bearing response when its event is on
+    /// the currently selected branch. Live projection must not clone the
+    /// complete ledger or unrelated admitted response bodies.
+    pub fn admitted_response(
+        &self,
+        identity: &ResponseAdmissionIdentity,
+    ) -> Option<AdmittedResponse> {
+        let (event, message, admission) = self.events.iter().find_map(|event| {
+            let TimelineEventKind::Messages(message) = &event.kind else {
+                return None;
+            };
+            let admission = message.response_admission.as_ref()?;
+            (admission.identity == *identity).then_some((event, message, admission))
+        })?;
+        fold_branch_provenance(self)
+            .admitted_response_events
+            .contains(&event.seq)
+            .then(|| AdmittedResponse {
+                event_seq: event.seq,
+                identity: admission.identity.clone(),
+                items: message.items.clone(),
+                quarantined_tool_exchanges: admission.quarantined_tool_exchanges,
+            })
+    }
+
     /// Identity-bearing assistant responses belonging to the currently
     /// selected branch, in Timeline order.
     pub fn admitted_responses(&self) -> Vec<AdmittedResponse> {
@@ -7006,6 +7031,39 @@ fn validate_tool_result_prune(
 mod tests {
     use super::*;
 
+    // The ignored append benchmark runs alone with one test thread. Count
+    // requested allocation bytes only while its sample window is enabled.
+    #[global_allocator]
+    static TEST_ALLOCATOR: CountingAllocator = CountingAllocator;
+
+    struct CountingAllocator;
+
+    static ALLOCATION_COUNTING: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    static ALLOCATED_BYTES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    unsafe impl std::alloc::GlobalAlloc for CountingAllocator {
+        unsafe fn alloc(&self, layout: std::alloc::Layout) -> *mut u8 {
+            let ptr = unsafe { std::alloc::System.alloc(layout) };
+            if ALLOCATION_COUNTING.load(std::sync::atomic::Ordering::Relaxed) {
+                ALLOCATED_BYTES.fetch_add(layout.size(), std::sync::atomic::Ordering::Relaxed);
+            }
+            ptr
+        }
+
+        unsafe fn dealloc(&self, ptr: *mut u8, layout: std::alloc::Layout) {
+            unsafe { std::alloc::System.dealloc(ptr, layout) }
+        }
+
+        unsafe fn realloc(&self, ptr: *mut u8, layout: std::alloc::Layout, size: usize) -> *mut u8 {
+            let ptr = unsafe { std::alloc::System.realloc(ptr, layout, size) };
+            if ALLOCATION_COUNTING.load(std::sync::atomic::Ordering::Relaxed) {
+                ALLOCATED_BYTES.fetch_add(size, std::sync::atomic::Ordering::Relaxed);
+            }
+            ptr
+        }
+    }
+
     fn assert_bulk_matches(transactional: &Timeline) {
         let replay = Timeline::from_events(transactional.events.clone()).unwrap();
         assert_same_fold(&replay, transactional);
@@ -7142,6 +7200,66 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_request_preserves_partial_evidence_without_admitting_it() {
+        let mut before = Timeline::default();
+        let turn = start_internal_turn(&mut before, 1);
+        let step = StepId { turn, index: 0 };
+        before
+            .record(TimelineEventKind::Step(StepEvent::Started { id: step }))
+            .unwrap();
+        before
+            .record(TimelineEventKind::Request(RequestEvent::Started {
+                id: "interrupted-request".into(),
+                turn,
+                step,
+                model_id: "model".into(),
+                input_message_count: 0,
+                tool_count: 0,
+            }))
+            .unwrap();
+        let partial = serde_json::json!({
+            "owner": {"request_id": "interrupted-request"},
+            "kind": "response",
+            "metadata": {"attempt_number": 1, "stream_end": null},
+            "bytes": 7,
+            "chunks": [{"blake3": blake3::hash(b"partial").to_hex().to_string(), "bytes": 7}],
+        });
+        before
+            .record(TimelineEventKind::Observation(ObservationEvent {
+                scope: "sampling_evidence".into(),
+                name: "response".into(),
+                turn: None,
+                step: None,
+                data: Some(partial.clone()),
+            }))
+            .unwrap();
+
+        let mut restored = Timeline::from_events(before.events().to_vec()).unwrap();
+        assert!(restored.surface().is_empty());
+        let repairs = restored.recover_interrupted().unwrap();
+        assert!(repairs.iter().any(|event| matches!(
+            &event.kind,
+            TimelineEventKind::Request(RequestEvent::Cancelled { id, reason, .. })
+                if id == "interrupted-request" && reason == "process_interrupted"
+        )));
+        assert!(repairs.iter().any(|event| matches!(
+            &event.kind,
+            TimelineEventKind::Turn(TurnEvent::Ended { terminal, .. })
+                if terminal.source == TurnTerminalSource::Recovery
+        )));
+        assert!(restored.events().iter().any(|event| matches!(
+            &event.kind,
+            TimelineEventKind::Observation(observation)
+                if observation.scope == "sampling_evidence" && observation.data.as_ref() == Some(&partial)
+        )));
+        assert!(restored.surface().is_empty());
+        assert!(!restored.events().iter().any(|event| matches!(
+            event.kind,
+            TimelineEventKind::Request(RequestEvent::Completed { .. })
+        )));
+    }
+
+    #[test]
     fn bulk_replay_preserves_large_request_history_and_rejects_invalid_suffix() {
         let mut timeline = Timeline::default();
         let turn = TurnId(7);
@@ -7256,6 +7374,134 @@ mod tests {
             baseline.as_secs_f64() / optimized.as_secs_f64()
         );
         assert_same_fold(&replay, &reference);
+    }
+
+    #[test]
+    #[ignore = "manual online append cost sweep; run alone with --test-threads=1"]
+    fn benchmark_online_timeline_append_cost() {
+        use std::sync::atomic::Ordering;
+        use std::time::Instant;
+
+        fn append_message(timeline: &mut Timeline) {
+            timeline
+                .append_many(
+                    vec![ConversationItem::assistant("history")],
+                    MessageCause::Assistant,
+                )
+                .unwrap();
+        }
+
+        fn append_completed_request_history(timeline: &mut Timeline, count: usize) {
+            let turn = TurnId(7);
+            let step = StepId { turn, index: 0 };
+            timeline
+                .record(TimelineEventKind::Turn(TurnEvent::Started {
+                    id: turn,
+                    input_ids: vec![],
+                    identity: user_identity(),
+                    model_id: "provider/model".into(),
+                    input_message_count: 0,
+                    prompt_index: 0,
+                    prompt_text: "task".into(),
+                    input_kind: TurnInputKind::Prompt,
+                    redirect_kind: None,
+                }))
+                .unwrap();
+            timeline
+                .record(TimelineEventKind::Step(StepEvent::Started { id: step }))
+                .unwrap();
+            for index in 0..count {
+                let id = format!("retained-request-{index}");
+                timeline
+                    .record(TimelineEventKind::Request(RequestEvent::Started {
+                        id: id.clone(),
+                        turn,
+                        step,
+                        model_id: "provider/model".into(),
+                        input_message_count: 0,
+                        tool_count: 0,
+                    }))
+                    .unwrap();
+                timeline
+                    .record(TimelineEventKind::Request(RequestEvent::Completed {
+                        id,
+                        duration_ms: 1,
+                        time_to_first_token_ms: None,
+                        usage: RequestUsage::default(),
+                        response_message_count: 0,
+                        attempt: 0,
+                        provider_terminal: None,
+                    }))
+                    .unwrap();
+            }
+        }
+
+        fn run_case(history_events: usize, lifecycle_entries: usize) {
+            let mut timeline = Timeline::default();
+            for _ in 0..history_events {
+                append_message(&mut timeline);
+            }
+            append_completed_request_history(&mut timeline, lifecycle_entries);
+            // Grow event and Surface vectors before timing so an allocation
+            // in a sample reflects the append transaction, not Vec capacity.
+            for _ in 0..32 {
+                append_message(&mut timeline);
+            }
+            let base_events = timeline.events.len();
+            let base_surface_items = timeline.surface.len();
+
+            let samples = 7;
+            let mut elapsed = Vec::with_capacity(samples);
+            let mut allocated = Vec::with_capacity(samples);
+            for _ in 0..samples {
+                let kind = TimelineEventKind::Messages(MessageEvent {
+                    cause: MessageCause::Assistant,
+                    items: vec![ConversationItem::assistant("sample")],
+                    surface: SurfaceOp::Append,
+                    response_admission: None,
+                });
+                ALLOCATED_BYTES.store(0, Ordering::Relaxed);
+                ALLOCATION_COUNTING.store(true, Ordering::Relaxed);
+                let start = Instant::now();
+                let event = timeline.prepare(kind).unwrap();
+                timeline.accept(event).unwrap();
+                let duration = start.elapsed();
+                ALLOCATION_COUNTING.store(false, Ordering::Relaxed);
+                elapsed.push(duration.as_nanos());
+                allocated.push(ALLOCATED_BYTES.load(Ordering::Relaxed));
+            }
+            elapsed.sort_unstable();
+            allocated.sort_unstable();
+            eprintln!(
+                "history_events={history_events} lifecycle_entries={lifecycle_entries} base_events={base_events} base_surface_items={base_surface_items} median_append_ns={} median_allocated_bytes={}",
+                elapsed[samples / 2],
+                allocated[samples / 2]
+            );
+        }
+
+        for history_events in [0, 1_000, 10_000] {
+            for lifecycle_entries in [0, 100, 1_000] {
+                run_case(history_events, lifecycle_entries);
+            }
+        }
+
+        let mut timeline = Timeline::default();
+        append_message(&mut timeline);
+        let invalid = TimelineEvent {
+            version: TIMELINE_SCHEMA_VERSION,
+            seq: timeline.next_seq(),
+            at_ms: 1,
+            kind: TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::Assistant,
+                items: vec![],
+                surface: SurfaceOp::Append,
+                response_admission: None,
+            }),
+        };
+        let before = format!("{timeline:?}");
+        assert!(timeline.accept(invalid).is_err());
+        assert_eq!(format!("{timeline:?}"), before);
+        eprintln!("rejected append preserved complete Timeline state");
     }
 
     fn record_compaction_summary_for(
@@ -10522,6 +10768,7 @@ mod tests {
             model_id: Some("model".into()),
             model_fingerprint: None,
             reasoning_effort: None,
+            response_messages: Vec::new(),
         });
         let mut timeline = Timeline::from_seed(vec![assistant]).unwrap();
 
@@ -14350,10 +14597,27 @@ mod tests {
             }))
             .unwrap();
         assert_eq!(timeline.admitted_responses().len(), 2);
+        assert_eq!(
+            timeline
+                .admitted_response(&ResponseAdmissionIdentity {
+                    request_id: "req-11".into(),
+                    attempt: 1,
+                })
+                .map(|response| response.event_seq),
+            Some(second)
+        );
 
         let rewound = timeline.rewind_surface(0).unwrap();
         timeline.replace_all(rewound, MessageCause::Rewind).unwrap();
         assert!(timeline.admitted_responses().is_empty());
+        assert!(
+            timeline
+                .admitted_response(&ResponseAdmissionIdentity {
+                    request_id: "req-11".into(),
+                    attempt: 1,
+                })
+                .is_none()
+        );
     }
 
     #[test]

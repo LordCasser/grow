@@ -24,7 +24,7 @@ use sampling_types::{
 
 use crate::client::{ApiBackend, SamplingClient};
 use crate::config::{RetryPolicy, SamplerConfig};
-use crate::events::{SamplingErrorInfo, SamplingEvent};
+use crate::events::{PreviewEventBudget, SamplingErrorInfo, SamplingEvent};
 use crate::handle::{AttemptScopeCapture, AttemptUsage, AttemptUsageSink};
 use crate::metrics::InferenceLatencyStats;
 use crate::retry::{
@@ -144,6 +144,7 @@ pub(crate) async fn run_request_task(
     usage_sink: Option<AttemptUsageSink>,
     evidence_sink: Option<crate::audit::EvidenceSink>,
     recovery: Option<crate::recovery::RecoveryBudget>,
+    preview_budget: Option<PreviewEventBudget>,
 ) -> RequestId {
     let mut completion_tx = completion_tx;
     let idle_timeout = Duration::from_secs(
@@ -251,6 +252,7 @@ pub(crate) async fn run_request_task(
                 Arc::clone(&output_observed),
                 scope_capture.as_ref(),
                 Some(&recovery),
+                preview_budget.as_ref(),
             )
             .instrument(sampling_span.clone());
             let attempt = async {
@@ -489,12 +491,14 @@ pub(crate) async fn run_request_task(
                     sampling_span.record("output_tokens", usage.completion_tokens);
                     sampling_span.record("reasoning_tokens", usage.reasoning_tokens);
                 }
-                // Emit Completed only after the loop succeeds; the L2
-                // stream's terminal event was suppressed by
-                // `run_one_attempt`.
-                let _ = event_tx.send(SamplingEvent::Completed {
+                // Emit terminal bookkeeping only after the loop succeeds; the
+                // L2 Completed event was consumed by `run_one_attempt`.
+                let _ = event_tx.send(SamplingEvent::RequestCompleted {
                     request_id: request_id.clone(),
-                    response: response.clone(),
+                    usage: response.usage.clone(),
+                    item_count: response.items.len(),
+                    provider_terminal: response.provider_terminal.clone(),
+                    doom_loop_signals: response.doom_loop_signals.clone(),
                     metrics: metrics.clone(),
                 });
                 send_completion(&mut completion_tx, Ok((*response, metrics)));
@@ -681,12 +685,15 @@ pub(crate) async fn run_request_task(
                     stop_reason = ?partial_response.stop_reason,
                     "turn ended by truncation-class stop_reason; partial response surfaced (no retry)"
                 );
-                // Emit Completed: the L2 stream's terminal event was
-                // suppressed by `run_one_attempt`, so this is the only
-                // terminal event the session sees.
-                let _ = event_tx.send(SamplingEvent::Completed {
+                // Emit terminal bookkeeping: the L2 Completed event was
+                // consumed by `run_one_attempt`, so this is the terminal
+                // event the session drainer sees.
+                let _ = event_tx.send(SamplingEvent::RequestCompleted {
                     request_id: request_id.clone(),
-                    response: partial_response.clone(),
+                    usage: partial_response.usage.clone(),
+                    item_count: partial_response.items.len(),
+                    provider_terminal: partial_response.provider_terminal.clone(),
+                    doom_loop_signals: partial_response.doom_loop_signals.clone(),
                     metrics: metrics.clone(),
                 });
                 send_completion(&mut completion_tx, Ok((*partial_response, metrics)));
@@ -940,6 +947,7 @@ async fn run_one_attempt(
     output_observed: Arc<AtomicBool>,
     scope_capture: Option<&AttemptScopeCapture>,
     recovery: Option<&crate::RecoveryBudget>,
+    preview_budget: Option<&PreviewEventBudget>,
 ) -> Result<AttemptRun, String> {
     // The provider-open future can be dropped by the cancellation branch
     // after an earlier poll admitted Goal usage but before it returns a raw
@@ -988,6 +996,7 @@ async fn run_one_attempt(
                     None,
                     output_observed,
                     recovery,
+                    preview_budget,
                 )
                 .await,
                 scope,
@@ -1046,6 +1055,7 @@ async fn run_one_attempt(
                     doom_check,
                     output_observed,
                     recovery,
+                    preview_budget,
                 )
                 .await,
                 scope,
@@ -1092,6 +1102,7 @@ async fn run_one_attempt(
                     None,
                     output_observed,
                     recovery,
+                    preview_budget,
                 )
                 .await,
                 scope,
@@ -1146,6 +1157,7 @@ async fn drive_l2(
     doom_check: Option<sampling_types::DoomLoopRecoveryPolicy>,
     output_observed: Arc<AtomicBool>,
     recovery: Option<&crate::RecoveryBudget>,
+    preview_budget: Option<&PreviewEventBudget>,
 ) -> AttemptOutcome {
     let mut l2 = pin!(l2);
     loop {
@@ -1236,7 +1248,42 @@ async fn drive_l2(
                     ) {
                         output_observed.store(true, Ordering::Relaxed);
                     }
-                    let _ = event_tx.send(retag(other, &request_id));
+                    let outbound = retag(other, &request_id);
+                    let permit = if let Some(budget) = preview_budget {
+                        let cost = match PreviewEventBudget::checked_credit_cost(&outbound) {
+                            Ok(cost) => cost,
+                            Err(bytes) => {
+                                return AttemptOutcome::Failed {
+                                    error: SamplingError::Lifecycle(format!(
+                                        "preview fragment exceeds {}-byte handoff capacity ({bytes} bytes)",
+                                        PreviewEventBudget::MAX_BYTES
+                                    )),
+                                    usage: None,
+                                    cost_usd_ticks: None,
+                                };
+                            }
+                        };
+                        if cost == 0 {
+                            None
+                        } else {
+                            let acquired = tokio::select! {
+                                biased;
+                                _ = cancel_token.cancelled() => return AttemptOutcome::Cancelled,
+                                acquired = budget.acquire(cost) => acquired,
+                            };
+                            match acquired {
+                                Ok(permit) => Some(permit),
+                                Err(_) => return AttemptOutcome::Cancelled,
+                            }
+                        }
+                    } else {
+                        None
+                    };
+                    if event_tx.send(outbound).is_ok() {
+                        if let Some(permit) = permit {
+                            permit.forget();
+                        }
+                    }
                     // Give a buffered terminal priority over cancellation so
                     // its provider-reported usage is never discarded.  For a
                     // non-terminal backlog, however, observe cancellation
@@ -1549,6 +1596,7 @@ mod tests {
                 })
             });
             let (event_tx, mut events) = mpsc::unbounded_channel();
+            let (completion_tx, completion_rx) = oneshot::channel();
             tokio::time::timeout(
                 Duration::from_secs(30),
                 run_request_task(
@@ -1575,20 +1623,29 @@ mod tests {
                     },
                     event_tx,
                     cancel,
-                    None,
+                    Some(completion_tx),
                     None,
                     Some(usage_sink),
                     Some(evidence),
+                    None,
                     None,
                 ),
             )
             .await
             .expect("bounded malformed-output recovery");
+            let completion = completion_rx
+                .await
+                .expect("request task should report its terminal result");
             server.abort();
             let mut collected = Vec::new();
             while let Some(event) = events.recv().await {
                 collected.push(event);
             }
+            assert!(
+                collected
+                    .iter()
+                    .all(|event| !matches!(event, SamplingEvent::Completed { .. }))
+            );
             let expected = match mode {
                 "recover" | "unknown_usage" | "lower_cap" => 2,
                 "exhaust" => 3,
@@ -1620,10 +1677,7 @@ mod tests {
             }
             let completions: Vec<_> = collected
                 .iter()
-                .filter_map(|event| match event {
-                    SamplingEvent::Completed { response, .. } => Some(response),
-                    _ => None,
-                })
+                .filter(|event| matches!(event, SamplingEvent::RequestCompleted { .. }))
                 .collect();
             if matches!(mode, "recover" | "unknown_usage") {
                 assert!(
@@ -1632,7 +1686,18 @@ mod tests {
                         .any(|event| matches!(event, SamplingEvent::Retrying { .. }))
                 );
                 assert_eq!(completions.len(), 1);
-                assert_eq!(completions[0].tool_calls()[0].arguments.as_ref(), "{}");
+                assert!(matches!(
+                    completions[0],
+                    SamplingEvent::RequestCompleted {
+                        usage: Some(usage),
+                        item_count: 1,
+                        provider_terminal: Some(_),
+                        doom_loop_signals,
+                        ..
+                    } if usage.total_tokens == 14 && doom_loop_signals.is_empty()
+                ));
+                let response = completion.expect("recovered response").0;
+                assert_eq!(response.tool_calls()[0].arguments.as_ref(), "{}");
                 assert!(
                     !collected
                         .iter()
@@ -1640,6 +1705,7 @@ mod tests {
                 );
             } else {
                 assert!(completions.is_empty(), "bad calls must never be admitted");
+                assert!(completion.is_err(), "rejected output has no response");
                 if mode == "irreversible" {
                     assert!(
                         !collected
@@ -1700,6 +1766,7 @@ mod tests {
             Arc::new(AtomicBool::new(false)),
             Some(&capture),
             None,
+            None,
         )
         .await
         .unwrap();
@@ -1758,6 +1825,7 @@ mod tests {
                 })),
                 Some(usage_sink),
                 Some(sink),
+                None,
                 None,
             ));
             let request = tokio::time::timeout(Duration::from_secs(2), records.recv())
@@ -1872,6 +1940,7 @@ mod tests {
                     None,
                     Some(sink),
                     None,
+                    None,
                 ));
                 let mut saw_raw = false;
                 loop {
@@ -1922,6 +1991,131 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn incomplete_and_malformed_sse_keep_exact_attempt_evidence() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for backend in [
+            ApiBackend::ChatCompletions,
+            ApiBackend::Responses,
+            ApiBackend::Messages,
+        ] {
+            for (failure, raw) in [
+                ("malformed", b"data: {broken}\n\n".as_slice()),
+                ("partial", b"data: {\"type\":".as_slice()),
+                ("empty", b"".as_slice()),
+            ] {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let address = listener.local_addr().unwrap();
+                let raw = raw.to_vec();
+                let served = raw.clone();
+                let server = tokio::spawn(async move {
+                    let (mut socket, _) = listener.accept().await.unwrap();
+                    let mut request = Vec::new();
+                    let mut buf = [0; 4096];
+                    loop {
+                        let count = socket.read(&mut buf).await.unwrap();
+                        assert!(count > 0, "provider request ended before its body");
+                        request.extend_from_slice(&buf[..count]);
+                        if let Some(end) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                        {
+                            let headers =
+                                String::from_utf8_lossy(&request[..end]).to_ascii_lowercase();
+                            let length: usize = headers
+                                .lines()
+                                .find_map(|line| line.strip_prefix("content-length:"))
+                                .unwrap()
+                                .trim()
+                                .parse()
+                                .unwrap();
+                            if request.len() >= end + 4 + length {
+                                break;
+                            }
+                        }
+                    }
+                    socket
+                        .write_all(
+                            format!(
+                                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                                served.len()
+                            )
+                            .as_bytes(),
+                        )
+                        .await
+                        .unwrap();
+                    socket.write_all(&served).await.unwrap();
+                });
+                let records = Arc::new(Mutex::new(Vec::new()));
+                let captured = records.clone();
+                let evidence: crate::audit::EvidenceSink = Arc::new(move |record| {
+                    captured.lock().unwrap().push((
+                        record.kind,
+                        record.metadata,
+                        record.body.as_ref().clone(),
+                    ));
+                    Box::pin(async { Ok(()) })
+                });
+                let (event_tx, mut events) = mpsc::unbounded_channel();
+                tokio::time::timeout(
+                    Duration::from_secs(10),
+                    run_request_task(
+                        RequestId::from("bad-sse-evidence"),
+                        ConversationRequest::default(),
+                        SamplerConfig {
+                            api_backend: backend.clone(),
+                            base_url: format!("http://{address}"),
+                            model: "test-model".into(),
+                            max_retries: Some(1),
+                            ..Default::default()
+                        },
+                        RetryPolicy::default(),
+                        event_tx,
+                        CancellationToken::new(),
+                        None,
+                        None,
+                        None,
+                        Some(evidence),
+                        None,
+                        None,
+                    ),
+                )
+                .await
+                .unwrap();
+                server.await.unwrap();
+                let mut outcomes = Vec::new();
+                while let Some(event) = events.recv().await {
+                    outcomes.push(event);
+                }
+                assert!(
+                    outcomes
+                        .iter()
+                        .any(|event| matches!(event, SamplingEvent::Failed { .. })),
+                    "{backend:?}/{failure}: {outcomes:?}"
+                );
+                assert!(
+                    !outcomes.iter().any(|event| matches!(
+                        event,
+                        SamplingEvent::Completed { .. } | SamplingEvent::Retrying { .. }
+                    )),
+                    "{backend:?}/{failure}: {outcomes:?}"
+                );
+                let records = records.lock().unwrap();
+                let kinds = records.iter().map(|(kind, _, _)| *kind).collect::<Vec<_>>();
+                assert_eq!(
+                    kinds,
+                    ["request", "response", "recovery_stop"],
+                    "{backend:?}/{failure}"
+                );
+                assert_eq!(records[1].2, raw, "{backend:?}/{failure}");
+                assert_eq!(records[1].1["status"], 200, "{backend:?}/{failure}");
+                assert!(
+                    records[1].1["provider_terminal"].is_null(),
+                    "{backend:?}/{failure}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn cancel_during_admission_never_starts_provider_for_every_backend() {
         for backend in [
             ApiBackend::ChatCompletions,
@@ -1956,6 +2150,7 @@ mod tests {
                 None,
                 Arc::new(AtomicBool::new(false)),
                 Some(&capture),
+                None,
                 None,
             ));
             tokio::select! {
@@ -2026,6 +2221,7 @@ mod tests {
                 None,
                 Some(capture),
                 Some(sink),
+                None,
                 None,
                 None,
             ));
@@ -2374,6 +2570,7 @@ mod tests {
             None,
             None,
             Some(budget.clone()),
+            None,
         )
         .await;
         let (second_events, _second_rx) = mpsc::unbounded_channel();
@@ -2389,6 +2586,7 @@ mod tests {
             None,
             None,
             Some(budget.clone()),
+            None,
         )
         .await;
 
@@ -2510,6 +2708,7 @@ mod tests {
                 Some(settlement),
                 None,
                 None,
+                None,
             )
             .await;
             let result = result.await.unwrap();
@@ -2578,6 +2777,7 @@ mod tests {
             None,
             None,
             Some(budget.clone()),
+            None,
         )
         .await;
         server.await.unwrap();
@@ -2693,6 +2893,7 @@ mod tests {
                 model_id: Some("test-model".into()),
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             })],
             stop_reason,
             usage: None,
@@ -2723,9 +2924,160 @@ mod tests {
             doom_check,
             Arc::clone(&output_observed),
             None,
+            None,
         )
         .await;
         (outcome, output_observed.load(Ordering::Relaxed))
+    }
+
+    #[tokio::test]
+    async fn preview_fragment_budget_backpressures_and_preserves_order() {
+        let request_id = RequestId::from("preview-backpressure");
+        let fragments = vec![
+            SamplingEvent::ChannelToken {
+                request_id: request_id.clone(),
+                channel: crate::events::SamplingChannel::Text,
+                text: "one".into(),
+                chunk_index: 0,
+            },
+            SamplingEvent::ToolCallDelta {
+                request_id: request_id.clone(),
+                tool_index: 0,
+                id: Some("call".into()),
+                name: Some("read_file".into()),
+                arguments_delta: Some("{}".into()),
+            },
+            SamplingEvent::ReasoningCompleted {
+                request_id: request_id.clone(),
+                signature: "signature".into(),
+            },
+            SamplingEvent::Failed {
+                request_id: request_id.clone(),
+                error: SamplingErrorInfo::from(&SamplingError::Lifecycle("done".into())),
+            },
+        ];
+        let budget = PreviewEventBudget::with_credits(2);
+        let producer_budget = budget.clone();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            drive_l2(
+                stream::iter(fragments),
+                request_id,
+                &event_tx,
+                &CancellationToken::new(),
+                Arc::new(Mutex::new(None)),
+                None,
+                Arc::new(AtomicBool::new(false)),
+                None,
+                Some(&producer_budget),
+            )
+            .await
+        });
+        let first = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let second = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(first, SamplingEvent::ChannelToken { .. }));
+        assert!(matches!(second, SamplingEvent::ToolCallDelta { .. }));
+        tokio::task::yield_now().await;
+        assert!(
+            event_rx.try_recv().is_err(),
+            "third fragment must wait for credit"
+        );
+        assert!(!task.is_finished());
+        budget.release(&first);
+        let third = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(third, SamplingEvent::ReasoningCompleted { .. }));
+        assert!(matches!(task.await.unwrap(), AttemptOutcome::Failed { .. }));
+        budget.release(&second);
+        budget.release(&third);
+    }
+
+    #[tokio::test]
+    async fn oversized_preview_fragment_fails_before_handoff() {
+        let request_id = RequestId::from("oversized-preview");
+        let fragment = SamplingEvent::ChannelToken {
+            request_id: request_id.clone(),
+            channel: crate::events::SamplingChannel::Text,
+            text: "x".repeat(PreviewEventBudget::MAX_BYTES + 1),
+            chunk_index: 0,
+        };
+        let budget = PreviewEventBudget::default();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let outcome = drive_l2(
+            stream::iter([fragment]),
+            request_id,
+            &event_tx,
+            &CancellationToken::new(),
+            Arc::new(Mutex::new(None)),
+            None,
+            Arc::new(AtomicBool::new(false)),
+            None,
+            Some(&budget),
+        )
+        .await;
+        assert!(
+            event_rx.try_recv().is_err(),
+            "oversized fragment was enqueued"
+        );
+        assert!(matches!(
+            outcome,
+            AttemptOutcome::Failed {
+                error: SamplingError::Lifecycle(message),
+                ..
+            } if message.contains("preview fragment exceeds")
+        ));
+    }
+
+    #[tokio::test]
+    async fn preview_fragment_budget_wait_is_cancelable() {
+        let request_id = RequestId::from("preview-cancel");
+        let fragments = (0..2)
+            .map(|chunk_index| SamplingEvent::ChannelToken {
+                request_id: request_id.clone(),
+                channel: crate::events::SamplingChannel::Text,
+                text: "fragment".into(),
+                chunk_index,
+            })
+            .collect::<Vec<_>>();
+        let budget = PreviewEventBudget::with_credits(1);
+        let producer_budget = budget.clone();
+        let cancel = CancellationToken::new();
+        let producer_cancel = cancel.clone();
+        let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+        let task = tokio::spawn(async move {
+            drive_l2(
+                stream::iter(fragments),
+                request_id,
+                &event_tx,
+                &producer_cancel,
+                Arc::new(Mutex::new(None)),
+                None,
+                Arc::new(AtomicBool::new(false)),
+                None,
+                Some(&producer_budget),
+            )
+            .await
+        });
+        let first = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(event_rx.try_recv().is_err());
+        cancel.cancel();
+        assert!(matches!(task.await.unwrap(), AttemptOutcome::Cancelled));
+        assert!(
+            event_rx.try_recv().is_err(),
+            "waiting fragment was not sent"
+        );
+        budget.release(&first);
     }
 
     #[tokio::test]
@@ -2861,6 +3213,7 @@ mod tests {
             None,
             Arc::new(AtomicBool::new(false)),
             None,
+            None,
         )
         .await;
 
@@ -2901,6 +3254,7 @@ mod tests {
             Arc::new(Mutex::new(None)),
             None,
             Arc::new(AtomicBool::new(false)),
+            None,
             None,
         )
         .await;

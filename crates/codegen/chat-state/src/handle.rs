@@ -317,6 +317,48 @@ impl ChatStateHandle {
         .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
     }
 
+    pub async fn begin_auxiliary_attempt_usage(
+        &self,
+        sideband_id: String,
+        attempt_no: u32,
+        model_id: String,
+        captured_prompt_index: Option<usize>,
+    ) -> Result<bool, TimelineWriteError> {
+        self.query("BeginAuxiliaryAttemptUsage", |reply| {
+            ChatStateCommand::BeginAuxiliaryAttemptUsage {
+                sideband_id,
+                attempt_no,
+                model_id,
+                captured_prompt_index,
+                reply,
+            }
+        })
+        .await
+        .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
+    }
+
+    pub async fn settle_auxiliary_attempt_usage(
+        &self,
+        sideband_id: String,
+        attempt_no: u32,
+        usage: Option<TokenUsage>,
+        cost_usd_ticks: Option<i64>,
+        api_duration_ms: Option<u64>,
+    ) -> Result<bool, TimelineWriteError> {
+        self.query("SettleAuxiliaryAttemptUsage", |reply| {
+            ChatStateCommand::SettleAuxiliaryAttemptUsage {
+                sideband_id,
+                attempt_no,
+                usage,
+                cost_usd_ticks,
+                api_duration_ms,
+                reply,
+            }
+        })
+        .await
+        .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
+    }
+
     /// Durably apply one child bill exactly once.
     pub async fn record_subagent_usage(
         &self,
@@ -676,6 +718,17 @@ impl ChatStateHandle {
             ChatStateCommand::GetTimelineEvents { reply }
         })
         .await
+    }
+
+    pub async fn admitted_response(
+        &self,
+        identity: crate::ResponseAdmissionIdentity,
+    ) -> Option<crate::AdmittedResponse> {
+        self.query("GetAdmittedResponse", |reply| {
+            ChatStateCommand::GetAdmittedResponse { identity, reply }
+        })
+        .await
+        .flatten()
     }
 
     pub async fn pending_notifications(&self) -> Option<Vec<crate::PendingNotification>> {

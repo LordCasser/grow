@@ -34,6 +34,13 @@ const SCHEMA_VERSION: &str = "4";
 /// expiry checks; the token suffix fences refresh/release to the owner.
 pub(crate) const META_KEY_BOOTSTRAP_CLAIM: &str = "bootstrap_claimed_at";
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum BootstrapClaimResult {
+    Busy,
+    AdoptedCompleted,
+    Claimed,
+}
+
 /// SQL that extracts the owner token from a claim stamp; the single source
 /// for every fenced statement, paired with [`claim_stamp`].
 const CLAIM_TOKEN_SQL: &str = "substr(value, instr(value, ':') + 1)";
@@ -400,6 +407,35 @@ impl SessionSearchIndex {
             ],
         )?;
         Ok(changed == 1)
+    }
+
+    /// Atomically claim bootstrap and inspect/clear its previous completion
+    /// marker. Non-forced callers adopt a marker that appeared just before
+    /// claim acquisition instead of needlessly rebuilding a completed index.
+    pub(crate) fn try_claim_bootstrap_for_reindex(
+        &self,
+        now_unix: i64,
+        lease: std::time::Duration,
+        token: &str,
+        completed_key: &str,
+        force_reindex_if_completed: bool,
+    ) -> Result<BootstrapClaimResult, rusqlite::Error> {
+        let tx = rusqlite::Transaction::new_unchecked(
+            &self.db,
+            rusqlite::TransactionBehavior::Immediate,
+        )?;
+        if !self.try_claim_bootstrap(now_unix, lease, token)? {
+            return Ok(BootstrapClaimResult::Busy);
+        }
+        if !force_reindex_if_completed && self.get_meta(completed_key)?.is_some() {
+            self.release_bootstrap_claim(token)?;
+            tx.commit()?;
+            return Ok(BootstrapClaimResult::AdoptedCompleted);
+        }
+        self.db
+            .execute("DELETE FROM meta WHERE key = ?1", [completed_key])?;
+        tx.commit()?;
+        Ok(BootstrapClaimResult::Claimed)
     }
 
     /// Re-stamp the lease. Fenced on `token`: returns `false` without
@@ -1216,6 +1252,57 @@ mod tests {
             Some("v2"),
             "owner writes take the update arm on conflict"
         );
+    }
+
+    #[test]
+    fn test_try_claim_bootstrap_for_reindex_preserves_post_claim_adoption() {
+        let temp = TempDir::new().unwrap();
+        let index = open(&temp);
+        index
+            .set_meta("last_bootstrap_at", "old-completion")
+            .unwrap();
+        let now = chrono::Utc::now().timestamp();
+
+        assert_eq!(
+            index
+                .try_claim_bootstrap_for_reindex(now, LEASE, "owner", "last_bootstrap_at", true,)
+                .unwrap(),
+            BootstrapClaimResult::Claimed,
+        );
+        assert_eq!(index.get_meta("last_bootstrap_at").unwrap(), None);
+        assert!(index.release_bootstrap_claim("owner").unwrap());
+
+        // A peer may finish between the loop's marker probe and claim attempt.
+        // The same transaction adopts its marker instead of clearing it and
+        // starting a redundant full reindex.
+        index
+            .set_meta("last_bootstrap_at", "new-completion")
+            .unwrap();
+        assert_eq!(
+            index
+                .try_claim_bootstrap_for_reindex(now, LEASE, "waiter", "last_bootstrap_at", false,)
+                .unwrap(),
+            BootstrapClaimResult::AdoptedCompleted,
+        );
+        assert_eq!(
+            index.get_meta("last_bootstrap_at").unwrap().as_deref(),
+            Some("new-completion")
+        );
+        assert_eq!(index.get_meta(META_KEY_BOOTSTRAP_CLAIM).unwrap(), None);
+
+        assert!(index.try_claim_bootstrap(now, LEASE, "peer").unwrap());
+        assert_eq!(
+            index
+                .try_claim_bootstrap_for_reindex(now, LEASE, "waiter", "last_bootstrap_at", false,)
+                .unwrap(),
+            BootstrapClaimResult::Busy,
+        );
+        assert_eq!(
+            index.get_meta("last_bootstrap_at").unwrap().as_deref(),
+            Some("new-completion")
+        );
+        let peer_claim = index.get_meta(META_KEY_BOOTSTRAP_CLAIM).unwrap().unwrap();
+        assert_eq!(peer_claim, claim_stamp(now, "peer"));
     }
 
     #[test]

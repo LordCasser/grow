@@ -496,7 +496,9 @@ impl SessionActor {
             client.set_liveness_handle(None);
             return Err(crate::session::mcp_restart::RecoveryError::Superseded);
         }
-        recovered.map(|_| ()).map_err(|error| error.to_string().into())
+        recovered
+            .map(|_| ())
+            .map_err(|error| error.to_string().into())
     }
 
     /// Unregister `server`'s tools from the bridge after stdio restart

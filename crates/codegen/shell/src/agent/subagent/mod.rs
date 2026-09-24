@@ -561,7 +561,7 @@ pub(crate) fn present_child_completion(
                 turns: result.turns,
                 duration_ms: result.duration_ms,
                 tokens_used: result.total_tokens_used,
-                output: result.success.then(|| result.output.to_string()),
+                output: None,
             },
             completion_data.parent_cmd_tx.as_ref(),
         );
@@ -1981,9 +1981,14 @@ async fn cancel_pending_shell_child(
 fn emit_subagent_notification(
     gateway: &GatewaySender,
     parent_session_id: &str,
-    update: SessionUpdate,
+    mut update: SessionUpdate,
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
 ) {
+    // The canonical child result and completion receipt own the answer. The
+    // parent lifecycle projection only needs the terminal status/identity.
+    if let SessionUpdate::SubagentFinished { output, .. } = &mut update {
+        *output = None;
+    }
     let mut meta = None;
     crate::util::event_id::ensure_event_id_meta(parent_session_id, &mut meta);
     let notification = SessionNotification {
@@ -1992,13 +1997,17 @@ fn emit_subagent_notification(
         meta: meta.map(serde_json::Value::Object),
     };
     if let Some(cmd_tx) = parent_cmd_tx {
-        let _ = cmd_tx.send(SessionCommand::GrowSessionNotification {
-            notification: notification.clone(),
-        });
+        if cmd_tx
+            .send(SessionCommand::GrowSessionNotification {
+                notification: notification.clone(),
+                forward_to_gateway: true,
+            })
+            .is_ok()
+        {
+            return;
+        }
     }
-    let params = serde_json::to_value(&notification)
-        .and_then(|v| serde_json::value::to_raw_value(&v))
-        .ok();
+    let params = serde_json::value::to_raw_value(&notification).ok();
     if let Some(params) = params {
         let ext_notification =
             acp::ExtNotification::new("grow/session_notification", params.into());
@@ -2100,14 +2109,18 @@ fn spawn_progress_publisher(
             if let Some(params) = params {
                 let ext_notification =
                     acp::ExtNotification::new("grow/session_notification", params.into());
-                gateway.forward_fire_and_forget(ext_notification);
+                let completed = gateway.forward_with_completion(ext_notification);
+                tokio::select! {
+                    _ = cancel_token.cancelled() => break,
+                    _ = completed => {}
+                }
             }
         }
     });
 }
 #[cfg(test)]
 mod progress_publisher_tests {
-    use super::{ProgressSignature, progress_tick_should_emit};
+    use super::{ProgressSignature, progress_tick_should_emit, spawn_progress_publisher};
     const BASE: ProgressSignature = (3, 7, 12, 0, 30_000);
     #[test]
     fn token_only_change_emits() {
@@ -2121,6 +2134,38 @@ mod progress_publisher_tests {
     #[test]
     fn heartbeat_forces_emit_when_unchanged() {
         assert!(progress_tick_should_emit(BASE, BASE, true));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_gateway_keeps_only_one_progress_delivery() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let signals = crate::session::signals::SessionSignalsHandle::new();
+                let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let gateway = acp_transport::AcpAgentGatewaySender::new(gateway_tx);
+                let cancel = tokio_util::sync::CancellationToken::new();
+                spawn_progress_publisher(
+                    signals.clone(),
+                    gateway,
+                    "parent".into(),
+                    "subagent".into(),
+                    "child".into(),
+                    std::time::Instant::now(),
+                    cancel.clone(),
+                );
+                signals.increment_turn();
+                tokio::task::yield_now().await;
+                tokio::time::advance(std::time::Duration::from_secs(2)).await;
+                tokio::task::yield_now().await;
+                let first = gateway_rx.recv().await.unwrap();
+                signals.increment_turn();
+                tokio::time::advance(std::time::Duration::from_secs(6)).await;
+                tokio::task::yield_now().await;
+                assert!(gateway_rx.try_recv().is_err());
+                cancel.cancel();
+                drop(first);
+            })
+            .await;
     }
 }
 /// Borrowed output schema so persistence does not copy the text.
@@ -2810,9 +2855,12 @@ async fn repair_subagent_completion_receipt(
 /// Reconcile parent spawn facts that have no terminal. The backend is merely
 /// an observation source: recovery first commits a child result (when the child
 /// entity exists), then closes the parent spawn, and only then emits UI state.
+/// `cold_recovery` is true only for a newly claimed writer. A resident viewer
+/// reconnect must not close that writer's still-active turn.
 pub(crate) async fn reconcile_orphaned_subagents_with_backend(
     projections: &crate::session::storage::SubagentProjectionState,
     emit_replay_projections: bool,
+    cold_recovery: bool,
     backend: &tools::implementations::grow_build::task::backend::ChannelBackend,
     parent_session_id: &str,
     parent_chat_state: &chat_state::ChatStateHandle,
@@ -3011,11 +3059,13 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
             ),
         }
     }
-    if let Err(error) = parent_chat_state.recover_interrupted_durably().await {
-        tracing::error!(
-            %error,
-            "failed to close local recovery scopes after subagent reconciliation"
-        );
+    if cold_recovery {
+        if let Err(error) = parent_chat_state.recover_interrupted_durably().await {
+            tracing::error!(
+                %error,
+                "failed to close local recovery scopes after subagent reconciliation"
+            );
+        }
     }
 }
 #[cfg(test)]

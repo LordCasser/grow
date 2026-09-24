@@ -6,7 +6,9 @@ use super::*;
 #[derive(Debug)]
 pub(super) struct MemoryFlushSnapshot {
     counts: chat_state::ConversationCounts,
-    request_messages: Vec<ChatRequestMessage>,
+    surface: Vec<ConversationItem>,
+    surface_ids: Vec<chat_state::SurfaceId>,
+    surface_revision: u64,
     input_ref: chat_state::TimelineRangeRef,
 }
 
@@ -494,7 +496,9 @@ impl SessionActor {
             let sampling_client = self.prepare_chat_completion(false).await?;
             let MemoryFlushSnapshot {
                 counts,
-                request_messages,
+                surface,
+                surface_ids,
+                surface_revision,
                 input_ref,
             } = match snapshot {
                 Some(snapshot) => snapshot,
@@ -519,8 +523,6 @@ impl SessionActor {
                 tool = counts.tool_result,
                 total = counts.total,
             );
-            let recent = super::helpers::memory_flush::select_flush_window(request_messages, 20);
-
             let flush_count = self.memory.flush_count.load(std::sync::atomic::Ordering::Relaxed);
             let system_prompt = if flush_count > 0 {
                 if let Some(prev) = self.memory.last_flush_content.borrow().as_deref() {
@@ -531,19 +533,23 @@ impl SessionActor {
             } else {
                 FLUSH_SYSTEM_PROMPT.to_owned()
             };
-            let sideband_prompt = format!(
-                "{system_prompt}\n\nNow write the memory summary as described in the system prompt."
-            );
-            let mut items: Vec<ConversationItem> = vec![ConversationItem::system(system_prompt)];
+            let sideband_prompt = format!("{system_prompt}\n\n{FLUSH_CLOSING_INSTRUCTION}");
+            let (items, context_surface_ids) =
+                super::helpers::memory_flush::build_flush_request_items(
+                    &surface,
+                    &surface_ids,
+                    &system_prompt,
+                )
+                .ok_or_else(|| {
+                    acp::Error::internal_error().data(
+                        "memory flush newest complete turn exceeds its input budget or is absent",
+                    )
+                })?;
             tracing::info!(
                 target: ::diagnostics::memory_log::TARGET,
                 "MEMORY_FLUSH: sending {n} recent messages to model (+ system prompt + user closer)",
-                n = recent.len(),
+                n = items.len().saturating_sub(2),
             );
-            items.extend(recent.into_iter().map(ConversationItem::from));
-            items.push(ConversationItem::user(
-                "Now write the memory summary as described in the system prompt.",
-            ));
 
             let model = match self.memory.flush_config.flush_model.clone() {
                 Some(m) => m,
@@ -564,7 +570,7 @@ impl SessionActor {
                 .begin_sideband(
                     chat_state::SidebandPurpose::MemoryFlush,
                     sideband_prompt,
-                    SidebandSource::Frozen(vec![input_ref]),
+                    SidebandSource::Frozen(vec![input_ref.clone()]),
                     chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                     chat_state::SidebandRoute {
                         model,
@@ -578,7 +584,16 @@ impl SessionActor {
                         .data(format!("memory flush Sideband could not start: {error}"))
                 })?;
             sideband
-                .attempt_all_sources(&request, sampling_client.api_backend(), None)
+                .attempt_selected(
+                    &request,
+                    sampling_client.api_backend(),
+                    vec![input_ref],
+                    Some(surface_revision),
+                    context_surface_ids,
+                    Vec::new(),
+                    "memory-flush-portable-window",
+                    None,
+                )
                 .await
                 .map_err(|error| {
                     acp::Error::internal_error().data(format!(
@@ -840,14 +855,11 @@ impl SessionActor {
             .materialize_timeline(self.session_info.id.to_string())
             .await?;
         let counts = chat_state::ConversationCounts::from_items(&materialized.surface);
-        let request_messages = crate::sampling::conversation_to_chat_messages(
-            chat_state::compaction_utils::prepare_conversation_for_summarization(
-                materialized.surface,
-            ),
-        );
         Some(MemoryFlushSnapshot {
             counts,
-            request_messages,
+            surface: materialized.surface,
+            surface_ids: materialized.surface_ids,
+            surface_revision: materialized.surface_revision,
             input_ref: materialized.input_ref,
         })
     }

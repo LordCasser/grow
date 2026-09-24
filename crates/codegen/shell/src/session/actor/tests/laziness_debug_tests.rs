@@ -32,6 +32,7 @@ fn assistant_text(text: &str) -> ConversationItem {
         model_id: None,
         model_fingerprint: None,
         reasoning_effort: None,
+        response_messages: Vec::new(),
     })
 }
 
@@ -46,6 +47,7 @@ fn assistant_with_tool_call(text: &str, name: &str, args: &str) -> ConversationI
         model_id: None,
         model_fingerprint: None,
         reasoning_effort: None,
+        response_messages: Vec::new(),
     })
 }
 
@@ -69,6 +71,7 @@ fn assistant_with_reasoning_items(
         model_id: None,
         model_fingerprint: None,
         reasoning_effort: None,
+        response_messages: Vec::new(),
     }));
     out
 }
@@ -182,6 +185,7 @@ fn flatten_skips_reasoning_when_text_is_empty() {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            response_messages: Vec::new(),
         }),
     ];
     let out = flatten_transcript_for_classifier(&items, true);
@@ -485,6 +489,7 @@ fn window_assistant_text_pin_skips_empty_assistant_turns() {
         model_id: None,
         model_fingerprint: None,
         reasoning_effort: None,
+        response_messages: Vec::new(),
     });
     // 5 real text turns at idxs 0..5, then 10 empty turns.
     let mut items: Vec<ConversationItem> =

@@ -1,7 +1,8 @@
 //! Per-prompt and per-session usage ledgers.
 //!
 //! `total_tokens()` is input + output: Responses wire `total` is live context
-//! length. Compaction and other side calls never call `record_main_loop_call`.
+//! length. Compaction and other side calls use `record_auxiliary_call` instead
+//! of incrementing the main-loop turn count.
 //!
 //! # Completeness ownership
 //!
@@ -68,6 +69,14 @@ pub struct UsageSegment {
 impl UsageSegment {
     fn fold_main_loop_call(&mut self, model_id: &str, call: &UsageTotals) {
         self.main_loop_model_calls = self.main_loop_model_calls.saturating_add(1);
+        self.fold_entry(model_id, call);
+        self.by_agent
+            .entry(UsageAgent::Owner)
+            .or_default()
+            .fold_totals(call);
+    }
+
+    fn fold_auxiliary_call(&mut self, model_id: &str, call: &UsageTotals) {
         self.fold_entry(model_id, call);
         self.by_agent
             .entry(UsageAgent::Owner)
@@ -215,6 +224,18 @@ impl UsageLedger {
         self.segments.last_mut().expect("usage segment initialized")
     }
 
+    pub(crate) fn current_segment_index(&mut self) -> usize {
+        self.initialize_segment(None);
+        self.segments.len() - 1
+    }
+
+    pub(crate) fn mark_segment_incomplete(&mut self, index: usize) {
+        self.incomplete = true;
+        if let Some(segment) = self.segments.get_mut(index) {
+            segment.incomplete = true;
+        }
+    }
+
     /// Fold one main-agent-loop model call. This is the only writer of
     /// `main_loop_model_calls` (the wire `numTurns`); side calls such as
     /// compaction must not use it.
@@ -234,6 +255,43 @@ impl UsageLedger {
             .fold_totals(&call);
         self.current_segment_mut()
             .fold_main_loop_call(model_id, &call);
+    }
+
+    /// Fold one auxiliary provider request under this session's owner without
+    /// making it a main-loop round (`numTurns`). A child session includes its
+    /// own auxiliary calls before its final bill is folded by the parent.
+    pub fn record_auxiliary_call(
+        &mut self,
+        model_id: &str,
+        usage: &TokenUsage,
+        api_duration_ms: Option<u64>,
+        cost_usd_ticks: Option<i64>,
+    ) {
+        let segment_index = self.current_segment_index();
+        self.record_auxiliary_call_at(
+            segment_index,
+            model_id,
+            usage,
+            api_duration_ms,
+            cost_usd_ticks,
+        );
+    }
+
+    pub(crate) fn record_auxiliary_call_at(
+        &mut self,
+        segment_index: usize,
+        model_id: &str,
+        usage: &TokenUsage,
+        api_duration_ms: Option<u64>,
+        cost_usd_ticks: Option<i64>,
+    ) {
+        let call = UsageTotals::from_call(usage, api_duration_ms, cost_usd_ticks);
+        self.fold_entry(model_id, &call);
+        self.by_agent
+            .entry(UsageAgent::Owner)
+            .or_default()
+            .fold_totals(&call);
+        self.segments[segment_index].fold_auxiliary_call(model_id, &call);
     }
 
     /// Fold subagent usage without incrementing `main_loop_model_calls`.
@@ -399,5 +457,42 @@ mod tests {
                 .sum::<u64>(),
             ledger.totals.total_tokens()
         );
+    }
+
+    #[test]
+    fn auxiliary_calls_charge_owner_without_incrementing_main_rounds() {
+        let mut ledger = UsageLedger::default();
+        ledger.record_main_loop_call("primary", &tu(10, 2), None, None);
+        ledger.record_auxiliary_call("recap", &tu(7, 3), Some(25), Some(100));
+        assert_eq!(ledger.totals.total_tokens(), 22);
+        assert_eq!(ledger.by_model["recap"].total_tokens(), 10);
+        assert_eq!(ledger.by_agent[&UsageAgent::Owner].total_tokens(), 22);
+        assert_eq!(ledger.main_loop_model_calls, 1);
+        assert_eq!(ledger.totals.model_calls, 2);
+        assert_eq!(ledger.segments[0].main_loop_model_calls, 1);
+        assert_eq!(ledger.segments[0].totals.total_tokens(), 22);
+    }
+
+    #[test]
+    fn child_final_bill_folds_its_auxiliary_calls_once_into_parent() {
+        let mut child = UsageLedger::default();
+        child.record_main_loop_call("main", &tu(10, 2), None, None);
+        child.record_auxiliary_call("recap", &tu(7, 3), None, None);
+        let bill = child
+            .by_model
+            .iter()
+            .map(|(model, totals)| (model.clone(), totals.clone()))
+            .collect::<Vec<_>>();
+
+        let mut parent = UsageLedger::default();
+        parent.record_subagent("child-1", &bill, child.incomplete);
+        assert_eq!(parent.totals.total_tokens(), 22);
+        assert_eq!(parent.totals.model_calls, 2);
+        assert_eq!(parent.main_loop_model_calls, 0);
+        assert_eq!(
+            parent.by_agent[&UsageAgent::Subagent("child-1".into())].total_tokens(),
+            22
+        );
+        assert_eq!(parent.by_model["recap"].total_tokens(), 10);
     }
 }

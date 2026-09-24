@@ -148,6 +148,7 @@ pub(crate) fn strip_tool_messages_for_conversation_item(
                         std::sync::Arc::<str>::from(s)
                     };
                     a.tool_calls.clear();
+                    a.response_messages.clear();
                 }
                 Some(ConversationItem::Assistant(a))
             }
@@ -294,6 +295,7 @@ fn truncate_item_to_tokens(item: ConversationItem, max_tokens: u64) -> Conversat
         ConversationItem::Assistant(mut a) => {
             if let Some(s) = truncate_text_to_bytes(&a.content, max_bytes) {
                 a.content = s;
+                a.response_messages.clear();
             }
             ConversationItem::Assistant(a)
         }
@@ -1018,6 +1020,23 @@ pub(crate) fn repair_tool_pairing_with_reason(
 /// Locate whole malformed exchanges before pairing repair can discard results
 /// or manufacture answers for an empty/ambiguous id. Arguments and current tool
 /// availability are deliberately not protocol-identity checks.
+pub(crate) fn has_malformed_tool_identity<'a>(
+    items: impl IntoIterator<Item = &'a ConversationItem>,
+) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    for item in items {
+        let ConversationItem::Assistant(assistant) = item else {
+            continue;
+        };
+        for call in &assistant.tool_calls {
+            if tool_identity_issue(call, &mut seen).is_some() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub(crate) fn malformed_tool_exchange_ranges(
     items: &[ConversationItem],
 ) -> Vec<std::ops::Range<usize>> {
@@ -1140,6 +1159,31 @@ pub fn strip_displaced_tool_results(items: &mut Vec<ConversationItem>) -> Vec<St
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn truncating_assistant_text_drops_stale_response_boundaries() {
+        let mut item = ConversationItem::assistant("commentary\nfinal answer");
+        let ConversationItem::Assistant(assistant) = &mut item else {
+            unreachable!();
+        };
+        assistant.response_messages = vec![
+            sampling_types::AssistantMessageBoundary {
+                start: 0,
+                end: 10,
+                phase: Some(sampling_types::AssistantMessagePhase::Commentary),
+            },
+            sampling_types::AssistantMessageBoundary {
+                start: 11,
+                end: 23,
+                phase: Some(sampling_types::AssistantMessagePhase::FinalAnswer),
+            },
+        ];
+        let ConversationItem::Assistant(truncated) = truncate_item_to_tokens(item, 1) else {
+            unreachable!();
+        };
+        assert!(truncated.response_messages.is_empty());
+        assert!(truncated.content.contains("truncated"));
+    }
 
     fn tool_call(id: &str, name: &str, arguments: &str) -> sampling_types::ToolCall {
         sampling_types::ToolCall {
@@ -1277,6 +1321,38 @@ mod tests {
         assert_eq!(quarantine_malformed_tool_exchanges(&mut items), 1);
         assert!(matches!(&items[0], ConversationItem::User(_)));
         assert_eq!(quarantine_malformed_tool_exchanges(&mut items), 0);
+    }
+
+    #[test]
+    fn read_only_identity_probe_matches_quarantine_across_surface_boundary() {
+        let existing = vec![ConversationItem::assistant_tool_calls(vec![tool_call(
+            "earlier",
+            "read_file",
+            "{}",
+        )])];
+        for incoming in [
+            vec![ConversationItem::assistant("clean response")],
+            vec![ConversationItem::assistant_tool_calls(vec![tool_call(
+                "later", "run", "{}",
+            )])],
+            vec![ConversationItem::assistant_tool_calls(vec![tool_call(
+                "earlier", "run", "{}",
+            )])],
+            vec![ConversationItem::assistant_tool_calls(vec![tool_call(
+                "", "run", "{}",
+            )])],
+        ] {
+            let observed = has_malformed_tool_identity(existing.iter().chain(&incoming));
+            let combined = existing
+                .iter()
+                .chain(&incoming)
+                .cloned()
+                .collect::<Vec<_>>();
+            assert_eq!(
+                observed,
+                !malformed_tool_exchange_ranges(&combined).is_empty()
+            );
+        }
     }
 
     #[test]
@@ -2879,6 +2955,7 @@ actual user question";
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
         ]);
         assert_eq!(result.len(), 3);
@@ -2895,6 +2972,7 @@ actual user question";
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
         ]);
         assert_eq!(result.len(), 1, "reasoning sibling must be dropped");
@@ -2936,6 +3014,7 @@ actual user question";
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
             ConversationItem::tool_result("tc1", "match found"),
         ]);
@@ -2971,6 +3050,7 @@ actual user question";
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
         ]);
         assert_eq!(result.len(), 1);
@@ -2998,6 +3078,7 @@ actual user question";
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
             ConversationItem::tool_result("tc1", "match"),
             ConversationItem::user("second turn"),
@@ -3008,6 +3089,7 @@ actual user question";
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
             ConversationItem::tool_result("tc2", "stray"),
             ConversationItem::user("third turn"),
@@ -3017,6 +3099,7 @@ actual user question";
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
         ]);
         assert_eq!(result.len(), 6);
@@ -3078,6 +3161,7 @@ actual user question";
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
             ConversationItem::tool_result("tc1", "files"),
         ];

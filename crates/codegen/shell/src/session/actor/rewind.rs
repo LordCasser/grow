@@ -12,13 +12,16 @@ impl SessionActor {
     /// Returns the `prompt_index → num_file_snapshots` map from the on-disk
     /// snapshot index (independent of the chat-state prompt index). The bridge
     /// joins these onto the server's rewind points.
-    pub(super) async fn rewind_file_counts(&self) -> std::collections::HashMap<usize, usize> {
-        self.file_state_tracker
+    pub(super) async fn rewind_file_counts(
+        &self,
+    ) -> std::io::Result<std::collections::HashMap<usize, usize>> {
+        Ok(self
+            .file_state_tracker
             .get_rewind_point_metas()
-            .await
+            .await?
             .into_iter()
             .map(|m| (m.prompt_index, m.num_file_snapshots))
-            .collect()
+            .collect())
     }
 
     /// Get available rewind points for this session.
@@ -26,10 +29,10 @@ impl SessionActor {
     /// Every prompt is a checkpoint — the list always contains `[0, 1, ..., N-1]`
     /// where N is the current prompt_index. File snapshots may or may not exist
     /// for each checkpoint (indicated by `has_file_changes`).
-    pub(super) async fn get_rewind_points(&self) -> RewindPointsResponse {
+    pub(super) async fn get_rewind_points(&self) -> std::io::Result<RewindPointsResponse> {
         // Metadata only — don't materialize the (huge) file-content snapshots
         // just to render the picker.
-        let file_metas = self.file_state_tracker.get_rewind_point_metas().await;
+        let file_metas = self.file_state_tracker.get_rewind_point_metas().await?;
 
         // Query prompt state from the chat state actor.
         let snapshot = self.chat_state_handle.snapshot().await;
@@ -86,7 +89,7 @@ impl SessionActor {
             })
             .collect();
 
-        RewindPointsResponse { rewind_points }
+        Ok(RewindPointsResponse { rewind_points })
     }
 
     /// Handle a rewind request with mode support.

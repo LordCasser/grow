@@ -705,6 +705,13 @@ impl SessionActor {
                 );
             }
             self.inject_workflow_status_reminder().await;
+            // The same gate protects both publication and its durable User
+            // message from the session-owned orphan sweep.
+            let image_asset_guard = if user_images.is_empty() {
+                None
+            } else {
+                Some(self.input_artifact_gate.lock().await)
+            };
             let user_message = if user_images.is_empty() {
                 user_message
             } else {
@@ -804,7 +811,12 @@ impl SessionActor {
                         }
                     }
                 };
+                drop(image_asset_guard);
                 if let Err(error) = input_commit {
+                    if !user_images.is_empty() {
+                        self.reconcile_user_image_assets(&self.background_service_shutdown)
+                            .await;
+                    }
                     tracing::error!(
                         session_id = %self.session_info.id.0,
                         prompt_id = %prompt_id,
@@ -1138,6 +1150,10 @@ impl SessionActor {
                 format!("turn {prompt_id} lost foreground ownership before terminalization"),
             ));
         }
+        // Regular admission becomes busy as soon as terminalization owns the
+        // foreground. Refresh open Behavior pickers after releasing the state
+        // and step-control locks, before the durable terminal can take time.
+        self.send_available_commands_update().await;
         if let Err(error) = self
             .emit_turn_ended(
                 timeline_outcome,

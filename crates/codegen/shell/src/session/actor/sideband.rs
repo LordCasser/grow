@@ -31,6 +31,7 @@ pub(crate) enum SidebandRunError {
 pub(crate) struct SidebandRun {
     evidence_sink: Option<sampler::audit::EvidenceSink>,
     evidence: Option<sampler::audit::AttemptEvidence>,
+    attempt_proven_undispatched: bool,
     background: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     timeline: chat_state::SidebandTimeline,
     persistence: NotificationSender,
@@ -38,6 +39,12 @@ pub(crate) struct SidebandRun {
     repair_cancellation: tokio_util::sync::CancellationToken,
     fail_stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
     goal_usage_window: super::goal_support::GoalUsageWindow,
+    usage_owner: Option<chat_state::ChatStateHandle>,
+    captured_prompt_index: Option<usize>,
+    admitted_auxiliary_attempt_no: Option<u32>,
+    pending_auxiliary_start: Option<(u32, String, Option<usize>)>,
+    pending_auxiliary_settlement:
+        Option<(Option<sampling_types::TokenUsage>, Option<i64>, Option<u64>)>,
     usage_owner_id: String,
     usage_epoch: u64,
     expected_goal_id: Option<String>,
@@ -154,6 +161,7 @@ impl SessionActor {
             .into());
         }
         let sideband_id = uuid::Uuid::now_v7().to_string();
+        let captured_prompt_index = self.chat_state_handle.current_prompt_index().await;
         let mut timeline = chat_state::SidebandTimeline::new(sideband_id)?;
         let spawn_source_refs = source_refs.clone();
         let request = timeline.prepare(chat_state::SidebandEventKind::Request(
@@ -184,6 +192,7 @@ impl SessionActor {
                 None,
             )),
             evidence: None,
+            attempt_proven_undispatched: false,
             background: None,
             timeline,
             persistence: self.notifications.clone(),
@@ -195,6 +204,11 @@ impl SessionActor {
             repair_cancellation: self.sideband_repair_cancel.child_token(),
             fail_stop: std::sync::Arc::clone(&self.sideband_fail_stop),
             goal_usage_window: self.goal_usage_window.clone(),
+            usage_owner: Some(self.chat_state_handle.clone()),
+            captured_prompt_index,
+            admitted_auxiliary_attempt_no: None,
+            pending_auxiliary_start: None,
+            pending_auxiliary_settlement: None,
             usage_owner_id: self.session_id_string(),
             usage_epoch: super::tasks_cancel::turn_usage_epoch_or(
                 self.goal_usage_window
@@ -228,11 +242,64 @@ impl SessionActor {
 }
 
 impl SidebandRun {
+    async fn settle_auxiliary_attempt_usage(
+        &mut self,
+        usage: Option<sampling_types::TokenUsage>,
+        cost_usd_ticks: Option<i64>,
+        api_duration_ms: Option<u64>,
+    ) -> Result<(), SidebandRunError> {
+        let Some(attempt_no) = self.admitted_auxiliary_attempt_no else {
+            return Ok(());
+        };
+        let proposed = (
+            usage.or_else(|| {
+                self.attempt_proven_undispatched
+                    .then(sampling_types::TokenUsage::default)
+                    .or_else(|| {
+                        self.evidence
+                            .as_ref()
+                            .filter(|e| !e.was_dispatched())
+                            .map(|_| sampling_types::TokenUsage::default())
+                    })
+            }),
+            cost_usd_ticks,
+            api_duration_ms,
+        );
+        if let Some(pending) = self.pending_auxiliary_settlement.as_ref() {
+            if serde_json::to_value(pending).ok() != serde_json::to_value(&proposed).ok() {
+                return Err(SidebandRunError::Admission(
+                    "conflicting auxiliary usage settlement".into(),
+                ));
+            }
+        } else {
+            self.pending_auxiliary_settlement = Some(proposed);
+        }
+        if let Some(owner) = self.usage_owner.as_ref() {
+            let (usage, cost, duration) = self
+                .pending_auxiliary_settlement
+                .clone()
+                .expect("settlement retained");
+            owner
+                .settle_auxiliary_attempt_usage(
+                    self.timeline.sideband_id().to_owned(),
+                    attempt_no,
+                    usage,
+                    cost,
+                    duration,
+                )
+                .await?;
+        }
+        self.pending_auxiliary_settlement = None;
+        self.admitted_auxiliary_attempt_no = None;
+        Ok(())
+    }
+
     async fn finish_evidence(
         &mut self,
         outcome: serde_json::Value,
     ) -> Result<(), SidebandRunError> {
         if let Some(evidence) = &self.evidence {
+            self.attempt_proven_undispatched = !evidence.was_dispatched();
             evidence.finish(outcome).await.map_err(|error| {
                 self.fail_stop
                     .store(true, std::sync::atomic::Ordering::Release);
@@ -245,10 +312,14 @@ impl SidebandRun {
 
     fn usage_after_evidence_gate(&self, tokens: Option<GoalTokenUsage>) -> Option<GoalTokenUsage> {
         tokens.or_else(|| {
-            self.evidence
-                .as_ref()
-                .filter(|evidence| !evidence.was_dispatched())
-                .map(|_| GoalTokenUsage::default())
+            self.attempt_proven_undispatched
+                .then(GoalTokenUsage::default)
+                .or_else(|| {
+                    self.evidence
+                        .as_ref()
+                        .filter(|evidence| !evidence.was_dispatched())
+                        .map(|_| GoalTokenUsage::default())
+                })
         })
     }
 
@@ -282,6 +353,17 @@ impl SidebandRun {
             self.admitted_attempt_id = None;
         }
         Ok(())
+    }
+
+    pub(crate) async fn settle_compaction_attempt(
+        &mut self,
+        usage: Option<&chat_state::SidebandUsage>,
+    ) -> Result<(), SidebandRunError> {
+        let tokens = usage.map(sideband_goal_tokens);
+        let session_usage = usage.map(sideband_usage_as_tokens).transpose()?;
+        self.settle_auxiliary_attempt_usage(session_usage, None, None)
+            .await?;
+        self.settle_goal_attempt(tokens).await
     }
 
     fn claim_goal_attempt(&mut self, tokens: Option<GoalTokenUsage>) -> Option<String> {
@@ -398,6 +480,8 @@ impl SidebandRun {
                 .saturating_add(1),
         )
         .map_err(|_| chat_state::SidebandError::AttemptOverflow)?;
+        self.settle_auxiliary_attempt_usage(None, None, None)
+            .await?;
         self.settle_goal_attempt(None).await?;
         self.goal_usage_window
             .wait_for_owner_settlements_through(&self.usage_owner_id, self.usage_epoch)
@@ -431,16 +515,15 @@ impl SidebandRun {
             .await;
         if result.is_ok() {
             self.evidence = evidence;
+            self.attempt_proven_undispatched = false;
         }
         result
     }
 
-    /// Poll-bind the Goal admission lease to the provider future. If an outer
-    /// cancellation/timeout branch wins before this future is polled, no Goal
-    /// attempt exists. Admission can wait for prior settlements; once granted,
-    /// it and the provider's first poll happen in the same task poll, so an
-    /// unknown result is legitimately fail-closed rather than a pre-wire false
-    /// positive.
+    /// Admit Goal ownership and durably start the owner-session usage attempt
+    /// before polling the provider. If the caller cancels before this future is
+    /// polled, neither admission exists. Cancellation after admission but before
+    /// provider poll settles a proven no-dispatch zero through the detached lease.
     pub(crate) async fn run_provider<F: std::future::Future>(
         &mut self,
         provider: F,
@@ -471,7 +554,7 @@ impl SidebandRun {
     }
 
     async fn provider_attempt_started(&mut self) -> Result<(), SidebandRunError> {
-        if self.admitted_attempt_id.is_some() {
+        if self.admitted_attempt_id.is_some() || self.admitted_auxiliary_attempt_no.is_some() {
             return Err(SidebandRunError::Admission(
                 "sideband provider attempt already started".into(),
             ));
@@ -495,6 +578,51 @@ impl SidebandRun {
             )
             .await
             .map_err(SidebandRunError::Admission)?;
+        let attempt_no = self
+            .timeline
+            .events()
+            .last()
+            .and_then(|event| match &event.kind {
+                chat_state::SidebandEventKind::Attempt(attempt) => Some(attempt.attempt_no),
+                _ => None,
+            })
+            .expect("open attempt checked above");
+        if let Some(owner) = self.usage_owner.as_ref() {
+            let model_id = self
+                .timeline
+                .events()
+                .first()
+                .and_then(|event| match &event.kind {
+                    chat_state::SidebandEventKind::Request(request) => {
+                        Some(request.route.model.clone())
+                    }
+                    _ => None,
+                })
+                .expect("Sideband request precedes attempt");
+            let prompt_index = self.captured_prompt_index;
+            self.pending_auxiliary_start = Some((attempt_no, model_id.clone(), prompt_index));
+            let result = owner
+                .begin_auxiliary_attempt_usage(
+                    self.timeline.sideband_id().to_owned(),
+                    attempt_no,
+                    model_id,
+                    prompt_index,
+                )
+                .await;
+            match result {
+                Ok(_) => self.pending_auxiliary_start = None,
+                Err(chat_state::TimelineWriteError::AcknowledgementLost) => {
+                    return Err(SidebandRunError::Parent(
+                        chat_state::TimelineWriteError::AcknowledgementLost,
+                    ));
+                }
+                Err(error) => {
+                    self.pending_auxiliary_start = None;
+                    return Err(error.into());
+                }
+            }
+        }
+        self.admitted_auxiliary_attempt_no = Some(attempt_no);
         Ok(())
     }
 
@@ -628,6 +756,12 @@ impl SessionActor {
         response: &ConversationResponse,
     ) -> Result<chat_state::SidebandUsage, SidebandRunError> {
         let usage = run.response_usage(response);
+        run.settle_auxiliary_attempt_usage(
+            response.usage.clone(),
+            response.usage.as_ref().and(response.cost_usd_ticks),
+            None,
+        )
+        .await?;
         let tokens = response
             .usage
             .as_ref()
@@ -636,19 +770,11 @@ impl SessionActor {
         Ok(usage)
     }
 
-    pub(crate) async fn settle_sideband_usage(
-        &self,
-        run: &mut SidebandRun,
-        usage: &chat_state::SidebandUsage,
-    ) -> Result<(), SidebandRunError> {
-        self.settle_sideband_attempt(run, Some(sideband_goal_tokens(usage)))
-            .await
-    }
-
     pub(crate) async fn settle_sideband_attempt_incomplete(
         &self,
         run: &mut SidebandRun,
     ) -> Result<(), SidebandRunError> {
+        run.settle_auxiliary_attempt_usage(None, None, None).await?;
         self.settle_sideband_attempt(run, None).await
     }
 
@@ -677,7 +803,24 @@ impl Drop for SidebandRun {
             self.goal_usage_window
                 .settle_attempt_detached(attempt_id, self.usage_after_evidence_gate(None));
         }
-        if self.timeline.is_ended() {
+        let auxiliary = self.admitted_auxiliary_attempt_no.take().map(|attempt_no| {
+            let (usage, cost, duration) =
+                self.pending_auxiliary_settlement.take().unwrap_or_else(|| {
+                    let usage = self
+                        .attempt_proven_undispatched
+                        .then(sampling_types::TokenUsage::default)
+                        .or_else(|| {
+                            self.evidence
+                                .as_ref()
+                                .filter(|e| !e.was_dispatched())
+                                .map(|_| sampling_types::TokenUsage::default())
+                        });
+                    (usage, None, None)
+                });
+            (attempt_no, usage, cost, duration)
+        });
+        let pending_auxiliary_start = self.pending_auxiliary_start.take();
+        if self.timeline.is_ended() && auxiliary.is_none() && pending_auxiliary_start.is_none() {
             return;
         }
         let activity = self.activity.take();
@@ -694,6 +837,7 @@ impl Drop for SidebandRun {
         let persistence = self.persistence.clone();
         let cancellation = self.repair_cancellation.clone();
         let evidence = self.evidence.take();
+        let usage_owner = self.usage_owner.clone();
         let fail_stop = self.fail_stop.clone();
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             tracing::error!(
@@ -704,6 +848,66 @@ impl Drop for SidebandRun {
         };
         runtime.spawn(async move {
             let _activity = activity;
+            if let (Some(owner), Some((attempt_no, model_id, prompt_index))) =
+                (usage_owner.as_ref(), pending_auxiliary_start)
+            {
+                loop {
+                    match owner.begin_auxiliary_attempt_usage(
+                        timeline.sideband_id().to_owned(), attempt_no, model_id.clone(), prompt_index,
+                    ).await {
+                        Ok(_) => break,
+                        Err(chat_state::TimelineWriteError::AcknowledgementLost) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+                        Err(error) => {
+                            tracing::error!(%error, "failed to resolve interrupted auxiliary admission");
+                            let _ = owner.mark_usage_incomplete(false, true).await;
+                            fail_stop.store(true, std::sync::atomic::Ordering::Release);
+                            return;
+                        }
+                    }
+                }
+                loop {
+                    match owner.settle_auxiliary_attempt_usage(
+                        timeline.sideband_id().to_owned(), attempt_no,
+                        Some(sampling_types::TokenUsage::default()), None, None,
+                    ).await {
+                        Ok(_) => break,
+                        Err(chat_state::TimelineWriteError::AcknowledgementLost) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
+                        Err(error) => {
+                            tracing::error!(%error, "failed to settle never-polled auxiliary attempt");
+                            let _ = owner.mark_usage_incomplete(false, true).await;
+                            fail_stop.store(true, std::sync::atomic::Ordering::Release);
+                            return;
+                        }
+                    }
+                }
+            }
+            if let (Some(owner), Some((attempt_no, usage, cost, duration))) =
+                (usage_owner, auxiliary)
+            {
+                loop {
+                    match owner
+                        .settle_auxiliary_attempt_usage(
+                            timeline.sideband_id().to_owned(),
+                            attempt_no,
+                            usage.clone(),
+                            cost,
+                            duration,
+                        )
+                        .await
+                    {
+                        Ok(_) => break,
+                        Err(chat_state::TimelineWriteError::AcknowledgementLost) => {
+                            tokio::time::sleep(std::time::Duration::from_millis(100)).await
+                        }
+                        Err(error) => {
+                            tracing::error!(%error, "failed to settle interrupted auxiliary usage");
+                            let _ = owner.mark_usage_incomplete(false, true).await;
+                            fail_stop.store(true, std::sync::atomic::Ordering::Release);
+                            return;
+                        }
+                    }
+                }
+            }
             if let Some(evidence) = evidence {
                 if let Err(error) = evidence
                     .finish(serde_json::json!({"cancelled": true}))
@@ -753,6 +957,34 @@ impl Drop for SidebandRun {
 
 fn sideband_goal_tokens(usage: &chat_state::SidebandUsage) -> GoalTokenUsage {
     GoalTokenUsage::from(usage)
+}
+
+fn sideband_usage_as_tokens(
+    usage: &chat_state::SidebandUsage,
+) -> Result<sampling_types::TokenUsage, SidebandRunError> {
+    let to_u32 = |value: u64| {
+        u32::try_from(value).map_err(|_| {
+            SidebandRunError::Admission(
+                "auxiliary usage exceeds the provider token field width".into(),
+            )
+        })
+    };
+    let prompt_tokens = to_u32(usage.input_tokens)?;
+    let completion_tokens = to_u32(usage.output_tokens)?;
+    Ok(sampling_types::TokenUsage {
+        prompt_tokens,
+        completion_tokens,
+        total_tokens: prompt_tokens
+            .checked_add(completion_tokens)
+            .ok_or_else(|| {
+                SidebandRunError::Admission(
+                    "auxiliary total usage exceeds the provider token field width".into(),
+                )
+            })?,
+        reasoning_tokens: 0,
+        cached_prompt_tokens: to_u32(usage.cache_read_tokens)?,
+        cache_creation_prompt_tokens: to_u32(usage.cache_write_tokens)?,
+    })
 }
 
 fn output_constraint_matches(
@@ -877,12 +1109,14 @@ mod tests {
             gateway: acp_transport::AcpAgentGatewaySender::new(gateway_tx),
             gateway_enabled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             persistence_tx,
+            preview_gateway_budget: sampler::PreviewEventBudget::default(),
         };
         let (goal_tx, _goal_rx) = tokio::sync::mpsc::unbounded_channel();
         (
             SidebandRun {
                 evidence_sink: None,
                 evidence: None,
+                attempt_proven_undispatched: false,
                 background: None,
                 timeline,
                 persistence,
@@ -892,6 +1126,11 @@ mod tests {
                 goal_usage_window: crate::session::actor::goal_support::GoalUsageWindow::new(
                     goal_tx, None,
                 ),
+                usage_owner: None,
+                captured_prompt_index: None,
+                admitted_auxiliary_attempt_no: None,
+                pending_auxiliary_start: None,
+                pending_auxiliary_settlement: None,
                 usage_owner_id: "test-session".into(),
                 usage_epoch: 0,
                 expected_goal_id: None,
@@ -1460,6 +1699,29 @@ mod tests {
                     .select_behavior(tool_types::BehaviorId::Goal);
                 actor.sync_goal_usage_window();
                 let (mut run, _rx) = test_run();
+                actor
+                    .chat_state_handle
+                    .record_timeline_event_durably(chat_state::TimelineEventKind::Sideband(
+                        chat_state::SidebandSpawnEvent {
+                            sideband_id: run.timeline.sideband_id().to_owned(),
+                            purpose: chat_state::SidebandPurpose::PermissionJudgment,
+                            source_refs: Vec::new(),
+                        },
+                    ))
+                    .await
+                    .unwrap();
+                actor
+                    .chat_state_handle
+                    .begin_auxiliary_attempt_usage(
+                        run.timeline.sideband_id().to_owned(),
+                        1,
+                        "test-model".into(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                run.usage_owner = Some(actor.chat_state_handle.clone());
+                run.admitted_auxiliary_attempt_no = Some(1);
                 run.goal_usage_window = actor.goal_usage_window.clone();
                 run.admitted_attempt_id = run
                     .goal_usage_window
@@ -1475,7 +1737,23 @@ mod tests {
                 .unwrap();
 
                 assert_eq!(actor.goal_tokens_used(), 120);
-                assert_eq!(actor.goal_tracker.lock().snapshot().unwrap().usage_breakdown.unwrap_or_default(), GoalTokenUsage::new(100, 40, 20));
+                let session = actor
+                    .chat_state_handle
+                    .try_get_session_usage()
+                    .await
+                    .unwrap();
+                assert_eq!(session.totals.total_tokens(), 120);
+                assert_eq!(session.main_loop_model_calls, 0);
+                assert_eq!(
+                    actor
+                        .goal_tracker
+                        .lock()
+                        .snapshot()
+                        .unwrap()
+                        .usage_breakdown
+                        .unwrap_or_default(),
+                    GoalTokenUsage::new(100, 40, 20)
+                );
             })
             .await;
     }
@@ -1509,6 +1787,29 @@ mod tests {
                 actor.sync_goal_usage_window();
 
                 let (mut run, _rx) = test_run();
+                actor
+                    .chat_state_handle
+                    .record_timeline_event_durably(chat_state::TimelineEventKind::Sideband(
+                        chat_state::SidebandSpawnEvent {
+                            sideband_id: run.timeline.sideband_id().to_owned(),
+                            purpose: chat_state::SidebandPurpose::PermissionJudgment,
+                            source_refs: Vec::new(),
+                        },
+                    ))
+                    .await
+                    .unwrap();
+                actor
+                    .chat_state_handle
+                    .begin_auxiliary_attempt_usage(
+                        run.timeline.sideband_id().to_owned(),
+                        1,
+                        "test-model".into(),
+                        None,
+                    )
+                    .await
+                    .unwrap();
+                run.usage_owner = Some(actor.chat_state_handle.clone());
+                run.admitted_auxiliary_attempt_no = Some(1);
                 run.goal_usage_window = actor.goal_usage_window.clone();
                 run.admitted_attempt_id = run
                     .goal_usage_window
@@ -1524,6 +1825,14 @@ mod tests {
 
                 let snapshot = actor.goal_tracker.lock().snapshot().cloned().unwrap();
                 assert!(snapshot.usage_incomplete);
+                assert!(
+                    actor
+                        .chat_state_handle
+                        .try_get_session_usage()
+                        .await
+                        .unwrap()
+                        .incomplete
+                );
                 assert_eq!(
                     snapshot.status,
                     crate::session::goal_tracker::GoalStatus::Paused
@@ -1533,6 +1842,71 @@ mod tests {
                     tool_types::BehaviorId::Normal,
                     "fail-closed usage must release Goal Behavior atomically"
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn dropped_admitted_sideband_marks_owner_session_usage_incomplete() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, _) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let actor = crate::session::actor::tests::support::create_test_actor(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+                let (mut run, mut sideband_rx) = test_run();
+                let sideband_id = run.timeline.sideband_id().to_owned();
+                actor
+                    .chat_state_handle
+                    .record_timeline_event_durably(chat_state::TimelineEventKind::Sideband(
+                        chat_state::SidebandSpawnEvent {
+                            sideband_id: sideband_id.clone(),
+                            purpose: chat_state::SidebandPurpose::PermissionJudgment,
+                            source_refs: Vec::new(),
+                        },
+                    ))
+                    .await
+                    .unwrap();
+                actor
+                    .chat_state_handle
+                    .begin_auxiliary_attempt_usage(sideband_id, 1, "test-model".into(), None)
+                    .await
+                    .unwrap();
+                run.usage_owner = Some(actor.chat_state_handle.clone());
+                run.admitted_auxiliary_attempt_no = Some(1);
+                drop(run);
+                tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    loop {
+                        if actor
+                            .chat_state_handle
+                            .try_get_session_usage()
+                            .await
+                            .unwrap()
+                            .incomplete
+                        {
+                            break;
+                        }
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("detached auxiliary settlement must reach session ledger");
+                let message = sideband_rx.recv().await.unwrap();
+                let crate::session::persistence::PersistenceMsg::SidebandDurablyAndAck {
+                    respond_to,
+                    ..
+                } = message
+                else {
+                    panic!("expected cancelled Sideband terminal")
+                };
+                respond_to.send(Ok(())).unwrap();
             })
             .await;
     }

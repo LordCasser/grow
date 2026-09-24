@@ -75,15 +75,18 @@ async fn sampling_candidate_is_scoped_and_dropped_until_durable_admission() {
                 native_continuation: None,
             };
             actor
-                .handle_sampling_event(SamplingEvent::Completed {
+                .handle_sampling_event(SamplingEvent::RequestCompleted {
                     request_id,
-                    response: Box::new(response),
+                    usage: response.usage,
+                    item_count: response.items.len(),
+                    provider_terminal: response.provider_terminal,
+                    doom_loop_signals: response.doom_loop_signals,
                     metrics: Default::default(),
                 })
                 .await;
             assert_eq!(
                 actor.sampling_preview.lock().as_ref(),
-                Some(&("candidate".into(), 1))
+                Some(&("candidate".into(), 1, false))
             );
             let mut preview_count = 0;
             while let Ok(event) = rx.try_recv() {

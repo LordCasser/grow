@@ -53,7 +53,6 @@ fn write_using_temp(
     result
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,7 +79,10 @@ mod tests {
         let tmp = dir.path().join("owned.tmp");
         assert!(write_using_temp(&path, &tmp, "next", None).is_err());
         assert!(!tmp.exists());
-        assert_eq!(std::fs::read_to_string(path.join("previous")).unwrap(), "keep");
+        assert_eq!(
+            std::fs::read_to_string(path.join("previous")).unwrap(),
+            "keep"
+        );
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
     }
 
@@ -92,9 +94,13 @@ mod tests {
         write_atomically(&path, "new", Some(0o600)).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
-        #[cfg(unix)] {
+        #[cfg(unix)]
+        {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
         }
     }
 }

@@ -128,18 +128,24 @@ const MAX_HIDDEN_STATE_BYTES: u64 = 1024 * 1024;
 pub async fn read_hidden_announcement_ids() -> BTreeSet<String> {
     let path = announcements_state_path();
     tokio::task::spawn_blocking(move || read_hidden_state_at(&path))
-        .await.ok().and_then(Result::ok).unwrap_or_default()
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or_default()
 }
 
 fn state_admission_error() -> std::io::Error {
-    std::io::Error::new(std::io::ErrorKind::InvalidData,
-        "announcement state must be an ordinary file within 1 MiB")
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "announcement state must be an ordinary file within 1 MiB",
+    )
 }
 
 fn read_hidden_state_at(path: &std::path::Path) -> std::io::Result<BTreeSet<String>> {
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
-    #[cfg(unix)] {
+    #[cfg(unix)]
+    {
         use std::os::unix::fs::OpenOptionsExt;
         options.custom_flags(libc::O_NONBLOCK);
     }
@@ -154,8 +160,12 @@ fn read_hidden_state_at(path: &std::path::Path) -> std::io::Result<BTreeSet<Stri
 fn read_hidden_state_from(reader: impl std::io::Read) -> std::io::Result<BTreeSet<String>> {
     use std::io::Read;
     let mut bytes = Vec::new();
-    reader.take(MAX_HIDDEN_STATE_BYTES + 1).read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > MAX_HIDDEN_STATE_BYTES { return Err(state_admission_error()); }
+    reader
+        .take(MAX_HIDDEN_STATE_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_HIDDEN_STATE_BYTES {
+        return Err(state_admission_error());
+    }
     let text = std::str::from_utf8(&bytes).map_err(|_| state_admission_error())?;
     Ok(parse_hidden_announcement_ids(text))
 }
@@ -165,12 +175,15 @@ pub async fn write_hidden_announcement_ids(ids: &BTreeSet<String>) -> std::io::R
     let path = announcements_state_path();
     let contents = serialize_hidden_announcement_ids(ids);
     tokio::task::spawn_blocking(move || write_hidden_state_at(&path, &contents))
-        .await.map_err(std::io::Error::other)?
+        .await
+        .map_err(std::io::Error::other)?
 }
 
 fn write_hidden_state_at(path: &std::path::Path, contents: &str) -> std::io::Result<()> {
     use std::io::Write;
-    if contents.len() as u64 > MAX_HIDDEN_STATE_BYTES { return Err(state_admission_error()); }
+    if contents.len() as u64 > MAX_HIDDEN_STATE_BYTES {
+        return Err(state_admission_error());
+    }
     write_hidden_state_with(path, |file| file.write_all(contents.as_bytes()))
 }
 
@@ -178,10 +191,14 @@ fn write_hidden_state_with(
     path: &std::path::Path,
     write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()>,
 ) -> std::io::Result<()> {
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty())
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."));
     std::fs::create_dir_all(parent)?;
-    let mut file = tempfile::Builder::new().prefix(".announcements-").tempfile_in(parent)?;
+    let mut file = tempfile::Builder::new()
+        .prefix(".announcements-")
+        .tempfile_in(parent)?;
     write(file.as_file_mut())?;
     file.as_file().sync_all()?;
     file.persist(path).map_err(|error| error.error)?;
@@ -249,7 +266,10 @@ mod tests {
         let path = dir.path().join("state.json");
         let ids = BTreeSet::from(["汉字".into()]);
         let mut exact = serialize_hidden_announcement_ids(&ids);
-        exact.extend(std::iter::repeat_n(' ', MAX_HIDDEN_STATE_BYTES as usize - exact.len()));
+        exact.extend(std::iter::repeat_n(
+            ' ',
+            MAX_HIDDEN_STATE_BYTES as usize - exact.len(),
+        ));
         write_hidden_state_at(&path, &exact).unwrap();
         assert_eq!(read_hidden_state_at(&path).unwrap(), ids);
         let over = exact.clone() + " ";
@@ -260,7 +280,10 @@ mod tests {
         assert_eq!(cursor.position(), MAX_HIDDEN_STATE_BYTES + 1);
         std::fs::write(&path, &over).unwrap();
         assert!(read_hidden_state_at(&path).is_err());
-        assert_eq!(std::fs::metadata(&path).unwrap().len(), MAX_HIDDEN_STATE_BYTES + 1);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().len(),
+            MAX_HIDDEN_STATE_BYTES + 1
+        );
         std::fs::write(&path, "malformed").unwrap();
         assert!(read_hidden_state_at(&path).unwrap().is_empty());
         assert!(read_hidden_state_at(dir.path()).is_err());
@@ -276,8 +299,13 @@ mod tests {
         assert_eq!(unsafe { libc::mkfifo(cpath.as_ptr(), 0o600) }, 0);
         let (tx, rx) = std::sync::mpsc::channel();
         let source = fifo.clone();
-        std::thread::spawn(move || { tx.send(read_hidden_state_at(&source).is_err()).unwrap(); });
-        assert!(rx.recv_timeout(std::time::Duration::from_secs(2)).expect("FIFO admission blocked"));
+        std::thread::spawn(move || {
+            tx.send(read_hidden_state_at(&source).is_err()).unwrap();
+        });
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_secs(2))
+                .expect("FIFO admission blocked")
+        );
         assert!(fifo.exists());
         let target = dir.path().join("state");
         let ids = BTreeSet::from(["one".into()]);
@@ -309,10 +337,19 @@ mod tests {
         let path = dir.path().join("nested/announcements.json");
         let ids = BTreeSet::from(["one".into(), "汉字".into()]);
         write_hidden_state_at(&path, &serialize_hidden_announcement_ids(&ids)).unwrap();
-        assert_eq!(parse_hidden_announcement_ids(&std::fs::read_to_string(&path).unwrap()), ids);
+        assert_eq!(
+            parse_hidden_announcement_ids(&std::fs::read_to_string(&path).unwrap()),
+            ids
+        );
         write_hidden_state_at(&path, &serialize_hidden_announcement_ids(&BTreeSet::new())).unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"hidden_ids\":[]}");
-        assert_eq!(std::fs::read_dir(path.parent().unwrap()).unwrap().count(), 1);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"hidden_ids\":[]}"
+        );
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
     }
 
     #[test]
@@ -324,7 +361,10 @@ mod tests {
         let unowned = dir.path().join(".announcements-existing");
         std::fs::write(&unowned, "not ours").unwrap();
         assert!(write_hidden_state_at(&target, "{\"hidden_ids\":[]}").is_err());
-        assert_eq!(std::fs::read_to_string(target.join("previous")).unwrap(), "keep");
+        assert_eq!(
+            std::fs::read_to_string(target.join("previous")).unwrap(),
+            "keep"
+        );
         assert_eq!(std::fs::read_to_string(&unowned).unwrap(), "not ours");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 2);
         let blocked_parent = dir.path().join("blocked");

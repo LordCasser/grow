@@ -1509,15 +1509,62 @@ async fn rewind_points_waits_for_in_flight_session_load() {
                 panic!("unexpected command after Rewind lookup");
             };
             respond_to
-                .send(crate::session::RewindPointsResponse {
+                .send(Ok(crate::session::RewindPointsResponse {
                     rewind_points: Vec::new(),
-                })
+                }))
                 .expect("Rewind response receiver must remain open");
 
             waiter
                 .await
                 .expect("Rewind task must not panic")
                 .expect("Rewind must resolve after session/load publishes the actor");
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn rewind_points_metadata_failure_reaches_client() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let agent = std::rc::Rc::new(build_minimal_agent_for_tests());
+            let (handle, mut commands) = make_test_handle_with_receiver("test-model", None);
+            let session_id = handle.info.id.clone();
+            agent
+                .sessions
+                .borrow_mut()
+                .insert(session_id.clone(), handle);
+            let request = acp::ExtRequest::new(
+                "grow/rewind/points",
+                serde_json::value::to_raw_value(&serde_json::json!({
+                    "sessionId": session_id.0.as_ref(),
+                }))
+                .unwrap()
+                .into(),
+            );
+            let request_agent = agent.clone();
+            let waiter = tokio::task::spawn_local(async move {
+                crate::extensions::rewind::handle(&request_agent, &request).await
+            });
+            let crate::session::SessionCommand::GetRewindPoints { respond_to } =
+                commands.recv().await.unwrap()
+            else {
+                panic!("expected rewind points request");
+            };
+            respond_to
+                .send(Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "pinned rewind record damaged",
+                )))
+                .unwrap();
+            let error = waiter.await.unwrap().unwrap_err();
+            assert!(
+                error
+                    .data
+                    .unwrap()
+                    .to_string()
+                    .contains("pinned rewind record damaged"),
+                "the picker must receive the scan failure"
+            );
         })
         .await;
 }
@@ -2201,6 +2248,76 @@ fn ext_method_rewind_uses_local_dispatch_without_bridge() {
             .await
             .expect_err("local rewind with no session must error");
         assert_eq!(err.code, acp::Error::resource_not_found(None).code);
+    });
+}
+
+#[test]
+fn queue_control_ext_request_returns_actor_acknowledgement() {
+    use acp_transport::AcpAgentHandler as _;
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let (handle, mut commands) = make_test_handle_with_receiver("test/default", None);
+        let session_id = handle.info.id.clone();
+        agent
+            .sessions
+            .borrow_mut()
+            .insert(session_id.clone(), handle);
+        let request = acp::ExtRequest::new(
+            "grow/queue/control",
+            serde_json::value::to_raw_value(&serde_json::json!({
+                "sessionId": session_id.0.as_ref(),
+                "operation": "hold",
+                "id": "queued-1",
+                "expectedVersion": 3,
+                "editId": "edit-1",
+                "leaderClientId": 7,
+            }))
+            .unwrap()
+            .into(),
+        );
+        let response = agent.ext_method(request);
+        tokio::pin!(response);
+        let command = tokio::select! {
+            result = &mut response => panic!("queue control replied before actor: {result:?}"),
+            command = commands.recv() => command.expect("actor command"),
+        };
+        let crate::session::SessionCommand::QueueControl {
+            request,
+            respond_to,
+        } = command
+        else {
+            panic!("expected queue control command");
+        };
+        assert_eq!(request.id, "queued-1");
+        assert_eq!(request.expected_version, 3);
+        assert_eq!(request.edit_id.as_deref(), Some("edit-1"));
+        assert_eq!(request.leader_client_id, Some(7));
+        respond_to
+            .send(crate::session::prompt_queue::QueueControlResult::applied(
+                Some(3),
+            ))
+            .unwrap();
+        let response = response.await.expect("control result");
+        let json: serde_json::Value = serde_json::from_str(response.0.get()).unwrap();
+        assert_eq!(json["applied"], true);
+        assert_eq!(json["version"], 3);
+        agent
+            .ext_notification(acp::ExtNotification::new(
+                "grow/internal/queue_client_disconnected",
+                serde_json::value::to_raw_value(&serde_json::json!({
+                    "leaderClientId": 7,
+                }))
+                .unwrap()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        assert!(matches!(
+            commands.recv().await,
+            Some(crate::session::SessionCommand::ReleaseQueueHoldsForClient {
+                leader_client_id: 7,
+            })
+        ));
     });
 }
 
@@ -3072,6 +3189,50 @@ fn ensure_session_supervisor_is_idempotent() {
         assert!(agent.supervisor_started.get());
     });
 }
+/// A leader generation can drop its agent while the process LocalSet stays
+/// alive. Pending tasks that hold a LocalRef must not run after that drop.
+#[test]
+fn agent_drop_aborts_owned_local_tasks() {
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let task_fired = fired.clone();
+        agent.spawn_owned_local(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            task_fired.store(true, std::sync::atomic::Ordering::SeqCst);
+        });
+        agent.ensure_session_supervisor();
+        drop(agent);
+        tokio::time::sleep(std::time::Duration::from_millis(20) + SESSION_SUPERVISOR_TICK).await;
+        assert!(!fired.load(std::sync::atomic::Ordering::SeqCst));
+    });
+}
+#[test]
+fn agent_drop_requests_primary_and_child_shutdown() {
+    run_local_for_bridge_test(|| async {
+        let agent = build_minimal_agent_for_tests();
+        let primary_id = acp::SessionId::new("drop-primary");
+        let child_id = acp::SessionId::new("drop-child");
+        let (primary, _primary_tx, mut primary_rx) = make_live_session_handle(&primary_id, None);
+        let (child, _child_tx, mut child_rx) = make_live_session_handle(&child_id, None);
+        agent.sessions.borrow_mut().insert(primary_id, primary);
+        agent
+            .active_child_sessions
+            .borrow_mut()
+            .insert(child_id, child);
+
+        drop(agent);
+
+        assert!(matches!(
+            primary_rx.try_recv(),
+            Ok(TestSessionCommand::Shutdown)
+        ));
+        assert!(matches!(
+            child_rx.try_recv(),
+            Ok(TestSessionCommand::Shutdown)
+        ));
+    });
+}
 /// After a terminal removal (reap/close drops the live-state entry), a later
 /// reload of the same SessionId starts clean at `IdleResident` with no stale
 /// terminal state leaking in (ties to the bounded-map fix).
@@ -3146,6 +3307,48 @@ async fn local_announcement_reload_updates_config_and_clients() {
     assert_eq!(payload.announcements, agent.cfg.borrow().announcements);
 }
 
+#[tokio::test]
+async fn commands_list_keeps_chat_and_session_requests_off_pre_session_discovery() {
+    let (agent, _rx) = build_agent_with_gateway_rx();
+
+    // Chat has precedence over sessionId and retains the product-catalog path.
+    // This test binary has no chat feature, so that path returns its existing
+    // capability error before touching cwd-scoped discovery.
+    let chat = acp::ExtRequest::new(
+        "grow/commands/list",
+        std::sync::Arc::from(
+            serde_json::value::to_raw_value(&serde_json::json!({
+                "kind": "chat",
+                "sessionId": "missing-session",
+                "cwd": "/path/that-must-not/be-scanned"
+            }))
+            .unwrap(),
+        ),
+    );
+    let error = crate::extensions::session_admin::handle(&agent, &chat)
+        .await
+        .expect_err("chat catalog keeps its existing unsupported-feature error");
+    assert_eq!(error.code, acp::Error::invalid_params().code);
+
+    // A non-chat live-session request resolves the actor catalog branch before
+    // cwd plugin/skill/workflow discovery. The missing id is therefore the
+    // observable result even with a deliberately unusable cwd.
+    let session = acp::ExtRequest::new(
+        "grow/commands/list",
+        std::sync::Arc::from(
+            serde_json::value::to_raw_value(&serde_json::json!({
+                "sessionId": "missing-session",
+                "cwd": "/path/that-must-not/be-scanned"
+            }))
+            .unwrap(),
+        ),
+    );
+    let error = crate::extensions::session_admin::handle(&agent, &session)
+        .await
+        .expect_err("live-session branch must report its missing session");
+    assert_eq!(error.code, acp::Error::invalid_request().code);
+}
+
 mod soft_default_settings_emit {
     use super::*;
     #[tokio::test]
@@ -3194,7 +3397,6 @@ mod soft_default_settings_emit {
     }
 }
 
-
 #[tokio::test(flavor = "current_thread")]
 #[serial_test::serial]
 async fn recap_extension_acknowledges_only_enqueued_commands() {
@@ -3204,32 +3406,61 @@ async fn recap_extension_acknowledges_only_enqueued_commands() {
     let agent = build_minimal_agent_for_tests();
     for auto in [false, true] {
         for closed in [false, true] {
+            let away_period_id = auto.then(uuid::Uuid::new_v4);
             let sid = acp::SessionId::new(format!("recap-{auto}-{closed}"));
             let (mut handle, receiver) = make_test_handle_with_receiver("test/default", None);
             handle.info.id = sid.clone();
             let mut receiver = Some(receiver);
-            if closed { drop(receiver.take()); }
+            if closed {
+                drop(receiver.take());
+            }
             agent.sessions.borrow_mut().insert(sid.clone(), handle);
             let request = acp::ExtRequest::new(
                 "grow/recap",
                 serde_json::value::to_raw_value(&serde_json::json!({
                     "sessionId": sid.0.to_string(), "auto": auto,
-                })).unwrap().into(),
+                    "awayPeriodId": away_period_id,
+                }))
+                .unwrap()
+                .into(),
             );
             let response = crate::extensions::recap::handle(&agent, &request).await;
             if closed {
                 let error = response.expect_err("closed receiver cannot accept recap");
                 assert_eq!(error.code, acp::Error::internal_error().code);
-                assert_eq!(error.data, Some(serde_json::json!("session command channel closed")));
+                assert_eq!(
+                    error.data,
+                    Some(serde_json::json!("session command channel closed"))
+                );
             } else {
                 assert!(response.is_ok());
                 assert!(matches!(receiver.as_mut().unwrap().try_recv().unwrap(),
-                    crate::session::SessionCommand::Recap { auto: queued } if queued == auto));
+                    crate::session::SessionCommand::Recap {
+                        auto: queued,
+                        away_period_id: queued_period,
+                    } if queued == auto && queued_period == away_period_id));
                 assert!(receiver.as_mut().unwrap().try_recv().is_err());
             }
             agent.sessions.borrow_mut().remove(&sid);
         }
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn recap_extension_rejects_auto_without_away_period() {
+    let agent = build_minimal_agent_for_tests();
+    let request = acp::ExtRequest::new(
+        "grow/recap",
+        serde_json::value::to_raw_value(&serde_json::json!({
+            "sessionId": "any", "auto": true,
+        }))
+        .unwrap()
+        .into(),
+    );
+    let error = crate::extensions::recap::handle(&agent, &request)
+        .await
+        .expect_err("automatic recap must name its away period");
+    assert_eq!(error.code, acp::Error::invalid_params().code);
 }
 
 #[test]
@@ -3238,11 +3469,25 @@ fn session_rename_lifecycle_is_serialized() {
     let Ok(home) = std::env::var(CHILD) else {
         let temp = tempfile::tempdir().unwrap();
         let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "agent::mvp_agent::tests::session_rename_lifecycle_is_serialized", "--nocapture"])
-            .env("GROW_HOME", temp.path()).env(CHILD, temp.path())
-            .output().unwrap();
-        assert!(output.status.success(), "child failed: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-        assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"), "child test was not executed");
+            .args([
+                "--exact",
+                "agent::mvp_agent::tests::session_rename_lifecycle_is_serialized",
+                "--nocapture",
+            ])
+            .env("GROW_HOME", temp.path())
+            .env(CHILD, temp.path())
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "child failed: {}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "child test was not executed"
+        );
         return;
     };
     assert_eq!(::config::grow_home(), std::path::PathBuf::from(&home));
@@ -3250,65 +3495,125 @@ fn session_rename_lifecycle_is_serialized() {
         use crate::session::storage::StorageAdapter;
         let agent = build_minimal_agent_for_tests();
         let sid = acp::SessionId::new("rename-lifecycle-test");
-        let info = crate::session::info::Info { id: sid.clone(), cwd: home.clone() };
+        let info = crate::session::info::Info {
+            id: sid.clone(),
+            cwd: home.clone(),
+        };
         let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(home.into());
-        storage.init_session(&info, crate::session::persistence::default_model_id()).await.unwrap();
+        storage
+            .init_session(&info, crate::session::persistence::default_model_id())
+            .await
+            .unwrap();
         drop(storage); // Release initializer's writer lease before dormant mutation.
         {
-        let (mut handle, mut commands) = make_test_handle_with_receiver("test/default", None);
-        handle.info = info.clone();
-        agent.sessions.borrow_mut().insert(sid.clone(), handle);
-        let request = acp::ExtRequest::new("grow/session/rename", serde_json::value::to_raw_value(&serde_json::json!({
-            "sessionId": sid.0.as_ref(), "title": "renamed", "cwd": info.cwd,
-        })).unwrap().into());
-        let prior = agent.lock_session_lifecycle(&sid).await;
-        let rename = crate::extensions::session_admin::handle(&agent, &request);
-        tokio::pin!(rename);
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut rename).await.is_err());
-        assert!(commands.try_recv().is_err(), "no title command before lifecycle acquisition");
-        drop(prior);
-        // A loader is announced before it can acquire its lifecycle guard.
-        let announced = agent.begin_session_load(&sid);
-        let command = tokio::time::timeout(std::time::Duration::from_secs(3), async {
-            tokio::select! {
-                result = &mut rename => panic!("rename ended before actor reply: {result:?}"),
-                command = commands.recv() => command.unwrap(),
-            }
-        }).await.expect("rename must not wait for a loader queued behind it");
-        let TestSessionCommand::SetSessionTitle { respond_to, .. } = command else { panic!("expected title command") };
-        let competing_load = agent.lock_session_lifecycle(&sid);
-        tokio::pin!(competing_load);
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut competing_load).await.is_err());
-        let deletion = agent.teardown_live_session_before_delete(&sid);
-        tokio::pin!(deletion);
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut deletion).await.is_err());
-        let second_rename = crate::extensions::session_admin::handle(&agent, &request);
-        tokio::pin!(second_rename);
-        assert!(tokio::time::timeout(std::time::Duration::from_millis(30), &mut second_rename).await.is_err());
-        let mut timeline = chat_state::Timeline::default();
-        let event = timeline.record(chat_state::TimelineEventKind::SessionTitle(chat_state::SessionTitleEvent {
-            title: "renamed".into(), source: chat_state::SessionTitleSource::User,
-        })).unwrap();
-        respond_to.send(Ok(event)).unwrap();
-        rename.await.unwrap();
-        let acquired = tokio::time::timeout(std::time::Duration::from_secs(1), &mut competing_load).await.unwrap();
-        drop(acquired);
-        drop(announced);
-        // Pending competitors are dropped without deleting any session.
+            let (mut handle, mut commands) = make_test_handle_with_receiver("test/default", None);
+            handle.info = info.clone();
+            agent.sessions.borrow_mut().insert(sid.clone(), handle);
+            let request = acp::ExtRequest::new(
+                "grow/session/rename",
+                serde_json::value::to_raw_value(&serde_json::json!({
+                    "sessionId": sid.0.as_ref(), "title": "renamed", "cwd": info.cwd,
+                }))
+                .unwrap()
+                .into(),
+            );
+            let prior = agent.lock_session_lifecycle(&sid).await;
+            let rename = crate::extensions::session_admin::handle(&agent, &request);
+            tokio::pin!(rename);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(30), &mut rename)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                commands.try_recv().is_err(),
+                "no title command before lifecycle acquisition"
+            );
+            drop(prior);
+            // A loader is announced before it can acquire its lifecycle guard.
+            let announced = agent.begin_session_load(&sid);
+            let command = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                tokio::select! {
+                    result = &mut rename => panic!("rename ended before actor reply: {result:?}"),
+                    command = commands.recv() => command.unwrap(),
+                }
+            })
+            .await
+            .expect("rename must not wait for a loader queued behind it");
+            let TestSessionCommand::SetSessionTitle { respond_to, .. } = command else {
+                panic!("expected title command")
+            };
+            let competing_load = agent.lock_session_lifecycle(&sid);
+            tokio::pin!(competing_load);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(30), &mut competing_load)
+                    .await
+                    .is_err()
+            );
+            let deletion = agent.teardown_live_session_before_delete(&sid);
+            tokio::pin!(deletion);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(30), &mut deletion)
+                    .await
+                    .is_err()
+            );
+            let second_rename = crate::extensions::session_admin::handle(&agent, &request);
+            tokio::pin!(second_rename);
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(30), &mut second_rename)
+                    .await
+                    .is_err()
+            );
+            let mut timeline = chat_state::Timeline::default();
+            let event = timeline
+                .record(chat_state::TimelineEventKind::SessionTitle(
+                    chat_state::SessionTitleEvent {
+                        title: "renamed".into(),
+                        source: chat_state::SessionTitleSource::User,
+                    },
+                ))
+                .unwrap();
+            respond_to.send(Ok(event)).unwrap();
+            rename.await.unwrap();
+            let acquired =
+                tokio::time::timeout(std::time::Duration::from_secs(1), &mut competing_load)
+                    .await
+                    .unwrap();
+            drop(acquired);
+            drop(announced);
+            // Pending competitors are dropped without deleting any session.
         }
         agent.sessions.borrow_mut().remove(&sid);
         let announced = agent.begin_session_load(&sid);
-        let request = acp::ExtRequest::new("grow/session/rename", serde_json::value::to_raw_value(&serde_json::json!({
-            "sessionId": sid.0.as_ref(), "title": "dormant renamed", "cwd": info.cwd,
-        })).unwrap().into());
-        tokio::time::timeout(std::time::Duration::from_secs(3), crate::extensions::session_admin::handle(&agent, &request))
-            .await.expect("dormant rename must not await an announced loader").unwrap();
+        let request = acp::ExtRequest::new(
+            "grow/session/rename",
+            serde_json::value::to_raw_value(&serde_json::json!({
+                "sessionId": sid.0.as_ref(), "title": "dormant renamed", "cwd": info.cwd,
+            }))
+            .unwrap()
+            .into(),
+        );
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            crate::extensions::session_admin::handle(&agent, &request),
+        )
+        .await
+        .expect("dormant rename must not await an announced loader")
+        .unwrap();
         drop(announced);
-        let summaries = crate::session::persistence::list_summaries(Some(&info.cwd)).await.unwrap();
-        assert_eq!(summaries.iter().find(|s| s.info.id == sid).unwrap().display_title(), "dormant renamed");
+        let summaries = crate::session::persistence::list_summaries(Some(&info.cwd))
+            .await
+            .unwrap();
+        assert_eq!(
+            summaries
+                .iter()
+                .find(|s| s.info.id == sid)
+                .unwrap()
+                .display_title(),
+            "dormant renamed"
+        );
     });
 }
-
 
 #[test]
 fn cold_resume_preserves_durable_effort_chain() {
@@ -3409,12 +3714,14 @@ reasoning_efforts = [{value = "max", default = true}, {value = "high"}]
                 .unwrap();
             let prior_resume_boundaries = events
                 .iter()
-                .filter(|event| matches!(
-                    &event.kind,
-                    chat_state::TimelineEventKind::Observation(observation)
-                        if observation.scope == "session_usage"
-                            && observation.name == "resume_started"
-                ))
+                .filter(|event| {
+                    matches!(
+                        &event.kind,
+                        chat_state::TimelineEventKind::Observation(observation)
+                            if observation.scope == "session_usage"
+                                && observation.name == "resume_started"
+                    )
+                })
                 .count();
             crate::session::persistence::latest_model_selection(&events)
                 .unwrap_or_else(|error| panic!("before cold resume {phase}: {error}"));
@@ -3439,12 +3746,14 @@ reasoning_efforts = [{value = "max", default = true}, {value = "high"}]
                 .await
                 .unwrap()
                 .into_iter()
-                .filter(|event| matches!(
-                    &event.kind,
-                    chat_state::TimelineEventKind::Observation(observation)
-                        if observation.scope == "session_usage"
-                            && observation.name == "resume_started"
-                ))
+                .filter(|event| {
+                    matches!(
+                        &event.kind,
+                        chat_state::TimelineEventKind::Observation(observation)
+                            if observation.scope == "session_usage"
+                                && observation.name == "resume_started"
+                    )
+                })
                 .count();
             assert_eq!(cold_resume_boundaries, prior_resume_boundaries + 1);
             let expected = if case == "none" {
@@ -3477,12 +3786,14 @@ reasoning_efforts = [{value = "max", default = true}, {value = "high"}]
                 .await
                 .unwrap()
                 .into_iter()
-                .filter(|event| matches!(
-                    &event.kind,
-                    chat_state::TimelineEventKind::Observation(observation)
-                        if observation.scope == "session_usage"
-                            && observation.name == "resume_started"
-                ))
+                .filter(|event| {
+                    matches!(
+                        &event.kind,
+                        chat_state::TimelineEventKind::Observation(observation)
+                            if observation.scope == "session_usage"
+                                && observation.name == "resume_started"
+                    )
+                })
                 .count();
             assert_eq!(resident_resume_boundaries, cold_resume_boundaries);
             assert_eq!(
@@ -3500,11 +3811,11 @@ reasoning_efforts = [{value = "max", default = true}, {value = "high"}]
             assert_eq!(
                 changes,
                 if case == "none" {
-                    0
-                } else if phase == 3 {
-                    2
-                } else {
                     1
+                } else if phase == 3 {
+                    3
+                } else {
+                    2
                 },
                 "hydration must not append model changes"
             );
@@ -3534,8 +3845,20 @@ reasoning_efforts = [{value = "max", default = true}, {value = "high"}]
                 // A real same-process close must release its persistence lease
                 // before an immediate cold load is admitted.
                 assert!(agent.close_session_explicit(&sid).await.unwrap());
-                agent.load_session(acp::LoadSessionRequest::new(sid.clone(), cwd.clone())).await.unwrap();
-                assert_eq!(agent.control_session_handle(&sid).unwrap().model_route.snapshot().sampling_config.reasoning_effort, expected);
+                agent
+                    .load_session(acp::LoadSessionRequest::new(sid.clone(), cwd.clone()))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    agent
+                        .control_session_handle(&sid)
+                        .unwrap()
+                        .model_route
+                        .snapshot()
+                        .sampling_config
+                        .reasoning_effort,
+                    expected
+                );
             }
             assert!(agent.close_session_explicit(&sid).await.unwrap());
             return;
@@ -3606,21 +3929,241 @@ reasoning_efforts = [{value = "max", default = true}, {value = "high"}]
     });
 }
 
+#[test]
+fn cold_resume_records_catalog_route_rebind() {
+    const CHILD: &str = "GROW_TEST_COLD_ROUTE_HOME";
+    let Ok(home) = std::env::var(CHILD) else {
+        let temp = tempfile::tempdir().unwrap();
+        for phase in 0..3 {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "agent::mvp_agent::tests::cold_resume_records_catalog_route_rebind",
+                    "--nocapture",
+                ])
+                .env("GROW_HOME", temp.path())
+                .env(CHILD, temp.path())
+                .env("GROW_TEST_COLD_ROUTE_PHASE", phase.to_string())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "phase {phase} failed: {}\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed"));
+        }
+        return;
+    };
+    run_local_for_bridge_test(|| async move {
+        use acp_transport::AcpAgentHandler as _;
+        let phase: u32 = std::env::var("GROW_TEST_COLD_ROUTE_PHASE")
+            .unwrap()
+            .parse()
+            .unwrap();
+        let base_url = if phase == 0 {
+            "http://127.0.0.1:1/v1"
+        } else {
+            "http://127.0.0.1:2/v1"
+        };
+        let raw = format!(
+            r#"
+[models]
+default = "test/default"
+[provider.test]
+api_backend = "chat_completions"
+[provider.test.options]
+base_url = "{base_url}"
+api_key = "test-only"
+[provider.test.models.default]
+context_window = 128000
+"#
+        );
+        let root = std::path::Path::new(&home);
+        std::fs::write(root.join("config.toml"), &raw).unwrap();
+        let mut cfg =
+            crate::agent::config::Config::new_from_toml_cfg(&toml::from_str(&raw).unwrap())
+                .unwrap();
+        cfg.default_model_override = None;
+        cfg.remote_settings = Some(crate::util::config::RemoteSettings::default());
+        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let agent = MvpAgent::new(GatewaySender::new(tx), &cfg).unwrap();
+        agent
+            .initialize(
+                acp::InitializeRequest::new(acp::ProtocolVersion::V1).meta(
+                    serde_json::json!({"startupHints":{"nonInteractive":true,"skipGitStatus":true,"skipProjectLayout":true}})
+                        .as_object()
+                        .cloned(),
+                ),
+            )
+            .await
+            .unwrap();
+        agent.set_auth_method(acp::AuthMethodId::new("provider.api_key"));
+        let cwd = root.join("workspace");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let sid = if phase == 0 {
+            let created = agent
+                .new_session(acp::NewSessionRequest::new(cwd.clone()))
+                .await
+                .unwrap();
+            std::fs::write(root.join("test-session-id"), created.session_id.0.as_ref()).unwrap();
+            created.session_id
+        } else {
+            let sid = acp::SessionId::new(std::fs::read_to_string(root.join("test-session-id")).unwrap());
+            agent
+                .load_session(acp::LoadSessionRequest::new(sid.clone(), cwd.clone()))
+                .await
+                .unwrap();
+            sid
+        };
+        let handle = agent.control_session_handle(&sid).unwrap();
+        let events = handle.chat_state_handle.timeline_events().await.unwrap();
+        let latest = crate::session::persistence::latest_model_selection(&events)
+            .unwrap()
+            .expect("route baseline must be durable");
+        let current = handle.model_route.snapshot().sampling_config;
+        let current_transport = sampling_types::model_image_input_key_from_parts(
+            &current.model,
+            &current.api_backend,
+            &current.base_url,
+            &current.query_params,
+        );
+        assert_eq!(latest.3, current_transport);
+        let reasons: Vec<_> = events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Observation(observation)
+                    if observation.scope == "model" && observation.name == "changed" =>
+                {
+                    observation.data.as_ref()?.get("reason")?.as_str()
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            reasons
+                .iter()
+                .filter(|reason| **reason == "session_start_route_baseline")
+                .count(),
+            1
+        );
+        assert_eq!(
+            reasons
+                .iter()
+                .filter(|reason| **reason == "cold_load_catalog_rebind")
+                .count(),
+            usize::from(phase > 0)
+        );
+        if phase == 1 {
+            let bridge = events.iter().find_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Observation(observation)
+                    if observation.scope == "model"
+                        && observation.data.as_ref()?.get("reason")?.as_str()
+                            == Some("cold_load_catalog_rebind") =>
+                {
+                    observation.data.as_ref()
+                }
+                _ => None,
+            }).unwrap();
+            assert_ne!(bridge["from_model_transport"], bridge["to_model_transport"]);
+            assert_eq!(bridge["to_model_transport"], serde_json::to_value(&current_transport).unwrap());
+            agent
+                .load_session(acp::LoadSessionRequest::new(sid.clone(), cwd.clone()))
+                .await
+                .unwrap();
+            let resident = agent.control_session_handle(&sid).unwrap().chat_state_handle.timeline_events().await.unwrap();
+            assert_eq!(resident.len(), events.len(), "resident reconnect must not rebind");
+            let lock = agent.model_reload_lock.lock().await;
+            let enqueued = crate::agent::handlers::model_switch::enqueue(
+                &agent,
+                &lock,
+                agent.control_session_handle(&sid).unwrap(),
+                crate::agent::handlers::model_switch::ModelSwitchRequest::new(
+                    sid.clone(),
+                    crate::agent::models::ModelId::new("test/default"),
+                ),
+            )
+            .unwrap();
+            drop(lock);
+            crate::agent::handlers::model_switch::finish(&agent, enqueued)
+                .await
+                .unwrap();
+        }
+        assert!(agent.close_session_explicit(&sid).await.unwrap());
+        if phase == 2 {
+            let no_route_sid = acp::SessionId::new("route-free-baseline");
+            let info = crate::session::info::Info {
+                id: no_route_sid.clone(),
+                cwd: cwd.to_str().unwrap().to_owned(),
+            };
+            let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(
+                root.to_path_buf(),
+            );
+            storage
+                .init_session_with_summary(
+                    &info,
+                    crate::session::persistence::Summary::new(
+                        &info,
+                        crate::agent::models::ModelId::new("test/default"),
+                    )
+                    .unwrap(),
+                    vec![crate::sampling::ConversationItem::system("prior system head")],
+                    Default::default(),
+                    Vec::new(),
+                )
+                .await
+                .unwrap();
+            drop(storage);
+            agent
+                .load_session(acp::LoadSessionRequest::new(no_route_sid.clone(), cwd))
+                .await
+                .unwrap();
+            let events = agent
+                .control_session_handle(&no_route_sid)
+                .unwrap()
+                .chat_state_handle
+                .timeline_events()
+                .await
+                .unwrap();
+            assert!(events.iter().any(|event| matches!(
+                &event.kind,
+                chat_state::TimelineEventKind::Observation(observation)
+                    if observation.scope == "model"
+                        && observation.data.as_ref().and_then(|data| data.get("reason"))
+                            .and_then(serde_json::Value::as_str)
+                            == Some("cold_load_route_baseline")
+            )));
+            assert!(agent.close_session_explicit(&no_route_sid).await.unwrap());
+        }
+    });
+}
+
 #[tokio::test(start_paused = true)]
 async fn persistence_drain_timeout_retains_incarnation() {
     let agent = build_minimal_agent_for_tests();
     let sid = acp::SessionId::new("persistence-drain-timeout");
     let (release, wait) = tokio::sync::oneshot::channel::<()>();
-    let task = tokio::spawn(async move { let _ = wait.await; });
+    let task = tokio::spawn(async move {
+        let _ = wait.await;
+    });
     let actor = std::thread::spawn(|| {});
-    while !actor.is_finished() { tokio::task::yield_now().await; }
-    agent.session_threads.borrow_mut().insert(sid.clone(), crate::session::SessionThread::with_persistence(actor, Some(task.abort_handle()), None));
+    while !actor.is_finished() {
+        tokio::task::yield_now().await;
+    }
+    agent.session_threads.borrow_mut().insert(
+        sid.clone(),
+        crate::session::SessionThread::with_persistence(actor, Some(task.abort_handle()), None),
+    );
     let error = agent.drain_old_session_thread(&sid).await.unwrap_err();
     assert!(error.contains("still shutting down"));
     assert!(agent.session_threads.borrow().contains_key(&sid));
     let _ = release.send(());
     task.await.unwrap();
-    assert_eq!(agent.drain_old_session_thread(&sid).await.unwrap(), SessionThreadExit::Clean);
+    assert_eq!(
+        agent.drain_old_session_thread(&sid).await.unwrap(),
+        SessionThreadExit::Clean
+    );
     assert!(!agent.session_threads.borrow().contains_key(&sid));
 }
 

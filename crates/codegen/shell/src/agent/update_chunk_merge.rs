@@ -99,7 +99,9 @@ impl ReplayBuffer {
         match self.settings.as_ref() {
             Some(settings) => self.consume_chunk_with_settings(
                 incoming,
-                settings.max_bytes,
+                settings
+                    .max_bytes
+                    .min(sampler::PreviewEventBudget::MAX_BYTES as u64),
                 settings.max_items,
                 settings.max_duration_ms,
             ),

@@ -74,6 +74,7 @@ pub(super) async fn maybe_start_pending_manual_compaction(
         state.foreground = ForegroundState::Compaction;
         user_context
     };
+    session.send_available_commands_update().await;
     spawn_manual_compaction(session, user_context, None);
     true
 }
@@ -142,6 +143,7 @@ impl SessionActor {
         } else {
             state.foreground = ForegroundState::Compaction;
             drop(state);
+            self.send_available_commands_update().await;
             spawn_manual_compaction(std::sync::Arc::clone(self), user_context, respond_to);
         }
     }
@@ -395,5 +397,152 @@ mod idle_admission_tests {
                 assert_eq!(state.pending_inputs.front().unwrap().prompt_id, "user-wins");
             })
             .await;
+    }
+
+    #[tokio::test]
+    async fn held_queue_head_stays_pending_ahead_of_goal_continuation() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                actor
+                    .goal_runtime_available
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                actor
+                    .goal_tracker
+                    .lock()
+                    .create_goal(
+                        "goal-1".into(),
+                        "finish the architecture migration".into(),
+                        None,
+                        "2026-08-24T00:00:00Z".into(),
+                    )
+                    .unwrap();
+                actor
+                    .behavior
+                    .lock()
+                    .select_behavior(tool_types::BehaviorId::Goal);
+                actor.state.lock().await.pending_inputs.push_back(
+                    crate::session::actor::tests::support::user_item("held-head", "test-client"),
+                );
+                let hold = actor
+                    .handle_queue_control(crate::session::prompt_queue::QueueControlRequest {
+                        session_id: "test-session".into(),
+                        operation: crate::session::prompt_queue::QueueControlOperation::Hold,
+                        id: "held-head".into(),
+                        expected_version: 0,
+                        edit_id: Some("test-edit".into()),
+                        new_text: None,
+                        leader_client_id: Some(1),
+                    })
+                    .await;
+                assert!(hold.applied);
+
+                let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+                arbitrate_idle_wake(actor.clone(), completion_tx).await;
+                tokio::task::yield_now().await;
+                tokio::task::yield_now().await;
+
+                let state = actor.state.lock().await;
+                assert!(state.foreground.is_idle());
+                assert_eq!(state.pending_inputs.len(), 1);
+                assert_eq!(
+                    state
+                        .pending_inputs
+                        .front()
+                        .map(|item| item.prompt_id.as_str()),
+                    Some("held-head")
+                );
+                drop(state);
+                assert_eq!(
+                    actor.goal_tracker.lock().status(),
+                    Some(crate::session::goal_tracker::GoalStatus::Active),
+                    "the held FIFO head must block a Goal continuation without stopping the Goal"
+                );
+            })
+            .await;
+    }
+
+    #[test]
+    fn queue_hold_and_promotion_share_one_control_boundary() {
+        std::thread::Builder::new()
+            .stack_size(32 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+                    let (actor, _gateway_rx) =
+                        crate::session::actor::tests::support::build_actor().await;
+                    actor
+                        .queue_input(
+                            vec![acp::ContentBlock::Text(acp::TextContent::new("queued"))],
+                            "race-queued".into(),
+                            crate::session::PromptOrigin::User,
+                            crate::session::TurnKind::User,
+                            None,
+                            None,
+                            false,
+                            None,
+                            tokio::sync::oneshot::channel().0,
+                            None,
+                        )
+                        .await;
+                    let gate = actor.step_control_gate.lock().await;
+                    let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let promotion = tokio::task::spawn_local(
+                        actor.clone().maybe_start_running_task(completion_tx),
+                    );
+                    let holder = actor.clone();
+                    let hold =
+                        tokio::task::spawn_local(async move {
+                            holder
+                        .handle_queue_control(crate::session::prompt_queue::QueueControlRequest {
+                            session_id: "test-session".into(),
+                            operation: crate::session::prompt_queue::QueueControlOperation::Hold,
+                            id: "race-queued".into(),
+                            expected_version: 0,
+                            edit_id: Some("race-edit".into()),
+                            new_text: None,
+                            leader_client_id: Some(1),
+                        })
+                        .await
+                        });
+                    tokio::task::yield_now().await;
+                    drop(gate);
+                    let result = hold.await.unwrap();
+                    promotion.await.unwrap();
+                    let state = actor.state.lock().await;
+                    if result.applied {
+                        assert!(state.queue_edit_holds.contains_key("race-queued"));
+                        assert!(
+                            state
+                                .pending_inputs
+                                .iter()
+                                .any(|item| item.prompt_id == "race-queued")
+                        );
+                        assert!(state.foreground.is_idle());
+                    } else {
+                        assert!(!state.queue_edit_holds.contains_key("race-queued"));
+                        if state
+                            .pending_inputs
+                            .iter()
+                            .any(|item| item.prompt_id == "race-queued")
+                        {
+                            // Promotion installs the foreground owner before
+                            // durable turn start consumes the queue head.
+                            assert_eq!(state.running_prompt_id(), Some("race-queued"));
+                        }
+                        assert!(matches!(
+                            result.reason,
+                            Some("already_running" | "not_queued")
+                        ));
+                    }
+                }));
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

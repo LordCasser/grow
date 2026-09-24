@@ -560,7 +560,8 @@ impl SessionActor {
             .any(|item| {
                 matches!(
                     &item.source,
-                    chat_state::NotificationSource::ParentMessage { .. } | chat_state::NotificationSource::AgentReply { .. }
+                    chat_state::NotificationSource::ParentMessage { .. }
+                        | chat_state::NotificationSource::AgentReply { .. }
                 )
             });
         let delivered_parent_message =
@@ -591,40 +592,76 @@ mod tests {
             .run_until(async {
                 for accepted in [false, true] {
                     let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
-                    let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let (persistence_tx, mut persistence_rx) =
+                        tokio::sync::mpsc::unbounded_channel();
                     let (actor, _events) = super::super::tests::support::create_test_actor_ex(
-                        0, 100_000, 80, gateway_tx, persistence_tx,
-                    ).await;
+                        0,
+                        100_000,
+                        80,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await;
                     begin_test_causal_turn(&actor).await;
                     install_test_foreground(&actor, "turn-1").await;
                     let text = "用户原文\n<user_query>literal user markup</user_query>";
                     if accepted {
-                        actor.admit_human_steer(
-                            "turn-1", text.into(), Vec::new(), Some("steer-display".into()),
-                        ).await.unwrap();
+                        actor
+                            .admit_human_steer(
+                                "turn-1",
+                                text.into(),
+                                Vec::new(),
+                                Some("steer-display".into()),
+                            )
+                            .await
+                            .unwrap();
                         assert!(actor.close_steering_and_drain("turn-1").await);
                     } else {
-                        actor.inject_pending_interjections(vec![PendingInterjection {
-                            text: text.into(), attachments: Vec::new(), requeue: None,
-                        }]).await;
+                        actor
+                            .inject_pending_interjections(vec![PendingInterjection {
+                                text: text.into(),
+                                attachments: Vec::new(),
+                                requeue: None,
+                            }])
+                            .await;
                     }
-                    let notification = tokio::time::timeout(std::time::Duration::from_secs(2), async {
-                        loop {
-                            if let Some(PersistenceMsg::Update(SessionUpdate::Acp(notification))) = persistence_rx.recv().await
-                                && matches!(notification.update, acp::SessionUpdate::UserMessageChunk(_))
-                            {
-                                break notification;
+                    let notification =
+                        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                            loop {
+                                if let Some(PersistenceMsg::Update(SessionUpdate::Acp(
+                                    notification,
+                                ))) = persistence_rx.recv().await
+                                    && matches!(
+                                        notification.update,
+                                        acp::SessionUpdate::UserMessageChunk(_)
+                                    )
+                                {
+                                    break notification;
+                                }
                             }
-                        }
-                    }).await.expect("persisted user display update");
+                        })
+                        .await
+                        .expect("persisted user display update");
                     let encoded = serde_json::to_string(&notification).unwrap();
-                    let replayed: acp::SessionNotification = serde_json::from_str(&encoded).unwrap();
-                    let acp::SessionUpdate::UserMessageChunk(chunk) = replayed.update else { panic!("user chunk") };
-                    let acp::ContentBlock::Text(display) = chunk.content else { panic!("text block") };
-                    assert_eq!(display.text, text, "resume must preserve user-authored text");
+                    let replayed: acp::SessionNotification =
+                        serde_json::from_str(&encoded).unwrap();
+                    let acp::SessionUpdate::UserMessageChunk(chunk) = replayed.update else {
+                        panic!("user chunk")
+                    };
+                    let acp::ContentBlock::Text(display) = chunk.content else {
+                        panic!("text block")
+                    };
+                    assert_eq!(
+                        display.text, text,
+                        "resume must preserve user-authored text"
+                    );
                     let conversation = actor.chat_state_handle.get_conversation().await;
-                    assert!(conversation.iter().any(|item| item.text_content() == format_interjection(text.into())),
-                        "model context must retain its runtime envelope");
+                    assert!(
+                        conversation
+                            .iter()
+                            .any(|item| item.text_content() == format_interjection(text.into())),
+                        "model context must retain its runtime envelope"
+                    );
                 }
             })
             .await;

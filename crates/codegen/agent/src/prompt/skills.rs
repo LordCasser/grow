@@ -213,13 +213,36 @@ pub fn collect_skill_config_dirs(
 
 /// Determine the skill scope for a config directory based on its location
 /// relative to `cwd`, `git_root`, and the user's home directory.
-fn scope_for_config_dir(dir: &Path, cwd: Option<&Path>, git_root: Option<&Path>) -> SkillScope {
-    // Home-level `~/.grow/` is User scope.
-    #[allow(deprecated)]
-    if let Some(home) = std::env::home_dir()
-        && dir.parent() == Some(home.as_path())
-    {
-        return SkillScope::User;
+fn canonical_path(path: &Path) -> PathBuf {
+    dunce::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn paths_resolve_to_same_location(left: &Path, right: &Path) -> bool {
+    canonical_path(left) == canonical_path(right)
+}
+
+fn scope_for_config_dir(
+    dir: &Path,
+    cwd: Option<&Path>,
+    git_root: Option<&Path>,
+    user_roots: &[PathBuf],
+) -> SkillScope {
+    // User roots are the canonical home identity. Compare resolved paths so an
+    // alternate spelling of home cannot make a User root look repository-local.
+    for root in user_roots {
+        if paths_resolve_to_same_location(dir, root) {
+            // A cwd's own `.grow` entry is explicitly Local even when it is a
+            // symlink to the User root. The actual home `.grow` remains User.
+            if cwd.is_some_and(|cwd| {
+                dir.parent() == Some(cwd)
+                    && root
+                        .parent()
+                        .is_none_or(|home| !paths_resolve_to_same_location(cwd, home))
+            }) {
+                return SkillScope::Local;
+            }
+            return SkillScope::User;
+        }
     }
 
     // Dir whose parent is cwd is Local scope.
@@ -237,6 +260,75 @@ fn scope_for_config_dir(dir: &Path, cwd: Option<&Path>, git_root: Option<&Path>)
     }
 
     SkillScope::User
+}
+
+/// Classify a resolved skill target by the known `.grow` source roots.
+/// Unknown locations are User scope, the lowest-trust filesystem scope.
+fn scope_for_resolved_skill_path(
+    path: &Path,
+    cwd: Option<&Path>,
+    git_root: Option<&Path>,
+    user_roots: &[PathBuf],
+) -> SkillScope {
+    let path = canonical_path(path);
+    // User roots win overlapping aliases during target classification. The
+    // selected source root's own scope is preserved earlier by
+    // `scope_for_discovered_skill`; this ordering only affects links leaving it.
+    if user_roots
+        .iter()
+        .any(|root| path.starts_with(canonical_path(root)))
+    {
+        return SkillScope::User;
+    }
+    if cwd.is_some_and(|cwd| path.starts_with(canonical_path(&cwd.join(".grow")))) {
+        return SkillScope::Local;
+    }
+    if git_root.is_some_and(|root| path.starts_with(canonical_path(&root.join(".grow")))) {
+        return SkillScope::Repo;
+    }
+    SkillScope::User
+}
+
+/// Keep the selected source scope while a discovered file remains physically
+/// inside that source root. Once a descendant link leaves it, use the
+/// canonical target's scope, capped so the alias cannot gain precedence.
+fn scope_for_discovered_skill(
+    path: &Path,
+    source_root: &Path,
+    source_scope: SkillScope,
+    cwd: Option<&Path>,
+    git_root: Option<&Path>,
+    user_roots: &[PathBuf],
+) -> SkillScope {
+    let resolved_path = canonical_path(path);
+    let resolved_source = canonical_path(source_root);
+    if resolved_path.starts_with(&resolved_source) {
+        return source_scope;
+    }
+
+    source_scope.max(scope_for_resolved_skill_path(
+        &resolved_path,
+        cwd,
+        git_root,
+        user_roots,
+    ))
+}
+
+fn collect_scoped_skill_paths(
+    paths: impl IntoIterator<Item = PathBuf>,
+    source_root: &Path,
+    source_scope: SkillScope,
+    cwd: Option<&Path>,
+    git_root: Option<&Path>,
+    user_roots: &[PathBuf],
+    seen: &mut HashSet<PathBuf>,
+    out: &mut Vec<(PathBuf, SkillScope)>,
+) {
+    for path in paths {
+        let scope =
+            scope_for_discovered_skill(&path, source_root, source_scope, cwd, git_root, user_roots);
+        collect_discovered_paths(std::iter::once(path), scope, seen, out);
+    }
 }
 
 /// Collect paths into `out`, deduplicating by canonical path.
@@ -301,12 +393,17 @@ async fn list_skills_with_roots(
     let mut seen_canonical_paths = HashSet::new();
 
     for config_dir in &config_dirs {
-        let scope = scope_for_config_dir(config_dir, cwd.as_deref(), git_root.as_deref());
+        let scope =
+            scope_for_config_dir(config_dir, cwd.as_deref(), git_root.as_deref(), user_roots);
 
         // Skills before commands: skills win name collisions.
-        collect_discovered_paths(
+        collect_scoped_skill_paths(
             find_skill_paths(config_dir),
+            config_dir,
             scope,
+            cwd.as_deref(),
+            git_root.as_deref(),
+            user_roots,
             &mut seen_canonical_paths,
             &mut skill_files,
         );
@@ -365,15 +462,28 @@ fn collect_config_skills(config_paths: &[String], git_root: Option<&Path>) -> Ve
         };
 
         if expanded.is_file() && expanded.file_name().is_some_and(|n| n == "SKILL.md") {
-            collect_discovered_paths(
+            collect_scoped_skill_paths(
                 std::iter::once(expanded),
+                &resolved,
                 scope,
+                None,
+                git_root,
+                &[],
                 &mut seen,
                 &mut skill_files,
             );
         } else if expanded.is_dir() {
             let dir_paths = find_skill_md_paths(&expanded);
-            collect_discovered_paths(dir_paths, scope, &mut seen, &mut skill_files);
+            collect_scoped_skill_paths(
+                dir_paths,
+                &resolved,
+                scope,
+                None,
+                git_root,
+                &[],
+                &mut seen,
+                &mut skill_files,
+            );
         } else {
             tracing::warn!(
                 path = %expanded.display(),
@@ -2556,6 +2666,143 @@ mod tests {
         let skills = list_skills_with_roots(cwd.to_str(), None, &[]).await;
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].scope, SkillScope::Local);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn user_home_root_alias_keeps_user_scope_inside_repository() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let cwd = repo.join("work");
+        let home = tmp.path().join("home");
+        let home_alias = repo.join("home-alias");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(home.join(".grow/skills")).unwrap();
+        git2::Repository::init(&repo).unwrap();
+        std::os::unix::fs::symlink(&home, &home_alias).unwrap();
+
+        let aliased_user_root = home_alias.join(".grow");
+        let dirs = collect_skill_config_dirs(
+            Some(&cwd),
+            None,
+            std::slice::from_ref(&aliased_user_root),
+            &[],
+        );
+        let git_root = dunce::canonicalize(&repo).unwrap();
+        assert_eq!(dirs, [aliased_user_root.clone()]);
+        assert_eq!(
+            scope_for_config_dir(
+                &dirs[0],
+                Some(&cwd),
+                Some(&git_root),
+                std::slice::from_ref(&home.join(".grow")),
+            ),
+            SkillScope::User
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn repo_descendant_link_to_external_skill_is_user_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let cwd = repo.join("work");
+        let repo_skills = repo.join(".grow/skills");
+        let external_skill = tmp.path().join("external/external-skill");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&repo_skills).unwrap();
+        write_skill_md(&external_skill, "external-skill");
+        git2::Repository::init(&repo).unwrap();
+        std::os::unix::fs::symlink(&external_skill, repo_skills.join("external-link")).unwrap();
+
+        let skills = list_skills_with_roots(cwd.to_str(), None, &[]).await;
+        let external = skills
+            .iter()
+            .find(|skill| skill.name == "external-skill")
+            .unwrap();
+        assert_eq!(external.scope, SkillScope::User);
+        assert!(external.path.contains("external-link/SKILL.md"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn user_descendant_link_into_repository_does_not_promote_scope() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let cwd = repo.join("work");
+        let home = tmp.path().join("home");
+        let user_skills = home.join(".grow/skills");
+        let repo_skill = repo.join(".grow/shared/repo-skill");
+        fs::create_dir_all(&cwd).unwrap();
+        fs::create_dir_all(&user_skills).unwrap();
+        write_skill_md(&repo_skill, "repo-skill");
+        git2::Repository::init(&repo).unwrap();
+        std::os::unix::fs::symlink(&repo_skill, user_skills.join("repo-link")).unwrap();
+
+        let user_root = home.join(".grow");
+        let skills =
+            list_skills_with_roots(cwd.to_str(), None, std::slice::from_ref(&user_root)).await;
+        let linked = skills
+            .iter()
+            .find(|skill| skill.name == "repo-skill")
+            .unwrap();
+        assert_eq!(linked.scope, SkillScope::User);
+        assert!(linked.path.contains("repo-link/SKILL.md"));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_root_alias_keeps_in_root_skills_local_but_downgrades_external_links() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cwd = tmp.path().join("project");
+        let shared_root = tmp.path().join("shared-grow");
+        let outside_skill = tmp.path().join("outside/outside-skill");
+        fs::create_dir_all(&cwd).unwrap();
+        write_skill_md(&shared_root.join("skills/local-skill"), "local-skill");
+        write_skill_md(&outside_skill, "outside-skill");
+        fs::create_dir_all(shared_root.join("skills")).unwrap();
+        std::os::unix::fs::symlink(&shared_root, cwd.join(".grow")).unwrap();
+        std::os::unix::fs::symlink(&outside_skill, shared_root.join("skills/outside-link"))
+            .unwrap();
+
+        let skills = list_skills_with_roots(cwd.to_str(), None, &[]).await;
+        let local = skills
+            .iter()
+            .find(|skill| skill.name == "local-skill")
+            .unwrap();
+        let outside = skills
+            .iter()
+            .find(|skill| skill.name == "outside-skill")
+            .unwrap();
+        assert_eq!(local.scope, SkillScope::Local);
+        assert_eq!(outside.scope, SkillScope::User);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn repo_link_into_user_root_is_not_promoted_by_cwd_grow_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        let cwd = repo.join("work");
+        let home = tmp.path().join("home");
+        let user_root = home.join(".grow");
+        let user_skill = user_root.join("shared-skill");
+        let repo_link = repo.join(".grow/skills/user-alias");
+        fs::create_dir_all(&cwd).unwrap();
+        write_skill_md(&user_skill, "shared-skill");
+        fs::create_dir_all(repo_link.parent().unwrap()).unwrap();
+        git2::Repository::init(&repo).unwrap();
+        std::os::unix::fs::symlink(&user_root, cwd.join(".grow")).unwrap();
+        std::os::unix::fs::symlink(&user_skill, &repo_link).unwrap();
+
+        let skills =
+            list_skills_with_roots(cwd.to_str(), None, std::slice::from_ref(&user_root)).await;
+        let skill = skills
+            .iter()
+            .find(|skill| skill.name == "shared-skill")
+            .unwrap();
+        assert_eq!(skill.scope, SkillScope::User);
+        assert!(skill.path.contains("user-alias/SKILL.md"));
     }
 
     #[test]

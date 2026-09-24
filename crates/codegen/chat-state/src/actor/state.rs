@@ -280,6 +280,10 @@ pub(crate) struct ChatState {
     /// reconstructed from Timeline observations so a replay cannot charge a
     /// settled attempt a second time.
     pub(crate) settled_model_attempts: BTreeMap<String, AttemptUsageSettlement>,
+    /// Auxiliary requests admitted and settled under this session's Timeline.
+    pub(crate) auxiliary_attempts: BTreeMap<AuxiliaryAttemptKey, (AuxiliaryAttemptStart, usize)>,
+    pub(crate) settled_auxiliary_attempts:
+        BTreeMap<AuxiliaryAttemptKey, AuxiliaryAttemptSettlement>,
     /// Durable child bills already folded into the parent lifetime ledger.
     pub(crate) settled_subagent_usage: BTreeMap<String, SubagentUsageSettlement>,
     /// Event-sequence turn capture state. `Some` = capture active, `None` = inactive.
@@ -298,6 +302,67 @@ pub(crate) struct AttemptUsageSettlement {
     pub(crate) usage: Option<TokenUsage>,
     pub(crate) cost_usd_ticks: Option<i64>,
     pub(crate) api_duration_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AuxiliaryAttemptKey {
+    pub(crate) sideband_id: String,
+    pub(crate) attempt_no: u32,
+}
+
+impl AuxiliaryAttemptKey {
+    fn validate(&self) -> Result<(), String> {
+        crate::validate_sideband_id(&self.sideband_id).map_err(|error| error.to_string())?;
+        if self.attempt_no == 0 {
+            return Err("auxiliary attempt number must be positive".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AuxiliaryAttemptStart {
+    pub(crate) key: AuxiliaryAttemptKey,
+    pub(crate) model_id: String,
+    pub(crate) captured_prompt_index: Option<usize>,
+}
+
+impl AuxiliaryAttemptStart {
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        self.key.validate()?;
+        if self.model_id.trim().is_empty() {
+            return Err("auxiliary model identity is empty".into());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct AuxiliaryAttemptSettlement {
+    pub(crate) key: AuxiliaryAttemptKey,
+    pub(crate) usage: Option<TokenUsage>,
+    pub(crate) cost_usd_ticks: Option<i64>,
+    pub(crate) api_duration_ms: Option<u64>,
+}
+
+impl AuxiliaryAttemptSettlement {
+    pub(crate) fn matches(&self, other: &Self) -> bool {
+        self.key == other.key
+            && token_usage_matches(self.usage.as_ref(), other.usage.as_ref())
+            && self.cost_usd_ticks == other.cost_usd_ticks
+            && self.api_duration_ms == other.api_duration_ms
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), String> {
+        self.key.validate()?;
+        if self.usage.is_none() && self.cost_usd_ticks.is_some() {
+            return Err("unknown auxiliary usage cannot have an exact cost".into());
+        }
+        Ok(())
+    }
 }
 
 /// Immutable terminal bill folded from one child into its parent session.
@@ -379,17 +444,26 @@ fn usage_from_timeline(
 ) -> Result<
     (
         BTreeMap<String, AttemptUsageSettlement>,
+        BTreeMap<AuxiliaryAttemptKey, (AuxiliaryAttemptStart, usize)>,
+        BTreeMap<AuxiliaryAttemptKey, AuxiliaryAttemptSettlement>,
         BTreeMap<String, SubagentUsageSettlement>,
         UsageLedger,
     ),
     crate::TimelineWriteError,
 > {
     let mut attempts = BTreeMap::new();
+    let mut auxiliary_attempts: BTreeMap<_, (AuxiliaryAttemptStart, usize)> = BTreeMap::new();
+    let mut settled_auxiliary_attempts: BTreeMap<_, AuxiliaryAttemptSettlement> = BTreeMap::new();
+    let mut spawned_sidebands = BTreeSet::new();
     let mut subagents = BTreeMap::new();
     let mut ledger = UsageLedger::default();
     ledger.initialize_segment(timeline.events().first().map(|event| event.at_ms));
 
     for event in timeline.events() {
+        if let crate::TimelineEventKind::Sideband(spawn) = &event.kind {
+            spawned_sidebands.insert(spawn.sideband_id.clone());
+            continue;
+        }
         let crate::TimelineEventKind::Observation(observation) = &event.kind else {
             continue;
         };
@@ -405,10 +479,68 @@ fn usage_from_timeline(
                     return Err(invalid("marker must not contain data".into()));
                 }
                 if observation.name == "resume_started" {
+                    for (start, segment_index) in auxiliary_attempts.values() {
+                        if !settled_auxiliary_attempts.contains_key(&start.key) {
+                            ledger.mark_segment_incomplete(*segment_index);
+                        }
+                    }
                     ledger.begin_resume_segment(event.seq, event.at_ms);
                 } else {
                     ledger.mark_incomplete();
                 }
+            }
+            ("sampling_usage", "aux_attempt_started") => {
+                let data = observation
+                    .data
+                    .as_ref()
+                    .ok_or_else(|| invalid("missing auxiliary attempt start".into()))?;
+                let start = AuxiliaryAttemptStart::deserialize(data)
+                    .map_err(|error| invalid(error.to_string()))?;
+                start.validate().map_err(invalid)?;
+                if !spawned_sidebands.contains(&start.key.sideband_id) {
+                    return Err(invalid(
+                        "auxiliary attempt has no preceding Sideband spawn".into(),
+                    ));
+                }
+                match auxiliary_attempts.get(&start.key) {
+                    Some((existing, _)) if existing == &start => continue,
+                    Some(_) => return Err(crate::TimelineWriteError::AttemptUsageConflict),
+                    None => {}
+                }
+                let segment_index = ledger.current_segment_index();
+                auxiliary_attempts.insert(start.key.clone(), (start, segment_index));
+            }
+            ("sampling_usage", "aux_attempt_settled") => {
+                let data = observation
+                    .data
+                    .as_ref()
+                    .ok_or_else(|| invalid("missing auxiliary attempt settlement".into()))?;
+                let settlement = AuxiliaryAttemptSettlement::deserialize(data)
+                    .map_err(|error| invalid(error.to_string()))?;
+                settlement.validate().map_err(invalid)?;
+                if let Some(existing) = settled_auxiliary_attempts.get(&settlement.key) {
+                    if existing.matches(&settlement) {
+                        continue;
+                    }
+                    return Err(crate::TimelineWriteError::AttemptUsageConflict);
+                }
+                let Some((start, segment_index)) = auxiliary_attempts.get(&settlement.key) else {
+                    return Err(invalid(
+                        "auxiliary settlement has no preceding start".into(),
+                    ));
+                };
+                if let Some(usage) = settlement.usage.as_ref() {
+                    ledger.record_auxiliary_call_at(
+                        *segment_index,
+                        &start.model_id,
+                        usage,
+                        settlement.api_duration_ms,
+                        settlement.cost_usd_ticks,
+                    );
+                } else {
+                    ledger.mark_segment_incomplete(*segment_index);
+                }
+                settled_auxiliary_attempts.insert(settlement.key.clone(), settlement);
             }
             ("sampling_usage", "attempt_settled") => {
                 let data = observation
@@ -449,7 +581,18 @@ fn usage_from_timeline(
         }
     }
 
-    Ok((attempts, subagents, ledger))
+    for (start, segment_index) in auxiliary_attempts.values() {
+        if !settled_auxiliary_attempts.contains_key(&start.key) {
+            ledger.mark_segment_incomplete(*segment_index);
+        }
+    }
+    Ok((
+        attempts,
+        auxiliary_attempts,
+        settled_auxiliary_attempts,
+        subagents,
+        ledger,
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -667,8 +810,13 @@ impl ChatState {
         sampling_config: SamplingConfig,
     ) -> Result<Self, crate::TimelineWriteError> {
         let initial_tokens = estimate_conversation_tokens(timeline.surface());
-        let (settled_model_attempts, settled_subagent_usage, session_usage) =
-            usage_from_timeline(&timeline)?;
+        let (
+            settled_model_attempts,
+            auxiliary_attempts,
+            settled_auxiliary_attempts,
+            settled_subagent_usage,
+            session_usage,
+        ) = usage_from_timeline(&timeline)?;
 
         Ok(Self {
             continuation: ContinuationLane::new(
@@ -688,6 +836,8 @@ impl ChatState {
             prompt_usage: None,
             session_usage,
             settled_model_attempts,
+            auxiliary_attempts,
+            settled_auxiliary_attempts,
             settled_subagent_usage,
             turn_capture: None,
         })

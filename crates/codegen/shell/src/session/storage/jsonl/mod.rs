@@ -1,4 +1,7 @@
-use super::{PersistedData, SessionUpdateEnvelope, StorageAdapter, updates_truncate_for_prompt};
+use super::{
+    PersistedData, SESSION_SEARCH_INDEX_FILE, SessionUpdateEnvelope, StorageAdapter,
+    updates_truncate_for_prompt,
+};
 use crate::sampling::{
     ConversationItem, conversation_truncate_for_prompt, transform_conversation_cwd,
 };
@@ -946,12 +949,53 @@ impl JsonlStorageAdapter {
         )
     }
 
+    fn is_session_search_index_artifact(name: &std::ffi::OsStr) -> bool {
+        let Some(name) = name.to_str() else {
+            return false;
+        };
+        let sidecars = ["-wal", "-shm", "-journal"];
+        if name == SESSION_SEARCH_INDEX_FILE
+            || sidecars
+                .iter()
+                .any(|suffix| name.strip_suffix(suffix) == Some(SESSION_SEARCH_INDEX_FILE))
+        {
+            return true;
+        }
+
+        let base_stem = SESSION_SEARCH_INDEX_FILE
+            .strip_suffix(".sqlite")
+            .unwrap_or(SESSION_SEARCH_INDEX_FILE);
+        let Some(per_host) = name
+            .strip_prefix(base_stem)
+            .and_then(|rest| rest.strip_prefix(".h-"))
+        else {
+            return false;
+        };
+        let Some((host, suffix)) = per_host.split_once(".sqlite") else {
+            return false;
+        };
+        !host.is_empty()
+            && host
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+            && (suffix.is_empty() || sidecars.contains(&suffix))
+    }
+
     /// Enumerate identity-checked session entities from the pinned storage
     /// authority. Directory names, cwd markers, and Summary identity are one
     /// indivisible admission boundary; callers never receive an ambient path.
     fn scan_opened_sessions<T>(
         &self,
         cwd: Option<&str>,
+        project: impl FnMut(OpenedSession) -> T,
+    ) -> io::Result<Vec<T>> {
+        self.scan_opened_sessions_with_policy(cwd, false, project)
+    }
+
+    fn scan_opened_sessions_with_policy<T>(
+        &self,
+        cwd: Option<&str>,
+        fail_on_invalid_candidate: bool,
         mut project: impl FnMut(OpenedSession) -> T,
     ) -> io::Result<Vec<T>> {
         if !matches!(&self.dir_mode, SessionDirMode::FromRoot(_)) {
@@ -971,11 +1015,20 @@ impl JsonlStorageAdapter {
             if cwd_name.to_string_lossy().starts_with('.') {
                 continue;
             }
+            if Self::is_session_search_index_artifact(&cwd_name) {
+                continue;
+            }
             let cwd_directory = match sessions
                 .open_relative_shared_read(Path::new(&cwd_name), "session cwd directory")
             {
                 Ok(directory) => directory,
-                Err(error) if Self::is_skippable_scan_error(&error) => continue,
+                Err(error)
+                    if error.kind() == io::ErrorKind::NotFound
+                        || (!fail_on_invalid_candidate
+                            && error.kind() == io::ErrorKind::InvalidData) =>
+                {
+                    continue;
+                }
                 Err(error) => return Err(error),
             };
             for session_name in cwd_directory.list_names()? {
@@ -986,12 +1039,22 @@ impl JsonlStorageAdapter {
                     .open_relative_shared_read(Path::new(&session_name), "session directory")
                 {
                     Ok(directory) => directory,
-                    Err(error) if Self::is_skippable_scan_error(&error) => continue,
+                    Err(error)
+                        if error.kind() == io::ErrorKind::NotFound
+                            || (!fail_on_invalid_candidate
+                                && error.kind() == io::ErrorKind::InvalidData) =>
+                    {
+                        continue;
+                    }
                     Err(error) => return Err(error),
                 };
                 let summary = match Self::read_summary_from_directory(&directory) {
                     Ok(summary) => summary,
-                    Err(error) if Self::is_skippable_scan_error(&error) => continue,
+                    Err(error)
+                        if !fail_on_invalid_candidate && Self::is_skippable_scan_error(&error) =>
+                    {
+                        continue;
+                    }
                     Err(error) => return Err(error),
                 };
                 if let Err(error) = Self::validate_physical_session_identity(
@@ -1000,15 +1063,24 @@ impl JsonlStorageAdapter {
                     &session_name,
                     &summary,
                 ) {
-                    if Self::is_skippable_scan_error(&error) {
+                    if !fail_on_invalid_candidate && Self::is_skippable_scan_error(&error) {
                         continue;
                     }
                     return Err(error);
                 }
-                if summary.validate_current_format().is_err()
-                    || summary.is_hidden()
-                    || cwd.is_some_and(|expected| expected != summary.info.cwd)
-                {
+                if summary.validate_current_format().is_err() {
+                    if fail_on_invalid_candidate {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "session {} has an unsupported or invalid summary format",
+                                summary.info.id
+                            ),
+                        ));
+                    }
+                    continue;
+                }
+                if summary.is_hidden() || cwd.is_some_and(|expected| expected != summary.info.cwd) {
                     continue;
                 }
                 if !ids.insert(summary.info.id.to_string()) {
@@ -1037,13 +1109,24 @@ impl JsonlStorageAdapter {
 
     pub(crate) fn list_sessions_sync(&self, cwd: Option<&str>) -> io::Result<Vec<Summary>> {
         let mut summaries = self.scan_opened_sessions(cwd, |opened| opened.summary)?;
+        Self::sort_session_summaries(&mut summaries);
+        Ok(summaries)
+    }
+
+    fn list_sessions_for_search_sync(&self) -> io::Result<Vec<Summary>> {
+        let mut summaries =
+            self.scan_opened_sessions_with_policy(None, true, |opened| opened.summary)?;
+        Self::sort_session_summaries(&mut summaries);
+        Ok(summaries)
+    }
+
+    fn sort_session_summaries(summaries: &mut [Summary]) {
         summaries.sort_by_cached_key(|s| {
             (
                 std::cmp::Reverse(s.last_active_at.unwrap_or(s.updated_at)),
                 s.info.id.0.to_string(),
             )
         });
-        Ok(summaries)
     }
     /// List the N most recently modified session summaries across all
     /// workspaces.
@@ -2073,7 +2156,7 @@ impl JsonlStorageAdapter {
         })
     }
 
-    fn read_timeline_from_directory(
+    pub(crate) fn read_timeline_from_directory(
         directory: &super::ContainedDirectory,
     ) -> io::Result<Vec<chat_state::TimelineEvent>> {
         Self::read_versioned_jsonl_from_directory(
@@ -2139,11 +2222,20 @@ impl JsonlStorageAdapter {
         self.append_update_to_file(info, update, durability)
             .await
             .map_err(super::AppendUpdateError::NotCommitted)?;
+        let payload_free_anchor = matches!(update,
+            super::SessionUpdate::Acp(notification)
+                if notification.meta.as_ref().is_some_and(|meta| {
+                    meta.contains_key("samplingRequestId") && meta.contains_key("samplingAttempt")
+                })
+                && matches!(&notification.update,
+                    acp::SessionUpdate::AgentMessageChunk(chunk)
+                        if matches!(&chunk.content, acp::ContentBlock::Text(text) if text.text.is_empty())));
         self.apply_summary_patch(
             info,
             super::summary_write::SummaryPatch {
                 record_activity: true,
-                messages: Some(super::summary_write::CounterOp::Increment(1)),
+                messages: (!payload_free_anchor)
+                    .then_some(super::summary_write::CounterOp::Increment(1)),
                 ..Default::default()
             },
         )
@@ -2838,6 +2930,7 @@ impl JsonlStorageAdapter {
                 Err(error) => return Err(error),
             }
             let manifest_path = run_dir.display_path().join("state.json");
+            let mut corrupt_sidecar_fingerprint = None;
             let sidecar = match run_dir.read_bounded(
                 std::ffi::OsStr::new("state.json"),
                 "Workflow manifest",
@@ -2847,6 +2940,11 @@ impl JsonlStorageAdapter {
                     match crate::session::workflow::store::decode_workflow_manifest(&bytes) {
                         Ok(manifest) => Some(manifest),
                         Err(error) => {
+                            corrupt_sidecar_fingerprint = Some(
+                                crate::session::workflow::store::WorkflowManifestFingerprint::of(
+                                    &bytes,
+                                ),
+                            );
                             tracing::warn!(path = %manifest_path.display(), %error, "using the Timeline seed for an invalid Workflow manifest");
                             None
                         }
@@ -2932,6 +3030,7 @@ impl JsonlStorageAdapter {
                 manifest,
                 script,
                 args,
+                corrupt_sidecar_fingerprint,
             });
             if restored.len() == MAX_RESTORED_WORKFLOW_RUNS {
                 tracing::warn!(
@@ -3087,7 +3186,7 @@ impl JsonlStorageAdapter {
         timeline: &Timeline,
         repair: bool,
     ) -> io::Result<Summary> {
-        let Some((model_id, reasoning_effort)) =
+        let Some((model_id, reasoning_effort, _, _)) =
             crate::session::persistence::latest_model_selection(timeline.events())?
         else {
             return Ok(summary);
@@ -3120,7 +3219,7 @@ fn transform_session_id_in_update(
         }
         super::SessionUpdate::ResponseReplayProjection(projection) => {
             projection
-                .updates
+                .into_notifications()
                 .into_iter()
                 .map(|mut notification| {
                     notification.session_id = new_id.clone();
@@ -3711,6 +3810,25 @@ impl StorageAdapter for JsonlStorageAdapter {
         .await
         .map_err(io::Error::other)?
     }
+    async fn repair_corrupt_workflow_run_state(
+        &self,
+        info: &Info,
+        manifest: &crate::session::workflow::store::WorkflowRunManifest,
+        fingerprint: crate::session::workflow::store::WorkflowManifestFingerprint,
+    ) -> io::Result<()> {
+        self.ensure_writer_lease(info)?;
+        let session = self.open_session(info)?.directory;
+        let manifest = manifest.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::session::workflow::store::repair_corrupt_workflow_run_manifest_in_directory(
+                &session,
+                &manifest,
+                fingerprint,
+            )
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
     async fn delete_workflow_run_state(&self, info: &Info, run_id: &str) -> io::Result<()> {
         self.ensure_writer_lease(info)?;
         let session = self.open_session(info)?.directory;
@@ -3799,6 +3917,12 @@ impl StorageAdapter for JsonlStorageAdapter {
         let adapter = self.clone();
         let cwd = cwd.map(str::to_owned);
         tokio::task::spawn_blocking(move || adapter.list_sessions_sync(cwd.as_deref()))
+            .await
+            .map_err(io::Error::other)?
+    }
+    async fn list_sessions_for_search(&self) -> io::Result<Vec<Summary>> {
+        let adapter = self.clone();
+        tokio::task::spawn_blocking(move || adapter.list_sessions_for_search_sync())
             .await
             .map_err(io::Error::other)?
     }

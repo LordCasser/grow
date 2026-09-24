@@ -654,6 +654,7 @@ async fn restored_actor_durably_repairs_dangling_tool_surface_before_launch() {
             model_id: Some("model".into()),
             model_fingerprint: None,
             reasoning_effort: None,
+            response_messages: Vec::new(),
         },
     )])
     .unwrap();
@@ -915,6 +916,12 @@ async fn response_admission_reconciles_after_caller_reply_is_lost() {
     let conversation = h.handle.get_conversation().await;
     assert_eq!(
         serde_json::to_value(&conversation[conversation.len() - items.len()..]).unwrap(),
+        serde_json::to_value(&items).unwrap()
+    );
+    let admitted = h.handle.admitted_response(identity.clone()).await.unwrap();
+    assert_eq!(admitted.identity, identity);
+    assert_eq!(
+        serde_json::to_value(&admitted.items).unwrap(),
         serde_json::to_value(&items).unwrap()
     );
 
@@ -1458,6 +1465,254 @@ async fn prompt_usage_ledger_via_handle_resets_and_clears() {
             .flatten()
             .is_none()
     );
+}
+
+#[tokio::test]
+async fn auxiliary_attempt_usage_is_durable_idempotent_and_separate_from_rounds() {
+    let h = TestHarness::new();
+    record_prompt(&h.handle, "auxiliary").await;
+    let sideband_id = uuid::Uuid::now_v7().to_string();
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Sideband(
+            crate::SidebandSpawnEvent {
+                sideband_id: sideband_id.clone(),
+                purpose: crate::SidebandPurpose::PermissionJudgment,
+                source_refs: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+    let usage = sampling_types::TokenUsage {
+        prompt_tokens: 80,
+        completion_tokens: 9,
+        total_tokens: 89,
+        reasoning_tokens: 3,
+        cached_prompt_tokens: 20,
+        ..Default::default()
+    };
+    assert_eq!(
+        h.handle
+            .begin_auxiliary_attempt_usage(sideband_id.clone(), 1, "aux-model".into(), Some(0))
+            .await
+            .unwrap(),
+        true
+    );
+    assert_eq!(
+        h.handle
+            .begin_auxiliary_attempt_usage(sideband_id.clone(), 1, "aux-model".into(), Some(0))
+            .await
+            .unwrap(),
+        false
+    );
+    assert!(matches!(
+        h.handle
+            .begin_auxiliary_attempt_usage(sideband_id.clone(), 1, "other".into(), Some(0))
+            .await,
+        Err(crate::TimelineWriteError::AttemptUsageConflict)
+    ));
+    assert_eq!(
+        h.handle
+            .settle_auxiliary_attempt_usage(
+                sideband_id.clone(),
+                1,
+                Some(usage.clone()),
+                Some(11),
+                Some(7)
+            )
+            .await
+            .unwrap(),
+        true
+    );
+    assert_eq!(
+        h.handle
+            .settle_auxiliary_attempt_usage(sideband_id.clone(), 1, Some(usage), Some(11), Some(7))
+            .await
+            .unwrap(),
+        false
+    );
+    assert!(matches!(
+        h.handle
+            .settle_auxiliary_attempt_usage(sideband_id.clone(), 1, None, None, None)
+            .await,
+        Err(crate::TimelineWriteError::AttemptUsageConflict)
+    ));
+    let session = h.handle.try_get_session_usage().await.unwrap();
+    let prompt = h.handle.try_get_prompt_usage().await.unwrap().unwrap();
+    assert_eq!(session.totals.total_tokens(), 89);
+    assert_eq!(session.totals.model_calls, 1);
+    assert_eq!(session.main_loop_model_calls, 0);
+    assert_eq!(
+        session.by_agent[&crate::UsageAgent::Owner].total_tokens(),
+        89
+    );
+    assert_eq!(prompt.totals.total_tokens(), 89);
+
+    let events = h.handle.timeline_events().await.unwrap();
+    let (persistence, _) = MockTimelinePersistence::new();
+    let (event_tx, _) = mpsc::unbounded_channel();
+    let restored = ChatStateActor::spawn_from_timeline(
+        events,
+        test_config(),
+        Box::new(persistence),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let recovered = restored.try_get_session_usage().await.unwrap();
+    assert_eq!(recovered.totals, session.totals);
+    assert_eq!(recovered.main_loop_model_calls, 0);
+
+    let mut timeline =
+        crate::Timeline::from_events(h.handle.timeline_events().await.unwrap()).unwrap();
+    let settlement = timeline
+        .events()
+        .iter()
+        .find_map(|event| match &event.kind {
+            crate::TimelineEventKind::Observation(observation)
+                if observation.name == "aux_attempt_settled" =>
+            {
+                Some(observation.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    timeline
+        .record(crate::TimelineEventKind::Observation(settlement.clone()))
+        .unwrap();
+    let (persistence, _) = MockTimelinePersistence::new();
+    let (event_tx, _) = mpsc::unbounded_channel();
+    let duplicate = ChatStateActor::spawn_from_timeline(
+        timeline.events().to_vec(),
+        test_config(),
+        Box::new(persistence),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        duplicate.try_get_session_usage().await.unwrap().totals,
+        session.totals
+    );
+    let mut conflict = settlement;
+    conflict.data.as_mut().unwrap()["api_duration_ms"] = serde_json::json!(99);
+    timeline
+        .record(crate::TimelineEventKind::Observation(conflict))
+        .unwrap();
+    assert!(matches!(
+        rejected_usage_restore(timeline.events().to_vec()).await,
+        crate::TimelineWriteError::AttemptUsageConflict
+    ));
+}
+
+#[tokio::test]
+async fn auxiliary_retries_bill_once_each_without_reassigning_a_late_prompt() {
+    let h = TestHarness::new();
+    record_prompt(&h.handle, "origin").await;
+    let sideband_id = uuid::Uuid::now_v7().to_string();
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Sideband(
+            crate::SidebandSpawnEvent {
+                sideband_id: sideband_id.clone(),
+                purpose: crate::SidebandPurpose::PermissionJudgment,
+                source_refs: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+    h.handle
+        .begin_auxiliary_attempt_usage(sideband_id.clone(), 1, "aux-model".into(), Some(0))
+        .await
+        .unwrap();
+    record_prompt(&h.handle, "next").await;
+    h.handle
+        .settle_auxiliary_attempt_usage(
+            sideband_id.clone(),
+            1,
+            Some(sampling_types::TokenUsage {
+                prompt_tokens: 8,
+                completion_tokens: 2,
+                total_tokens: 10,
+                ..Default::default()
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(h.handle.try_get_prompt_usage().await.unwrap().is_none());
+    h.handle
+        .begin_auxiliary_attempt_usage(sideband_id.clone(), 2, "aux-model".into(), Some(1))
+        .await
+        .unwrap();
+    h.handle
+        .settle_auxiliary_attempt_usage(
+            sideband_id,
+            2,
+            Some(sampling_types::TokenUsage {
+                prompt_tokens: 4,
+                completion_tokens: 1,
+                total_tokens: 5,
+                ..Default::default()
+            }),
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    let session = h.handle.try_get_session_usage().await.unwrap();
+    assert_eq!(session.totals.total_tokens(), 15);
+    assert_eq!(session.totals.model_calls, 2);
+    assert_eq!(session.main_loop_model_calls, 0);
+    assert_eq!(
+        h.handle
+            .try_get_prompt_usage()
+            .await
+            .unwrap()
+            .unwrap()
+            .totals
+            .total_tokens(),
+        5
+    );
+}
+
+#[tokio::test]
+async fn open_auxiliary_attempt_marks_origin_segment_incomplete_on_restore() {
+    let h = TestHarness::new();
+    let sideband_id = uuid::Uuid::now_v7().to_string();
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Sideband(
+            crate::SidebandSpawnEvent {
+                sideband_id: sideband_id.clone(),
+                purpose: crate::SidebandPurpose::PermissionJudgment,
+                source_refs: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+    h.handle
+        .begin_auxiliary_attempt_usage(sideband_id.clone(), 1, "aux-model".into(), None)
+        .await
+        .unwrap();
+    h.handle.begin_usage_resume_segment().await.unwrap();
+    let events = h.handle.timeline_events().await.unwrap();
+    let (persistence, _) = MockTimelinePersistence::new();
+    let (event_tx, _) = mpsc::unbounded_channel();
+    let restored = ChatStateActor::spawn_from_timeline(
+        events,
+        test_config(),
+        Box::new(persistence),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let recovered = restored.try_get_session_usage().await.unwrap();
+    assert!(recovered.incomplete);
+    assert!(recovered.segments[0].incomplete);
+    assert!(!recovered.segments[1].incomplete);
+    assert_eq!(recovered.totals.model_calls, 0);
 }
 
 #[tokio::test]
@@ -4303,6 +4558,7 @@ async fn parallel_tool_calls_accept_first_reject_second_skip_third() {
         model_id: Some("grow-3".to_string()),
         model_fingerprint: None,
         reasoning_effort: None,
+        response_messages: Vec::new(),
     });
     h.handle.push_assistant_response(assistant_with_tools);
 
@@ -4590,6 +4846,7 @@ async fn dangling_tool_calls_after_crash_are_repaired_on_load() {
             model_id: Some("grow-3".to_string()),
             model_fingerprint: None,
             reasoning_effort: None,
+            response_messages: Vec::new(),
         }),
         // Only call_1 got persisted before the crash
         ConversationItem::tool_result("call_1", "fn main() { ... }"),
@@ -5765,6 +6022,7 @@ async fn get_last_model_metadata_returns_both_fields() {
             model_id: Some("grow-4.5".into()),
             model_fingerprint: Some("fp_abc123".into()),
             reasoning_effort: None,
+            response_messages: Vec::new(),
         }),
     ]);
     let meta = h.handle.get_last_model_metadata().await;
@@ -5816,6 +6074,7 @@ async fn sampling_config_survives_compaction_replacement() {
                 model_id: Some("grow-4.5".into()),
                 model_fingerprint: Some("fp_abc123".into()),
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
         ],
         config,
@@ -5904,6 +6163,7 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
                 model_id: Some("grow-4.5".into()),
                 model_fingerprint: Some("fp_acd3142484d3ad6f".into()),
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
         ],
         config,
@@ -5935,6 +6195,7 @@ async fn model_metadata_lost_after_compaction_then_recovered_on_next_turn() {
             model_id: Some("grow-4.5".into()),
             model_fingerprint: Some("fp_acd3142484d3ad6f".into()),
             reasoning_effort: None,
+            response_messages: Vec::new(),
         }));
 
     // Metadata recovered.
@@ -6555,6 +6816,7 @@ async fn endpoint_switch_matrix_strips_native_reasoning_and_diagnostics() {
                             model_id: Some("source-model".to_owned()),
                             model_fingerprint: Some("source-fingerprint".to_owned()),
                             reasoning_effort: Some(sampling_types::ReasoningEffort::High),
+                            response_messages: Vec::new(),
                         }),
                     ],
                     Some(native_fragment_for(source)),
@@ -6709,6 +6971,7 @@ async fn restored_session_starts_with_portable_history_only() {
             model_id: Some("old-model".to_owned()),
             model_fingerprint: Some("old-fingerprint".to_owned()),
             reasoning_effort: Some(sampling_types::ReasoningEffort::High),
+            response_messages: Vec::new(),
         }),
         ConversationItem::Assistant(AssistantItem {
             content: "".into(),
@@ -6720,6 +6983,7 @@ async fn restored_session_starts_with_portable_history_only() {
             model_id: Some("old-model".to_owned()),
             model_fingerprint: Some("old-fingerprint".to_owned()),
             reasoning_effort: None,
+            response_messages: Vec::new(),
         }),
         ConversationItem::tool_result("old-provider-call-id", "historical README text"),
     ];

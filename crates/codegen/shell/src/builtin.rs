@@ -210,7 +210,10 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         extract_builtin_files_transaction(home.path()).unwrap();
         for (name, content) in BUILTIN_FILES {
-            assert_eq!(std::fs::read_to_string(home.path().join(name)).unwrap(), *content);
+            assert_eq!(
+                std::fs::read_to_string(home.path().join(name)).unwrap(),
+                *content
+            );
         }
         assert_eq!(
             std::fs::read_to_string(home.path().join(".metadata_version")).unwrap(),

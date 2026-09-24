@@ -64,7 +64,7 @@ impl ChatStateActor {
         let previous_prompt_index = self.state.timeline.next_prompt_index();
         if let Err(error) = self.state.timeline.accept(event) {
             self.persistence_poisoned = true;
-            return Err(crate::commands::TimelineWriteError::Invalid(error));
+            return Err(crate::commands::TimelineWriteError::CommittedProjectionInvalid(error));
         }
         self.refresh_prompt_projection(previous_prompt_index);
         Ok(committed)
@@ -520,6 +520,42 @@ impl ChatStateActor {
                     .await;
                 let _ = reply.send(result);
             }
+            ChatStateCommand::BeginAuxiliaryAttemptUsage {
+                sideband_id,
+                attempt_no,
+                model_id,
+                captured_prompt_index,
+                reply,
+            } => {
+                let result = self
+                    .begin_auxiliary_attempt_usage(
+                        sideband_id,
+                        attempt_no,
+                        model_id,
+                        captured_prompt_index,
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
+            ChatStateCommand::SettleAuxiliaryAttemptUsage {
+                sideband_id,
+                attempt_no,
+                usage,
+                cost_usd_ticks,
+                api_duration_ms,
+                reply,
+            } => {
+                let result = self
+                    .settle_auxiliary_attempt_usage(
+                        sideband_id,
+                        attempt_no,
+                        usage,
+                        cost_usd_ticks,
+                        api_duration_ms,
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
             ChatStateCommand::RecordSubagentUsage {
                 subagent_id,
                 by_model,
@@ -737,6 +773,9 @@ impl ChatStateActor {
             }
             ChatStateCommand::GetTimelineEvents { reply } => {
                 let _ = reply.send(self.state.timeline.events().to_vec());
+            }
+            ChatStateCommand::GetAdmittedResponse { identity, reply } => {
+                let _ = reply.send(self.state.timeline.admitted_response(&identity));
             }
             ChatStateCommand::GetPendingNotifications { reply } => {
                 let _ = reply.send(self.state.timeline.pending_notifications());

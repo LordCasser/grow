@@ -347,7 +347,8 @@ async fn usage_ack_precedes_terminal_presentation() {
                 notification: SessionNotification {
                     update: SessionUpdate::SubagentFinished { .. },
                     ..
-                }
+                },
+                forward_to_gateway: true,
             })
         ));
 }
@@ -381,12 +382,11 @@ async fn subagent_inherits_session_cli_overrides() {
         );
     assert_eq!(def.disallowed_tools, vec!["write"]);
 }
-/// Persisted⇒stamped chokepoint for the subagent emitter: the
-/// `SessionCommand` persist hop and the live broadcast must carry the
-/// SAME `eventId`, minted before the fork (divergent or missing ids
-/// degrade cursor reconnects to full replays or re-applied lines).
+/// Subagent lifecycle has one stamped parent command. The parent actor owns
+/// both persistence and live delivery; the child must not enqueue a second
+/// gateway copy.
 #[tokio::test]
-async fn emit_subagent_notification_stamps_one_event_id_on_both_paths() {
+async fn emit_subagent_notification_sends_one_metadata_only_parent_command() {
     use crate::test_support::lsp_runtime::test_gateway_with_receiver;
     let (gateway, mut gateway_rx) = test_gateway_with_receiver();
     let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
@@ -402,12 +402,19 @@ async fn emit_subagent_notification_stamps_one_event_id_on_both_paths() {
             turns: 0,
             duration_ms: 5,
             tokens_used: 0,
-            output: None,
+            output: Some("large child answer".into()),
         },
         Some(&cmd_tx),
     );
-    let persisted_id = match cmd_rx.try_recv().expect("persist hop must fire") {
-        SessionCommand::GrowSessionNotification { notification } => {
+    let persisted_id = match cmd_rx.try_recv().expect("parent command must fire") {
+        SessionCommand::GrowSessionNotification {
+            notification,
+            forward_to_gateway: true,
+        } => {
+            assert!(matches!(
+                notification.update,
+                SessionUpdate::SubagentFinished { output: None, .. }
+            ));
             notification
                 .meta
                 .as_ref()
@@ -419,17 +426,7 @@ async fn emit_subagent_notification_stamps_one_event_id_on_both_paths() {
         _ => panic!("expected GrowSessionNotification"),
     };
     assert!(persisted_id.starts_with("parent-sess-"));
-    let broadcast_id = match gateway_rx.try_recv().expect("broadcast must fire") {
-        acp_transport::AcpClientMessage::ExtNotification(args) => {
-            let params: serde_json::Value = serde_json::from_str(
-                    args.request.params.get(),
-                )
-                .unwrap();
-            params["_meta"]["eventId"].as_str().unwrap().to_string()
-        }
-        _ => panic!("expected ExtNotification"),
-    };
-    assert_eq!(persisted_id, broadcast_id);
+    assert!(gateway_rx.try_recv().is_err());
 }
 #[test]
 fn subagent_max_turns_definition_wins_else_inherits_parent() {
@@ -1196,6 +1193,7 @@ async fn recovery_repairs_receipt_after_durable_parent_terminal() {
             reconcile_orphaned_subagents_with_backend(
                 &crate::session::storage::SubagentProjectionState::default(),
                 false,
+                true,
                 &backend,
                 &parent_id,
                 &parent,
@@ -1337,6 +1335,7 @@ async fn backend_running_inspection_keeps_parent_spawn_open() {
     reconcile_orphaned_subagents_with_backend(
         &crate::session::storage::SubagentProjectionState::default(),
         false,
+        true,
         &backend,
         &parent_id,
         &parent,
@@ -1414,6 +1413,7 @@ async fn foreign_backend_inspection_cannot_close_or_fill_a_parent_spawn() {
     reconcile_orphaned_subagents_with_backend(
         &crate::session::storage::SubagentProjectionState::default(),
         false,
+        true,
         &backend,
         &parent_id,
         &parent,
@@ -1487,6 +1487,7 @@ async fn unavailable_completed_output_keeps_parent_spawn_open() {
     reconcile_orphaned_subagents_with_backend(
         &crate::session::storage::SubagentProjectionState::default(),
         false,
+        true,
         &backend,
         &parent_id,
         &parent,
@@ -1536,6 +1537,7 @@ async fn missing_unpublished_child_closes_without_forging_result_ref() {
     reconcile_orphaned_subagents_with_backend(
         &crate::session::storage::SubagentProjectionState::default(),
         false,
+        true,
         &backend,
         &parent_id,
         &parent,
@@ -1816,6 +1818,7 @@ fn verbatim_fork_falls_back_to_summary_on_incomplete_tail() {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
         ];
     let ctx = verbatim_or_normalize_fork(items, 256_000).unwrap();
@@ -2306,7 +2309,8 @@ async fn committed_cancelled_completion_presents_one_finish() {
                     notification: SessionNotification {
                         update: SessionUpdate::SubagentFinished { status, .. },
                         ..
-                    }
+                    },
+                    forward_to_gateway: true,
                 } if status == "cancelled"
             ) {
             persisted += 1;
@@ -2323,7 +2327,7 @@ async fn committed_cancelled_completion_presents_one_finish() {
             live += 1;
         }
     }
-    assert_eq!(live, 1);
+    assert_eq!(live, 0);
 }
 async fn run_promote_cancel_with_worktree(
     worktree: &Path,

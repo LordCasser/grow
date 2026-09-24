@@ -1,12 +1,15 @@
 //! Centralized unified log for cross-component session observability.
 //!
-//! Shell writes directly via [`emit()`]. Pager forwards entries
+//! Shell queues records via [`emit()`]. Pager forwards entries
 //! over ACP (`grow/log` notifications); shell receives them in
-//! [`ingest_client_entries()`] and writes on their behalf.
+//! [`ingest_client_entries()`] and queues them on their behalf. One bounded
+//! process-local worker owns disk writes.
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, Write};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc::{self, SyncSender, TrySendError};
 use std::sync::{LazyLock, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -35,6 +38,11 @@ fn current_version() -> String {
 pub const LOG_DIR: &str = "logs";
 const LOG_FILE: &str = "unified.jsonl";
 pub const MAX_SIZE: u64 = 5 * 1024 * 1024; // 5 MB
+/// Maximum size of one complete JSONL record, including its trailing LF.
+const MAX_RECORD_BYTES: usize = 64 * 1024;
+const MAX_RECORD_JSON_BYTES: usize = MAX_RECORD_BYTES - 1;
+const WRITER_QUEUE_RECORDS: usize = 64;
+const FLUSH_DEADLINE: Duration = Duration::from_secs(2);
 
 /// ACP method name for unified log notifications.
 pub const LOG_METHOD: &str = "grow/log";
@@ -162,6 +170,123 @@ struct LogWriter {
 type FileIdentity = (u64, u64);
 
 static WRITER: LazyLock<Mutex<Option<LogWriter>>> = LazyLock::new(|| Mutex::new(open_writer()));
+static WRITE_QUEUE: OnceLock<Option<SyncSender<WriterCommand>>> = OnceLock::new();
+static DROPPED_RECORDS: AtomicU64 = AtomicU64::new(0);
+
+#[derive(Debug)]
+enum WriterCommand {
+    Record(Vec<u8>),
+    Flush(SyncSender<()>),
+}
+
+fn writer_queue() -> Option<&'static SyncSender<WriterCommand>> {
+    WRITE_QUEUE
+        .get_or_init(|| {
+            let (sender, receiver) = mpsc::sync_channel(WRITER_QUEUE_RECORDS);
+            match std::thread::Builder::new()
+                .name("grow-unified-log".into())
+                .spawn(move || writer_loop(receiver, &WRITER, &DROPPED_RECORDS))
+            {
+                Ok(_) => Some(sender),
+                Err(_) => None,
+            }
+        })
+        .as_ref()
+}
+
+fn dropped_record_line(count: u64) -> Option<Vec<u8>> {
+    encode_entry_line(&LogEntry {
+        ts: now_ts(),
+        src: LogSource::Shell,
+        pid: std::process::id(),
+        ver: "unknown".into(),
+        lvl: LogLevel::Warn,
+        sid: None,
+        msg: format!("unified log dropped {count} records while its writer queue was full"),
+        ctx: Some(serde_json::json!({ "event": "records_dropped", "count": count })),
+    })
+}
+
+fn append_queued_record(
+    writer: &Mutex<Option<LogWriter>>,
+    dropped_records: &AtomicU64,
+    line: Vec<u8>,
+) {
+    let dropped = dropped_records.swap(0, Ordering::AcqRel);
+    let mut lines = if dropped == 0 {
+        Vec::new()
+    } else {
+        dropped_record_line(dropped).unwrap_or_default()
+    };
+    lines.extend_from_slice(&line);
+    let Ok(mut guard) = writer.lock() else { return };
+    let Some(writer) = guard.as_mut() else { return };
+    if let Err(error) = writer.append_lines(&lines) {
+        if dropped != 0 {
+            dropped_records.fetch_add(dropped, Ordering::AcqRel);
+        }
+        tracing::warn!(%error, "unified log write failed");
+    }
+}
+
+fn writer_loop(
+    receiver: mpsc::Receiver<WriterCommand>,
+    writer: &Mutex<Option<LogWriter>>,
+    dropped_records: &AtomicU64,
+) {
+    while let Ok(command) = receiver.recv() {
+        match command {
+            WriterCommand::Record(line) => append_queued_record(writer, dropped_records, line),
+            WriterCommand::Flush(reply) => {
+                if let Ok(mut guard) = writer.lock()
+                    && let Some(writer) = guard.as_mut()
+                {
+                    let _ = writer.file.flush();
+                }
+                let _ = reply.send(());
+            }
+        }
+    }
+}
+
+fn enqueue_record(sender: &SyncSender<WriterCommand>, dropped: &AtomicU64, line: Vec<u8>) -> bool {
+    if sender.try_send(WriterCommand::Record(line)).is_err() {
+        dropped.fetch_add(1, Ordering::AcqRel);
+        false
+    } else {
+        true
+    }
+}
+
+/// Wait for the writer to process records accepted before this call, without
+/// waiting indefinitely for a blocked OS write. Crossing the barrier does not
+/// prove individual appends succeeded or that bytes were synchronized to disk.
+pub(crate) fn flush_pending() -> bool {
+    let Some(sender) = WRITE_QUEUE.get().and_then(Option::as_ref) else {
+        return true;
+    };
+    flush_sender(sender, Instant::now() + FLUSH_DEADLINE)
+}
+
+fn flush_sender(sender: &SyncSender<WriterCommand>, deadline: Instant) -> bool {
+    let (reply, done) = mpsc::sync_channel(0);
+    let mut command = WriterCommand::Flush(reply);
+    loop {
+        match sender.try_send(command) {
+            Ok(()) => break,
+            Err(TrySendError::Full(pending)) => {
+                command = pending;
+                if Instant::now() >= deadline {
+                    return false;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(TrySendError::Disconnected(_)) => return false,
+        }
+    }
+    done.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .is_ok()
+}
 
 /// See [`redirect_to_temp_for_tests`].
 static TEST_REDIRECT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -178,6 +303,7 @@ static TEST_REDIRECT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 /// so an emit that precedes the redirect cannot pin the real path. Test
 /// binaries install it pre-main via `#[ctor]`.
 pub fn redirect_to_temp_for_tests() {
+    let _ = flush_pending();
     TEST_REDIRECT.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Ok(mut guard) = WRITER.lock() {
         *guard = open_writer();
@@ -240,6 +366,18 @@ fn path_identity(path: &std::path::Path) -> Option<FileIdentity> {
     Some((meta.dev(), meta.ino()))
 }
 
+#[cfg(unix)]
+fn open_file_identity(file: &File) -> std::io::Result<FileIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    let metadata = file.metadata()?;
+    Ok((metadata.dev(), metadata.ino()))
+}
+
+#[cfg(not(unix))]
+fn open_file_identity(file: &File) -> std::io::Result<FileIdentity> {
+    file.metadata().map(|_| (0, 0))
+}
+
 /// Windows has no comparably cheap stable id from a path stat, so this
 /// degrades to presence detection: a deleted log is still healed, a replaced
 /// one is not.
@@ -269,7 +407,14 @@ fn open_writer_at(path: PathBuf) -> Option<LogWriter> {
         trim_file(&path);
     }
 
-    match OpenOptions::new().create(true).append(true).open(&path) {
+    // The descriptor must support in-place trimming while its inode lock is
+    // held. Appends explicitly seek to EOF under that lock.
+    match OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .open(&path)
+    {
         Ok(file) => LogWriter::from_open_file(file, path),
         Err(e) => {
             tracing::warn!("[unified_log] failed to open log file: {e}");
@@ -280,17 +425,7 @@ fn open_writer_at(path: PathBuf) -> Option<LogWriter> {
 
 impl LogWriter {
     fn from_open_file(file: File, path: PathBuf) -> Option<Self> {
-        let metadata = file.metadata().ok()?;
-        #[cfg(unix)]
-        let identity = {
-            use std::os::unix::fs::MetadataExt;
-            Some((metadata.dev(), metadata.ino()))
-        };
-        #[cfg(not(unix))]
-        let identity = {
-            let _ = metadata;
-            Some((0, 0))
-        };
+        let identity = Some(open_file_identity(&file).ok()?);
         Some(Self {
             identity,
             file,
@@ -347,29 +482,130 @@ impl LogWriter {
         }
         true
     }
+
+    fn append_lines(&mut self, lines: &[u8]) -> std::io::Result<()> {
+        if !self.maintain() {
+            return Ok(());
+        }
+
+        // trim_file rewrites and truncates this inode under the same lock.
+        self.file.lock()?;
+        let written = self.append_locked(lines);
+        let unlocked = self.file.unlock();
+        written.and(unlocked)
+    }
+
+    fn append_locked(&mut self, lines: &[u8]) -> std::io::Result<()> {
+        let append_len = u64::try_from(lines.len()).map_err(std::io::Error::other)?;
+        if self.file.metadata()?.len().saturating_add(append_len) > MAX_SIZE {
+            if path_identity(&self.path) != self.identity {
+                return Err(std::io::Error::other(
+                    "unified log path no longer names the locked inode",
+                ));
+            }
+            if !trim_open_file(&mut self.file)? {
+                return Err(std::io::Error::other(
+                    "unified log tail has no complete line boundary",
+                ));
+            }
+            if self.file.metadata()?.len().saturating_add(append_len) > MAX_SIZE {
+                return Err(std::io::Error::other(
+                    "unified log record does not fit after trimming",
+                ));
+            }
+        }
+        self.file.seek(std::io::SeekFrom::End(0))?;
+        self.file.write_all(lines)
+    }
 }
 
-fn write_lines(lines: &[u8]) {
-    let Ok(mut guard) = WRITER.lock() else { return };
-    let writer = match guard.as_mut() {
-        Some(w) => w,
-        None => return,
-    };
-    if !writer.maintain() {
-        return;
+fn write_lines(lines: Vec<u8>) {
+    if let Some(sender) = writer_queue() {
+        enqueue_record(sender, &DROPPED_RECORDS, lines);
+    } else {
+        DROPPED_RECORDS.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+struct BoundedJsonWriter {
+    bytes: Vec<u8>,
+    exceeded_limit: bool,
+}
+
+impl BoundedJsonWriter {
+    fn new() -> Self {
+        Self {
+            bytes: Vec::new(),
+            exceeded_limit: false,
+        }
+    }
+}
+
+impl Write for BoundedJsonWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.bytes.len().saturating_add(bytes.len()) > MAX_RECORD_JSON_BYTES {
+            self.exceeded_limit = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "unified log record exceeds its byte limit",
+            ));
+        }
+
+        self.bytes
+            .try_reserve_exact(bytes.len())
+            .map_err(std::io::Error::other)?;
+        self.bytes.extend_from_slice(bytes);
+        Ok(bytes.len())
     }
 
-    if let Err(e) = writer.file.write_all(lines) {
-        tracing::warn!("[unified_log] write failed: {e}");
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
     }
+}
+
+fn serialize_bounded<T: Serialize>(value: &T) -> Result<Vec<u8>, (serde_json::Error, bool)> {
+    let mut writer = BoundedJsonWriter::new();
+    match serde_json::to_writer(&mut writer, value) {
+        Ok(()) => Ok(writer.bytes),
+        Err(error) => Err((error, writer.exceeded_limit)),
+    }
+}
+
+fn oversized_entry_diagnostic(entry: &LogEntry) -> LogEntry {
+    LogEntry {
+        ts: now_ts(),
+        src: entry.src,
+        pid: entry.pid,
+        // Do not carry through client-controlled or otherwise large metadata
+        // into the replacement record.
+        ver: "unknown".to_owned(),
+        lvl: entry.lvl,
+        sid: None,
+        msg: "unified log record omitted because it exceeded the 65536-byte limit".to_owned(),
+        ctx: Some(serde_json::json!({
+            "event": "record_omitted",
+            "reason": "serialized_record_exceeds_limit",
+            "max_bytes": MAX_RECORD_BYTES,
+        })),
+    }
+}
+
+fn encode_entry_line(entry: &LogEntry) -> Option<Vec<u8>> {
+    let mut line = match serialize_bounded(entry) {
+        Ok(line) => line,
+        Err((_error, true)) => serialize_bounded(&oversized_entry_diagnostic(entry)).ok()?,
+        Err((_error, false)) => return None,
+    };
+    line.push(b'\n');
+    debug_assert!(line.len() <= MAX_RECORD_BYTES);
+    Some(line)
 }
 
 fn write_entry(entry: &LogEntry) {
-    let Ok(mut line) = serde_json::to_vec(entry) else {
+    let Some(line) = encode_entry_line(entry) else {
         return;
     };
-    line.push(b'\n');
-    write_lines(&line);
+    write_lines(line);
 }
 
 fn read_trim_window(reader: &mut (impl Read + Seek), len: u64) -> std::io::Result<Vec<u8>> {
@@ -384,9 +620,9 @@ fn read_trim_window(reader: &mut (impl Read + Seek), len: u64) -> std::io::Resul
 /// **preserving the inode**.
 ///
 /// Rewrites the retained tail at offset 0 and truncates to match. This must
-/// not go through temp + rename: every other process holds an `O_APPEND`
+/// not go through temp + rename: every other process holds a persistent
 /// descriptor on this inode, and swapping a fresh file in underneath them
-/// leaves each one appending to an unlinked inode that nothing can read and
+/// leaves each one writing to an unlinked inode that nothing can read and
 /// nothing will ever trim. That failure was silent and unbounded — a single
 /// developer machine accumulated roughly 26 MB across six orphaned inodes,
 /// several of them past the 5 MB cap, while the visible log held only what
@@ -399,16 +635,15 @@ fn read_trim_window(reader: &mut (impl Read + Seek), len: u64) -> std::io::Resul
 /// line-delimited diagnostic log that costs at most a few garbled lines,
 /// against losing every sibling's output indefinitely.
 ///
-/// A sibling appending *during* the rewrite may lose that one line to the
-/// truncation. The previous implementation lost every line written after the
-/// rename, forever.
+/// Appends use the same inode lock, so an entry written successfully during a
+/// concurrent trim remains after its rewrite and truncate.
 ///
 /// The whole read-modify-write is held under an exclusive advisory lock on
 /// the log itself, because trimming in place is only safe for one process at
 /// a time — see the comment in the body.
 ///
-/// Known limitation: if the bounded tail contains no newline, trimming is
-/// skipped rather than splitting a line. This is not a hard disk-size cap.
+/// If the bounded tail contains no newline, trimming is skipped rather than
+/// splitting a line. The append path then refuses growth beyond the limit.
 pub fn trim_file(path: &std::path::Path) {
     // One trimmer at a time, across processes. Writers decide on the real
     // on-disk size, so when the log crosses the cap every process reaches
@@ -436,39 +671,35 @@ pub fn trim_file(path: &std::path::Path) {
         return;
     }
 
-    let Ok(metadata) = file.metadata() else {
-        return;
-    };
-    if !metadata.is_file() {
-        return;
+    if let Err(e) = trim_open_file(&mut file) {
+        tracing::warn!(%e, "unified log trim failed");
     }
-    let data = match read_trim_window(&mut file, metadata.len()) {
-        Ok(data) => data,
-        Err(e) => {
-            tracing::warn!("[unified_log] trim read failed: {e}");
-            return;
-        }
-    };
+    // The lock is released when `file` drops.
+}
+
+/// Trim a read/write descriptor while its inode lock is already held.
+/// `false` means the bounded tail has no complete line to retain.
+fn trim_open_file(file: &mut File) -> std::io::Result<bool> {
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Ok(false);
+    }
+    let data = read_trim_window(file, metadata.len())?;
     // Discard the first partial line in the admitted tail window.
     let start = match data.iter().position(|&b| b == b'\n') {
         Some(pos) => pos + 1,
-        None => return,
+        None => return Ok(false),
     };
     let tail = &data[start..];
 
     // Rewind rather than truncate-on-open: the tail is laid down over the
     // head first, and only then is the file shortened, so the retained bytes
     // are never absent from disk.
-    if file.rewind().is_err() {
-        return;
-    }
-    if let Err(e) = file.write_all(tail) {
-        tracing::warn!("[unified_log] trim rewrite failed: {e}");
-        return;
-    }
-    let _ = file.set_len(tail.len() as u64);
-    let _ = file.flush();
-    // The lock is released when `file` drops.
+    file.rewind()?;
+    file.write_all(tail)?;
+    file.set_len(tail.len() as u64)?;
+    file.flush()?;
+    Ok(true)
 }
 
 // ---------------------------------------------------------------------------
@@ -503,8 +734,8 @@ pub fn ingest_client_entries(src: LogSource, entries: &[ClientLogEntry]) {
     if matches!(src, LogSource::Shell) || entries.is_empty() {
         return;
     }
-    // Serialize all entries up front, then write in a single lock acquisition.
-    let mut buf = Vec::new();
+    // Enqueue each bounded record separately so a client batch cannot create
+    // an unbounded process-local pending buffer.
     for client_entry in entries {
         let entry = LogEntry {
             ts: client_entry.ts.clone(),
@@ -516,13 +747,9 @@ pub fn ingest_client_entries(src: LogSource, entries: &[ClientLogEntry]) {
             msg: client_entry.msg.clone(),
             ctx: client_entry.ctx.clone(),
         };
-        if let Ok(mut line) = serde_json::to_vec(&entry) {
-            line.push(b'\n');
-            buf.extend_from_slice(&line);
+        if let Some(line) = encode_entry_line(&entry) {
+            write_lines(line);
         }
-    }
-    if !buf.is_empty() {
-        write_lines(&buf);
     }
 }
 
@@ -552,13 +779,8 @@ pub fn debug(msg: &str, sid: Option<&str>, ctx: Option<serde_json::Value>) {
 /// Used by local diagnostic tooling to capture the log state at a point in time.
 pub fn snapshot_log() -> Option<Vec<u8>> {
     let path = log_path();
-    // Flush pending writes before reading.
-    if let Ok(mut guard) = WRITER.lock()
-        && let Some(ref mut w) = *guard
-    {
-        let _ = w.file.flush();
-    }
-    // Lock released intentionally — snapshot is approximate.
+    // The barrier is bounded; a slow filesystem can leave this snapshot partial.
+    let _ = flush_pending();
     match fs::read(&path) {
         Ok(data) if !data.is_empty() => Some(data),
         _ => None,
@@ -598,6 +820,161 @@ mod tests {
     }
 
     #[test]
+    fn blocked_writer_drops_overflow_without_blocking_producer_and_reports_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unified.jsonl");
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+            .unwrap();
+        let writer = Mutex::new(LogWriter::from_open_file(file, path.clone()));
+        let dropped = AtomicU64::new(0);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let held = writer.lock().unwrap();
+
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| writer_loop(receiver, &writer, &dropped));
+            assert!(enqueue_record(&sender, &dropped, b"first\n".to_vec()));
+            let deadline = Instant::now() + Duration::from_secs(1);
+            let mut second = WriterCommand::Record(b"second\n".to_vec());
+            loop {
+                match sender.try_send(second) {
+                    Ok(()) => break,
+                    Err(TrySendError::Full(pending)) => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "worker did not take first record"
+                        );
+                        second = pending;
+                        std::thread::yield_now();
+                    }
+                    Err(TrySendError::Disconnected(_)) => panic!("worker stopped"),
+                }
+            }
+            let start = Instant::now();
+            assert!(!enqueue_record(&sender, &dropped, b"third\n".to_vec()));
+            assert!(start.elapsed() < Duration::from_millis(500));
+            assert_eq!(dropped.load(Ordering::Acquire), 1);
+            drop(held);
+            drop(sender);
+            worker.join().unwrap();
+        });
+
+        let output = fs::read_to_string(path).unwrap();
+        let lines = output.lines().collect::<Vec<_>>();
+        assert_eq!(lines.len(), 3, "{output}");
+        assert_eq!(lines[0], "first");
+        assert_eq!(lines[2], "second");
+        let diagnostic: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(diagnostic["ctx"]["event"], "records_dropped");
+        assert_eq!(diagnostic["ctx"]["count"], 1);
+    }
+
+    #[test]
+    fn flush_barrier_stops_waiting_for_a_full_queue() {
+        let (sender, _receiver) = mpsc::sync_channel(1);
+        sender
+            .try_send(WriterCommand::Record(b"held\n".to_vec()))
+            .unwrap();
+        let start = Instant::now();
+        assert!(!flush_sender(&sender, start + Duration::from_millis(30)));
+        assert!(start.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn burst_appends_enforce_capacity_between_maintenance_ticks() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unified.jsonl");
+        let mut writer = open_writer_at(path.clone()).unwrap();
+        let payload = "x".repeat(32 * 1024);
+
+        for index in 0..200 {
+            let line = format!("{{\"index\":{index},\"payload\":\"{payload}\"}}\n");
+            writer.append_lines(line.as_bytes()).unwrap();
+            assert!(
+                file_size(&path) <= MAX_SIZE,
+                "append {index} exceeded quota"
+            );
+        }
+
+        let lines = fs::read_to_string(&path).unwrap();
+        assert!(lines.lines().count() < 200, "oldest lines should be pruned");
+        for line in lines.lines() {
+            serde_json::from_str::<serde_json::Value>(line).unwrap();
+        }
+        assert!(lines.contains("\"index\":199"));
+    }
+
+    #[test]
+    fn independent_writers_share_the_capacity_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unified.jsonl");
+        let writers = [
+            open_writer_at(path.clone()).unwrap(),
+            open_writer_at(path.clone()).unwrap(),
+        ];
+        let payload = "x".repeat(32 * 1024);
+        let final_record_barrier = std::sync::Barrier::new(2);
+
+        std::thread::scope(|scope| {
+            for (id, mut writer) in writers.into_iter().enumerate() {
+                let path = path.clone();
+                let payload = &payload;
+                let final_record_barrier = &final_record_barrier;
+                scope.spawn(move || {
+                    for index in 0..120 {
+                        if index == 119 {
+                            final_record_barrier.wait();
+                        }
+                        let line = format!(
+                            "{{\"writer\":{id},\"index\":{index},\"payload\":\"{payload}\"}}\n"
+                        );
+                        writer.append_lines(line.as_bytes()).unwrap();
+                        assert!(file_size(&path) <= MAX_SIZE);
+                    }
+                });
+            }
+        });
+
+        let lines = fs::read_to_string(path).unwrap();
+        for line in lines.lines() {
+            serde_json::from_str::<serde_json::Value>(line).unwrap();
+        }
+        assert!(lines.contains("\"writer\":0,\"index\":119"));
+        assert!(lines.contains("\"writer\":1,\"index\":119"));
+    }
+
+    #[test]
+    fn untrimmable_tail_rejects_growth() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unified.jsonl");
+        let mut writer = open_writer_at(path.clone()).unwrap();
+        fs::write(&path, vec![b'x'; MAX_SIZE as usize]).unwrap();
+        writer.last_maintenance = Instant::now();
+
+        assert!(writer.append_lines(b"new\n").is_err());
+        assert_eq!(file_size(&path), MAX_SIZE);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn replacement_path_does_not_trim_the_wrong_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("unified.jsonl");
+        let mut writer = open_writer_at(path.clone()).unwrap();
+        fs::write(&path, vec![b'x'; MAX_SIZE as usize]).unwrap();
+        let replacement = dir.path().join("replacement.jsonl");
+        fs::write(&replacement, b"replacement\n").unwrap();
+        fs::rename(&replacement, &path).unwrap();
+        writer.last_maintenance = Instant::now();
+
+        assert!(writer.append_lines(b"new\n").is_err());
+        assert_eq!(writer.file.metadata().unwrap().len(), MAX_SIZE);
+        assert_eq!(fs::read(path).unwrap(), b"replacement\n");
+    }
+
+    #[test]
     fn log_entry_serializes_required_identity() {
         let entry = LogEntry {
             ts: "2025-07-14T10:30:00.123Z".into(),
@@ -634,6 +1011,65 @@ mod tests {
         assert!(json.contains("\"retry\":3"));
         assert!(json.contains("\"pid\":4242"));
         assert!(json.contains("\"ver\":\"0.1.211\""));
+    }
+
+    #[test]
+    fn bounded_encoder_preserves_a_record_at_the_exact_limit() {
+        let mut entry = LogEntry {
+            ts: "2025-07-14T10:30:00.123Z".into(),
+            src: LogSource::Shell,
+            pid: 4242,
+            ver: "1.0.0".into(),
+            lvl: LogLevel::Info,
+            sid: None,
+            msg: String::new(),
+            ctx: None,
+        };
+        let empty_len = serde_json::to_vec(&entry).unwrap().len();
+        entry.msg = "x".repeat(MAX_RECORD_JSON_BYTES - empty_len);
+
+        let expected_json = serde_json::to_vec(&entry).unwrap();
+        assert_eq!(expected_json.len(), MAX_RECORD_JSON_BYTES);
+        let line = encode_entry_line(&entry).expect("record exactly at budget");
+        assert_eq!(line.len(), MAX_RECORD_BYTES);
+        assert_eq!(line.last(), Some(&b'\n'));
+        assert_eq!(&line[..line.len() - 1], expected_json);
+    }
+
+    #[test]
+    fn oversized_record_becomes_one_bounded_valid_diagnostic_line() {
+        let entry = LogEntry {
+            ts: "client supplied timestamp that must not be retained".into(),
+            src: LogSource::GrowPager,
+            pid: 4242,
+            ver: "x".repeat(MAX_RECORD_BYTES * 2),
+            lvl: LogLevel::Warn,
+            sid: Some("session-that-must-not-be-retained".into()),
+            msg: "oversized message marker".repeat(MAX_RECORD_BYTES * 2),
+            ctx: Some(serde_json::json!({"private_payload": "must not be retained"})),
+        };
+
+        let line = encode_entry_line(&entry).expect("oversized entry diagnostic");
+        assert!(line.len() <= MAX_RECORD_BYTES);
+        assert_eq!(line.last(), Some(&b'\n'));
+        assert_eq!(line.iter().filter(|&&byte| byte == b'\n').count(), 1);
+
+        let decoded: LogEntry = serde_json::from_slice(&line[..line.len() - 1]).unwrap();
+        assert_eq!(decoded.src, LogSource::GrowPager);
+        assert_eq!(decoded.pid, 4242);
+        assert_eq!(decoded.lvl, LogLevel::Warn);
+        assert_eq!(decoded.ver, "unknown");
+        assert!(decoded.sid.is_none());
+        assert!(decoded.msg.contains("exceeded the 65536-byte limit"));
+        let context = decoded.ctx.unwrap();
+        assert_eq!(context["event"], "record_omitted");
+        assert_eq!(context["reason"], "serialized_record_exceeds_limit");
+        assert_eq!(context["max_bytes"], MAX_RECORD_BYTES);
+        assert!(
+            !line
+                .windows(b"oversized message marker".len())
+                .any(|window| window == b"oversized message marker")
+        );
     }
 
     #[test]
@@ -727,7 +1163,7 @@ mod tests {
             assert_ne!(writer.identity, path_identity(&path));
             writer.last_maintenance = Instant::now() - MAINTENANCE_INTERVAL;
             assert!(writer.maintain());
-            writer.file.write_all(b"visible\n").unwrap();
+            writer.append_lines(b"visible\n").unwrap();
             writer.file.flush().unwrap();
             assert!(fs::read_to_string(&path).unwrap().contains("visible"));
             assert_eq!(writer.identity, path_identity(&path));
@@ -765,7 +1201,7 @@ mod tests {
             writer.maintain(),
             "a writer that successfully re-pointed at the live file is writable",
         );
-        writer.file.write_all(b"after replacement\n").unwrap();
+        writer.append_lines(b"after replacement\n").unwrap();
         writer.file.flush().unwrap();
 
         let visible = fs::read_to_string(&path).unwrap();
@@ -804,7 +1240,7 @@ mod tests {
             writer.maintain(),
             "a writer that successfully re-pointed at the live file is writable",
         );
-        writer.file.write_all(b"after deletion\n").unwrap();
+        writer.append_lines(b"after deletion\n").unwrap();
         writer.file.flush().unwrap();
 
         let visible = fs::read_to_string(&path).expect("log must be recreated");
@@ -900,6 +1336,66 @@ mod tests {
         assert!(fs::read_to_string(&path).unwrap().len() < content.len());
     }
 
+    #[test]
+    fn append_waits_for_trim_and_survives_truncate() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        fs::write(&path, b"old\ntail\n").unwrap();
+        let writer = LogWriter::from_open_file(
+            OpenOptions::new().append(true).open(&path).unwrap(),
+            path.clone(),
+        )
+        .unwrap();
+        let mut trimmer = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        trimmer.lock().unwrap();
+
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let append = std::thread::spawn(move || {
+            let mut writer = writer;
+            started_tx.send(()).unwrap();
+            finished_tx.send(writer.append_lines(b"new\n")).unwrap();
+        });
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            finished_rx
+                .recv_timeout(Duration::from_millis(100))
+                .is_err(),
+            "append must wait while the trim owns the inode"
+        );
+
+        trimmer.seek(std::io::SeekFrom::Start(0)).unwrap();
+        trimmer.write_all(b"tail\n").unwrap();
+        trimmer.set_len(5).unwrap();
+        drop(trimmer);
+        finished_rx
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap()
+            .unwrap();
+        append.join().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"tail\nnew\n");
+    }
+
+    #[test]
+    fn trim_yields_while_writer_owns_inode_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.jsonl");
+        fs::write(&path, b"old\ntail\n").unwrap();
+        let writer = LogWriter::from_open_file(
+            OpenOptions::new().append(true).open(&path).unwrap(),
+            path.clone(),
+        )
+        .unwrap();
+        writer.file.lock().unwrap();
+        trim_file(&path);
+        writer.file.unlock().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"old\ntail\n");
+    }
+
     /// The reopen can itself fail — a log directory replaced by a file, a full
     /// disk, exhausted descriptors. Appending to the old handle anyway would
     /// reproduce the orphaning this module was changed to end, so the writer
@@ -945,7 +1441,7 @@ mod tests {
             "the writer must recover as soon as the path is usable again",
         );
 
-        writer.file.write_all(b"after recovery\n").unwrap();
+        writer.append_lines(b"after recovery\n").unwrap();
         writer.file.flush().unwrap();
         let visible = fs::read_to_string(&path).unwrap();
         assert!(

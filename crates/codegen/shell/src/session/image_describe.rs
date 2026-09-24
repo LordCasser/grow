@@ -5,7 +5,7 @@ use agent_client_protocol::schema::v1::ImageContent;
 use base64::Engine as _;
 use parking_lot::Mutex;
 use sampling_types::conversation::{ContentPart, ConversationItem, UserItem};
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 /// Character cap on source text supplied to the neutral transcription model.
 pub const SOURCE_CONTEXT_CAP: usize = 12_000;
@@ -223,6 +223,117 @@ pub fn persist_user_images(
     })
 }
 
+fn image_batch_name(path: &str) -> Option<&str> {
+    let path = Path::new(path);
+    let file = path.file_name()?.to_str()?;
+    let batch = path.parent()?.file_name()?.to_str()?;
+    let parent = path.parent()?.parent()?.file_name()?.to_str()?;
+    let (index, extension) = file.strip_prefix("image-")?.split_once('.')?;
+    if parent != "assets"
+        || index.is_empty()
+        || index.starts_with('0')
+        || !index.bytes().all(|byte| byte.is_ascii_digit())
+        || !matches!(extension, "png" | "jpg" | "gif" | "webp" | "bmp")
+        || !valid_published_batch_name(batch)
+    {
+        return None;
+    }
+    Some(batch)
+}
+
+fn valid_published_batch_name(name: &str) -> bool {
+    name.strip_prefix("images-").is_some_and(|hash| {
+        hash.len() == 64
+            && hash
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    })
+}
+
+fn valid_staging_batch_name(name: &str) -> bool {
+    name.strip_prefix(".images-")
+        .and_then(|name| name.strip_suffix(".tmp"))
+        .is_some_and(|id| uuid::Uuid::parse_str(id).is_ok())
+}
+
+/// Extract roots from physical User messages rather than the projected
+/// Surface: compaction and rewind cannot make a committed asset unowned.
+fn committed_image_batches(events: &[chat_state::TimelineEvent]) -> BTreeSet<String> {
+    let mut retained = BTreeSet::new();
+    for event in events {
+        let items: &[ConversationItem] = match &event.kind {
+            chat_state::TimelineEventKind::Messages(message) => &message.items,
+            chat_state::TimelineEventKind::Input(chat_state::InputEvent::Consumed {
+                item, ..
+            }) => std::slice::from_ref(item),
+            chat_state::TimelineEventKind::Notification(
+                chat_state::NotificationEvent::Consumed {
+                    input: Some(item), ..
+                },
+            ) => std::slice::from_ref(item),
+            _ => continue,
+        };
+        for item in items {
+            let ConversationItem::User(user) = item else {
+                continue;
+            };
+            for part in &user.content {
+                let ContentPart::Text { text } = part else {
+                    continue;
+                };
+                for path in sampling_types::conversation::image_files_envelope_paths(text) {
+                    if let Some(name) = image_batch_name(&path) {
+                        retained.insert(name.to_owned());
+                    }
+                }
+            }
+        }
+    }
+    retained
+}
+
+/// Read authoritative committed facts before touching any asset. Callers hold
+/// the session's image admission gate and writer epoch while this runs.
+pub(crate) fn reconcile_user_image_assets(
+    session: &crate::session::storage::ContainedDirectory,
+) -> std::io::Result<usize> {
+    let events =
+        crate::session::storage::JsonlStorageAdapter::read_timeline_from_directory(session)?;
+    let timeline = chat_state::Timeline::from_events(events)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let retained = committed_image_batches(timeline.events());
+    sweep_user_image_assets(session, &retained)
+}
+
+fn sweep_user_image_assets(
+    session: &crate::session::storage::ContainedDirectory,
+    retained: &BTreeSet<String>,
+) -> std::io::Result<usize> {
+    let assets =
+        match session.open_relative(Path::new("assets"), "session image asset directory", false) {
+            Ok(assets) => assets,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(error) => return Err(error),
+        };
+    let mut removed = 0;
+    assets.visit_names(|name| {
+        let Some(name_str) = name.to_str() else {
+            return Ok(());
+        };
+        if (valid_published_batch_name(name_str) && !retained.contains(name_str))
+            || valid_staging_batch_name(name_str)
+        {
+            match assets.remove_tree_child(name) {
+                Ok(()) => removed += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    })?;
+    Ok(removed)
+}
+
 fn persist_user_images_with(
     session: &crate::session::storage::ContainedDirectory,
     images: &[ImageContent],
@@ -388,7 +499,10 @@ pub fn build_describe_request(
     });
     if let ConversationItem::User(u) = &mut user_item {
         for url in image_urls {
-            u.content.push(ContentPart::Image { description: None, url: url.clone() });
+            u.content.push(ContentPart::Image {
+                description: None,
+                url: url.clone(),
+            });
         }
     }
     ConversationRequest::from_items(vec![user_item]).with_model(model)
@@ -428,6 +542,78 @@ mod tests {
             false,
         )
         .unwrap()
+    }
+
+    fn write_timeline(path: &Path, timeline: &chat_state::Timeline) {
+        let mut bytes = Vec::new();
+        for event in timeline.events() {
+            serde_json::to_writer(&mut bytes, event).unwrap();
+            bytes.push(b'\n');
+        }
+        std::fs::write(path.join("timeline.jsonl"), bytes).unwrap();
+    }
+
+    #[test]
+    fn user_image_asset_reconciliation_follows_committed_physical_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = test_session(dir.path());
+        let retained =
+            persist_user_images(&session, &[ImageContent::new("AQID", "image/png")]).unwrap();
+        let orphan =
+            persist_user_images(&session, &[ImageContent::new("BAUG", "image/png")]).unwrap();
+        let retained_batch = retained[0].parent().unwrap();
+        let orphan_batch = orphan[0].parent().unwrap();
+        let stage = dir
+            .path()
+            .join("assets")
+            .join(format!(".images-{}.tmp", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&stage).unwrap();
+        std::fs::write(stage.join("image-1.png"), b"partial").unwrap();
+        let unrelated = dir.path().join("assets").join("user-owned");
+        std::fs::create_dir(&unrelated).unwrap();
+
+        assert!(reconcile_user_image_assets(&session).is_err());
+        assert!(retained_batch.is_dir());
+        assert!(orphan_batch.is_dir());
+        assert!(stage.is_dir());
+
+        std::fs::write(dir.path().join("timeline.jsonl"), b"{broken timeline}\n").unwrap();
+        assert!(reconcile_user_image_assets(&session).is_err());
+        assert!(orphan_batch.is_dir());
+        assert!(stage.is_dir());
+
+        let message =
+            render_image_files_block(&[retained[0].to_string_lossy().into_owned()]).unwrap();
+        let timeline =
+            chat_state::Timeline::from_seed(vec![ConversationItem::user(message)]).unwrap();
+        write_timeline(dir.path(), &timeline);
+        assert_eq!(reconcile_user_image_assets(&session).unwrap(), 2);
+        assert!(retained_batch.is_dir());
+        assert!(!orphan_batch.exists());
+        assert!(!stage.exists());
+        assert!(unrelated.is_dir());
+    }
+
+    #[test]
+    fn consumed_input_is_an_image_asset_root() {
+        let path = "/session/assets/images-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/image-1.png";
+        let message = render_image_files_block(&[path.to_owned()]).unwrap();
+        let event = chat_state::TimelineEvent {
+            version: chat_state::TIMELINE_SCHEMA_VERSION,
+            seq: chat_state::EventSeq::new(1),
+            at_ms: 0,
+            kind: chat_state::TimelineEventKind::Input(chat_state::InputEvent::Consumed {
+                input_ids: vec!["input-1".into()],
+                turn: chat_state::TurnId(1),
+                item: ConversationItem::user(message),
+            }),
+        };
+        assert_eq!(
+            committed_image_batches(&[event]),
+            BTreeSet::from([
+                "images-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into()
+            ])
+        );
     }
     #[test]
     fn persist_and_prepend_image_files_writes_assets_and_lists_paths() {
@@ -807,7 +993,9 @@ pub(crate) async fn describe_images_with_local_ocr(
         let text = tokio::time::timeout_at(
             deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(30)),
             run_local_ocr(Path::new("tesseract"), bytes),
-        ).await.map_err(|_| "local OCR timed out".to_owned())??;
+        )
+        .await
+        .map_err(|_| "local OCR timed out".to_owned())??;
         descriptions.push(format!("Image {} (local OCR text):\n{text}", index + 1));
         if descriptions.iter().map(String::len).sum::<usize>() > 256 * 1024 {
             return Err("local OCR group output exceeds limit".into());
@@ -820,29 +1008,45 @@ fn decode_ocr_image(url: &str) -> Result<Vec<u8>, String> {
     if url.len() > 8 * 1024 * 1024 {
         return Err("local OCR image exceeds input limit".into());
     }
-    let (header, data) = url.split_once(',').ok_or("local OCR requires an inline image")?;
+    let (header, data) = url
+        .split_once(',')
+        .ok_or("local OCR requires an inline image")?;
     if !header.starts_with("data:image/") || !header.ends_with(";base64") {
         return Err("local OCR requires a base64 inline image".into());
     }
-    base64::engine::general_purpose::STANDARD.decode(data)
+    base64::engine::general_purpose::STANDARD
+        .decode(data)
         .map_err(|_| "invalid local OCR image encoding".to_owned())
 }
 
 async fn run_local_ocr(program: &Path, bytes: Vec<u8>) -> Result<String, String> {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use std::process::Stdio;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     const OUTPUT_LIMIT: u64 = 64 * 1024;
     let mut child = tokio::process::Command::new(program)
         .args(["stdin", "stdout"])
-        .stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
-        .kill_on_drop(true).spawn().map_err(|error| format!("local OCR unavailable: {error}"))?;
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+        .map_err(|error| format!("local OCR unavailable: {error}"))?;
     let mut input = child.stdin.take().ok_or("local OCR stdin unavailable")?;
     let output = child.stdout.take().ok_or("local OCR stdout unavailable")?;
     let errors = child.stderr.take().ok_or("local OCR stderr unavailable")?;
-    async fn read_bounded(reader: impl tokio::io::AsyncRead + Unpin, limit: u64) -> Result<Vec<u8>, String> {
+    async fn read_bounded(
+        reader: impl tokio::io::AsyncRead + Unpin,
+        limit: u64,
+    ) -> Result<Vec<u8>, String> {
         let mut bytes = Vec::new();
-        reader.take(limit + 1).read_to_end(&mut bytes).await.map_err(|e| e.to_string())?;
-        if bytes.len() as u64 > limit { return Err("local OCR output exceeds limit".into()); }
+        reader
+            .take(limit + 1)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|e| e.to_string())?;
+        if bytes.len() as u64 > limit {
+            return Err("local OCR output exceeds limit".into());
+        }
         Ok(bytes)
     }
     let (_, output, _, status) = tokio::try_join!(
@@ -856,10 +1060,14 @@ async fn run_local_ocr(program: &Path, bytes: Vec<u8>) -> Result<String, String>
         read_bounded(errors, 4096),
         async { child.wait().await.map_err(|e| e.to_string()) },
     )?;
-    if !status.success() { return Err(format!("local OCR exited with {status}")); }
+    if !status.success() {
+        return Err(format!("local OCR exited with {status}"));
+    }
     let text = String::from_utf8(output).map_err(|_| "local OCR returned invalid UTF-8")?;
     let text = text.trim();
-    if text.is_empty() { return Err("local OCR found no text".into()); }
+    if text.is_empty() {
+        return Err("local OCR found no text".into());
+    }
     Ok(text.to_owned())
 }
 
@@ -878,11 +1086,18 @@ mod local_ocr_tests {
         assert!(decode_ocr_image("https://example.com/image.png").is_err());
         assert!(decode_ocr_image("data:image/png;base64,***").is_err());
         assert!(decode_ocr_image(&"x".repeat(8 * 1024 * 1024 + 1)).is_err());
-        assert_eq!(decode_ocr_image("data:image/png;base64,YWJj").unwrap(), b"abc");
+        assert_eq!(
+            decode_ocr_image("data:image/png;base64,YWJj").unwrap(),
+            b"abc"
+        );
     }
     async fn bounded_ocr(program: &Path, bytes: Vec<u8>) -> Result<String, String> {
-        tokio::time::timeout(std::time::Duration::from_secs(5), run_local_ocr(program, bytes))
-            .await.expect("OCR pipe protocol must not hang")
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            run_local_ocr(program, bytes),
+        )
+        .await
+        .expect("OCR pipe protocol must not hang")
     }
     #[tokio::test]
     async fn cancellation_terminates_the_local_ocr_process() {
@@ -894,33 +1109,65 @@ mod local_ocr_tests {
         let pid = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
                 if let Ok(text) = tokio::fs::read_to_string(&pid_path).await {
-                    if let Ok(pid) = text.trim().parse::<u32>() { break pid; }
+                    if let Ok(pid) = text.trim().parse::<u32>() {
+                        break pid;
+                    }
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-        }).await.expect("OCR fixture must start");
+        })
+        .await
+        .expect("OCR fixture must start");
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                let alive = tokio::process::Command::new("kill").args(["-0", &pid.to_string()])
-                    .stdout(Stdio::null()).stderr(Stdio::null()).status().await.unwrap().success();
-                if !alive { break; }
+                let alive = tokio::process::Command::new("kill")
+                    .args(["-0", &pid.to_string()])
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .await
+                    .unwrap()
+                    .success();
+                if !alive {
+                    break;
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
-        }).await.expect("cancelled OCR must not leave a running process");
+        })
+        .await
+        .expect("cancelled OCR must not leave a running process");
     }
 
     #[tokio::test]
     async fn local_process_retains_text_and_rejects_empty_or_failed_output() {
         let dir = tempfile::tempdir().unwrap();
         let path = executable(dir.path(), "printf 'recognized text\\n'");
-        assert_eq!(bounded_ocr(&path, b"image".to_vec()).await.unwrap(), "recognized text");
+        assert_eq!(
+            bounded_ocr(&path, b"image".to_vec()).await.unwrap(),
+            "recognized text"
+        );
         let path = executable(dir.path(), "exit 0");
-        assert!(bounded_ocr(&path, vec![]).await.unwrap_err().contains("no text"));
+        assert!(
+            bounded_ocr(&path, vec![])
+                .await
+                .unwrap_err()
+                .contains("no text")
+        );
         let path = executable(dir.path(), "printf partial; exit 1");
-        assert!(bounded_ocr(&path, vec![]).await.unwrap_err().contains("exited"));
+        assert!(
+            bounded_ocr(&path, vec![])
+                .await
+                .unwrap_err()
+                .contains("exited")
+        );
         let path = executable(dir.path(), "head -c 65537 /dev/zero");
-        assert!(bounded_ocr(&path, vec![]).await.unwrap_err().contains("exceeds limit"));
+        assert!(
+            bounded_ocr(&path, vec![])
+                .await
+                .unwrap_err()
+                .contains("exceeds limit")
+        );
     }
 }

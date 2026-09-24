@@ -12,6 +12,8 @@ pub(crate) struct WorkflowNotifySender {
     session_id: agent_client_protocol::schema::v1::SessionId,
     gateway: acp_transport::AcpAgentGatewaySender,
     persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
+    budget: sampler::PreviewEventBudget,
+    preview: std::sync::Arc<parking_lot::Mutex<Option<(String, u32, bool)>>>,
     store: WorkflowRunStore,
 }
 
@@ -20,12 +22,16 @@ impl WorkflowNotifySender {
         session_id: agent_client_protocol::schema::v1::SessionId,
         gateway: acp_transport::AcpAgentGatewaySender,
         persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
+        budget: sampler::PreviewEventBudget,
+        preview: std::sync::Arc<parking_lot::Mutex<Option<(String, u32, bool)>>>,
         store: WorkflowRunStore,
     ) -> Self {
         Self {
             session_id,
             gateway,
             persistence_tx,
+            budget,
+            preview,
             store,
         }
     }
@@ -76,21 +82,15 @@ impl WorkflowNotifySender {
             update,
             meta: meta.map(serde_json::Value::Object),
         };
-        let raw = serde_json::to_value(&notification)
-            .and_then(|v| serde_json::value::to_raw_value(&v))
-            .ok();
-        if persist {
-            let _ = self.persistence_tx.send(PersistenceMsg::Update(
-                crate::session::storage::SessionUpdate::Grow(Box::new(notification)),
-            ));
-        }
-        if let Some(raw) = raw {
-            let ext = agent_client_protocol::schema::v1::ExtNotification::new(
-                "grow/session_notification",
-                raw.into(),
-            );
-            self.gateway.forward_fire_and_forget(ext);
-        }
+        crate::session::notifications::dispatch_auxiliary_grow(
+            &self.gateway,
+            &self.persistence_tx,
+            &self.budget,
+            &self.preview,
+            "grow/session_notification",
+            notification,
+            persist,
+        );
     }
 }
 

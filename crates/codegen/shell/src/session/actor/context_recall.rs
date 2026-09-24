@@ -1233,7 +1233,15 @@ fn render_archive_item(
             "tool",
             format!("call_id={}\n{}", result.tool_call_id, result.content),
         ),
-        ConversationItem::AgentMessage(batch) => ("agent_message", batch.messages.iter().map(sampling_types::agent_message_result_content).collect::<Vec<_>>().join("\n")),
+        ConversationItem::AgentMessage(batch) => (
+            "agent_message",
+            batch
+                .messages
+                .iter()
+                .map(sampling_types::agent_message_result_content)
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ),
         ConversationItem::BackendToolCall(_) => ("backend_tool", item.text_content()),
         ConversationItem::Reasoning(_) => unreachable!(),
     };

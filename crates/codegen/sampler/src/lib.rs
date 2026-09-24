@@ -41,8 +41,12 @@ pub use config::{
     AuthScheme, BearerResolver, OriginClientInfo, RetryPolicy, SamplerConfig, SharedBearerResolver,
 };
 pub use doom_loop::DoomLoopSignalCollector;
-pub use events::{SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent};
-pub use handle::{AttemptAdmission, AttemptScopeCapture, AttemptUsage, AttemptUsageSink, SamplerHandle};
+pub use events::{
+    PreviewEventBudget, SamplingChannel, SamplingErrorInfo, SamplingErrorKind, SamplingEvent,
+};
+pub use handle::{
+    AttemptAdmission, AttemptScopeCapture, AttemptUsage, AttemptUsageSink, SamplerHandle,
+};
 pub use metrics::{InferenceLatencyStats, compute_percentiles};
 pub use recovery::{OutputDelivery, RecoveryBudget};
 pub use retry::{

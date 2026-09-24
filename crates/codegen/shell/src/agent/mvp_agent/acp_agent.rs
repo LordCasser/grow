@@ -161,7 +161,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         self.spawn_initialize_launch_mcp_setup();
         {
             let agent_ref = LocalRef::new(self);
-            tokio::task::spawn_local(async move {
+            self.spawn_owned_local(async move {
                 tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                 agent_ref.get().emit_announcements();
             });
@@ -809,7 +809,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         drop(persistence_timer);
         let crate::session::persistence::PersistedInfoLight {
             mut summary,
-            timeline,
+            mut timeline,
             mut control_snapshot,
             session_directory,
             rewind_points_source,
@@ -878,6 +878,59 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             &summary.current_model_id, origin_client.clone(),
         );
         load_session_sampling.reasoning_effort = summary.reasoning_effort;
+        if spawn_new_actor {
+            let current_transport = sampling_types::model_image_input_key_from_parts(
+                &load_session_sampling.model,
+                &load_session_sampling.api_backend,
+                &load_session_sampling.base_url,
+                &load_session_sampling.query_params,
+            );
+            let previous = crate::session::persistence::latest_model_selection(timeline.events())
+                .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
+            let missing_baseline = previous.is_none();
+            let (previous_model, previous_effort, previous_provider, previous_transport) =
+                previous.unwrap_or_else(|| {
+                    (
+                        summary.current_model_id.clone(),
+                        summary.reasoning_effort,
+                        load_session_sampling.model.clone(),
+                        current_transport.clone(),
+                    )
+                });
+            if missing_baseline
+                || previous_model != summary.current_model_id
+                || previous_effort != summary.reasoning_effort
+                || previous_provider != load_session_sampling.model
+                || previous_transport != current_transport
+            {
+                let reason = if missing_baseline {
+                    "cold_load_route_baseline"
+                } else {
+                    "cold_load_catalog_rebind"
+                };
+                let event = timeline
+                    .record(crate::session::persistence::model_change_event(
+                        &previous_model,
+                        &summary.current_model_id,
+                        previous_effort,
+                        summary.reasoning_effort,
+                        &previous_provider,
+                        &load_session_sampling.model,
+                        &previous_transport,
+                        &current_transport,
+                        reason,
+                        None,
+                    ))
+                    .map_err(|error| {
+                        acp::Error::internal_error()
+                            .data(format!("could not record the cold model route: {error}"))
+                    })?;
+                persistence
+                    .append_timeline_event_durably(event)
+                    .await
+                    .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
+            }
+        }
         let restored_compaction_count = persisted_signals
             .as_ref()
             .map(|s| s.compaction_count as u64)
@@ -1257,6 +1310,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             crate::agent::subagent::reconcile_orphaned_subagents_with_backend(
                     &subagent_projections,
                     !no_replay,
+                    spawn_new_actor,
                     &tools::implementations::grow_build::task::backend::ChannelBackend::for_session(
                         self.subagent_event_tx.clone(),
                         session_id.0.clone(),
@@ -2004,7 +2058,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             | "grow/internal/reload_workflows" | "grow/internal/reload_models"
             | "grow/internal/reload_announcements"
             | "grow/plugins/reload" | "grow/commands/list" | "grow/commands/execute"
-            | "grow/queue/prompt_status" => {
+            | "grow/queue/prompt_status" | "grow/queue/control" => {
                 crate::extensions::session_admin::handle(self, &args).await
             }
             "grow/session/repair" => crate::extensions::repair::handle(self, &args).await,
@@ -2169,6 +2223,18 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         if args.method.as_ref() == "grow/internal/evict_sessions" {
             self.handle_evict_sessions(&args.params).await;
         }
+        if args.method.as_ref() == "grow/internal/queue_client_disconnected"
+            && let Ok(params) = serde_json::from_str::<serde_json::Value>(args.params.get())
+            && let Some(leader_client_id) = params.get("leaderClientId").and_then(|v| v.as_u64())
+        {
+            for handle in self.sessions.borrow().values() {
+                let _ = handle.cmd_tx.send(
+                    crate::session::SessionCommand::ReleaseQueueHoldsForClient {
+                        leader_client_id,
+                    },
+                );
+            }
+        }
         if args.method.as_ref() == "grow/toggle_plan_mode"
             && let Ok(params) = serde_json::from_str::<
                 serde_json::Value,
@@ -2213,14 +2279,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                 );
             }
         }
-        if matches!(
-            args.method.as_ref(),
-            "grow/queue/remove"
-                | "grow/queue/reorder"
-                | "grow/queue/clear"
-                | "grow/queue/edit"
-                | "grow/queue/interject"
-        )
+        if crate::agent::ext_parsers::is_queue_notification_method(args.method.as_ref())
             && let Ok(params) = serde_json::from_str::<
                 serde_json::Value,
             >(args.params.get())
@@ -2241,7 +2300,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                 .find(|s| s.info.id.0.as_ref() == session_id_str)
                 .cloned();
             if let Some(handle) = handle {
-                let cmd = crate::agent::ext_parsers::parse_queue_edit_command(
+                let cmd = crate::agent::ext_parsers::parse_queue_notification_command(
                     args.method.as_ref(),
                     &params,
                     owner,
@@ -2285,6 +2344,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                         .cmd_tx
                         .send(crate::session::SessionCommand::GrowSessionNotification {
                             notification,
+                            forward_to_gateway: false,
                         });
                 } else {
                     tracing::warn!(

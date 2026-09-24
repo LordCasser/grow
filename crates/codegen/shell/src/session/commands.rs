@@ -530,7 +530,7 @@ pub enum SessionCommand {
             oneshot::Sender<anyhow::Result<chat_state::compaction_utils::HistoryRepairReport>>,
     },
     GetRewindPoints {
-        respond_to: oneshot::Sender<RewindPointsResponse>,
+        respond_to: oneshot::Sender<std::io::Result<RewindPointsResponse>>,
     },
     /// Local file-snapshot counts keyed by `prompt_index`, read straight from
     /// the file-state tracker (independent of the chat-state prompt index,
@@ -538,11 +538,14 @@ pub enum SessionCommand {
     /// server's rewind points so `num_file_snapshots`/`has_file_changes` match
     /// what local-mode rewind reports.
     GetRewindFileCounts {
-        respond_to: oneshot::Sender<std::collections::HashMap<usize, usize>>,
+        respond_to: oneshot::Sender<std::io::Result<std::collections::HashMap<usize, usize>>>,
     },
     /// Grow extension session notification - client-side events to store in persistence
     GrowSessionNotification {
         notification: SessionNotification,
+        /// Internal child lifecycle projections are forwarded after the
+        /// parent actor persists them; client-origin updates are persist-only.
+        forward_to_gateway: bool,
     },
     /// Apply subagent usage into parent ledgers. Acks `()` once chat-state
     /// applied (prompt-attributed or session-only). Drop the oneshot on failure
@@ -698,17 +701,6 @@ pub enum SessionCommand {
         definition_revision: u64,
         task_ids: Vec<String>,
     },
-    /// Remove a queued (not-yet-running) prompt from the authoritative prompt
-    /// queue. Versioned + idempotent: a stale `expected_version`
-    /// or an already-drained `id` is a no-op (the actor just re-broadcasts the
-    /// current queue so the client reconciles). When `owner` is `Some`, the
-    /// removal only applies if the item's attribution matches (edit authority:
-    /// a client edits its own items).
-    RemoveQueuedPrompt {
-        id: String,
-        expected_version: u64,
-        owner: Option<String>,
-    },
     /// Reorder the queued (not-yet-running) prompts to match `ordered_ids`.
     /// Ids not present in the live queue are ignored; queued items missing
     /// from `ordered_ids` keep their relative order at the back. The actor
@@ -721,31 +713,18 @@ pub enum SessionCommand {
     ClearQueue {
         owner: Option<String>,
     },
-    /// Replace the text of a queued (not-yet-running) prompt in place
-    /// (server-side LWW). Last write wins via the actor's
-    /// serialized mailbox; the rebroadcast of `grow/queue/changed` is the
-    /// truth signal for every attached client. The original `owner`
-    /// attribution is preserved; `editor` is recorded as the most recent
-    /// editor (for future "alice edited this" UX). A missing id, or an id
-    /// that names the currently-running turn, is a benign no-op.
-    EditQueuedPrompt {
-        id: String,
-        new_text: String,
-        editor: Option<String>,
+    /// A versioned, acknowledged edit or removal of an admitted FIFO item.
+    QueueControl {
+        request: crate::session::prompt_queue::QueueControlRequest,
+        respond_to: oneshot::Sender<crate::session::prompt_queue::QueueControlResult>,
     },
-    /// Hold a queued prompt out of combine-on-promote while a client edits it
-    /// in the composer. Released via [`Self::ReleaseCombineEdit`].
-    HoldCombineEdit {
-        id: String,
-    },
-    /// Release a previous [`Self::HoldCombineEdit`].
-    ReleaseCombineEdit {
-        id: String,
+    /// Drop transient holds owned by a disconnected leader client.
+    ReleaseQueueHoldsForClient {
+        leader_client_id: u64,
     },
     /// Atomically move a queued prompt into the current regular turn. The
     /// current turn id is part of admission so a late UI action cannot steer
-    /// a replacement turn. Versioned + idempotent like
-    /// [`RemoveQueuedPrompt`]; `grow/queue/changed` remains authoritative.
+    /// a replacement turn. `grow/queue/changed` remains authoritative.
     SteerQueuedPrompt {
         expected_turn_id: String,
         id: String,
@@ -847,6 +826,8 @@ pub enum SessionCommand {
         /// `true` when triggered automatically on return-from-away,
         /// `false` for an explicit `/recap`.
         auto: bool,
+        /// Pager-owned away period for an automatic request; absent for manual.
+        away_period_id: Option<uuid::Uuid>,
     },
     /// Request an AI-generated shell command suggestion.
     ///

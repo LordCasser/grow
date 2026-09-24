@@ -565,4 +565,28 @@ impl SessionActor {
             error => tracing::warn!(?error, "input image reconciliation failed"),
         }
     }
+
+    pub(super) async fn reconcile_user_image_assets(
+        &self,
+        shutdown: &tokio_util::sync::CancellationToken,
+    ) {
+        if shutdown.is_cancelled() {
+            return;
+        }
+        let _guard = self.input_artifact_gate.lock().await;
+        if shutdown.is_cancelled() {
+            return;
+        }
+        let Ok(directory) = self.session_directory.try_clone() else {
+            return;
+        };
+        match tokio::task::spawn_blocking(move || {
+            crate::session::image_describe::reconcile_user_image_assets(&directory)
+        })
+        .await
+        {
+            Ok(Ok(_)) => {}
+            error => tracing::warn!(?error, "user image asset reconciliation failed"),
+        }
+    }
 }

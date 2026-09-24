@@ -180,7 +180,7 @@ impl RestartActions for E2eActions {
             .get_mut(server)
             .and_then(|q| q.pop_front())
             .unwrap_or_else(|| Err("not scripted".to_string()))
-                .map_err(Into::into)
+            .map_err(Into::into)
     }
 }
 

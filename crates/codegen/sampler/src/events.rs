@@ -1,6 +1,8 @@
 //! Outbound events emitted by the sampler.
 
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use sampling_types::{
     ApiBackend, ConversationResponse, EmptyResponseContext, ResponseModelMetadata, SamplingError,
@@ -100,6 +102,19 @@ pub enum SamplingEvent {
         metrics: InferenceLatencyStats,
     },
 
+    /// Terminal metadata for a request managed by the Sampler actor. The
+    /// complete response is delivered separately to the request caller; this
+    /// event keeps response bodies and native continuation out of the shared
+    /// event queue.
+    RequestCompleted {
+        request_id: RequestId,
+        usage: Option<sampling_types::TokenUsage>,
+        item_count: usize,
+        provider_terminal: Option<sampling_types::ProviderTerminal>,
+        doom_loop_signals: Vec<sampling_types::DoomLoopSignal>,
+        metrics: InferenceLatencyStats,
+    },
+
     /// Request is being retried.
     Retrying {
         request_id: RequestId,
@@ -127,6 +142,153 @@ pub enum SamplingEvent {
         request_id: RequestId,
         metadata: ResponseModelMetadata,
     },
+}
+
+/// Credits for the fragment portion of a session's sampler event handoff.
+/// Control and terminal events retain their existing synchronous path.
+#[derive(Clone)]
+pub struct PreviewEventBudget {
+    credits: Arc<Semaphore>,
+}
+
+impl Default for PreviewEventBudget {
+    fn default() -> Self {
+        Self {
+            credits: Arc::new(Semaphore::new(Self::MAX_CREDITS as usize)),
+        }
+    }
+}
+
+impl PreviewEventBudget {
+    const CREDIT_BYTES: usize = 16 * 1024;
+    const MAX_CREDITS: u32 = 4096;
+    pub const MAX_BYTES: usize = Self::CREDIT_BYTES * Self::MAX_CREDITS as usize;
+
+    #[cfg(test)]
+    pub(crate) fn with_credits(credits: usize) -> Self {
+        Self {
+            credits: Arc::new(Semaphore::new(credits)),
+        }
+    }
+
+    fn charged_bytes(event: &SamplingEvent) -> Option<usize> {
+        Some(match event {
+            SamplingEvent::ChannelToken { text, .. } => text.len(),
+            SamplingEvent::ToolCallDelta {
+                id,
+                name,
+                arguments_delta,
+                ..
+            } => id
+                .as_ref()
+                .map_or(0, String::len)
+                .saturating_add(name.as_ref().map_or(0, String::len))
+                .saturating_add(arguments_delta.as_ref().map_or(0, String::len)),
+            SamplingEvent::ResponseStarted {
+                message_id, model, ..
+            } => message_id.len().saturating_add(model.len()),
+            SamplingEvent::ReasoningCompleted { signature, .. } => signature.len(),
+            _ => return None,
+        })
+    }
+
+    fn checked_cost_for_bytes(bytes: usize) -> Result<u32, usize> {
+        if bytes > Self::MAX_BYTES {
+            return Err(bytes);
+        }
+        Ok(bytes
+            .saturating_add(Self::CREDIT_BYTES - 1)
+            .div_euclid(Self::CREDIT_BYTES)
+            .max(1) as u32)
+    }
+
+    pub(crate) fn checked_credit_cost(event: &SamplingEvent) -> Result<u32, usize> {
+        Self::charged_bytes(event).map_or(Ok(0), Self::checked_cost_for_bytes)
+    }
+
+    pub fn credit_cost(event: &SamplingEvent) -> u32 {
+        Self::checked_credit_cost(event).unwrap_or(Self::MAX_CREDITS)
+    }
+
+    pub async fn acquire(
+        &self,
+        cost: u32,
+    ) -> Result<OwnedSemaphorePermit, tokio::sync::AcquireError> {
+        Arc::clone(&self.credits).acquire_many_owned(cost).await
+    }
+
+    /// Reserve a complete downstream notification without waiting inside the
+    /// session event loop. Exhaustion is an explicit preview failure.
+    pub fn try_acquire_bytes(&self, bytes: usize) -> std::io::Result<OwnedSemaphorePermit> {
+        if bytes > Self::MAX_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "preview notification exceeds the byte budget",
+            ));
+        }
+        let cost = bytes.div_ceil(Self::CREDIT_BYTES).max(1) as u32;
+        Arc::clone(&self.credits)
+            .try_acquire_many_owned(cost)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::WouldBlock, error))
+    }
+
+    /// Return credits after the session actor consumes a fragment's translated
+    /// notifications. Direct sampler consumers may return them on receive.
+    pub fn release(&self, event: &SamplingEvent) {
+        self.release_cost(Self::credit_cost(event));
+    }
+
+    pub fn release_cost(&self, cost: u32) {
+        if cost != 0 {
+            self.credits.add_permits(cost as usize);
+        }
+    }
+
+    pub fn close(&self) {
+        self.credits.close();
+    }
+}
+
+#[cfg(test)]
+mod preview_budget_tests {
+    use super::*;
+
+    #[test]
+    fn fragment_credits_charge_count_and_payload() {
+        let event = |bytes| SamplingEvent::ChannelToken {
+            request_id: RequestId::from("fragment-credit"),
+            channel: SamplingChannel::Text,
+            text: "x".repeat(bytes),
+            chunk_index: 0,
+        };
+        assert_eq!(PreviewEventBudget::credit_cost(&event(0)), 1);
+        assert_eq!(PreviewEventBudget::credit_cost(&event(16 * 1024)), 1);
+        assert_eq!(PreviewEventBudget::credit_cost(&event(16 * 1024 + 1)), 2);
+        assert_eq!(
+            PreviewEventBudget::credit_cost(&event(64 * 1024 * 1024)),
+            4096
+        );
+        assert_eq!(
+            PreviewEventBudget::credit_cost(&SamplingEvent::AttemptDiscarded {
+                request_id: RequestId::from("fragment-credit"),
+                attempt: 1,
+            }),
+            0
+        );
+    }
+
+    #[test]
+    fn single_fragment_cost_rejects_bytes_above_total_capacity() {
+        assert_eq!(PreviewEventBudget::checked_cost_for_bytes(0), Ok(1));
+        assert_eq!(
+            PreviewEventBudget::checked_cost_for_bytes(PreviewEventBudget::MAX_BYTES),
+            Ok(PreviewEventBudget::MAX_CREDITS)
+        );
+        assert_eq!(
+            PreviewEventBudget::checked_cost_for_bytes(PreviewEventBudget::MAX_BYTES + 1),
+            Err(PreviewEventBudget::MAX_BYTES + 1)
+        );
+    }
 }
 
 /// Serializable mirror of [`SamplingError`].

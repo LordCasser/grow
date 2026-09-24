@@ -13,11 +13,10 @@ use tokio::sync::mpsc;
 /// 1. `T` is heap-allocated and never moved (e.g., behind `Rc` or owned by
 ///    the ACP connection for the process lifetime).
 /// 2. All access happens on the **same** `LocalSet` thread (no `Send`).
-/// 3. The `LocalRef` does not outlive the `LocalSet`.
+/// 3. Every task holding the reference is aborted before `T` is dropped.
 ///
-/// These invariants are upheld by construction: `LocalRef` is `!Send`
-/// (via `*const T`) and only used inside `spawn_local` closures on the
-/// agent's `LocalSet`.
+/// `LocalRef` is `!Send` (via `*const T`). `MvpAgent` registers each task
+/// holding one with `spawn_owned_local` so dropping the agent aborts the task.
 pub(crate) struct LocalRef<T> {
     ptr: *const T,
 }
@@ -26,8 +25,8 @@ impl<T> LocalRef<T> {
     ///
     /// # Safety contract (enforced by the caller, not by the type system)
     ///
-    /// The referenced `T` must live for the entire duration of the `LocalSet`
-    /// and must not be moved or deallocated while any `LocalRef` clone exists.
+    /// The referenced `T` must not move or be deallocated while any task
+    /// holding a `LocalRef` can still be polled.
     pub(crate) fn new(val: &T) -> Self {
         Self { ptr: val as *const T }
     }
@@ -573,6 +572,9 @@ pub struct MvpAgent {
     /// once (on the first `spawn_and_register_session`). See
     /// `ensure_session_supervisor`.
     supervisor_started: std::cell::Cell<bool>,
+    /// Local tasks holding a raw reference to this agent. Aborted before any
+    /// agent fields are dropped, including on an abrupt leader generation exit.
+    owned_local_tasks: RefCell<Vec<tokio::task::JoinHandle<()>>>,
     /// Test-only spy recording every terminal roster delta `(session_id,
     /// final_state)` emitted by `record_roster_delta` (reap → `DeadFailed`,
     /// explicit close → `Completed`). Lets tests observe a terminal demotion
@@ -584,6 +586,26 @@ pub struct MvpAgent {
     /// actually spawned. Asserts `ensure_session_supervisor` is idempotent.
     #[cfg(test)]
     supervisor_spawn_count: std::cell::Cell<usize>,
+}
+impl MvpAgent {
+    fn spawn_owned_local(&self, future: impl std::future::Future<Output = ()> + 'static) {
+        let mut tasks = self.owned_local_tasks.borrow_mut();
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(tokio::task::spawn_local(future));
+    }
+}
+impl Drop for MvpAgent {
+    fn drop(&mut self) {
+        for task in self.owned_local_tasks.get_mut().drain(..) {
+            task.abort();
+        }
+        for session in self.sessions.get_mut().values() {
+            let _ = session.cmd_tx.send(crate::session::SessionCommand::Shutdown);
+        }
+        for session in self.active_child_sessions.borrow().values() {
+            let _ = session.cmd_tx.send(crate::session::SessionCommand::Shutdown);
+        }
+    }
 }
 /// Spawn a thread to warm the shared async HTTP client (`OnceLock`-cached).
 /// Loading TLS root certs is ~95ms; doing it here avoids a cold-start hit
@@ -925,7 +947,7 @@ impl MvpAgent {
                 tracing::debug!("replay: skipping malformed response projection record");
                 return;
             };
-            for notification in projection.updates {
+            for notification in projection.into_notifications() {
                 let Ok(line) = serde_json::to_string(&serde_json::json!({
                     "method": "session/update",
                     "params": notification,

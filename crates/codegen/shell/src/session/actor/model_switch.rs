@@ -641,6 +641,7 @@ impl SessionActor {
         }
         drop(admission);
         drop(gate);
+        self.send_available_commands_update().await;
         if should_drain {
             self.spawn_claimed_pending_step_control_drain();
         }
@@ -1006,6 +1007,7 @@ impl SessionActor {
             )
             .await;
         drop(gate);
+        self.send_available_commands_update().await;
         if should_drain {
             self.spawn_claimed_pending_step_control_drain();
         }
@@ -1304,6 +1306,7 @@ impl SessionActor {
             )
             .await;
         drop(gate);
+        self.send_available_commands_update().await;
         if should_drain {
             self.spawn_claimed_pending_step_control_drain();
         }
@@ -1355,6 +1358,7 @@ impl SessionActor {
             .await;
         }
         drop(gate);
+        self.send_available_commands_update().await;
         if should_drain {
             self.drain_claimed_pending_step_controls().await;
         }
@@ -1381,16 +1385,25 @@ impl SessionActor {
         let mut model_changed = false;
         let mut agent_changed = false;
         let mut behavior_changed = false;
+        let mut control_applied = false;
         loop {
             let (key, preparation, projection) = {
                 let mut admission = self.state.lock().await;
                 if !matches!(&admission.foreground, ForegroundState::RegularTurn(_)) {
+                    drop(admission);
+                    if control_applied {
+                        self.send_available_commands_update().await;
+                    }
                     return (model_changed, agent_changed, behavior_changed);
                 }
                 let Some(key) = admission
                     .pending_step_controls
                     .next_key_at_boundary(boundary)
                 else {
+                    drop(admission);
+                    if control_applied {
+                        self.send_available_commands_update().await;
+                    }
                     return (model_changed, agent_changed, behavior_changed);
                 };
                 let preparation = admission.pending_step_controls.agent_preparation(key);
@@ -1458,6 +1471,7 @@ impl SessionActor {
                 mut terminal_settlement,
                 fatal_error,
             ) = self.apply_pending_control(control, workspace_binding).await;
+            control_applied = true;
             // The control was atomically claimed under `state` immediately
             // before application. Admission itself does not wait on this gate:
             // a later desired revision is accepted while the durable commit is
@@ -3190,11 +3204,13 @@ mod tests {
                             tool_types::BehaviorAvailabilityDisposition::Available
                         );
                     }
-                    assert_eq!(
-                        last,
-                        Some(serde_json::to_value(expected).unwrap()),
-                        "client must receive released foreground availability"
-                    );
+                    let actual: tool_types::BehaviorAvailability = serde_json::from_value(
+                        last.expect("released foreground availability update"),
+                    )
+                    .unwrap();
+                    assert_eq!(actual.current, expected.current);
+                    assert_eq!(actual.choices, expected.choices);
+                    assert!(actual.revision < expected.revision);
                     for target in ["goal", "workflow", "normal"] {
                         let (tx, rx) = tokio::sync::oneshot::channel();
                         assert!(
@@ -3231,15 +3247,14 @@ mod tests {
                                 });
                             }
                         }
-                        assert_eq!(
-                            last,
-                            Some(
-                                serde_json::to_value(
-                                    actor.behavior_availability_projection().await
-                                )
-                                .unwrap()
-                            )
-                        );
+                        let expected = actor.behavior_availability_projection().await;
+                        let actual: tool_types::BehaviorAvailability = serde_json::from_value(
+                            last.expect("Behavior selection availability update"),
+                        )
+                        .unwrap();
+                        assert_eq!(actual.current, expected.current);
+                        assert_eq!(actual.choices, expected.choices);
+                        assert!(actual.revision < expected.revision);
                     }
                 }
             })

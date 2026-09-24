@@ -318,7 +318,11 @@ impl WorkflowManager {
     ) -> Result<(String, oneshot::Receiver<WorkflowOutcome>), LaunchError> {
         let admission_generation = self.admission_snapshot()?;
         if let Some(run_id) = spec.resume_run_id.as_deref()
-            && self.tracker.lock().get(run_id).is_some_and(|run| run.status.is_resumable())
+            && self
+                .tracker
+                .lock()
+                .get(run_id)
+                .is_some_and(|run| run.status.is_resumable())
             && let Some(active) = self.active.get_mut(run_id)
         {
             // The watcher projects a stopped state before persisting Ended.
@@ -326,11 +330,13 @@ impl WorkflowManager {
             // do not let reaping discard a failed terminal acknowledgment.
             let settled = (&mut active.done).await;
             self.active.remove(run_id);
-            settled.map_err(|_| {
-                LaunchError::Timeline(format!(
-                    "workflow {run_id} terminal watcher stopped before acknowledgement"
-                ))
-            })?.map_err(LaunchError::Timeline)?;
+            settled
+                .map_err(|_| {
+                    LaunchError::Timeline(format!(
+                        "workflow {run_id} terminal watcher stopped before acknowledgement"
+                    ))
+                })?
+                .map_err(LaunchError::Timeline)?;
         }
         self.reap_terminal_runs();
         if self.active.len() >= WORKFLOW_MAX_ACTIVE_RUNS_PER_SESSION {
@@ -518,7 +524,16 @@ impl WorkflowManager {
             .await
         {
             if !resumed {
-                self.rollback_unspawned_run(&run_id);
+                // Only causal validation proves Spawned was never offered to
+                // persistence. A failed/lost ACK may follow a durable append;
+                // a sidecar tombstone would then contradict Timeline recovery.
+                if matches!(error, chat_state::TimelineWriteError::Invalid(_)) {
+                    self.rollback_unspawned_run(&run_id);
+                } else {
+                    return Err(LaunchError::Timeline(format!(
+                        "workflow {run_id} spawn commit is uncertain; reload the session to inspect it: {error}"
+                    )));
+                }
             }
             return Err(LaunchError::Timeline(error.to_string()));
         }
@@ -906,6 +921,8 @@ impl WorkflowManager {
             agent_client_protocol::schema::v1::SessionId::new("test-session"),
             acp_transport::AcpAgentGatewaySender::new(gateway_tx),
             persist_tx,
+            sampler::PreviewEventBudget::default(),
+            Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
         );
         let manager = Arc::new(tokio::sync::Mutex::new(WorkflowManager::new(
@@ -1270,6 +1287,17 @@ fn test_session_directory(
 
 #[cfg(test)]
 fn test_timeline() -> chat_state::ChatStateHandle {
+    test_timeline_with_persistence(
+        Box::new(chat_state::NullTimelinePersistence),
+        CancellationToken::new(),
+    )
+}
+
+#[cfg(test)]
+fn test_timeline_with_persistence(
+    persistence: Box<dyn chat_state::TimelinePersistence>,
+    cancellation: CancellationToken,
+) -> chat_state::ChatStateHandle {
     let config = sampling_types::SamplingConfig {
         base_url: "https://api.example.com".into(),
         model: "test-model".into(),
@@ -1287,9 +1315,9 @@ fn test_timeline() -> chat_state::ChatStateHandle {
     chat_state::ChatStateActor::spawn(
         Vec::new(),
         config,
-        Box::new(chat_state::NullTimelinePersistence),
+        persistence,
         mpsc::unbounded_channel().0,
-        CancellationToken::new(),
+        cancellation,
     )
 }
 
@@ -1368,6 +1396,8 @@ mod tests {
             agent_client_protocol::schema::v1::SessionId::new("test-session"),
             acp_transport::AcpAgentGatewaySender::new(gateway_tx),
             persist_tx,
+            sampler::PreviewEventBudget::default(),
+            Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
         );
         let tracker = Arc::new(parking_lot::Mutex::new(WorkflowTracker::default()));
@@ -1600,6 +1630,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn acknowledged_spawn_with_lost_caller_reply_keeps_recovery_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
+        let (persistence, mut records) =
+            chat_state::MockTimelinePersistence::new_with_manual_timeline_ack();
+        let cancellation = CancellationToken::new();
+        manager.timeline =
+            test_timeline_with_persistence(Box::new(persistence), cancellation.clone());
+        let resolved = resolve_inline(
+            "let meta = #{ name: \"t\", description: \"d\" };\ncomplete(\"done\");".into(),
+        )
+        .unwrap();
+
+        let mut launch = Box::pin(manager.launch(resolved, spec()));
+        let acknowledgement = tokio::select! {
+            result = &mut launch => panic!("launch finished before durable Spawned ACK: {result:?}"),
+            acknowledgement = records.next_timeline_ack() => acknowledgement.unwrap(),
+        };
+        let spawn = records
+            .drain()
+            .into_iter()
+            .find_map(|record| match record {
+                chat_state::PersistenceRecord::Timeline(event)
+                    if matches!(
+                        event.kind,
+                        chat_state::TimelineEventKind::Workflow(
+                            chat_state::WorkflowEvent::Spawned { .. }
+                        )
+                    ) =>
+                {
+                    Some(event)
+                }
+                _ => None,
+            })
+            .expect("Spawned offered to durable writer");
+        let chat_state::TimelineEventKind::Workflow(chat_state::WorkflowEvent::Spawned {
+            run_id,
+            ..
+        }) = &spawn.kind
+        else {
+            unreachable!()
+        };
+        let run_id = run_id.clone();
+
+        acknowledgement.send(Ok(())).unwrap();
+        cancellation.cancel();
+        let error = launch.await.unwrap_err();
+
+        assert!(matches!(error, LaunchError::Timeline(_)));
+        assert!(error.to_string().contains(&run_id));
+        assert!(error.to_string().contains("uncertain"));
+        assert!(manager.store.script_for(&run_id).is_some());
+        assert!(manager.tracker.lock().get(&run_id).is_some());
+        assert!(
+            !dir.path()
+                .join("workflows")
+                .join(&run_id)
+                .join("cleared")
+                .exists()
+        );
+        let replayed = chat_state::Timeline::from_events(vec![spawn]).unwrap();
+        assert!(replayed.workflow_lifecycle(&run_id).is_some());
+    }
+
+    #[tokio::test]
     async fn terminal_manifest_failure_still_closes_timeline_as_interrupted() {
         let dir = tempfile::tempdir().unwrap();
         let (mut manager, _rx, _cancels) =
@@ -1641,6 +1736,7 @@ mod tests {
                 if let PersistenceMsg::WorkflowRunStateAndAck {
                     manifest,
                     respond_to,
+                    ..
                 } = message
                 {
                     if !injected && manifest.state.status == WorkflowRunStatus::Active {
@@ -1662,6 +1758,8 @@ mod tests {
             agent_client_protocol::schema::v1::SessionId::new("scratch-failure-test"),
             acp_transport::AcpAgentGatewaySender::new(gateway_tx),
             persist_tx,
+            sampler::PreviewEventBudget::default(),
+            Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
         );
         let mut manager = WorkflowManager::new(
@@ -1789,8 +1887,11 @@ mod tests {
             let mut barrier = Some((ready_tx, release_rx));
             while let Some(message) = persist_rx.recv().await {
                 if let crate::session::persistence::PersistenceMsg::WorkflowRunStateAndAck {
-                    manifest, respond_to,
-                } = message {
+                    manifest,
+                    respond_to,
+                    ..
+                } = message
+                {
                     if manifest.state.status.is_resumable()
                         && let Some((ready, release)) = barrier.take()
                     {
@@ -1802,12 +1903,27 @@ mod tests {
             }
         });
         let script = "let meta = #{ name: \"t\", description: \"d\" }; await_user(\"user\", \"pause\"); complete(\"done\");";
-        let (run_id, first_outcome) = manager.launch(resolve_inline(script.into()).unwrap(), spec()).await.unwrap();
+        let (run_id, first_outcome) = manager
+            .launch(resolve_inline(script.into()).unwrap(), spec())
+            .await
+            .unwrap();
         ready_rx.await.unwrap();
-        assert!(manager.tracker.lock().get(&run_id).unwrap().status.is_resumable());
-        let resume = manager.launch(resolve_inline(script.into()).unwrap(), LaunchSpec {
-            resume_run_id: Some(run_id), ..spec()
-        });
+        assert!(
+            manager
+                .tracker
+                .lock()
+                .get(&run_id)
+                .unwrap()
+                .status
+                .is_resumable()
+        );
+        let resume = manager.launch(
+            resolve_inline(script.into()).unwrap(),
+            LaunchSpec {
+                resume_run_id: Some(run_id),
+                ..spec()
+            },
+        );
         tokio::pin!(resume);
         tokio::select! {
             result = &mut resume => panic!("resume crossed pending terminal: {:?}", result.err()),
@@ -1815,16 +1931,26 @@ mod tests {
         }
         release_tx.send(()).unwrap();
         let (_, second_outcome) = resume.await.unwrap();
-        assert!(matches!(first_outcome.await.unwrap(), WorkflowOutcome::AwaitingUser { .. }));
-        assert!(matches!(second_outcome.await.unwrap(), WorkflowOutcome::Completed { .. }));
+        assert!(matches!(
+            first_outcome.await.unwrap(),
+            WorkflowOutcome::AwaitingUser { .. }
+        ));
+        assert!(matches!(
+            second_outcome.await.unwrap(),
+            WorkflowOutcome::Completed { .. }
+        ));
     }
 
     #[tokio::test]
     async fn resume_propagates_terminal_ack_failure_without_advancing_epoch() {
         for dropped in [false, true] {
             let (mut manager, _rx) = test_manager(None);
-            let script = "let meta = #{ name: \"t\", description: \"d\" }; await_user(\"user\", \"pause\");";
-            let (run_id, outcome) = manager.launch(resolve_inline(script.into()).unwrap(), spec()).await.unwrap();
+            let script =
+                "let meta = #{ name: \"t\", description: \"d\" }; await_user(\"user\", \"pause\");";
+            let (run_id, outcome) = manager
+                .launch(resolve_inline(script.into()).unwrap(), spec())
+                .await
+                .unwrap();
             outcome.await.unwrap();
             let epoch = manager.tracker.lock().execution_epoch(&run_id);
             let (done_tx, done_rx) = oneshot::channel();
@@ -1834,9 +1960,15 @@ mod tests {
             } else {
                 done_tx.send(Err("terminal disk failure".into())).unwrap();
             }
-            let result = manager.launch(resolve_inline(script.into()).unwrap(), LaunchSpec {
-                resume_run_id: Some(run_id.clone()), ..spec()
-            }).await;
+            let result = manager
+                .launch(
+                    resolve_inline(script.into()).unwrap(),
+                    LaunchSpec {
+                        resume_run_id: Some(run_id.clone()),
+                        ..spec()
+                    },
+                )
+                .await;
             assert!(matches!(result, Err(LaunchError::Timeline(_))));
             assert_eq!(manager.tracker.lock().execution_epoch(&run_id), epoch);
         }

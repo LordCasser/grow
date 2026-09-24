@@ -129,7 +129,7 @@ async fn rewind_with_no_prompts_lists_no_points_and_rejects_execute() {
             let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
             let actor = create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
 
-            let points = actor.get_rewind_points().await;
+            let points = actor.get_rewind_points().await.unwrap();
             assert!(
                 points.rewind_points.is_empty(),
                 "fresh session must expose zero rewind points: {points:?}"
@@ -203,7 +203,14 @@ async fn rewind_to_start_keeps_only_preamble() {
 
             // With prompt_index back at 0 the session behaves like a fresh
             // one: no points, further rewinds rejected.
-            assert!(actor.get_rewind_points().await.rewind_points.is_empty());
+            assert!(
+                actor
+                    .get_rewind_points()
+                    .await
+                    .unwrap()
+                    .rewind_points
+                    .is_empty()
+            );
             let again = actor
                 .handle_rewind(RewindRequest {
                     target_prompt_index: 0,
@@ -311,7 +318,7 @@ async fn rewind_twice_narrows_history_each_time() {
             assert_eq!(actor.chat_state_handle.get_prompt_index().await, 1);
 
             // Picker after two rewinds offers exactly turn 0.
-            let points = actor.get_rewind_points().await;
+            let points = actor.get_rewind_points().await.unwrap();
             let indices: Vec<usize> = points
                 .rewind_points
                 .iter()
@@ -449,20 +456,58 @@ async fn rewind_to_synthetic_auto_wake_turn_cuts_at_the_wake() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn rewind_history_read_failure_preserves_conversation() {
-    tokio::task::LocalSet::new().run_until(async {
-        let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut actor = create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
-        seed_test_timeline(&actor, seed_conversation(true), &["P0", "Background task abc completed", "P2"]).await;
-        let source = tempfile::NamedTempFile::new().unwrap();
-        std::fs::write(source.path(), [0xff, b'\n']).unwrap();
-        actor.file_state_tracker = std::sync::Arc::new(workspace::session::file_state::FileStateTracker::with_lazy_file(source.reopen().unwrap(), source.path().to_path_buf()));
-        let before = actor.chat_state_handle.get_conversation().await.iter().map(|item| item.text_content()).collect::<Vec<_>>();
-        let result = actor.handle_rewind(RewindRequest { target_prompt_index: 2, force: true, mode: RewindMode::ConversationOnly }).await;
-        assert!(result.is_err(), "unreadable rewind history must abort the operation");
-        assert_eq!(actor.chat_state_handle.get_prompt_index().await, 3);
-        let after = actor.chat_state_handle.get_conversation().await.iter().map(|item| item.text_content()).collect::<Vec<_>>();
-        assert_eq!(before, after);
-        assert!(!actor.session_dir.join(crate::session::persistence::REWIND_TRANSACTION_FILE).exists());
-    }).await;
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut actor = create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
+            seed_test_timeline(
+                &actor,
+                seed_conversation(true),
+                &["P0", "Background task abc completed", "P2"],
+            )
+            .await;
+            let source = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(source.path(), [0xff, b'\n']).unwrap();
+            actor.file_state_tracker = std::sync::Arc::new(
+                workspace::session::file_state::FileStateTracker::with_lazy_file(
+                    source.reopen().unwrap(),
+                    source.path().to_path_buf(),
+                ),
+            );
+            let before = actor
+                .chat_state_handle
+                .get_conversation()
+                .await
+                .iter()
+                .map(|item| item.text_content())
+                .collect::<Vec<_>>();
+            let result = actor
+                .handle_rewind(RewindRequest {
+                    target_prompt_index: 2,
+                    force: true,
+                    mode: RewindMode::ConversationOnly,
+                })
+                .await;
+            assert!(
+                result.is_err(),
+                "unreadable rewind history must abort the operation"
+            );
+            assert_eq!(actor.chat_state_handle.get_prompt_index().await, 3);
+            let after = actor
+                .chat_state_handle
+                .get_conversation()
+                .await
+                .iter()
+                .map(|item| item.text_content())
+                .collect::<Vec<_>>();
+            assert_eq!(before, after);
+            assert!(
+                !actor
+                    .session_dir
+                    .join(crate::session::persistence::REWIND_TRANSACTION_FILE)
+                    .exists()
+            );
+        })
+        .await;
 }

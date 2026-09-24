@@ -632,7 +632,8 @@ impl SessionActor {
                 attempt,
             } => {
                 self.finish_sampling_preview(false);
-                *self.sampling_preview.lock() = Some((request_id.as_str().to_owned(), attempt));
+                *self.sampling_preview.lock() =
+                    Some((request_id.as_str().to_owned(), attempt, false));
                 self.send_buffered_grow_update(GrowSessionUpdate::SamplingAttempt {
                     request_id: request_id.as_str().to_owned(),
                     attempt,
@@ -644,8 +645,13 @@ impl SessionActor {
                 request_id,
                 attempt,
             } => {
-                if self.sampling_preview.lock().as_ref()
-                    == Some(&(request_id.as_str().to_owned(), attempt))
+                if self
+                    .sampling_preview
+                    .lock()
+                    .as_ref()
+                    .is_some_and(|(id, ordinal, _)| {
+                        id == request_id.as_str() && *ordinal == attempt
+                    })
                 {
                     self.finish_sampling_preview(false);
                 }
@@ -711,31 +717,41 @@ impl SessionActor {
                 })
                 .await;
             }
-            SamplingEvent::Completed {
+            // Full terminal responses belong to direct Layer-2 stream
+            // consumers; the actor event channel carries RequestCompleted.
+            SamplingEvent::Completed { .. } => {}
+            SamplingEvent::RequestCompleted {
                 request_id,
-                response,
+                usage,
+                item_count,
+                provider_terminal,
+                doom_loop_signals,
                 metrics,
             } => {
-                let usage = response.usage.as_ref();
                 self.events.request_completed(
                     request_id.as_str(),
                     metrics.time_to_first_token_ms,
                     chat_state::RequestUsage {
-                        input_tokens: usage.map(|usage| u64::from(usage.prompt_tokens)),
-                        output_tokens: usage.map(|usage| u64::from(usage.completion_tokens)),
-                        cache_read_tokens: usage.map(|usage| u64::from(usage.cached_prompt_tokens)),
+                        input_tokens: usage.as_ref().map(|usage| u64::from(usage.prompt_tokens)),
+                        output_tokens: usage
+                            .as_ref()
+                            .map(|usage| u64::from(usage.completion_tokens)),
+                        cache_read_tokens: usage
+                            .as_ref()
+                            .map(|usage| u64::from(usage.cached_prompt_tokens)),
                         cache_write_tokens: usage
+                            .as_ref()
                             .map(|usage| u64::from(usage.cache_creation_prompt_tokens)),
                     },
-                    response.items.len(),
+                    item_count,
                     metrics.attempts,
-                    response.provider_terminal.clone(),
+                    provider_terminal,
                 );
                 if let Some(tx) = self.turn_stream_drained.lock().take() {
                     let _ = tx.send(());
                 }
                 if let Some(policy) = self.doom_loop_recovery {
-                    let triggers = policy.confident_triggers(&response.doom_loop_signals);
+                    let triggers = policy.confident_triggers(&doom_loop_signals);
                     if !triggers.is_empty() {
                         let attempts = {
                             let mut tally = self.doom_loop_turn_tally.lock();

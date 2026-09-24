@@ -429,6 +429,44 @@ pub struct AssistantItem {
     /// backends that don't echo it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_effort: Option<crate::ReasoningEffort>,
+    /// Provider-neutral boundaries of Responses output messages in `content`.
+    /// The ranges exclude display separators; native IDs and status stay in
+    /// the native continuation lane.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub response_messages: Vec<AssistantMessageBoundary>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AssistantMessagePhase {
+    Commentary,
+    FinalAnswer,
+}
+
+impl From<rs::MessagePhase> for AssistantMessagePhase {
+    fn from(phase: rs::MessagePhase) -> Self {
+        match phase {
+            rs::MessagePhase::Commentary => Self::Commentary,
+            rs::MessagePhase::FinalAnswer => Self::FinalAnswer,
+        }
+    }
+}
+
+impl From<AssistantMessagePhase> for rs::MessagePhase {
+    fn from(phase: AssistantMessagePhase) -> Self {
+        match phase {
+            AssistantMessagePhase::Commentary => Self::Commentary,
+            AssistantMessagePhase::FinalAnswer => Self::FinalAnswer,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssistantMessageBoundary {
+    pub start: usize,
+    pub end: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub phase: Option<AssistantMessagePhase>,
 }
 
 /// Tool result message
@@ -922,6 +960,7 @@ pub fn redact_projected_image_tool_call(item: &mut ConversationItem, tool_call_i
     call.arguments = Arc::<str>::from(r#"{"source":"[image projected to durable text]"}"#);
     assistant.content =
         Arc::<str>::from("[Image-associated assistant text projected to durable text.]");
+    assistant.response_messages.clear();
     true
 }
 
@@ -1250,7 +1289,9 @@ fn projected_image_reference_tokens(source: &ConversationItem) -> Vec<String> {
     references
 }
 
-fn image_files_envelope_paths(text: &str) -> Vec<String> {
+/// Paths in the managed image-files envelope. Physical Timeline readers use
+/// these references to retain session-owned image asset batches.
+pub fn image_files_envelope_paths(text: &str) -> Vec<String> {
     const OPEN: &str = "<image_files>";
     const CLOSE: &str = "</image_files>";
     let mut remaining = text;
@@ -1834,6 +1875,7 @@ pub fn project_portable_history_with_reasoning(
                         model_id: None,
                         model_fingerprint: None,
                         reasoning_effort: None,
+                        response_messages: assistant.response_messages.clone(),
                     }));
                 }
                 pending_reasoning.clear();
@@ -1889,13 +1931,25 @@ pub fn project_portable_history_with_reasoning(
                 } else {
                     assistant.content.clone()
                 };
-                if !content.is_empty() || !calls.is_empty() {
+                if !content.is_empty()
+                    || !calls.is_empty()
+                    || !assistant.response_messages.is_empty()
+                {
                     projected.push(ConversationItem::Assistant(AssistantItem {
                         content,
                         tool_calls: calls,
                         model_id: None,
                         model_fingerprint: None,
                         reasoning_effort: None,
+                        response_messages: if assistant
+                            .content
+                            .trim_start()
+                            .starts_with(HISTORICAL_TOOL_EXCHANGE_HEADER)
+                        {
+                            Vec::new()
+                        } else {
+                            assistant.response_messages.clone()
+                        },
                     }));
                 }
                 for item in &items[index + 1..next] {
@@ -1939,6 +1993,51 @@ enum RequestSegment {
     Native(NativeContinuationFragment),
 }
 
+/// A native call's neutral mirror belongs to its span. The same ID on an
+/// assistant call outside that span belongs to a distinct exchange and cannot
+/// share one provider correlation key with the native call.
+fn native_tool_id_conflicts_with_neutral_exchange(
+    items: &[ConversationItem],
+    native: &NativeContinuationProjection,
+) -> bool {
+    for span in &native.spans {
+        let native_ids: BTreeSet<&str> = match &span.fragment {
+            NativeContinuationFragment::ChatCompletions(message) => message
+                .tool_calls
+                .iter()
+                .filter_map(|call| call.id.as_deref())
+                .collect(),
+            NativeContinuationFragment::Responses(fragment) => fragment
+                .iter()
+                .filter_map(|item| match item {
+                    rs::InputItem::Item(rs::Item::FunctionCall(call)) => {
+                        Some(call.call_id.as_str())
+                    }
+                    _ => None,
+                })
+                .collect(),
+            NativeContinuationFragment::Messages(fragment) => fragment
+                .iter()
+                .filter_map(|block| match block {
+                    crate::messages::ContentBlock::ToolUse { id, .. } => Some(id.as_str()),
+                    _ => None,
+                })
+                .collect(),
+        };
+        if native_ids.is_empty() {
+            continue;
+        }
+        if items.iter().enumerate().any(|(index, item)| {
+            (index < span.start || index >= span.end)
+                && matches!(item, ConversationItem::Assistant(assistant)
+                    if assistant.tool_calls.iter().any(|call| native_ids.contains(call.id.as_ref())))
+        }) {
+            return true;
+        }
+    }
+    false
+}
+
 fn request_segments(req: &ConversationRequest, backend: ApiBackend) -> Vec<RequestSegment> {
     let Some(native) = &req.native_continuation else {
         return vec![RequestSegment::Items {
@@ -1958,6 +2057,13 @@ fn request_segments(req: &ConversationRequest, backend: ApiBackend) -> Vec<Reque
     let Some(portable_end) = native.portable_prefix_end(&req.items) else {
         return vec![portable_segment(&req.items)];
     };
+
+    // The native bytes cannot be rewritten to distinguish independent calls
+    // with the same ID. Project the whole request portably so the existing
+    // duplicate-call filter removes that ambiguous protocol instead.
+    if native_tool_id_conflicts_with_neutral_exchange(&req.items, native) {
+        return vec![portable_segment(&req.items)];
+    }
 
     for span in &native.spans {
         if span.fragment.backend() != backend {
@@ -2610,6 +2716,7 @@ impl ConversationItem {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            response_messages: Vec::new(),
         })
     }
 
@@ -2625,6 +2732,7 @@ impl ConversationItem {
             model_id: Some(model_id.into()),
             model_fingerprint: None,
             reasoning_effort: None,
+            response_messages: Vec::new(),
         })
     }
 
@@ -2636,6 +2744,7 @@ impl ConversationItem {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            response_messages: Vec::new(),
         })
     }
 
@@ -2817,6 +2926,34 @@ impl UserItem {
 }
 
 impl AssistantItem {
+    /// Return checked message slices, or fall back to flat text if an old or
+    /// transformed record has no valid boundary ledger.
+    fn response_message_slices(&self) -> Option<Vec<(&str, Option<AssistantMessagePhase>)>> {
+        if self.response_messages.is_empty() {
+            return None;
+        }
+        if self.response_messages[0].start != 0 {
+            return None;
+        }
+        let mut previous_end = 0;
+        let mut messages = Vec::with_capacity(self.response_messages.len());
+        for boundary in &self.response_messages {
+            if boundary.start < previous_end || boundary.end < boundary.start {
+                return None;
+            }
+            let separator = self.content.get(previous_end..boundary.start)?;
+            if !separator.is_empty() && separator != "\n" {
+                return None;
+            }
+            messages.push((
+                self.content.get(boundary.start..boundary.end)?,
+                boundary.phase,
+            ));
+            previous_end = boundary.end;
+        }
+        (previous_end == self.content.len()).then_some(messages)
+    }
+
     /// Add a tool call to this assistant message
     pub fn add_tool_call(&mut self, call: ToolCall) {
         self.tool_calls.push(call);
@@ -2934,6 +3071,7 @@ impl From<ChatRequestMessage> for ConversationItem {
                     model_id: None,
                     model_fingerprint: None,
                     reasoning_effort: None,
+                    response_messages: Vec::new(),
                 })
             }
             Role::Tool => {
@@ -3228,6 +3366,7 @@ impl From<ChatResponseMessage> for ConversationItem {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            response_messages: Vec::new(),
         })
     }
 }
@@ -3292,22 +3431,34 @@ pub fn response_to_conversation_items(
 
     let mut items: Vec<ConversationItem> = Vec::with_capacity(response.output.len() + 1);
     let mut content = String::new();
+    let mut response_messages = Vec::new();
     let mut tool_calls: Vec<ToolCall> = Vec::new();
     let mut backend_tool_count: usize = 0;
 
     for item in response.output {
         match item {
             rs::OutputItem::Message(msg) => {
-                // Accumulate output text into the trailing Assistant item;
-                // there is at most one Message per response in practice.
+                // Preserve each output message boundary and phase while the
+                // existing flat content remains the display/Chat projection.
+                let mut message_text = String::new();
                 for content_part in msg.content {
                     if let rs::OutputMessageContent::OutputText(text_content) = content_part {
-                        if !content.is_empty() {
-                            content.push('\n');
+                        if !message_text.is_empty() {
+                            message_text.push('\n');
                         }
-                        content.push_str(&text_content.text);
+                        message_text.push_str(&text_content.text);
                     }
                 }
+                if !content.is_empty() && !message_text.is_empty() {
+                    content.push('\n');
+                }
+                let start = content.len();
+                content.push_str(&message_text);
+                response_messages.push(AssistantMessageBoundary {
+                    start,
+                    end: content.len(),
+                    phase: msg.phase.map(Into::into),
+                });
             }
             rs::OutputItem::FunctionCall(fc) => {
                 // Client-side tool calls aggregate into the trailing
@@ -3361,6 +3512,7 @@ pub fn response_to_conversation_items(
         model_id: Some(model_id),
         model_fingerprint,
         reasoning_effort,
+        response_messages,
     }));
 
     Ok(items)
@@ -3766,8 +3918,19 @@ fn conversation_item_to_input_items(
             // a sibling `ConversationItem::Reasoning(_)` immediately before
             // this item (when applicable) and is emitted by its own arm.
 
-            // Add text content as assistant message if present
-            if !a.content.is_empty() {
+            // An accepted Responses output may contain multiple assistant
+            // messages with different phases. The neutral ledger carries only
+            // their text boundaries, never native output IDs or status.
+            if let Some(messages) = a.response_message_slices() {
+                for (text, phase) in messages {
+                    items.push(rs::InputItem::EasyMessage(rs::EasyInputMessage {
+                        r#type: rs::MessageType::Message,
+                        role: rs::Role::Assistant,
+                        content: rs::EasyInputContent::Text(text.to_owned()),
+                        phase: phase.map(Into::into),
+                    }));
+                }
+            } else if !a.content.is_empty() {
                 items.push(rs::InputItem::EasyMessage(rs::EasyInputMessage {
                     r#type: rs::MessageType::Message,
                     role: rs::Role::Assistant,
@@ -4154,7 +4317,28 @@ pub fn transform_conversation_cwd(
             }
             ConversationItem::Assistant(a) => {
                 if a.content.contains(source_cwd) {
-                    a.content = Arc::<str>::from(a.content.replace(source_cwd, target_cwd));
+                    if let Some(messages) = a.response_message_slices() {
+                        let mut content = String::new();
+                        let mut boundaries = Vec::with_capacity(messages.len());
+                        for (text, phase) in messages {
+                            let rewritten = text.replace(source_cwd, target_cwd);
+                            if !content.is_empty() && !rewritten.is_empty() {
+                                content.push('\n');
+                            }
+                            let start = content.len();
+                            content.push_str(&rewritten);
+                            boundaries.push(AssistantMessageBoundary {
+                                start,
+                                end: content.len(),
+                                phase,
+                            });
+                        }
+                        a.content = Arc::<str>::from(content);
+                        a.response_messages = boundaries;
+                    } else {
+                        a.content = Arc::<str>::from(a.content.replace(source_cwd, target_cwd));
+                        a.response_messages.clear();
+                    }
                 }
                 // Tool call arguments contain file paths that must also be rewritten.
                 // The arguments field is a JSON-encoded string; source_cwd appears as
@@ -4941,6 +5125,7 @@ impl From<crate::messages::MessagesResponse> for ConversationItem {
             model_id: Some(resp.model),
             model_fingerprint: None,
             reasoning_effort: None,
+            response_messages: Vec::new(),
         })
     }
 }
@@ -5819,6 +6004,7 @@ mod tests {
             model_id: Some("grow-3".to_string()),
             model_fingerprint: None,
             reasoning_effort: None,
+            response_messages: Vec::new(),
         };
 
         let item = ConversationItem::Assistant(assistant.clone());
@@ -6207,6 +6393,7 @@ mod tests {
             model_id: Some("grow-3".to_string()),
             model_fingerprint: None,
             reasoning_effort: None,
+            response_messages: Vec::new(),
         });
 
         for item in [reasoning_item, assistant_item] {
@@ -6282,6 +6469,116 @@ mod tests {
             }
             ApiBackend::Messages => serde_json::to_value(build_messages_request(request)).unwrap(),
         }
+    }
+
+    #[test]
+    fn responses_phases_survive_portable_projection_and_tool_pairing() {
+        let response: rs::Response = serde_json::from_value(serde_json::json!({
+            "id": "resp_phased",
+            "created_at": 0,
+            "object": "response",
+            "model": "test-model",
+            "status": "completed",
+            "output": [
+                {"type": "message", "id": "msg_1", "role": "assistant", "status": "completed",
+                 "phase": "commentary", "content": [{"type": "output_text", "text": "working", "annotations": []}]},
+                {"type": "message", "id": "msg_2", "role": "assistant", "status": "completed",
+                 "phase": "final_answer", "content": [{"type": "output_text", "text": "done", "annotations": []}]},
+                {"type": "function_call", "id": "fc_1", "call_id": "call_1",
+                 "name": "lookup", "arguments": "{}", "status": "completed"}
+            ]
+        }))
+        .unwrap();
+        let mut items = response_to_conversation_items(response).unwrap();
+        let ConversationItem::Assistant(assistant) = &items[0] else {
+            panic!("expected one assistant call batch");
+        };
+        assert_eq!(assistant.content.as_ref(), "working\ndone");
+        assert_eq!(
+            assistant.response_message_slices().unwrap(),
+            vec![
+                ("working", Some(AssistantMessagePhase::Commentary)),
+                ("done", Some(AssistantMessagePhase::FinalAnswer)),
+            ]
+        );
+        let durable = serde_json::to_vec(&items).unwrap();
+        items = serde_json::from_slice(&durable).unwrap();
+        items.push(ConversationItem::tool_result("call_1", "found"));
+        let portable = project_portable_history(&items);
+        let ConversationItem::Assistant(portable_assistant) = &portable[0] else {
+            unreachable!();
+        };
+        assert_eq!(portable_assistant.response_messages.len(), 2);
+        let mut request = ConversationRequest::from_items(items).with_model("next-model");
+        request.native_continuation = Some(NativeContinuationProjection {
+            portable_prefix_len: request.items.len(),
+            spans: Vec::new(),
+            portable_reasoning_backend: None,
+        });
+        let responses = portable_wire(&request, ApiBackend::Responses);
+        let input = responses["input"].as_array().unwrap();
+        assert_eq!(input[0]["phase"], "commentary");
+        assert_eq!(input[0]["content"], "working");
+        assert_eq!(input[1]["phase"], "final_answer");
+        assert_eq!(input[1]["content"], "done");
+        assert_eq!(input[2]["type"], "function_call");
+        assert_eq!(input[3]["type"], "function_call_output");
+        assert_wire_tool_pairs(&responses, &["call_1"]);
+        for backend in [ApiBackend::ChatCompletions, ApiBackend::Messages] {
+            let wire = portable_wire(&request, backend);
+            assert!(!wire.to_string().contains("final_answer"));
+            assert!(!wire.to_string().contains("commentary"));
+            assert_wire_tool_pairs(&wire, &["call_1"]);
+        }
+    }
+
+    #[test]
+    fn malformed_responses_boundaries_fall_back_to_flat_text() {
+        let mut item = ConversationItem::assistant("safe text");
+        let ConversationItem::Assistant(assistant) = &mut item else {
+            unreachable!();
+        };
+        assistant.response_messages.push(AssistantMessageBoundary {
+            start: 0,
+            end: assistant.content.len() + 1,
+            phase: Some(AssistantMessagePhase::FinalAnswer),
+        });
+        let request = ConversationRequest::from_items(vec![item]);
+        let wire = portable_wire(&request, ApiBackend::Responses);
+        assert_eq!(wire["input"][0]["content"], "safe text");
+        assert!(wire["input"][0].get("phase").is_none());
+    }
+
+    #[test]
+    fn cwd_rewrite_preserves_response_message_boundaries() {
+        let mut item = ConversationItem::assistant("/old/a\n/old/b");
+        let ConversationItem::Assistant(assistant) = &mut item else {
+            unreachable!();
+        };
+        assistant.response_messages = vec![
+            AssistantMessageBoundary {
+                start: 0,
+                end: 6,
+                phase: Some(AssistantMessagePhase::Commentary),
+            },
+            AssistantMessageBoundary {
+                start: 7,
+                end: 13,
+                phase: Some(AssistantMessagePhase::FinalAnswer),
+            },
+        ];
+        transform_conversation_cwd(std::slice::from_mut(&mut item), "/old", "/workspace");
+        let ConversationItem::Assistant(assistant) = &item else {
+            unreachable!();
+        };
+        assert_eq!(assistant.content.as_ref(), "/workspace/a\n/workspace/b");
+        assert_eq!(
+            assistant.response_message_slices().unwrap(),
+            vec![
+                ("/workspace/a", Some(AssistantMessagePhase::Commentary)),
+                ("/workspace/b", Some(AssistantMessagePhase::FinalAnswer)),
+            ]
+        );
     }
 
     fn assert_wire_tool_pairs(wire: &serde_json::Value, expected: &[&str]) {
@@ -6614,6 +6911,103 @@ mod tests {
         assert_eq!(wire.to_string().matches("native thought").count(), 1);
     }
 
+    fn native_tool_fragment(backend: ApiBackend, id: &str) -> NativeContinuationFragment {
+        match backend {
+            ApiBackend::ChatCompletions => NativeContinuationFragment::ChatCompletions(
+                ChatRequestMessage::assistant_tool_call(
+                    ToolCallRequest::function("read_file", "{}").with_id(id),
+                ),
+            ),
+            ApiBackend::Responses => {
+                NativeContinuationFragment::Responses(vec![rs::InputItem::Item(
+                    rs::Item::FunctionCall(rs::FunctionToolCall {
+                        call_id: id.to_owned(),
+                        name: "read_file".into(),
+                        arguments: "{}".into(),
+                        id: None,
+                        status: None,
+                        namespace: None,
+                    }),
+                )])
+            }
+            ApiBackend::Messages => NativeContinuationFragment::Messages(vec![
+                serde_json::from_value(serde_json::json!({
+                    "type": "tool_use", "id": id, "name": "read_file", "input": {}
+                }))
+                .unwrap(),
+            ]),
+        }
+    }
+
+    #[test]
+    fn cross_segment_duplicate_tool_id_falls_back_to_safe_portable_history() {
+        let call = |id: &str| {
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: id.into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            }])
+        };
+        for backend in [
+            ApiBackend::ChatCompletions,
+            ApiBackend::Responses,
+            ApiBackend::Messages,
+        ] {
+            let mut request = ConversationRequest::from_items(vec![
+                ConversationItem::user("first request"),
+                call("reused_id"),
+                ConversationItem::tool_result("reused_id", "first result"),
+                ConversationItem::user("second request"),
+                call("reused_id"),
+                ConversationItem::tool_result("reused_id", "second result"),
+                ConversationItem::user("continue"),
+            ]);
+            request.native_continuation = Some(NativeContinuationProjection {
+                portable_prefix_len: 4,
+                spans: vec![NativeContinuationSpan {
+                    start: 4,
+                    end: 5,
+                    fragment: native_tool_fragment(backend.clone(), "reused_id"),
+                }],
+                portable_reasoning_backend: None,
+            });
+            let wire = portable_wire(&request, backend);
+            assert_wire_tool_pairs(&wire, &[]);
+            assert!(wire.to_string().contains("continue"));
+        }
+    }
+
+    #[test]
+    fn native_tool_id_with_later_neutral_result_keeps_its_native_span() {
+        let call = ConversationItem::assistant_tool_calls(vec![ToolCall {
+            id: "native_id".into(),
+            name: "read_file".into(),
+            arguments: "{}".into(),
+        }]);
+        for backend in [
+            ApiBackend::ChatCompletions,
+            ApiBackend::Responses,
+            ApiBackend::Messages,
+        ] {
+            let mut request = ConversationRequest::from_items(vec![
+                ConversationItem::user("inspect"),
+                call.clone(),
+                ConversationItem::tool_result("native_id", "found"),
+            ]);
+            request.native_continuation = Some(NativeContinuationProjection {
+                portable_prefix_len: 1,
+                spans: vec![NativeContinuationSpan {
+                    start: 1,
+                    end: 2,
+                    fragment: native_tool_fragment(backend.clone(), "native_id"),
+                }],
+                portable_reasoning_backend: None,
+            });
+            let wire = portable_wire(&request, backend);
+            assert_wire_tool_pairs(&wire, &["native_id"]);
+        }
+    }
+
     #[test]
     fn portable_history_is_allowlisted_for_all_wire_backends() {
         let mut user = ConversationItem::user("inspect both images");
@@ -6632,6 +7026,7 @@ mod tests {
                 model_id: Some("source_model_id".to_owned()),
                 model_fingerprint: Some("source_fingerprint".to_owned()),
                 reasoning_effort: Some(crate::ReasoningEffort::High),
+                response_messages: Vec::new(),
             }),
             ConversationItem::tool_result_with_images(
                 "native_call_id",
@@ -6935,6 +7330,7 @@ mod tests {
                 model_id: Some("source-model".to_owned()),
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
             ConversationItem::tool_result("orphan_source_id", "orphan result"),
         ]);
@@ -6965,6 +7361,7 @@ mod tests {
                 model_id: Some("grow-3".to_string()),
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
             // New user message
             ConversationItem::user("Now what is 3+3?"),
@@ -7032,6 +7429,7 @@ mod tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
         ]);
 
@@ -8004,6 +8402,7 @@ mod tests {
                 model_id: Some("messages-compatible-model".into()),
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
             // Completed tool pair
             ConversationItem::Assistant(AssistantItem {
@@ -8016,6 +8415,7 @@ mod tests {
                 model_id: Some("messages-compatible-model".into()),
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
             ConversationItem::tool_result("call_1", "fn main() {}"),
             ConversationItem::Assistant(AssistantItem {
@@ -8024,6 +8424,7 @@ mod tests {
                 model_id: Some("messages-compatible-model".into()),
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
             // Mid-turn: orphaned tool_use (no result yet)
             ConversationItem::Assistant(AssistantItem {
@@ -8036,6 +8437,7 @@ mod tests {
                 model_id: Some("messages-compatible-model".into()),
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
         ]
     }
@@ -8772,6 +9174,7 @@ mod tests {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            response_messages: Vec::new(),
         })];
 
         transform_conversation_cwd(&mut items, worktree, root);
@@ -8832,6 +9235,7 @@ mod tests {
                 model_id: Some("grow-3".to_string()),
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
         ];
 
@@ -8888,6 +9292,7 @@ mod tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
         ];
 
@@ -8939,6 +9344,7 @@ mod tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
         ];
 
@@ -9047,6 +9453,7 @@ mod tests {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            response_messages: Vec::new(),
         })];
 
         transform_conversation_cwd(&mut items, "/old/path", "/new/path");
@@ -9171,6 +9578,7 @@ mod tests {
                 model_id: Some("test-model".to_string()),
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             })],
             stop_reason: Some(StopReason::Stop),
             usage: None,
@@ -9195,6 +9603,7 @@ mod tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             })],
             stop_reason: Some(StopReason::Stop),
             usage: None,
@@ -9223,6 +9632,7 @@ mod tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             })],
             stop_reason: Some(StopReason::ToolCalls),
             usage: None,
@@ -9441,6 +9851,7 @@ mod tests {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            response_messages: Vec::new(),
         }
         .with_model_id("grow-3");
 
@@ -9515,6 +9926,7 @@ mod tests {
             model_id: None,
             model_fingerprint: None,
             reasoning_effort: None,
+            response_messages: Vec::new(),
         })
     }
 
@@ -10492,6 +10904,7 @@ mod tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
             ConversationItem::tool_result_with_images(
                 "call_1",
@@ -11032,6 +11445,7 @@ mod tests {
                     model_id: None,
                     model_fingerprint: None,
                     reasoning_effort: None,
+                    response_messages: Vec::new(),
                 }),
             ],
             stop_reason: Some(StopReason::Stop),
@@ -11649,6 +12063,7 @@ mod tests {
                 model_id: None,
                 model_fingerprint: None,
                 reasoning_effort: None,
+                response_messages: Vec::new(),
             }),
             ConversationItem::tool_result("call_1", "file contents"),
         ]);

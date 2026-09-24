@@ -25,9 +25,11 @@ use config_types::{BoolFlag, ConfigSource, Resolved, SessionSearchConfig};
 use tokio::sync::{Semaphore, mpsc};
 use tokio::time::Instant;
 
-use super::search_fts::{self, SessionDoc, SessionSearchIndex, SessionSearchRow};
+use super::search_fts::{
+    self, BootstrapClaimResult, SessionDoc, SessionSearchIndex, SessionSearchRow,
+};
 use super::search_recovery;
-use super::{StorageAdapter, TimelineLedgerReader};
+use super::{SESSION_SEARCH_INDEX_FILE, StorageAdapter, TimelineLedgerReader};
 use crate::session::info::Info;
 use crate::session::persistence::Summary;
 use acp_transport::protocol as acp;
@@ -368,7 +370,7 @@ pub fn notify_session_updated(session_id: &str, cwd: &str) {
 /// journal-mode classifier inspects the parent directory, so a caller that
 /// means to write must go through [`search_db_path`] first.
 fn search_db_path_in(root_dir: &Path) -> PathBuf {
-    let path = root_dir.join("sessions").join("session_search.sqlite");
+    let path = root_dir.join("sessions").join(SESSION_SEARCH_INDEX_FILE);
     // Pre-resolve the per-host sibling used on network mounts. Resolution is
     // idempotent, so the index opening the same path again is a no-op.
     sqlite_journal::JournalMode::for_db_path(&path).effective_db_path(&path)
@@ -749,32 +751,38 @@ async fn bootstrap_with_lease_inner(
             return Ok(BootstrapOutcome::Done);
         }
 
-        if claim_bootstrap_lease(&db_path, &token, BOOTSTRAP_LEASE_DURATION).await? {
-            // Only a launch's first claim ignores an existing marker (the
-            // launch owes pruning and skipped retries); everyone else
-            // adopts any completed marker.
-            let first_launch_claim = role == BootstrapRole::Launch && !peer_seen;
-            if !first_launch_claim && has_completed_bootstrap_marker(root_dir).await == Some(true) {
+        let force_reindex_if_completed = role == BootstrapRole::Launch && !peer_seen;
+        match claim_bootstrap_lease(
+            &db_path,
+            &token,
+            BOOTSTRAP_LEASE_DURATION,
+            force_reindex_if_completed,
+        )
+        .await?
+        {
+            BootstrapClaimResult::Claimed => {
+                tracing::info!(
+                    token = %token,
+                    contended = peer_seen,
+                    waited_ms = started.elapsed().as_millis() as u64,
+                    "claimed session search bootstrap lease"
+                );
+                let refresher =
+                    spawn_claim_refresher(db_path.clone(), token.clone(), BOOTSTRAP_LEASE_REFRESH);
+                let result = reindex_all(root_dir, storage, &token, refresher.claim_lost()).await;
+                drop(refresher);
                 release_bootstrap_claim(&db_path, &token).await;
+                return result;
+            }
+            BootstrapClaimResult::AdoptedCompleted => {
                 tracing::info!(
                     waited_ms = started.elapsed().as_millis() as u64,
-                    "adopted a peer's completed session search bootstrap"
+                    "adopted a completed session search bootstrap"
                 );
                 clear_bootstrapping_flag();
                 return Ok(BootstrapOutcome::Done);
             }
-            tracing::info!(
-                token = %token,
-                contended = peer_seen,
-                waited_ms = started.elapsed().as_millis() as u64,
-                "claimed session search bootstrap lease"
-            );
-            let refresher =
-                spawn_claim_refresher(db_path.clone(), token.clone(), BOOTSTRAP_LEASE_REFRESH);
-            let result = reindex_all(root_dir, storage, &token, refresher.claim_lost()).await;
-            drop(refresher);
-            release_bootstrap_claim(&db_path, &token).await;
-            return result;
+            BootstrapClaimResult::Busy => {}
         }
         peer_seen = true;
 
@@ -817,12 +825,19 @@ async fn claim_bootstrap_lease(
     db_path: &Path,
     token: &ClaimToken,
     lease: Duration,
-) -> io::Result<bool> {
+    force_reindex_if_completed: bool,
+) -> io::Result<BootstrapClaimResult> {
     let db_path = db_path.to_path_buf();
     let token = token.as_str().to_string();
     tokio::task::spawn_blocking(move || {
         with_search_index(&db_path, |index| {
-            index.try_claim_bootstrap(chrono::Utc::now().timestamp(), lease, &token)
+            index.try_claim_bootstrap_for_reindex(
+                chrono::Utc::now().timestamp(),
+                lease,
+                &token,
+                META_KEY_LAST_BOOTSTRAP,
+                force_reindex_if_completed,
+            )
         })
     })
     .await
@@ -1084,7 +1099,7 @@ async fn reindex_all(
     progress.bytes_read.store(0, Ordering::Relaxed);
 
     let start = Instant::now();
-    let summaries = storage.list_sessions(None).await?;
+    let summaries = storage.list_sessions_for_search().await?;
     progress
         .total
         .store(summaries.len() as u64, Ordering::Relaxed);
@@ -1129,7 +1144,7 @@ async fn reindex_all(
             // upserts are idempotent, not fenced; stopping just avoids
             // contending with it.
             if claim_lost.load(Ordering::Acquire) {
-                return;
+                return Ok(());
             }
 
             let session_id = summary.info.id.to_string();
@@ -1157,9 +1172,11 @@ async fn reindex_all(
                         &e,
                         "failed to write title-only index row for large session",
                     );
+                    progress.skipped.fetch_add(1, Ordering::Relaxed);
+                    return Err(e);
                 }
                 progress.skipped.fetch_add(1, Ordering::Relaxed);
-                return;
+                return Ok(());
             }
 
             // Wrap with per-session timeout to prevent pipeline stalls.
@@ -1221,24 +1238,37 @@ async fn reindex_all(
                         "failed to index session for search",
                     );
                     progress.skipped.fetch_add(1, Ordering::Relaxed);
-                    return;
+                    return Err(e);
                 }
                 Err(_) => {
                     // Timeout expired — the spawn_blocking task continues to
                     // completion but the pipeline moves on to the next session.
                     log_bootstrap_timeout(&session_id, timeout_dur.as_secs());
                     progress.skipped.fetch_add(1, Ordering::Relaxed);
-                    return;
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("indexing session {session_id} exceeded its timeout"),
+                    ));
                 }
             }
             progress.indexed.fetch_add(1, Ordering::Relaxed);
+            Ok(())
         });
     }
 
     // Drain the JoinSet — wait for all tasks to complete
+    let mut failed_tasks = 0usize;
     while let Some(result) = join_set.join_next().await {
-        if let Err(e) = result {
-            tracing::warn!(error = %e, "session indexing task panicked");
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                failed_tasks += 1;
+                tracing::debug!(error = %error, "session indexing task failed");
+            }
+            Err(error) => {
+                failed_tasks += 1;
+                tracing::warn!(error = %error, "session indexing task panicked");
+            }
         }
     }
 
@@ -1252,6 +1282,12 @@ async fn reindex_all(
         } else {
             BootstrapOutcome::Done
         });
+    }
+
+    if failed_tasks > 0 {
+        return Err(io::Error::other(format!(
+            "session search bootstrap had {failed_tasks} failed indexing task(s)"
+        )));
     }
 
     // Prune sessions deleted on disk. Fenced: `expected_ids` is a startup
@@ -1620,6 +1656,7 @@ mod tests {
                     model_id: Some("model".into()),
                     model_fingerprint: None,
                     reasoning_effort: None,
+                    response_messages: Vec::new(),
                 }),
                 chat_state::MessageCause::Assistant,
             )
@@ -1970,6 +2007,209 @@ mod tests {
             has_completed_bootstrap_marker(root).await,
             Some(true),
             "recheck on a marker-less index must re-run the bootstrap, which rewrites the marker"
+        );
+    }
+
+    fn physical_session_dir(root: &Path, info: &Info) -> PathBuf {
+        root.join("sessions")
+            .join(crate::util::grow_home::encode_cwd_dirname(&info.cwd))
+            .join(info.id.to_string())
+    }
+
+    fn encode_timeline(timeline: &Timeline) -> Vec<u8> {
+        use std::io::Write as _;
+
+        let mut bytes = Vec::new();
+        for event in timeline.events() {
+            serde_json::to_writer(&mut bytes, event).unwrap();
+            bytes.write_all(b"\n").unwrap();
+        }
+        bytes
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn invalid_summary_preserves_index_and_recheck_recovers() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.into());
+        let info = Info {
+            id: acp::SessionId::new("invalid-summary-bootstrap"),
+            cwd: "/bootstrap-test".into(),
+        };
+        let summary = storage
+            .init_session(&info, crate::agent::models::ModelId::new("test"))
+            .await
+            .unwrap();
+        let db_path = search_db_path(root);
+        let mut indexed_summary = summary.clone();
+        indexed_summary.title = Some("keptsummarysentinel".into());
+        let existing_doc = build_session_doc(&indexed_summary, "old indexed content".into());
+        with_search_index(&db_path, |index| index.upsert_doc(&existing_doc)).unwrap();
+        write_last_bootstrap_at(&db_path).unwrap();
+
+        let discovered = storage
+            .list_sessions_for_search()
+            .await
+            .expect("the index database beside a valid cwd is not a session candidate");
+        assert_eq!(discovered.len(), 1);
+
+        let summary_path = physical_session_dir(root, &info).join("summary.json");
+        let valid_summary = std::fs::read(&summary_path).unwrap();
+        std::fs::remove_file(&summary_path).unwrap();
+
+        assert!(storage.list_sessions(None).await.unwrap().is_empty());
+        assert!(storage.list_sessions_for_search().await.is_err());
+        let error = bootstrap_with_lease(root, &storage, BootstrapRole::Launch)
+            .await
+            .expect_err("a missing summary in an opened session directory must fail bootstrap");
+        assert_eq!(has_completed_bootstrap_marker(root).await, Some(false));
+        let preserved = with_search_index(&db_path, |index| {
+            index.query("keptsummarysentinel", None, 10, 0, false)
+        })
+        .unwrap();
+        assert_eq!(
+            preserved.results.len(),
+            1,
+            "failed discovery cannot prune the old row: {error}"
+        );
+
+        std::fs::write(&summary_path, b"{invalid summary").unwrap();
+        let error = bootstrap_with_lease(root, &storage, BootstrapRole::Launch)
+            .await
+            .expect_err("an undecodable summary must fail bootstrap");
+        assert_eq!(has_completed_bootstrap_marker(root).await, Some(false));
+        assert_eq!(
+            with_search_index(&db_path, |index| index.query(
+                "keptsummarysentinel",
+                None,
+                10,
+                0,
+                false
+            ))
+            .unwrap()
+            .results
+            .len(),
+            1,
+            "invalid summary discovery cannot prune the old row: {error}"
+        );
+
+        std::fs::write(&summary_path, valid_summary).unwrap();
+        let mut pending = HashMap::new();
+        handle_job(
+            root,
+            &storage,
+            &mut pending,
+            SearchIndexJob::RecheckBootstrap,
+            Duration::from_millis(1),
+        )
+        .await;
+        assert_eq!(has_completed_bootstrap_marker(root).await, Some(true));
+        assert!(
+            with_search_index(&db_path, |index| index.all_indexed_session_ids())
+                .unwrap()
+                .contains(&info.id.to_string())
+        );
+    }
+
+    #[serial_test::serial]
+    #[tokio::test]
+    async fn timeline_failure_preserves_row_and_recheck_indexes_repaired_content() {
+        use std::io::Write as _;
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let root = tmp.path();
+        let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.into());
+        let info = Info {
+            id: acp::SessionId::new("timeline-failure-bootstrap"),
+            cwd: "/bootstrap-test".into(),
+        };
+        storage
+            .init_session(&info, crate::agent::models::ModelId::new("test"))
+            .await
+            .unwrap();
+
+        let mut initial = Timeline::default();
+        record_search_turn(
+            &mut initial,
+            1,
+            0,
+            "oldtimelineword",
+            "old timeline answer",
+            vec![],
+        );
+        for event in initial.events() {
+            storage
+                .append_timeline_event_durable(&info, event)
+                .await
+                .unwrap();
+        }
+        let timeline_path = physical_session_dir(root, &info).join("timeline.jsonl");
+        let repaired_timeline = {
+            let mut timeline = Timeline::default();
+            record_search_turn(
+                &mut timeline,
+                1,
+                0,
+                "newtimelineword",
+                "repaired timeline answer",
+                vec![],
+            );
+            encode_timeline(&timeline)
+        };
+        let db_path = search_db_path(root);
+        let outcome = bootstrap_with_lease(root, &storage, BootstrapRole::Launch)
+            .await
+            .unwrap();
+        assert_eq!(outcome, BootstrapOutcome::Done);
+        assert_eq!(has_completed_bootstrap_marker(root).await, Some(true));
+
+        std::fs::write(&timeline_path, b"{invalid timeline\n").unwrap();
+        let error = bootstrap_with_lease(root, &storage, BootstrapRole::Launch)
+            .await
+            .expect_err("a failed required Timeline fold must fail bootstrap");
+        assert_eq!(has_completed_bootstrap_marker(root).await, Some(false));
+        let preserved = with_search_index(&db_path, |index| {
+            index.query("oldtimelineword", None, 10, 0, false)
+        })
+        .unwrap();
+        assert_eq!(
+            preserved.results.len(),
+            1,
+            "failed fold cannot prune the old row: {error}"
+        );
+
+        std::fs::write(&timeline_path, repaired_timeline).unwrap();
+        let mut pending = HashMap::new();
+        handle_job(
+            root,
+            &storage,
+            &mut pending,
+            SearchIndexJob::RecheckBootstrap,
+            Duration::from_millis(1),
+        )
+        .await;
+        assert_eq!(has_completed_bootstrap_marker(root).await, Some(true));
+        let results = with_search_index(&db_path, |index| {
+            index.query("newtimelineword", None, 10, 0, false)
+        })
+        .unwrap();
+        assert_eq!(
+            results.results.len(),
+            1,
+            "recheck must index the repaired Timeline"
+        );
+        assert!(
+            with_search_index(&db_path, |index| index.query(
+                "oldtimelineword",
+                None,
+                10,
+                0,
+                false
+            ))
+            .unwrap()
+            .results
+            .is_empty()
         );
     }
 

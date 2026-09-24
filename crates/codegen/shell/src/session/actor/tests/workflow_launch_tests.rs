@@ -131,6 +131,8 @@ async fn saved_workflow_dynamic_command_with_agent_preflight_creates_run() {
                 agent_client_protocol::schema::v1::SessionId::new("workflow-launch-test"),
                 acp_transport::AcpAgentGatewaySender::new(workflow_gateway_tx),
                 workflow_persistence_tx,
+                sampler::PreviewEventBudget::default(),
+                std::sync::Arc::new(parking_lot::Mutex::new(None)),
                 store.clone(),
             );
             let manager = WorkflowManager::new(

@@ -265,7 +265,7 @@ async fn run_file_counts_scenario() {
         .add_before_snapshot_for_prompt(1, Path::new("/tmp/c.rs"), cwd, Some("c".into()))
         .await;
 
-    let counts = actor.rewind_file_counts().await;
+    let counts = actor.rewind_file_counts().await.unwrap();
     assert_eq!(counts.get(&0).copied(), Some(2));
     assert_eq!(counts.get(&1).copied(), Some(1));
     assert_eq!(counts.get(&2).copied(), None);
@@ -335,7 +335,15 @@ async fn rewind_persistence_failure_rolls_back_files_and_keeps_tracker() {
                 actor.tool_context.fs.read_to_string(&path).await.unwrap(),
                 "after"
             );
-            assert_eq!(actor.file_state_tracker.get_rewind_points().await.unwrap().len(), 1);
+            assert_eq!(
+                actor
+                    .file_state_tracker
+                    .get_rewind_points()
+                    .await
+                    .unwrap()
+                    .len(),
+                1
+            );
         })
         .await;
 }
@@ -405,7 +413,8 @@ async fn pending_rewind_transaction_rolls_forward_before_session_use() {
                 actor
                     .file_state_tracker
                     .get_rewind_points()
-                    .await.unwrap()
+                    .await
+                    .unwrap()
                     .is_empty()
             );
         })

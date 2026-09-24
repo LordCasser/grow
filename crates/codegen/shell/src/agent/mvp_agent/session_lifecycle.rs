@@ -482,9 +482,7 @@ impl MvpAgent {
     /// The sweep body is wrapped in `catch_unwind` so a single panicking sweep
     /// can never terminate the loop (which would silently disable reaping for
     /// the rest of the process). The task holds a `LocalRef` (raw pointer) to
-    /// `self` for the lifetime of the `LocalSet`; this is sound because the
-    /// agent owns the `LocalSet` and outlives it (same contract as
-    /// `start_subagent_coordinator`), and `LocalRef` is `!Send`.
+    /// `self` and is aborted by the agent owner before its fields are dropped.
     pub(super) fn ensure_session_supervisor(&self) {
         if self.supervisor_started.replace(true) {
             return;
@@ -493,7 +491,7 @@ impl MvpAgent {
         self.supervisor_spawn_count
             .set(self.supervisor_spawn_count.get() + 1);
         let agent_ref = LocalRef::new(self);
-        tokio::task::spawn_local(async move {
+        self.spawn_owned_local(async move {
             loop {
                 tokio::time::sleep(SESSION_SUPERVISOR_TICK).await;
                 let result = futures::FutureExt::catch_unwind(std::panic::AssertUnwindSafe(

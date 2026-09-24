@@ -783,6 +783,10 @@ pub enum SessionUpdate {
         /// `false` for an explicit `/recap`.
         #[serde(default)]
         auto: bool,
+        /// Pager-owned away period for live automatic results. Historical
+        /// records and manual recaps have no such identity.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        away_period_id: Option<uuid::Uuid>,
     },
     /// A manual `/recap` produced no recap — no assistant turns yet, a failed
     /// prepare/model call, or an empty summary. The pager shows a loading
@@ -876,16 +880,16 @@ pub enum SessionUpdate {
         access_kind: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         access_summary: Option<String>,
-        /// Full unredacted request detail for a live UI notification. The
-        /// permission audit bridge clears this field in the durable copy.
+        /// Legacy optional field. Producers clear it; Pager redacts legacy
+        /// replayed values before display.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         access_detail: Option<String>,
         outcome: SubagentPermissionOutcome,
         source: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
-        /// Full classifier explanation for the live detail modal. Never
-        /// persisted by the permission audit bridge.
+        /// Legacy optional field. Producers clear it; Pager redacts legacy
+        /// replayed values before display.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         classifier_reason: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1292,6 +1296,22 @@ pub struct DiffContent {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_recap_notification_preserves_away_period_identity() {
+        let away_period_id = uuid::Uuid::new_v4();
+        let update = SessionUpdate::SessionRecap {
+            summary: "Current state".into(),
+            auto: true,
+            away_period_id: Some(away_period_id),
+        };
+        let json = serde_json::to_value(&update).unwrap();
+        assert_eq!(json["away_period_id"], away_period_id.to_string());
+        assert!(matches!(
+            serde_json::from_value::<SessionUpdate>(json).unwrap(),
+            SessionUpdate::SessionRecap { auto: true, away_period_id: Some(id), .. } if id == away_period_id
+        ));
+    }
 
     #[test]
     fn subagent_progress_serializes_snake_case_tag() {

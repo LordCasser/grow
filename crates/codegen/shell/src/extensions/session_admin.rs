@@ -55,8 +55,33 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "grow/commands/list" => handle_commands_list(agent, args).await,
         "grow/commands/execute" => handle_command_execute(agent, args).await,
         "grow/queue/prompt_status" => handle_prompt_status(agent, args).await,
+        "grow/queue/control" => handle_queue_control(agent, args).await,
         _ => Err(acp::Error::method_not_found()),
     }
+}
+
+async fn handle_queue_control(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    let request: crate::session::prompt_queue::QueueControlRequest = parse_params(args)?;
+    if request.id.is_empty() {
+        return Err(acp::Error::invalid_params().data("queue id must not be empty"));
+    }
+    let session_id = acp::SessionId::new(Arc::from(request.session_id.as_str()));
+    let Some(handle) = agent.session_handle_waiting_for_load(&session_id).await else {
+        return Err(acp::Error::invalid_request()
+            .data(format!("unknown session id: {}", request.session_id)));
+    };
+    let (respond_to, response) = tokio::sync::oneshot::channel();
+    handle
+        .cmd_tx
+        .send(SessionCommand::QueueControl {
+            request,
+            respond_to,
+        })
+        .map_err(|_| acp::Error::internal_error().data("session actor unavailable"))?;
+    let result = response
+        .await
+        .map_err(|_| acp::Error::internal_error().data("session actor dropped queue control"))?;
+    to_raw_response(&result)
 }
 
 async fn handle_prompt_status(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
@@ -608,54 +633,58 @@ async fn handle_commands_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRe
         )));
     }
 
-    // For a given cwd, compute the plugin registry the same way a session would
-    // at spawn time (via build_for_cwd) and the same way reload_plugins_impl does
-    // (ancestor project config walk). This is required so
-    // that `grow/commands/list` (the pull used by embedding clients after session
-    // start) returns plugin-provided slash commands for the target cwd.
-    //
-    // The shared snapshot is only populated at agent boot (using process CWD)
-    // and by explicit reloads. In client<->container (and SSH) setups the agent's
-    // launch CWD is unrelated to the user's chosen workspace dir, so relying on
-    // snapshot() alone meant the post-start pull returned no project plugin
-    // skills until the user manually reloaded.
-    let plugin_reg = if let Some(cwd_str) = &req.cwd {
-        let cwd = Path::new(cwd_str);
+    // Pre-session command listing scans plugins, skills, and workflows. Keep
+    // the entire composition in the shared bounded worker: moving only one of
+    // those scans would still leave synchronous filesystem work on this async
+    // request path.
+    let cwd = req.cwd;
+    let kind = req.kind;
+    let remote_settings = agent.cfg.borrow().remote_settings.clone();
+    let plugin_registry = agent.plugin_registry_handle().clone();
+    let runtime = tokio::runtime::Handle::current();
+    let response = super::skills::run_bounded_discovery(
+        super::skills::DISCOVERY_SLOTS.clone(),
+        super::skills::DISCOVERY_TIMEOUT,
+        "commands/list discovery",
+        move || {
+            runtime.block_on(async move {
+                // For a given cwd, compute the plugin registry the same way a
+                // session does at spawn time. Trust must be recorded before
+                // effective project config is read; that config gates project
+                // plugin paths on the recorded verdict.
+                let plugin_reg = if let Some(cwd_str) = &cwd {
+                    let cwd_path = Path::new(cwd_str);
+                    let project_trusted = crate::agent::folder_trust::resolve_and_record(
+                        cwd_path,
+                        remote_settings.as_ref(),
+                        false,
+                    );
+                    let disk_cfg = crate::config::resolve_effective_plugins_config(cwd_path)
+                        .to_discovery_config();
+                    // Read-only discovery: do not refresh local plugin installs.
+                    plugin_registry.build_for_cwd(cwd_path, &disk_cfg, &[], project_trusted)
+                } else {
+                    // No cwd: retain the boot snapshot; skill and workflow
+                    // discovery below still runs inside this worker.
+                    plugin_registry.snapshot()
+                };
 
-        // Folder-trust gates repo-local project plugins (hooks/MCP). Resolve and
-        // record the verdict for this cwd (honoring the real remote) BEFORE the
-        // plugins-config read below: that read gates its project-paths merge on
-        // the recorded verdict, and a cold cwd (client-supplied, no session
-        // resolve yet) must not first take the gate's remote-less backstop —
-        // that would record a kill-switch-blind deny no later resolve can lift.
-        let remote_settings = agent.cfg.borrow().remote_settings.clone();
-        let project_trusted =
-            crate::agent::folder_trust::resolve_and_record(cwd, remote_settings.as_ref(), false);
-
-        // Effective [plugins] config (global + ancestor project configs),
-        // shared with reload_plugins_impl and the eager
-        // fan-out so the menu agrees with each session's registry for this cwd.
-        let disk_cfg = crate::config::resolve_effective_plugins_config(cwd).to_discovery_config();
-
-        // Fresh discovery for *this* cwd (includes .grow/plugins under it, plus
-        // the cli --plugin-dir dirs). Does not mutate the shared snapshot.
-        agent
-            .plugin_registry_handle()
-            .build_for_cwd(cwd, &disk_cfg, &[], project_trusted)
-    } else {
-        // No cwd: global/user skills only (pre-session case). Use the boot snapshot.
-        agent.plugin_registry_handle().snapshot()
-    };
-
-    let response = crate::session::slash_commands::list_commands(
-        req.cwd.as_deref(),
-        &skills_config,
-        plugin_reg.as_deref(),
-        availability,
-        false,
-        req.kind.as_deref(),
+                crate::session::slash_commands::list_commands(
+                    cwd.as_deref(),
+                    &skills_config,
+                    plugin_reg.as_deref(),
+                    availability,
+                    false,
+                    kind.as_deref(),
+                )
+                .await
+            })
+        },
     )
-    .await?;
+    .await
+    .map_err(|error| {
+        acp::Error::internal_error().data(format!("commands/list discovery failed: {error}"))
+    })??;
     Ok(acp::ExtResponse::new(Arc::from(
         serde_json::value::to_raw_value(&response)?,
     )))

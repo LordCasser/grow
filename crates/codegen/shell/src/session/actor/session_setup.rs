@@ -184,9 +184,6 @@ impl SessionActor {
         let behavior_availability = self.behavior_availability_projection().await;
         let (_, workflows, workflow_diagnostics) = self.named_workflow_snapshot();
         let commands = slash_commands::available_commands(&skills, availability, &workflows);
-        if commands.is_empty() {
-            return;
-        }
         let mut meta = slash_commands::build_tools_meta(&tool_names, &behavior_availability);
         meta.insert(
             "grow/workflowDefinitions".into(),
@@ -219,6 +216,24 @@ impl SessionActor {
         )
         .await;
     }
+
+    /// Refresh Behavior availability after idle arbitration without holding
+    /// the actor admission mutex across capability reads or notification
+    /// delivery. A concurrent foreground admission is reflected by the
+    /// projection itself; callers do not publish an idle snapshot based on a
+    /// stale pre-await check.
+    pub(super) async fn send_available_commands_update_if_idle(&self) -> bool {
+        let idle = {
+            let admission = self.state.lock().await;
+            admission.foreground.is_idle() && admission.termination.is_open()
+        };
+        if !idle {
+            return false;
+        }
+        self.send_available_commands_update().await;
+        true
+    }
+
     /// Build the wrapped system-reminder carrier for a skill update.
     ///
     /// Returns `None` when the update has no reminder body. Tag selection is

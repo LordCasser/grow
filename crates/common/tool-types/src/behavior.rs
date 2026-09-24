@@ -46,6 +46,10 @@ pub enum BehaviorAvailabilityDisposition {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BehaviorAvailability {
+    /// Shell-local ordering for availability projections. Clients retain the
+    /// newest revision so a late asynchronous build cannot roll their view back.
+    #[serde(default)]
+    pub revision: u64,
     pub current: BehaviorId,
     pub choices: Vec<BehaviorAvailabilityEntry>,
 }

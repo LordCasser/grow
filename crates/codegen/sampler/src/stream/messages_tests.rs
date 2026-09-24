@@ -140,9 +140,11 @@ fn assert_incomplete_stream_failure(events: &[SamplingEvent]) -> &SamplingErrorI
     );
     assert!(error.is_retryable);
     assert_eq!(error.backend, Some(sampling_types::ApiBackend::Messages));
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, SamplingEvent::Completed { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SamplingEvent::Completed { .. }))
+    );
     error
 }
 
@@ -155,9 +157,11 @@ fn assert_invalid_tool_arguments_failure(events: &[SamplingEvent]) -> &SamplingE
         crate::events::SamplingErrorKind::InvalidToolArguments
     );
     assert!(error.is_retryable);
-    assert!(!events
-        .iter()
-        .any(|event| matches!(event, SamplingEvent::Completed { .. })));
+    assert!(
+        !events
+            .iter()
+            .any(|event| matches!(event, SamplingEvent::Completed { .. }))
+    );
     error
 }
 
@@ -279,9 +283,11 @@ async fn malformed_lifecycles_fail_without_completed_items() {
         };
         assert_eq!(error.kind, expected_kind, "case {index}");
         assert_eq!(error.is_retryable, expected_retryable, "case {index}");
-        assert!(!events
-            .iter()
-            .any(|event| matches!(event, SamplingEvent::Completed { .. })));
+        assert!(
+            !events
+                .iter()
+                .any(|event| matches!(event, SamplingEvent::Completed { .. }))
+        );
         assert!(
             error.usage.is_none(),
             "nonterminal usage cannot be called final, case {index}"
@@ -375,10 +381,7 @@ async fn tool_json_validation_is_atomic_and_preserves_initial_objects() {
                 crate::events::SamplingErrorKind::Serialization => assert_protocol_failure(&events),
                 expected => panic!("unexpected expected kind {expected:?}"),
             };
-            assert_eq!(
-                error.usage.as_ref().unwrap().completion_tokens,
-                5
-            );
+            assert_eq!(error.usage.as_ref().unwrap().completion_tokens, 5);
         }
     }
 }

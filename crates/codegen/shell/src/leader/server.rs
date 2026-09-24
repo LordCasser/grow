@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -42,6 +43,10 @@ const ID_NAMESPACE_SEP: char = '|';
 /// transcript is preserved by the client's eventId dedup; only the ordering
 /// nicety is lost in this degenerate case).
 const MAX_BUFFERED_LIVE_PER_LOAD: usize = 4096;
+const CANDIDATE_MEMORY_BYTES: usize = 8 * 1024 * 1024;
+const MAX_CANDIDATE_RECORD_BYTES: usize = 64 * 1024 * 1024;
+const MAX_CANDIDATE_SPOOL_BYTES: usize = 512 * 1024 * 1024;
+const MAX_CANDIDATE_SPOOL_RECORDS: usize = 1_000_000;
 enum ServerEvent {
     Disconnected(ClientId),
     Registered(ClientId, ClientMode, ClientCapabilities, String),
@@ -288,30 +293,111 @@ fn sampling_attempt_signal(json: &serde_json::Value) -> Option<SamplingAttemptSi
     })
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct SamplingCandidate {
-    /// The one live candidate for a session. Once a terminal boundary arrives
-    /// this vector is cleared; the key is retained only as a bounded terminal
+    /// The one live candidate for a session. The key remains as a terminal
     /// watermark until the next Started boundary replaces it.
     key: Option<SamplingCandidateKey>,
-    payloads: Vec<SamplingBufferedPayload>,
+    payloads: CandidateSpool,
     terminal: Option<SamplingAttemptBoundary>,
     buffer_unknown: bool,
+    failed: bool,
 }
 
 #[derive(Debug)]
-struct SamplingBufferedPayload {
-    payload: Arc<str>,
-    candidate: bool,
+struct CandidateSpool {
+    file: tempfile::SpooledTempFile,
+    bytes: usize,
+    records: usize,
+}
+
+impl CandidateSpool {
+    fn new(directory: &Path) -> Self {
+        Self {
+            file: tempfile::spooled_tempfile_in(CANDIDATE_MEMORY_BYTES, directory),
+            bytes: 0,
+            records: 0,
+        }
+    }
+
+    fn push(&mut self, payload: &str) -> std::io::Result<()> {
+        if payload.len() > MAX_CANDIDATE_RECORD_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "candidate record exceeds byte budget",
+            ));
+        }
+        let length = u32::try_from(payload.len()).map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "candidate record too large",
+            )
+        })?;
+        let frame_bytes = payload.len().checked_add(4).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "candidate size overflow")
+        })?;
+        if self.records >= MAX_CANDIDATE_SPOOL_RECORDS
+            || frame_bytes > MAX_CANDIDATE_SPOOL_BYTES.saturating_sub(self.bytes)
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "candidate spool budget exceeded",
+            ));
+        }
+        self.file.write_all(&length.to_be_bytes())?;
+        self.file.write_all(payload.as_bytes())?;
+        self.bytes += frame_bytes;
+        self.records += 1;
+        Ok(())
+    }
+
+    fn for_each(&mut self, mut publish: impl FnMut(Arc<str>)) -> std::io::Result<()> {
+        self.file.seek(SeekFrom::Start(0))?;
+        for _ in 0..self.records {
+            let mut length = [0u8; 4];
+            self.file.read_exact(&mut length)?;
+            let length = u32::from_be_bytes(length) as usize;
+            if length > MAX_CANDIDATE_RECORD_BYTES {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "candidate spool record exceeds budget",
+                ));
+            }
+            let mut payload = vec![0u8; length];
+            self.file.read_exact(&mut payload)?;
+            let payload = String::from_utf8(payload)
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            publish(Arc::from(payload));
+        }
+        Ok(())
+    }
+}
+
+impl SamplingCandidate {
+    fn new(directory: &Path) -> Self {
+        Self {
+            key: None,
+            payloads: CandidateSpool::new(directory),
+            terminal: None,
+            buffer_unknown: false,
+            failed: false,
+        }
+    }
+
+    fn fail(&mut self, directory: &Path, error: std::io::Error) {
+        error!(error = %error, "Leader candidate spool failed; awaiting terminal boundary for canonical resync");
+        self.payloads = CandidateSpool::new(directory);
+        self.failed = true;
+    }
 }
 
 /// Deliver temporarily held session payloads to clients that cannot render
 /// provisional sampling lifecycle events. This is called at a candidate
 /// boundary; late subscribers rely on durable session/load replay and are not
 /// backfilled from this transient buffer.
-fn fanout_sampling_payloads(
+fn fanout_sampling_payload(
     key: &SamplingCandidateKey,
-    payloads: &[Arc<str>],
+    payload: Arc<str>,
     clients: &HashMap<ClientId, ClientState>,
     session_subscribers: &HashMap<String, HashSet<ClientId>>,
     child_sessions: &HashMap<String, HashSet<String>>,
@@ -335,18 +421,94 @@ fn fanout_sampling_payloads(
                         .any(|descendant| descendant == &key.session_id)))
             .then(|| (*cid, root.clone()))
         });
-        let mut payloads = payloads.iter().cloned();
         if let Some(load_key) = load_key {
             let buffer = load_live_buffer.entry(load_key).or_default();
-            buffer.extend(payloads.by_ref().map(|payload| {
+            if buffer.len() < MAX_BUFFERED_LIVE_PER_LOAD {
                 let seq = serde_json::from_str::<serde_json::Value>(&payload)
                     .ok()
                     .and_then(|json| event_seq_of(&json));
-                (payload, seq)
-            }));
-        } else {
-            for payload in payloads {
-                let _ = client.tx.try_send(ClientOutbound::Acp(payload));
+                buffer.push((payload.clone(), seq));
+                continue;
+            }
+        }
+        let _ = client.tx.try_send(ClientOutbound::Acp(payload.clone()));
+    }
+}
+
+fn resync_payload(session_id: &str) -> Arc<str> {
+    serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": "grow/leader/resync_required",
+        "params": { "sessionId": session_id },
+    })
+    .to_string()
+    .into()
+}
+
+fn load_covers_session(
+    client_id: ClientId,
+    session_id: &str,
+    load_live_buffer: &HashMap<(ClientId, String), Vec<BufferedLive>>,
+    child_sessions: &HashMap<String, HashSet<String>>,
+) -> bool {
+    load_live_buffer.keys().any(|(loading_client, root)| {
+        *loading_client == client_id
+            && (root == session_id
+                || live_descendant_sessions(root, child_sessions)
+                    .iter()
+                    .any(|descendant| descendant == session_id))
+    })
+}
+
+fn send_resync_or_defer(
+    client_id: ClientId,
+    session_id: &str,
+    clients: &HashMap<ClientId, ClientState>,
+    load_live_buffer: &HashMap<(ClientId, String), Vec<BufferedLive>>,
+    child_sessions: &HashMap<String, HashSet<String>>,
+    pending_resync: &mut HashSet<(ClientId, String)>,
+) {
+    if load_covers_session(client_id, session_id, load_live_buffer, child_sessions) {
+        pending_resync.insert((client_id, session_id.to_owned()));
+    } else if let Some(client) = clients.get(&client_id) {
+        match client
+            .tx
+            .try_send(ClientOutbound::Acp(resync_payload(session_id)))
+        {
+            Ok(true) => {}
+            Ok(false) => warn!(
+                client_id = client_id.0,
+                session_id, "Resync notification channel full"
+            ),
+            Err(error) => {
+                warn!(client_id = client_id.0, session_id, %error, "Resync notification channel closed")
+            }
+        }
+    }
+}
+
+fn resync_non_retracting_subscribers(
+    session_id: &str,
+    clients: &HashMap<ClientId, ClientState>,
+    session_subscribers: &HashMap<String, HashSet<ClientId>>,
+    load_live_buffer: &HashMap<(ClientId, String), Vec<BufferedLive>>,
+    child_sessions: &HashMap<String, HashSet<String>>,
+    pending_resync: &mut HashSet<(ClientId, String)>,
+) {
+    if let Some(subscribers) = session_subscribers.get(session_id) {
+        for &client_id in subscribers {
+            if clients
+                .get(&client_id)
+                .is_some_and(|client| !client.capabilities.sampling_attempt_lifecycle)
+            {
+                send_resync_or_defer(
+                    client_id,
+                    session_id,
+                    clients,
+                    load_live_buffer,
+                    child_sessions,
+                    pending_resync,
+                );
             }
         }
     }
@@ -731,6 +893,23 @@ fn inject_capabilities_into_session_new(
         }
     }
     mutated
+}
+
+/// Stamp queue-control requests with the server-assigned connection identity.
+/// The value is authoritative for transient edit holds, so a client-supplied
+/// value must never survive forwarding.
+fn inject_queue_control_client_id(json: &mut serde_json::Value, client_id: ClientId) -> bool {
+    if json.get("method").and_then(serde_json::Value::as_str) != Some("grow/queue/control") {
+        return false;
+    }
+    let Some(params) = json
+        .get_mut("params")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return false;
+    };
+    params.insert("leaderClientId".into(), serde_json::json!(client_id.0));
+    true
 }
 /// Inject client identity into an `initialize` request.
 ///
@@ -1224,6 +1403,10 @@ pub async fn run_leader_server(
     control_state: LeaderServerControlState,
 ) -> Result<(), ServerError> {
     let _ = std::fs::remove_file(&socket_path);
+    let spool_directory = socket_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
     let shutdown_reason_rx = shutdown_tx.subscribe();
     let listener = LocalListener::bind(&socket_path)?;
     info!("Leader server listening");
@@ -1239,6 +1422,7 @@ pub async fn run_leader_server(
     let mut retired_sessions: HashSet<String> = HashSet::new();
     let mut pending_load_by_req: HashMap<String, (ClientId, String)> = HashMap::new();
     let mut load_live_buffer: HashMap<(ClientId, String), Vec<BufferedLive>> = HashMap::new();
+    let mut pending_resync: HashSet<(ClientId, String)> = HashSet::new();
     let mut orphan_replay_warned: HashSet<ClientId> = HashSet::new();
     let mut load_replay_max_seq: HashMap<(ClientId, String), u64> = HashMap::new();
     // Sampling previews are transient: retain at most the current candidate
@@ -1338,6 +1522,14 @@ pub async fn run_leader_server(
                 ServerEvent::Disconnected(id) => {
                     let was_registered = clients.get(&id).is_some_and(|c| c.registered);
                     clients.remove(&id);
+                    let _ = acp_tx.send(
+                        serde_json::json!({
+                            "jsonrpc": "2.0",
+                            "method": "grow/internal/queue_client_disconnected",
+                            "params": { "leaderClientId": id.0 }
+                        })
+                        .to_string(),
+                    );
                     if was_registered {
                         client_count.fetch_sub(1, Ordering::Relaxed);
                         ::diagnostics::unified_log::info(
@@ -1348,6 +1540,7 @@ pub async fn run_leader_server(
                     }
                     pending_load_by_req.retain(|_, (c, _)| *c != id);
                     load_live_buffer.retain(|(c, _), _| *c != id);
+                    pending_resync.retain(|(c, _)| *c != id);
                     load_replay_max_seq.retain(|(c, _), _| *c != id);
                     let mut detached_sessions: Vec<String> = Vec::new();
                     let viewed: Vec<String> = session_subscribers
@@ -1510,6 +1703,7 @@ pub async fn run_leader_server(
                         }
                     }
                     if let (Some(json), Some(client)) = (json.as_mut(), clients.get_mut(&id)) {
+                        payload_mutated |= inject_queue_control_client_id(json, id);
                         if !client.initialize_seen {
                             let (injected, was_initialize) =
                                 inject_client_identity_into_initialize(json, &client.client_type);
@@ -1702,6 +1896,30 @@ pub async fn run_leader_server(
                                 );
                             }
                         }
+                        let ready_resync: Vec<String> = pending_resync
+                            .iter()
+                            .filter(|(client, session_id)| {
+                                *client == buf_client
+                                    && !load_covers_session(
+                                        *client,
+                                        session_id,
+                                        &load_live_buffer,
+                                        &child_sessions,
+                                    )
+                            })
+                            .map(|(_, session_id)| session_id.clone())
+                            .collect();
+                        for session_id in ready_resync {
+                            pending_resync.remove(&(buf_client, session_id.clone()));
+                            send_resync_or_defer(
+                                buf_client,
+                                &session_id,
+                                &clients,
+                                &load_live_buffer,
+                                &child_sessions,
+                                &mut pending_resync,
+                            );
+                        }
                     }
                     continue;
                 }
@@ -1725,8 +1943,6 @@ pub async fn run_leader_server(
                     .then(|| json.as_ref().and_then(sampling_attempt_signal))
                     .flatten();
                 let mut drop_sampling_preview = false;
-                let mut defer_unattributed = false;
-                let mut deferred_flush: Option<(SamplingCandidateKey, Vec<Arc<str>>)> = None;
                 if let Some(signal) = &sampling_signal {
                     if retired_sessions.contains(&signal.key.session_id) {
                         continue;
@@ -1735,7 +1951,7 @@ pub async fn run_leader_server(
                         Some(SamplingAttemptBoundary::Started) => {
                             let candidate = sampling_candidates
                                 .entry(signal.key.session_id.clone())
-                                .or_default();
+                                .or_insert_with(|| SamplingCandidate::new(spool_directory));
                             let stale_same_request =
                                 candidate.key.as_ref().is_some_and(|current| {
                                     current.request_id == signal.key.request_id
@@ -1748,116 +1964,103 @@ pub async fn run_leader_server(
                                 // client after the candidate is terminal.
                                 drop_sampling_preview = true;
                             } else {
-                                if candidate.buffer_unknown && candidate.terminal.is_none() {
-                                    if let Some(old_key) = candidate.key.clone() {
-                                        let independent = candidate
-                                            .payloads
-                                            .iter()
-                                            .filter(|record| !record.candidate)
-                                            .map(|record| record.payload.clone())
-                                            .collect::<Vec<_>>();
-                                        if !independent.is_empty() {
-                                            deferred_flush = Some((old_key, independent));
-                                        }
-                                    }
-                                }
                                 candidate.key = Some(signal.key.clone());
-                                candidate.payloads.clear();
+                                candidate.payloads = CandidateSpool::new(spool_directory);
                                 candidate.terminal = None;
+                                candidate.failed = false;
                                 candidate.buffer_unknown = signal.output_delivery
                                     == Some(SamplingOutputDelivery::Retractable);
                                 if candidate.buffer_unknown {
-                                    candidate.payloads.push(SamplingBufferedPayload {
-                                        payload: payload.clone(),
-                                        candidate: true,
-                                    });
+                                    if let Err(error) = candidate.payloads.push(&payload) {
+                                        candidate.fail(spool_directory, error);
+                                    }
                                 }
                             }
                         }
                         Some(SamplingAttemptBoundary::Discarded) => {
-                            let mut independent = None;
                             let candidate = sampling_candidates
                                 .entry(signal.key.session_id.clone())
-                                .or_default();
+                                .or_insert_with(|| SamplingCandidate::new(spool_directory));
                             if candidate.key.as_ref() == Some(&signal.key)
                                 || candidate.key.is_none()
                             {
                                 candidate.key = Some(signal.key.clone());
-                                if candidate.buffer_unknown {
-                                    independent = Some(
-                                        std::mem::take(&mut candidate.payloads)
-                                            .into_iter()
-                                            .filter(|record| !record.candidate)
-                                            .map(|record| record.payload)
-                                            .collect::<Vec<_>>(),
-                                    );
-                                } else {
-                                    candidate.payloads.clear();
-                                }
+                                candidate.payloads = CandidateSpool::new(spool_directory);
                                 candidate.terminal = Some(SamplingAttemptBoundary::Discarded);
-                            }
-                            if let Some(independent) = independent
-                                && !independent.is_empty()
-                            {
-                                fanout_sampling_payloads(
-                                    &signal.key,
-                                    &independent,
-                                    &clients,
-                                    &session_subscribers,
-                                    &child_sessions,
-                                    &mut load_live_buffer,
-                                );
+                                candidate.failed = false;
                             }
                         }
                         Some(SamplingAttemptBoundary::Accepted) => {
                             let mut accepted_payloads = None;
+                            let mut needs_resync = false;
                             let candidate = sampling_candidates
                                 .entry(signal.key.session_id.clone())
-                                .or_default();
+                                .or_insert_with(|| SamplingCandidate::new(spool_directory));
                             if candidate.key.is_none() {
                                 candidate.key = Some(signal.key.clone());
                             }
                             if candidate.key.as_ref() == Some(&signal.key)
                                 && candidate.terminal.is_none()
                             {
-                                if candidate.buffer_unknown {
-                                    let mut payloads = std::mem::take(&mut candidate.payloads)
-                                        .into_iter()
-                                        .map(|record| record.payload)
-                                        .collect::<Vec<_>>();
-                                    payloads.push(payload.clone());
-                                    accepted_payloads = Some(payloads);
+                                if candidate.failed {
+                                    needs_resync = true;
+                                    candidate.payloads = CandidateSpool::new(spool_directory);
+                                } else if candidate.buffer_unknown {
+                                    let mut payloads = std::mem::replace(
+                                        &mut candidate.payloads,
+                                        CandidateSpool::new(spool_directory),
+                                    );
+                                    if let Err(error) = payloads.push(&payload) {
+                                        candidate.fail(spool_directory, error);
+                                        needs_resync = true;
+                                    } else {
+                                        accepted_payloads = Some(payloads);
+                                    }
                                 } else {
-                                    candidate.payloads.clear();
+                                    candidate.payloads = CandidateSpool::new(spool_directory);
                                 }
                                 candidate.terminal = Some(SamplingAttemptBoundary::Accepted);
                             }
-                            if let Some(payloads) = accepted_payloads {
-                                fanout_sampling_payloads(
-                                    &signal.key,
-                                    &payloads,
+                            if let Some(mut payloads) = accepted_payloads {
+                                if let Err(error) = payloads.for_each(|payload| {
+                                    fanout_sampling_payload(
+                                        &signal.key,
+                                        payload,
+                                        &clients,
+                                        &session_subscribers,
+                                        &child_sessions,
+                                        &mut load_live_buffer,
+                                    );
+                                }) {
+                                    error!(%error, "Accepted candidate spool read failed; requesting canonical resync");
+                                    needs_resync = true;
+                                }
+                            }
+                            if needs_resync {
+                                resync_non_retracting_subscribers(
+                                    &signal.key.session_id,
                                     &clients,
                                     &session_subscribers,
+                                    &load_live_buffer,
                                     &child_sessions,
-                                    &mut load_live_buffer,
+                                    &mut pending_resync,
                                 );
                             }
                         }
                         None => {
                             let candidate = sampling_candidates
                                 .entry(signal.key.session_id.clone())
-                                .or_default();
+                                .or_insert_with(|| SamplingCandidate::new(spool_directory));
                             if candidate.key.is_none() {
                                 candidate.key = Some(signal.key.clone());
                             }
                             if candidate.key.as_ref() == Some(&signal.key)
                                 && candidate.terminal.is_none()
                             {
-                                if candidate.buffer_unknown {
-                                    candidate.payloads.push(SamplingBufferedPayload {
-                                        payload: payload.clone(),
-                                        candidate: true,
-                                    });
+                                if candidate.buffer_unknown && !candidate.failed {
+                                    if let Err(error) = candidate.payloads.push(&payload) {
+                                        candidate.fail(spool_directory, error);
+                                    }
                                 }
                             } else {
                                 // A preview arriving after its terminal
@@ -1868,29 +2071,6 @@ pub async fn run_leader_server(
                             }
                         }
                     }
-                }
-                if sampling_live_notification
-                    && sampling_signal.is_none()
-                    && let Some(session_id) = json.as_ref().and_then(extract_session_id)
-                    && let Some(candidate) = sampling_candidates.get_mut(&session_id)
-                    && candidate.buffer_unknown
-                    && candidate.terminal.is_none()
-                {
-                    candidate.payloads.push(SamplingBufferedPayload {
-                        payload: payload.clone(),
-                        candidate: false,
-                    });
-                    defer_unattributed = true;
-                }
-                if let Some((key, payloads)) = deferred_flush {
-                    fanout_sampling_payloads(
-                        &key,
-                        &payloads,
-                        &clients,
-                        &session_subscribers,
-                        &child_sessions,
-                        &mut load_live_buffer,
-                    );
                 }
                 if drop_sampling_preview {
                     continue;
@@ -2073,15 +2253,14 @@ pub async fn run_leader_server(
                         }
                     } else if let Some(subs) = session_subscribers.get(sid.as_str()) {
                         for &cid in subs.iter() {
-                            let buffer_unknown = defer_unattributed
-                                || sampling_signal.as_ref().is_some_and(|signal| {
-                                    sampling_candidates.get(&signal.key.session_id).is_some_and(
-                                        |candidate| {
-                                            candidate.key.as_ref() == Some(&signal.key)
-                                                && candidate.buffer_unknown
-                                        },
-                                    )
-                                });
+                            let buffer_unknown = sampling_signal.as_ref().is_some_and(|signal| {
+                                sampling_candidates.get(&signal.key.session_id).is_some_and(
+                                    |candidate| {
+                                        candidate.key.as_ref() == Some(&signal.key)
+                                            && candidate.buffer_unknown
+                                    },
+                                )
+                            });
                             if buffer_unknown
                                 && clients.get(&cid).is_some_and(|client| {
                                     !client.capabilities.sampling_attempt_lifecycle
@@ -2571,6 +2750,61 @@ mod tests {
     use super::*;
     use std::time::Duration;
     use tempfile::TempDir;
+
+    #[test]
+    fn candidate_spool_spills_in_order_and_rejects_limit_without_writing() {
+        let directory = TempDir::new().unwrap();
+        let mut spool = CandidateSpool {
+            file: tempfile::spooled_tempfile_in(32, directory.path()),
+            bytes: 0,
+            records: 0,
+        };
+        spool.push("first").unwrap();
+        assert!(!spool.file.is_rolled());
+        spool
+            .push("a payload large enough to cross the in-memory threshold")
+            .unwrap();
+        assert!(spool.file.is_rolled());
+        let mut observed = Vec::new();
+        spool
+            .for_each(|payload| observed.push(payload.to_string()))
+            .unwrap();
+        assert_eq!(
+            observed,
+            [
+                "first",
+                "a payload large enough to cross the in-memory threshold"
+            ]
+        );
+
+        let prior_records = spool.records;
+        spool.bytes = MAX_CANDIDATE_SPOOL_BYTES - 4;
+        assert!(spool.push("x").is_err());
+        assert_eq!(spool.records, prior_records);
+        spool.bytes = 0;
+        spool.records = MAX_CANDIDATE_SPOOL_RECORDS;
+        assert!(spool.push("x").is_err());
+        assert_eq!(spool.records, MAX_CANDIDATE_SPOOL_RECORDS);
+    }
+    #[test]
+    fn candidate_spool_read_error_can_follow_a_partial_accepted_flush() {
+        let directory = TempDir::new().unwrap();
+        let mut spool = CandidateSpool::new(directory.path());
+        spool.push("first").unwrap();
+        spool.push("second").unwrap();
+        spool
+            .file
+            .seek(SeekFrom::Start(4 + "first".len() as u64))
+            .unwrap();
+        spool.file.write_all(&u32::MAX.to_be_bytes()).unwrap();
+        let mut delivered = Vec::new();
+        assert!(
+            spool
+                .for_each(|payload| delivered.push(payload.to_string()))
+                .is_err()
+        );
+        assert_eq!(delivered, ["first"]);
+    }
     /// Parse a raw payload for the parse-once helper APIs. Panics on invalid
     /// JSON — the routing loop parses once up front, and non-JSON payloads
     /// never reach the helpers (they forward/drop verbatim).
@@ -3996,6 +4230,7 @@ mod tests {
         let started = r#"{"jsonrpc":"2.0","method":"grow/session_notification","params":{"sessionId":"sampling-session","_meta":{"samplingOutputDelivery":"retractable"},"update":{"sessionUpdate":"sampling_attempt","request_id":"req-1","attempt":1,"state":"started"}}}"#;
         let preview = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sampling-session","_meta":{"samplingRequestId":"req-1","samplingAttempt":1,"eventId":"sampling-session-19"},"value":"preview-1"}}"#;
         let interleaved = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"sampling-session","_meta":{"eventId":"sampling-session-20"},"value":"interleaved-20"}}"#;
+        let interleaved_grow = r#"{"jsonrpc":"2.0","method":"grow/session_notification","params":{"sessionId":"sampling-session","update":{"sessionUpdate":"goal_updated","marker":"independent-grow"}}}"#;
         let accepted = r#"{"jsonrpc":"2.0","method":"grow/session_notification","params":{"sessionId":"sampling-session","update":{"sessionUpdate":"sampling_attempt","request_id":"req-1","attempt":1,"state":"accepted"}}}"#;
         response_tx.send(started.into()).unwrap();
         assert!(
@@ -4025,11 +4260,15 @@ mod tests {
                 .await
                 .is_some_and(|payload| payload.contains("preview-1"))
         );
-        response_tx.send(interleaved.into()).unwrap();
+        let large_preview = format!(
+            r#"{{"jsonrpc":"2.0","method":"session/update","params":{{"sessionId":"sampling-session","_meta":{{"samplingRequestId":"req-1","samplingAttempt":1,"eventId":"sampling-session-large"}},"value":"{}"}}}}"#,
+            "x".repeat(CANDIDATE_MEMORY_BYTES)
+        );
+        response_tx.send(large_preview).unwrap();
         assert!(
             next_acp_payload(&mut capable_reader)
                 .await
-                .is_some_and(|payload| payload.contains("interleaved-20"))
+                .is_some_and(|payload| payload.contains("sampling-session-large"))
         );
         assert!(
             tokio::time::timeout(
@@ -4038,6 +4277,28 @@ mod tests {
             )
             .await
             .is_err()
+        );
+        response_tx.send(interleaved.into()).unwrap();
+        assert!(
+            next_acp_payload(&mut capable_reader)
+                .await
+                .is_some_and(|payload| payload.contains("interleaved-20"))
+        );
+        assert!(
+            next_acp_payload(&mut buffered_reader)
+                .await
+                .is_some_and(|payload| payload.contains("interleaved-20"))
+        );
+        response_tx.send(interleaved_grow.into()).unwrap();
+        assert!(
+            next_acp_payload(&mut capable_reader)
+                .await
+                .is_some_and(|payload| payload.contains("independent-grow"))
+        );
+        assert!(
+            next_acp_payload(&mut buffered_reader)
+                .await
+                .is_some_and(|payload| payload.contains("independent-grow"))
         );
         response_tx.send(accepted.into()).unwrap();
         assert!(
@@ -4058,7 +4319,7 @@ mod tests {
         assert!(
             next_acp_payload(&mut buffered_reader)
                 .await
-                .is_some_and(|payload| payload.contains("interleaved-20"))
+                .is_some_and(|payload| payload.contains("sampling-session-large"))
         );
         assert!(
             next_acp_payload(&mut buffered_reader)
@@ -4130,6 +4391,116 @@ mod tests {
             next_acp_payload(&mut buffered_reader)
                 .await
                 .is_some_and(|payload| payload.contains("accepted"))
+        );
+        cancel.cancel();
+    }
+
+    #[tokio::test]
+    async fn failed_candidate_spool_keeps_observer_attached_and_resyncs_only_acceptance() {
+        let temp = TempDir::new().unwrap();
+        let (sock_path, cancel, response_tx, mut acp_rx) =
+            setup_persistent_server_with_agent(&temp).await;
+        let (mut reader, mut writer) = connect_and_register(&sock_path, "observer").await;
+        load_session(&mut writer, "spool-failure-session").await;
+        complete_load(&mut acp_rx, &response_tx).await;
+        let _ = next_acp_payload(&mut reader).await;
+
+        // Existing connections survive unlinking the socket, but the next
+        // tempfile rollover cannot create a spool in its former directory.
+        std::fs::remove_file(&sock_path).unwrap();
+        std::fs::remove_dir(temp.path()).unwrap();
+        let large = "x".repeat(CANDIDATE_MEMORY_BYTES + 1);
+        let started = |request_id: &str| {
+            serde_json::json!({
+                "jsonrpc": "2.0", "method": "grow/session_notification",
+                "params": {"sessionId": "spool-failure-session",
+                    "_meta": {"samplingOutputDelivery": "retractable"},
+                    "update": {"sessionUpdate": "sampling_attempt", "request_id": request_id,
+                        "attempt": 1, "state": "started"}}
+            })
+            .to_string()
+        };
+        let preview = |request_id: &str| {
+            serde_json::json!({
+                "jsonrpc": "2.0", "method": "session/update",
+                "params": {"sessionId": "spool-failure-session",
+                    "_meta": {"samplingRequestId": request_id, "samplingAttempt": 1},
+                    "value": large}
+            })
+            .to_string()
+        };
+        let terminal = |request_id: &str, state: &str| {
+            serde_json::json!({
+                "jsonrpc": "2.0", "method": "grow/session_notification",
+                "params": {"sessionId": "spool-failure-session",
+                    "update": {"sessionUpdate": "sampling_attempt", "request_id": request_id,
+                        "attempt": 1, "state": state}}
+            })
+            .to_string()
+        };
+        response_tx.send(started("discarded")).unwrap();
+        response_tx.send(preview("discarded")).unwrap();
+        response_tx
+            .send(terminal("discarded", "discarded"))
+            .unwrap();
+        response_tx.send(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"spool-failure-session","value":"independent-after-discard"}}"#.into()).unwrap();
+        assert!(
+            next_acp_payload(&mut reader)
+                .await
+                .unwrap()
+                .contains("independent-after-discard")
+        );
+
+        response_tx.send(started("accepted")).unwrap();
+        response_tx.send(preview("accepted")).unwrap();
+        response_tx.send(terminal("accepted", "accepted")).unwrap();
+        let resync = next_acp_payload(&mut reader).await.unwrap();
+        assert!(resync.contains("grow/leader/resync_required"));
+        assert!(!resync.contains(&large));
+        response_tx.send(r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"spool-failure-session","value":"independent-after-accept"}}"#.into()).unwrap();
+        assert!(
+            next_acp_payload(&mut reader)
+                .await
+                .unwrap()
+                .contains("independent-after-accept")
+        );
+        load_session(&mut writer, "spool-failure-session").await;
+        let forwarded = tokio::time::timeout(Duration::from_secs(1), acp_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let load_id = serde_json::from_str::<serde_json::Value>(&forwarded).unwrap()["id"].clone();
+        response_tx.send(started("accepted-during-load")).unwrap();
+        response_tx.send(preview("accepted-during-load")).unwrap();
+        response_tx
+            .send(terminal("accepted-during-load", "accepted"))
+            .unwrap();
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                read_message::<_, ServerMessage>(&mut reader)
+            )
+            .await
+            .is_err(),
+            "resync must wait for the in-flight load"
+        );
+        response_tx
+            .send(
+                serde_json::json!({"jsonrpc": "2.0", "id": load_id, "result": {"models": []}})
+                    .to_string(),
+            )
+            .unwrap();
+        assert!(
+            next_acp_payload(&mut reader)
+                .await
+                .unwrap()
+                .contains("\"result\"")
+        );
+        assert!(
+            next_acp_payload(&mut reader)
+                .await
+                .unwrap()
+                .contains("grow/leader/resync_required")
         );
         cancel.cancel();
     }
@@ -4842,6 +5213,39 @@ mod tests {
         );
         cancel.cancel();
     }
+
+    #[tokio::test]
+    async fn queue_control_overwrites_forged_leader_client_id_before_forwarding() {
+        let temp = TempDir::new().unwrap();
+        let (sock_path, cancel, _response_tx, mut acp_rx) =
+            setup_persistent_server_with_agent(&temp).await;
+        let (_reader, mut writer, client_id) =
+            connect_register_get_id(&sock_path, "queue-client").await;
+
+        write_message(
+            &mut writer,
+            &ClientMessage::Acp {
+                payload: r#"{"jsonrpc":"2.0","method":"grow/queue/control","id":41,"params":{"sessionId":"sess-queue","leaderClientId":999,"action":"hold"}}"#.into(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let forwarded = tokio::time::timeout(Duration::from_secs(1), acp_rx.recv())
+            .await
+            .expect("queue control should be forwarded")
+            .expect("agent ACP channel should remain open");
+        let json: serde_json::Value = serde_json::from_str(&forwarded).unwrap();
+        assert_eq!(json["method"], "grow/queue/control");
+        assert_eq!(json["params"]["sessionId"], "sess-queue");
+        assert_eq!(json["params"]["action"], "hold");
+        assert_eq!(
+            json["params"]["leaderClientId"].as_u64(),
+            Some(client_id.0),
+            "the server-assigned connection ID must replace a forged client value"
+        );
+        cancel.cancel();
+    }
     #[tokio::test]
     async fn server_sends_shutting_down_before_shutdown() {
         let temp = TempDir::new().unwrap();
@@ -5249,12 +5653,21 @@ mod tests {
         drop(_reader);
         drop(writer);
         tokio::time::sleep(Duration::from_millis(100)).await;
-        let eviction_msg = tokio::time::timeout(Duration::from_secs(1), acp_rx.recv())
-            .await
-            .expect("should receive eviction notification")
-            .expect("channel should not be closed");
-        let json: serde_json::Value =
-            serde_json::from_str(&eviction_msg).expect("should be valid JSON");
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let json = loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            let notification = tokio::time::timeout(remaining, acp_rx.recv())
+                .await
+                .expect("should receive eviction notification before deadline")
+                .expect("channel should not be closed");
+            let json: serde_json::Value =
+                serde_json::from_str(&notification).expect("should be valid JSON");
+            match json["method"].as_str() {
+                Some("grow/internal/queue_client_disconnected") => continue,
+                Some("grow/internal/evict_sessions") => break json,
+                method => panic!("unexpected ACP notification before eviction: {method:?}"),
+            }
+        };
         assert_eq!(json["method"], "grow/internal/evict_sessions");
         let session_ids = json["params"]["sessionIds"]
             .as_array()
@@ -5267,10 +5680,10 @@ mod tests {
         );
         cancel.cancel();
     }
-    /// When a client disconnects without interacting with any sessions,
-    /// no eviction notification should be sent.
+    /// A client disconnect notification is independent of session subscribers;
+    /// no session eviction is needed when the client viewed no sessions.
     #[tokio::test]
-    async fn no_eviction_when_client_has_no_sessions() {
+    async fn disconnect_notifies_agent_even_when_client_has_no_sessions() {
         let temp = TempDir::new().unwrap();
         let sock_path = temp.path().join("test.sock");
         let (acp_tx, mut acp_rx) = mpsc::unbounded_channel();
@@ -5297,16 +5710,25 @@ mod tests {
             .await;
         });
         tokio::time::sleep(Duration::from_millis(50)).await;
-        let (mut _reader, mut writer) = connect_and_register(&sock_path, "idle-client").await;
+        let (_reader, mut writer, client_id) =
+            connect_register_get_id(&sock_path, "idle-client").await;
         write_message(&mut writer, &ClientMessage::Disconnect)
             .await
             .unwrap();
         drop(_reader);
         drop(writer);
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        let disconnected = tokio::time::timeout(Duration::from_secs(1), acp_rx.recv())
+            .await
+            .expect("disconnect notification must not depend on session subscribers")
+            .expect("agent ACP channel should remain open");
+        let json: serde_json::Value = serde_json::from_str(&disconnected).unwrap();
+        assert_eq!(json["method"], "grow/internal/queue_client_disconnected");
+        assert_eq!(json["params"]["leaderClientId"].as_u64(), Some(client_id.0));
         assert!(
-            acp_rx.try_recv().is_err(),
-            "no eviction notification should be sent for clients with no sessions"
+            tokio::time::timeout(Duration::from_millis(100), acp_rx.recv())
+                .await
+                .is_err(),
+            "the client with no sessions must not trigger session eviction"
         );
         cancel.cancel();
     }
@@ -6282,8 +6704,20 @@ mod tests {
         drop(reader_a);
         drop(writer_a);
         tokio::time::sleep(Duration::from_millis(80)).await;
+        let disconnected = tokio::time::timeout(Duration::from_secs(1), acp_rx.recv())
+            .await
+            .expect("disconnect housekeeping notification should arrive")
+            .expect("ACP channel should remain open");
+        let disconnected: serde_json::Value =
+            serde_json::from_str(&disconnected).expect("disconnect notification should be JSON");
+        assert_eq!(
+            disconnected["method"],
+            "grow/internal/queue_client_disconnected"
+        );
         assert!(
-            acp_rx.try_recv().is_err(),
+            tokio::time::timeout(Duration::from_millis(100), acp_rx.recv())
+                .await
+                .is_err(),
             "session must NOT be evicted while another subscriber remains"
         );
         let req = r#"{"jsonrpc":"2.0","id":7,"method":"fs/read_text_file","params":{"sessionId":"sess-xfer","path":"/tmp/x"}}"#;

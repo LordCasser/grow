@@ -9,6 +9,132 @@ use super::support::*;
 use super::*;
 use sampling_types::ConversationItem;
 
+#[tokio::test(flavor = "current_thread")]
+async fn ai_suggest_stream_records_terminal_and_raw_body_in_its_sideband_attempt() {
+    use sampling_types::ApiBackend;
+    use test_support::{MockInferenceServer, ScriptedResponse, SseEvent};
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for backend in [
+                ApiBackend::ChatCompletions,
+                ApiBackend::Responses,
+                ApiBackend::Messages,
+            ] {
+                let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, _persistence_rx, sideband_events) =
+                    sideband_persistence_harness();
+                let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                let server = MockInferenceServer::start().await.unwrap();
+                server.set_response("pwd");
+                let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                config.base_url = server.url();
+                config.api_backend = backend.clone();
+                actor.chat_state_handle.replace_sampling_route(config);
+
+                assert_eq!(
+                    actor
+                        .handle_ai_suggest("pw", "/tmp", Some("test-model"))
+                        .await,
+                    Some("pwd".to_owned()),
+                    "{backend:?}"
+                );
+                let evidence = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .find_map(|event| match event.kind {
+                        chat_state::TimelineEventKind::Observation(observation)
+                            if observation.scope == "sampling_evidence"
+                                && observation.name == "response" =>
+                        {
+                            observation.data
+                        }
+                        _ => None,
+                    })
+                    .expect("AI suggest response evidence");
+                assert!(evidence["bytes"].as_u64().unwrap() > 0, "{backend:?}");
+                assert!(
+                    !evidence["metadata"]["provider_terminal"].is_null(),
+                    "{backend:?}: {evidence}"
+                );
+                if backend == ApiBackend::ChatCompletions {
+                    assert_eq!(evidence["metadata"]["stream_end"], "sse_done");
+                }
+                assert_eq!(evidence["metadata"]["outcome"]["accepted"], true);
+                let body = evidence["chunks"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .flat_map(|chunk| {
+                        std::fs::read(actor.session_dir.join(format!(
+                            "artifacts/sampling/{}.bin",
+                            chunk["blake3"].as_str().unwrap()
+                        )))
+                        .unwrap()
+                    })
+                    .collect::<Vec<u8>>();
+                assert!(String::from_utf8_lossy(&body).contains("pwd"));
+                assert!(sideband_events.lock().iter().any(|event| matches!(
+                    event.kind,
+                    chat_state::SidebandEventKind::End(chat_state::SidebandEnd {
+                        outcome: chat_state::SidebandOutcome::Completed,
+                        ..
+                    })
+                )));
+            }
+
+            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx, sideband_events) = sideband_persistence_harness();
+            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response(
+                "/v1/chat/completions",
+                ScriptedResponse::sse(vec![SseEvent::data("{malformed")]),
+            );
+            let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            config.base_url = server.url();
+            config.api_backend = ApiBackend::ChatCompletions;
+            actor.chat_state_handle.replace_sampling_route(config);
+
+            assert_eq!(
+                actor
+                    .handle_ai_suggest("pw", "/tmp", Some("test-model"))
+                    .await,
+                None
+            );
+            let evidence = actor
+                .chat_state_handle
+                .timeline_events()
+                .await
+                .unwrap()
+                .into_iter()
+                .find_map(|event| match event.kind {
+                    chat_state::TimelineEventKind::Observation(observation)
+                        if observation.scope == "sampling_evidence"
+                            && observation.name == "response" =>
+                    {
+                        observation.data
+                    }
+                    _ => None,
+                })
+                .expect("failed AI suggest response evidence");
+            assert!(evidence["bytes"].as_u64().unwrap() > 0);
+            assert!(evidence["metadata"]["outcome"]["failed"].as_bool() == Some(true));
+            assert!(evidence["metadata"]["outcome"]["error"].is_string());
+            assert!(sideband_events.lock().iter().any(|event| matches!(
+                event.kind,
+                chat_state::SidebandEventKind::End(chat_state::SidebandEnd {
+                    outcome: chat_state::SidebandOutcome::Failed,
+                    ..
+                })
+            )));
+        })
+        .await;
+}
+
 fn sideband_persistence_harness() -> (
     tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
     tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
@@ -274,7 +400,7 @@ async fn auto_recap_below_min_turns_is_noop_and_display_only() {
                 "seed must be applied before the recap call"
             );
 
-            actor.handle_recap(true).await;
+            actor.handle_recap(true, Some(uuid::Uuid::new_v4())).await;
 
             let after = actor.chat_state_handle.get_conversation().await;
             assert_eq!(
@@ -319,7 +445,7 @@ async fn manual_recap_never_mutates_conversation() {
                 "seed must be applied before the recap call"
             );
 
-            actor.handle_recap(false).await;
+            actor.handle_recap(false, None).await;
 
             let after = actor.chat_state_handle.get_conversation().await;
             assert_eq!(
@@ -394,7 +520,7 @@ async fn manual_recap_with_no_turns_emits_unavailable() {
             // No main (user) turns — the gate skips before any model call.
             replace_test_surface(&actor.chat_state_handle, vec![]).await;
 
-            actor.handle_recap(false).await;
+            actor.handle_recap(false, None).await;
             tokio::task::yield_now().await;
 
             assert!(
@@ -430,7 +556,7 @@ async fn manual_recap_generation_failure_emits_unavailable() {
             )
             .await;
 
-            actor.handle_recap(false).await;
+            actor.handle_recap(false, None).await;
             tokio::task::yield_now().await;
 
             assert!(
@@ -463,7 +589,7 @@ async fn manual_recap_generation_failure_records_sideband() {
             )
             .await;
 
-            actor.handle_recap(false).await;
+            actor.handle_recap(false, None).await;
             tokio::task::yield_now().await;
 
             let events = events.lock();
@@ -510,7 +636,7 @@ async fn auto_recap_gated_does_not_emit_unavailable() {
             )
             .await;
 
-            actor.handle_recap(true).await;
+            actor.handle_recap(true, Some(uuid::Uuid::new_v4())).await;
 
             assert!(
                 !drained_recap_unavailable(&mut persistence_rx),
@@ -544,7 +670,7 @@ async fn manual_recap_over_budget_is_display_only_and_references_timeline() {
             .await;
             let before = actor.chat_state_handle.get_conversation().await;
 
-            actor.handle_recap(false).await;
+            actor.handle_recap(false, None).await;
 
             // Display-only: the conversation is byte-identical afterwards.
             let after = actor.chat_state_handle.get_conversation().await;
@@ -699,7 +825,7 @@ async fn recap_request_rides_parent_prompt_cache() {
             )
             .await;
 
-            actor.handle_recap(false).await;
+            actor.handle_recap(false, None).await;
 
             assert!(
                 server.has_responses_request(),
@@ -794,6 +920,7 @@ async fn side_question_preserves_completed_tool_evidence_on_all_backends() {
                             model_id: None,
                             model_fingerprint: None,
                             reasoning_effort: None,
+                            response_messages: Vec::new(),
                         }),
                     ];
                     if completed >= 1 {
@@ -1075,7 +1202,7 @@ async fn assert_sideband_prepared_route(side_question: bool) {
                     "Previous work summary."
                 );
             } else {
-                actor.handle_recap(false).await;
+                actor.handle_recap(false, None).await;
             }
             preparation_hook.with(|hook| assert!(hook.borrow().is_none()));
             let requests = old_server.requests();

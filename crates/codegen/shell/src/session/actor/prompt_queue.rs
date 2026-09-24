@@ -11,6 +11,123 @@ pub(super) struct RunningPromptDisplay {
 }
 
 impl SessionActor {
+    pub(super) async fn handle_queue_control(
+        &self,
+        request: crate::session::prompt_queue::QueueControlRequest,
+    ) -> crate::session::prompt_queue::QueueControlResult {
+        use crate::session::prompt_queue::{QueueControlOperation, QueueControlResult};
+        let result = match request.operation {
+            QueueControlOperation::Hold => {
+                let Some(edit_id) = request.edit_id.as_deref().filter(|id| !id.is_empty()) else {
+                    return QueueControlResult::rejected("missing_edit_id");
+                };
+                let _control_gate = self.step_control_gate.lock().await;
+                let mut state = self.state.lock().await;
+                if Self::is_running_prompt(&state, &request.id) {
+                    QueueControlResult::rejected("already_running")
+                } else if let Some(version) = state.pending_inputs.iter().find_map(|item| {
+                    item.queue_meta
+                        .as_ref()
+                        .filter(|meta| meta.id == request.id)
+                        .map(|meta| meta.version)
+                }) {
+                    if version != request.expected_version {
+                        QueueControlResult::rejected("stale_version")
+                    } else if let Some(hold) = state.queue_edit_holds.get(&request.id) {
+                        if hold.edit_id == edit_id
+                            && hold.leader_client_id == request.leader_client_id
+                        {
+                            QueueControlResult::applied(Some(version))
+                        } else {
+                            QueueControlResult::rejected("held_for_edit")
+                        }
+                    } else {
+                        state.queue_edit_holds.insert(
+                            request.id.clone(),
+                            super::QueueEditHold {
+                                version,
+                                edit_id: edit_id.to_string(),
+                                leader_client_id: request.leader_client_id,
+                            },
+                        );
+                        QueueControlResult::applied(Some(version))
+                    }
+                } else {
+                    QueueControlResult::rejected("not_queued")
+                }
+            }
+            QueueControlOperation::Release => {
+                let Some(edit_id) = request.edit_id.as_deref().filter(|id| !id.is_empty()) else {
+                    return QueueControlResult::rejected("missing_edit_id");
+                };
+                let _control_gate = self.step_control_gate.lock().await;
+                let mut state = self.state.lock().await;
+                let result = match state.queue_edit_holds.get(&request.id) {
+                    None => QueueControlResult::applied(None),
+                    Some(hold)
+                        if hold.edit_id == edit_id
+                            && hold.version == request.expected_version
+                            && hold.leader_client_id == request.leader_client_id =>
+                    {
+                        state.queue_edit_holds.remove(&request.id);
+                        QueueControlResult::applied(None)
+                    }
+                    Some(_) => QueueControlResult::rejected("edit_hold_mismatch"),
+                };
+                if result.applied {
+                    self.idle_arbiter.notify_one();
+                }
+                result
+            }
+            QueueControlOperation::Save => {
+                let Some(edit_id) = request.edit_id.as_deref().filter(|id| !id.is_empty()) else {
+                    return QueueControlResult::rejected("missing_edit_id");
+                };
+                let Some(text) = request.new_text.filter(|text| !text.trim().is_empty()) else {
+                    return QueueControlResult::rejected("blank_text");
+                };
+                match self
+                    .replace_queued_prompt_with_admitted_input(
+                        &request.id,
+                        text,
+                        None,
+                        Some((request.expected_version, edit_id, request.leader_client_id)),
+                    )
+                    .await
+                {
+                    Ok(version) => QueueControlResult::applied(Some(version)),
+                    Err(reason) => QueueControlResult::rejected(reason),
+                }
+            }
+            QueueControlOperation::Remove => {
+                self.handle_remove_queued_prompt(
+                    &request.id,
+                    request.expected_version,
+                    request.leader_client_id,
+                    request.edit_id.as_deref(),
+                )
+                .await
+            }
+        };
+        if !result.applied {
+            let state = self.state.lock().await;
+            self.broadcast_queue_changed(&state);
+        }
+        result
+    }
+
+    pub(super) async fn release_queue_holds_for_client(&self, leader_client_id: u64) {
+        let _control_gate = self.step_control_gate.lock().await;
+        let mut state = self.state.lock().await;
+        let before = state.queue_edit_holds.len();
+        state
+            .queue_edit_holds
+            .retain(|_, hold| hold.leader_client_id != Some(leader_client_id));
+        if state.queue_edit_holds.len() != before {
+            self.idle_arbiter.notify_one();
+        }
+    }
+
     /// Append one regular turn to the explicit FIFO.
     pub(super) async fn queue_input(
         &self,
@@ -458,65 +575,64 @@ impl SessionActor {
         &self,
         id: &str,
         expected_version: u64,
-        owner: Option<&str>,
-    ) {
+        leader_client_id: Option<u64>,
+        edit_id: Option<&str>,
+    ) -> crate::session::prompt_queue::QueueControlResult {
+        use crate::session::prompt_queue::QueueControlResult;
         let _control_gate = self.step_control_gate.lock().await;
         let input_ids = {
             let state = self.state.lock().await;
-            (!Self::is_running_prompt(&state, id))
-                .then(|| {
-                    state.pending_inputs.iter().find(|item| {
-                        item.queue_meta.as_ref().is_some_and(|meta| {
-                            meta.id == id
-                                && meta.version == expected_version
-                                && owner.is_none_or(|owner| meta.owner.as_deref() == Some(owner))
-                        })
-                    })
-                })
-                .flatten()
-                .map(|item| item.input_ids.clone())
-        };
-        if let Some(input_ids) = input_ids {
-            if let Err(error) = self
-                .dismiss_input_ids(input_ids, chat_state::InputDismissReason::UserRemoved)
-                .await
-            {
-                tracing::error!(%error, queued_id = id, "queue removal was not durable");
-            } else {
-                let removed = {
-                    let mut state = self.state.lock().await;
-                    state
-                        .pending_inputs
-                        .iter()
-                        .position(|item| {
-                            item.queue_meta.as_ref().is_some_and(|meta| {
-                                meta.id == id
-                                    && meta.version == expected_version
-                                    && owner
-                                        .is_none_or(|owner| meta.owner.as_deref() == Some(owner))
-                            })
-                        })
-                        .and_then(|pos| state.pending_inputs.remove(pos))
-                };
-                if let Some(item) = removed {
-                    Self::respond_removed_prompt(item.respond_to);
-                } else {
-                    tracing::error!(
-                        queued_id = id,
-                        "durably dismissed queue row disappeared behind the control fence"
-                    );
-                }
+            if Self::is_running_prompt(&state, id) {
+                return QueueControlResult::rejected("already_running");
             }
-        } else {
-            tracing::debug!(
-                queued_id = %id,
-                expected_version,
-                "queue remove was a no-op (drained / stale / not owner); rebroadcasting"
-            );
+            let Some(item) = state
+                .pending_inputs
+                .iter()
+                .find(|item| item.queue_meta.as_ref().is_some_and(|meta| meta.id == id))
+            else {
+                return QueueControlResult::rejected("not_queued");
+            };
+            if item.queue_meta.as_ref().unwrap().version != expected_version {
+                return QueueControlResult::rejected("stale_version");
+            }
+            if let Some(hold) = state.queue_edit_holds.get(id)
+                && (edit_id != Some(hold.edit_id.as_str())
+                    || leader_client_id != hold.leader_client_id)
+            {
+                return QueueControlResult::rejected("held_for_edit");
+            }
+            item.input_ids.clone()
+        };
+        if let Err(error) = self
+            .dismiss_input_ids(input_ids, chat_state::InputDismissReason::UserRemoved)
+            .await
+        {
+            tracing::error!(%error, queued_id = id, "queue removal was not durable");
+            return QueueControlResult::rejected("dismiss_failed");
         }
-        // Always re-broadcast the authoritative queue so the client reconciles.
-        let state = self.state.lock().await;
+        let mut state = self.state.lock().await;
+        let removed = state
+            .pending_inputs
+            .iter()
+            .position(|item| {
+                item.queue_meta
+                    .as_ref()
+                    .is_some_and(|meta| meta.id == id && meta.version == expected_version)
+            })
+            .and_then(|pos| state.pending_inputs.remove(pos));
+        let Some(item) = removed else {
+            tracing::error!(
+                queued_id = id,
+                "dismissed queue row disappeared behind the control fence"
+            );
+            return QueueControlResult::rejected("queue_changed_after_dismissal");
+        };
+        state.queue_edit_holds.remove(id);
+        Self::respond_removed_prompt(item.respond_to);
         self.broadcast_queue_changed(&state);
+        drop(state);
+        self.idle_arbiter.notify_one();
+        QueueControlResult::applied(None)
     }
 
     /// Atomically move one queued user row into the identified running turn.
@@ -530,9 +646,10 @@ impl SessionActor {
     ) {
         let mut effective_version = expected_version;
         if let Some(new_text) = new_text.filter(|text| !text.trim().is_empty()) {
-            if !self
-                .replace_queued_prompt_with_admitted_input(id, new_text.to_string(), owner)
+            if self
+                .replace_queued_prompt_with_admitted_input(id, new_text.to_string(), owner, None)
                 .await
+                .is_err()
             {
                 return;
             }
@@ -562,6 +679,10 @@ impl SessionActor {
                 self.broadcast_queue_changed(&state);
                 return;
             };
+            if state.queue_edit_holds.contains_key(id) {
+                self.broadcast_queue_changed(&state);
+                return;
+            }
             let plain_prompt = item
                 .queue_meta
                 .as_ref()
@@ -659,20 +780,40 @@ impl SessionActor {
         id: &str,
         new_text: String,
         editor: Option<&str>,
-    ) -> bool {
+        held_edit: Option<(u64, &str, Option<u64>)>,
+    ) -> Result<u64, &'static str> {
         let _control_gate = self.step_control_gate.lock().await;
         let snapshot = {
             let state = self.state.lock().await;
             if Self::is_running_prompt(&state, id) {
-                return false;
+                return Err("already_running");
             }
             let Some(item) = state
                 .pending_inputs
                 .iter()
                 .find(|item| item.queue_meta.as_ref().is_some_and(|meta| meta.id == id))
             else {
-                return false;
+                return Err("not_queued");
             };
+            let version = item.queue_meta.as_ref().unwrap().version;
+            match held_edit {
+                Some((expected_version, edit_id, leader_client_id)) => {
+                    if version != expected_version {
+                        return Err("stale_version");
+                    }
+                    if !state.queue_edit_holds.get(id).is_some_and(|hold| {
+                        hold.version == expected_version
+                            && hold.edit_id == edit_id
+                            && hold.leader_client_id == leader_client_id
+                    }) {
+                        return Err("edit_hold_mismatch");
+                    }
+                }
+                None if state.queue_edit_holds.contains_key(id) => {
+                    return Err("held_for_edit");
+                }
+                None => {}
+            }
             (
                 item.prompt_id.clone(),
                 item.prompt_blocks.clone(),
@@ -738,7 +879,7 @@ impl SessionActor {
             Ok(admitted) => admitted,
             Err(error) => {
                 tracing::warn!(%error, queued_id = id, "queue edit admission was blocked");
-                return false;
+                return Err("admission_failed");
             }
         };
         let mut state = self.state.lock().await;
@@ -747,14 +888,17 @@ impl SessionActor {
             .iter_mut()
             .find(|item| item.queue_meta.as_ref().is_some_and(|meta| meta.id == id))
         else {
-            return false;
+            return Err("queue_changed_after_admission");
         };
+        let version = replacement.queue_meta.as_ref().unwrap().version;
         item.input_ids = vec![admitted.input_id];
         item.prompt_blocks = replacement.prompt_blocks;
         item.queue_meta = replacement.queue_meta;
-        state.combine_edit_holds.remove(id);
+        state.queue_edit_holds.remove(id);
         self.broadcast_queue_changed(&state);
-        true
+        drop(state);
+        self.idle_arbiter.notify_one();
+        Ok(version)
     }
 
     /// Reorder queued prompts to match `ordered_ids`. The
@@ -762,7 +906,12 @@ impl SessionActor {
     /// not named in `ordered_ids` keep their relative order behind the named
     /// ones. Idempotent; re-broadcasts the result.
     pub(super) async fn handle_reorder_queue(&self, ordered_ids: &[String]) {
+        let _control_gate = self.step_control_gate.lock().await;
         let mut state = self.state.lock().await;
+        if !state.queue_edit_holds.is_empty() {
+            self.broadcast_queue_changed(&state);
+            return;
+        }
 
         // Partition: items we never reorder (running turn front + synthetic /
         // non-queue items) vs reorderable queued user prompts.
@@ -810,6 +959,7 @@ impl SessionActor {
                 .filter_map(|item| {
                     let meta = item.queue_meta.as_ref()?;
                     (running_id != Some(meta.id.as_str())
+                        && !state.queue_edit_holds.contains_key(&meta.id)
                         && owner.is_none_or(|owner| meta.owner.as_deref() == Some(owner)))
                     .then(|| (meta.id.clone(), meta.version, item.input_ids.clone()))
                 })
@@ -866,44 +1016,6 @@ impl SessionActor {
         }
         let state = self.state.lock().await;
         self.broadcast_queue_changed(&state);
-    }
-
-    /// Replace the text of a queued (not-yet-running) prompt in place
-    /// (LWW).
-    ///
-    /// Semantics — last write wins via the actor's serialized mailbox.
-    /// Concretely, for an entry whose `queue_meta.id == id`:
-    /// 1. Rebuild the underlying `prompt_blocks` as a single
-    ///    [`acp::TextContent`] block carrying `new_text` (any non-text blocks
-    ///    such as pasted images on the original prompt are not preserved — the
-    ///    user has explicitly typed replacement text).
-    /// 2. Update `queue_meta.text`, bump `queue_meta.version`, and record
-    ///    `last_editor` (the original `owner` attribution is preserved).
-    /// 3. Re-broadcast `grow/queue/changed` so every subscriber renders the
-    ///    new text and version.
-    ///
-    /// **No-op cases** (each is a benign discard with no rebroadcast — nothing
-    /// changed):
-    /// - The id is not in `pending_inputs` (already drained / removed).
-    /// - The id names the currently-running turn — editing the live turn is
-    ///   out of scope.
-    /// - `new_text` is blank (a queued prompt is never blanked).
-    pub(super) async fn handle_edit_queued_prompt(
-        &self,
-        id: &str,
-        new_text: String,
-        editor: Option<&str>,
-    ) {
-        if new_text.trim().is_empty() {
-            tracing::debug!(queued_id = %id, "queue edit no-op: empty newText");
-            return;
-        }
-        if !self
-            .replace_queued_prompt_with_admitted_input(id, new_text, editor)
-            .await
-        {
-            tracing::debug!(queued_id = %id, "queue edit did not replace the admitted input");
-        }
     }
 
     /// Merge consecutive plain prompts into `pending[0]` via
@@ -1084,9 +1196,8 @@ impl SessionActor {
         stamp_combined_display_texts(map, &segs);
     }
 
-    /// Replace a queued item's prompt body with `new_text` and bump its LWW
-    /// version metadata. Shared by `handle_edit_queued_prompt` and the
-    /// turn-ended fallback in `handle_interject_queued_prompt`.
+    /// Build a queued item's replacement body and bump its version metadata.
+    /// The caller validates edit identity and version before admission.
     ///
     /// Replaces the text blocks with a single text block carrying the new
     /// text; Image blocks are RETAINED — the queue-edit wire is text-only,
@@ -1134,6 +1245,326 @@ impl SessionActor {
 mod follow_up_admission_tests {
     use super::*;
     use crate::agent::config::FollowUpBehavior;
+    use crate::session::prompt_queue::{QueueControlOperation, QueueControlRequest};
+
+    fn control(
+        operation: QueueControlOperation,
+        id: &str,
+        expected_version: u64,
+        edit_id: Option<&str>,
+        new_text: Option<&str>,
+        leader_client_id: Option<u64>,
+    ) -> QueueControlRequest {
+        QueueControlRequest {
+            session_id: "test-session".into(),
+            operation,
+            id: id.into(),
+            expected_version,
+            edit_id: edit_id.map(str::to_owned),
+            new_text: new_text.map(str::to_owned),
+            leader_client_id,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn queue_control_hold_save_remove_checks_version_and_edit_identity() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                actor
+                    .queue_input(
+                        text_blocks("original"),
+                        "queued-control".into(),
+                        crate::session::PromptOrigin::User,
+                        crate::session::TurnKind::User,
+                        None,
+                        None,
+                        false,
+                        None,
+                        tokio::sync::oneshot::channel().0,
+                        None,
+                    )
+                    .await;
+                let first_input = actor.state.lock().await.pending_inputs[0].input_ids[0].clone();
+                assert!(
+                    actor
+                        .handle_queue_control(control(
+                            QueueControlOperation::Hold,
+                            "queued-control",
+                            0,
+                            Some("edit-1"),
+                            None,
+                            Some(1),
+                        ))
+                        .await
+                        .applied
+                );
+                assert!(
+                    !actor
+                        .handle_queue_control(control(
+                            QueueControlOperation::Release,
+                            "queued-control",
+                            0,
+                            Some("edit-1"),
+                            None,
+                            Some(2),
+                        ))
+                        .await
+                        .applied
+                );
+                assert!(
+                    !actor
+                        .handle_queue_control(control(
+                            QueueControlOperation::Save,
+                            "queued-control",
+                            0,
+                            Some("edit-2"),
+                            Some("wrong"),
+                            Some(1),
+                        ))
+                        .await
+                        .applied
+                );
+                assert!(
+                    !actor
+                        .handle_queue_control(control(
+                            QueueControlOperation::Remove,
+                            "queued-control",
+                            0,
+                            None,
+                            None,
+                            Some(2),
+                        ))
+                        .await
+                        .applied
+                );
+                assert!(
+                    actor
+                        .handle_queue_control(control(
+                            QueueControlOperation::Release,
+                            "queued-control",
+                            0,
+                            Some("edit-1"),
+                            None,
+                            Some(1),
+                        ))
+                        .await
+                        .applied
+                );
+                {
+                    let state = actor.state.lock().await;
+                    assert!(state.queue_edit_holds.is_empty());
+                    assert_eq!(
+                        state.pending_inputs[0].queue_meta.as_ref().unwrap().text,
+                        "original"
+                    );
+                }
+                assert!(
+                    actor
+                        .handle_queue_control(control(
+                            QueueControlOperation::Hold,
+                            "queued-control",
+                            0,
+                            Some("edit-1"),
+                            None,
+                            Some(1),
+                        ))
+                        .await
+                        .applied
+                );
+                let saved = actor
+                    .handle_queue_control(control(
+                        QueueControlOperation::Save,
+                        "queued-control",
+                        0,
+                        Some("edit-1"),
+                        Some("revised"),
+                        Some(1),
+                    ))
+                    .await;
+                assert!(saved.applied);
+                assert_eq!(saved.version, Some(1));
+                let state = actor.state.lock().await;
+                assert!(state.queue_edit_holds.is_empty());
+                assert_eq!(
+                    state.pending_inputs[0].queue_meta.as_ref().unwrap().text,
+                    "revised"
+                );
+                assert_ne!(state.pending_inputs[0].input_ids[0], first_input);
+                drop(state);
+                assert!(
+                    !actor
+                        .handle_queue_control(control(
+                            QueueControlOperation::Remove,
+                            "queued-control",
+                            0,
+                            None,
+                            None,
+                            Some(2),
+                        ))
+                        .await
+                        .applied
+                );
+                assert!(
+                    actor
+                        .handle_queue_control(control(
+                            QueueControlOperation::Hold,
+                            "queued-control",
+                            1,
+                            Some("edit-3"),
+                            None,
+                            Some(2),
+                        ))
+                        .await
+                        .applied
+                );
+                assert!(
+                    !actor
+                        .handle_queue_control(control(
+                            QueueControlOperation::Release,
+                            "queued-control",
+                            0,
+                            Some("edit-1"),
+                            None,
+                            Some(1),
+                        ))
+                        .await
+                        .applied
+                );
+                assert!(
+                    actor
+                        .state
+                        .lock()
+                        .await
+                        .queue_edit_holds
+                        .contains_key("queued-control")
+                );
+                assert!(
+                    actor
+                        .handle_queue_control(control(
+                            QueueControlOperation::Release,
+                            "queued-control",
+                            1,
+                            Some("edit-3"),
+                            None,
+                            Some(2),
+                        ))
+                        .await
+                        .applied
+                );
+                assert!(
+                    actor
+                        .handle_queue_control(control(
+                            QueueControlOperation::Remove,
+                            "queued-control",
+                            1,
+                            None,
+                            None,
+                            Some(2),
+                        ))
+                        .await
+                        .applied
+                );
+                assert!(actor.state.lock().await.pending_inputs.is_empty());
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn disconnected_client_releases_only_its_queue_holds() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                for id in ["first", "second"] {
+                    actor.state.lock().await.pending_inputs.push_back(
+                        crate::session::actor::tests::support::user_item(id, "test-client"),
+                    );
+                }
+                for (id, client) in [("first", 1), ("second", 2)] {
+                    assert!(
+                        actor
+                            .handle_queue_control(control(
+                                QueueControlOperation::Hold,
+                                id,
+                                0,
+                                Some("edit"),
+                                None,
+                                Some(client),
+                            ))
+                            .await
+                            .applied
+                    );
+                }
+                actor.release_queue_holds_for_client(1).await;
+                let state = actor.state.lock().await;
+                assert!(!state.queue_edit_holds.contains_key("first"));
+                assert!(state.queue_edit_holds.contains_key("second"));
+                assert_eq!(state.pending_inputs.len(), 2);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejected_replacement_keeps_original_input_and_edit_hold() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                actor
+                    .queue_input(
+                        text_blocks("original"),
+                        "queued-denied".into(),
+                        crate::session::PromptOrigin::User,
+                        crate::session::TurnKind::User,
+                        None,
+                        None,
+                        false,
+                        None,
+                        tokio::sync::oneshot::channel().0,
+                        None,
+                    )
+                    .await;
+                let original_input =
+                    actor.state.lock().await.pending_inputs[0].input_ids[0].clone();
+                assert!(
+                    actor
+                        .handle_queue_control(control(
+                            QueueControlOperation::Hold,
+                            "queued-denied",
+                            0,
+                            Some("edit-denied"),
+                            None,
+                            Some(1),
+                        ))
+                        .await
+                        .applied
+                );
+                install_user_prompt_deny_hook(&actor, "deny-edit");
+                spawn_user_prompt_deny_responder(gateway_rx, "denied");
+                let result = actor
+                    .handle_queue_control(control(
+                        QueueControlOperation::Save,
+                        "queued-denied",
+                        0,
+                        Some("edit-denied"),
+                        Some("replacement"),
+                        Some(1),
+                    ))
+                    .await;
+                assert!(!result.applied);
+                assert_eq!(result.reason, Some("admission_failed"));
+                let state = actor.state.lock().await;
+                assert_eq!(
+                    state.pending_inputs[0].queue_meta.as_ref().unwrap().text,
+                    "original"
+                );
+                assert_eq!(state.pending_inputs[0].input_ids, vec![original_input]);
+                assert!(state.queue_edit_holds.contains_key("queued-denied"));
+            })
+            .await;
+    }
 
     fn install_user_prompt_deny_hook(actor: &SessionActor, callback_id: &str) {
         let mut client_hooks = crate::extensions::hooks::ClientHooks::new();

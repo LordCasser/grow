@@ -32,6 +32,7 @@ pub(crate) mod summary_write;
 pub(crate) const SUMMARY_FILE: &str = "summary.json";
 pub(crate) const UPDATES_FILE: &str = "updates.jsonl";
 pub(crate) const TIMELINE_FILE: &str = "timeline.jsonl";
+pub(crate) const SESSION_SEARCH_INDEX_FILE: &str = "session_search.sqlite";
 pub(crate) const SIDEBANDS_DIR: &str = "sidebands";
 pub(crate) const MAX_JSONL_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
 pub(crate) const MAX_SESSION_SUMMARY_BYTES: u64 = 1024 * 1024;
@@ -3248,6 +3249,22 @@ pub trait StorageAdapter: Send + Sync {
         manifest: &crate::session::workflow::store::WorkflowRunManifest,
     ) -> io::Result<()>;
 
+    /// Replace a still-identical corrupt Workflow sidecar with its Timeline
+    /// seed. Implementations must compare the supplied snapshot under the
+    /// Workflow state lock before the atomic replacement, then acknowledge
+    /// success from the existing durable-write path.
+    async fn repair_corrupt_workflow_run_state(
+        &self,
+        _info: &Info,
+        _manifest: &crate::session::workflow::store::WorkflowRunManifest,
+        _fingerprint: crate::session::workflow::store::WorkflowManifestFingerprint,
+    ) -> io::Result<()> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "guarded Workflow sidecar repair is unsupported",
+        ))
+    }
+
     async fn delete_workflow_run_state(&self, info: &Info, run_id: &str) -> io::Result<()>;
 
     /// Load all persisted data for a session
@@ -3265,6 +3282,11 @@ pub trait StorageAdapter: Send + Sync {
     /// List session summaries, optionally filtered by current working directory.
     /// When `cwd` is `None`, returns summaries for all sessions.
     async fn list_sessions(&self, cwd: Option<&str>) -> io::Result<Vec<Summary>>;
+
+    /// Enumerate the complete session snapshot used to rebuild the search
+    /// index. Implementations must fail when a present candidate cannot be
+    /// validated; a partial list cannot authorize pruning indexed rows.
+    async fn list_sessions_for_search(&self) -> io::Result<Vec<Summary>>;
 
     /// Permanently delete a session's stored data (all files for the
     /// session). Implementations must treat a missing session as success
@@ -3642,7 +3664,7 @@ fn for_each_reconciled_replay_line<F: FnMut(acp::SessionUpdate)>(
                 f(strip_context_wrappers(notification.update));
             }
             SessionUpdate::ResponseReplayProjection(projection) => {
-                for notification in projection.updates {
+                for notification in projection.into_notifications() {
                     emitted = true;
                     f(strip_context_wrappers(notification.update));
                 }
@@ -3886,7 +3908,7 @@ fn for_each_replay_update<F: FnMut(acp::SessionUpdate)>(
             // by the filter and intentionally dropped (matching the typed load).
             Ok(SessionUpdate::Grow(_)) => {}
             Ok(SessionUpdate::ResponseReplayProjection(projection)) => {
-                for notification in projection.updates {
+                for notification in projection.into_notifications() {
                     forwarded = true;
                     f(strip_context_wrappers(notification.update));
                 }
@@ -5579,7 +5601,7 @@ mod tests {
                 SessionUpdate::Acp(notif) => vec![strip_context_wrappers(notif.update)],
                 SessionUpdate::Grow(_) => Vec::new(),
                 SessionUpdate::ResponseReplayProjection(projection) => projection
-                    .updates
+                    .into_notifications()
                     .into_iter()
                     .map(|notification| strip_context_wrappers(notification.update))
                     .collect(),

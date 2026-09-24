@@ -491,7 +491,11 @@ impl SessionActor {
             )
         })
         .collect();
-        BehaviorAvailability { current, choices }
+        BehaviorAvailability {
+            revision: 0,
+            current,
+            choices,
+        }
     }
 
     /// Capture the Shell-authoritative Behavior choice projection from one
@@ -500,19 +504,28 @@ impl SessionActor {
     pub(super) async fn behavior_availability_projection(
         &self,
     ) -> tool_types::BehaviorAvailability {
-        let support = self.behavior_capability_support().await;
-        let admission_facts = {
-            let admission = self.state.lock().await;
-            Self::capture_behavior_admission_facts(&admission, None)
+        let (revision, admission_facts) = {
+            let mut admission = self.state.lock().await;
+            admission.behavior_availability_revision = admission
+                .behavior_availability_revision
+                .checked_add(1)
+                .expect("Behavior availability projection revision exhausted");
+            (
+                admission.behavior_availability_revision,
+                Self::capture_behavior_admission_facts(&admission, None),
+            )
         };
+        let support = self.behavior_capability_support().await;
         let workflow_tracker = self.workflow_tracker().await;
         let workflow_tracker = workflow_tracker.lock();
-        self.behavior_availability_from_tracker(
+        let mut projection = self.behavior_availability_from_tracker(
             &workflow_tracker,
             support,
             crate::session::behavior::BehaviorRequestAuthority::Picker,
             admission_facts,
-        )
+        );
+        projection.revision = revision;
+        projection
     }
 
     pub(super) fn apply_behavior_to_snapshot(&self, snapshot: &mut TurnDeltaSnapshot) {
@@ -681,6 +694,7 @@ impl SessionActor {
                 false,
             )
             .await;
+        self.send_available_commands_update().await;
         should_start
     }
 

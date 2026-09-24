@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use fs2::FileExt as _;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::session::persistence::PersistenceMsg;
@@ -30,6 +31,28 @@ pub struct RestoredWorkflowRun {
     pub manifest: WorkflowRunManifest,
     pub script: String,
     pub args: serde_json::Value,
+    pub(crate) corrupt_sidecar_fingerprint: Option<WorkflowManifestFingerprint>,
+}
+
+/// Fixed-size compare-and-swap token for a sidecar that failed decoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WorkflowManifestFingerprint {
+    length: u64,
+    sha256: [u8; 32],
+}
+
+impl WorkflowManifestFingerprint {
+    pub(crate) fn of(bytes: &[u8]) -> Self {
+        Self {
+            length: bytes.len() as u64,
+            sha256: Sha256::digest(bytes).into(),
+        }
+    }
+
+    fn matches(self, bytes: &[u8]) -> bool {
+        let digest: [u8; 32] = Sha256::digest(bytes).into();
+        self.length == bytes.len() as u64 && self.sha256 == digest
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -63,10 +86,15 @@ impl WorkflowRunStore {
         persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
         restored: Vec<RestoredWorkflowRun>,
         lifecycles: &HashMap<String, chat_state::WorkflowLifecycle>,
-    ) -> (Self, Vec<WorkflowRunState>) {
+    ) -> (
+        Self,
+        Vec<WorkflowRunState>,
+        Vec<(WorkflowRunState, WorkflowManifestFingerprint)>,
+    ) {
         let store = Self::new(session_directory, persistence_tx);
         let mut states = Vec::with_capacity(restored.len());
         let mut repaired = Vec::new();
+        let mut corrupt_sidecar_repairs = Vec::new();
         {
             let mut sources = store.sources.lock();
             // Storage enumerates these in canonical Timeline spawn order.
@@ -75,6 +103,7 @@ impl WorkflowRunStore {
                     manifest,
                     script,
                     args,
+                    corrupt_sidecar_fingerprint,
                 } = run;
                 let run_id = manifest.state.run_id.clone();
                 let Some(lifecycle) = lifecycles.get(&run_id) else {
@@ -105,7 +134,11 @@ impl WorkflowRunStore {
                     },
                 );
                 if was_repaired || resolution.used_timeline_seed {
-                    repaired.push(state.clone());
+                    if let Some(fingerprint) = corrupt_sidecar_fingerprint {
+                        corrupt_sidecar_repairs.push((state.clone(), fingerprint));
+                    } else {
+                        repaired.push(state.clone());
+                    }
                 }
                 states.push(state);
             }
@@ -119,7 +152,7 @@ impl WorkflowRunStore {
                 );
             }
         }
-        (store, states)
+        (store, states, corrupt_sidecar_repairs)
     }
 
     pub(crate) fn register(
@@ -254,6 +287,39 @@ impl WorkflowRunStore {
         self.persistence_tx
             .send(PersistenceMsg::WorkflowRunStateAndAck {
                 manifest,
+                corrupt_sidecar_fingerprint: None,
+                respond_to,
+            })
+            .map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "workflow persistence channel closed",
+                )
+            })?;
+        response.await.map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "workflow persistence actor dropped acknowledgement",
+            )
+        })?
+    }
+
+    pub(crate) async fn repair_corrupt_sidecar_ack(
+        &self,
+        state: &WorkflowRunState,
+        fingerprint: WorkflowManifestFingerprint,
+    ) -> io::Result<()> {
+        let manifest = self.manifest_for(state).ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::NotFound,
+                "workflow state has no registered resume source",
+            )
+        })?;
+        let (respond_to, response) = oneshot::channel();
+        self.persistence_tx
+            .send(PersistenceMsg::WorkflowRunStateAndAck {
+                manifest,
+                corrupt_sidecar_fingerprint: Some(fingerprint),
                 respond_to,
             })
             .map_err(|_| {
@@ -344,6 +410,10 @@ pub(crate) fn resolve_workflow_restore_manifest(
         });
     }
 
+    let mut initial = initial;
+    // The Spawn seed contains no later agent accounting. Even a terminal
+    // lifecycle cannot turn its initial zero into a complete usage count.
+    initial.state.agent_usage_incomplete = true;
     Ok(WorkflowManifestResolution {
         manifest: initial,
         used_timeline_seed: true,
@@ -557,6 +627,22 @@ pub(crate) fn write_workflow_run_manifest_in_directory(
     session: &crate::session::storage::ContainedDirectory,
     manifest: &WorkflowRunManifest,
 ) -> io::Result<()> {
+    write_workflow_run_manifest_with_precondition(session, manifest, None)
+}
+
+pub(crate) fn repair_corrupt_workflow_run_manifest_in_directory(
+    session: &crate::session::storage::ContainedDirectory,
+    manifest: &WorkflowRunManifest,
+    fingerprint: WorkflowManifestFingerprint,
+) -> io::Result<()> {
+    write_workflow_run_manifest_with_precondition(session, manifest, Some(fingerprint))
+}
+
+fn write_workflow_run_manifest_with_precondition(
+    session: &crate::session::storage::ContainedDirectory,
+    manifest: &WorkflowRunManifest,
+    corrupt_fingerprint: Option<WorkflowManifestFingerprint>,
+) -> io::Result<()> {
     let run_id = &manifest.state.run_id;
     validate_run_id(run_id)?;
     let run_relative = Path::new("workflows").join(run_id);
@@ -576,7 +662,14 @@ pub(crate) fn write_workflow_run_manifest_in_directory(
     #[cfg(not(any(unix, windows)))]
     let cleared = false;
     if cleared {
-        return Ok(());
+        return if corrupt_fingerprint.is_some() {
+            Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("Workflow {run_id} was cleared during restore repair"),
+            ))
+        } else {
+            Ok(())
+        };
     }
     #[cfg(any(unix, windows))]
     match run_dir.read_bounded(
@@ -585,37 +678,52 @@ pub(crate) fn write_workflow_run_manifest_in_directory(
         MAX_WORKFLOW_MANIFEST_BYTES,
     ) {
         Ok(existing) => {
-            let on_disk = decode_workflow_manifest(&existing)?;
-            if on_disk.state.run_id != *run_id {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "Workflow manifest run id does not match its directory",
-                ));
-            }
-            match on_disk.state.revision.cmp(&manifest.state.revision) {
-                std::cmp::Ordering::Greater => {
+            if let Some(expected) = corrupt_fingerprint {
+                if !expected.matches(&existing) {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!(
-                            "stale Workflow manifest revision for {run_id}: persisted {}, incoming {}",
-                            on_disk.state.revision, manifest.state.revision
-                        ),
+                        format!("Workflow manifest changed during restore repair: {run_id}"),
                     ));
                 }
-                std::cmp::Ordering::Equal if on_disk == *manifest => return Ok(()),
-                std::cmp::Ordering::Equal => {
+            } else {
+                let on_disk = decode_workflow_manifest(&existing)?;
+                if on_disk.state.run_id != *run_id {
                     return Err(io::Error::new(
                         io::ErrorKind::InvalidData,
-                        format!(
-                            "conflicting Workflow manifest content at revision {} for {run_id}",
-                            manifest.state.revision
-                        ),
+                        "Workflow manifest run id does not match its directory",
                     ));
                 }
-                std::cmp::Ordering::Less => {}
+                match on_disk.state.revision.cmp(&manifest.state.revision) {
+                    std::cmp::Ordering::Greater => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "stale Workflow manifest revision for {run_id}: persisted {}, incoming {}",
+                                on_disk.state.revision, manifest.state.revision
+                            ),
+                        ));
+                    }
+                    std::cmp::Ordering::Equal if on_disk == *manifest => return Ok(()),
+                    std::cmp::Ordering::Equal => {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!(
+                                "conflicting Workflow manifest content at revision {} for {run_id}",
+                                manifest.state.revision
+                            ),
+                        ));
+                    }
+                    std::cmp::Ordering::Less => {}
+                }
             }
         }
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound && corrupt_fingerprint.is_none() => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Workflow manifest disappeared during restore repair: {run_id}"),
+            ));
+        }
         Err(error) => return Err(error),
     }
     let json = encode_workflow_manifest(manifest)?;
@@ -842,6 +950,54 @@ mod tests {
         writer.await.unwrap();
     }
 
+    #[tokio::test]
+    async fn corrupt_sidecar_repair_waits_for_its_storage_ack() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let store = WorkflowRunStore::new(None, tx);
+        store
+            .register("wf_repair_ack", "complete(1);", &serde_json::json!({}))
+            .unwrap();
+        let state = WorkflowTracker::default().start_run(
+            "wf_repair_ack".into(),
+            "demo".into(),
+            "objective".into(),
+            Vec::new(),
+            None,
+            None,
+            crate::session::workflow::tracker::test_runtime_route(),
+        );
+        let fingerprint = WorkflowManifestFingerprint::of(b"{broken json");
+        let (received_tx, received_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let writer = tokio::spawn(async move {
+            let Some(PersistenceMsg::WorkflowRunStateAndAck {
+                corrupt_sidecar_fingerprint,
+                respond_to,
+                ..
+            }) = rx.recv().await
+            else {
+                panic!("expected guarded Workflow repair acknowledgement");
+            };
+            assert_eq!(corrupt_sidecar_fingerprint, Some(fingerprint));
+            let _ = received_tx.send(());
+            let result = release_rx.await.unwrap();
+            let _ = respond_to.send(result);
+        });
+        let repair =
+            tokio::spawn(
+                async move { store.repair_corrupt_sidecar_ack(&state, fingerprint).await },
+            );
+
+        received_rx.await.unwrap();
+        assert!(
+            !repair.is_finished(),
+            "repair must wait for durable storage acknowledgement"
+        );
+        let _ = release_tx.send(Ok(()));
+        repair.await.unwrap().unwrap();
+        writer.await.unwrap();
+    }
+
     #[test]
     fn admission_uses_the_writer_manifest_size_limit() {
         let (tx, _rx) = mpsc::unbounded_channel();
@@ -917,6 +1073,53 @@ mod tests {
         assert_eq!(persisted, manifest);
     }
 
+    #[cfg(any(unix, windows))]
+    #[test]
+    fn corrupt_manifest_repair_replaces_only_the_observed_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = crate::session::storage::ContainedDirectory::open(
+            dir.path(),
+            Path::new(""),
+            "Workflow test session",
+            false,
+        )
+        .unwrap();
+        let run_dir = dir.path().join("workflows/wf_corrupt");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let state_path = run_dir.join("state.json");
+        let corrupt = b"{broken json";
+        std::fs::write(&state_path, corrupt).unwrap();
+        let seed = manifest("wf_corrupt", 1);
+        let fingerprint = WorkflowManifestFingerprint::of(corrupt);
+
+        repair_corrupt_workflow_run_manifest_in_directory(&session, &seed, fingerprint).unwrap();
+        assert_eq!(
+            decode_workflow_manifest(&std::fs::read(&state_path).unwrap()).unwrap(),
+            seed
+        );
+
+        let changed_corrupt = b"{different broken json";
+        std::fs::write(&state_path, changed_corrupt).unwrap();
+        let error = repair_corrupt_workflow_run_manifest_in_directory(&session, &seed, fingerprint)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read(&state_path).unwrap(), changed_corrupt);
+
+        let newer = manifest("wf_corrupt", 9);
+        std::fs::write(&state_path, serde_json::to_vec(&newer).unwrap()).unwrap();
+        let before = std::fs::read(&state_path).unwrap();
+        let error = repair_corrupt_workflow_run_manifest_in_directory(&session, &seed, fingerprint)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(std::fs::read(&state_path).unwrap(), before);
+
+        std::fs::remove_file(&state_path).unwrap();
+        let error = repair_corrupt_workflow_run_manifest_in_directory(&session, &seed, fingerprint)
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert!(!state_path.exists());
+    }
+
     #[test]
     fn concurrent_workflow_manifest_writes_converge_on_highest_revision() {
         let dir = tempfile::tempdir().unwrap();
@@ -982,10 +1185,11 @@ mod tests {
             },
             script: "complete(1);".into(),
             args: serde_json::json!({}),
+            corrupt_sidecar_fingerprint: None,
         };
 
         let timeline = timeline_with_workflow("wf_active", "deep-research", "objective");
-        let (_store, states) = WorkflowRunStore::from_restored(
+        let (_store, states, _) = WorkflowRunStore::from_restored(
             None,
             tx,
             vec![restored],
@@ -1031,6 +1235,7 @@ mod tests {
             },
             script: "await_user(\"back_off\", \"review\");".into(),
             args: serde_json::json!({}),
+            corrupt_sidecar_fingerprint: None,
         };
         let mut timeline = timeline_with_workflow("wf_attention", "review", "objective");
         timeline
@@ -1046,7 +1251,7 @@ mod tests {
             ))
             .unwrap();
 
-        let (_store, states) = WorkflowRunStore::from_restored(
+        let (_store, states, _) = WorkflowRunStore::from_restored(
             None,
             tx,
             vec![restored],
@@ -1084,6 +1289,7 @@ mod tests {
             },
             script: "complete(1);".into(),
             args: serde_json::json!({}),
+            corrupt_sidecar_fingerprint: None,
         };
         let mut timeline = timeline_with_workflow("wf_resume", "demo", "objective");
         timeline
@@ -1107,7 +1313,7 @@ mod tests {
             ))
             .unwrap();
 
-        let (_store, states) = WorkflowRunStore::from_restored(
+        let (_store, states, _) = WorkflowRunStore::from_restored(
             None,
             tx,
             vec![restored],
@@ -1133,11 +1339,13 @@ mod tests {
             manifest: invalid_manifest,
             script: "complete(0);".into(),
             args: serde_json::json!({"invalid": true}),
+            corrupt_sidecar_fingerprint: None,
         };
         let valid = RestoredWorkflowRun {
             manifest: manifest("wf_valid", 1),
             script: "complete(1);".into(),
             args: serde_json::json!({"valid": true}),
+            corrupt_sidecar_fingerprint: None,
         };
         let mut timeline = timeline_with_workflow("wf_invalid", "demo", "objective");
         timeline
@@ -1154,7 +1362,7 @@ mod tests {
             ))
             .unwrap();
 
-        let (store, states) = WorkflowRunStore::from_restored(
+        let (store, states, _) = WorkflowRunStore::from_restored(
             None,
             tx,
             vec![invalid, valid],
@@ -1192,6 +1400,7 @@ mod tests {
             manifest: damaged,
             script: "complete(1);".into(),
             args: serde_json::json!({"restored": true}),
+            corrupt_sidecar_fingerprint: None,
         };
         let mut timeline = chat_state::Timeline::default();
         timeline
@@ -1208,7 +1417,7 @@ mod tests {
             ))
             .unwrap();
 
-        let (store, states) = WorkflowRunStore::from_restored(
+        let (store, states, _) = WorkflowRunStore::from_restored(
             None,
             tx,
             vec![restored],
@@ -1224,6 +1433,34 @@ mod tests {
         assert_eq!(
             store.script_for("wf_rebuilt").as_deref(),
             Some("complete(1);")
+        );
+    }
+
+    #[test]
+    fn timeline_seed_from_corrupt_sidecar_is_scheduled_for_guarded_repair() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let seed = manifest("wf_corrupt_restore", 1);
+        let fingerprint = WorkflowManifestFingerprint::of(b"{broken json");
+        let restored = RestoredWorkflowRun {
+            manifest: seed.clone(),
+            script: "complete(1);".into(),
+            args: serde_json::json!({}),
+            corrupt_sidecar_fingerprint: Some(fingerprint),
+        };
+        let timeline = timeline_with_workflow("wf_corrupt_restore", "demo", "objective");
+
+        let (_store, states, repairs) = WorkflowRunStore::from_restored(
+            None,
+            tx,
+            vec![restored],
+            &lifecycle_snapshot(&timeline),
+        );
+
+        assert_eq!(states.len(), 1);
+        assert_eq!(repairs, vec![(states[0].clone(), fingerprint)]);
+        assert!(
+            rx.try_recv().is_err(),
+            "corrupt repair must use its ACK path"
         );
     }
 
@@ -1252,7 +1489,50 @@ mod tests {
             resolve_workflow_restore_manifest("wf_frozen", &lifecycle, Some(drifted)).unwrap();
 
         assert!(resolution.used_timeline_seed);
-        assert_eq!(resolution.manifest, initial);
+        assert!(resolution.manifest.state.agent_usage_incomplete);
+        let mut expected = initial;
+        expected.state.agent_usage_incomplete = true;
+        assert_eq!(resolution.manifest, expected);
+    }
+
+    #[test]
+    fn completed_workflow_without_sidecar_reports_seed_usage_incomplete() {
+        let initial = manifest("wf_done", 1);
+        let mut timeline = timeline_with_workflow("wf_done", "demo", "objective");
+        timeline
+            .record(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Ended {
+                    run_id: "wf_done".into(),
+                    execution_epoch: 0,
+                    status: chat_state::WorkflowExecutionStatus::Complete,
+                    handoff: chat_state::WorkflowTurnHandoff::Completion,
+                    duration_ms: 1,
+                    message: None,
+                },
+            ))
+            .unwrap();
+        let lifecycle = timeline.workflow_lifecycle("wf_done").unwrap();
+
+        let mut seed = resolve_workflow_restore_manifest("wf_done", &lifecycle, None)
+            .unwrap()
+            .manifest
+            .state;
+        reconcile_workflow_lifecycle(&mut seed, &lifecycle);
+        assert_eq!(
+            seed.status,
+            super::super::tracker::WorkflowRunStatus::Complete
+        );
+        assert_eq!(seed.agents_used, 0);
+        assert!(seed.agent_usage_incomplete);
+
+        let mut sidecar = initial;
+        sidecar.state.agents_used = 2;
+        let mut restored =
+            resolve_workflow_restore_manifest("wf_done", &lifecycle, Some(sidecar)).unwrap();
+        assert!(!restored.used_timeline_seed);
+        reconcile_workflow_lifecycle(&mut restored.manifest.state, &lifecycle);
+        assert_eq!(restored.manifest.state.agents_used, 2);
+        assert!(!restored.manifest.state.agent_usage_incomplete);
     }
 
     #[test]
@@ -1315,9 +1595,10 @@ mod tests {
             },
             script: "complete(1);".into(),
             args: serde_json::json!({}),
+            corrupt_sidecar_fingerprint: None,
         };
 
-        let (_store, states) =
+        let (_store, states, _) =
             WorkflowRunStore::from_restored(None, tx, vec![restored], &HashMap::new());
         assert!(states.is_empty());
     }
