@@ -10,6 +10,8 @@ use crate::common::*;
 #[ignore]
 async fn minimal_esc_cancels_running_turn() {
     let content = ContentController::start().await.expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
+    content.seed_llm_config().expect("seed mock LLM config");
     // Paced, long stream so the turn is provably still running when Esc lands.
     let long = format!(
         "{MOCK_RESPONSE_SENTINEL} {}",

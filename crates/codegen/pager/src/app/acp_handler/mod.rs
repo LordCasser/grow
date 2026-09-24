@@ -53,8 +53,9 @@ use permissions::{apply_recap_block, handle_permission_request, should_drop_late
 
 // Child modules using `super::*` need these sibling symbols in scope.
 use routing::{
-    SessionMatch, find_session_match, is_matched_agent_active, is_matched_view_active,
-    mcp_target_agent, resolve_notif_agent, resolve_target_agent_view, resolve_target_view,
+    SessionMatch, find_exact_session_match, find_permission_session_match, find_session_match,
+    is_matched_agent_active, is_matched_view_active, mcp_target_agent, resolve_notif_agent,
+    resolve_target_agent_view, resolve_target_view,
 };
 
 pub(crate) use settings::apply_models_state_update;
@@ -779,6 +780,7 @@ fn queue_open_workflows_modal_refresh(app: &mut AppView, agent_id: AgentId) {
 /// Handle an Grow extension notification.
 fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
     match notif.method.as_ref() {
+        "grow/leader/resync_required" => handle_leader_resync_required(notif, app),
         "grow/session_notification" | "grow/session/update" => {
             handle_session_notification(notif, app)
         }
@@ -801,6 +803,41 @@ fn handle_ext_notification(notif: &acp::ExtNotification, app: &mut AppView) -> b
         "grow/mcp/server_status" => handle_mcp_server_status(notif, app),
         _ => false,
     }
+}
+
+fn handle_leader_resync_required(notif: &acp::ExtNotification, app: &mut AppView) -> bool {
+    static NEXT_RESYNC_GENERATION: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(1 << 63);
+    let Ok(params) = serde_json::from_str::<serde_json::Value>(notif.params.get()) else {
+        return false;
+    };
+    let Some(session_id) = params.get("sessionId").and_then(serde_json::Value::as_str) else {
+        return false;
+    };
+    let Some(matched) = find_exact_session_match(app, &acp::SessionId::new(session_id)) else {
+        return false;
+    };
+    let agent_id = matched.agent_id();
+    let is_active = is_matched_agent_active(app, agent_id);
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return false;
+    };
+    let Some(root_session_id) = agent.session.session_id.clone() else {
+        return false;
+    };
+    let cwd = agent.session.cwd.clone();
+    let permission_mode = agent.session.permission_mode();
+    let generation = NEXT_RESYNC_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    agent.begin_session_resync(generation);
+    crate::minimal_api::restart_minimal_transcript_after_reload(app, &[agent_id]);
+    app.pending_effects.push(Effect::ResyncSession {
+        agent_id,
+        session_id: root_session_id,
+        cwd,
+        generation,
+        permission_mode,
+    });
+    is_active
 }
 
 /// Handle `grow/session/interjection` — the leader broadcasts this

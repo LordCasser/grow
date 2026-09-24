@@ -11,6 +11,8 @@ use crate::common::*;
 #[ignore]
 async fn minimal_ctrl_c_arms_and_quits() {
     let content = ContentController::start().await.expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
+    content.seed_llm_config().expect("seed mock LLM config");
     let mut harness = spawn_minimal(&content);
     wait_minimal_ready(&mut harness);
 

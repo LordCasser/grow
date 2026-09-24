@@ -13,11 +13,18 @@ use crate::theme::Theme;
 
 /// Identity of a passive inquiry row rendered with the normal tool chrome.
 /// Its durable start/approval/end events are not three separate UI rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CoordinationPhase {
+    Received,
+    Approved,
+    Terminal,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoordinationRow {
     pub source_peer_id: String,
     pub inquiry_id: String,
-    pub terminal: bool,
+    pub phase: CoordinationPhase,
 }
 
 /// Other/unknown tool call.
@@ -525,7 +532,11 @@ impl BlockContent for OtherToolCallBlock {
             Some(AccentStyle::static_color(theme.accent_error))
         } else if ctx.is_running {
             Some(AccentStyle::animated(theme.accent_running))
-        } else if self.coordination.as_ref().is_some_and(|row| row.terminal) {
+        } else if self
+            .coordination
+            .as_ref()
+            .is_some_and(|row| row.phase == CoordinationPhase::Terminal)
+        {
             Some(AccentStyle::static_color(theme.accent_success))
         } else {
             Some(AccentStyle::static_color(theme.accent_tool))
@@ -655,7 +666,7 @@ mod coordination_tests {
                     block.coordination = Some(CoordinationRow {
                         source_peer_id: "peer".into(),
                         inquiry_id: "one".into(),
-                        terminal: false,
+                        phase: CoordinationPhase::Received,
                     });
                 }
                 assert!(

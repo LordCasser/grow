@@ -266,7 +266,9 @@ impl<T: ListItem> ListPane<'_, T> {
             let Some(item) = self.items.get(pi) else {
                 continue;
             };
-            let item_h = state.layout().item_height(vi);
+            let Some(item_h) = state.layout().item_height(vi) else {
+                continue;
+            };
 
             // How many rows to skip at the top of this item (only for the first item).
             let skip = if vi == first_vi { skip_rows } else { 0 };
@@ -1461,7 +1463,7 @@ mod tests {
         // Layout height should match desired height (not be clipped)
         assert_eq!(
             state.layout().item_height(0),
-            full_height,
+            Some(full_height),
             "Layout cache height should match desired height"
         );
 
@@ -1501,7 +1503,7 @@ mod tests {
         for (i, &h) in heights.iter().enumerate() {
             assert_eq!(
                 state.layout().item_height(i),
-                h,
+                Some(h),
                 "Item {} height mismatch",
                 i
             );
@@ -1649,7 +1651,7 @@ mod tests {
         // Fix should compute at narrow width
         assert_eq!(
             state.layout().item_height(0),
-            height_narrow,
+            Some(height_narrow),
             "Fix should compute height at narrow width"
         );
 
@@ -1686,7 +1688,7 @@ mod tests {
         for i in 0..items.len() {
             assert_eq!(
                 state.layout().item_height(i),
-                narrow_height,
+                Some(narrow_height),
                 "Item {} should have narrow-width height",
                 i
             );
@@ -1712,7 +1714,7 @@ mod tests {
 
         assert_eq!(
             state.layout().item_height(0),
-            height_narrow,
+            Some(height_narrow),
             "Phase 2 should recompute at narrow width"
         );
     }

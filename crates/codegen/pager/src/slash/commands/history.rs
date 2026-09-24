@@ -28,7 +28,9 @@ impl SlashCommand for HistoryCommand {
         if query == "--prompts" {
             CommandResult::Action(Action::OpenHistorySearch)
         } else {
-            CommandResult::Action(Action::ShowSessionPicker { query: query.to_owned() })
+            CommandResult::Action(Action::ShowSessionPicker {
+                query: query.to_owned(),
+            })
         }
     }
 }
@@ -68,7 +70,11 @@ mod tests {
         let models = ModelState::default();
         let bundle = BundleState::default();
         let mut ctx = make_ctx(&models, &bundle);
-        for (args, expected) in [("", ""), ("  deployment error  ", "deployment error"), ("历史结果", "历史结果")] {
+        for (args, expected) in [
+            ("", ""),
+            ("  deployment error  ", "deployment error"),
+            ("历史结果", "历史结果"),
+        ] {
             assert!(matches!(HistoryCommand.run(&mut ctx, args),
                 CommandResult::Action(Action::ShowSessionPicker { query }) if query == expected));
         }

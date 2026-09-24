@@ -71,7 +71,8 @@ impl ListLayoutCache {
     /// Used for **incremental append**: when new items arrive, we compute
     /// heights only for the new items and extend the prefix-sum array.
     ///
-    /// Panics if `self` is `FixedHeight` — caller must ensure the mode matches.
+    /// Fixed-height caches count every appended item; variable-height caches
+    /// retain the supplied per-item heights.
     pub fn extend_heights(&mut self, new_heights: impl IntoIterator<Item = u16>) {
         match self {
             Self::Variable {
@@ -85,8 +86,8 @@ impl ListLayoutCache {
                     heights.push(h);
                 }
             }
-            Self::FixedHeight { .. } => {
-                panic!("extend_heights called on FixedHeight cache");
+            Self::FixedHeight { count } => {
+                *count = count.saturating_add(new_heights.into_iter().count());
             }
         }
     }
@@ -114,18 +115,22 @@ impl ListLayoutCache {
     /// Virtual-y position (in visual lines from top) of item at `idx`.
     ///
     /// For `FixedHeight`, this is just `idx`.
-    pub fn virtual_y(&self, idx: usize) -> usize {
+    pub fn virtual_y(&self, idx: usize) -> Option<usize> {
         match self {
-            Self::FixedHeight { .. } => idx,
-            Self::Variable { prefix_sums, .. } => prefix_sums.get(idx).copied().unwrap_or(0),
+            Self::FixedHeight { count } => (idx < *count).then_some(idx),
+            Self::Variable {
+                heights,
+                prefix_sums,
+                ..
+            } => (idx < heights.len()).then(|| prefix_sums[idx]),
         }
     }
 
     /// Height of item at `idx` in visual lines.
-    pub fn item_height(&self, idx: usize) -> u16 {
+    pub fn item_height(&self, idx: usize) -> Option<u16> {
         match self {
-            Self::FixedHeight { .. } => 1,
-            Self::Variable { heights, .. } => heights.get(idx).copied().unwrap_or(1),
+            Self::FixedHeight { count } => (idx < *count).then_some(1),
+            Self::Variable { heights, .. } => heights.get(idx).copied(),
         }
     }
 
@@ -182,10 +187,10 @@ mod tests {
         let cache = ListLayoutCache::fixed(5);
         assert_eq!(cache.total_height(), 5);
         assert_eq!(cache.item_count(), 5);
-        assert_eq!(cache.virtual_y(0), 0);
-        assert_eq!(cache.virtual_y(3), 3);
-        assert_eq!(cache.item_height(0), 1);
-        assert_eq!(cache.item_height(4), 1);
+        assert_eq!(cache.virtual_y(0), Some(0));
+        assert_eq!(cache.virtual_y(3), Some(3));
+        assert_eq!(cache.item_height(0), Some(1));
+        assert_eq!(cache.item_height(4), Some(1));
         assert_eq!(cache.item_at_y(0), Some(0));
         assert_eq!(cache.item_at_y(4), Some(4));
         // Clamped
@@ -198,6 +203,8 @@ mod tests {
         assert_eq!(cache.total_height(), 0);
         assert_eq!(cache.item_count(), 0);
         assert_eq!(cache.item_at_y(0), None);
+        assert_eq!(cache.virtual_y(0), None);
+        assert_eq!(cache.item_height(0), None);
     }
 
     #[test]
@@ -208,15 +215,15 @@ mod tests {
         assert_eq!(cache.item_count(), 4);
 
         // virtual_y positions: 0, 3, 4, 6
-        assert_eq!(cache.virtual_y(0), 0);
-        assert_eq!(cache.virtual_y(1), 3);
-        assert_eq!(cache.virtual_y(2), 4);
-        assert_eq!(cache.virtual_y(3), 6);
+        assert_eq!(cache.virtual_y(0), Some(0));
+        assert_eq!(cache.virtual_y(1), Some(3));
+        assert_eq!(cache.virtual_y(2), Some(4));
+        assert_eq!(cache.virtual_y(3), Some(6));
 
-        assert_eq!(cache.item_height(0), 3);
-        assert_eq!(cache.item_height(1), 1);
-        assert_eq!(cache.item_height(2), 2);
-        assert_eq!(cache.item_height(3), 4);
+        assert_eq!(cache.item_height(0), Some(3));
+        assert_eq!(cache.item_height(1), Some(1));
+        assert_eq!(cache.item_height(2), Some(2));
+        assert_eq!(cache.item_height(3), Some(4));
     }
 
     #[test]
@@ -254,7 +261,7 @@ mod tests {
         let cache = ListLayoutCache::from_heights(80, vec![5]);
         assert_eq!(cache.total_height(), 5);
         assert_eq!(cache.item_count(), 1);
-        assert_eq!(cache.virtual_y(0), 0);
+        assert_eq!(cache.virtual_y(0), Some(0));
         assert_eq!(cache.item_at_y(0), Some(0));
         assert_eq!(cache.item_at_y(4), Some(0));
         assert_eq!(cache.item_at_y(5), Some(0)); // clamped
@@ -270,6 +277,26 @@ mod tests {
     }
 
     #[test]
+    fn out_of_range_geometry_is_absent() {
+        let fixed = ListLayoutCache::fixed(1);
+        assert_eq!(fixed.virtual_y(1), None);
+        assert_eq!(fixed.item_height(1), None);
+
+        let variable = ListLayoutCache::from_heights(80, [3, 1]);
+        assert_eq!(variable.virtual_y(2), None);
+        assert_eq!(variable.item_height(2), None);
+    }
+
+    #[test]
+    fn extend_heights_is_safe_for_fixed_cache() {
+        let mut cache = ListLayoutCache::fixed(1);
+        cache.extend_heights([7, 2]);
+        assert_eq!(cache.item_count(), 3);
+        assert_eq!(cache.total_height(), 3);
+        assert_eq!(cache.item_height(2), Some(1));
+    }
+
+    #[test]
     fn extend_heights_appends() {
         let mut cache = ListLayoutCache::from_heights(80, vec![3, 1]);
         assert_eq!(cache.item_count(), 2);
@@ -280,12 +307,12 @@ mod tests {
         assert_eq!(cache.total_height(), 10);
 
         // Prefix sums: [0, 3, 4, 6, 10]
-        assert_eq!(cache.virtual_y(0), 0);
-        assert_eq!(cache.virtual_y(1), 3);
-        assert_eq!(cache.virtual_y(2), 4);
-        assert_eq!(cache.virtual_y(3), 6);
-        assert_eq!(cache.item_height(2), 2);
-        assert_eq!(cache.item_height(3), 4);
+        assert_eq!(cache.virtual_y(0), Some(0));
+        assert_eq!(cache.virtual_y(1), Some(3));
+        assert_eq!(cache.virtual_y(2), Some(4));
+        assert_eq!(cache.virtual_y(3), Some(6));
+        assert_eq!(cache.item_height(2), Some(2));
+        assert_eq!(cache.item_height(3), Some(4));
     }
 
     #[test]

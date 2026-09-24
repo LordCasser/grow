@@ -74,7 +74,7 @@ pub fn maybe_commit_plan(app: &mut AppView) {
 
     // Extract the plan (owned) under a short immutable borrow so the mutable
     // scrollback push and the `minimal_state` read/write below don't overlap it.
-    let plan = minimal_api::app_agent(app, id).and_then(|agent| {
+    let plan = minimal_api::app_visible_agent(app, id).and_then(|agent| {
         minimal_api::plan_approval_view(agent)
             .map(|pav| (pav.tool_call_id.clone(), pav.plan_content.clone()))
     });
@@ -90,7 +90,7 @@ pub fn maybe_commit_plan(app: &mut AppView) {
     // agent borrow can't fail here (the plan was just extracted from it), but
     // if it ever did, stamping the id anyway would treat the plan as committed
     // while nothing ever reaches native scrollback.
-    if let Some(agent) = minimal_api::app_agent_mut(app, id) {
+    if let Some(agent) = minimal_api::app_visible_agent_mut(app, id) {
         let block = RenderBlock::agent_message(content);
         // No anchor (the tool was reaped): append, and the plan commits at turn
         // end — the pre-fix behavior, still better than dropping it.

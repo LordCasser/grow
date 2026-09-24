@@ -20,6 +20,7 @@ use pager::minimal_api;
 use pager::render::Renderable;
 use pager::scrollback::block::{BlockContent, RenderBlock};
 use pager::scrollback::blocks::ToolCallBlock;
+use pager::scrollback::blocks::tool::CoordinationPhase;
 use pager::scrollback::entry::{EntryId, ScrollbackEntry};
 use pager::scrollback::state::ScrollbackState;
 use pager::scrollback::types::DisplayMode;
@@ -106,7 +107,7 @@ pub fn is_committable(entry: &ScrollbackEntry, turn_running: bool, is_last: bool
         return false;
     }
     if matches!(&entry.block, RenderBlock::ToolCall(ToolCallBlock::Other(block))
-        if block.coordination.as_ref().is_some_and(|row| !row.terminal))
+        if block.coordination.as_ref().is_some_and(|row| row.phase != CoordinationPhase::Terminal))
     {
         return false;
     }
@@ -180,7 +181,7 @@ pub fn prepare_live_tail_display(app: &mut AppView) {
         _ => return,
     };
     let appearance = committed_appearance(minimal_api::app_appearance(app));
-    let Some(agent) = minimal_api::app_agent_mut(app, id) else {
+    let Some(agent) = minimal_api::app_visible_agent_mut(app, id) else {
         return;
     };
     let sb = minimal_api::agent_scrollback_mut(agent);
@@ -593,7 +594,7 @@ fn buffer_to_semantic_rows(
     rows
 }
 
-/// Commit the active agent's newly-finalized blocks into native scrollback.
+/// Commit the selected root or child Agent's newly-finalized blocks into native scrollback.
 ///
 /// For each entry in the leading committable run: stamp its print-once display
 /// mode (K9), then `insert_before` it using the shared `EntryRenderer` at
@@ -615,7 +616,7 @@ pub fn commit_active(
     };
     // Snapshot the commit appearance before borrowing `agents` mutably.
     let appearance = committed_appearance(minimal_api::app_appearance(app));
-    let Some(agent) = minimal_api::app_agent_mut(app, id) else {
+    let Some(agent) = minimal_api::app_visible_agent_mut(app, id) else {
         return false;
     };
     // Hold commits while a centered fullscreen app-modal (settings) is open: it
@@ -736,7 +737,7 @@ pub fn expand_pending(
     // region or a reconnect transaction is staging replay. An `insert_before`
     // would respectively scroll the popup or leak staged history into native
     // scrollback (same hold as `commit_active`; bugbot).
-    match minimal_api::app_agent(app, id) {
+    match minimal_api::app_visible_agent(app, id) {
         Some(agent)
             if !super::overlay::app_modal_active(agent)
                 && !minimal_api::agent_session_reload_active(agent) => {}
@@ -751,7 +752,7 @@ pub fn expand_pending(
     let ids = minimal_api::take_minimal_pending_expand(app);
     let mut requeue: Vec<EntryId> = Vec::new();
     {
-        let Some(agent) = minimal_api::app_agent_mut(app, id) else {
+        let Some(agent) = minimal_api::app_visible_agent_mut(app, id) else {
             // Can't happen (existence checked just above, nothing in between
             // can remove the agent) — but if it ever does, the drained queue
             // must go back rather than silently vanish.
@@ -804,7 +805,7 @@ pub fn sync_pending_marks(app: &mut AppView) {
         ActiveView::Agent(id) => *id,
         _ => return,
     };
-    if let Some(agent) = minimal_api::app_agent_mut(app, id) {
+    if let Some(agent) = minimal_api::app_visible_agent_mut(app, id) {
         minimal_api::sync_pending_user_input_marks(agent);
     }
 }

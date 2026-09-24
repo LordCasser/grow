@@ -12,9 +12,14 @@ const T2: &str = "CLUSTER_SENTINEL_T2";
 /// driver/viewer roles flip for the next turn. In-process port of the
 /// `leader_two_clients_shared_session` PTY case.
 #[test]
-#[ignore = "leader-cluster: needs single-process isolation (process-global env + grow_home OnceLock in the shared lib test binary); run: cargo test -p pager --lib -- app::leader_cluster --ignored --test-threads=1"]
-#[serial_test::serial(GROW_HOME)]
+#[ignore = "expensive multi-client leader integration scenario; runs in an isolated exact-test child"]
 fn two_clients_share_session_and_stream_both_ways() {
+    if run_in_isolated_child(
+        module_path!(),
+        "two_clients_share_session_and_stream_both_ways",
+    ) {
+        return;
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -74,9 +79,14 @@ fn two_clients_share_session_and_stream_both_ways() {
 /// every subscriber exactly once; each viewer's attach replay is unicast
 /// (it never duplicates into the already-attached clients).
 #[test]
-#[ignore = "leader-cluster: needs single-process isolation (process-global env + grow_home OnceLock in the shared lib test binary); run: cargo test -p pager --lib -- app::leader_cluster --ignored --test-threads=1"]
-#[serial_test::serial(GROW_HOME)]
+#[ignore = "expensive multi-client leader integration scenario; runs in an isolated exact-test child"]
 fn n_client_fan_out_without_replay_duplication() {
+    if run_in_isolated_child(
+        module_path!(),
+        "n_client_fan_out_without_replay_duplication",
+    ) {
+        return;
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -154,9 +164,11 @@ fn n_client_fan_out_without_replay_duplication() {
 /// lands Idle, and no inference request is re-driven. In-process port of
 /// `leader_reattach_completion_roundtrips_durable_log`.
 #[test]
-#[ignore = "leader-cluster: needs single-process isolation (process-global env + grow_home OnceLock in the shared lib test binary); run: cargo test -p pager --lib -- app::leader_cluster --ignored --test-threads=1"]
-#[serial_test::serial(GROW_HOME)]
+#[ignore = "expensive multi-client leader integration scenario; runs in an isolated exact-test child"]
 fn reattach_completion_roundtrips_durable_log() {
+    if run_in_isolated_child(module_path!(), "reattach_completion_roundtrips_durable_log") {
+        return;
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -234,9 +246,14 @@ fn reattach_completion_roundtrips_durable_log() {
 /// (its `plan_reconnect_load` is event_loop-private; the cwd/meta
 /// derivation is replicated inline).
 #[test]
-#[ignore = "leader-cluster: needs single-process isolation (process-global env + grow_home OnceLock in the shared lib test binary); run: cargo test -p pager --lib -- app::leader_cluster --ignored --test-threads=1"]
-#[serial_test::serial(GROW_HOME)]
+#[ignore = "expensive multi-client leader integration scenario; runs in an isolated exact-test child"]
 fn leader_kill_reconnect_reloads_without_duplicating_history() {
+    if run_in_isolated_child(
+        module_path!(),
+        "leader_kill_reconnect_reloads_without_duplicating_history",
+    ) {
+        return;
+    }
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -251,7 +268,7 @@ fn leader_kill_reconnect_reloads_without_duplicating_history() {
 
         // Kill the leader generation, respawn at the same path; the
         // bridge's reconnector adopts the new in-process server.
-        cluster.kill_leader().await;
+        cluster.kill_leader(&sid).await;
         cluster.respawn_leader().await;
 
         let mut status_rx = a.status_rx.clone().expect("reconnecting client");
@@ -340,20 +357,16 @@ fn leader_kill_reconnect_reloads_without_duplicating_history() {
         )
         .await;
         let ok = load.is_ok();
-        // Drain the replay the load unicast to this client BEFORE
-        // finalizing, mirroring the production replay-then-finalize order.
-        a.pump_until("reload replay lands", move |app| {
-            app.agents
-                .values()
-                .any(|agent| agent_message_text(agent).contains(T1))
-        })
-        .await;
+        assert!(ok, "reconnect session/load failed: {:?}", load.err());
+        // Process updates already sent before the load response, then finalize.
+        // A valid cursor sends no old replay, so the stashed transcript becomes
+        // visible only when finish_session_reload restores it.
+        a.pump_once();
         a.app
             .agents
             .get_mut(&agent_id)
             .unwrap()
             .finish_session_reload(1, ok);
-        assert!(ok, "reconnect session/load failed: {:?}", load.err());
 
         assert_eq!(
             occurrences(&agent_message_text(a.agent_for_session(&sid)), T1),
@@ -373,18 +386,4 @@ fn leader_kill_reconnect_reloads_without_duplicating_history() {
 
         a.sever();
     });
-}
-
-/// Locate `<grow_home>/sessions/<enc-cwd>/<sid>/updates.jsonl` without the
-/// (internal) cwd encoder: scan one level of cwd dirs (same approach as
-/// session_load_perf's `locate_session_dir`).
-fn find_session_updates_file(sid: &str) -> Option<PathBuf> {
-    let sessions = effective_grow_home().join("sessions");
-    for entry in std::fs::read_dir(&sessions).ok()?.flatten() {
-        let candidate = entry.path().join(sid).join("updates.jsonl");
-        if candidate.is_file() {
-            return Some(candidate);
-        }
-    }
-    None
 }

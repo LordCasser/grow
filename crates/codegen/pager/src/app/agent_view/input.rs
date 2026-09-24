@@ -420,6 +420,15 @@ impl AgentView {
         registry: &ActionRegistry,
         effects: &mut Vec<super::actions::Effect>,
     ) -> InputOutcome {
+        // An invalidated child cannot own input while Minimal renders the
+        // root fallback. Release the stale selection before routing either.
+        if self
+            .active_subagent
+            .as_ref()
+            .is_some_and(|key| !self.subagent_views.contains_key(key))
+        {
+            self.active_subagent = None;
+        }
         if matches!(ev, Event::Key(_)) {
             self.prompt.last_input_delta = Default::default();
         }
@@ -429,7 +438,7 @@ impl AgentView {
                     self.record_input(key, &outcome);
                 }
                 *outcome
-            },
+            }
             crate::minimal_api::MinimalBtwInput::Occluded => {
                 let jump_dismissed = self.dismiss_jump_picker_if_suppressed();
                 let suspended = crate::minimal_api::suspend_minimal_btw(self);
@@ -1373,9 +1382,8 @@ impl AgentView {
         // Workflow children select only from the immutable Run snapshot that
         // Shell will accept. Ordinary sessions keep live native/plugin
         // discovery; `[subagents.toggle]` is unrelated to Agent switching.
-        let agent_catalog = self.session.workflow_agent_names.as_ref().map_or_else(
-            || crate::views::agents_modal::build_switch_agent_catalog(&self.session.cwd),
-            |names| {
+        if let Some(names) = &self.session.workflow_agent_names {
+            self.prompt.slash_controller.set_agent_catalog(
                 names
                     .iter()
                     .map(|name| crate::slash::command::AgentArg {
@@ -1383,12 +1391,9 @@ impl AgentView {
                         description: "Workflow Run snapshot".into(),
                         scope: "workflow".into(),
                     })
-                    .collect()
-            },
-        );
-        self.prompt
-            .slash_controller
-            .set_agent_catalog(agent_catalog);
+                    .collect(),
+            );
+        }
         self.sync_command_selection_context();
         let items = self
             .prompt
@@ -1415,6 +1420,64 @@ impl AgentView {
             }
             _ => self.show_toast("No options are available for this selector."),
         }
+    }
+
+    pub(crate) fn apply_switch_agent_catalog(
+        &mut self,
+        catalog: Vec<crate::slash::command::AgentArg>,
+    ) {
+        self.prompt.slash_controller.set_agent_catalog(catalog);
+        let Some(ActiveModal::ArgPicker {
+            command,
+            args_query,
+            ..
+        }) = self.active_modal.as_ref()
+        else {
+            return;
+        };
+        if command != "agent" {
+            return;
+        }
+        let suggested = self
+            .prompt
+            .slash_controller
+            .registry()
+            .get("agent")
+            .and_then(|command| {
+                let ctx = self.prompt.slash_controller.app_ctx(&self.session.models);
+                command.suggest_args(&ctx, args_query)
+            })
+            .unwrap_or_default();
+        let Some(ActiveModal::ArgPicker {
+            items,
+            original_items,
+            state,
+            ..
+        }) = self.active_modal.as_mut()
+        else {
+            return;
+        };
+        let selected_name = items
+            .get(state.selected)
+            .map(|item| item.insert_text.clone());
+        let query = state.query().to_lowercase();
+        *original_items = suggested;
+        *items = original_items
+            .iter()
+            .filter(|item| {
+                query.is_empty()
+                    || item.match_text.to_lowercase().contains(&query)
+                    || item.display.to_lowercase().contains(&query)
+                    || item.description.to_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect();
+        state.selected = selected_name
+            .as_deref()
+            .and_then(|name| items.iter().position(|item| item.insert_text == name))
+            .unwrap_or_else(|| state.selected.min(items.len().saturating_sub(1)));
+        state.hovered = state.hovered.filter(|index| *index < items.len());
+        state.scroll_offset = None;
     }
 
     pub(super) fn sync_command_selection_context(&mut self) {

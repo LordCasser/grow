@@ -35,6 +35,7 @@ impl AgentsTab {
     }
 }
 
+#[derive(Debug)]
 pub struct AgentListEntry {
     pub name: String,
     pub description: String,
@@ -103,6 +104,14 @@ pub struct AgentsModalState {
     pub cwd: PathBuf,
     pub default_agent: String,
     pub active_agent: Option<String>,
+    pub load_token: u64,
+    pub loading: bool,
+}
+
+static NEXT_LOAD_TOKEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_load_token() -> u64 {
+    NEXT_LOAD_TOKEN.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 fn user_visible_builtins() -> &'static [BuiltinAgentName] {
@@ -121,10 +130,19 @@ impl AgentsModalState {
         _bundle: &BundleState,
         active_agent: Option<String>,
     ) -> Self {
+        let mut modal = Self::new_loading(cwd, active_agent);
+        modal.complete_reload(Ok((
+            build_agent_list(cwd, toggle),
+            resolve_default_agent_name(cwd),
+        )));
+        modal
+    }
+
+    pub fn new_loading(cwd: &Path, active_agent: Option<String>) -> Self {
         Self {
             window: ModalWindowState::with_tabs(1),
             active_tab: AgentsTab::Agents,
-            agents: build_agent_list(cwd, toggle),
+            agents: Vec::new(),
             selected: 0,
             scroll: 0,
             search: LineEditor::default(),
@@ -133,18 +151,35 @@ impl AgentsModalState {
             content_rect: None,
             message: None,
             cwd: cwd.to_path_buf(),
-            default_agent: resolve_default_agent_name(cwd),
+            default_agent: String::new(),
             active_agent,
+            load_token: next_load_token(),
+            loading: true,
         }
     }
 
-    fn rebuild_agents(&mut self) {
-        self.agents = build_agent_list(&self.cwd, &load_agent_toggle());
-        self.selected = self.selected.min(self.agents.len().saturating_sub(1));
+    pub fn begin_reload(&mut self) -> u64 {
+        self.load_token = next_load_token();
+        self.loading = true;
+        self.message = None;
+        self.load_token
     }
 
-    pub fn refresh_after_editor(&mut self, _tab: AgentsTab) {
-        self.rebuild_agents();
+    pub fn complete_reload(&mut self, result: Result<(Vec<AgentListEntry>, String), String>) {
+        self.loading = false;
+        match result {
+            Ok((agents, default_agent)) => {
+                self.agents = agents;
+                self.default_agent = default_agent;
+                self.selected = self.selected.min(self.agents.len().saturating_sub(1));
+            }
+            Err(error) => self.message = Some(AgentsModalMessage::error(error)),
+        }
+    }
+
+    pub fn refresh_after_editor(&mut self, tab: AgentsTab) -> u64 {
+        self.active_tab = tab;
+        self.begin_reload()
     }
 
     pub fn search_query(&self) -> &str {
@@ -208,6 +243,30 @@ impl AgentsModalState {
             entry.expanded = false;
         }
     }
+}
+
+pub fn load_agent_catalog(cwd: &Path) -> (Vec<AgentListEntry>, String) {
+    let toggle = load_agent_toggle();
+    (
+        build_agent_list(cwd, &toggle),
+        resolve_default_agent_name(cwd),
+    )
+}
+
+pub fn builtin_switch_agent_catalog() -> Vec<crate::slash::command::AgentArg> {
+    user_visible_builtins()
+        .iter()
+        .filter_map(|builtin| {
+            let definition = builtin.definition();
+            definition
+                .is_primary_agent_eligible()
+                .then(|| crate::slash::command::AgentArg {
+                    name: definition.name,
+                    description: definition.description,
+                    scope: AgentScope::BuiltIn.label().to_owned(),
+                })
+        })
+        .collect()
 }
 
 pub fn build_switch_agent_catalog(cwd: &Path) -> Vec<crate::slash::command::AgentArg> {
@@ -629,6 +688,16 @@ pub fn render_agents_modal(
     buf.set_string(content.x, y, blurb, Style::default().fg(theme.gray_dim));
     y += 2;
 
+    if state.loading {
+        buf.set_string(
+            content.x,
+            y,
+            "Loading agents...",
+            Style::default().fg(theme.gray_dim),
+        );
+        return;
+    }
+
     if state.search_active || !state.search_query().is_empty() {
         let prefix = format!("/ {}", state.search_query());
         buf.set_string(content.x, y, prefix, Style::default().fg(theme.accent_user));
@@ -854,10 +923,10 @@ pub fn handle_agents_key(state: &mut AgentsModalState, key: &KeyEvent) -> Agents
             AgentsModalOutcome::Changed
         }
         KeyCode::Char('t') => {
-            if let Some(entry) = state.agents.get(state.selected) {
+            if let Some(entry) = state.agents.get_mut(state.selected) {
                 let name = entry.name.clone();
                 match toggle_agent(&name, !entry.enabled) {
-                    Ok(()) => state.rebuild_agents(),
+                    Ok(()) => entry.enabled = !entry.enabled,
                     Err(error) => state.message = Some(AgentsModalMessage::error(error)),
                 }
             }

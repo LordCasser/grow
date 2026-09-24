@@ -984,9 +984,13 @@ fn finish_trust_resolves_and_replays_startup() {
 #[serial_test::serial(GROW_HOME)]
 #[test]
 fn trust_folder_grants_and_resolves() {
+    if crate::test_util::run_with_isolated_grow_home(concat!(
+        module_path!(),
+        "::trust_folder_grants_and_resolves"
+    )) {
+        return;
+    }
     use workspace::trust::{TrustStore, workspace_key};
-    let home = tempfile::tempdir().expect("home tempdir");
-    unsafe { std::env::set_var("GROW_HOME", home.path()) };
     simulate_release_build();
     let repo = tempfile::tempdir().expect("repo tempdir");
     let workspace = workspace_key(repo.path());
@@ -1010,10 +1014,13 @@ fn trust_folder_grants_and_resolves() {
 #[serial_test::serial(GROW_HOME)]
 #[test]
 fn trust_folder_rejects_confirmation_period_replacement() {
+    if crate::test_util::run_with_isolated_grow_home(concat!(
+        module_path!(),
+        "::trust_folder_rejects_confirmation_period_replacement"
+    )) {
+        return;
+    }
     use workspace::trust::{TrustStore, workspace_identity_for_cwd, workspace_key};
-
-    let home = tempfile::tempdir().expect("home tempdir");
-    unsafe { std::env::set_var("GROW_HOME", home.path()) };
     simulate_release_build();
 
     let root = tempfile::tempdir().expect("repo parent tempdir");

@@ -640,6 +640,8 @@ pub(crate) type InlineMediaCompletions =
 pub struct AgentView {
     pub session: AgentSession,
     pub(crate) session_binding_epoch: u32,
+    /// Last `/agent` picker discovery request; late results from older views are ignored.
+    pub(crate) switch_catalog_request: u64,
     pub scrollback: ScrollbackState,
     pub prompt: PromptWidget,
     /// Sticky: once the user types in the prompt, hide the tip for the session.
@@ -659,6 +661,10 @@ pub struct AgentView {
     pub active_pane: AgentPane,
     /// Current mode of the prompt widget (normal vs editing a queued prompt).
     pub prompt_mode: PromptMode,
+    /// One Shell-owned shared-row edit, including the hold request in flight.
+    pub(crate) server_queue_edit: Option<queue_edit::ServerQueueEdit>,
+    /// Release queued against the previous session before a view is rebound.
+    pub(crate) pending_queue_release: Option<crate::app::actions::Effect>,
     /// Current special prompt input mode (Normal/Bash/Feedback/Remember).
     pub prompt_input_mode: PromptInputMode,
     /// Multiline input mode: swap Enter (insert newline) and Shift+Enter (send).

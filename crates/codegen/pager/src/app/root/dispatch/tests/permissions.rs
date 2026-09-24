@@ -180,6 +180,39 @@ fn permission_select_clears_double_click_tracker_for_next_prompt() {
 }
 
 #[test]
+fn malformed_child_selection_cannot_enable_parent_always_approve() {
+    use std::sync::Arc;
+
+    let mut app = test_app_with_agent();
+    let mut response_rx = enqueue_permission_with_enable_always_approve(&mut app);
+    let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+    let child = agent.permission_queue.front_mut().unwrap();
+    child.request.request.session_id = acp::SessionId::new("child-session");
+    child.options.retain(|option| {
+        option.option_id.0.as_ref() != workspace::permission::ENABLE_ALWAYS_APPROVE_OPTION_ID
+    });
+    child.request.request.options = child.options.clone();
+    // A stale child marker without a corresponding view is treated as root by
+    // the existing mode-toggle routing heuristic.
+    agent.active_subagent = Some("stale-child-session".into());
+
+    let effects = dispatch(
+        Action::PermissionSelect(acp::PermissionOptionId::new(Arc::from(
+            workspace::permission::ENABLE_ALWAYS_APPROVE_OPTION_ID,
+        ))),
+        &mut app,
+    );
+
+    assert!(effects.is_empty());
+    assert!(!app.agents[&AgentId(0)].session.is_always_approve());
+    assert_eq!(app.agents[&AgentId(0)].permission_queue.len(), 1);
+    assert!(matches!(
+        response_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+}
+
+#[test]
 fn drain_root_permission_queue_clears_double_click_tracker() {
     let mut app = test_app_with_agent();
     let _rx = enqueue_permission_with_enable_always_approve(&mut app);
@@ -316,6 +349,47 @@ fn permission_cancel_toasts_when_requester_disconnected() {
         agent_toast(&app).as_deref(),
         Some("This permission request is no longer valid (the requester disconnected)"),
         "cancelling a request whose requester disconnected must toast",
+    );
+}
+
+/// Closing a requester while its permission prompt is pending must cancel
+/// that request. A stale allow action after teardown must not enable the
+/// session-wide always-approve mode.
+#[test]
+fn closing_requester_cancels_pending_permission_without_authorizing() {
+    let mut app = test_app_with_agent();
+    let mut response_rx = enqueue_permission_with_enable_always_approve(&mut app);
+
+    assert!(
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .clear_transport_interactions_for_session("test-session")
+    );
+
+    assert!(app.agents[&AgentId(0)].permission_queue.is_empty());
+    assert!(matches!(
+        response_rx.try_recv(),
+        Ok(Ok(acp::RequestPermissionResponse {
+            outcome: acp::RequestPermissionOutcome::Cancelled,
+            ..
+        }))
+    ));
+
+    let effects = dispatch(
+        Action::PermissionSelect(acp::PermissionOptionId::new(std::sync::Arc::from(
+            workspace::permission::ENABLE_ALWAYS_APPROVE_OPTION_ID,
+        ))),
+        &mut app,
+    );
+
+    assert!(
+        effects.is_empty(),
+        "a stale allow action must have no effects"
+    );
+    assert!(
+        !app.agents[&AgentId(0)].session.is_always_approve(),
+        "closing the requester must not authorize or change the session mode"
     );
 }
 

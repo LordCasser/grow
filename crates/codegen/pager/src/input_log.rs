@@ -30,7 +30,9 @@ fn write_input_dump_with(
         .tempfile_in(directory)?;
     write(file.as_file_mut())?;
     file.as_file().sync_all()?;
-    file.keep().map(|(_, path)| path).map_err(|error| error.error)
+    file.keep()
+        .map(|(_, path)| path)
+        .map_err(|error| error.error)
 }
 
 /// Default ring buffer capacity (~10 seconds of fast typing).
@@ -211,18 +213,31 @@ mod tests {
     fn input_dump_same_timestamp_preserves_each_private_snapshot() {
         let directory = tempfile::tempdir().unwrap();
         let logs = directory.path().join("nested/logs");
-        let now = chrono::DateTime::parse_from_rfc3339("2026-09-07T12:34:56Z").unwrap().to_utc();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-07T12:34:56Z")
+            .unwrap()
+            .to_utc();
         let first = super::write_input_dump(&logs, now, r#"{"snapshot":1}"#).unwrap();
         let second = super::write_input_dump(&logs, now, r#"{"snapshot":2}"#).unwrap();
         assert_ne!(first, second);
-        for (path, expected) in [(&first, r#"{"snapshot":1}"#), (&second, r#"{"snapshot":2}"#)] {
+        for (path, expected) in [
+            (&first, r#"{"snapshot":1}"#),
+            (&second, r#"{"snapshot":2}"#),
+        ] {
             assert_eq!(std::fs::read_to_string(path).unwrap(), expected);
-            assert!(path.file_name().unwrap().to_string_lossy().starts_with("input-debug-20260907-123456-"));
+            assert!(
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("input-debug-20260907-123456-")
+            );
             assert_eq!(path.extension().unwrap(), "json");
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
-                assert_eq!(std::fs::metadata(path).unwrap().permissions().mode() & 0o777, 0o600);
+                assert_eq!(
+                    std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
             }
         }
         let error = super::write_input_dump_with(&logs, now, |file| {
@@ -233,12 +248,19 @@ mod tests {
             }
             std::io::Write::write_all(file, b"partial")?;
             Err(std::io::Error::other("injected write error"))
-        }).unwrap_err();
+        })
+        .unwrap_err();
         assert_eq!(error.to_string(), "injected write error");
         assert_eq!(std::fs::read_dir(&logs).unwrap().count(), 2);
-        assert_eq!(std::fs::read_to_string(&first).unwrap(), r#"{"snapshot":1}"#);
+        assert_eq!(
+            std::fs::read_to_string(&first).unwrap(),
+            r#"{"snapshot":1}"#
+        );
         assert!(super::write_input_dump(&first.join("invalid"), now, "{}").is_err());
-        assert_eq!(std::fs::read_to_string(&first).unwrap(), r#"{"snapshot":1}"#);
+        assert_eq!(
+            std::fs::read_to_string(&first).unwrap(),
+            r#"{"snapshot":1}"#
+        );
     }
 
     use super::*;

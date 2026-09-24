@@ -146,7 +146,6 @@ fn collect_path_completions(
                 "file".to_string()
             },
         });
-
     }
 
     // Sort: directories first, then alphabetical. Truncate after sort.
@@ -197,7 +196,13 @@ mod tests {
         std::fs::write(root.join("a.txt"), b"").unwrap();
         std::fs::write(root.join(".hidden"), b"").unwrap();
         let items = list_path_completions(root, "./");
-        assert_eq!(items.iter().map(|item| item.display.as_str()).collect::<Vec<_>>(), ["folder/", "a.txt", "z.txt"]);
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.display.as_str())
+                .collect::<Vec<_>>(),
+            ["folder/", "a.txt", "z.txt"]
+        );
         assert_eq!(items[0].insert_text, "./folder/");
         assert_eq!(items[1].insert_text, "./a.txt");
         assert_eq!(items[0].description, "directory");
@@ -214,9 +219,17 @@ mod tests {
     fn symlink_directory_keeps_drill_down_suffix() {
         let directory = tempfile::tempdir().unwrap();
         std::fs::create_dir(directory.path().join("target")).unwrap();
-        std::os::unix::fs::symlink(directory.path().join("target"), directory.path().join("link")).unwrap();
+        std::os::unix::fs::symlink(
+            directory.path().join("target"),
+            directory.path().join("link"),
+        )
+        .unwrap();
         let items = list_path_completions(directory.path(), "./");
-        assert!(items.iter().any(|item| item.insert_text == "./link/" && item.description == "directory"));
+        assert!(
+            items
+                .iter()
+                .any(|item| item.insert_text == "./link/" && item.description == "directory")
+        );
     }
 
     static DEFAULT_BUNDLE_STATE: BundleState = BundleState {

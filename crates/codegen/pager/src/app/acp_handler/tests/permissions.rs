@@ -1,5 +1,42 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
     use super::*;
+    use crate::app::acp_handler::permissions::mcp_scope_permission;
+
+    #[test]
+    fn mcp_scope_option_metadata_must_match_request_identity() {
+        let mut request = permission_req_with_raw_input(None);
+        request.tool_call.fields.title = Some("linear__list".to_owned());
+        let meta = |tool_name: &str, server_prefix: Option<&str>| {
+            serde_json::to_value(workspace::permission::McpToolPermission {
+                prompt_prefix: "Always allow:".to_owned(),
+                tool_name: tool_name.to_owned(),
+                server_prefix: server_prefix.map(str::to_owned),
+            })
+            .unwrap()
+            .as_object()
+            .cloned()
+        };
+        for (tool_name, server_prefix) in [
+            ("slack__post", Some("slack")),
+            ("linear__list", Some("other")),
+        ] {
+            request.options = vec![acp::PermissionOption::new(
+                "allow-always-mcp",
+                "Always allow".to_owned(),
+                acp::PermissionOptionKind::AllowAlways,
+            )
+            .meta(meta(tool_name, server_prefix))];
+            assert!(mcp_scope_permission(&request).is_none());
+        }
+
+        request.options = vec![acp::PermissionOption::new(
+            "allow-always-mcp",
+            "Always allow".to_owned(),
+            acp::PermissionOptionKind::AllowAlways,
+        )
+        .meta(meta("linear__list", Some("linear")))];
+        assert!(mcp_scope_permission(&request).is_some());
+    }
 
     /// The permission prompt must surface the payload an MCP call would
     /// send — both `UseTool` (meta-dispatch) and `MCPTool` (natively
@@ -379,13 +416,18 @@ fn recap_replay_restores_display_without_consuming_current_feedback() {
             app.notification_service.focus_tracker =
                 crate::notifications::focus::FocusTracker::new(0, 0);
             app.notification_service.focus_tracker.on_focus_lost();
+            let away_period_id = app.notification_service.focus_tracker.away_period_id();
             assert!(app.notification_service.focus_tracker.recap_due("recap-owner"));
             let agent = app.agents.get_mut(&AgentId(0)).unwrap();
             agent.session.loading_replay = replay;
             agent.session.set_live_feedback("recap",
                 crate::scrollback::blocks::NoticeTone::Progress, "Current manual request");
             let before = agent.scrollback.len();
-            let update = GrowSessionUpdate::SessionRecap { summary: "Restored recap".into(), auto };
+            let update = GrowSessionUpdate::SessionRecap {
+                summary: "Restored recap".into(),
+                auto,
+                away_period_id: if replay || !auto { None } else { away_period_id },
+            };
             let msg = if replay {
                 make_replayed_ext_session_notification("recap-owner", "recap-history", update)
             } else {
@@ -409,11 +451,58 @@ fn background_recap_does_not_consume_active_session_away_eligibility() {
     app.agents.insert(AgentId(1), background);
     app.notification_service.focus_tracker = crate::notifications::focus::FocusTracker::new(0, 0);
     app.notification_service.focus_tracker.on_focus_lost();
+    let away_period_id = app.notification_service.focus_tracker.away_period_id();
     // Background updates do not request an active-view repaint.
     assert!(!handle(make_ext_session_notification("background",
-        GrowSessionUpdate::SessionRecap { summary: "Background result".into(), auto: true }), &mut app));
+        GrowSessionUpdate::SessionRecap {
+            summary: "Background result".into(),
+            auto: true,
+            away_period_id,
+        }), &mut app));
     assert!(app.notification_service.focus_tracker.recap_due("foreground"));
     assert!(!app.notification_service.focus_tracker.recap_due("background"));
     assert_eq!(app.agents[&AgentId(1)].scrollback.len(), 1);
     assert!(app.agents[&AgentId(0)].scrollback.is_empty());
+}
+
+#[test]
+fn old_automatic_recap_does_not_satisfy_a_new_away_period() {
+    let mut app = make_app_with_agent("recap-owner");
+    app.notification_service.focus_tracker = crate::notifications::focus::FocusTracker::new(0, 0);
+    app.notification_service.focus_tracker.on_focus_lost();
+    let old_period = app.notification_service.focus_tracker.away_period_id().unwrap();
+    app.notification_service.focus_tracker.on_focus_gained();
+    app.notification_service.focus_tracker.on_focus_lost();
+    let current_period = app.notification_service.focus_tracker.away_period_id().unwrap();
+    assert_ne!(old_period, current_period);
+
+    for away_period_id in [Some(old_period), None] {
+        assert!(!handle(
+            make_ext_session_notification(
+                "recap-owner",
+                GrowSessionUpdate::SessionRecap {
+                    summary: "Outdated recap".into(),
+                    auto: true,
+                    away_period_id,
+                },
+            ),
+            &mut app,
+        ));
+        assert!(app.agents[&AgentId(0)].scrollback.is_empty());
+        assert!(app.notification_service.focus_tracker.recap_due("recap-owner"));
+    }
+
+    assert!(handle(
+        make_ext_session_notification(
+            "recap-owner",
+            GrowSessionUpdate::SessionRecap {
+                summary: "Current recap".into(),
+                auto: true,
+                away_period_id: Some(current_period),
+            },
+        ),
+        &mut app,
+    ));
+    assert_eq!(app.agents[&AgentId(0)].scrollback.len(), 1);
+    assert!(!app.notification_service.focus_tracker.recap_due("recap-owner"));
 }

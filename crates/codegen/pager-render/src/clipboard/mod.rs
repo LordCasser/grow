@@ -14,6 +14,8 @@ pub use trust::{
 };
 
 use std::sync::OnceLock;
+#[cfg(target_os = "macos")]
+use std::sync::mpsc::{self, SyncSender};
 
 use crate::terminal::{MultiplexerKind, TerminalContext};
 
@@ -497,7 +499,10 @@ impl CopyDelivery {
     /// Persistent feedback: preserve backend evidence and always name the backup.
     pub fn summary_message(&self) -> std::borrow::Cow<'static, str> {
         match self {
-            Self::Clipboard { result, file: Some(path) } => std::borrow::Cow::Owned(format!(
+            Self::Clipboard {
+                result,
+                file: Some(path),
+            } => std::borrow::Cow::Owned(format!(
                 "{} (also saved to {})",
                 result.message_lead,
                 display_copy_path(path),
@@ -585,22 +590,31 @@ fn write_owner_only_with(
     match std::fs::metadata(&target) {
         Ok(metadata) => {
             if !metadata.is_file() {
-                return Err(Error::new(ErrorKind::InvalidInput, "Copy target must be a regular file"));
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "Copy target must be a regular file",
+                ));
             }
             if metadata.permissions().readonly() {
-                return Err(Error::new(ErrorKind::PermissionDenied, "Copy target is read-only"));
+                return Err(Error::new(
+                    ErrorKind::PermissionDenied,
+                    "Copy target is read-only",
+                ));
             }
         }
         Err(error) if error.kind() == ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    let parent = target.parent().filter(|p| !p.as_os_str().is_empty())
+    let parent = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."));
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        temp.as_file().set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        temp.as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
     write(temp.as_file_mut())?;
     temp.as_file().sync_all()?;
@@ -996,9 +1010,8 @@ fn should_run_attachment_probe(
 /// into the off-thread probe's staleness check instead of taking a second
 /// native read that could land after a clipboard change.
 ///
-/// Cheap (native snapshot only, no subprocess) so paste handlers can call it on
-/// the event loop to decide whether to DEFER the heavy probe to a background
-/// task instead of blocking inline.
+/// The native snapshot runs on a bounded worker; paste handlers wait at most
+/// 10 ms on the event loop before deferring the heavy probe.
 pub fn attachment_probe_gate(clipboard_text: Option<&str>) -> Option<Option<u64>> {
     // One snapshot read; a None change_count is unavailable, so the gate must not
     // rule out a raster (propagates the availability fix into the defer gate).
@@ -1106,23 +1119,101 @@ struct AttachmentsProbeResult {
 /// Re-export [`ImageData`] so pager code does not import the shell directly.
 pub use client_support::clipboard::ImageData;
 
+#[cfg(target_os = "macos")]
+#[derive(Clone, Copy)]
+enum MetadataProbe {
+    ChangeCount,
+    Snapshot,
+}
+
+#[cfg(target_os = "macos")]
+type MetadataReply = (Option<u64>, bool);
+
+#[cfg(target_os = "macos")]
+type MetadataRequest = (MetadataProbe, SyncSender<MetadataReply>);
+
+#[cfg(target_os = "macos")]
+fn metadata_probe_sender() -> Option<&'static SyncSender<MetadataRequest>> {
+    static WORKER: OnceLock<Option<SyncSender<MetadataRequest>>> = OnceLock::new();
+    WORKER
+        .get_or_init(|| {
+            let (sender, receiver) = mpsc::sync_channel::<MetadataRequest>(1);
+            std::thread::Builder::new()
+                .name("clipboard-metadata".into())
+                .spawn(move || {
+                    while let Ok((kind, reply)) = receiver.recv() {
+                        let result = match kind {
+                            MetadataProbe::ChangeCount => {
+                                (client_support::clipboard::clipboard_change_count(), false)
+                            }
+                            MetadataProbe::Snapshot => {
+                                client_support::clipboard::clipboard_image_snapshot()
+                            }
+                        };
+                        let _ = reply.send(result);
+                    }
+                })
+                .ok()
+                .map(|_| sender)
+        })
+        .as_ref()
+}
+
+#[cfg(target_os = "macos")]
+fn request_metadata(
+    sender: &SyncSender<MetadataRequest>,
+    kind: MetadataProbe,
+    timeout: std::time::Duration,
+) -> MetadataReply {
+    let (reply, result) = mpsc::sync_channel(0);
+    if sender.try_send((kind, reply)).is_err() {
+        return (None, false);
+    }
+    result.recv_timeout(timeout).unwrap_or((None, false))
+}
+
+#[cfg(target_os = "macos")]
+fn pager_metadata(kind: MetadataProbe) -> MetadataReply {
+    const DEADLINE: std::time::Duration = std::time::Duration::from_millis(10);
+    metadata_probe_sender()
+        .map(|sender| request_metadata(sender, kind, DEADLINE))
+        .unwrap_or((None, false))
+}
+
 /// One pasteboard snapshot `(change_count, has_pasteable_image)` read in a
-/// single native pass (macOS native, sub-millisecond, no data read). `(None,
-/// false)` off-macOS or when AppKit cannot be loaded.
+/// single native pass off the Pager loop. `(None, false)` when unavailable.
 pub fn clipboard_image_snapshot() -> (Option<u64>, bool) {
     #[cfg(any(test, feature = "test-support"))]
     if let Some(snapshot) = test_support::hook_image_snapshot() {
         return snapshot;
     }
+    #[cfg(target_os = "macos")]
+    return pager_metadata(MetadataProbe::Snapshot);
+    #[cfg(not(target_os = "macos"))]
     client_support::clipboard::clipboard_image_snapshot()
 }
 
 /// Cheap pasteboard `changeCount` read (one native message, no type scan, no
 /// data read). The changeCount-first hot path of the focus-driven
 /// clipboard-image tip: a delta here is what gates the heavier
-/// [`clipboard_image_snapshot`] classification. `None` off-macOS.
+/// [`clipboard_image_snapshot`] classification. `None` off-macOS or on a
+/// missed native metadata deadline.
 pub fn clipboard_change_count() -> Option<u64> {
     // Seam consistency: a hooked snapshot's change_count is the changeCount.
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some((change_count, _)) = test_support::hook_image_snapshot() {
+        return change_count;
+    }
+    #[cfg(target_os = "macos")]
+    return pager_metadata(MetadataProbe::ChangeCount).0;
+    #[cfg(not(target_os = "macos"))]
+    client_support::clipboard::clipboard_change_count()
+}
+
+/// Recheck the pasteboard version from an already deferred attachment probe.
+/// This runs off the UI thread, so it can wait for the native result rather
+/// than treating a short Pager metadata deadline as a changed clipboard.
+pub fn clipboard_change_count_background() -> Option<u64> {
     #[cfg(any(test, feature = "test-support"))]
     if let Some((change_count, _)) = test_support::hook_image_snapshot() {
         return change_count;
@@ -1140,11 +1231,9 @@ pub fn clipboard_image_probe_supported() -> bool {
     client_support::clipboard::clipboard_image_probe_supported()
 }
 
-/// Prime the macOS AppKit `dlopen` ONCE on a detached background thread, so the
-/// first synchronous probe (~1s after a focus-gain) is just the cheap metadata
-/// read and never stalls a frame on the one-time framework load. The probe
-/// itself stays synchronous — this is a single one-time prime, not a per-probe
-/// async layer. No-op off-macOS and after the first call.
+/// Prime the macOS AppKit `dlopen` once on a detached thread. The metadata
+/// worker still owns native reads; prewarming makes its first reply more likely
+/// to meet the Pager deadline. No-op off-macOS and after the first call.
 pub fn prewarm_image_probe() {
     use std::sync::Once;
     static WARMED: Once = Once::new();
@@ -1377,16 +1466,78 @@ pub use test_support::{
 
 #[cfg(test)]
 mod tests {
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metadata_request_times_out_and_rejects_a_full_worker_queue() {
+        use super::{MetadataProbe, request_metadata};
+        use std::sync::mpsc;
+        use std::time::{Duration, Instant};
+
+        let (sender, _stalled_worker) = mpsc::sync_channel(1);
+        let started = Instant::now();
+        assert_eq!(
+            request_metadata(&sender, MetadataProbe::Snapshot, Duration::from_millis(10)),
+            (None, false)
+        );
+        assert!(started.elapsed() < Duration::from_millis(200));
+
+        let started = Instant::now();
+        assert_eq!(
+            request_metadata(
+                &sender,
+                MetadataProbe::ChangeCount,
+                Duration::from_millis(10)
+            ),
+            (None, false)
+        );
+        assert!(started.elapsed() < Duration::from_millis(200));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn late_metadata_reply_cannot_replace_a_newer_probe() {
+        use super::{MetadataProbe, request_metadata};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let (sender, receiver) = mpsc::sync_channel::<super::MetadataRequest>(1);
+        let worker = std::thread::spawn(move || {
+            let (_, first_reply) = receiver.recv().unwrap();
+            std::thread::sleep(Duration::from_millis(30));
+            assert!(first_reply.send((Some(1), true)).is_err());
+            let (_, second_reply) = receiver.recv().unwrap();
+            second_reply.send((Some(2), false)).unwrap();
+        });
+        assert_eq!(
+            request_metadata(&sender, MetadataProbe::Snapshot, Duration::from_millis(10)),
+            (None, false)
+        );
+        assert_eq!(
+            request_metadata(&sender, MetadataProbe::Snapshot, Duration::from_secs(1)),
+            (Some(2), false)
+        );
+        worker.join().unwrap();
+    }
+
     #[test]
     fn copy_summary_preserves_delivery_evidence_and_backup() {
-        for feedback in [ClipboardFeedback::Copied, ClipboardFeedback::CopiedTmux,
-            ClipboardFeedback::UnverifiedOscRemote] {
+        for feedback in [
+            ClipboardFeedback::Copied,
+            ClipboardFeedback::CopiedTmux,
+            ClipboardFeedback::UnverifiedOscRemote,
+        ] {
             for backup in [None, Some(std::path::PathBuf::from("/copy-backup.txt"))] {
                 let expected = match &backup {
-                    Some(_) => format!("{} (also saved to /copy-backup.txt)", feedback.message_lead()),
+                    Some(_) => format!(
+                        "{} (also saved to /copy-backup.txt)",
+                        feedback.message_lead()
+                    ),
                     None => feedback.message().to_string(),
                 };
-                let delivery = CopyDelivery::Clipboard { result: feedback.to_result(), file: backup };
+                let delivery = CopyDelivery::Clipboard {
+                    result: feedback.to_result(),
+                    file: backup,
+                };
                 assert_eq!(delivery.summary_message(), expected);
                 if feedback == ClipboardFeedback::UnverifiedOscRemote {
                     assert!(delivery.summary_message().starts_with("Copy sent"));
@@ -1394,11 +1545,21 @@ mod tests {
                 }
             }
         }
-        let file = CopyDelivery::File { path: "/copy-backup.txt".into() };
-        assert_eq!(file.summary_message(), "Clipboard unreachable — wrote /copy-backup.txt");
-        let failed = CopyDelivery::Failed { clipboard: ClipboardFeedback::Failed.to_result(),
-            file_error: std::io::Error::other("disk error") };
-        assert_eq!(failed.summary_message(), ClipboardFeedback::Failed.message());
+        let file = CopyDelivery::File {
+            path: "/copy-backup.txt".into(),
+        };
+        assert_eq!(
+            file.summary_message(),
+            "Clipboard unreachable — wrote /copy-backup.txt"
+        );
+        let failed = CopyDelivery::Failed {
+            clipboard: ClipboardFeedback::Failed.to_result(),
+            file_error: std::io::Error::other("disk error"),
+        };
+        assert_eq!(
+            failed.summary_message(),
+            ClipboardFeedback::Failed.message()
+        );
     }
 
     #[test]
@@ -1421,13 +1582,21 @@ mod tests {
             file.write_all(b"partial")?;
             Err(std::io::Error::other("injected copy failure"))
         });
-        assert!(result.unwrap_err().to_string().contains("injected copy failure"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("injected copy failure")
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "old content");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o644);
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
         }
         super::write_text_to_copy_file("new content", &path).unwrap();
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new content");
@@ -1446,13 +1615,26 @@ mod tests {
         let link = dir.path().join("copy.txt");
         symlink("target.txt", &link).unwrap();
         super::write_text_to_copy_file("new", &link).unwrap();
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
-        assert_eq!(std::fs::metadata(&target).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         let dangling = dir.path().join("dangling.txt");
         symlink("missing.txt", &dangling).unwrap();
         assert!(super::write_text_to_copy_file("no", &dangling).is_err());
-        assert!(std::fs::symlink_metadata(&dangling).unwrap().file_type().is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&dangling)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o400)).unwrap();
         assert!(super::write_text_to_copy_file("no", &link).is_err());
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "new");
@@ -1769,6 +1951,7 @@ mod tests {
         assert_eq!(attachment_probe_gate(Some("caption")), Some(Some(42)));
         assert!(attachment_probe_would_run(Some("caption")));
         assert_eq!(clipboard_change_count(), Some(42));
+        assert_eq!(clipboard_change_count_background(), Some(42));
         clear_clipboard_probe_hook();
 
         // No raster: the gate skips, so there is no baseline to hand back.

@@ -17,6 +17,8 @@ mod continue_resumes_session_with_history;
 mod endline_park_is_markerless;
 #[path = "pty_e2e/endline_wakeups_close_with_markers.rs"]
 mod endline_wakeups_close_with_markers;
+#[path = "pty_e2e/local_draft_recovers_after_quit.rs"]
+mod local_draft_recovers_after_quit;
 #[path = "pty_e2e/rename_title_shows_in_prompt_border.rs"]
 mod rename_title_shows_in_prompt_border;
 #[path = "pty_e2e/reparked_wait_stays_markerless.rs"]

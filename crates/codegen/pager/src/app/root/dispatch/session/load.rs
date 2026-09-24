@@ -577,7 +577,10 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
         let hydrate_sid = session_id.clone();
         agent.bind_session_id(session_id);
         agent.session.clear_live_feedback("session-load");
-        agent.scrollback.end_batch();
+        {
+            let _timer = diagnostics::instrumentation::timer("pager.replay.end_batch");
+            agent.scrollback.end_batch();
+        }
         agent.session.loading_replay = false;
         agent.session.replay_live_cursor_seen = false;
         agent.session.finish_turn(&mut agent.scrollback);
@@ -875,19 +878,13 @@ pub(in crate::app::root::dispatch) fn dispatch_session_picker_closed(
 }
 /// Fetch invalidation shared by EVERY picker-dismissal path:
 /// modal Esc/mouse close, modal and welcome picks (all variants), and the
-/// welcome-screen Esc. A modal close must not invalidate the welcome screen's
-/// plain list fetch. A welcome dismissal must bump
-/// and drop the loading flag: the welcome view survives the close, so a
-/// still-loading flag holds `show_picker` in a spinner limbo that ignores
-/// input until the late response lands and resurrects the picker.
+/// welcome-screen Esc. A dismissal invalidates every pending list result;
+/// otherwise an old modal result could repopulate the welcome picker. Drop
+/// the welcome loading flag too so a late result cannot strand its spinner.
 fn invalidate_picker_fetch_on_dismiss(app: &mut AppView) {
-    let welcome_dismissal = matches!(app.active_view, crate::app::root::ActiveView::Welcome);
-    if welcome_dismissal {
-        app.session_picker_list_seq += 1;
-    }
-    if welcome_dismissal {
-        app.session_picker_loading = false;
-    }
+    app.session_picker_list_seq += 1;
+    app.session_picker_list_binding = None;
+    app.session_picker_loading = false;
     app.session_picker_deep_search_seq += 1;
     app.session_picker_content_loading = false;
 }

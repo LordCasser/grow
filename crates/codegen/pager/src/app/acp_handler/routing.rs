@@ -112,6 +112,38 @@ pub(super) fn find_session_match(
     app: &AppView,
     session_id: &acp::SessionId,
 ) -> Option<SessionMatch> {
+    find_exact_session_match(app, session_id).or_else(|| {
+        // Pass 3: race-window fallback for ordinary notifications that arrive
+        // before the root session_id has been assigned. Permission requests
+        // deliberately use `find_permission_session_match` below and cannot
+        // inherit this fallback from an arbitrary raw session ID.
+        if let ActiveView::Agent(active_id) = app.active_view
+            && let Some(agent) = app.agents.get(&active_id)
+            && agent.session.session_id.is_none()
+        {
+            return Some(SessionMatch::Root(active_id));
+        }
+        None
+    })
+}
+
+/// Locate only an exact root or registered child session for permission
+/// admission. Unlike ordinary notifications, a permission request carries
+/// authority-sensitive session identity and must not inherit the startup
+/// race-window fallback.
+pub(super) fn find_permission_session_match(
+    app: &AppView,
+    session_id: &acp::SessionId,
+) -> Option<SessionMatch> {
+    find_exact_session_match(app, session_id)
+}
+
+/// Resolve exact root and child identities, preferring roots when an
+/// inconsistent view graph contains the same ID in both places.
+pub(super) fn find_exact_session_match(
+    app: &AppView,
+    session_id: &acp::SessionId,
+) -> Option<SessionMatch> {
     // Single pass over `app.agents`: prefer an exact root match (returned
     // immediately, since root takes precedence) but track the first child
     // match seen as a fallback used after the full scan completes.
@@ -134,17 +166,6 @@ pub(super) fn find_session_match(
     }
     if let Some(id) = child_match {
         return Some(SessionMatch::Child(id));
-    }
-    // Pass 3: race-window fallback for notifications that arrive before the
-    // root session_id has been assigned. Only the active agent is eligible,
-    // and only when its `session_id` is still `None` -- otherwise we would
-    // misroute a stranger's notification to whichever agent happens to be
-    // foregrounded.
-    if let ActiveView::Agent(active_id) = app.active_view
-        && let Some(agent) = app.agents.get(&active_id)
-        && agent.session.session_id.is_none()
-    {
-        return Some(SessionMatch::Root(active_id));
     }
     None
 }

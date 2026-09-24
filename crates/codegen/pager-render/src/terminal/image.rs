@@ -43,6 +43,35 @@ pub enum GraphicsProtocol {
     None,
 }
 
+/// Maximum serialized bytes in one Grow-owned terminal image escape buffer.
+pub const MAX_TERMINAL_IMAGE_ESCAPE_BYTES: usize = 100_000_000;
+
+fn base64_encoded_len(input_len: usize) -> Option<usize> {
+    input_len.checked_add(2)?.checked_div(3)?.checked_mul(4)
+}
+
+pub fn append_image_escape(output: &mut String, text: &str) -> Option<()> {
+    append_image_escape_with_limit(output, text, MAX_TERMINAL_IMAGE_ESCAPE_BYTES)
+}
+
+pub fn append_image_escape_with_limit(output: &mut String, text: &str, limit: usize) -> Option<()> {
+    append_image_escape_with_limit_inner(output, text, limit)
+}
+
+fn append_image_escape_with_limit_inner(
+    output: &mut String,
+    text: &str,
+    limit: usize,
+) -> Option<()> {
+    let new_len = output.len().checked_add(text.len())?;
+    if new_len > limit {
+        return None;
+    }
+    output.try_reserve(text.len()).ok()?;
+    output.push_str(text);
+    Some(())
+}
+
 impl GraphicsProtocol {
     /// Whether this protocol can render pixel images inline.
     pub fn supports_images(self) -> bool {
@@ -253,34 +282,76 @@ pub fn prepare_kitty_overlay_image_bytes(image_data: &[u8]) -> Option<Vec<u8>> {
         .decode()
         .ok()?;
 
-    let mut png = Vec::new();
-    {
-        use image::ExtendedColorType;
-        use image::ImageEncoder;
-        use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+    encode_rgba_png_bounded(&img.to_rgba8(), MAX_SIPS_OUTPUT_BYTES)
+}
 
-        let rgba = img.to_rgba8();
-        let encoder =
-            PngEncoder::new_with_quality(&mut png, CompressionType::Fast, FilterType::Adaptive);
-        encoder
-            .write_image(
-                rgba.as_raw(),
-                rgba.width(),
-                rgba.height(),
-                ExtendedColorType::Rgba8,
-            )
-            .ok()?;
+struct BoundedPngOutput {
+    bytes: Vec<u8>,
+    limit: usize,
+    // The PNG writer can finish chunks in Drop and discard that write error.
+    // Remember every rejected write so an incomplete PNG is never returned.
+    failed: bool,
+}
+
+impl BoundedPngOutput {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::new(),
+            limit,
+            failed: false,
+        }
     }
-    Some(png)
+}
+
+impl std::io::Write for BoundedPngOutput {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        if self.bytes.len().saturating_add(data.len()) > self.limit {
+            self.failed = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::WriteZero,
+                "PNG conversion output exceeds its byte limit",
+            ));
+        }
+        if let Err(error) = self.bytes.try_reserve_exact(data.len()) {
+            self.failed = true;
+            return Err(std::io::Error::other(error));
+        }
+        self.bytes.extend_from_slice(data);
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn encode_rgba_png_bounded(rgba: &image::RgbaImage, limit: usize) -> Option<Vec<u8>> {
+    use image::ExtendedColorType;
+    use image::ImageEncoder;
+    use image::codecs::png::{CompressionType, FilterType, PngEncoder};
+
+    let mut output = BoundedPngOutput::new(limit);
+    let encoder =
+        PngEncoder::new_with_quality(&mut output, CompressionType::Fast, FilterType::Adaptive);
+    encoder
+        .write_image(
+            rgba.as_raw(),
+            rgba.width(),
+            rgba.height(),
+            ExtendedColorType::Rgba8,
+        )
+        .ok()?;
+    (!output.failed).then_some(output.bytes)
 }
 
 /// Admit source dimensions before either conversion backend allocates pixels.
-fn overlay_conversion_within_pixel_budget(image_data: &[u8]) -> bool {
+pub(crate) fn overlay_conversion_within_pixel_budget(image_data: &[u8]) -> bool {
     const MAX_SOURCE_PIXELS: u64 = 16_000_000;
-    tools::util::image_validate::validate_image_bytes_unrestricted(image_data, false)
-        .is_ok_and(|(width, height, _)| {
+    tools::util::image_validate::validate_image_bytes_unrestricted(image_data, false).is_ok_and(
+        |(width, height, _)| {
             width != 0 && height != 0 && u64::from(width) * u64::from(height) <= MAX_SOURCE_PIXELS
-        })
+        },
+    )
 }
 
 fn sips_temp_directory() -> Option<tempfile::TempDir> {
@@ -296,7 +367,11 @@ fn sips_temp_directory() -> Option<tempfile::TempDir> {
 
 /// Convert image bytes to PNG via macOS `sips` using owned temporary files.
 fn convert_via_sips(image_data: &[u8]) -> Option<Vec<u8>> {
-    convert_via_sips_in(image_data, sips_temp_directory()?, std::process::Command::new("sips"))
+    convert_via_sips_in(
+        image_data,
+        sips_temp_directory()?,
+        std::process::Command::new("sips"),
+    )
 }
 
 fn convert_via_sips_in(
@@ -322,7 +397,11 @@ fn convert_via_sips_in(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    let status = match run_sips_command(sips_cmd, std::time::Duration::from_secs(10)) {
+    let status = match run_sips_command(
+        sips_cmd,
+        std::time::Duration::from_secs(10),
+        MAX_SIPS_OUTPUT_BYTES as u64,
+    ) {
         Ok(status) => status,
         Err(error) => {
             tracing::warn!(%error, "sips conversion process failed");
@@ -337,7 +416,7 @@ fn convert_via_sips_in(
     read_sips_output(&dst)
 }
 
-const MAX_SIPS_OUTPUT_BYTES: usize = 100_000_000;
+pub(crate) const MAX_SIPS_OUTPUT_BYTES: usize = 100_000_000;
 
 fn read_sips_output(path: &std::path::Path) -> Option<Vec<u8>> {
     let mut options = std::fs::OpenOptions::new();
@@ -358,22 +437,55 @@ fn read_sips_output(path: &std::path::Path) -> Option<Vec<u8>> {
 fn read_sips_output_bytes(reader: impl std::io::Read, limit: usize) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut bytes = Vec::new();
-    reader.take((limit as u64).saturating_add(1)).read_to_end(&mut bytes).ok()?;
+    reader
+        .take((limit as u64).saturating_add(1))
+        .read_to_end(&mut bytes)
+        .ok()?;
     (!bytes.is_empty() && bytes.len() <= limit).then_some(bytes)
 }
 
 fn run_sips_command(
     mut command: std::process::Command,
     timeout: std::time::Duration,
+    output_limit: u64,
 ) -> std::io::Result<std::process::ExitStatus> {
     use std::io::{Error, ErrorKind};
     use std::time::{Duration, Instant};
-    command.stdin(std::process::Stdio::null())
+    command
+        .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
     tty_utils::detach_std_command(&mut command);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: getrlimit/setrlimit only access child-local process state
+        // and are safe in the post-fork, pre-exec hook. Lower both ceilings so
+        // the converter cannot raise its own soft limit while writing output.
+        unsafe {
+            command.pre_exec(move || {
+                let requested =
+                    libc::rlim_t::try_from(output_limit).map_err(std::io::Error::other)?;
+                let mut limits = std::mem::MaybeUninit::<libc::rlimit>::uninit();
+                if libc::getrlimit(libc::RLIMIT_FSIZE, limits.as_mut_ptr()) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                let mut limits = limits.assume_init();
+                limits.rlim_cur = limits.rlim_cur.min(requested);
+                limits.rlim_max = limits.rlim_max.min(requested);
+                if libc::setrlimit(libc::RLIMIT_FSIZE, &limits) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = output_limit;
     #[allow(clippy::disallowed_methods)] // owned, deadline-bound converter
-    let mut child = command.spawn().map_err(|e| Error::new(e.kind(), format!("sips process startup failed: {e}")))?;
+    let mut child = command
+        .spawn()
+        .map_err(|e| Error::new(e.kind(), format!("sips process startup failed: {e}")))?;
     let group = match tty_utils::ProcessGroup::new().and_then(|mut group| {
         group.attach_std(&child)?;
         Ok(group)
@@ -382,14 +494,22 @@ fn run_sips_command(
         Err(error) => {
             let _ = child.kill();
             let _ = child.wait();
-            return Err(Error::new(error.kind(), format!("sips process-group attachment failed: {error}")));
+            return Err(Error::new(
+                error.kind(),
+                format!("sips process-group attachment failed: {error}"),
+            ));
         }
     };
     let started = Instant::now();
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Ok(status),
-            Err(error) => break Err(Error::new(error.kind(), format!("sips process wait failed: {error}"))),
+            Err(error) => {
+                break Err(Error::new(
+                    error.kind(),
+                    format!("sips process wait failed: {error}"),
+                ));
+            }
             Ok(None) if started.elapsed() >= timeout => {
                 break Err(Error::new(ErrorKind::TimedOut, "sips conversion timed out"));
             }
@@ -407,8 +527,14 @@ fn run_sips_command(
             return status;
         }
         return Err(match status {
-            Err(primary) => Error::new(primary.kind(), format!("{primary}; process-group cleanup failed: {error}")),
-            Ok(_) => Error::new(error.kind(), format!("sips process-group cleanup failed: {error}")),
+            Err(primary) => Error::new(
+                primary.kind(),
+                format!("{primary}; process-group cleanup failed: {error}"),
+            ),
+            Ok(_) => Error::new(
+                error.kind(),
+                format!("sips process-group cleanup failed: {error}"),
+            ),
         });
     }
     status
@@ -453,7 +579,7 @@ pub fn render_kitty_image(
     format: KittyImageFormat,
     cols: u16,
     rows: u16,
-) -> String {
+) -> Option<String> {
     render_kitty_image_z(image_data, format, cols, rows, 1)
 }
 
@@ -467,7 +593,7 @@ pub fn render_kitty_image_z(
     cols: u16,
     rows: u16,
     z: i32,
-) -> String {
+) -> Option<String> {
     let header = format!(
         "a=T,f={},t=d,q=2,C=1,z={},i={},p={},c={},r={}",
         format.code(),
@@ -482,35 +608,69 @@ pub fn render_kitty_image_z(
 
 /// Transmit image data to the terminal without displaying it (`a=t`).
 /// Use `place_kitty_image` to display it at a position.
-pub fn transmit_kitty_image(image_data: &[u8], format: KittyImageFormat, image_id: u32) -> String {
+pub fn transmit_kitty_image(
+    image_data: &[u8],
+    format: KittyImageFormat,
+    image_id: u32,
+) -> Option<String> {
     let header = format!("a=t,f={},t=d,q=2,i={}", format.code(), image_id);
     kitty_chunked_escape(image_data, &header)
 }
 
 /// Encode image data as chunked Kitty escape sequences.
 /// `first_chunk_header` is the metadata for the first chunk (action, format, etc.).
-fn kitty_chunked_escape(image_data: &[u8], first_chunk_header: &str) -> String {
-    use base64::Engine as _;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(image_data);
+fn kitty_chunked_escape(image_data: &[u8], first_chunk_header: &str) -> Option<String> {
+    kitty_chunked_escape_with_limit(
+        image_data,
+        first_chunk_header,
+        MAX_TERMINAL_IMAGE_ESCAPE_BYTES,
+    )
+}
 
-    let chunk_size = 4096;
-    let chunks: Vec<&str> = b64
-        .as_bytes()
-        .chunks(chunk_size)
-        .map(|c| std::str::from_utf8(c).unwrap_or(""))
-        .collect();
+fn kitty_chunked_escape_with_limit(
+    image_data: &[u8],
+    first_chunk_header: &str,
+    limit: usize,
+) -> Option<String> {
+    use base64::Engine as _;
+    const SOURCE_CHUNK: usize = 3072; // exactly 4096 base64 bytes when full
+    const FIRST_FRAME_OVERHEAD: usize = 3 + 5 + 2; // ESC_G + ,m=0; + ST
+    const CONTINUATION_FRAME_OVERHEAD: usize = 3 + 8 + 2; // ESC_G + q=2,m=0; + ST
+
+    let encoded_len = base64_encoded_len(image_data.len())?;
+    let chunk_count = encoded_len.checked_add(4095)?.checked_div(4096)?;
+    if chunk_count == 0 {
+        return Some(String::new());
+    }
+    let framing_len = FIRST_FRAME_OVERHEAD
+        .checked_add(first_chunk_header.len())?
+        .checked_add(
+            chunk_count
+                .checked_sub(1)?
+                .checked_mul(CONTINUATION_FRAME_OVERHEAD)?,
+        )?;
+    let output_len = encoded_len.checked_add(framing_len)?;
+    if output_len > limit {
+        return None;
+    }
 
     let mut out = String::new();
-    for (i, chunk) in chunks.iter().enumerate() {
-        let is_last = i == chunks.len() - 1;
-        let m = if is_last { 0 } else { 1 };
-        if i == 0 {
-            out.push_str(&format!("\x1b_G{first_chunk_header},m={m};{chunk}\x1b\\"));
+    out.try_reserve_exact(output_len).ok()?;
+    let chunk_total = image_data.len().checked_add(SOURCE_CHUNK - 1)? / SOURCE_CHUNK;
+    for (index, source_chunk) in image_data.chunks(SOURCE_CHUNK).enumerate() {
+        let is_last = index + 1 == chunk_total;
+        out.push_str("\x1b_G");
+        if index == 0 {
+            out.push_str(first_chunk_header);
         } else {
-            out.push_str(&format!("\x1b_Gq=2,m={m};{chunk}\x1b\\"));
+            out.push_str("q=2");
         }
+        out.push_str(if is_last { ",m=0;" } else { ",m=1;" });
+        base64::engine::general_purpose::STANDARD.encode_string(source_chunk, &mut out);
+        out.push_str("\x1b\\");
     }
-    out
+    debug_assert_eq!(out.len(), output_len);
+    Some(out)
 }
 
 /// Place an already-transmitted image at the cursor position (`a=p`).
@@ -555,15 +715,43 @@ pub fn clear_kitty_image(image_id: u32) -> String {
 /// Build an iTerm2 inline image escape sequence.
 ///
 /// Uses `\x1b]1337;File=inline=1;width=Ncells;height=Ncells;preserveAspectRatio=1:BASE64\x07`.
-pub fn render_iterm2_image(image_data: &[u8], cols: u16, rows: u16) -> String {
+pub fn render_iterm2_image(image_data: &[u8], cols: u16, rows: u16) -> Option<String> {
+    render_iterm2_image_with_limit(image_data, cols, rows, MAX_TERMINAL_IMAGE_ESCAPE_BYTES)
+}
+
+fn render_iterm2_image_with_limit(
+    image_data: &[u8],
+    cols: u16,
+    rows: u16,
+    limit: usize,
+) -> Option<String> {
     use base64::Engine as _;
-    let b64 = base64::engine::general_purpose::STANDARD.encode(image_data);
-    format!(
-        "\x1b]1337;File=inline=1;width={cols}cells;height={rows}cells;preserveAspectRatio=1:{b64}\x07",
-        cols = cols,
-        rows = rows,
-        b64 = b64,
+    use std::fmt::Write as _;
+    let encoded_len = base64_encoded_len(image_data.len())?;
+    const PREFIX: &str = "\x1b]1337;File=inline=1;width=";
+    const BETWEEN: &str = "cells;height=";
+    const SUFFIX: &str = "cells;preserveAspectRatio=1:";
+    let prefix_len = PREFIX
+        .len()
+        .checked_add(cols.to_string().len())?
+        .checked_add(BETWEEN.len())?
+        .checked_add(rows.to_string().len())?
+        .checked_add(SUFFIX.len())?;
+    let output_len = prefix_len.checked_add(encoded_len)?.checked_add(1)?;
+    if output_len > limit {
+        return None;
+    }
+    let mut out = String::new();
+    out.try_reserve_exact(output_len).ok()?;
+    write!(
+        out,
+        "\x1b]1337;File=inline=1;width={cols}cells;height={rows}cells;preserveAspectRatio=1:"
     )
+    .ok()?;
+    base64::engine::general_purpose::STANDARD.encode_string(image_data, &mut out);
+    out.push('\x07');
+    debug_assert_eq!(out.len(), output_len);
+    Some(out)
 }
 
 // -------------------------------------------------------------------------
@@ -601,7 +789,7 @@ pub(super) fn build_overlay_image_escapes_for_protocol(
 
     let mut esc = String::new();
     // ANSI cursor positioning is 1-based.
-    esc.push_str(&format!("\x1b[{};{}H", cell_y + 1, cell_x + 1));
+    append_image_escape(&mut esc, &format!("\x1b[{};{}H", cell_y + 1, cell_x + 1))?;
     match protocol {
         GraphicsProtocol::Kitty => {
             if retransmit {
@@ -610,22 +798,24 @@ pub(super) fn build_overlay_image_escapes_for_protocol(
                 // balloons native GPU surface counts in long-lived sessions.
                 // Place-only frames do not need image bytes / format detection.
                 let format = kitty_format_from_bytes(image_data)?;
-                esc.push_str(&transmit_kitty_image(
-                    image_data,
-                    format,
-                    KITTY_PLACEMENT_ID,
-                ));
+                append_image_escape(
+                    &mut esc,
+                    &transmit_kitty_image(image_data, format, KITTY_PLACEMENT_ID)?,
+                )?;
             }
-            esc.push_str(&place_kitty_image(
-                KITTY_PLACEMENT_ID,
-                cols,
-                rows,
-                1, // above text (modal overlays)
-            ));
+            append_image_escape(
+                &mut esc,
+                &place_kitty_image(
+                    KITTY_PLACEMENT_ID,
+                    cols,
+                    rows,
+                    1, // above text (modal overlays)
+                ),
+            )?;
         }
         GraphicsProtocol::ITerm2 => {
             if retransmit {
-                esc.push_str(&render_iterm2_image(image_data, cols, rows));
+                append_image_escape(&mut esc, &render_iterm2_image(image_data, cols, rows)?)?;
             }
         }
         GraphicsProtocol::None => unreachable!(),
@@ -640,7 +830,7 @@ pub fn transmit_inline_image(image_data: &[u8], image_id: u32) -> Option<String>
     match detect_graphics_protocol() {
         GraphicsProtocol::Kitty => {
             let format = kitty_format_from_bytes(image_data)?;
-            Some(transmit_kitty_image(image_data, format, image_id))
+            transmit_kitty_image(image_data, format, image_id)
         }
         GraphicsProtocol::ITerm2 => Some(String::new()),
         GraphicsProtocol::None => None,
@@ -676,7 +866,7 @@ pub fn place_inline_image(
     let img_y = area.y;
 
     let mut esc = String::new();
-    esc.push_str(&format!("\x1b[{};{}H", img_y + 1, img_x + 1));
+    append_image_escape(&mut esc, &format!("\x1b[{};{}H", img_y + 1, img_x + 1))?;
     match protocol {
         GraphicsProtocol::Kitty => {
             let visible_rows = area.height.min(fit_rows);
@@ -691,23 +881,32 @@ pub fn place_inline_image(
                 } else {
                     img_h
                 };
-                esc.push_str(&place_kitty_image_cropped(
-                    image_id,
-                    fit_cols,
-                    visible_rows,
-                    -1,
-                    0,
-                    src_y,
-                    img_w,
-                    src_h.max(1),
-                ));
+                append_image_escape(
+                    &mut esc,
+                    &place_kitty_image_cropped(
+                        image_id,
+                        fit_cols,
+                        visible_rows,
+                        -1,
+                        0,
+                        src_y,
+                        img_w,
+                        src_h.max(1),
+                    ),
+                )?;
             } else {
-                esc.push_str(&place_kitty_image(image_id, fit_cols, fit_rows, -1));
+                append_image_escape(
+                    &mut esc,
+                    &place_kitty_image(image_id, fit_cols, fit_rows, -1),
+                )?;
             }
         }
         GraphicsProtocol::ITerm2 => {
             if emit_iterm_data {
-                esc.push_str(&render_iterm2_image(image_data, fit_cols, area.height));
+                append_image_escape(
+                    &mut esc,
+                    &render_iterm2_image(image_data, fit_cols, area.height)?,
+                )?;
             }
         }
         GraphicsProtocol::None => unreachable!(),

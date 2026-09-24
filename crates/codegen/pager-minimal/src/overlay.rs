@@ -204,7 +204,7 @@ fn will_commit(app: &AppView) -> bool {
     let ActiveView::Agent(id) = minimal_api::app_active_view(app) else {
         return false;
     };
-    let Some(agent) = minimal_api::app_agent(app, *id) else {
+    let Some(agent) = minimal_api::app_visible_agent(app, *id) else {
         return false;
     };
     if app_modal_active(agent) || minimal_api::agent_session_reload_active(agent) {
@@ -223,7 +223,11 @@ fn compute_target(
 ) -> u16 {
     let rows = minimal_api::minimal_fps_rows(app, term_h.saturating_sub(1));
     let content = compute_content_target(app, term_h.saturating_sub(rows), width, frame);
-    if rows == 0 { content } else { content.max(3).saturating_add(rows) }
+    if rows == 0 {
+        content
+    } else {
+        content.max(3).saturating_add(rows)
+    }
 }
 
 fn compute_content_target(
@@ -259,7 +263,7 @@ fn compute_content_target(
     let id = *id;
     // Snapshot mode/multiline before the mut agent borrow so `prompt_style` can
     // still read `app.appearance` (same inputs as `draw_live`).
-    let (input_mode, multiline) = minimal_api::app_agent(app, id)
+    let (input_mode, multiline) = minimal_api::app_visible_agent(app, id)
         .map(|a| {
             (
                 minimal_api::agent_prompt_input_mode(a),
@@ -275,7 +279,7 @@ fn compute_content_target(
         multiline,
     );
 
-    let Some(agent) = minimal_api::app_agent_mut(app, id) else {
+    let Some(agent) = minimal_api::app_visible_agent_mut(app, id) else {
         return base;
     };
 
@@ -829,6 +833,46 @@ fn inline_input_style(theme: &Theme) -> PromptStyle {
 mod tests {
     use super::*;
     use pager::views::suggestion_controller::CompletionItemParsed;
+
+    #[test]
+    fn viewport_commit_gate_uses_the_same_child_frontier_as_native_commit() {
+        use pager::app::session::AgentId;
+        use pager::scrollback::block::RenderBlock;
+
+        let mut app = minimal_api::test_minimal_app();
+        let mut root = minimal_api::test_agent_view(Some("root"), "/tmp/root".into());
+        let mut child = minimal_api::test_agent_view(Some("child"), "/tmp/child".into());
+        child.session.id = AgentId(1);
+        root.scrollback
+            .push_block(RenderBlock::notice("root history"));
+        assert_eq!(
+            super::super::commit::commit_leading_run(&mut root.scrollback, false, |_, _| true),
+            1
+        );
+        child
+            .scrollback
+            .push_block(RenderBlock::notice("child history"));
+        root.subagent_views.insert("child".into(), Box::new(child));
+        root.active_subagent = Some("child".into());
+        app.agents.insert(AgentId(0), root);
+        app.active_view = ActiveView::Agent(AgentId(0));
+
+        assert!(will_commit(&app));
+        let child = app
+            .agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .subagent_views
+            .get_mut("child")
+            .unwrap();
+        assert_eq!(
+            super::super::commit::commit_leading_run(&mut child.scrollback, false, |_, _| true),
+            1
+        );
+        assert!(!will_commit(&app));
+        app.agents.get_mut(&AgentId(0)).unwrap().active_subagent = None;
+        assert!(!will_commit(&app));
+    }
 
     fn completion_item() -> CompletionItemParsed {
         CompletionItemParsed {

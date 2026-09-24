@@ -60,14 +60,15 @@ pub fn pump_transcript(app: &mut AppView) {
     // (id collisions would stitch the transcript from the wrong session). The
     // owner keeps existing across view switches, so the build also survives
     // the user tabbing away — only a truly-removed agent drops it.
-    let id = build.agent;
     let appearance = super::commit::committed_appearance(minimal_api::app_appearance(app));
-    if let Some(agent) = minimal_api::app_agent_mut(app, id) {
+    if let Some(agent) = minimal_api::transcript_owner_agent_mut(app, &build) {
         minimal_api::ensure_agent_media_link_paths(agent);
     }
     {
-        let Some(agent) = minimal_api::app_agent(app, id) else {
-            tracing::warn!("minimal: transcript build's agent removed; dropping the build");
+        let Some(agent) = minimal_api::transcript_owner_agent(app, &build) else {
+            tracing::warn!(
+                "minimal: transcript build's owner removed or rebound; dropping the build"
+            );
             return;
         };
         let theme = Theme::current();
@@ -119,16 +120,14 @@ pub fn pump_transcript(app: &mut AppView) {
     }
 
     // Done: hand the file to the event loop's suspend-into-$PAGER path.
-    finish_transcript(app, id, build.out);
+    finish_transcript(app, build);
 }
 
-/// Write the finished transcript and arm `pending_pager` (ANSI → the
-/// event loop adds `-R` for `less`). Errors surface as a system block on the
-/// build's owning agent (which may differ from the active view — the user can
-/// tab away while the build runs).
-fn finish_transcript(app: &mut AppView, id: pager::app::session::AgentId, out: String) {
-    if out.is_empty() {
-        if let Some(agent) = minimal_api::app_agent_mut(app, id) {
+/// Hand the finished transcript to the background snapshot writer. Errors
+/// surface on the build's owning agent after the write result returns.
+fn finish_transcript(app: &mut AppView, build: minimal_api::TranscriptBuild) {
+    if build.out.is_empty() {
+        if let Some(agent) = minimal_api::transcript_owner_agent_mut(app, &build) {
             minimal_api::agent_scrollback_mut(agent).push_block(
                 pager::scrollback::block::RenderBlock::notice(
                     "No conversation transcript to view yet",
@@ -137,18 +136,7 @@ fn finish_transcript(app: &mut AppView, id: pager::app::session::AgentId, out: S
         }
         return;
     }
-    match minimal_api::app_set_pending_pager(app, id, &out, true) {
-        Ok(()) => {}
-        Err(e) => {
-            if let Some(agent) = minimal_api::app_agent_mut(app, id) {
-                minimal_api::agent_scrollback_mut(agent).push_block(
-                    pager::scrollback::block::RenderBlock::notice(format!(
-                        "Failed to write transcript: {e}"
-                    )),
-                );
-            }
-        }
-    }
+    minimal_api::queue_minimal_transcript_snapshot(app, build);
 }
 
 /// Render one entry (fully expanded, at [`FULL_VIEW_WIDTH`]) and append its

@@ -10,23 +10,14 @@
 //! effects run through the real `effects::execute` (the same loop
 //! `event_loop::run` performs, minus the terminal).
 //!
-//! Env sandboxing follows this crate's `serial(GROW_HOME)` idiom; note
-//! `grow_home()` is process-cached (OnceLock), so disk assertions always go
-//! through [`effective_grow_home`] rather than assuming the temp dir won.
-//!
-//! The scenarios are `#[ignore]`d in the shared lib test binary: the harness
-//! mutates process-global env (proxy URLs, `GROW_API_KEY`,
-//! `GROW_LEADER_SOCKET`, `GROW_HOME`) for a real agent's whole lifetime, and
-//! in a several-thousand-test process that poisons concurrently-running tests
-//! (and `grow_home()`'s OnceLock is usually already pinned). Run on demand:
+//! Each ignored scenario re-executes itself in an exact-test child process.
+//! The parent supplies a temporary `GROW_HOME` before the child harness starts,
+//! so `grow_home()`'s process cache and the environment changes needed to bring
+//! up the mock agent belong only to that scenario. Run on demand:
 //!
 //! ```bash
-//! cargo test -p pager --lib -- app::leader_cluster --ignored --test-threads=1
+//! cargo test -p pager --lib -- app::leader_cluster --ignored
 //! ```
-//!
-//! Follow-up to un-ignore: move the scenarios to a dedicated test binary
-//! (single-process isolation via a test-harness feature over the pub(crate)
-//! seams), where env is set before any process-global's first touch.
 //!
 //! Unix-only: the leader transport here is a unix socket.
 
@@ -40,6 +31,7 @@ use acp_transport::{
     AcpAgentGatewayReceiver as GatewayReceiver, AcpAgentGatewaySender as GatewaySender,
     AcpClientRx, LineBufferedRead, acp_send,
 };
+use fs2::FileExt as _;
 use shell::agent::config::Config as AgentConfig;
 use shell::agent::mvp_agent::MvpAgent;
 use shell::leader::{
@@ -79,6 +71,19 @@ async fn bounded<T>(what: &str, fut: impl std::future::Future<Output = T>) -> T 
 /// process-cached, so an earlier test in this binary may have pinned it.
 fn effective_grow_home() -> PathBuf {
     config::grow_home()
+}
+
+/// Locate the durable leaf for a test session without reimplementing the
+/// storage cwd encoder.
+fn find_session_updates_file(sid: &str) -> Option<PathBuf> {
+    let sessions = effective_grow_home().join("sessions");
+    for entry in std::fs::read_dir(&sessions).ok()?.flatten() {
+        let candidate = entry.path().join(sid).join("updates.jsonl");
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
 }
 
 /// Concatenated agent-message text across a view's scrollback (copy of the
@@ -391,8 +396,8 @@ impl PagerLeaderCluster {
         let (agent_in_read, agent_in_write) = tokio::io::simplex(SIMPLEX_BUF);
         let (agent_out_read, agent_out_write) = tokio::io::simplex(SIMPLEX_BUF);
 
+        let agent_config = mock_agent_config(&self.server.url());
         generation_tasks.push(tokio::task::spawn_local(async move {
-            let agent_config = AgentConfig::default();
             let (gw_tx, gw_rx) = tokio::sync::mpsc::unbounded_channel();
             let gateway = GatewaySender::new(gw_tx);
             let agent = MvpAgent::new(gateway, &agent_config).expect("valid agent config");
@@ -447,7 +452,7 @@ impl PagerLeaderCluster {
 
     /// Kill the current leader generation (server + agent die together, like
     /// a real leader process crash) and wait for the socket to vanish.
-    async fn kill_leader(&mut self) {
+    async fn kill_leader(&mut self, session_id: &str) {
         self.server_cancel.cancel();
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while self.sock_path.exists() && tokio::time::Instant::now() < deadline {
@@ -470,6 +475,37 @@ impl PagerLeaderCluster {
         for task in self.generation_tasks.drain(..) {
             task.abort();
             let _ = task.await;
+        }
+        // This fixture shares a process with session actor OS threads. A real
+        // leader process exit kills them; here the Agent requests shutdown on
+        // drop, and the replacement must wait for the old writer's lease.
+        let writer_lease = find_session_updates_file(session_id)
+            .expect("completed turn has a session updates file")
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("session writer lease has a parent")
+            .join(format!(".{session_id}.writer.lock"));
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let file = std::fs::OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&writer_lease)
+                .expect("open old session writer lease");
+            match file.try_lock_exclusive() {
+                Ok(()) => {
+                    fs2::FileExt::unlock(&file).expect("release test writer lease probe");
+                    break;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(
+                        tokio::time::Instant::now() < deadline,
+                        "old session writer did not release its lease: {session_id}"
+                    );
+                    tokio::time::sleep(PUMP_TICK).await;
+                }
+                Err(error) => panic!("old session writer lease probe failed: {error}"),
+            }
         }
         // The next generation's agent must re-authenticate its ACP surface.
         self.authenticated = false;
@@ -612,6 +648,61 @@ impl Drop for PagerLeaderCluster {
 
 fn occurrences(haystack: &str, needle: &str) -> usize {
     haystack.matches(needle).count()
+}
+
+/// The cluster must not depend on a developer's config.toml in `GROW_HOME`.
+fn mock_agent_config(base_url: &str) -> AgentConfig {
+    let raw: toml::Value = toml::from_str(&format!(
+        "[models]\ndefault = \"test/test-model\"\n\n[provider.test]\napi_backend = \"chat_completions\"\n\n[provider.test.options]\nbase_url = \"{base_url}\"\n\n[provider.test.models.test-model]\nname = \"Test Model\"\ncontext_window = 128000\n"
+    ))
+    .expect("valid explicit test model TOML");
+    let mut config = AgentConfig::new_from_toml_cfg(&raw).expect("valid explicit test config");
+    config.default_model_override = None;
+    config.remote_settings = Some(shell::util::config::RemoteSettings::default());
+    config
+}
+
+/// Run one leader-cluster scenario in a clean process. `grow_home()` is a
+/// process-wide cache and the cluster temporarily sets several environment
+/// variables, so serializing this test among the crate's tests is not an
+/// isolation boundary. The child runs only this exact test and receives its
+/// private home before libtest or the test body can initialize global state.
+fn run_in_isolated_child(module_path: &str, test_name: &str) -> bool {
+    const CHILD_MARKER: &str = "GROW_PAGER_LEADER_CLUSTER_CHILD";
+    if std::env::var_os(CHILD_MARKER).is_some() {
+        return false;
+    }
+
+    let module_path = module_path.strip_prefix("pager::").unwrap_or(module_path);
+    let exact_test = format!("{module_path}::{test_name}");
+    let home = tempfile::tempdir().expect("isolated leader-cluster GROW_HOME");
+    let output = std::process::Command::new(
+        std::env::current_exe().expect("leader-cluster test executable"),
+    )
+    .args([
+        "--exact",
+        &exact_test,
+        "--ignored",
+        "--nocapture",
+        "--test-threads=1",
+    ])
+    .env("GROW_HOME", home.path())
+    .env(CHILD_MARKER, "1")
+    .output()
+    .expect("run isolated leader-cluster child");
+    assert!(
+        output.status.success(),
+        "isolated leader-cluster test {exact_test} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!("test {exact_test} ... ok")),
+        "isolated child did not run exact test {exact_test}\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    true
 }
 
 mod scenarios;

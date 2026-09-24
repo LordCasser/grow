@@ -311,6 +311,12 @@ pub(crate) fn scrollback_has_user_messages(
 /// no session exists yet, surface a toast; the auto path is best-effort and
 /// silently no-ops without an active session.
 pub(super) fn dispatch_send_recap(app: &mut AppView, auto: bool) -> Vec<Effect> {
+    // Automatic recaps are best-effort and must not use a stale capability or
+    // unloaded session while the replacement shell is being initialized.
+    if auto && app.reconnect_pending {
+        return vec![];
+    }
+
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
@@ -332,6 +338,15 @@ pub(super) fn dispatch_send_recap(app: &mut AppView, auto: bool) -> Vec<Effect> 
             agent.show_toast("No active session");
         }
         return vec![];
+    };
+
+    let away_period_id = if auto {
+        let Some(id) = app.notification_service.focus_tracker.away_period_id() else {
+            return vec![];
+        };
+        Some(id)
+    } else {
+        None
     };
 
     if !auto {
@@ -361,7 +376,11 @@ pub(super) fn dispatch_send_recap(app: &mut AppView, auto: bool) -> Vec<Effect> 
             .note_auto_recap_attempt(&session_id.0);
     }
 
-    vec![Effect::SendRecap { session_id, auto }]
+    vec![Effect::SendRecap {
+        session_id,
+        auto,
+        away_period_id,
+    }]
 }
 
 // TaskResult handlers.

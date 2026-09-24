@@ -10,6 +10,7 @@ const AUTO_RECAP_RETRY_INTERVAL: Duration = Duration::from_secs(90);
 pub struct FocusTracker {
     focused: Cell<bool>,
     lost_at: Cell<Option<Instant>>,
+    away_period_id: Cell<Option<uuid::Uuid>>,
     idle_threshold: Duration,
     /// Minimum unfocused time before an automatic session recap is offered on
     /// return. See [`FocusTracker::recap_due`].
@@ -28,6 +29,7 @@ impl FocusTracker {
         Self {
             focused: Cell::new(true),
             lost_at: Cell::new(None),
+            away_period_id: Cell::new(None),
             idle_threshold: Duration::from_secs(idle_threshold_secs),
             recap_threshold: Duration::from_secs(recap_threshold_secs),
             recap_shown_this_away: RefCell::new(HashSet::new()),
@@ -43,6 +45,7 @@ impl FocusTracker {
     pub fn on_focus_lost(&self) {
         self.focused.set(false);
         self.lost_at.set(Some(Instant::now()));
+        self.away_period_id.set(Some(uuid::Uuid::new_v4()));
         // A fresh away period begins — re-arm auto recap.
         self.recap_shown_this_away.borrow_mut().clear();
         self.last_auto_recap_attempt_at.borrow_mut().clear();
@@ -60,6 +63,14 @@ impl FocusTracker {
 
     pub fn is_focused(&self) -> bool {
         self.focused.get()
+    }
+
+    pub fn away_period_id(&self) -> Option<uuid::Uuid> {
+        self.away_period_id.get()
+    }
+
+    pub fn accepts_auto_recap(&self, away_period_id: Option<uuid::Uuid>) -> bool {
+        away_period_id.is_some() && away_period_id == self.away_period_id.get()
     }
 
     /// `true` if an automatic session recap request should be sent: unfocused
@@ -88,14 +99,18 @@ impl FocusTracker {
     /// Does **not** consume the away period — only starts retry backoff so we
     /// do not spam every poll while the shell still rejects (e.g. <3 min idle).
     pub fn note_auto_recap_attempt(&self, session_id: &str) {
-        self.last_auto_recap_attempt_at.borrow_mut().insert(session_id.into(), Instant::now());
+        self.last_auto_recap_attempt_at
+            .borrow_mut()
+            .insert(session_id.into(), Instant::now());
     }
 
     /// Record that a recap was shown (auto or manual `/recap`) for the current
     /// away period. Stops further **auto** requests for that session until focus is lost again.
     /// Manual `/recap` may still be invoked repeatedly.
     pub fn mark_recap_shown(&self, session_id: &str) {
-        self.recap_shown_this_away.borrow_mut().insert(session_id.into());
+        self.recap_shown_this_away
+            .borrow_mut()
+            .insert(session_id.into());
     }
 }
 
@@ -223,7 +238,10 @@ mod tests {
         let tracker = FocusTracker::new(0, 180);
         tracker.on_focus_lost();
         assert!(tracker.should_notify(), "notification fires immediately");
-        assert!(!tracker.recap_due("s1"), "recap waits for its own threshold");
+        assert!(
+            !tracker.recap_due("s1"),
+            "recap waits for its own threshold"
+        );
     }
 
     #[test]
@@ -242,11 +260,14 @@ mod tests {
     fn recap_re_arms_after_new_away_period() {
         let tracker = FocusTracker::new(3, 0);
         tracker.on_focus_lost();
+        let first_period = tracker.away_period_id();
         tracker.mark_recap_shown("s1");
         assert!(!tracker.recap_due("s1"));
         // Return, then leave again — a new away period re-arms the recap.
         tracker.on_focus_gained();
+        assert_eq!(tracker.away_period_id(), first_period);
         tracker.on_focus_lost();
+        assert_ne!(tracker.away_period_id(), first_period);
         assert!(tracker.recap_due("s1"));
     }
 
@@ -264,7 +285,8 @@ mod tests {
         );
         // Simulate retry interval elapsed without a successful notification.
         tracker.last_auto_recap_attempt_at.borrow_mut().insert(
-            "s1".into(), Instant::now() - AUTO_RECAP_RETRY_INTERVAL - Duration::from_secs(1),
+            "s1".into(),
+            Instant::now() - AUTO_RECAP_RETRY_INTERVAL - Duration::from_secs(1),
         );
         assert!(
             tracker.recap_due("s1"),
@@ -278,7 +300,8 @@ mod tests {
         tracker.on_focus_lost();
         tracker.note_auto_recap_attempt("s1");
         tracker.last_auto_recap_attempt_at.borrow_mut().insert(
-            "s1".into(), Instant::now() - AUTO_RECAP_RETRY_INTERVAL - Duration::from_secs(1),
+            "s1".into(),
+            Instant::now() - AUTO_RECAP_RETRY_INTERVAL - Duration::from_secs(1),
         );
         tracker.mark_recap_shown("s1");
         assert!(!tracker.recap_due("s1"), "shown recap must not retry");
@@ -300,5 +323,4 @@ mod tests {
         assert!(tracker.recap_shown_this_away.borrow().is_empty());
         assert!(tracker.last_auto_recap_attempt_at.borrow().is_empty());
     }
-
 }

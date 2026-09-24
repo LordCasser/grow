@@ -2640,7 +2640,10 @@ mod tests {
         for step in 0..12 {
             state.select_next(&items);
             let idx = state.selected_index.unwrap();
-            let item_y = state.layout.virtual_y(idx);
+            let item_y = state
+                .layout
+                .virtual_y(idx)
+                .unwrap_or_else(|| state.layout.total_height());
             let vp = state.viewport_height as usize;
             assert!(
                 item_y >= state.scroll_offset && item_y < state.scroll_offset + vp,
@@ -2666,7 +2669,10 @@ mod tests {
             // simulate key: select_next
             state.select_next(&items);
             let idx = state.selected_index.unwrap();
-            let item_y = state.layout.virtual_y(idx);
+            let item_y = state
+                .layout
+                .virtual_y(idx)
+                .unwrap_or_else(|| state.layout.total_height());
             let vp = state.viewport_height as usize;
             assert!(
                 item_y >= state.scroll_offset && item_y < state.scroll_offset + vp,

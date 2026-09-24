@@ -911,7 +911,7 @@ impl QueuePane {
             // a stale hover after a wheel-scroll). A plain saturating_sub would
             // collapse an above-viewport row to row 0 and mis-paint it.
             let item_y = self.list_state.layout().virtual_y(idx);
-            if let Some(rel) = item_y.checked_sub(self.list_state.scroll_offset())
+            if let Some(rel) = item_y.and_then(|y| y.checked_sub(self.list_state.scroll_offset()))
                 && rel < inner.height as usize
             {
                 let screen_y = inner.y + rel as u16;
@@ -950,7 +950,7 @@ impl QueuePane {
             // saturating_sub would otherwise bind the buttons to row 0 and
             // mis-route clicks to an off-screen entry.
             let item_y = self.list_state.layout().virtual_y(idx);
-            if let Some(rel) = item_y.checked_sub(self.list_state.scroll_offset())
+            if let Some(rel) = item_y.and_then(|y| y.checked_sub(self.list_state.scroll_offset()))
                 && rel < inner.height as usize
             {
                 let screen_y = inner.y + rel as u16;

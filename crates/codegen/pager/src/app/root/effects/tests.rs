@@ -830,6 +830,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
         tasks
     };
     let mut tasks = run(Effect::FetchSessionList {
+        cwd: std::path::PathBuf::from("/owner"),
         query: Some("hit".into()),
         seq: 7,
         kind_filter: None,
@@ -847,6 +848,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
         other => panic!("expected SessionListLoaded, got {other:?}"),
     }
     let mut tasks = run(Effect::FetchSessionList {
+        cwd: std::path::PathBuf::from("."),
         query: None,
         seq: 8,
         kind_filter: None,
@@ -863,6 +865,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
         other => panic!("expected SessionListLoaded, got {other:?}"),
     }
     let mut tasks = run(Effect::FetchSessionList {
+        cwd: std::path::PathBuf::from("."),
         query: Some("fail-me".into()),
         seq: 9,
         kind_filter: None,
@@ -881,6 +884,7 @@ async fn fetch_session_list_pushes_query_and_echoes_seq() {
     }
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 3);
+    assert_eq!(captured[0]["cwd"], "/owner");
     assert_eq!(captured[0]["query"], "hit");
     assert_eq!(captured[0]["limit"], 30);
     assert!(captured[0]["cwd"].is_string());
@@ -1255,7 +1259,8 @@ async fn recap_admission_effect_and_dispatch_handle_manual_and_auto_outcomes() {
                 crate::scrollback::blocks::NoticeTone::Progress, "Manual recap pending");
             let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
             let mut tasks = JoinSet::new();
-            execute(Effect::SendRecap { session_id: session_id.clone(), auto },
+            let away_period_id = auto.then(uuid::Uuid::new_v4);
+            execute(Effect::SendRecap { session_id: session_id.clone(), auto, away_period_id },
                 &mut tasks, &tx, Path::new("."), &SessionFlags::default());
             let request = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
                 .await.unwrap().unwrap();
@@ -1266,6 +1271,7 @@ async fn recap_admission_effect_and_dispatch_handle_manual_and_auto_outcomes() {
             let request: serde_json::Value = serde_json::from_str(args.request.params.get()).unwrap();
             assert_eq!(request["sessionId"], session_id.0.as_ref());
             assert_eq!(request["auto"], auto);
+            assert_eq!(request["awayPeriodId"], serde_json::json!(away_period_id));
             args.response_tx.send(shell::extensions::to_ext_response(Ok(payload))).unwrap();
             let result = tokio::time::timeout(std::time::Duration::from_secs(2), tasks.join_next())
                 .await.unwrap().unwrap().unwrap();
@@ -1336,4 +1342,42 @@ fn history_search_decodes_failures_without_fabricating_empty_results() {
     let (hits, pending) = super::decode_deep_search_response(r#"{"result":{"results":[],"bootstrapping":true}}"#).unwrap();
     assert!(hits.is_empty());
     assert!(pending);
+}
+
+#[tokio::test]
+async fn agent_catalog_timeout_keeps_blocked_worker_permit() {
+    let slot = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = std::sync::mpsc::channel();
+    let first = tokio::spawn(super::run_agent_catalog_discovery(
+        slot.clone(),
+        std::time::Duration::from_millis(100),
+        move || {
+            let _ = started_tx.send(());
+            release_rx.recv().unwrap();
+            (Vec::<()>::new(), "grow".to_owned())
+        },
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(2), started_rx)
+        .await
+        .expect("worker should start")
+        .expect("worker should signal start");
+    assert_eq!(first.await.unwrap().unwrap_err(), "Agent catalog scan timed out");
+    assert_eq!(slot.available_permits(), 0);
+
+    let second = super::run_agent_catalog_discovery(
+        slot.clone(),
+        std::time::Duration::from_millis(100),
+        || (Vec::<()>::new(), "stale".to_owned()),
+    )
+    .await;
+    assert_eq!(second.unwrap_err(), "Agent catalog scan timed out");
+    assert_eq!(slot.available_permits(), 0);
+
+    release_tx.send(()).unwrap();
+    let permit = tokio::time::timeout(std::time::Duration::from_secs(2), slot.acquire())
+        .await
+        .expect("worker should release permit")
+        .unwrap();
+    drop(permit);
 }

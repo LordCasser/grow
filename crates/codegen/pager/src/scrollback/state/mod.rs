@@ -779,7 +779,7 @@ impl ScrollbackState {
             && let RenderBlock::SubagentPermission(group) = &mut entry.block
             && group.epoch() == self.permission_epoch
         {
-            group.push(event);
+            assert!(group.push(event, self.permission_epoch));
             entry.invalidate_cache();
             self.mark_structurally_dirty(id);
             self.bump_content_generation();
@@ -829,7 +829,8 @@ impl ScrollbackState {
                 if let Some(current) = self.entries.get_mut(&current_id)
                     && let RenderBlock::SubagentPermission(current_block) = &mut current.block
                 {
-                    current_block.extend(tail_block.take_members());
+                    let tail_epoch = tail_block.epoch();
+                    assert!(current_block.extend(tail_block.take_members(), tail_epoch));
                     current.invalidate_cache();
                     self.running.remove(&tail_id);
                     self.dirty_heights.remove(&tail_id);
@@ -1361,6 +1362,12 @@ impl ScrollbackState {
     /// Lowest entry index that may still be uncommitted (minimal-mode hint).
     pub(crate) fn commit_scan_cursor(&self) -> usize {
         self.minimal_commit.scan_cursor()
+    }
+
+    /// Start a new visible Minimal screen epoch after changing Agent views.
+    /// Native history from older epochs remains in the terminal scrollback.
+    pub(crate) fn reset_minimal_native_frontier(&mut self) {
+        self.minimal_commit.clear();
     }
 
     /// Advance the commit scan cursor, clamped to the current entry count.

@@ -245,6 +245,15 @@ pub struct SessionPickerEntry {
     /// Lazy-loaded detail for the expanded card view.
     pub card_detail: Option<CardDetail>,
 }
+/// Identity of the view and directory that issued the current picker list fetch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SessionPickerBinding {
+    pub root_agent_id: Option<AgentId>,
+    pub child_session_key: Option<String>,
+    pub session_id: Option<acp_transport::protocol::SessionId>,
+    pub session_binding_epoch: Option<u32>,
+    pub cwd: PathBuf,
+}
 /// Detail loaded on-demand when a session card is expanded.
 #[derive(Debug, Clone)]
 pub struct CardDetail {
@@ -640,6 +649,7 @@ pub struct AppView {
     /// stays 0 so plain list responses keep their pre-existing
     /// last-write-wins behavior.
     pub session_picker_list_seq: u64,
+    pub(crate) session_picker_list_binding: Option<SessionPickerBinding>,
     /// Invalidates detail reads when picker rows or filters change.
     pub(crate) session_picker_detail_generation: u64,
     /// The search query `session_picker_entries` were server-fetched with
@@ -840,8 +850,16 @@ impl AppView {
         self.local_drafts.next_deadline()
     }
 
-    pub(crate) fn flush_local_drafts(&mut self) {
-        self.local_drafts.flush_all();
+    pub(crate) fn local_draft_ready_notify(&self) -> Option<std::sync::Arc<tokio::sync::Notify>> {
+        self.local_drafts.ready_notify()
+    }
+
+    pub(crate) async fn checkpoint_local_drafts(&mut self) -> std::io::Result<()> {
+        let active = match self.active_view {
+            ActiveView::Agent(id) => Some(id),
+            _ => None,
+        };
+        self.local_drafts.checkpoint(&self.agents, active).await
     }
 
     pub(crate) fn transfer_local_draft_ownership(&mut self, effect: &crate::app::actions::Effect) {
@@ -939,6 +957,7 @@ impl AppView {
             session_picker_content_loading: false,
             session_picker_deep_search_seq: 0,
             session_picker_list_seq: 0,
+            session_picker_list_binding: None,
             session_picker_detail_generation: 0,
             session_picker_entries_query: None,
             cli_model_override: None,
@@ -1030,7 +1049,9 @@ impl AppView {
             return None;
         }
         self.announcement_write_in_flight = true;
-        Some(Effect::PersistAnnouncementsHidden { hidden_ids: self.hidden_announcement_ids.clone() })
+        Some(Effect::PersistAnnouncementsHidden {
+            hidden_ids: self.hidden_announcement_ids.clone(),
+        })
     }
 
     pub(crate) fn finish_announcement_persistence(&mut self) -> Option<Effect> {
@@ -2603,37 +2624,43 @@ impl AppView {
     /// - Placement id 1 is cleared only when no popup agent is drawn; a popup
     ///   owns and reuses that slot across consecutive dashboard frames.
     /// - Inline scrollback media ids (2+) are drained per agent via
-    ///   `AgentView::take_inline_media_clear_escapes`, which resets the
-    ///   agent's placement tracking — a one-shot sweep per transition,
-    ///   not a per-frame cost. The popup-attached agent is skipped: it
+    ///   agent clear state with one shared frame byte budget; an ID is
+    ///   removed only when its escape fits. The popup-attached agent is skipped: it
     ///   just drew and manages its own placements. The clears-before-popup
     ///   ordering also means a drained id that collides with one the popup
     ///   re-places this frame ends up displayed, not deleted.
     fn dashboard_stale_image_clears(
         agents: &mut IndexMap<AgentId, AgentView>,
         drawn_agent: Option<AgentId>,
+        limit: usize,
     ) -> Option<crate::terminal::overlay::PostFlush> {
         if crate::terminal::image::detect_graphics_protocol()
             == crate::terminal::image::GraphicsProtocol::None
         {
             return None;
         }
-        let mut clears = crate::terminal::overlay::PostFlush::default();
-        let mut has_escapes = false;
+        let overlay_clear = drawn_agent
+            .is_none()
+            .then(crate::terminal::overlay::clear_kitty);
+        let media_limit = limit.saturating_sub(
+            overlay_clear
+                .as_ref()
+                .map_or(0, |clear| clear.as_str().len()),
+        );
+        let mut media_clears = String::new();
         for (id, agent) in agents.iter_mut() {
             if Some(*id) == drawn_agent {
                 continue;
             }
-            if let Some(esc) = agent.take_inline_media_clear_escapes() {
-                clears.append_plain(&esc);
-                has_escapes = true;
-            }
+            agent.append_inline_media_clear_tree_with_limit(&mut media_clears, media_limit);
         }
-        if drawn_agent.is_none() {
-            clears.append(crate::terminal::overlay::clear_kitty().into());
-            has_escapes = true;
+        let mut clears = crate::terminal::overlay::PostFlush::plain(media_clears);
+        if let Some(clear) = overlay_clear {
+            // `media_limit` reserved the complete overlay clear before any agent
+            // state was drained, so this bounded append cannot exceed the frame.
+            let _ = clears.append_bounded(clear.into(), limit);
         }
-        has_escapes.then_some(clears)
+        (!clears.as_str().is_empty()).then_some(clears)
     }
     /// Minimal mode: queue the most-recently committed folded block (collapsed
     /// reasoning / truncated tool output) to be re-printed fully expanded below
@@ -2644,7 +2671,7 @@ impl AppView {
             return false;
         };
         let id = *id;
-        let found = match self.agents.get_mut(&id) {
+        let found = match crate::minimal_api::app_visible_agent_mut(self, id) {
             Some(agent) => agent.scrollback.take_expandable_committed(),
             None => None,
         };
@@ -3132,8 +3159,15 @@ impl AppView {
                                 } else {
                                     (None, None, None)
                                 };
-                            let stale_clears =
-                                Self::dashboard_stale_image_clears(agents, drawn_popup_agent);
+                            let popup_bytes = popup_post_flush
+                                .as_ref()
+                                .map_or(0, |post_flush| post_flush.as_str().len());
+                            let stale_clears = Self::dashboard_stale_image_clears(
+                                agents,
+                                drawn_popup_agent,
+                                crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES
+                                    .saturating_sub(popup_bytes),
+                            );
                             let popup_post_flush =
                                 Self::merge_post_flush(stale_clears, popup_post_flush);
                             let tutorial_open = self.tutorial.is_some();
@@ -4105,6 +4139,7 @@ pub(crate) mod tests {
             session_picker_content_loading: false,
             session_picker_deep_search_seq: 0,
             session_picker_list_seq: 0,
+            session_picker_list_binding: None,
             session_picker_detail_generation: 0,
             session_picker_entries_query: None,
             startup_warnings: Vec::new(),
@@ -4643,6 +4678,209 @@ pub(crate) mod tests {
         };
         Box::new(AgentView::new(session, ScrollbackState::new()))
     }
+
+    #[test]
+    fn minimal_visible_epoch_follows_child_and_reprints_each_selected_history() {
+        let mut app = test_app_with_agent();
+        let root_id = super::super::session::AgentId(0);
+        let mut child = idle_child_view(&app, 1, "child-minimal-owner");
+        child.prompt.set_text("child draft");
+        child
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::notice(
+                "child history",
+            ));
+        let root = app.agents.get_mut(&root_id).unwrap();
+        root.prompt.set_text("root draft");
+        root.scrollback
+            .push_block(crate::scrollback::block::RenderBlock::notice(
+                "root history",
+            ));
+        root.scrollback.mark_committed(0);
+        root.subagent_views
+            .insert("child-minimal-owner".into(), child);
+
+        let root_owner = crate::minimal_api::minimal_visible_owner(&app).unwrap();
+        crate::minimal_api::set_minimal_committed_plan_id(&mut app, Some("root-plan".into()));
+        assert_eq!(
+            crate::minimal_api::app_visible_agent(&app, root_id)
+                .unwrap()
+                .prompt
+                .text(),
+            "root draft"
+        );
+        app.agents.get_mut(&root_id).unwrap().active_subagent = Some("child-minimal-owner".into());
+        let child_owner = crate::minimal_api::minimal_visible_owner(&app).unwrap();
+        assert_ne!(root_owner, child_owner);
+        assert_eq!(crate::minimal_api::minimal_committed_plan_id(&app), None);
+        crate::minimal_api::set_minimal_committed_plan_id(&mut app, Some("child-plan".into()));
+        assert_eq!(
+            crate::minimal_api::app_visible_agent(&app, root_id)
+                .unwrap()
+                .prompt
+                .text(),
+            "child draft"
+        );
+        crate::minimal_api::with_minimal_live_state(&mut app, |_, agent, _| {
+            assert_eq!(agent.unwrap().prompt.text(), "child draft");
+        });
+        crate::minimal_api::begin_minimal_visible_epoch(&mut app, Some(child_owner));
+        assert_eq!(app.agents[&root_id].scrollback.commit_scan_cursor(), 0);
+        assert!(
+            app.agents[&root_id]
+                .scrollback
+                .is_committed(app.agents[&root_id].scrollback.get(0).unwrap().id)
+        );
+        {
+            let child = &mut app
+                .agents
+                .get_mut(&root_id)
+                .unwrap()
+                .subagent_views
+                .get_mut("child-minimal-owner")
+                .unwrap();
+            child.scrollback.mark_committed(0);
+            let id = child.scrollback.get(0).unwrap().id;
+            child.scrollback.record_committed_for_expand(id);
+        }
+        assert!(app.minimal_expand_last());
+        assert_eq!(app.minimal_state.pending_expand.len(), 1);
+        app.agents.get_mut(&root_id).unwrap().active_subagent = None;
+        crate::minimal_api::begin_minimal_visible_epoch(&mut app, Some(root_owner));
+        assert_eq!(
+            crate::minimal_api::minimal_committed_plan_id(&app),
+            Some("root-plan")
+        );
+        assert!(app.minimal_state.pending_expand.is_empty());
+        let root = &app.agents[&root_id];
+        assert!(
+            !root
+                .scrollback
+                .is_committed(root.scrollback.get(0).unwrap().id)
+        );
+        let child = &root.subagent_views["child-minimal-owner"];
+        assert!(
+            child
+                .scrollback
+                .is_committed(child.scrollback.get(0).unwrap().id)
+        );
+    }
+
+    #[test]
+    fn minimal_missing_child_falls_back_to_root_input_and_owner() {
+        let mut app = test_app_with_agent();
+        let id = super::super::session::AgentId(0);
+        app.screen_mode = ScreenMode::Minimal;
+        app.registry = ActionRegistry::defaults_for(ScreenMode::Minimal);
+        let root = app.agents.get_mut(&id).unwrap();
+        root.active_pane = crate::views::agent::ActivePane::Prompt;
+        root.active_subagent = Some("removed-child".into());
+        assert_eq!(
+            crate::minimal_api::app_visible_agent(&app, id)
+                .unwrap()
+                .session
+                .id,
+            id
+        );
+        assert!(
+            crate::minimal_api::minimal_visible_owner(&app)
+                .unwrap()
+                .child_session_id
+                .is_none()
+        );
+        let _ = app.handle_input(&key_event(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app.agents[&id].active_subagent.is_none());
+        assert_eq!(app.agents[&id].prompt.text(), "x");
+    }
+
+    #[test]
+    fn minimal_root_permission_and_child_rebinding_change_frame_owner() {
+        let mut app = test_app_with_agent();
+        let root_id = super::super::session::AgentId(0);
+        let key = "child-minimal-permission";
+        let child = idle_child_view(&app, 1, key);
+        let root = app.agents.get_mut(&root_id).unwrap();
+        root.subagent_views.insert(key.into(), child);
+        root.active_subagent = Some(key.into());
+        let child_owner = crate::minimal_api::minimal_visible_owner(&app).unwrap();
+        assert_eq!(child_owner.child_session_id.as_deref(), Some(key));
+
+        let (response_tx, _response_rx) = tokio::sync::oneshot::channel();
+        let request = agent_client_protocol::schema::v1::RequestPermissionRequest::new(
+            agent_client_protocol::schema::v1::SessionId::new(std::sync::Arc::from("root")),
+            agent_client_protocol::schema::v1::ToolCallUpdate::new(
+                agent_client_protocol::schema::v1::ToolCallId::new(std::sync::Arc::from("call")),
+                agent_client_protocol::schema::v1::ToolCallUpdateFields::default(),
+            ),
+            vec![],
+        );
+        app.agents
+            .get_mut(&root_id)
+            .unwrap()
+            .permission_queue
+            .push_back(crate::views::permission_view::PermissionViewState {
+                request: acp_transport::AcpArgs {
+                    request,
+                    response_tx,
+                },
+                id: 0,
+                focus: crate::views::permission_view::PermissionFocus::Options,
+                options: vec![],
+                active_idx: 0,
+                bash_highlights: None,
+                bash_selection_count: 0,
+                bash_command_raw: None,
+                mcp_scope: None,
+                title: "Root permission".into(),
+                description: vec![],
+                args_expanded: false,
+                desc_scroll: 0,
+                subagent_label: None,
+                options_area_height: 0,
+                options_scroll_offset: 0,
+            });
+        let root_owner = crate::minimal_api::minimal_visible_owner(&app).unwrap();
+        assert!(root_owner.child_session_id.is_none());
+        assert_eq!(
+            crate::minimal_api::app_visible_agent(&app, root_id)
+                .unwrap()
+                .session
+                .id,
+            root_id
+        );
+        app.agents
+            .get_mut(&root_id)
+            .unwrap()
+            .permission_queue
+            .clear();
+        assert_eq!(
+            crate::minimal_api::minimal_visible_owner(&app),
+            Some(child_owner.clone())
+        );
+
+        let child = app
+            .agents
+            .get_mut(&root_id)
+            .unwrap()
+            .subagent_views
+            .get_mut(key)
+            .unwrap();
+        child
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::notice("old binding"));
+        child.scrollback.mark_committed(0);
+        child.session.session_id = Some("rebound-child".to_string().into());
+        let rebound = crate::minimal_api::minimal_visible_owner(&app).unwrap();
+        assert_ne!(rebound, child_owner);
+        assert_eq!(rebound.child_session_id.as_deref(), Some(key));
+        crate::minimal_api::begin_minimal_visible_epoch(&mut app, Some(rebound));
+        let child = &app.agents[&root_id].subagent_views[key];
+        assert!(
+            !child
+                .scrollback
+                .is_committed(child.scrollback.get(0).unwrap().id)
+        );
+    }
     fn key_event(code: KeyCode, mods: KeyModifiers) -> Event {
         Event::Key(KeyEvent::new(code, mods))
     }
@@ -4858,10 +5096,16 @@ pub(crate) mod tests {
         idle_agent_with_content(&mut app, id);
         app.minimal_state.transcript = Some(crate::minimal_api::TranscriptBuild {
             agent: id,
+            root_view_agent_id: id,
+            root_session_id: app.agents.get(&id).unwrap().session.session_id.clone(),
+            view_agent_id: id,
+            child_session_id: None,
+            session_id: app.agents.get(&id).unwrap().session.session_id.clone(),
             restart_after_reload: false,
             ids: Vec::new(),
             next: 0,
             out: String::new(),
+            generation: app.minimal_state.transcript_generation,
         });
         assert_eq!(app.visible_frame_interval(TEST_FRAME_INTERVAL), None);
         assert!(
@@ -5180,7 +5424,11 @@ pub(crate) mod tests {
         use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
         let mut jpeg = Vec::new();
         image::RgbImage::from_pixel(16, 12, image::Rgb([20, 40, 60]))
-            .write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg).unwrap();
+            .write_to(
+                &mut std::io::Cursor::new(&mut jpeg),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
         for memory in [true, false] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("source.jpg");
@@ -5189,43 +5437,99 @@ pub(crate) mod tests {
             let id = super::super::session::AgentId(0);
             idle_agent_with_content(&mut app, id);
             let guard = crate::terminal::image::set_protocol_for_test(GraphicsProtocol::Kitty);
-            let mut pasted = crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData {
-                data: jpeg.clone(), mime_type: "image/jpeg".into(),
+            let mut pasted =
+                crate::prompt_images::from_clipboard_data(&crate::clipboard::ImageData {
+                    data: jpeg.clone(),
+                    mime_type: "image/jpeg".into(),
+                });
+            pasted.session_image_path = Some(if memory {
+                dir.path().join("missing.jpg")
+            } else {
+                path
             });
-            pasted.session_image_path = Some(if memory { dir.path().join("missing.jpg") } else { path });
-            if !memory { pasted.encoded_bytes = None; }
+            if !memory {
+                pasted.encoded_bytes = None;
+            }
             let agent = app.agents.get_mut(&id).unwrap();
             agent.prompt.set_text("");
             agent.prompt.insert_image(pasted).unwrap();
             agent.prompt.textarea.set_cursor(0);
-            agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut Vec::new());
-            let viewer = agent.image_viewer.as_ref().expect("real Enter opens the viewer");
-            assert!(viewer.loading && viewer.image_bytes.is_empty() && viewer.display_bytes.is_empty());
+            agent.handle_prompt_key_for_test(
+                &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &mut Vec::new(),
+            );
+            let viewer = agent
+                .image_viewer
+                .as_ref()
+                .expect("real Enter opens the viewer");
+            assert!(
+                viewer.loading && viewer.image_bytes.is_empty() && viewer.display_bytes.is_empty()
+            );
             assert_eq!(viewer.display_number, 1);
             let owner_id = viewer.overlay_owner_id;
             drop(guard);
-            let _worker_context = crate::terminal::image::set_protocol_for_test(GraphicsProtocol::None);
+            let _worker_context =
+                crate::terminal::image::set_protocol_for_test(GraphicsProtocol::None);
             app.tick();
-            let index = app.pending_effects.iter().position(|effect| matches!(effect, crate::app::actions::Effect::LoadImageViewer { .. })).unwrap();
-            let crate::app::actions::Effect::LoadImageViewer { source, protocol, .. } = app.pending_effects.remove(index) else { unreachable!() };
+            let index = app
+                .pending_effects
+                .iter()
+                .position(|effect| {
+                    matches!(effect, crate::app::actions::Effect::LoadImageViewer { .. })
+                })
+                .unwrap();
+            let crate::app::actions::Effect::LoadImageViewer {
+                source, protocol, ..
+            } = app.pending_effects.remove(index)
+            else {
+                unreachable!()
+            };
             assert_eq!(protocol, GraphicsProtocol::Kitty);
             assert_eq!(matches!(&source, ImageViewerLoadSource::Memory(_)), memory);
-            let result = std::thread::spawn(move || crate::prompt_images::load_image_data(source, protocol)).join().unwrap();
-            assert!(matches!(&result, ImageLoadResult::Loaded(data) if data.image_bytes == jpeg && crate::terminal::image::kitty_format_from_bytes(&data.display_bytes).is_some()));
-            let _ = crate::app::root::dispatch::dispatch(Action::TaskComplete(crate::app::actions::TaskResult::ImageViewerLoaded {
-                agent_id: id, child_session_id: None, owner_id, result,
-            }), &mut app);
+            let result =
+                std::thread::spawn(move || crate::prompt_images::load_image_data(source, protocol))
+                    .join()
+                    .unwrap();
+            assert!(
+                matches!(&result, ImageLoadResult::Loaded(data) if data.image_bytes == jpeg && crate::terminal::image::kitty_format_from_bytes(&data.display_bytes).is_some())
+            );
+            let _ = crate::app::root::dispatch::dispatch(
+                Action::TaskComplete(crate::app::actions::TaskResult::ImageViewerLoaded {
+                    agent_id: id,
+                    child_session_id: None,
+                    owner_id,
+                    result,
+                }),
+                &mut app,
+            );
             assert!(!app.agents[&id].image_viewer.as_ref().unwrap().loading);
-            let _reopen_context = crate::terminal::image::set_protocol_for_test(GraphicsProtocol::Kitty);
+            let _reopen_context =
+                crate::terminal::image::set_protocol_for_test(GraphicsProtocol::Kitty);
             let agent = app.agents.get_mut(&id).unwrap();
             agent.image_viewer = None;
-            agent.handle_prompt_key_for_test(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE), &mut Vec::new());
+            agent.handle_prompt_key_for_test(
+                &KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+                &mut Vec::new(),
+            );
             let new_owner = agent.image_viewer.as_ref().unwrap().overlay_owner_id;
             assert_ne!(new_owner, owner_id);
-            let _ = crate::app::root::dispatch::dispatch(Action::TaskComplete(crate::app::actions::TaskResult::ImageViewerLoaded {
-                agent_id: id, child_session_id: None, owner_id, result: ImageLoadResult::Failed,
-            }), &mut app);
-            assert_eq!(app.agents[&id].image_viewer.as_ref().unwrap().overlay_owner_id, new_owner);
+            let _ = crate::app::root::dispatch::dispatch(
+                Action::TaskComplete(crate::app::actions::TaskResult::ImageViewerLoaded {
+                    agent_id: id,
+                    child_session_id: None,
+                    owner_id,
+                    result: ImageLoadResult::Failed,
+                }),
+                &mut app,
+            );
+            assert_eq!(
+                app.agents[&id]
+                    .image_viewer
+                    .as_ref()
+                    .unwrap()
+                    .overlay_owner_id,
+                new_owner
+            );
         }
     }
 
@@ -7915,7 +8219,11 @@ pub(crate) mod tests {
         use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
         let _g = set_protocol_for_test(GraphicsProtocol::Kitty);
         let mut app = test_app_with_agent();
-        let clears = AppView::dashboard_stale_image_clears(&mut app.agents, None);
+        let clears = AppView::dashboard_stale_image_clears(
+            &mut app.agents,
+            None,
+            crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES,
+        );
         let expected = crate::terminal::overlay::clear_kitty().into_string();
         assert_eq!(
             clears.as_ref().map(|post| post.as_str()),
@@ -7928,7 +8236,11 @@ pub(crate) mod tests {
         use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
         let _g = set_protocol_for_test(GraphicsProtocol::None);
         let mut app = test_app_with_agent();
-        let clears = AppView::dashboard_stale_image_clears(&mut app.agents, None);
+        let clears = AppView::dashboard_stale_image_clears(
+            &mut app.agents,
+            None,
+            crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES,
+        );
         assert!(clears.is_none(), "text-only terminals never get escapes");
     }
     #[test]
@@ -7944,19 +8256,58 @@ pub(crate) mod tests {
                 .insert(std::path::PathBuf::from("/tmp/media.png"), 5);
             agent.inline_media_active = true;
         }
-        let clears = AppView::dashboard_stale_image_clears(&mut app.agents, None)
-            .expect("kitty sweep always emits");
+        let clears = AppView::dashboard_stale_image_clears(
+            &mut app.agents,
+            None,
+            crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES,
+        )
+        .expect("kitty sweep always emits");
         assert!(
             clears
                 .as_str()
                 .contains(&crate::terminal::image::clear_kitty_image(5)),
             "deletes the undrawn agent's inline placement: {clears:?}"
         );
-        let again = AppView::dashboard_stale_image_clears(&mut app.agents, None);
+        let again = AppView::dashboard_stale_image_clears(
+            &mut app.agents,
+            None,
+            crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES,
+        );
         let expected = crate::terminal::overlay::clear_kitty().into_string();
         assert_eq!(
             again.as_ref().map(|post| post.as_str()),
             Some(expected.as_str()),
+        );
+    }
+    #[test]
+    fn dashboard_stale_clears_share_limit_and_retain_overflow_state() {
+        use crate::terminal::image::{GraphicsProtocol, set_protocol_for_test};
+        let _g = set_protocol_for_test(GraphicsProtocol::Kitty);
+        let mut app = test_app_with_agent();
+        let id = super::super::session::AgentId(0);
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent
+                .inline_media_ids
+                .insert(std::path::PathBuf::from("/tmp/a.png"), 5);
+            agent
+                .inline_media_ids
+                .insert(std::path::PathBuf::from("/tmp/b.png"), 6);
+            agent.inline_media_active = true;
+        }
+        let first = crate::terminal::image::clear_kitty_image(5);
+        let clears = AppView::dashboard_stale_image_clears(
+            &mut app.agents,
+            Some(super::super::session::AgentId(1)),
+            first.len(),
+        )
+        .unwrap();
+        assert!(clears.as_str().len() <= first.len());
+        let agent = app.agents.get(&id).unwrap();
+        assert_eq!(
+            agent.inline_media_ids.len(),
+            1,
+            "one clear fits and the other remains pending"
         );
     }
     #[test]
@@ -7978,7 +8329,14 @@ pub(crate) mod tests {
             .unwrap()
             .commit();
         for _ in 0..2 {
-            assert!(AppView::dashboard_stale_image_clears(&mut app.agents, Some(id)).is_none());
+            assert!(
+                AppView::dashboard_stale_image_clears(
+                    &mut app.agents,
+                    Some(id),
+                    crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES
+                )
+                .is_none()
+            );
             let popup = crate::terminal::overlay::static_image(&png, 20, 10, 0, 0, 7).unwrap();
             assert!(!popup.as_str().contains("a=t"));
             let _ = popup.commit();
@@ -8009,8 +8367,12 @@ pub(crate) mod tests {
             |_inner, _buf| panic!("tiny popup must not draw the agent"),
         );
         assert!(!drawn);
-        let clear =
-            AppView::dashboard_stale_image_clears(&mut app.agents, drawn.then_some(id)).unwrap();
+        let clear = AppView::dashboard_stale_image_clears(
+            &mut app.agents,
+            drawn.then_some(id),
+            crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES,
+        )
+        .unwrap();
         assert!(clear.as_str().contains("a=d"));
         assert!(
             !crate::terminal::overlay::static_image(&png, 20, 10, 0, 0, 8)

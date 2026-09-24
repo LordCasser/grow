@@ -1890,15 +1890,24 @@ fn scroll_log_failure_reports_off_and_next_toggle_reenables() {
     for i in 0..20 {
         let at = base + Duration::from_millis(i * 5);
         assert_eq!(
-            state.on_scroll_event_at(at, ScrollDirection::Down, config).lines,
-            mirror.on_scroll_event_at(at, ScrollDirection::Down, config).lines,
+            state
+                .on_scroll_event_at(at, ScrollDirection::Down, config)
+                .lines,
+            mirror
+                .on_scroll_event_at(at, ScrollDirection::Down, config)
+                .lines,
         );
         assert!(!state.scroll_log_active(), "failed sink must report off");
     }
     assert!(directory.path().is_dir());
-    let path = state.toggle_scroll_log().expect("one toggle retries from failed state");
+    let path = state
+        .toggle_scroll_log()
+        .expect("one toggle retries from failed state");
     assert!(state.scroll_log_active());
-    assert!(!path.exists(), "retry remains lazy and does not write user logs in this test");
+    assert!(
+        !path.exists(),
+        "retry remains lazy and does not write user logs in this test"
+    );
     assert!(state.toggle_scroll_log().is_none());
     assert!(!state.scroll_log_active());
 }

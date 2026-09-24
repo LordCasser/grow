@@ -7,6 +7,63 @@ use super::super::task_result::{
 use super::*;
 use shell::session::unified_list::ListScope;
 
+#[test]
+fn late_queue_hold_ack_releases_the_confirmed_server_hold() {
+    let mut app = test_app_with_agent();
+    let agent_id = AgentId(0);
+    let session_id = app.agents[&agent_id].session.session_id.clone().unwrap();
+    let binding_epoch = app.agents[&agent_id].session_binding_epoch;
+
+    let effects = dispatch_task_result(
+        TaskResult::QueueControlResolved {
+            agent_id,
+            session_id: session_id.clone(),
+            binding_epoch,
+            operation: crate::app::actions::QueueControlOperation::Hold,
+            id: "queued-1".into(),
+            expected_version: 3,
+            edit_id: Some("old-edit".into()),
+            result: Ok(crate::app::actions::QueueControlWire {
+                applied: true,
+                version: Some(3),
+                reason: None,
+            }),
+        },
+        &mut app,
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [crate::app::actions::Effect::QueueReleaseEdit {
+            session_id: sid,
+            id,
+            expected_version: 3,
+            edit_id,
+            ..
+        }] if sid == &session_id && id == "queued-1" && edit_id == "old-edit"
+    ));
+
+    // A lost response does not prove the server rejected the hold. Releasing
+    // the same edit identity is safe even if the request never arrived.
+    let effects = dispatch_task_result(
+        TaskResult::QueueControlResolved {
+            agent_id,
+            session_id: session_id.clone(),
+            binding_epoch,
+            operation: crate::app::actions::QueueControlOperation::Hold,
+            id: "queued-1".into(),
+            expected_version: 3,
+            edit_id: Some("uncertain-edit".into()),
+            result: Err("connection lost".into()),
+        },
+        &mut app,
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [crate::app::actions::Effect::QueueReleaseEdit { edit_id, .. }]
+            if edit_id == "uncertain-edit"
+    ));
+}
+
 fn doctor_target(app: &AppView, id: AgentId) -> crate::app::actions::DoctorFixTarget {
     let agent = &app.agents[&id];
     crate::app::actions::DoctorFixTarget {
@@ -437,7 +494,7 @@ fn doctor_planning_rejects_bind_replace_and_unbind_rebind() {
         }
         dispatch_task_result(
             TaskResult::DoctorFixPlanned {
-            report_only: false,
+                report_only: false,
                 target,
                 result: Ok(crate::app::actions::DoctorPlanningOutcome::Plan(Box::new(
                     crate::diagnostics::test_fix_plan(temp.path()),
@@ -2904,25 +2961,27 @@ fn rollback_reverts_thread_local_cache_too() {
 /// Notice fires once per relaxed run; survives search, re-arms on a cwd-scoped browse.
 #[test]
 fn session_list_relax_surfaces_notice_once() {
-    let relax_response = || {
+    let relax_response = |seq| {
         Action::TaskComplete(TaskResult::SessionListLoaded {
             scope: ListScope::Repo,
             sessions: vec![make_picker_entry("local-other-cwd-1", "/elsewhere")],
-            seq: 0,
+            seq,
             query: None,
         })
     };
 
     let mut app = test_app_with_agent();
     open_session_picker_with(&mut app, vec![]);
-    let _ = dispatch(relax_response(), &mut app);
+    let _ = dispatch(Action::FetchSessionList, &mut app);
+    let seq = app.session_picker_list_seq;
+    let _ = dispatch(relax_response(seq), &mut app);
     assert!(
         read_toast(&app).contains("this repo"),
         "the relaxed scope must be explained"
     );
 
     app.agents.get_mut(&AgentId(0)).unwrap().toast = None;
-    let _ = dispatch(relax_response(), &mut app);
+    let _ = dispatch(relax_response(seq), &mut app);
     assert!(
         app.agents[&AgentId(0)].toast.is_none(),
         "the relax notice must not repeat while the scope is unchanged"
@@ -2932,12 +2991,12 @@ fn session_list_relax_surfaces_notice_once() {
         Action::TaskComplete(TaskResult::SessionListLoaded {
             scope: ListScope::Cwd,
             sessions: vec![],
-            seq: 0,
+            seq,
             query: Some("needle".into()),
         }),
         &mut app,
     );
-    let _ = dispatch(relax_response(), &mut app);
+    let _ = dispatch(relax_response(seq), &mut app);
     assert!(
         app.agents[&AgentId(0)].toast.is_none(),
         "a search response must not re-arm the relax notice"
@@ -2947,12 +3006,12 @@ fn session_list_relax_surfaces_notice_once() {
         Action::TaskComplete(TaskResult::SessionListLoaded {
             scope: ListScope::Cwd,
             sessions: vec![make_picker_entry("local-here-1", "/here")],
-            seq: 0,
+            seq,
             query: None,
         }),
         &mut app,
     );
-    let _ = dispatch(relax_response(), &mut app);
+    let _ = dispatch(relax_response(seq), &mut app);
     assert!(
         read_toast(&app).contains("this repo"),
         "a scope change back to relaxed must notify again"
@@ -2983,11 +3042,11 @@ fn session_list_relax_on_welcome_does_not_latch() {
 /// though the prior latch is set.
 #[test]
 fn session_list_relax_renotifies_when_cwd_changes() {
-    let relax = || {
+    let relax = |seq| {
         Action::TaskComplete(TaskResult::SessionListLoaded {
             scope: ListScope::Repo,
             sessions: vec![make_picker_entry("local-other-cwd-1", "/elsewhere")],
-            seq: 0,
+            seq,
             query: None,
         })
     };
@@ -2995,16 +3054,18 @@ fn session_list_relax_renotifies_when_cwd_changes() {
     let mut app = test_app_with_agent();
     open_session_picker_with(&mut app, vec![]);
 
-    app.cwd = std::path::PathBuf::from("/repo/a");
-    let _ = dispatch(relax(), &mut app);
+    app.agents.get_mut(&AgentId(0)).unwrap().session.cwd = "/repo/a".into();
+    let _ = dispatch(Action::FetchSessionList, &mut app);
+    let _ = dispatch(relax(app.session_picker_list_seq), &mut app);
     assert!(
         read_toast(&app).contains("this repo"),
         "the first cwd must notify"
     );
 
     app.agents.get_mut(&AgentId(0)).unwrap().toast = None;
-    app.cwd = std::path::PathBuf::from("/repo/b");
-    let _ = dispatch(relax(), &mut app);
+    app.agents.get_mut(&AgentId(0)).unwrap().session.cwd = "/repo/b".into();
+    let _ = dispatch(Action::FetchSessionList, &mut app);
+    let _ = dispatch(relax(app.session_picker_list_seq), &mut app);
     assert!(
         read_toast(&app).contains("this repo"),
         "a different cwd must re-notify even with the prior latch set"
@@ -3016,11 +3077,12 @@ fn session_list_relax_renotifies_when_cwd_changes() {
 fn session_list_empty_without_partial_keeps_generic_toast() {
     let mut app = test_app_with_agent();
     open_session_picker_with(&mut app, vec![]);
+    let _ = dispatch(Action::FetchSessionList, &mut app);
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
             scope: ListScope::Cwd,
             sessions: vec![],
-            seq: 0,
+            seq: app.session_picker_list_seq,
             query: None,
         }),
         &mut app,
@@ -3033,9 +3095,15 @@ fn doctor_dispatch_defers_collection_and_limits_duplicate_requests() {
     use crate::slash::command::DoctorRequest;
     let mut app = test_app_with_agent();
     let cwd = app.agents[&AgentId(0)].session.cwd.clone();
-    for request in [DoctorRequest::Report, DoctorRequest::ListFixes, DoctorRequest::Fix(crate::diagnostics::TMUX_CLIPBOARD_ID, None)] {
+    for request in [
+        DoctorRequest::Report,
+        DoctorRequest::ListFixes,
+        DoctorRequest::Fix(crate::diagnostics::TMUX_CLIPBOARD_ID, None),
+    ] {
         let effects = super::super::prompt::dispatch_doctor(request, &mut app);
-        assert!(matches!(effects.as_slice(), [Effect::PrepareDoctor { input, .. }] if input.workspace == cwd));
+        assert!(
+            matches!(effects.as_slice(), [Effect::PrepareDoctor { input, .. }] if input.workspace == cwd)
+        );
         assert!(super::super::prompt::dispatch_doctor(DoctorRequest::Report, &mut app).is_empty());
         assert_eq!(app.doctor_collection.available_permits(), 0);
         drop(effects);
@@ -3049,16 +3117,37 @@ fn doctor_report_completion_stays_with_original_session() {
     let id = AgentId(0);
     let target = doctor_target(&app, id);
     app.active_view = crate::app::root::ActiveView::Welcome;
-    dispatch_task_result(TaskResult::DoctorFixPlanned {
-        report_only: true, target: target.clone(),
-        result: Ok(crate::app::actions::DoctorPlanningOutcome::Report("original report".into())),
-    }, &mut app);
+    dispatch_task_result(
+        TaskResult::DoctorFixPlanned {
+            report_only: true,
+            target: target.clone(),
+            result: Ok(crate::app::actions::DoctorPlanningOutcome::Report(
+                "original report".into(),
+            )),
+        },
+        &mut app,
+    );
     assert!(matches!(&app.agents[&id].scrollback.last().unwrap().block,
         RenderBlock::Notice(block) if block.text == "original report"));
     let count = app.agents[&id].scrollback.len();
-    app.agents.get_mut(&id).unwrap().bind_session_id("replacement".into());
-    for result in [Ok(crate::app::actions::DoctorPlanningOutcome::Report("stale report".into())), Err("old failure".into())] {
-        dispatch_task_result(TaskResult::DoctorFixPlanned { report_only: true, target: target.clone(), result }, &mut app);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .bind_session_id("replacement".into());
+    for result in [
+        Ok(crate::app::actions::DoctorPlanningOutcome::Report(
+            "stale report".into(),
+        )),
+        Err("old failure".into()),
+    ] {
+        dispatch_task_result(
+            TaskResult::DoctorFixPlanned {
+                report_only: true,
+                target: target.clone(),
+                result,
+            },
+            &mut app,
+        );
         assert_eq!(app.agents[&id].scrollback.len(), count);
     }
 }
@@ -3069,10 +3158,25 @@ fn doctor_report_from_removed_origin_does_not_fall_back_to_another_agent() {
     let target = doctor_target(&app, AgentId(0));
     app.agents.shift_remove(&AgentId(0));
     let other = AgentId(1);
-    app.agents.insert(other, crate::test_util::make_agent_view(Some("other"), "/tmp"));
+    app.agents.insert(
+        other,
+        crate::test_util::make_agent_view(Some("other"), "/tmp"),
+    );
     app.active_view = crate::app::root::ActiveView::Agent(other);
-    for result in [Ok(crate::app::actions::DoctorPlanningOutcome::Report("removed report".into())), Err("removed error".into())] {
-        dispatch_task_result(TaskResult::DoctorFixPlanned { report_only: true, target: target.clone(), result }, &mut app);
+    for result in [
+        Ok(crate::app::actions::DoctorPlanningOutcome::Report(
+            "removed report".into(),
+        )),
+        Err("removed error".into()),
+    ] {
+        dispatch_task_result(
+            TaskResult::DoctorFixPlanned {
+                report_only: true,
+                target: target.clone(),
+                result,
+            },
+            &mut app,
+        );
         assert!(app.agents[&other].scrollback.is_empty());
     }
 }

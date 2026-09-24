@@ -52,7 +52,9 @@ use super::session::lifecycle::{
     dispatch_new_session_inner, dispatch_new_session_with_id, dispatch_new_worktree_session,
     dispatch_trust_folder, open_delete_current_session_question, open_new_session_question,
 };
-use super::session::list::dispatch_fetch_session_list;
+use super::session::list::{
+    dispatch_fetch_session_list, refresh_pending_picker_after_owner_switch,
+};
 use super::session::load::{
     dispatch_load_session, dispatch_pick_content_session,
     dispatch_pick_content_session_in_worktree, dispatch_pick_session,
@@ -81,10 +83,9 @@ use super::settings::ui::{
     dispatch_toggle_vim_mode,
 };
 use super::status::{
-    dispatch_copy_session_id, dispatch_copy_usage_modal_value,
-    dispatch_open_tutorial, dispatch_show_context_info, dispatch_show_queue,
-    dispatch_show_release_notes, dispatch_show_session_info, dispatch_show_tasks,
-    dispatch_show_usage,
+    dispatch_copy_session_id, dispatch_copy_usage_modal_value, dispatch_open_tutorial,
+    dispatch_show_context_info, dispatch_show_queue, dispatch_show_release_notes,
+    dispatch_show_session_info, dispatch_show_tasks, dispatch_show_usage,
 };
 use super::task_result::{dispatch_task_result, unregister_all_active_sessions};
 use super::transcript::{
@@ -115,7 +116,15 @@ use crate::views::session_picker::CONTENT_EXPAND_OFFSET;
 /// this reason; audit an arm's `return`s before moving it.
 pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
     app.setting_persistence.begin_dispatch();
-    let effects = dispatch_inner(action, app);
+    let mut effects = dispatch_inner(action, app);
+    effects.extend(
+        app.agents
+            .values_mut()
+            .filter_map(|agent| agent.pending_queue_release.take()),
+    );
+    if !effects.iter().any(|effect| matches!(effect, Effect::Quit)) {
+        effects.extend(refresh_pending_picker_after_owner_switch(app));
+    }
     app.setting_persistence.finish_dispatch(effects)
 }
 
@@ -317,15 +326,19 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::QueueRemoveShared {
             id,
             expected_version,
-        } => match active_agent_session_id(app) {
-            Some(session_id) => {
+            edit_id,
+        } => match (app.active_view, active_agent_session_id(app)) {
+            (ActiveView::Agent(agent_id), Some(session_id)) => {
                 vec![Effect::QueueRemove {
+                    agent_id,
                     session_id,
+                    binding_epoch: app.agents[&agent_id].session_binding_epoch,
                     id,
                     expected_version,
+                    edit_id,
                 }]
             }
-            None => vec![],
+            _ => vec![],
         },
         Action::QueueReorderShared { ordered_ids } => match active_agent_session_id(app) {
             Some(session_id) => {
@@ -340,21 +353,22 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             Some(session_id) => vec![Effect::QueueClear { session_id }],
             None => vec![],
         },
-        Action::QueueEditShared { id, new_text } => match active_agent_session_id(app) {
-            Some(session_id) => vec![Effect::QueueEdit {
+        Action::QueueEditShared {
+            id,
+            expected_version,
+            edit_id,
+            new_text,
+        } => match (app.active_view, active_agent_session_id(app)) {
+            (ActiveView::Agent(agent_id), Some(session_id)) => vec![Effect::QueueEdit {
+                agent_id,
                 session_id,
+                binding_epoch: app.agents[&agent_id].session_binding_epoch,
                 id,
+                expected_version,
+                edit_id,
                 new_text,
             }],
-            None => vec![],
-        },
-        Action::QueueHoldEditShared { id } => match active_agent_session_id(app) {
-            Some(session_id) => vec![Effect::QueueHoldEdit { session_id, id }],
-            None => vec![],
-        },
-        Action::QueueReleaseEditShared { id } => match active_agent_session_id(app) {
-            Some(session_id) => vec![Effect::QueueReleaseEdit { session_id, id }],
-            None => vec![],
+            _ => vec![],
         },
         Action::QueueInterjectShared {
             id,
@@ -541,9 +555,7 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::CopyAssistantMessage { n, file_path } => {
             dispatch_copy_assistant_message(app, n, file_path)
         }
-        Action::ExportConversation { file_path } => {
-            dispatch_export_conversation(app, file_path)
-        }
+        Action::ExportConversation { file_path } => dispatch_export_conversation(app, file_path),
         Action::OpenTranscriptPager => {
             dispatch_open_transcript_pager(app);
             vec![]
@@ -854,13 +866,33 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             command,
             args_query,
         } => {
-            let ActiveView::Agent(_) = app.active_view else {
+            let ActiveView::Agent(id) = app.active_view else {
                 return vec![];
             };
-            if let Some(agent) = get_active_agent_mut(app) {
-                agent.open_command_picker(&command, &args_query);
+            let Some(agent) = get_active_agent_mut(app) else {
+                return vec![];
+            };
+            if command == "agent" && agent.session.workflow_agent_names.is_none() {
+                agent
+                    .prompt
+                    .slash_controller
+                    .set_agent_catalog(crate::views::agents_modal::builtin_switch_agent_catalog());
             }
-            vec![]
+            agent.open_command_picker(&command, &args_query);
+            if command != "agent" || agent.session.workflow_agent_names.is_some() {
+                return vec![];
+            }
+            static NEXT_CATALOG_REQUEST: std::sync::atomic::AtomicU64 =
+                std::sync::atomic::AtomicU64::new(1);
+            agent.switch_catalog_request =
+                NEXT_CATALOG_REQUEST.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            vec![Effect::LoadSwitchAgentCatalog {
+                agent_id: id,
+                cwd: agent.session.cwd.clone(),
+                request_token: agent.switch_catalog_request,
+                binding_epoch: agent.session_binding_epoch,
+                session_id: agent.session.session_id.clone(),
+            }]
         }
         Action::AnnouncementsHide => {
             let shown_key = crate::views::announcements::first_session_announcement(

@@ -26,6 +26,22 @@ async fn run_reasoning_turn(collapse_thinking: bool) -> Turn {
     ])
     .await
     .expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
+    content.seed_llm_config().expect("seed mock LLM config");
+    let config_path = content.home().join(".grow/config.toml");
+    let config = std::fs::read_to_string(&config_path)
+        .expect("read mock LLM config")
+        .replace("default = \"mock/mock\"", "default = \"mock/test-model\"")
+        .replace(
+            "api_backend = \"chat_completions\"",
+            "api_backend = \"responses\"",
+        )
+        .replace(
+            "[provider.mock.models.mock]",
+            "[provider.mock.models.test-model]",
+        )
+        .replace("name = \"Mock\"", "name = \"test-model\"");
+    std::fs::write(config_path, config).expect("configure Responses backend");
     let reasoning = format!("{REASONING_SENTINEL} pondering syllables quietly and at some length");
     let answer = format!("{MOCK_RESPONSE_SENTINEL} the answer body.");
     let expectation = content.expect_response(
@@ -40,12 +56,7 @@ async fn run_reasoning_turn(collapse_thinking: bool) -> Turn {
     content.set_response(answer.clone());
 
     // Ingestion is gated on this toggle, and the sandbox `$HOME` has no config.
-    std::fs::create_dir_all(content.home().join(".grow")).expect("mk .grow");
-    std::fs::write(
-        content.home().join(".grow/config.toml"),
-        "[ui]\nshow_thinking_blocks = true\n",
-    )
-    .expect("write config");
+    seed_ui_config(&content, "show_thinking_blocks = true");
     if collapse_thinking {
         let grow_home = content.sandbox().grow_home().to_path_buf();
         std::fs::create_dir_all(&grow_home).expect("mk grow home");

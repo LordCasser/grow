@@ -183,16 +183,15 @@
             !first.compact_text().contains("019ff8d7"),
             "compact identity must match the Subagents pane instead of exposing a session id"
         );
-        assert!(
-            first
-                .compact_text()
-                .contains("run_terminal_command [bash: cargo test -p shell]")
-        );
-        assert!(
-            first
-                .detail_text()
-                .contains("Reason: main-agent judgment timed out")
-        );
+        let compact = first.compact_text();
+        let detail = first.detail_text();
+        assert!(compact.contains("run_terminal_command [bash: command details redacted]"));
+        assert!(detail.contains("Access summary (replay-safe): command details redacted"));
+        for text in [compact.as_str(), detail.as_str()] {
+            assert!(!text.contains("cargo test -p shell"));
+            assert!(!text.contains("--nocapture"));
+            assert!(!text.contains("provider did not respond"));
+        }
         for (outcome, expected) in [
             (
                 shell::extensions::notification::SubagentPermissionOutcome::Approved,

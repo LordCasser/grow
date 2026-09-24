@@ -1503,6 +1503,21 @@ mod tests {
         assert!(!out.exists(), "a failed render writes no PNG");
     }
 
+    #[test]
+    fn worker_group_edge_limit_fails_without_partial_png() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("group-overflow.png");
+        let source = format!("flowchart LR\n{}", "A & B --> C & D\n".repeat(1025));
+        assert!(source.len() < RenderLimits::default().max_source_bytes);
+        let (tx, rx) = spawn_worker();
+        tx.send(render_job_for(&source, &out)).unwrap();
+        let result = rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("worker reports the parser failure");
+        assert!(matches!(result.outcome, MermaidOutcome::Failed));
+        assert!(!out.exists(), "parser failure must not publish partial PNG");
+    }
+
     /// A re-render under the worker's coalescing still produces a fresh PNG: a
     /// disk-hit on the second send returns `Ready` from the cached file.
     #[test]

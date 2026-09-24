@@ -461,6 +461,36 @@
         );
     }
 
+    #[test]
+    fn unmatched_permission_during_startup_is_cancelled_without_root_fallback() {
+        // Ordinary session updates may use the startup fallback while the
+        // root ID is being assigned. A permission request with a stranger's
+        // raw session ID must not be attributed to that root.
+        let mut app = make_app_with_agent("sess-A");
+        app.agents.get_mut(&AgentId(0)).unwrap().session.session_id = None;
+
+        let (msg, mut rx) = make_permission_message("not-yet-assigned/stranger");
+        let affected = handle(msg, &mut app);
+
+        assert!(!affected);
+        let root = app.agents.get(&AgentId(0)).unwrap();
+        assert!(root.permission_queue.is_empty());
+        assert_eq!(
+            root.session.permission_mode,
+            shell::util::config::PermissionMode::Ask,
+            "the unmatched request must not change root permission mode"
+        );
+        let response = rx
+            .try_recv()
+            .expect("unmatched permission must be answered immediately")
+            .expect("response must be Ok");
+        assert!(
+            matches!(response.outcome, acp::RequestPermissionOutcome::Cancelled),
+            "unmatched startup permission must be cancelled, got {:?}",
+            response.outcome,
+        );
+    }
+
     // ── Plan approval persistence tests ─────────────────────────
 
     #[test]

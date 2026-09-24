@@ -40,7 +40,7 @@ fn force_off_overrides_capability() {
 
 #[test]
 fn kitty_escape_chunks_and_preserves_cursor() {
-    let small = render_kitty_image(&[0u8; 10], KittyImageFormat::Png, 40, 20);
+    let small = render_kitty_image(&[0u8; 10], KittyImageFormat::Png, 40, 20).unwrap();
     assert!(small.contains("a=T"));
     assert!(small.contains("f=100"));
     assert!(small.contains("q=2"));
@@ -48,8 +48,40 @@ fn kitty_escape_chunks_and_preserves_cursor() {
     assert!(small.contains("c=40"));
     assert!(small.contains("r=20"));
     assert!(small.contains("m=0"));
-    let large = render_kitty_image(&vec![0u8; 5000], KittyImageFormat::Png, 40, 20);
+    let large = render_kitty_image(&vec![0u8; 5000], KittyImageFormat::Png, 40, 20).unwrap();
     assert!(large.matches("\x1b_G").count() > 1);
+}
+
+#[test]
+fn image_escape_builders_accept_exact_fit_and_reject_overflow() {
+    let image = [1u8; 12];
+    let kitty_header = "a=t,f=100,t=d,q=2,i=7";
+    let kitty = kitty_chunked_escape_with_limit(&image, kitty_header, usize::MAX).unwrap();
+    assert_eq!(
+        kitty_chunked_escape_with_limit(&image, kitty_header, kitty.len())
+            .unwrap()
+            .len(),
+        kitty.len()
+    );
+    assert!(kitty_chunked_escape_with_limit(&image, kitty_header, kitty.len() - 1).is_none());
+
+    let iterm = render_iterm2_image_with_limit(&image, 30, 15, usize::MAX).unwrap();
+    assert_eq!(
+        render_iterm2_image_with_limit(&image, 30, 15, iterm.len())
+            .unwrap()
+            .len(),
+        iterm.len()
+    );
+    assert!(render_iterm2_image_with_limit(&image, 30, 15, iterm.len() - 1).is_none());
+}
+
+#[test]
+fn image_frame_aggregate_stays_bounded_without_partial_append() {
+    let mut output = "abc".to_owned();
+    append_image_escape_with_limit(&mut output, "de", 5).unwrap();
+    assert_eq!(output, "abcde");
+    assert!(append_image_escape_with_limit(&mut output, "f", 5).is_none());
+    assert_eq!(output, "abcde");
 }
 
 #[test]
@@ -75,17 +107,53 @@ fn kitty_format_and_conversion_produce_png() {
 }
 
 #[test]
+fn rust_png_conversion_enforces_exact_output_limit() {
+    use std::io::Write as _;
+
+    let mut output = BoundedPngOutput::new(4);
+    output.write_all(b"ab").unwrap();
+    output.write_all(b"cd").unwrap();
+    assert!(output.write_all(b"e").is_err());
+    assert_eq!(output.bytes, b"abcd");
+
+    let rgba = image::RgbaImage::from_pixel(1, 1, image::Rgba([1, 2, 3, 255]));
+    let encoded = encode_rgba_png_bounded(&rgba, 1024).unwrap();
+    assert_eq!(
+        encode_rgba_png_bounded(&rgba, encoded.len()).unwrap(),
+        encoded
+    );
+    assert!(image::load_from_memory(&encoded).is_ok());
+    assert!(encode_rgba_png_bounded(&rgba, encoded.len() - 1).is_none());
+}
+
+#[test]
 fn overlay_conversion_pixel_budget_checks_jpeg_headers_without_decoding() {
     let buffer = image::ImageBuffer::from_pixel(1, 1, image::Rgb([1u8, 2, 3]));
     let mut jpeg = Vec::new();
-    buffer.write_to(&mut std::io::Cursor::new(&mut jpeg), image::ImageFormat::Jpeg).unwrap();
-    let sof = jpeg.windows(2).position(|marker| marker == [0xff, 0xc0]).unwrap();
-    for (width, height, allowed) in [(4000u16, 4000u16, true), (4001, 4000, false), (65535, 65535, false)] {
+    buffer
+        .write_to(
+            &mut std::io::Cursor::new(&mut jpeg),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
+    let sof = jpeg
+        .windows(2)
+        .position(|marker| marker == [0xff, 0xc0])
+        .unwrap();
+    for (width, height, allowed) in [
+        (4000u16, 4000u16, true),
+        (4001, 4000, false),
+        (65535, 65535, false),
+    ] {
         let mut header = jpeg.clone();
         header[sof + 5..sof + 7].copy_from_slice(&height.to_be_bytes());
         header[sof + 7..sof + 9].copy_from_slice(&width.to_be_bytes());
-        let dimensions = tools::util::image_validate::validate_image_bytes_unrestricted(&header, false).unwrap();
-        assert_eq!((dimensions.0, dimensions.1), (u32::from(width), u32::from(height)));
+        let dimensions =
+            tools::util::image_validate::validate_image_bytes_unrestricted(&header, false).unwrap();
+        assert_eq!(
+            (dimensions.0, dimensions.1),
+            (u32::from(width), u32::from(height))
+        );
         assert_eq!(overlay_conversion_within_pixel_budget(&header), allowed);
         if !allowed {
             let original = header.clone();
@@ -112,7 +180,14 @@ fn sips_workspaces_have_independent_owned_lifetimes() {
     {
         use std::os::unix::fs::PermissionsExt;
         for directory in [&first, &second] {
-            assert_eq!(std::fs::metadata(directory.path()).unwrap().permissions().mode() & 0o777, 0o700);
+            assert_eq!(
+                std::fs::metadata(directory.path())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
         }
     }
     let first_path = first.path().to_owned();
@@ -137,8 +212,11 @@ fn sips_workspaces_are_removed_after_process_success_and_failure() {
         let mut command = std::process::Command::new("/bin/sh");
         command.args(["-c", script, "sips-test"]);
         let result = convert_via_sips_in(b"source bytes", directory, command);
-        if succeeds { assert_eq!(result.unwrap(), b"source bytes"); }
-        else { assert!(result.is_none()); }
+        if succeeds {
+            assert_eq!(result.unwrap(), b"source bytes");
+        } else {
+            assert!(result.is_none());
+        }
         assert!(!path.exists(), "temporary files leaked after {script}");
     }
 }
@@ -148,7 +226,9 @@ fn sips_workspaces_are_removed_after_early_failure() {
     for block_source in [false, true] {
         let directory = sips_temp_directory().unwrap();
         let path = directory.path().to_owned();
-        if block_source { std::fs::create_dir(path.join("source.dat")).unwrap(); }
+        if block_source {
+            std::fs::create_dir(path.join("source.dat")).unwrap();
+        }
         let command = std::process::Command::new(path.join("missing-executable"));
         assert!(convert_via_sips_in(b"source bytes", directory, command).is_none());
         assert!(!path.exists());
@@ -161,7 +241,7 @@ fn sips_runner_preserves_exit_status() {
     for code in [0, 7] {
         let mut command = std::process::Command::new("/bin/sh");
         command.args(["-c", &format!("exit {code}")]);
-        let result = run_sips_command(command, std::time::Duration::from_secs(2)).unwrap();
+        let result = run_sips_command(command, std::time::Duration::from_secs(2), 1024).unwrap();
         assert_eq!(result.code(), Some(code));
     }
 }
@@ -181,12 +261,18 @@ fn sips_runner_stops_timed_out_and_orphaned_group_members() {
         let mut command = std::process::Command::new("/bin/sh");
         command.args(["-c", script, "sips-test"]).arg(&marker);
         let started = Instant::now();
-        let result = run_sips_command(command, Duration::from_millis(50));
-        if leader_exits { assert!(result.unwrap().success()); }
-        else { assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut); }
+        let result = run_sips_command(command, Duration::from_millis(50), 1024);
+        if leader_exits {
+            assert!(result.unwrap().success());
+        } else {
+            assert_eq!(result.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        }
         assert!(started.elapsed() < Duration::from_secs(2));
         std::thread::sleep(Duration::from_millis(450));
-        assert!(!marker.exists(), "owned descendant survived converter completion");
+        assert!(
+            !marker.exists(),
+            "owned descendant survived converter completion"
+        );
     }
 }
 
@@ -196,8 +282,11 @@ fn sips_output_reader_bounds_actual_consumption() {
         let mut reader = std::io::Cursor::new(vec![42; size]);
         let output = read_sips_output_bytes(&mut reader, 8);
         assert_eq!(reader.position(), size.min(9) as u64);
-        if size == 8 { assert_eq!(output.unwrap(), vec![42; 8]); }
-        else { assert!(output.is_none()); }
+        if size == 8 {
+            assert_eq!(output.unwrap(), vec![42; 8]);
+        } else {
+            assert!(output.is_none());
+        }
     }
     struct FailedRead;
     impl std::io::Read for FailedRead {
@@ -206,6 +295,25 @@ fn sips_output_reader_bounds_actual_consumption() {
         }
     }
     assert!(read_sips_output_bytes(FailedRead, 8).is_none());
+}
+
+#[cfg(unix)]
+#[test]
+fn sips_child_file_limit_prevents_oversized_artifact() {
+    let directory = tempfile::tempdir().unwrap();
+    let output = directory.path().join("output.png");
+    let mut command = std::process::Command::new("/bin/sh");
+    command
+        .args([
+            "-c",
+            "dd if=/dev/zero of=\"$1\" bs=2048 count=1 2>/dev/null",
+            "sips-limit",
+        ])
+        .arg(&output);
+
+    let status = run_sips_command(command, std::time::Duration::from_secs(2), 1024).unwrap();
+    assert!(!status.success());
+    assert!(std::fs::metadata(output).unwrap().len() <= 1024);
 }
 
 #[cfg(unix)]
@@ -230,7 +338,10 @@ fn sips_output_growth_after_metadata_still_stops_at_budget() {
     std::fs::write(&path, b"1234").unwrap();
     let mut reader = std::fs::File::open(&path).unwrap();
     assert_eq!(reader.metadata().unwrap().len(), 4);
-    let mut writer = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+    let mut writer = std::fs::OpenOptions::new()
+        .append(true)
+        .open(&path)
+        .unwrap();
     writer.write_all(&[7; 64]).unwrap();
     drop(writer);
     assert!(read_sips_output_bytes(&mut reader, 4).is_none());
@@ -242,11 +353,21 @@ fn sips_output_growth_after_metadata_still_stops_at_budget() {
 fn sips_output_fifo_is_rejected_without_blocking() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("output.png");
-    let status = std::process::Command::new("/usr/bin/mkfifo").arg(&path).status().unwrap();
+    let status = std::process::Command::new("/usr/bin/mkfifo")
+        .arg(&path)
+        .status()
+        .unwrap();
     assert!(status.success());
     let (sender, receiver) = std::sync::mpsc::channel();
-    let worker = std::thread::spawn(move || { sender.send(read_sips_output(&path)).unwrap(); });
-    assert!(receiver.recv_timeout(std::time::Duration::from_secs(2)).unwrap().is_none());
+    let worker = std::thread::spawn(move || {
+        sender.send(read_sips_output(&path)).unwrap();
+    });
+    assert!(
+        receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap()
+            .is_none()
+    );
     worker.join().unwrap();
 }
 
@@ -254,7 +375,7 @@ fn sips_output_fifo_is_rejected_without_blocking() {
 fn sips_startup_error_reports_stage_and_kind() {
     let directory = tempfile::tempdir().unwrap();
     let command = std::process::Command::new(directory.path().join("missing-program"));
-    let error = run_sips_command(command, std::time::Duration::from_secs(1)).unwrap_err();
+    let error = run_sips_command(command, std::time::Duration::from_secs(1), 1024).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
     assert!(error.to_string().contains("sips process startup failed:"));
 }
@@ -269,15 +390,19 @@ fn sips_pre_exec_permission_error_is_identified_as_startup() {
     unsafe {
         command.pre_exec(|| Err(std::io::Error::from_raw_os_error(libc::EPERM)));
     }
-    let error = run_sips_command(command, std::time::Duration::from_secs(1)).unwrap_err();
+    let error = run_sips_command(command, std::time::Duration::from_secs(1), 1024).unwrap_err();
     assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
     assert!(error.to_string().contains("sips process startup failed:"));
-    assert!(error.to_string().contains(&std::io::Error::from_raw_os_error(libc::EPERM).to_string()));
+    assert!(
+        error
+            .to_string()
+            .contains(&std::io::Error::from_raw_os_error(libc::EPERM).to_string())
+    );
 }
 
 #[test]
 fn iterm_escape_preserves_requested_geometry() {
-    let escape = render_iterm2_image(&[0u8; 10], 30, 15);
+    let escape = render_iterm2_image(&[0u8; 10], 30, 15).unwrap();
     assert!(escape.starts_with("\x1b]1337;File="));
     assert!(escape.contains("width=30cells"));
     assert!(escape.contains("height=15cells"));

@@ -9,10 +9,35 @@ use crate::scrollback::export::render_blocks_to_markdown;
 use crate::scrollback::state::ScrollbackState;
 
 /// A private, disposable snapshot owned by the external pager request.
-pub(crate) fn write_pager_transcript(content: &str, ansi: bool) -> std::io::Result<tempfile::TempPath> {
+pub(crate) fn write_pager_transcript(
+    content: &str,
+    ansi: bool,
+) -> std::io::Result<tempfile::TempPath> {
     write_pager_transcript_with(&std::env::temp_dir(), ansi, |file| {
         file.write_all(content.as_bytes())
     })
+}
+
+pub(crate) async fn write_pager_transcript_background(
+    content: String,
+    ansi: bool,
+) -> Result<tempfile::TempPath, String> {
+    let directory = std::env::temp_dir();
+    write_pager_transcript_background_with(directory, ansi, move |file| {
+        file.write_all(content.as_bytes())
+    })
+    .await
+}
+
+async fn write_pager_transcript_background_with(
+    directory: PathBuf,
+    ansi: bool,
+    write: impl FnOnce(&mut std::fs::File) -> std::io::Result<()> + Send + 'static,
+) -> Result<tempfile::TempPath, String> {
+    tokio::task::spawn_blocking(move || write_pager_transcript_with(&directory, ansi, write))
+        .await
+        .map_err(|error| format!("Transcript writer failed: {error}"))?
+        .map_err(|error| error.to_string())
 }
 
 fn write_pager_transcript_with(
@@ -116,18 +141,26 @@ fn write_export_file_with(
     let permissions = match std::fs::metadata(&target) {
         Ok(metadata) => {
             if !metadata.is_file() {
-                return Err(Error::new(ErrorKind::InvalidInput, "Export target must be a regular file"));
+                return Err(Error::new(
+                    ErrorKind::InvalidInput,
+                    "Export target must be a regular file",
+                ));
             }
             let permissions = metadata.permissions();
             if permissions.readonly() {
-                return Err(Error::new(ErrorKind::PermissionDenied, "Export target is read-only"));
+                return Err(Error::new(
+                    ErrorKind::PermissionDenied,
+                    "Export target is read-only",
+                ));
             }
             Some(permissions)
         }
         Err(error) if error.kind() == ErrorKind::NotFound => None,
         Err(error) => return Err(error),
     };
-    let parent = target.parent().filter(|p| !p.as_os_str().is_empty())
+    let parent = target
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."));
     std::fs::create_dir_all(parent)?;
     let mut temp = tempfile::NamedTempFile::new_in(parent)?;
@@ -144,11 +177,61 @@ fn clipboard_export_feedback(result: &crate::clipboard::CopyResult, text: &str) 
     if result.delivery.is_failed() {
         anyhow::bail!("Conversation export failed: {}", result.message);
     }
-    Ok(format!("{}{}", result.message, crate::clipboard::clipboard_stats_suffix(text)))
+    Ok(format!(
+        "{}{}",
+        result.message,
+        crate::clipboard::clipboard_stats_suffix(text)
+    ))
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_minimal_snapshot_write_keeps_runtime_responsive() {
+        let directory = tempfile::tempdir().unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let directory_path = directory.path().to_path_buf();
+        let write = tokio::spawn(super::write_pager_transcript_background_with(
+            directory_path,
+            true,
+            move |file| {
+                let _ = started_tx.send(());
+                release_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .map_err(std::io::Error::other)?;
+                file.write_all(b"blocked ansi snapshot")
+            },
+        ));
+
+        started_rx.await.unwrap();
+        let (input_tx, mut input_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            let _ = input_tx.send("key");
+        });
+        let input = tokio::time::timeout(Duration::from_millis(250), &mut input_rx)
+            .await
+            .expect("input event should be processed while snapshot IO is blocked")
+            .unwrap();
+        assert_eq!(input, "key");
+
+        release_tx.send(()).unwrap();
+        let path = write.await.unwrap().unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"blocked ansi snapshot");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
     #[test]
     fn pager_transcript_partial_write_cleans_private_file() {
         let directory = tempfile::tempdir().unwrap();
@@ -160,7 +243,8 @@ mod tests {
             }
             std::io::Write::write_all(file, b"partial secret")?;
             Err(std::io::Error::other("injected write failure"))
-        }).unwrap_err();
+        })
+        .unwrap_err();
         assert_eq!(error.to_string(), "injected write failure");
         assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 0);
     }
@@ -176,12 +260,16 @@ mod tests {
         let error = write_export_file_with(&path, |file| {
             file.write_all(b"partial new export")?;
             Err(std::io::Error::other("injected write failure"))
-        }).unwrap_err();
+        })
+        .unwrap_err();
         assert!(error.to_string().contains("injected write failure"));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "old export");
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         write_export_file(&path, "complete new export").unwrap();
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "complete new export");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "complete new export"
+        );
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
         assert!(write_export_file(dir.path(), "no").is_err());
         let nested = dir.path().join("nested/new.md");
@@ -196,18 +284,34 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("export.md");
         write_export_file(&path, "old").unwrap();
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
         let link = dir.path().join("link.md");
         symlink("export.md", &link).unwrap();
         write_export_file(&link, "new").unwrap();
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
-        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o640);
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
         let dangling = dir.path().join("dangling.md");
         symlink("missing.md", &dangling).unwrap();
         assert!(write_export_file(&dangling, "no").is_err());
-        assert!(std::fs::symlink_metadata(&dangling).unwrap().file_type().is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&dangling)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o440)).unwrap();
         assert!(write_export_file(&path, "no").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
@@ -217,15 +321,29 @@ mod tests {
     fn clipboard_export_preserves_delivery_outcome() {
         for (delivery, message) in [
             (ClipboardDelivery::Failed, "Copy failed"),
-            (ClipboardDelivery::Unverified, "Copy sent; delivery unverified"),
+            (
+                ClipboardDelivery::Unverified,
+                "Copy sent; delivery unverified",
+            ),
             (ClipboardDelivery::Confirmed, "Copied to tmux buffer"),
         ] {
-            let result = CopyResult { message, message_lead: message, ticks: 30, delivery };
+            let result = CopyResult {
+                message,
+                message_lead: message,
+                ticks: 30,
+                delivery,
+            };
             let feedback = clipboard_export_feedback(&result, "你好\nworld");
             if delivery == ClipboardDelivery::Failed {
                 assert!(feedback.unwrap_err().to_string().contains("Copy failed"));
             } else {
-                assert_eq!(feedback.unwrap(), format!("{message}{}", crate::clipboard::clipboard_stats_suffix("你好\nworld")));
+                assert_eq!(
+                    feedback.unwrap(),
+                    format!(
+                        "{message}{}",
+                        crate::clipboard::clipboard_stats_suffix("你好\nworld")
+                    )
+                );
             }
         }
     }

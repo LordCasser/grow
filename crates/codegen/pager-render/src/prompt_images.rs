@@ -7,6 +7,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 
 use ratatui_textarea::ElementId;
@@ -18,6 +19,79 @@ use ratatui_textarea::ElementId;
 /// (`try_read_dropped_paths`) — useful for RCing cross-platform paste
 /// regressions from a single user's session capture.
 pub const PROMPT_IMAGES_TRACING_TARGET: &str = "prompt_images";
+
+const VIEWER_AGGREGATE_BYTES: usize = 896_000_000;
+const MAX_VIEWER_SOURCE_BYTES: usize = 50_000_000;
+static VIEWER_BUDGET: OnceLock<Arc<ViewerBudget>> = OnceLock::new();
+
+#[derive(Debug)]
+struct ViewerBudget {
+    used: AtomicUsize,
+    limit: usize,
+}
+
+impl ViewerBudget {
+    fn new(limit: usize) -> Self {
+        Self {
+            used: AtomicUsize::new(0),
+            limit,
+        }
+    }
+
+    fn reserve(self: &Arc<Self>, bytes: usize) -> Option<ViewerBudgetLease> {
+        self.used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(bytes).filter(|total| *total <= self.limit)
+            })
+            .ok()?;
+        Some(ViewerBudgetLease {
+            budget: Arc::clone(self),
+            bytes,
+        })
+    }
+}
+
+#[derive(Debug)]
+struct ViewerBudgetLease {
+    budget: Arc<ViewerBudget>,
+    bytes: usize,
+}
+
+impl ViewerBudgetLease {
+    fn resize(&mut self, bytes: usize) -> bool {
+        if bytes <= self.bytes {
+            self.budget
+                .used
+                .fetch_sub(self.bytes - bytes, Ordering::AcqRel);
+            self.bytes = bytes;
+            return true;
+        }
+        let extra = bytes - self.bytes;
+        if self
+            .budget
+            .used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                used.checked_add(extra)
+                    .filter(|total| *total <= self.budget.limit)
+            })
+            .is_err()
+        {
+            return false;
+        }
+        self.bytes = bytes;
+        true
+    }
+}
+
+impl Drop for ViewerBudgetLease {
+    fn drop(&mut self) {
+        self.budget.used.fetch_sub(self.bytes, Ordering::AcqRel);
+    }
+}
+
+fn viewer_budget() -> Arc<ViewerBudget> {
+    Arc::clone(VIEWER_BUDGET.get_or_init(|| Arc::new(ViewerBudget::new(VIEWER_AGGREGATE_BYTES))))
+}
 
 // -------------------------------------------------------------------------
 // Scrollable image viewer state
@@ -47,6 +121,7 @@ pub struct ImageViewerState {
     pub loading: bool,
     /// Identity used by the shared terminal overlay upload owner.
     pub overlay_owner_id: u64,
+    reservation: Option<ViewerBudgetLease>,
     /// Source and protocol captured by the requesting UI thread.
     source: Option<ImageViewerLoadSource>,
     protocol: crate::terminal::image::GraphicsProtocol,
@@ -85,6 +160,7 @@ impl ImageViewerState {
             title: None,
             loading: true,
             overlay_owner_id: crate::terminal::overlay::next_owner_id(),
+            reservation: None,
             source: Some(source),
             protocol: crate::terminal::image::detect_graphics_protocol(),
             modal_state: Default::default(),
@@ -107,6 +183,7 @@ impl ImageViewerState {
             title: path.file_name().map(|n| n.to_string_lossy().into_owned()),
             loading: true,
             overlay_owner_id: crate::terminal::overlay::next_owner_id(),
+            reservation: None,
             source: Some(ImageViewerLoadSource::Path(path.to_path_buf())),
             protocol: crate::terminal::image::detect_graphics_protocol(),
             modal_state: Default::default(),
@@ -115,7 +192,12 @@ impl ImageViewerState {
 
     /// Take the source and protocol for background loading. Returns `None` if
     /// already taken or not in loading state.
-    pub fn take_load_request(&mut self) -> Option<(ImageViewerLoadSource, crate::terminal::image::GraphicsProtocol)> {
+    pub fn take_load_request(
+        &mut self,
+    ) -> Option<(
+        ImageViewerLoadSource,
+        crate::terminal::image::GraphicsProtocol,
+    )> {
         if self.loading {
             self.source.take().map(|source| (source, self.protocol))
         } else {
@@ -129,6 +211,7 @@ impl ImageViewerState {
 
     /// Apply loaded data from a background thread.
     pub fn apply_loaded(&mut self, data: LoadedImageData) {
+        self.reservation = Some(data.reservation);
         self.image_bytes = data.image_bytes;
         self.display_bytes = data.display_bytes;
         self.mime_type = data.mime_type;
@@ -171,12 +254,16 @@ pub struct LoadedImageData {
     pub mime_type: String,
     pub image_width: u32,
     pub image_height: u32,
+    reservation: ViewerBudgetLease,
 }
 
 /// Load owned image data. This is the heavy work (file read or memory copy,
 /// decode, format conversion) that runs on a background thread.
-pub fn load_image_data(source: ImageViewerLoadSource, protocol: crate::terminal::image::GraphicsProtocol) -> ImageLoadResult {
-    load_image_data_with_limit(source, protocol, 50_000_000)
+pub fn load_image_data(
+    source: ImageViewerLoadSource,
+    protocol: crate::terminal::image::GraphicsProtocol,
+) -> ImageLoadResult {
+    load_image_data_with_limit(source, protocol, MAX_VIEWER_SOURCE_BYTES)
 }
 
 fn load_image_data_with_limit(
@@ -184,15 +271,45 @@ fn load_image_data_with_limit(
     protocol: crate::terminal::image::GraphicsProtocol,
     limit: usize,
 ) -> ImageLoadResult {
+    load_image_data_with_budget(source, protocol, limit, viewer_budget())
+}
+
+fn load_image_data_with_budget(
+    source: ImageViewerLoadSource,
+    protocol: crate::terminal::image::GraphicsProtocol,
+    limit: usize,
+    budget: Arc<ViewerBudget>,
+) -> ImageLoadResult {
+    // A bounded regular-file read may grow its Vec before discovering the
+    // allowance plus one byte. Reserve the maximum growth before any read.
+    let initial = match &source {
+        ImageViewerLoadSource::Memory(bytes) if bytes.is_empty() || bytes.len() > limit => {
+            return ImageLoadResult::Failed;
+        }
+        ImageViewerLoadSource::Memory(bytes) => bytes.len(),
+        ImageViewerLoadSource::Path(_) => limit.saturating_add(1).saturating_mul(2),
+    };
+    let Some(mut reservation) = budget.reserve(initial) else {
+        tracing::warn!("image viewer: aggregate memory allowance reached before source read");
+        return ImageLoadResult::Failed;
+    };
     let bytes = match source {
-        ImageViewerLoadSource::Memory(bytes) if !bytes.is_empty() && bytes.len() <= limit => Some(bytes.to_vec()),
+        ImageViewerLoadSource::Memory(bytes) if !bytes.is_empty() && bytes.len() <= limit => {
+            Some(bytes.to_vec())
+        }
         ImageViewerLoadSource::Memory(_) => None,
         ImageViewerLoadSource::Path(path) => read_bounded_image_file(&path, limit),
     };
     let Some(bytes) = bytes else {
-        tracing::warn!(limit, "image viewer: source unavailable, empty or over byte allowance");
+        tracing::warn!(
+            limit,
+            "image viewer: source unavailable, empty or over byte allowance"
+        );
         return ImageLoadResult::Failed;
     };
+    if !reservation.resize(bytes.capacity()) {
+        return ImageLoadResult::Failed;
+    }
     let (w, h) = match decode_image_dimensions(&bytes) {
         Some(dims) => dims,
         None => {
@@ -200,8 +317,38 @@ fn load_image_data_with_limit(
             return ImageLoadResult::Failed;
         }
     };
-    let display_bytes = crate::terminal::image::prepare_overlay_image_bytes_for_protocol(&bytes, protocol)
-        .unwrap_or_else(|| bytes.clone());
+    let conversion = protocol == crate::terminal::image::GraphicsProtocol::Kitty
+        && crate::terminal::image::kitty_format_from_bytes(&bytes).is_none()
+        && crate::terminal::image::overlay_conversion_within_pixel_budget(&bytes);
+    let required = if conversion {
+        // DynamicImage can occupy 16 bytes per pixel (RGBA32F); allow a
+        // second decoded workspace. Vec growth can hold up to twice the
+        // bounded PNG output while it is assembled or read from sips.
+        (u64::from(w) * u64::from(h))
+            .checked_mul(32)
+            .and_then(|pixels| usize::try_from(pixels).ok())
+            .and_then(|pixels| {
+                bytes
+                    .capacity()
+                    .checked_add(pixels)?
+                    .checked_add(crate::terminal::image::MAX_SIPS_OUTPUT_BYTES.saturating_mul(2))
+            })
+    } else {
+        bytes.capacity().checked_add(bytes.len())
+    };
+    if !required.is_some_and(|required| reservation.resize(required)) {
+        tracing::warn!("image viewer: aggregate memory allowance reached before conversion");
+        return ImageLoadResult::Failed;
+    }
+    let display_bytes =
+        crate::terminal::image::prepare_overlay_image_bytes_for_protocol(&bytes, protocol)
+            .unwrap_or_else(|| bytes.clone());
+    let Some(retained) = bytes.capacity().checked_add(display_bytes.capacity()) else {
+        return ImageLoadResult::Failed;
+    };
+    if !reservation.resize(retained) {
+        return ImageLoadResult::Failed;
+    }
     let mime_type = client_support::clipboard::mime_from_bytes(&bytes).to_owned();
 
     ImageLoadResult::Loaded(LoadedImageData {
@@ -210,6 +357,7 @@ fn load_image_data_with_limit(
         mime_type,
         image_width: w,
         image_height: h,
+        reservation,
     })
 }
 
@@ -616,7 +764,10 @@ const MAX_DROP_IMAGE_BYTES: usize = 50_000_000;
 fn read_bounded_image_bytes(reader: impl std::io::Read, limit: usize) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut data = Vec::new();
-    reader.take((limit as u64).saturating_add(1)).read_to_end(&mut data).ok()?;
+    reader
+        .take((limit as u64).saturating_add(1))
+        .read_to_end(&mut data)
+        .ok()?;
     (!data.is_empty() && data.len() <= limit).then_some(data)
 }
 
@@ -634,7 +785,6 @@ fn read_bounded_image_file(path: &std::path::Path, limit: usize) -> Option<Vec<u
         return None;
     }
     read_bounded_image_bytes(file, limit)
-
 }
 
 /// Validate that `path` points to a readable image file and load it as
@@ -1925,8 +2075,11 @@ mod tests {
             let mut reader = std::io::Cursor::new(vec![7; size]);
             let result = read_bounded_image_bytes(&mut reader, 8);
             assert_eq!(reader.position(), size.min(9) as u64);
-            if size == 8 { assert_eq!(result.unwrap(), vec![7; 8]); }
-            else { assert!(result.is_none()); }
+            if size == 8 {
+                assert_eq!(result.unwrap(), vec![7; 8]);
+            } else {
+                assert!(result.is_none());
+            }
         }
     }
 
@@ -1938,7 +2091,9 @@ mod tests {
         file.set_len(MAX_DROP_IMAGE_BYTES as u64 + 1).unwrap();
         drop(file);
         let dropped = try_read_dropped_path(path.to_str().unwrap()).unwrap();
-        assert!(matches!(dropped, DroppedPath::NonImage(ref resolved) if *resolved == dunce::canonicalize(&path).unwrap()));
+        assert!(
+            matches!(dropped, DroppedPath::NonImage(ref resolved) if *resolved == dunce::canonicalize(&path).unwrap())
+        );
         assert!(try_read_image_from_path(path.to_str().unwrap()).is_none());
     }
 
@@ -1950,13 +2105,23 @@ mod tests {
         let size = std::fs::metadata(&path).unwrap().len() as usize;
         let plain = dir.path().join("notes.txt");
         std::fs::write(&plain, "notes").unwrap();
-        let text = format!("{}\n{}\n{}", path.display(), plain.display(), path.display());
+        let text = format!(
+            "{}\n{}\n{}",
+            path.display(),
+            plain.display(),
+            path.display()
+        );
         let entries = try_read_dropped_paths_with_budget(&text, size * 2);
         assert_eq!(entries.len(), 3);
         assert!(matches!(&entries[0], DroppedPath::Image(image) if image.byte_len == size));
-        assert!(matches!(&entries[1], DroppedPath::NonImage(p) if *p == dunce::canonicalize(&plain).unwrap()));
+        assert!(
+            matches!(&entries[1], DroppedPath::NonImage(p) if *p == dunce::canonicalize(&plain).unwrap())
+        );
         assert!(matches!(&entries[2], DroppedPath::Image(image) if image.byte_len == size));
-        assert_eq!(try_read_dropped_paths_with_budget(plain.to_str().unwrap(), 0).len(), 1);
+        assert_eq!(
+            try_read_dropped_paths_with_budget(plain.to_str().unwrap(), 0).len(),
+            1
+        );
     }
 
     #[test]
@@ -3510,6 +3675,211 @@ mod tests {
     // ----- open_from_path ----------------------------------------------------
 
     #[test]
+    fn viewer_aggregate_reservation_follows_retained_and_stale_results() {
+        use crate::terminal::image::GraphicsProtocol;
+
+        let png = make_test_png(8, 8);
+        let budget = Arc::new(ViewerBudget::new(png.len() * 2));
+        let load = || {
+            load_image_data_with_budget(
+                ImageViewerLoadSource::Memory(Arc::from(png.clone())),
+                GraphicsProtocol::None,
+                png.len(),
+                Arc::clone(&budget),
+            )
+        };
+        let ImageLoadResult::Loaded(first) = load() else {
+            panic!("first viewer load must fit")
+        };
+        assert_eq!(budget.used.load(Ordering::Acquire), png.len() * 2);
+        assert!(matches!(load(), ImageLoadResult::Failed));
+        assert_eq!(budget.used.load(Ordering::Acquire), png.len() * 2);
+
+        let mut viewer =
+            ImageViewerState::open_from_path_deferred(std::path::Path::new("image.png"));
+        viewer.apply_loaded(first);
+        assert_eq!(budget.used.load(Ordering::Acquire), png.len() * 2);
+        drop(viewer);
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+
+        let ImageLoadResult::Loaded(stale) = load() else {
+            panic!("reservation must be reusable after viewer close")
+        };
+        assert_eq!(budget.used.load(Ordering::Acquire), png.len() * 2);
+        drop(stale);
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn concurrent_viewer_loads_cannot_exceed_aggregate_allowance() {
+        use crate::terminal::image::GraphicsProtocol;
+
+        let png = make_test_png(8, 8);
+        let budget = Arc::new(ViewerBudget::new(png.len() * 3));
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let done = Arc::new(std::sync::Barrier::new(3));
+        let workers = (0..2)
+            .map(|_| {
+                let bytes: Arc<[u8]> = Arc::from(png.clone());
+                let budget = Arc::clone(&budget);
+                let start = Arc::clone(&start);
+                let done = Arc::clone(&done);
+                std::thread::spawn(move || {
+                    start.wait();
+                    let result = load_image_data_with_budget(
+                        ImageViewerLoadSource::Memory(bytes),
+                        GraphicsProtocol::None,
+                        MAX_VIEWER_SOURCE_BYTES,
+                        budget,
+                    );
+                    let loaded = matches!(&result, ImageLoadResult::Loaded(_));
+                    done.wait();
+                    drop(result);
+                    loaded
+                })
+            })
+            .collect::<Vec<_>>();
+        start.wait();
+        done.wait();
+        assert_eq!(
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .filter(|loaded| *loaded)
+                .count(),
+            1
+        );
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn viewer_aggregate_budget_rejects_conversion_before_decode() {
+        use crate::terminal::image::GraphicsProtocol;
+
+        let mut jpeg = Vec::new();
+        image::RgbImage::from_pixel(16, 12, image::Rgb([20, 40, 60]))
+            .write_to(
+                &mut std::io::Cursor::new(&mut jpeg),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        let budget = Arc::new(ViewerBudget::new(jpeg.len() * 2));
+        assert!(matches!(
+            load_image_data_with_budget(
+                ImageViewerLoadSource::Memory(Arc::from(jpeg)),
+                GraphicsProtocol::Kitty,
+                MAX_VIEWER_SOURCE_BYTES,
+                Arc::clone(&budget),
+            ),
+            ImageLoadResult::Failed
+        ));
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn viewer_conversion_reservation_shrinks_to_display_buffers() {
+        use crate::terminal::image::GraphicsProtocol;
+
+        const WIDTH: u32 = 2048;
+        const HEIGHT: u32 = 2048;
+        let mut jpeg = Vec::new();
+        image::RgbImage::from_pixel(WIDTH, HEIGHT, image::Rgb([20, 40, 60]))
+            .write_to(
+                &mut std::io::Cursor::new(&mut jpeg),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        let conversion_allowance = jpeg.len()
+            + (WIDTH as usize * HEIGHT as usize) * 32
+            + crate::terminal::image::MAX_SIPS_OUTPUT_BYTES * 2;
+        let budget = Arc::new(ViewerBudget::new(conversion_allowance));
+        let ImageLoadResult::Loaded(data) = load_image_data_with_budget(
+            ImageViewerLoadSource::Memory(Arc::from(jpeg)),
+            GraphicsProtocol::Kitty,
+            MAX_VIEWER_SOURCE_BYTES,
+            Arc::clone(&budget),
+        ) else {
+            panic!("converted viewer must fit its reserved allowance")
+        };
+        assert!(crate::terminal::image::kitty_format_from_bytes(&data.display_bytes).is_some());
+        assert_eq!(
+            budget.used.load(Ordering::Acquire),
+            data.image_bytes.capacity() + data.display_bytes.capacity()
+        );
+        assert!(budget.used.load(Ordering::Acquire) < conversion_allowance);
+        drop(data);
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn concurrent_converted_viewers_release_memory_on_close_and_reopen() {
+        use crate::terminal::image::GraphicsProtocol;
+
+        let mut jpeg = Vec::new();
+        image::RgbImage::from_pixel(2048, 2048, image::Rgb([20, 40, 60]))
+            .write_to(
+                &mut std::io::Cursor::new(&mut jpeg),
+                image::ImageFormat::Jpeg,
+            )
+            .unwrap();
+        let source: Arc<[u8]> = Arc::from(jpeg);
+        let budget = Arc::new(ViewerBudget::new(VIEWER_AGGREGATE_BYTES));
+        let start = Arc::new(std::sync::Barrier::new(3));
+        let workers = (0..2)
+            .map(|_| {
+                let source = Arc::clone(&source);
+                let budget = Arc::clone(&budget);
+                let start = Arc::clone(&start);
+                std::thread::spawn(move || {
+                    start.wait();
+                    load_image_data_with_budget(
+                        ImageViewerLoadSource::Memory(source),
+                        GraphicsProtocol::Kitty,
+                        MAX_VIEWER_SOURCE_BYTES,
+                        budget,
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        start.wait();
+        let loaded = workers
+            .into_iter()
+            .map(|worker| match worker.join().unwrap() {
+                ImageLoadResult::Loaded(data) => data,
+                ImageLoadResult::Failed => panic!("two bounded conversions should fit"),
+            })
+            .collect::<Vec<_>>();
+        let retained = loaded
+            .iter()
+            .map(|data| data.image_bytes.capacity() + data.display_bytes.capacity())
+            .sum::<usize>();
+        assert_eq!(budget.used.load(Ordering::Acquire), retained);
+
+        let mut viewers = loaded
+            .into_iter()
+            .map(|data| {
+                let mut viewer =
+                    ImageViewerState::open_from_path_deferred(std::path::Path::new("image.jpg"));
+                viewer.apply_loaded(data);
+                viewer
+            })
+            .collect::<Vec<_>>();
+        viewers.pop();
+        assert!(budget.used.load(Ordering::Acquire) < retained);
+        let ImageLoadResult::Loaded(reopened) = load_image_data_with_budget(
+            ImageViewerLoadSource::Memory(source),
+            GraphicsProtocol::Kitty,
+            MAX_VIEWER_SOURCE_BYTES,
+            Arc::clone(&budget),
+        ) else {
+            panic!("closing a viewer must release room for reopening")
+        };
+        drop(reopened);
+        drop(viewers);
+        assert_eq!(budget.used.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
     fn viewer_source_budget_matches_memory_and_file_boundaries() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("image.png");
@@ -3519,16 +3889,32 @@ mod tests {
             for limit in [0, png.len() - 1, png.len()] {
                 let source = if memory {
                     ImageViewerLoadSource::Memory(Arc::from(png.clone()))
-                } else { ImageViewerLoadSource::Path(path.clone()) };
-                let result = load_image_data_with_limit(source, crate::terminal::image::GraphicsProtocol::None, limit);
+                } else {
+                    ImageViewerLoadSource::Path(path.clone())
+                };
+                let result = load_image_data_with_limit(
+                    source,
+                    crate::terminal::image::GraphicsProtocol::None,
+                    limit,
+                );
                 if limit == png.len() {
-                    let ImageLoadResult::Loaded(data) = result else { panic!("exact fit rejected") };
+                    let ImageLoadResult::Loaded(data) = result else {
+                        panic!("exact fit rejected")
+                    };
                     assert_eq!(data.image_bytes, png);
                     assert_eq!((data.image_width, data.image_height), (8, 8));
-                } else { assert!(matches!(result, ImageLoadResult::Failed)); }
+                } else {
+                    assert!(matches!(result, ImageLoadResult::Failed));
+                }
             }
         }
-        assert!(matches!(load_image_data(ImageViewerLoadSource::Memory(Arc::from([])), crate::terminal::image::GraphicsProtocol::None), ImageLoadResult::Failed));
+        assert!(matches!(
+            load_image_data(
+                ImageViewerLoadSource::Memory(Arc::from([])),
+                crate::terminal::image::GraphicsProtocol::None
+            ),
+            ImageLoadResult::Failed
+        ));
     }
 
     #[test]
@@ -3539,7 +3925,12 @@ mod tests {
         std::fs::write(&path, b"1234").unwrap();
         let mut reader = std::fs::File::open(&path).unwrap();
         assert_eq!(reader.metadata().unwrap().len(), 4);
-        std::fs::OpenOptions::new().append(true).open(&path).unwrap().write_all(&[7; 64]).unwrap();
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap()
+            .write_all(&[7; 64])
+            .unwrap();
         assert!(read_bounded_image_bytes(&mut reader, 4).is_none());
         assert_eq!(reader.stream_position().unwrap(), 5);
     }
@@ -3556,19 +3947,36 @@ mod tests {
         assert_eq!(read_bounded_image_file(&link, png.len()).unwrap(), png);
         assert!(read_bounded_image_file(directory.path(), 100).is_none());
         let fifo = directory.path().join("fifo.png");
-        assert!(std::process::Command::new("/usr/bin/mkfifo").arg(&fifo).status().unwrap().success());
+        assert!(
+            std::process::Command::new("/usr/bin/mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
         let (sender, receiver) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
-            sender.send(load_image_data(ImageViewerLoadSource::Path(fifo), crate::terminal::image::GraphicsProtocol::None)).unwrap();
+            sender
+                .send(load_image_data(
+                    ImageViewerLoadSource::Path(fifo),
+                    crate::terminal::image::GraphicsProtocol::None,
+                ))
+                .unwrap();
         });
-        assert!(matches!(receiver.recv_timeout(std::time::Duration::from_secs(2)).unwrap(), ImageLoadResult::Failed));
+        assert!(matches!(
+            receiver
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap(),
+            ImageLoadResult::Failed
+        ));
         worker.join().unwrap();
     }
 
     #[test]
     fn image_viewer_open_defers_invalid_memory_and_missing_file_sources() {
         let mut image = from_clipboard_data(&crate::clipboard::ImageData {
-            data: b"invalid image".to_vec(), mime_type: "image/png".into(),
+            data: b"invalid image".to_vec(),
+            mime_type: "image/png".into(),
         });
         image.display_number = 7;
         for memory in [true, false] {
@@ -3583,7 +3991,10 @@ mod tests {
             let (source, protocol) = viewer.take_load_request().unwrap();
             assert!(!viewer.has_deferred_source());
             assert!(viewer.take_load_request().is_none());
-            assert!(matches!(load_image_data(source, protocol), ImageLoadResult::Failed));
+            assert!(matches!(
+                load_image_data(source, protocol),
+                ImageLoadResult::Failed
+            ));
         }
         image.session_image_path = None;
         assert!(ImageViewerState::open(&image).is_none());
@@ -3592,7 +4003,8 @@ mod tests {
     #[test]
     fn image_viewer_reopening_assigns_unique_owner() {
         let image = from_clipboard_data(&crate::clipboard::ImageData {
-            data: make_test_png(2, 2), mime_type: "image/png".into(),
+            data: make_test_png(2, 2),
+            mime_type: "image/png".into(),
         });
         let first = ImageViewerState::open(&image).unwrap();
         let second = ImageViewerState::open(&image).unwrap();
@@ -3631,7 +4043,8 @@ mod tests {
 
     #[test]
     fn deferred_path_missing_file_stays_unloaded() {
-        let mut viewer = ImageViewerState::open_from_path_deferred(std::path::Path::new("/no/such/file.png"));
+        let mut viewer =
+            ImageViewerState::open_from_path_deferred(std::path::Path::new("/no/such/file.png"));
         assert!(!viewer.finish_loading());
         assert!(viewer.image_bytes.is_empty());
     }

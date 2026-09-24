@@ -334,7 +334,10 @@ impl ListPaneState {
     /// mode toggle) to keep the selected item at the same screen position.
     pub fn set_scroll_anchor(&mut self) {
         if let Some(vi) = self.selected_index {
-            let item_y = self.layout.virtual_y(vi);
+            let item_y = self
+                .layout
+                .virtual_y(vi)
+                .unwrap_or_else(|| self.layout.total_height());
             let screen_y = item_y.saturating_sub(self.scroll_offset);
             self.scroll_anchor = Some(screen_y);
         }
@@ -472,7 +475,10 @@ impl ListPaneState {
     pub fn cycle_wrap_mode(&mut self) {
         // Record anchor: screen-y of the selected item before the mode switch.
         if let Some(vi) = self.selected_index {
-            let item_y = self.layout.virtual_y(vi);
+            let item_y = self
+                .layout
+                .virtual_y(vi)
+                .unwrap_or_else(|| self.layout.total_height());
             let screen_y = item_y.saturating_sub(self.scroll_offset);
             self.scroll_anchor = Some(screen_y);
         }
@@ -811,7 +817,10 @@ impl ListPaneState {
         if let Some(desired_screen_y) = self.scroll_anchor.take()
             && let Some(vi) = self.selected_index
         {
-            let new_item_y = self.layout.virtual_y(vi);
+            let new_item_y = self
+                .layout
+                .virtual_y(vi)
+                .unwrap_or_else(|| self.layout.total_height());
             self.scroll_offset = new_item_y.saturating_sub(desired_screen_y);
         }
 
@@ -932,7 +941,10 @@ impl ListPaneState {
         let screen_y = match self.scroll_screen_y {
             Some(sy) => Some(sy),
             None => self.selected_index.map(|vi| {
-                let item_y = self.layout.virtual_y(vi);
+                let item_y = self
+                    .layout
+                    .virtual_y(vi)
+                    .unwrap_or_else(|| self.layout.total_height());
                 item_y.saturating_sub(self.scroll_offset)
             }),
         };
@@ -996,7 +1008,12 @@ impl ListPaneState {
 
         // Search forward (within viewport).
         for vi in (target_vi + 1)..count {
-            if self.layout.virtual_y(vi) >= vp_bottom {
+            if self
+                .layout
+                .virtual_y(vi)
+                .unwrap_or_else(|| self.layout.total_height())
+                >= vp_bottom
+            {
                 break;
             }
             let pi = self.to_physical(vi);
@@ -1009,8 +1026,11 @@ impl ListPaneState {
 
         // Search backward (within viewport).
         for vi in (0..target_vi).rev() {
-            let vy = self.layout.virtual_y(vi);
-            let vh = self.layout.item_height(vi) as usize;
+            let vy = self
+                .layout
+                .virtual_y(vi)
+                .unwrap_or_else(|| self.layout.total_height());
+            let vh = self.layout.item_height(vi).unwrap_or(0) as usize;
             if vy + vh <= vp_top {
                 break;
             }
@@ -1084,7 +1104,10 @@ impl ListPaneState {
         let screen_y = match self.scroll_screen_y {
             Some(sy) => Some(sy),
             None => self.selected_index.map(|vi| {
-                let item_y = self.layout.virtual_y(vi);
+                let item_y = self
+                    .layout
+                    .virtual_y(vi)
+                    .unwrap_or_else(|| self.layout.total_height());
                 item_y.saturating_sub(self.scroll_offset)
             }),
         };
@@ -1153,8 +1176,11 @@ impl ListPaneState {
         };
         self.reset_edge_state();
         self.scroll_screen_y = None;
-        let item_y = self.layout.virtual_y(vi);
-        let item_h = self.layout.item_height(vi) as usize;
+        let item_y = self
+            .layout
+            .virtual_y(vi)
+            .unwrap_or_else(|| self.layout.total_height());
+        let item_h = self.layout.item_height(vi).unwrap_or(0) as usize;
         let vp = self.viewport_height as usize;
         // Place item midpoint at viewport midpoint.
         let item_mid = item_y + item_h / 2;
@@ -1412,8 +1438,11 @@ impl ListPaneState {
         let Some(vi) = self.selected_index else {
             return;
         };
-        let item_y = self.layout.virtual_y(vi);
-        let item_h = self.layout.item_height(vi) as usize;
+        let item_y = self
+            .layout
+            .virtual_y(vi)
+            .unwrap_or_else(|| self.layout.total_height());
+        let item_h = self.layout.item_height(vi).unwrap_or(0) as usize;
         let vp = self.viewport_height as usize;
         // Adaptive margin: shrink when viewport is too small for full margin.
         // Need at least 1 row for the item itself + 2×margin, so margin ≤ (vp-1)/2.
@@ -1458,7 +1487,10 @@ impl ListPaneState {
         let viewport_end = self.scroll_offset + vp;
         let mut last = first;
         for i in first..count {
-            let item_y = self.layout.virtual_y(i);
+            let item_y = self
+                .layout
+                .virtual_y(i)
+                .unwrap_or_else(|| self.layout.total_height());
             if item_y >= viewport_end {
                 break;
             }
@@ -1475,7 +1507,10 @@ impl ListPaneState {
         if range.is_empty() {
             return 0;
         }
-        let first_y = self.layout.virtual_y(range.start);
+        let first_y = self
+            .layout
+            .virtual_y(range.start)
+            .unwrap_or_else(|| self.layout.total_height());
         (self.scroll_offset - first_y) as u16
     }
 
@@ -1948,7 +1983,10 @@ impl ListPaneState {
         let vp = self.viewport_height as usize;
         let center_on = |this: &mut Self, idx: usize| {
             if vp > 0 && this.layout.total_height() > vp {
-                let target_y = this.layout.virtual_y(idx);
+                let target_y = this
+                    .layout
+                    .virtual_y(idx)
+                    .unwrap_or_else(|| this.layout.total_height());
                 let max_offset = this.layout.total_height().saturating_sub(vp);
                 this.scroll_offset = target_y.saturating_sub(vp / 2).min(max_offset);
             }

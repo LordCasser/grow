@@ -6,6 +6,7 @@ use crate::app::session::AgentId;
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::state::ScrollbackState;
 use crate::views::prompt_widget::{PromptWidget, StashedPrompt};
+use agent_client_protocol::schema::v1 as acp;
 
 /// User prompt that participates in the shell's prompt numbering.
 /// Interjections render as user prompts but the shell never numbers them,
@@ -312,6 +313,7 @@ pub(super) fn dispatch_rewind_select_mode(
             vec![Effect::RewindExecute {
                 agent_id: id,
                 session_id,
+                session_binding_epoch: agent.session_binding_epoch,
                 target_prompt_index: target,
                 mode,
             }]
@@ -349,6 +351,7 @@ pub(super) fn dispatch_rewind_select_mode(
                 vec![Effect::RewindExecute {
                     agent_id: id,
                     session_id,
+                    session_binding_epoch: agent.session_binding_epoch,
                     target_prompt_index: target,
                     mode,
                 }]
@@ -407,6 +410,7 @@ pub(super) fn dispatch_rewind_confirm(
     vec![Effect::RewindExecute {
         agent_id: id,
         session_id,
+        session_binding_epoch: agent.session_binding_epoch,
         target_prompt_index: target,
         mode,
     }]
@@ -900,12 +904,39 @@ pub(super) fn handle_rewind_execute_failed(
         .unwrap_or(0);
     let draft = agent.rewind_state.take().and_then(|s| s.stashed_draft);
     agent.rewind_state = Some(crate::views::rewind::RewindState {
-        phase: crate::views::rewind::RewindPhase::Error { message: error },
+        phase: crate::views::rewind::RewindPhase::Error {
+            message: format!("Rewind outcome unknown. Reload session to verify. {error}"),
+        },
         anchor_entry_idx: anchor,
         stashed_draft: draft,
         selected_prompt_index: None,
     });
     vec![]
+}
+
+pub(super) fn rewind_execution_binding_is_current(
+    app: &AppView,
+    agent_id: AgentId,
+    session_id: &acp::SessionId,
+    session_binding_epoch: u32,
+) -> bool {
+    app.agents.get(&agent_id).is_some_and(|agent| {
+        agent.session.session_id.as_ref() == Some(session_id)
+            && agent.session_binding_epoch == session_binding_epoch
+    })
+}
+
+pub(super) fn show_rewind_execution_notice(app: &mut AppView, message: &str) {
+    if app.screen_mode.is_minimal()
+        && let ActiveView::Agent(id) = app.active_view
+        && let Some(agent) = crate::minimal_api::app_visible_agent_mut(app, id)
+    {
+        agent
+            .scrollback
+            .push_block(RenderBlock::notice(message.to_string()));
+    } else {
+        app.show_toast(message);
+    }
 }
 
 /// Read-only requests may outlive their overlay; execution results must still

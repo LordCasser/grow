@@ -1762,20 +1762,22 @@ fn build_welcome_esc_dismisses_spinner_only_loading_picker() {
     let _ = dispatch(Action::SessionPickerClosed, &mut app);
     assert!(!app.session_picker_loading, "picker fully dismissed");
 }
-/// Build-mode canary: modal close must not bump the list seq — an in-flight
-/// plain fetch keeps its pre-existing land-after-close behavior.
+/// Closing an Agent modal invalidates its pending list result instead of
+/// spilling that result into the welcome picker's hidden fields.
 #[test]
-fn build_mode_modal_close_does_not_invalidate_plain_fetch() {
+fn modal_close_invalidates_plain_fetch() {
     let mut app = test_app_with_agent();
     open_session_picker_with(&mut app, vec![make_picker_entry("build-cl-1", "/tmp/repo")]);
+    let _ = dispatch(Action::FetchSessionList, &mut app);
     let seq = app.session_picker_list_seq;
     get_active_agent_mut(&mut app)
         .expect("active agent")
         .active_modal = None;
     let _ = dispatch(Action::SessionPickerClosed, &mut app);
     assert_eq!(
-        app.session_picker_list_seq, seq,
-        "Build-mode close must not invalidate in-flight plain fetches"
+        app.session_picker_list_seq,
+        seq + 1,
+        "closing the modal invalidates its in-flight list fetch"
     );
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
@@ -1787,16 +1789,202 @@ fn build_mode_modal_close_does_not_invalidate_plain_fetch() {
         &mut app,
     );
     assert!(
-        app.session_picker_entries.is_some(),
-        "Build-mode plain response still lands after close (pre-existing behavior)"
+        app.session_picker_entries.is_none(),
+        "a closed modal response must not populate the welcome picker"
     );
+}
+
+#[test]
+fn list_response_without_visible_picker_is_ignored() {
+    let mut app = test_app_with_agent();
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            scope: ListScope::Cwd,
+            sessions: vec![make_picker_entry("hidden", "/repo")],
+            seq: app.session_picker_list_seq,
+            query: None,
+        }),
+        &mut app,
+    );
+    assert!(app.session_picker_entries.is_none());
+    assert!(app.agents[&AgentId(0)].active_modal.is_none());
+}
+
+#[test]
+fn agent_picker_list_fetch_uses_session_cwd() {
+    let mut app = test_app_with_agent();
+    app.cwd = "/launch".into();
+    app.agents.get_mut(&AgentId(0)).unwrap().session.cwd = "/session".into();
+    open_session_picker_with(&mut app, vec![]);
+    let effects = dispatch(Action::FetchSessionList, &mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::FetchSessionList { cwd, .. }] if cwd == std::path::Path::new("/session")
+    ));
+}
+
+#[test]
+fn picker_list_result_does_not_cross_agent_or_child_focus() {
+    let mut app = three_agent_app();
+    open_session_picker_with(&mut app, vec![]);
+    let _ = dispatch(Action::FetchSessionList, &mut app);
+    let first_seq = app.session_picker_list_seq;
+
+    app.active_view = ActiveView::Agent(AgentId(1));
+    open_session_picker_with(&mut app, vec![make_picker_entry("agent-1", "/other")]);
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            scope: ListScope::Cwd,
+            sessions: vec![make_picker_entry("agent-0", "/root")],
+            seq: first_seq,
+            query: None,
+        }),
+        &mut app,
+    );
+    let Some(crate::views::modal::ActiveModal::SessionPicker { entries, .. }) =
+        app.agents[&AgentId(1)].active_modal.as_ref()
+    else {
+        panic!("second Agent picker remains open");
+    };
+    assert_eq!(entries.as_ref().unwrap()[0].id, "agent-1");
+
+    app.active_view = ActiveView::Agent(AgentId(0));
+    let root = app.agents.get_mut(&AgentId(0)).unwrap();
+    let child = crate::test_util::make_agent_view(Some("picker-child"), "/child");
+    root.insert_subagent_view("picker-child".into(), Box::new(child));
+    root.active_subagent = Some("picker-child".into());
+    open_session_picker_with(&mut app, vec![make_picker_entry("child", "/child")]);
+    if let Some(crate::views::modal::ActiveModal::SessionPicker { loading, .. }) = app
+        .agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .subagent_views
+        .get_mut("picker-child")
+        .unwrap()
+        .active_modal
+        .as_mut()
+    {
+        *loading = true;
+    }
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            scope: ListScope::Cwd,
+            sessions: vec![make_picker_entry("agent-0", "/root")],
+            seq: first_seq,
+            query: None,
+        }),
+        &mut app,
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::FetchSessionList { cwd, .. }] if cwd == std::path::Path::new("/child")
+    ));
+    let child = &app.agents[&AgentId(0)].subagent_views["picker-child"];
+    let Some(crate::views::modal::ActiveModal::SessionPicker { entries, .. }) =
+        child.active_modal.as_ref()
+    else {
+        panic!("child picker remains open");
+    };
+    assert_eq!(entries.as_ref().unwrap()[0].id, "child");
+}
+
+#[test]
+fn pending_picker_refetches_after_agent_switch_without_cross_delivery() {
+    use crate::views::modal::ActiveModal;
+
+    let mut app = three_agent_app();
+    app.agents.get_mut(&AgentId(0)).unwrap().session.cwd = "/agent-a".into();
+    app.agents.get_mut(&AgentId(1)).unwrap().session.cwd = "/agent-b".into();
+    open_session_picker_with(&mut app, vec![]);
+    if let Some(ActiveModal::SessionPicker { loading, .. }) = app
+        .agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .active_modal
+        .as_mut()
+    {
+        *loading = true;
+    }
+    let _ = dispatch(Action::FetchSessionList, &mut app);
+    let a_seq = app.session_picker_list_seq;
+
+    app.active_view = ActiveView::Agent(AgentId(1));
+    open_session_picker_with(&mut app, vec![]);
+    if let Some(ActiveModal::SessionPicker { loading, .. }) = app
+        .agents
+        .get_mut(&AgentId(1))
+        .unwrap()
+        .active_modal
+        .as_mut()
+    {
+        *loading = true;
+    }
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionListFailed {
+            error: "old-a-error".into(),
+            seq: a_seq,
+            query: None,
+        }),
+        &mut app,
+    );
+    let b_seq = app.session_picker_list_seq;
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::FetchSessionList { cwd, seq, .. }]
+            if cwd == std::path::Path::new("/agent-b") && *seq == b_seq
+    ));
+    let Some(ActiveModal::SessionPicker { entries, .. }) =
+        app.agents[&AgentId(1)].active_modal.as_ref()
+    else {
+        panic!("Agent B picker remains open");
+    };
+    assert!(entries.as_ref().is_some_and(Vec::is_empty));
+    assert!(app.agents[&AgentId(1)].toast.is_none());
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            scope: ListScope::Cwd,
+            sessions: vec![make_picker_entry("from-b", "/agent-b")],
+            seq: b_seq,
+            query: None,
+        }),
+        &mut app,
+    );
+    app.active_view = ActiveView::Agent(AgentId(0));
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            scope: ListScope::Cwd,
+            sessions: vec![make_picker_entry("old-a", "/agent-a")],
+            seq: a_seq,
+            query: None,
+        }),
+        &mut app,
+    );
+    let new_a_seq = app.session_picker_list_seq;
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::FetchSessionList { cwd, seq, .. }]
+            if cwd == std::path::Path::new("/agent-a") && *seq == new_a_seq
+    ));
+
+    app.active_view = ActiveView::Agent(AgentId(1));
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            scope: ListScope::Cwd,
+            sessions: vec![make_picker_entry("old-a", "/agent-a")],
+            seq: a_seq,
+            query: None,
+        }),
+        &mut app,
+    );
+    assert!(effects.is_empty(), "loaded Agent B picker needs no refetch");
 }
 /// Build-mode canary: `content_loading` belongs to the FTS5 deep search
 /// (guarded by `deep_search_seq`); a plain (query-less) list response or
 /// failure landing mid-deep-search must NOT hide its spinner.
 #[test]
 fn build_mode_list_response_preserves_deep_search_spinner() {
-    let mut app = test_app_with_agent();
+    let mut app = test_app();
     let _ = dispatch(Action::FetchSessionList, &mut app);
     app.session_picker_state.set_query("abc");
     let effects = dispatch(Action::ForceDeepSearch, &mut app);
@@ -1832,53 +2020,30 @@ fn build_mode_list_response_preserves_deep_search_spinner() {
         "plain list failure must not hide the deep-search spinner"
     );
 }
-/// Build-mode canary: plain picker fetches never bump the list seq, so two
-/// rapid picker opens keep their pre-existing last-write-wins behavior —
-/// BOTH responses land in arrival order instead of the superseded one being
-/// dropped as stale (the stale-drop is chat-search machinery).
+/// Each plain fetch owns a sequence; a slow earlier response cannot replace
+/// the result of a later picker open.
 #[test]
-fn build_mode_rapid_plain_fetches_keep_last_write_wins() {
+fn rapid_plain_fetches_ignore_superseded_response() {
     let mut app = test_app();
     let first = dispatch(Action::FetchSessionList, &mut app);
     let second = dispatch(Action::FetchSessionList, &mut app);
-    for effects in [&first, &second] {
-        assert!(
-            matches!(
-                &effects[..],
-                [Effect::FetchSessionList {
-                    query: None,
-                    seq: 0,
-                    kind_filter: None,
-                }]
-            ),
-            "Build-mode plain fetch must not bump the seq, got {effects:?}"
-        );
-    }
+    assert!(matches!(
+        &first[..],
+        [Effect::FetchSessionList { seq: 1, .. }]
+    ));
+    assert!(matches!(
+        &second[..],
+        [Effect::FetchSessionList { seq: 2, .. }]
+    ));
     assert_eq!(
-        app.session_picker_list_seq, 0,
-        "Build mode never bumps the list seq"
-    );
-    let _ = dispatch(
-        Action::TaskComplete(TaskResult::SessionListLoaded {
-            scope: ListScope::Cwd,
-            sessions: vec![make_picker_entry("build-first", "/r")],
-            seq: 0,
-            query: None,
-        }),
-        &mut app,
-    );
-    assert_eq!(
-        app.session_picker_entries
-            .as_ref()
-            .map(|e| e[0].id.as_str()),
-        Some("build-first"),
-        "superseded plain response must land (pre-existing behavior)"
+        app.session_picker_list_seq, 2,
+        "every fetch advances the list generation"
     );
     let _ = dispatch(
         Action::TaskComplete(TaskResult::SessionListLoaded {
             scope: ListScope::Cwd,
             sessions: vec![make_picker_entry("build-second", "/r")],
-            seq: 0,
+            seq: 2,
             query: None,
         }),
         &mut app,
@@ -1888,7 +2053,23 @@ fn build_mode_rapid_plain_fetches_keep_last_write_wins() {
             .as_ref()
             .map(|e| e[0].id.as_str()),
         Some("build-second"),
-        "later plain response wins (pre-existing behavior)"
+        "the latest response lands"
+    );
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::SessionListLoaded {
+            scope: ListScope::Cwd,
+            sessions: vec![make_picker_entry("build-first", "/r")],
+            seq: 1,
+            query: None,
+        }),
+        &mut app,
+    );
+    assert_eq!(
+        app.session_picker_entries
+            .as_ref()
+            .map(|e| e[0].id.as_str()),
+        Some("build-second"),
+        "the superseded response cannot overwrite the latest result"
     );
 }
 

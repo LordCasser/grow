@@ -1854,7 +1854,9 @@ mod tests {
 
     #[test]
     fn coordination_answer_double_click_expands_the_passive_tool_row() {
-        use crate::scrollback::blocks::tool::{CoordinationRow, OtherToolCallBlock};
+        use crate::scrollback::blocks::tool::{
+            CoordinationPhase, CoordinationRow, OtherToolCallBlock,
+        };
         use crate::scrollback::types::DisplayMode;
         let mut agent = make_agent();
         let mut block = OtherToolCallBlock::new("Answered session peer", "")
@@ -1862,7 +1864,7 @@ mod tests {
         block.coordination = Some(CoordinationRow {
             source_peer_id: "peer".into(),
             inquiry_id: "one".into(),
-            terminal: true,
+            phase: CoordinationPhase::Terminal,
         });
         agent.scrollback.upsert_coordination_row(block, false);
         double_click_gesture(&mut agent, Instant::now(), 0);
@@ -1875,7 +1877,9 @@ mod tests {
 
     #[test]
     fn coordination_answering_double_click_can_expand_then_collapse() {
-        use crate::scrollback::blocks::tool::{CoordinationRow, OtherToolCallBlock};
+        use crate::scrollback::blocks::tool::{
+            CoordinationPhase, CoordinationRow, OtherToolCallBlock,
+        };
         use crate::scrollback::types::DisplayMode;
         let mut agent = make_agent();
         let mut block =
@@ -1883,7 +1887,7 @@ mod tests {
         block.coordination = Some(CoordinationRow {
             source_peer_id: "peer".into(),
             inquiry_id: "one".into(),
-            terminal: false,
+            phase: CoordinationPhase::Received,
         });
         agent.scrollback.upsert_coordination_row(block, false);
         for (i, expected) in [
@@ -1988,7 +1992,7 @@ mod tests {
         };
         let mut agent = make_agent();
         let mut group = SubagentPermissionBlock::new(permission("tool-1", "read_file"));
-        group.push(permission("tool-2", "search_replace"));
+        assert!(group.push(permission("tool-2", "search_replace"), group.epoch()));
         agent
             .scrollback
             .push_block(crate::scrollback::block::RenderBlock::subagent_permission(

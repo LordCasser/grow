@@ -109,6 +109,13 @@ impl AgentView {
         session_id: agent_client_protocol::schema::v1::SessionId,
     ) {
         if self.session.session_id.as_ref() != Some(&session_id) {
+            self.close_rewind_for_binding_change();
+            if let Some(effect) = self.release_server_queue_edit_on_close() {
+                self.pending_queue_release = Some(effect);
+                self.show_toast(
+                    "Queued edit ended with the previous session; copy text or press Esc",
+                );
+            }
             self.clear_behavior_switch_confirmation();
             self.session_binding_epoch = self.session_binding_epoch.wrapping_add(1);
             self.session.last_seen_event_id = None;
@@ -120,10 +127,39 @@ impl AgentView {
     }
     /// Unbind this view from its current session identity.
     pub(crate) fn unbind_session_id(&mut self) {
+        self.close_rewind_for_binding_change();
+        if let Some(effect) = self.release_server_queue_edit_on_close() {
+            self.pending_queue_release = Some(effect);
+            self.show_toast("Queued edit ended with the previous session; copy text or press Esc");
+        }
         self.clear_behavior_switch_confirmation();
         if self.session.session_id.take().is_some() {
             self.session_binding_epoch = self.session_binding_epoch.wrapping_add(1);
             self.clear_minimal_btw_lifecycle();
+        }
+    }
+
+    fn close_rewind_for_binding_change(&mut self) {
+        let had_rewind = self.rewind_state.is_some();
+        let stashed_draft = self
+            .rewind_state
+            .take()
+            .and_then(|state| state.stashed_draft);
+        if let Some(draft) = stashed_draft {
+            self.prompt.restore(draft);
+        }
+        if let Some(text) = self.pending_inline_resubmit.take() {
+            if self.prompt.text().is_empty() {
+                self.prompt.set_text(&text);
+            } else {
+                self.prompt.append_text(&format!("\n{text}"));
+            }
+        }
+        self.rewind_read = None;
+        self.rewind_points = None;
+        if had_rewind && self.inline_edit.is_some() {
+            self.inline_edit = None;
+            self.scrollback.set_inline_edit_height(None);
         }
     }
     /// Record a prompt id this client originated (sent to the agent as the turn
@@ -178,6 +214,7 @@ impl AgentView {
         let mut view = Self {
             session,
             session_binding_epoch: 0,
+            switch_catalog_request: 0,
             scrollback,
             prompt,
             tip_typing_dismissed: false,
@@ -189,6 +226,8 @@ impl AgentView {
             load_return_view: None,
             active_pane: ActivePane::Prompt,
             prompt_mode: PromptMode::Normal,
+            server_queue_edit: None,
+            pending_queue_release: None,
             prompt_input_mode: PromptInputMode::Normal,
             multiline_mode: false,
             vim_mode: crate::appearance::cache::load_vim_mode(),
@@ -619,6 +658,21 @@ impl AgentView {
         );
         self.scrollback.begin_batch();
         self.begin_replay_window();
+    }
+
+    /// Recover an accepted candidate whose leader-side transient delivery was
+    /// lost. A cursor tail cannot reconstruct the missing candidate, so this
+    /// window always replaces the transcript from canonical replay.
+    pub(crate) fn begin_session_resync(&mut self, generation: u64) {
+        self.begin_session_reload(generation);
+        if let Some(reload) = self.session_reload.as_mut() {
+            reload.force_full_replay = true;
+        }
+        self.session.set_live_feedback(
+            "session-load",
+            crate::scrollback::blocks::NoticeTone::Progress,
+            "Resyncing session\u{2026}",
+        );
     }
 
     /// A cursor-resolved reconnect can keep the old transcript and append only

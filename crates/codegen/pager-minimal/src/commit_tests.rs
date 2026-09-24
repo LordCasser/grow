@@ -100,6 +100,84 @@ fn collapsed_appearance() -> AppearanceConfig {
 }
 
 #[test]
+fn live_tail_stamping_uses_the_selected_child_then_the_root() {
+    use pager::app::root::ActiveView;
+    use pager::app::session::AgentId;
+
+    let mut app = minimal_api::test_minimal_app();
+    app.appearance.minimal_collapse_thinking = true;
+    let mut root = minimal_api::test_agent_view(Some("root"), "/tmp/root".into());
+    let mut child = minimal_api::test_agent_view(Some("child"), "/tmp/child".into());
+    child.session.id = AgentId(1);
+    root.scrollback
+        .push(ScrollbackEntry::running(RenderBlock::thinking(
+            "root thought",
+        )));
+    child
+        .scrollback
+        .push(ScrollbackEntry::running(RenderBlock::thinking(
+            "child thought",
+        )));
+    root.subagent_views.insert("child".into(), Box::new(child));
+    root.active_subagent = Some("child".into());
+    app.agents.insert(AgentId(0), root);
+    app.active_view = ActiveView::Agent(AgentId(0));
+
+    prepare_live_tail_display(&mut app);
+    let root = &app.agents[&AgentId(0)];
+    assert_eq!(
+        root.scrollback.get(0).unwrap().display_mode(),
+        DisplayMode::Truncated
+    );
+    assert_eq!(
+        root.subagent_views["child"]
+            .scrollback
+            .get(0)
+            .unwrap()
+            .display_mode(),
+        DisplayMode::Collapsed
+    );
+
+    app.agents.get_mut(&AgentId(0)).unwrap().active_subagent = None;
+    prepare_live_tail_display(&mut app);
+    assert_eq!(
+        app.agents[&AgentId(0)]
+            .scrollback
+            .get(0)
+            .unwrap()
+            .display_mode(),
+        DisplayMode::Collapsed
+    );
+}
+
+#[test]
+fn new_visible_epoch_retries_a_failed_native_commit() {
+    use pager::app::root::ActiveView;
+    use pager::app::session::AgentId;
+
+    let mut app = minimal_api::test_minimal_app();
+    let mut root = minimal_api::test_agent_view(Some("root"), "/tmp/root".into());
+    root.scrollback.push(finalized("history"));
+    let first_id = root.scrollback.get(0).unwrap().id;
+    assert_eq!(
+        commit_leading_run(&mut root.scrollback, false, |_, _| true),
+        1
+    );
+    app.agents.insert(AgentId(0), root);
+    app.active_view = ActiveView::Agent(AgentId(0));
+    let owner = minimal_api::minimal_visible_owner(&app).unwrap();
+    minimal_api::begin_minimal_visible_epoch(&mut app, Some(owner));
+    let state = &mut app.agents.get_mut(&AgentId(0)).unwrap().scrollback;
+    assert_eq!(scan_frontier(state, false).tail_start, 1);
+    assert_eq!(commit_leading_run(state, false, |_, _| false), 0);
+    assert!(!minimal_api::is_committed(state, state.get(0).unwrap()));
+    assert_eq!(minimal_api::minimal_failed_frontier(state), Some(first_id));
+    assert_eq!(scan_frontier(state, false).tail_start, 0);
+    assert_eq!(commit_leading_run(state, false, |_, _| true), 1);
+    assert!(minimal_api::is_committed(state, state.get(0).unwrap()));
+}
+
+#[test]
 fn live_tail_is_stamped_before_the_first_height_measurement() {
     let mut state = ScrollbackState::new();
     state.push(ScrollbackEntry::running(RenderBlock::thinking(
@@ -206,9 +284,9 @@ fn running_tool_still_holds_the_frontier_even_with_a_later_block() {
     assert_eq!(minimal_api::commit_scan_cursor(&s), 1);
 }
 
-fn coordination_row(terminal: bool) -> ScrollbackEntry {
-    use pager::scrollback::blocks::tool::{CoordinationRow, OtherToolCallBlock};
-    let title = if terminal {
+fn coordination_row(phase: pager::scrollback::blocks::tool::CoordinationPhase) -> ScrollbackEntry {
+    use pager::scrollback::blocks::tool::{CoordinationPhase, CoordinationRow, OtherToolCallBlock};
+    let title = if phase == CoordinationPhase::Terminal {
         "Answered session peer"
     } else {
         "Answering session peer"
@@ -218,22 +296,25 @@ fn coordination_row(terminal: bool) -> ScrollbackEntry {
     block.coordination = Some(CoordinationRow {
         source_peer_id: "peer".into(),
         inquiry_id: "one".into(),
-        terminal,
+        phase,
     });
     ScrollbackEntry::new(RenderBlock::ToolCall(ToolCallBlock::Other(block)))
 }
 
 #[test]
 fn coordination_holds_native_frontier_until_its_own_terminal_not_primary_turn_end() {
+    use pager::scrollback::blocks::tool::CoordinationPhase;
     for turn_running in [false, true] {
         for is_last in [false, true] {
-            for animated in [false, true] {
-                let mut entry = coordination_row(false);
-                entry.is_running = animated;
-                assert!(!is_committable(&entry, turn_running, is_last));
+            for phase in [CoordinationPhase::Received, CoordinationPhase::Approved] {
+                for animated in [false, true] {
+                    let mut entry = coordination_row(phase);
+                    entry.is_running = animated;
+                    assert!(!is_committable(&entry, turn_running, is_last));
+                }
             }
             assert!(is_committable(
-                &coordination_row(true),
+                &coordination_row(CoordinationPhase::Terminal),
                 turn_running,
                 is_last
             ));
@@ -243,8 +324,9 @@ fn coordination_holds_native_frontier_until_its_own_terminal_not_primary_turn_en
 
 #[test]
 fn coordination_idle_start_is_live_and_only_answered_is_committed_once() {
+    use pager::scrollback::blocks::tool::CoordinationPhase;
     let mut state = ScrollbackState::new();
-    let id = state.push(coordination_row(false));
+    let id = state.push(coordination_row(CoordinationPhase::Received));
     state.set_entry_running(id, true);
     let mut printed = Vec::new();
     commit_leading_run(&mut state, false, |_, index| {
@@ -257,7 +339,7 @@ fn coordination_idle_start_is_live_and_only_answered_is_committed_once() {
     );
     assert_eq!(scan_frontier(&state, false).tail_start, 0);
 
-    state.get_by_id_mut(id).unwrap().block = coordination_row(true).block;
+    state.get_by_id_mut(id).unwrap().block = coordination_row(CoordinationPhase::Terminal).block;
     state.finish_running(id);
     commit_leading_run(&mut state, false, |_, index| {
         printed.push(index);
@@ -275,13 +357,14 @@ fn coordination_idle_start_is_live_and_only_answered_is_committed_once() {
 
 #[test]
 fn coordination_interrupted_terminal_releases_later_native_history() {
+    use pager::scrollback::blocks::tool::CoordinationPhase;
     let mut state = ScrollbackState::new();
-    let id = state.push(coordination_row(false));
+    let id = state.push(coordination_row(CoordinationPhase::Received));
     state.push(finalized("later normal turn"));
     // Replay alone does not prove the inquiry is running or finished.
     assert!(!state.get_by_id(id).unwrap().is_running);
     assert!(commit_collect(&mut state).is_empty());
-    let mut interrupted = coordination_row(true);
+    let mut interrupted = coordination_row(CoordinationPhase::Terminal);
     let RenderBlock::ToolCall(ToolCallBlock::Other(block)) = &mut interrupted.block else {
         panic!()
     };
@@ -294,9 +377,14 @@ fn coordination_interrupted_terminal_releases_later_native_history() {
 
 #[test]
 fn coordination_minimal_default_is_one_line_for_start_and_finish() {
-    for terminal in [false, true] {
+    use pager::scrollback::blocks::tool::CoordinationPhase;
+    for phase in [
+        CoordinationPhase::Received,
+        CoordinationPhase::Approved,
+        CoordinationPhase::Terminal,
+    ] {
         let mut state = ScrollbackState::new();
-        state.push(coordination_row(terminal));
+        state.push(coordination_row(phase));
         stamp_live_tail_display_modes(&mut state, &default_appearance());
         assert_eq!(state.get(0).unwrap().display_mode(), DisplayMode::Collapsed);
     }

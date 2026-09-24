@@ -298,6 +298,8 @@ fn write_payload(
     payload: &WriterPayload,
     sync: &WriterSync,
 ) -> std::io::Result<()> {
+    let mut timer = diagnostics::instrumentation::timer("pager.frame.write");
+    timer.with_field("bytes", payload.data.len() as u64);
     match writer
         .write_all(&payload.data)
         .and_then(|()| writer.flush())
@@ -480,11 +482,15 @@ pub fn draw_frame(
     let _ = terminal.autoresize();
     let mut link_spans: Vec<LinkSpan> = Vec::new();
     let (cursor_pos, post_flush_escapes) = {
+        let _timer = diagnostics::instrumentation::timer("pager.frame.render");
         let mut frame = terminal.get_frame();
         render_fn(&mut frame, &mut link_spans)
     };
     terminal.set_frame_links(&link_spans);
-    let has_changes = terminal.flush_with_links().unwrap_or(false);
+    let has_changes = {
+        let _timer = diagnostics::instrumentation::timer("pager.frame.diff");
+        terminal.flush_with_links().unwrap_or(false)
+    };
     terminal.swap_buffers();
     let post_flush_wrote_cursor = post_flush_escapes.is_some();
     let action = cursor.action(cursor_pos, has_changes || post_flush_wrote_cursor);
@@ -497,7 +503,10 @@ pub fn draw_frame(
     }
     cursor.apply(action, terminal.backend_mut());
     let _ = terminal.backend_mut().queue(EndSynchronizedUpdate);
-    let _ = terminal.backend_mut().flush();
+    {
+        let _timer = diagnostics::instrumentation::timer("pager.frame.queue");
+        let _ = terminal.backend_mut().flush();
+    }
 }
 #[cfg(test)]
 mod tests {

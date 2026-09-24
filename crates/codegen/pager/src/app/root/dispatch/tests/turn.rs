@@ -2088,6 +2088,7 @@ fn subagent_label_strips_control_characters() {
 #[serial_test::serial(MOUSE_CAPTURE_ENABLED)]
 #[test]
 fn mouse_reporting_toggle_sticky_survives_subagent_esc_to_parent() {
+    let _reset = MouseCaptureTestReset;
     reset_mouse_capture_enabled(true);
     assert!(mouse_capture_is_enabled());
     let mut app = test_app_with_agent();

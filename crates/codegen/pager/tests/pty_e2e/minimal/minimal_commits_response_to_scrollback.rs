@@ -14,6 +14,8 @@ use crate::common::*;
 #[ignore]
 async fn minimal_commits_response_to_scrollback() {
     let content = ContentController::start().await.expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
+    content.seed_llm_config().expect("seed mock LLM config");
     // Sentinel on the FIRST rendered row; 80 code-block rows >> the 50-row
     // screen, so the head scrolls into native scrollback once the block commits.
     // (Prose lines would markdown-reflow into one short paragraph that fits on

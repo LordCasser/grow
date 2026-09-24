@@ -19,6 +19,8 @@ async fn minimal_new_session_keeps_history_and_resets() {
     const WELCOME_BANNER: &str = "Grow";
 
     let content = ContentController::start().await.expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
+    content.seed_llm_config().expect("seed mock LLM config");
     // Code-block rows (not prose, which markdown-reflows to fit on screen) so
     // turn 1 is genuinely taller than the screen and its head commits into
     // native scrollback before `/new` — see `tall_response`.

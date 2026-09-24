@@ -20,7 +20,8 @@
 use std::ops::Range;
 use std::sync::{
     Arc, Mutex,
-    mpsc::{Receiver, Sender, channel},
+    atomic::{AtomicBool, Ordering},
+    mpsc::{SyncSender, sync_channel},
 };
 use std::thread::{self, JoinHandle};
 
@@ -108,7 +109,7 @@ impl ScrollbackSearchIndex {
     /// An empty query yields nothing (an empty pattern would otherwise match at
     /// every byte); zero-width matches are skipped for the same reason.
     pub fn find(&self, matcher: &TextMatcher) -> Vec<ScrollbackMatch> {
-        scan_matches(&self.entries, matcher)
+        scan_matches(&self.entries, matcher, None)
     }
 }
 
@@ -118,18 +119,28 @@ impl ScrollbackSearchIndex {
 /// [`SearchDaemon`]. An empty query yields nothing (an empty pattern would
 /// otherwise match at every byte); zero-width matches are skipped for the same
 /// reason.
-fn scan_matches(entries: &[IndexedEntry], matcher: &TextMatcher) -> Vec<ScrollbackMatch> {
+fn scan_matches(
+    entries: &[IndexedEntry],
+    matcher: &TextMatcher,
+    stop: Option<&AtomicBool>,
+) -> Vec<ScrollbackMatch> {
     if matcher.query().is_empty() {
         return Vec::new();
     }
     let regex = matcher.compiled_regex();
     let mut matches = Vec::new();
     for entry in entries {
+        if stop.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+            break;
+        }
         // Matches arrive in ascending byte order, so walk newlines forward
         // once per entry to label each match's line instead of rescanning.
         let mut line = 0usize;
         let mut counted_to = 0usize;
         for m in regex.find_iter(&entry.text) {
+            if stop.is_some_and(|flag| flag.load(Ordering::Relaxed)) {
+                break;
+            }
             if m.start() == m.end() {
                 continue;
             }
@@ -164,64 +175,24 @@ struct SearchSnapshot {
     query: String,
 }
 
-/// Work sent from the UI thread to the daemon.
-///
-/// Each keystroke is one atomic `Update` carrying the latest query plus, only
-/// when content changed, the new corpus. Bundling them means the daemon can
-/// never wake having seen a new corpus but not yet the matching query (a
-/// split-snapshot that would publish one stale result before correcting).
-enum SearchMsg {
-    Update {
-        /// New corpus to scan, or `None` to keep the corpus the daemon holds.
-        corpus: Option<Arc<[IndexedEntry]>>,
-        /// Query to scan for.
-        query: String,
-        /// UI-owned request identity.
-        request_generation: u64,
-    },
-    /// Shut the daemon thread down.
-    Stop,
-}
-
-/// The newest corpus and query coalesced from a burst of `Update`s.
-#[derive(Default)]
-struct DrainedUpdate {
+/// The newest corpus and query coalesced while the worker is busy.
+#[derive(Debug, Default)]
+struct PendingUpdate {
     corpus: Option<Arc<[IndexedEntry]>>,
     query: Option<String>,
     request_generation: Option<u64>,
     stop: bool,
 }
 
-/// Coalesce all currently-pending messages, keeping the newest corpus and the
-/// newest query so a burst of keystrokes triggers a single scan of the latest
-/// query. A later `None` corpus means "unchanged" and must not clobber a corpus
-/// carried by an earlier message in the burst. `Stop` always wins and ends
-/// draining immediately.
-fn drain_to_latest(first: SearchMsg, rx: &Receiver<SearchMsg>) -> DrainedUpdate {
-    let mut out = DrainedUpdate::default();
-    let mut msg = first;
-    loop {
-        match msg {
-            SearchMsg::Update {
-                corpus,
-                query,
-                request_generation,
-            } => {
-                if corpus.is_some() {
-                    out.corpus = corpus;
-                }
-                out.query = Some(query);
-                out.request_generation = Some(request_generation);
-            }
-            SearchMsg::Stop => {
-                out.stop = true;
-                return out;
-            }
+impl PendingUpdate {
+    /// A later `None` corpus means unchanged and must not clobber an earlier
+    /// corpus awaiting the same wake. The newest query and identity always win.
+    fn merge(&mut self, corpus: Option<Arc<[IndexedEntry]>>, query: String, generation: u64) {
+        if corpus.is_some() {
+            self.corpus = corpus;
         }
-        match rx.try_recv() {
-            Ok(next) => msg = next,
-            Err(_) => return out,
-        }
+        self.query = Some(query);
+        self.request_generation = Some(generation);
     }
 }
 
@@ -229,30 +200,30 @@ fn drain_to_latest(first: SearchMsg, rx: &Receiver<SearchMsg>) -> DrainedUpdate 
 #[derive(Debug)]
 struct SearchDaemon {
     shared: Arc<Mutex<SearchSnapshot>>,
-    tx: Sender<SearchMsg>,
-    /// Deliberately detached, never joined: closing a search must not block the
-    /// UI on an in-flight scan. `Stop` plus channel-disconnect both end the
-    /// thread, and the worker owns its `Arc` clones, so dropping this is safe.
+    pending: Arc<Mutex<PendingUpdate>>,
+    tx: SyncSender<()>,
+    stop_requested: Arc<AtomicBool>,
+    /// Deliberately detached: closing search must not join an in-flight scan
+    /// on the input thread. Stop is checked during scanning and before publish.
     _handle: JoinHandle<()>,
 }
 
 impl SearchDaemon {
     fn new() -> Self {
         let shared = Arc::new(Mutex::new(SearchSnapshot::default()));
-        // Unbounded so `update_query`'s send never blocks the input thread.
-        // A bounded channel could stall the 257th keystroke on a full buffer,
-        // and dropping on full (try_send) could lose the final query. Messages
-        // are tiny (an Arc pointer + the query) and the daemon drains the whole
-        // queue on each wakeup, so it stays short in practice.
-        let (tx, rx) = channel::<SearchMsg>();
+        let pending = Arc::new(Mutex::new(PendingUpdate::default()));
+        let (tx, rx) = sync_channel::<()>(1);
+        let stop_requested = Arc::new(AtomicBool::new(false));
 
         let out = shared.clone();
+        let worker_pending = pending.clone();
+        let worker_stop = stop_requested.clone();
         let handle = thread::spawn(move || {
             let mut corpus: Arc<[IndexedEntry]> = Arc::from([]);
             let mut query = String::new();
-            while let Ok(msg) = rx.recv() {
-                let update = drain_to_latest(msg, &rx);
-                if update.stop {
+            while rx.recv().is_ok() {
+                let update = std::mem::take(&mut *worker_pending.lock().unwrap());
+                if update.stop || worker_stop.load(Ordering::Relaxed) {
                     break;
                 }
                 if let Some(new_corpus) = update.corpus {
@@ -272,8 +243,11 @@ impl SearchDaemon {
                 let matches: Arc<[ScrollbackMatch]> = if query.is_empty() || matcher.is_error() {
                     Arc::from([])
                 } else {
-                    scan_matches(&corpus, &matcher).into()
+                    scan_matches(&corpus, &matcher, Some(&worker_stop)).into()
                 };
+                if worker_stop.load(Ordering::Relaxed) {
+                    break;
+                }
                 *out.lock().unwrap() = SearchSnapshot {
                     matches,
                     request_generation,
@@ -285,16 +259,34 @@ impl SearchDaemon {
 
         Self {
             shared,
+            pending,
             tx,
+            stop_requested,
             _handle: handle,
+        }
+    }
+
+    fn submit(&self, corpus: Option<Arc<[IndexedEntry]>>, query: String, generation: u64) {
+        self.pending
+            .lock()
+            .unwrap()
+            .merge(corpus, query, generation);
+        // A full channel already carries the wake for the merged request.
+        if let Err(std::sync::mpsc::TrySendError::Disconnected(())) = self.tx.try_send(()) {
+            tracing::debug!("scrollback search daemon unavailable; dropping query update");
         }
     }
 }
 
 impl Drop for SearchDaemon {
     fn drop(&mut self) {
-        // Best-effort: a closed channel just means the thread already exited.
-        let _ = self.tx.send(SearchMsg::Stop);
+        self.stop_requested.store(true, Ordering::Relaxed);
+        *self.pending.lock().unwrap() = PendingUpdate {
+            stop: true,
+            ..PendingUpdate::default()
+        };
+        // Never wait for notification capacity or an active scan.
+        let _ = self.tx.try_send(());
     }
 }
 
@@ -388,15 +380,7 @@ impl ScrollbackSearchState {
             return;
         };
         self.request_generation = request_generation;
-        if let Err(err) = self.daemon.tx.send(SearchMsg::Update {
-            corpus,
-            query,
-            request_generation,
-        }) {
-            // A failed send means the daemon thread is gone (panicked or already
-            // stopped) — search has silently stopped working, so leave a trace.
-            tracing::debug!(%err, "scrollback search daemon unavailable; dropping query update");
-        }
+        self.daemon.submit(corpus, query, request_generation);
     }
 
     pub(crate) fn apply_query_key(
@@ -991,31 +975,13 @@ mod tests {
     }
 
     #[test]
-    fn drain_to_latest_keeps_newest_corpus_and_query() {
+    fn pending_merge_keeps_newest_corpus_and_query() {
         let c1 = corpus_of(&["one"]);
         let c2 = corpus_of(&["two", "three"]);
-        let (tx, rx) = std::sync::mpsc::channel::<SearchMsg>();
-        tx.send(SearchMsg::Update {
-            corpus: Some(c1),
-            query: "a".into(),
-            request_generation: 1,
-        })
-        .unwrap();
-        tx.send(SearchMsg::Update {
-            corpus: None,
-            query: "ab".into(),
-            request_generation: 2,
-        })
-        .unwrap();
-        tx.send(SearchMsg::Update {
-            corpus: Some(c2.clone()),
-            query: "abc".into(),
-            request_generation: 3,
-        })
-        .unwrap();
-
-        let first = rx.recv().unwrap();
-        let out = drain_to_latest(first, &rx);
+        let mut out = PendingUpdate::default();
+        out.merge(Some(c1), "a".into(), 1);
+        out.merge(None, "ab".into(), 2);
+        out.merge(Some(c2.clone()), "abc".into(), 3);
 
         assert!(!out.stop);
         assert_eq!(out.query.as_deref(), Some("abc"), "newest query wins");
@@ -1027,24 +993,11 @@ mod tests {
     }
 
     #[test]
-    fn drain_to_latest_none_corpus_keeps_earlier_corpus() {
+    fn pending_merge_none_corpus_keeps_earlier_corpus() {
         let c1 = corpus_of(&["one"]);
-        let (tx, rx) = std::sync::mpsc::channel::<SearchMsg>();
-        tx.send(SearchMsg::Update {
-            corpus: Some(c1.clone()),
-            query: "a".into(),
-            request_generation: 1,
-        })
-        .unwrap();
-        tx.send(SearchMsg::Update {
-            corpus: None,
-            query: "ab".into(),
-            request_generation: 2,
-        })
-        .unwrap();
-
-        let first = rx.recv().unwrap();
-        let out = drain_to_latest(first, &rx);
+        let mut out = PendingUpdate::default();
+        out.merge(Some(c1.clone()), "a".into(), 1);
+        out.merge(None, "ab".into(), 2);
 
         assert!(
             std::sync::Arc::ptr_eq(&out.corpus.unwrap(), &c1),
@@ -1055,20 +1008,22 @@ mod tests {
     }
 
     #[test]
-    fn drain_to_latest_stop_wins() {
-        let (tx, rx) = std::sync::mpsc::channel::<SearchMsg>();
-        tx.send(SearchMsg::Update {
-            corpus: None,
-            query: "a".into(),
-            request_generation: 1,
-        })
-        .unwrap();
-        tx.send(SearchMsg::Stop).unwrap();
+    fn dropped_search_worker_discards_pending_work_and_exits() {
+        let daemon = SearchDaemon::new();
+        let shared = daemon.shared.clone();
+        daemon.submit(Some(corpus_of(&["first"])), "first".into(), 1);
+        for generation in 2..=1_000 {
+            daemon.submit(None, format!("query-{generation}"), generation);
+        }
+        drop(daemon);
 
-        let first = rx.recv().unwrap();
-        let out = drain_to_latest(first, &rx);
-
-        assert!(out.stop);
+        for _ in 0..1_000 {
+            if Arc::strong_count(&shared) == 1 {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("scrollback search worker did not exit after owner drop");
     }
 
     #[test]
@@ -1153,7 +1108,7 @@ mod tests {
         // queries back-to-back without polling between sends so they coalesce in
         // the channel. None of the burst updates carry a corpus (content is
         // unchanged), so the daemon must reuse the corpus it holds and settle on
-        // the LAST query — drain_to_latest coalescing + corpus carry-forward
+        // the LAST query — pending-request coalescing + corpus carry-forward
         // (`Update.corpus` is `None`) exercised end-to-end through the daemon.
         let state = state_with(&["alpha", "alpha beta", "beta gamma"]);
         let mut search = ScrollbackSearchState::open();

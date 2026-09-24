@@ -58,7 +58,7 @@ pub fn maybe_commit_welcome(app: &mut AppView, terminal: &mut PagerTerminal) {
     let version = version::VERSION;
     let (cwd, model) = match minimal_api::app_active_view(app) {
         ActiveView::Agent(id) => {
-            let agent = minimal_api::app_agent(app, *id);
+            let agent = minimal_api::app_visible_agent(app, *id);
             (
                 agent
                     .map(|a| minimal_api::agent_cwd(a).display().to_string())

@@ -358,13 +358,19 @@ pub(crate) const SEND_NOW_TIP_SENTINEL: &str = "to send now";
 // careful environment variable setup to avoid static caching issues with
 // GROW_HOME.
 
-/// Seed `~/.grow/config.toml` with a `[ui]` section body (e.g.
-/// `"vim_mode = true"`). Call before spawning the pager.
+/// Append a `[ui]` section body (e.g. `"vim_mode = true"`) to the isolated
+/// `~/.grow/config.toml`, preserving provider configuration already seeded by
+/// `ContentController::seed_llm_config`. Call before spawning the pager.
 pub(crate) fn seed_ui_config(content: &ContentController, ui_body: &str) {
     let grow_home = content.home().join(".grow");
     std::fs::create_dir_all(&grow_home).expect("create .grow");
-    let config = format!("[ui]\n{ui_body}\n");
-    std::fs::write(grow_home.join("config.toml"), config).expect("write config.toml");
+    let config_path = grow_home.join("config.toml");
+    let mut config = std::fs::read_to_string(&config_path).unwrap_or_default();
+    if !config.is_empty() && !config.ends_with('\n') {
+        config.push('\n');
+    }
+    config.push_str(&format!("\n[ui]\n{ui_body}\n"));
+    std::fs::write(config_path, config).expect("write config.toml");
 }
 
 /// Seed `[ui] keep_text_selection = "hold"` under the content controller's home.

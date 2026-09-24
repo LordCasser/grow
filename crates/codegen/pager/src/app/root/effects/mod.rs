@@ -22,12 +22,33 @@ use acp_transport::protocol as acp;
 use tokio::task::JoinSet;
 use tokio::io::AsyncBufReadExt as _;
 use acp_transport::{AcpAgentTx, acp_send};
-use actions::{ClipboardPasteTarget, Effect, ProbedAttachment, SubagentKillOutcome, TaskResult};
-#[cfg(test)]
+use actions::{ClipboardPasteTarget, Effect, ProbedAttachment, QueueControlOperation, SubagentKillOutcome, TaskResult};
 use agent::AgentId;
 use crate::unified_log as ulog;
 use shell::sampling::error::http_status_from_error;
 use shell::session::{ExtMethodResult, SessionInfoResponse};
+
+static AGENT_CATALOG_SLOT: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
+
+async fn run_agent_catalog_discovery<T: Send + 'static>(
+    slot: std::sync::Arc<tokio::sync::Semaphore>,
+    deadline: std::time::Duration,
+    scan: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    tokio::time::timeout(deadline, async {
+        let permit = slot.acquire_owned().await.map_err(|error| error.to_string())?;
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            scan()
+        })
+        .await
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|_| "Agent catalog scan timed out".to_owned())
+    .and_then(std::convert::identity)
+}
 
 fn control_rpc_outcome(status: Option<&str>) -> actions::ControlRpcOutcome {
     if status == Some("superseded") {
@@ -76,6 +97,45 @@ fn recap_admission_error(response: &acp::ExtResponse) -> Option<String> {
     }
 }
 
+fn spawn_queue_control(
+    tasks: &mut JoinSet<TaskResult>,
+    acp_tx: &AcpAgentTx,
+    agent_id: AgentId,
+    session_id: acp::SessionId,
+    binding_epoch: u32,
+    operation: QueueControlOperation,
+    id: String,
+    expected_version: u64,
+    edit_id: Option<String>,
+    params: serde_json::Value,
+) {
+    let tx = acp_tx.clone();
+    tasks.spawn(async move {
+        let request = acp::ExtRequest::new(
+            "grow/queue/control",
+            serde_json::value::to_raw_value(&params)
+                .expect("serialize queue control params")
+                .into(),
+        );
+        let result = match acp_send(request, &tx).await {
+            Ok(response) => serde_json::from_str(response.0.get()).map_err(|error| {
+                sanitize_user_error(&format!("invalid queue control response: {error}"))
+            }),
+            Err(error) => Err(sanitize_user_error(&error.to_string())),
+        };
+        TaskResult::QueueControlResolved {
+            agent_id,
+            session_id,
+            binding_epoch,
+            operation,
+            id,
+            expected_version,
+            edit_id,
+            result,
+        }
+    });
+}
+
 pub(crate) fn execute(
     effect: Effect,
     tasks: &mut JoinSet<TaskResult>,
@@ -87,6 +147,20 @@ pub(crate) fn execute(
     match effect {
         Effect::WriteTranscriptFile { id, request } => {
             tasks.spawn(crate::app::transcript_file_writes::execute(id, request));
+        }
+        Effect::WriteMinimalTranscriptSnapshot {
+            generation,
+            owner,
+            content,
+        } => {
+            tasks.spawn(async move {
+                let result = crate::export_cmd::write_pager_transcript_background(content, true).await;
+                TaskResult::MinimalTranscriptSnapshotWritten {
+                    generation,
+                    owner,
+                    result,
+                }
+            });
         }
 
         Effect::RegisterActiveSession { session_id, cwd } => {
@@ -716,9 +790,31 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::FetchSessionList { query, seq, .. } => {
+        Effect::ResyncSession { agent_id, session_id, cwd, generation, permission_mode } => {
             let tx = acp_tx.clone();
-            let cwd = cwd.to_path_buf();
+            tasks.spawn(async move {
+                let meta = serde_json::json!({
+                    "permissionMode": shell::util::config::permission_mode_canonical_str(permission_mode),
+                });
+                let request = acp::LoadSessionRequest::new(session_id.clone(), cwd.clone())
+                    .mcp_servers(shell::util::config::load_mcp_servers(&cwd))
+                    .meta(meta.as_object().cloned());
+                let result = tokio::time::timeout(
+                    std::time::Duration::from_secs(30),
+                    acp_send(request, &tx),
+                )
+                .await
+                .map_err(|_| "Session resync timed out".to_owned())
+                .and_then(|result| {
+                    result
+                        .map(|response| parse_session_load_foreground(response.meta.as_ref()))
+                        .map_err(|error| sanitize_user_error(&error.to_string()))
+                });
+                TaskResult::SessionResynced { agent_id, session_id, generation, result }
+            });
+        }
+        Effect::FetchSessionList { cwd, query, seq, .. } => {
+            let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
                     let mut params = serde_json::json!({
@@ -1144,26 +1240,16 @@ pub(crate) fn execute(
                     TaskResult::CancelComplete
                 });
         }
-        Effect::QueueRemove { session_id, id, expected_version } => {
-            let tx = acp_tx.clone();
-            tasks
-                .spawn(async move {
-                    let params = serde_json::json!({
-                    "sessionId": session_id.0.to_string(),
-                    "id": id,
-                    "expectedVersion": expected_version,
-                });
-                    let notification = acp::ExtNotification::new(
-                        "grow/queue/remove",
-                        serde_json::value::to_raw_value(&params)
-                            .expect("serialize queue/remove params")
-                            .into(),
-                    );
-                    if let Err(e) = acp_send(notification, &tx).await {
-                        tracing::warn!("Failed to send queue/remove notification: {e}");
-                    }
-                    TaskResult::CancelComplete
-                });
+        Effect::QueueRemove { agent_id, session_id, binding_epoch, id, expected_version, edit_id } => {
+            let params = serde_json::json!({
+                "sessionId": session_id.0.to_string(),
+                "operation": "remove",
+                "id": id,
+                "expectedVersion": expected_version,
+                "editId": edit_id,
+            });
+            spawn_queue_control(tasks, acp_tx, agent_id, session_id, binding_epoch,
+                QueueControlOperation::Remove, id, expected_version, edit_id, params);
         }
         Effect::QueueReorder { session_id, ordered_ids } => {
             let tx = acp_tx.clone();
@@ -1204,66 +1290,39 @@ pub(crate) fn execute(
                     TaskResult::CancelComplete
                 });
         }
-        Effect::QueueEdit { session_id, id, new_text } => {
-            let tx = acp_tx.clone();
-            tasks
-                .spawn(async move {
-                    let params = serde_json::json!({
-                    "sessionId": session_id.0.to_string(),
-                    "id": id,
-                    "newText": new_text,
-                });
-                    let notification = acp::ExtNotification::new(
-                        "grow/queue/edit",
-                        serde_json::value::to_raw_value(&params)
-                            .expect("serialize queue/edit params")
-                            .into(),
-                    );
-                    if let Err(e) = acp_send(notification, &tx).await {
-                        tracing::warn!("Failed to send queue/edit notification: {e}");
-                    }
-                    TaskResult::CancelComplete
-                });
+        Effect::QueueEdit { agent_id, session_id, binding_epoch, id, expected_version, edit_id, new_text } => {
+            let params = serde_json::json!({
+                "sessionId": session_id.0.to_string(),
+                "operation": "save",
+                "id": id,
+                "expectedVersion": expected_version,
+                "editId": edit_id,
+                "newText": new_text,
+            });
+            spawn_queue_control(tasks, acp_tx, agent_id, session_id, binding_epoch,
+                QueueControlOperation::Save, id, expected_version, Some(edit_id), params);
         }
-        Effect::QueueHoldEdit { session_id, id } => {
-            let tx = acp_tx.clone();
-            tasks
-                .spawn(async move {
-                    let params = serde_json::json!({
-                    "sessionId": session_id.0.to_string(),
-                    "id": id,
-                });
-                    let notification = acp::ExtNotification::new(
-                        "grow/queue/hold_edit",
-                        serde_json::value::to_raw_value(&params)
-                            .expect("serialize queue/hold_edit params")
-                            .into(),
-                    );
-                    if let Err(e) = acp_send(notification, &tx).await {
-                        tracing::warn!("Failed to send queue/hold_edit notification: {e}");
-                    }
-                    TaskResult::CancelComplete
-                });
+        Effect::QueueHoldEdit { agent_id, session_id, id, expected_version, edit_id, binding_epoch } => {
+            let params = serde_json::json!({
+                "sessionId": session_id.0.to_string(),
+                "operation": "hold",
+                "id": id,
+                "expectedVersion": expected_version,
+                "editId": edit_id,
+            });
+            spawn_queue_control(tasks, acp_tx, agent_id, session_id, binding_epoch,
+                QueueControlOperation::Hold, id, expected_version, Some(edit_id), params);
         }
-        Effect::QueueReleaseEdit { session_id, id } => {
-            let tx = acp_tx.clone();
-            tasks
-                .spawn(async move {
-                    let params = serde_json::json!({
-                    "sessionId": session_id.0.to_string(),
-                    "id": id,
-                });
-                    let notification = acp::ExtNotification::new(
-                        "grow/queue/release_edit",
-                        serde_json::value::to_raw_value(&params)
-                            .expect("serialize queue/release_edit params")
-                            .into(),
-                    );
-                    if let Err(e) = acp_send(notification, &tx).await {
-                        tracing::warn!("Failed to send queue/release_edit notification: {e}");
-                    }
-                    TaskResult::CancelComplete
-                });
+        Effect::QueueReleaseEdit { agent_id, session_id, binding_epoch, id, expected_version, edit_id } => {
+            let params = serde_json::json!({
+                "sessionId": session_id.0.to_string(),
+                "operation": "release",
+                "id": id,
+                "expectedVersion": expected_version,
+                "editId": edit_id,
+            });
+            spawn_queue_control(tasks, acp_tx, agent_id, session_id, binding_epoch,
+                QueueControlOperation::Release, id, expected_version, Some(edit_id), params);
         }
         Effect::QueueInterject {
             session_id,
@@ -1627,7 +1686,8 @@ pub(crate) fn execute(
                     let probe_bracketed = ctx.source.is_bracketed();
                     let probe = tokio::task::spawn_blocking(move || {
                         if change_count.is_some()
-                            && crate::clipboard::clipboard_change_count() != change_count
+                            && crate::clipboard::clipboard_change_count_background()
+                                != change_count
                         {
                             return (ProbedAttachment::ProbeDropped, None);
                         }
@@ -2834,6 +2894,36 @@ pub(crate) fn execute(
                     }
                 });
         }
+        Effect::LoadAgentsModal { agent_id, cwd, load_token } => {
+            tasks.spawn(async move {
+                let result = run_agent_catalog_discovery(
+                    AGENT_CATALOG_SLOT.clone(),
+                    std::time::Duration::from_secs(5),
+                    move || crate::views::agents_modal::load_agent_catalog(&cwd),
+                ).await;
+                TaskResult::AgentsModalLoaded {
+                    agent_id,
+                    load_token,
+                    result,
+                }
+            });
+        }
+        Effect::LoadSwitchAgentCatalog { agent_id, cwd, request_token, binding_epoch, session_id } => {
+            tasks.spawn(async move {
+                let result = run_agent_catalog_discovery(
+                    AGENT_CATALOG_SLOT.clone(),
+                    std::time::Duration::from_secs(5),
+                    move || crate::views::agents_modal::build_switch_agent_catalog(&cwd),
+                ).await;
+                TaskResult::SwitchAgentCatalogLoaded {
+                    agent_id,
+                    request_token,
+                    binding_epoch,
+                    session_id,
+                    result,
+                }
+            });
+        }
         Effect::ShowSessionInfo { agent_id, session_id, revision, show_resolved_model, nonce } => {
             let tx = acp_tx.clone();
             tasks
@@ -3144,7 +3234,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::SendRecap { session_id, auto } => {
+        Effect::SendRecap { session_id, auto, away_period_id } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -3154,6 +3244,7 @@ pub(crate) fn execute(
                                 &serde_json::json!({
                         "sessionId": session_id.0.to_string(),
                         "auto": auto,
+                        "awayPeriodId": away_period_id,
                     }),
                             )
                             .expect("serialize recap params")
@@ -3565,7 +3656,7 @@ pub(crate) fn execute(
                     }
                 });
         }
-        Effect::RewindExecute { agent_id, session_id, target_prompt_index, mode } => {
+        Effect::RewindExecute { agent_id, session_id, session_binding_epoch, target_prompt_index, mode } => {
             let tx = acp_tx.clone();
             tasks
                 .spawn(async move {
@@ -3598,12 +3689,16 @@ pub(crate) fn execute(
                                 Ok(r) => {
                                     TaskResult::RewindExecuteComplete {
                                         agent_id,
+                                        session_id,
+                                        session_binding_epoch,
                                         response: r,
                                     }
                                 }
                                 Err(e) => {
                                     TaskResult::RewindExecuteFailed {
                                         agent_id,
+                                        session_id,
+                                        session_binding_epoch,
                                         error: format!("invalid response: {e}"),
                                     }
                                 }
@@ -3612,6 +3707,8 @@ pub(crate) fn execute(
                         Err(e) => {
                             TaskResult::RewindExecuteFailed {
                                 agent_id,
+                                session_id,
+                                session_binding_epoch,
                                 error: sanitize_user_error(&e.to_string()),
                             }
                         }

@@ -13,6 +13,8 @@ const TAG: &str = "QUIT";
 #[ignore]
 async fn minimal_parked_plan_survives_quit() {
     let content = ContentController::start().await.expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
+    content.seed_llm_config().expect("seed mock LLM config");
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} first turn done."));
 
     let mut harness = spawn_minimal_sized(&content, 20, 100);

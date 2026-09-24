@@ -1745,6 +1745,15 @@ fn simple_mode_rollback_preserves_queue_release_effect() {
         server_id: Some("q1".into()),
         kind: crate::app::session::QueueEntryKind::Prompt,
     };
+    agent.server_queue_edit = Some(crate::app::agent_view::queue_edit::ServerQueueEdit {
+        row_id: 7,
+        id: "q1".into(),
+        version: 0,
+        edit_id: "edit-1".into(),
+        pending: false,
+        saving: false,
+        lost: false,
+    });
     agent.prompt.set_text("");
     agent.force_active_pane(crate::views::agent::ActivePane::Prompt);
 
@@ -1756,8 +1765,8 @@ fn simple_mode_rollback_preserves_queue_release_effect() {
 
     assert!(matches!(
         effects.as_slice(),
-        [Effect::QueueReleaseEdit { session_id, id }]
-            if session_id == &agent_client_protocol::schema::v1::SessionId::new("s1") && id == "q1"
+        [Effect::QueueReleaseEdit { session_id, id, edit_id, .. }]
+            if session_id == &agent_client_protocol::schema::v1::SessionId::new("s1") && id == "q1" && edit_id == "edit-1"
     ));
 }
 
@@ -3459,6 +3468,7 @@ fn new_session_inherits_switched_default_model_for_welcome() {
 #[serial_test::serial(MOUSE_CAPTURE_ENABLED)]
 #[test]
 fn mouse_reporting_toggle_off_sticky_persists_after_transient_toast() {
+    let _reset = MouseCaptureTestReset;
     reset_mouse_capture_enabled(true);
     assert!(mouse_capture_is_enabled());
     let mut app = test_app_with_agent();

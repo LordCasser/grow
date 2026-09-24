@@ -2,7 +2,7 @@
 //! turn's tool tracker. A sideband must not claim or complete a primary turn.
 
 use super::*;
-use crate::scrollback::blocks::tool::OtherToolCallBlock;
+use crate::scrollback::blocks::tool::{CoordinationPhase, OtherToolCallBlock};
 
 impl ScrollbackState {
     fn coordination_entry_id(&self, source_peer_id: &str, inquiry_id: &str) -> Option<EntryId> {
@@ -25,11 +25,15 @@ impl ScrollbackState {
         mut block: OtherToolCallBlock,
         is_replay: bool,
     ) -> bool {
-        let row = block
+        let Some(row) = block
             .coordination
             .as_ref()
-            .expect("coordination row identity");
-        let terminal = row.terminal;
+            .filter(|row| !row.source_peer_id.is_empty() && !row.inquiry_id.is_empty())
+        else {
+            return false;
+        };
+        let phase = row.phase;
+        let terminal = phase == CoordinationPhase::Terminal;
         let mut running = !is_replay && !terminal;
         let existing = self.coordination_entry_id(&row.source_peer_id, &row.inquiry_id);
         let id = if let Some(id) = existing {
@@ -37,11 +41,16 @@ impl ScrollbackState {
             let RenderBlock::ToolCall(ToolCallBlock::Other(previous)) = &entry.block else {
                 unreachable!()
             };
-            // Replayed receipts/approvals cannot resurrect a completed row.
-            if previous
+            let previous_phase = previous
                 .coordination
                 .as_ref()
-                .is_some_and(|row| row.terminal)
+                .expect("existing inquiry row has coordination identity")
+                .phase;
+            // Out-of-order receipts cannot erase approval or terminal facts.
+            // A replay at the same phase cannot replace a live projection.
+            if previous_phase > phase
+                || previous_phase == CoordinationPhase::Terminal
+                || (previous_phase == phase && is_replay)
             {
                 return false;
             }
@@ -101,7 +110,7 @@ impl ScrollbackState {
                     *id,
                     existing,
                     block.clone(),
-                    !entry.is_running && !row.terminal,
+                    !entry.is_running && row.phase != CoordinationPhase::Terminal,
                 ))
             })
             .collect();
@@ -132,9 +141,102 @@ mod tests {
         block.coordination = Some(CoordinationRow {
             source_peer_id: "peer".into(),
             inquiry_id: id.into(),
-            terminal,
+            phase: if terminal {
+                CoordinationPhase::Terminal
+            } else {
+                CoordinationPhase::Received
+            },
         });
         block
+    }
+
+    fn phased_row(id: &str, peer: &str, phase: CoordinationPhase) -> OtherToolCallBlock {
+        let mut block = row(id, phase == CoordinationPhase::Terminal);
+        let coordination = block.coordination.as_mut().unwrap();
+        coordination.source_peer_id = peer.into();
+        coordination.phase = phase;
+        block.name = match phase {
+            CoordinationPhase::Received => "Inquiry received",
+            CoordinationPhase::Approved => "Inquiry approved",
+            CoordinationPhase::Terminal => "Inquiry complete",
+        }
+        .into();
+        block
+    }
+
+    #[test]
+    fn coordination_approval_before_start_keeps_approved_details() {
+        let mut state = ScrollbackState::new();
+        let approved = phased_row("same", "peer", CoordinationPhase::Approved);
+        assert!(state.upsert_coordination_row(approved, false));
+        let id = state.entry(0).unwrap().id;
+        for is_replay in [false, true] {
+            assert!(!state.upsert_coordination_row(
+                phased_row("same", "peer", CoordinationPhase::Received),
+                is_replay,
+            ));
+        }
+        assert_eq!(state.len(), 1);
+        let entry = state.get_by_id(id).unwrap();
+        assert!(entry.is_running);
+        let RenderBlock::ToolCall(ToolCallBlock::Other(block)) = &entry.block else {
+            panic!()
+        };
+        assert_eq!(block.name, "Inquiry approved");
+        assert_eq!(
+            block.coordination.as_ref().unwrap().phase,
+            CoordinationPhase::Approved
+        );
+    }
+
+    #[test]
+    fn coordination_terminal_first_absorbs_older_live_and_replayed_notices() {
+        let mut state = ScrollbackState::new();
+        assert!(state.upsert_coordination_row(
+            phased_row("same", "peer", CoordinationPhase::Terminal),
+            false,
+        ));
+        let id = state.entry(0).unwrap().id;
+        for phase in [CoordinationPhase::Received, CoordinationPhase::Approved] {
+            for is_replay in [false, true] {
+                assert!(
+                    !state.upsert_coordination_row(phased_row("same", "peer", phase), is_replay,)
+                );
+            }
+        }
+        assert_eq!(state.len(), 1);
+        let entry = state.get_by_id(id).unwrap();
+        assert!(!entry.is_running);
+        let RenderBlock::ToolCall(ToolCallBlock::Other(block)) = &entry.block else {
+            panic!()
+        };
+        assert_eq!(block.name, "Inquiry complete");
+    }
+
+    #[test]
+    fn coordination_same_id_peers_advance_independently() {
+        let mut state = ScrollbackState::new();
+        state.upsert_coordination_row(
+            phased_row("same", "parent", CoordinationPhase::Approved),
+            false,
+        );
+        state.upsert_coordination_row(
+            phased_row("same", "child", CoordinationPhase::Received),
+            false,
+        );
+        let parent_id = state.entry(0).unwrap().id;
+        let child_id = state.entry(1).unwrap().id;
+        state.upsert_coordination_row(
+            phased_row("same", "child", CoordinationPhase::Terminal),
+            false,
+        );
+        assert!(!state.upsert_coordination_row(
+            phased_row("same", "parent", CoordinationPhase::Received),
+            false,
+        ));
+        assert_eq!(state.len(), 2);
+        assert!(state.get_by_id(parent_id).unwrap().is_running);
+        assert!(!state.get_by_id(child_id).unwrap().is_running);
     }
 
     #[test]
@@ -149,7 +251,7 @@ mod tests {
 
         // Cursor reload must use the same composite identity too.
         let mut tail = state.fresh_continuation();
-        other.coordination.as_mut().unwrap().terminal = true;
+        other.coordination.as_mut().unwrap().phase = CoordinationPhase::Terminal;
         other.name = "Answered session other".into();
         tail.upsert_coordination_row(other, true);
         state.append_entries_from(tail);
@@ -192,6 +294,29 @@ mod tests {
         assert!(state.entry(0).unwrap().is_running);
         assert!(state.has_running_entries());
         assert_eq!(state.len(), 1);
+    }
+
+    #[test]
+    fn coordination_upsert_rejects_missing_or_empty_identity_without_mutation() {
+        let invalid = [
+            OtherToolCallBlock::new("Answering session peer", ""),
+            {
+                let mut block = row("one", false);
+                block.coordination.as_mut().unwrap().source_peer_id.clear();
+                block
+            },
+            {
+                let mut block = row("one", false);
+                block.coordination.as_mut().unwrap().inquiry_id.clear();
+                block
+            },
+        ];
+        let mut state = ScrollbackState::new();
+        for block in invalid {
+            assert!(!state.upsert_coordination_row(block, false));
+            assert!(state.is_empty());
+            assert!(!state.has_running_entries());
+        }
     }
 
     #[test]

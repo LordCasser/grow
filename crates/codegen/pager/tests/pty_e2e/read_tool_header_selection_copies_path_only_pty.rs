@@ -14,6 +14,8 @@ use super::common::*;
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn read_tool_header_selection_copies_path_only_pty() {
     let content = ContentController::start().await.expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
+    content.seed_llm_config().expect("seed mock LLM config");
 
     // File lives under the isolated HOME so the agent sandbox can read it.
     let target = content.home().join(READ_HDR_FILE);

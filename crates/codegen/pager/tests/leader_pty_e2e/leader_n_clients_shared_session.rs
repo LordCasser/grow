@@ -24,6 +24,11 @@ async fn leader_n_clients_shared_session() {
     let cluster = LeaderCluster::start(DEFAULT_ROWS, DEFAULT_COLS)
         .await
         .expect("start cluster");
+    git2::Repository::init(cluster.content().home()).expect("initialize isolated project");
+    cluster
+        .content()
+        .seed_llm_config()
+        .expect("seed mock LLM config");
     cluster
         .content()
         .set_response(format!("{} first turn payload.", turn_sentinel(1)));
@@ -36,6 +41,9 @@ async fn leader_n_clients_shared_session() {
         .expect("driver submit turn 1");
     a.wait_for_text(&turn_sentinel(1), STREAM_TIMEOUT)
         .expect("driver turn 1");
+    cluster
+        .wait_for_turn_completed(STREAM_TIMEOUT)
+        .expect("driver turn 1 durable terminal before viewers attach");
 
     // Every viewer attaches through the shared leader and must replay the
     // driver's transcript exactly once (duplicated replay or an empty pane

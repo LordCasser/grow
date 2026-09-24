@@ -4,7 +4,10 @@ use super::cta::{
     handle_plugin_cta_catalog_loaded, handle_plugin_cta_debounce_expired,
     handle_plugin_cta_mcps_loaded,
 };
-use super::ctx::{find_agent_by_session_id, find_agent_view_by_session_id, get_active_agent_mut};
+use super::ctx::{
+    find_agent_by_session_id, find_agent_view_by_session_id, find_transcript_file_owner,
+    get_active_agent_mut,
+};
 use super::dashboard::handle_dashboard_location_candidates_loaded;
 use super::notes::{handle_btw_response, handle_memory_note_saved};
 use super::prompt::{
@@ -14,6 +17,7 @@ use super::queue::maybe_drain_queue;
 use super::rewind::{
     dispatch_rewind_success, handle_rewind_execute_failed, handle_rewind_points_loaded,
     handle_rewind_preview_complete, handle_rewind_preview_failed,
+    rewind_execution_binding_is_current, show_rewind_execution_notice,
 };
 use super::router::{dispatch, dispatch_action_result};
 use super::session::fork::{
@@ -43,13 +47,27 @@ use super::turn::handle_bg_task_killed;
 use crate::app::actions::{
     ClipboardPasteCompletion, ClipboardPasteContext, ClipboardPasteFailure, ClipboardPasteTarget,
     DoctorFixTarget, DoctorPlanningOutcome, Effect, ProbedAttachment, PromptStatusWire,
-    SubagentKillOutcome, TaskResult,
+    QueueControlOperation, SubagentKillOutcome, TaskResult,
 };
 use crate::app::root::{ActiveView, AppView};
 use crate::app::session::AgentId;
 use crate::scrollback::block::RenderBlock;
 use crate::scrollback::blocks::{NoticeCategory, NoticeTone};
 use acp_transport::protocol as acp;
+
+fn queue_control_reason(reason: &str) -> &'static str {
+    match reason {
+        "already_running" => "prompt already started",
+        "not_queued" => "prompt is no longer queued",
+        "stale_version" => "prompt changed; refresh the queue",
+        "held_for_edit" => "prompt is being edited elsewhere",
+        "edit_hold_mismatch" => "edit hold is no longer yours",
+        "admission_failed" => "edited prompt could not be saved",
+        "dismiss_failed" => "prompt removal could not be saved",
+        "blank_text" => "edited prompt is empty",
+        _ => "queue operation failed",
+    }
+}
 pub(super) fn unregister_session_effect(session_id: Option<acp::SessionId>) -> Vec<Effect> {
     session_id
         .map(|sid| Effect::UnregisterActiveSession { session_id: sid })
@@ -290,8 +308,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             if !app.transcript_file_writes.finish(id) {
                 return vec![];
             }
-            if let Some(agent) = app.agents.get_mut(&agent_id)
-                && agent.session.session_id == session_id
+            if let Some(agent) =
+                find_transcript_file_owner(&mut app.agents, agent_id, session_id.as_ref())
             {
                 let message =
                     result.unwrap_or_else(|error| format!("Failed to write file: {error}"));
@@ -303,6 +321,16 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 .start_next()
                 .into_iter()
                 .collect()
+        }
+        TaskResult::MinimalTranscriptSnapshotWritten {
+            generation,
+            owner,
+            result,
+        } => {
+            crate::minimal_api::complete_minimal_transcript_snapshot(
+                app, generation, owner, result,
+            );
+            vec![]
         }
 
         TaskResult::SessionCreated {
@@ -386,6 +414,36 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             session_id,
             error,
         } => handle_session_load_failed(app, agent_id, session_id, error),
+        TaskResult::SessionResynced {
+            agent_id,
+            session_id,
+            generation,
+            result,
+        } => {
+            let Some(agent) = app.agents.get_mut(&agent_id) else {
+                return vec![];
+            };
+            if agent.session.session_id.as_ref() != Some(&session_id) {
+                return vec![];
+            }
+            let ok = result.is_ok();
+            let foreground = result
+                .as_ref()
+                .ok()
+                .and_then(|value| value.as_ref())
+                .map(|snapshot| snapshot.prompt_id.clone());
+            if !agent.finalize_reload_and_maybe_adopt(generation, ok, foreground) {
+                return vec![];
+            }
+            if let Err(error) = result {
+                agent.show_toast(&format!("Session resync failed: {error}. Reload to retry."));
+                return vec![];
+            }
+            crate::app::subagent::restore_descendant_state(app, agent_id);
+            app.agents
+                .get_mut(&agent_id)
+                .map_or_else(Vec::new, |agent| maybe_drain_queue(agent).effects)
+        }
         TaskResult::SessionListLoaded {
             sessions,
             scope,
@@ -435,6 +493,147 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             http_status,
             prompt_id,
         } => handle_prompt_response(app, agent_id, result, http_status, prompt_id),
+        TaskResult::QueueControlResolved {
+            agent_id,
+            session_id,
+            binding_epoch,
+            operation,
+            id,
+            expected_version,
+            edit_id,
+            result,
+        } => {
+            let acknowledgement_unknown = result.is_err();
+            let outcome = result.and_then(|response| {
+                if response.applied {
+                    Ok(response.version)
+                } else {
+                    Err(queue_control_reason(response.reason.as_deref().unwrap_or("")).into())
+                }
+            });
+            let owned = app.agents.get(&agent_id).is_some_and(|agent| {
+                agent.session.session_id.as_ref() == Some(&session_id)
+                    && agent.session_binding_epoch == binding_epoch
+            });
+            let matching_edit = edit_id.as_deref().is_some_and(|edit_id| {
+                owned
+                    && app.agents.get(&agent_id).is_some_and(|agent| {
+                        agent.server_queue_edit.as_ref().is_some_and(|hold| {
+                            hold.id == id
+                                && hold.edit_id == edit_id
+                                && hold.version == expected_version
+                        })
+                    })
+            });
+            match operation {
+                QueueControlOperation::Hold => {
+                    let edit_target_visible = app.agents.get(&agent_id).is_some_and(|agent| {
+                        agent.queue.is_visible()
+                            && agent.active_pane == crate::app::agent_view::AgentPane::Queue
+                    });
+                    if !matching_edit
+                        || app.active_view != ActiveView::Agent(agent_id)
+                        || !edit_target_visible
+                    {
+                        if matching_edit {
+                            app.agents.get_mut(&agent_id).unwrap().server_queue_edit = None;
+                        }
+                        if outcome.is_ok() || acknowledgement_unknown {
+                            return vec![Effect::QueueReleaseEdit {
+                                agent_id,
+                                session_id,
+                                binding_epoch,
+                                id,
+                                expected_version,
+                                edit_id: edit_id.unwrap_or_default(),
+                            }];
+                        }
+                        return vec![];
+                    }
+                    let agent = app.agents.get_mut(&agent_id).unwrap();
+                    match outcome {
+                        Ok(Some(version)) if version == expected_version => {
+                            let mut effects = Vec::new();
+                            agent.confirm_server_queue_hold(
+                                &id,
+                                edit_id.as_deref().unwrap_or_default(),
+                                version,
+                                &mut effects,
+                            );
+                            effects
+                        }
+                        Ok(_) => {
+                            agent.server_queue_edit = None;
+                            agent.show_toast("Couldn't confirm queued edit version");
+                            vec![Effect::QueueReleaseEdit {
+                                agent_id,
+                                session_id,
+                                binding_epoch,
+                                id,
+                                expected_version,
+                                edit_id: edit_id.unwrap_or_default(),
+                            }]
+                        }
+                        Err(error) => {
+                            agent.server_queue_edit = None;
+                            agent.show_toast(&format!("Couldn't edit queued prompt: {error}"));
+                            if acknowledgement_unknown {
+                                vec![Effect::QueueReleaseEdit {
+                                    agent_id,
+                                    session_id,
+                                    binding_epoch,
+                                    id,
+                                    expected_version,
+                                    edit_id: edit_id.unwrap_or_default(),
+                                }]
+                            } else {
+                                vec![]
+                            }
+                        }
+                    }
+                }
+                QueueControlOperation::Save => {
+                    if matching_edit {
+                        app.agents
+                            .get_mut(&agent_id)
+                            .unwrap()
+                            .resolve_server_queue_save(
+                                &id,
+                                edit_id.as_deref().unwrap_or_default(),
+                                outcome.map(|_| ()),
+                            );
+                    }
+                    vec![]
+                }
+                QueueControlOperation::Release => {
+                    if owned && let Err(error) = outcome {
+                        app.agents
+                            .get_mut(&agent_id)
+                            .unwrap()
+                            .show_toast(&format!("Couldn't release queued edit: {error}"));
+                    }
+                    vec![]
+                }
+                QueueControlOperation::Remove => {
+                    if matching_edit {
+                        app.agents
+                            .get_mut(&agent_id)
+                            .unwrap()
+                            .resolve_server_queue_remove(
+                                &id,
+                                edit_id.as_deref().unwrap_or_default(),
+                                outcome.map(|_| ()),
+                            );
+                    } else if owned && let Err(error) = outcome {
+                        app.agents
+                            .get_mut(&agent_id)
+                            .unwrap()
+                            .show_toast(&format!("Couldn't remove queued prompt: {error}"));
+                    }
+                    vec![]
+                }
+            }
+        }
         TaskResult::PromptStatusResolved {
             agent_id,
             prompt_id,
@@ -1061,6 +1260,56 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             }
             vec![]
         }
+        TaskResult::AgentsModalLoaded {
+            agent_id,
+            load_token,
+            result,
+        } => {
+            if let Some(modal) = app
+                .agents
+                .get_mut(&agent_id)
+                .and_then(|agent| agent.agents_modal.as_mut())
+                && modal.load_token == load_token
+            {
+                modal.complete_reload(result);
+            }
+            vec![]
+        }
+        TaskResult::SwitchAgentCatalogLoaded {
+            agent_id,
+            request_token,
+            binding_epoch,
+            session_id,
+            result,
+        } => {
+            if !matches!(app.active_view, ActiveView::Agent(id) if id == agent_id) {
+                return vec![];
+            }
+            let Some(agent) = get_active_agent_mut(app) else {
+                return vec![];
+            };
+            if agent.switch_catalog_request != request_token
+                || agent.session_binding_epoch != binding_epoch
+                || agent.session.session_id != session_id
+            {
+                return vec![];
+            }
+            let Some(crate::views::modal::ActiveModal::ArgPicker { command, .. }) =
+                agent.active_modal.as_ref()
+            else {
+                return vec![];
+            };
+            if command != "agent" {
+                return vec![];
+            }
+            match result {
+                Ok(catalog) => agent.apply_switch_agent_catalog(catalog),
+                Err(error) => {
+                    agent.show_toast(&format!("Could not load agent definitions: {error}"))
+                }
+            }
+            vec![]
+        }
         TaskResult::SessionInfoComplete {
             agent_id,
             session_id,
@@ -1470,11 +1719,51 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::RewindPreviewFailed {
             agent_id, error, ..
         } => handle_rewind_preview_failed(app, agent_id, error),
-        TaskResult::RewindExecuteComplete { agent_id, response } => {
-            dispatch_rewind_success(app, agent_id, response)
+        TaskResult::RewindExecuteComplete {
+            agent_id,
+            session_id,
+            session_binding_epoch,
+            response,
+        } => {
+            if rewind_execution_binding_is_current(
+                app,
+                agent_id,
+                &session_id,
+                session_binding_epoch,
+            ) {
+                dispatch_rewind_success(app, agent_id, response)
+            } else {
+                show_rewind_execution_notice(
+                    app,
+                    if response.success {
+                        "Rewind completed in a previous session. Reload it to refresh."
+                    } else {
+                        "Rewind was rejected in a previous session."
+                    },
+                );
+                vec![]
+            }
         }
-        TaskResult::RewindExecuteFailed { agent_id, error } => {
-            handle_rewind_execute_failed(app, agent_id, error)
+        TaskResult::RewindExecuteFailed {
+            agent_id,
+            session_id,
+            session_binding_epoch,
+            error,
+        } => {
+            if rewind_execution_binding_is_current(
+                app,
+                agent_id,
+                &session_id,
+                session_binding_epoch,
+            ) {
+                handle_rewind_execute_failed(app, agent_id, error)
+            } else {
+                show_rewind_execution_notice(
+                    app,
+                    "Rewind outcome unknown for a previous session. Reload it to verify.",
+                );
+                vec![]
+            }
         }
         TaskResult::SuggestionDebounceExpired {
             agent_id,

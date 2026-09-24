@@ -38,6 +38,37 @@ pub struct SubagentPermissionEvent {
 }
 
 impl SubagentPermissionEvent {
+    fn redact_audit_details(&mut self) {
+        self.tool_name = tools::util::truncate_str_with_marker(&self.tool_name, 128).into_owned();
+        self.access_kind = match self.access_kind.as_str() {
+            "read" => "read",
+            "grep" => "grep",
+            "edit" => "edit",
+            "bash" => "bash",
+            "mcp" => "mcp",
+            "web_fetch" => "web_fetch",
+            "internal_control" => "internal_control",
+            _ => "other",
+        }
+        .to_owned();
+        let summary = match self.access_kind.as_str() {
+            "read" | "grep" | "edit" => "path details redacted".to_owned(),
+            "bash" => "command details redacted".to_owned(),
+            "mcp" => format!("{} (arguments redacted)", self.tool_name),
+            "web_fetch" => "URL details redacted".to_owned(),
+            "internal_control" => "control details redacted".to_owned(),
+            _ => "request details redacted".to_owned(),
+        };
+        self.access_summary =
+            Some(tools::util::truncate_str_with_marker(&summary, 240).into_owned());
+        self.access_detail = None;
+        self.classifier_reason = None;
+        self.reason = self
+            .reason
+            .as_deref()
+            .map(|reason| tools::util::truncate_str_with_marker(reason, 240).into_owned());
+    }
+
     pub fn child_label(&self) -> String {
         if let Some(title) = self
             .subagent_title
@@ -74,12 +105,38 @@ impl SubagentPermissionEvent {
         matches!(self.outcome, SubagentPermissionOutcome::Approved)
     }
 
+    fn safe_access_summary(&self) -> String {
+        let tool_name = tools::util::truncate_str_with_marker(&self.tool_name, 128);
+        match self.safe_access_kind() {
+            "read" | "grep" | "edit" => "path details redacted".to_owned(),
+            "bash" => "command details redacted".to_owned(),
+            "mcp" => format!("{tool_name} (arguments redacted)"),
+            "web_fetch" => "URL details redacted".to_owned(),
+            "internal_control" => "control details redacted".to_owned(),
+            _ => "request details redacted".to_owned(),
+        }
+    }
+
+    fn safe_access_kind(&self) -> &'static str {
+        match self.access_kind.as_str() {
+            "read" => "read",
+            "grep" => "grep",
+            "edit" => "edit",
+            "bash" => "bash",
+            "mcp" => "mcp",
+            "web_fetch" => "web_fetch",
+            "internal_control" => "internal_control",
+            _ => "other",
+        }
+    }
+
     pub fn compact_text(&self) -> String {
-        let access = self
-            .access_summary
-            .as_deref()
-            .map(|summary| format!("{} [{}: {summary}]", self.tool_name, self.access_kind))
-            .unwrap_or_else(|| format!("{} [{}]", self.tool_name, self.access_kind));
+        let access = format!(
+            "{} [{}: {}]",
+            tools::util::truncate_str_with_marker(&self.tool_name, 128),
+            self.safe_access_kind(),
+            self.safe_access_summary()
+        );
         format!(
             "Subagent permission · {} · {} · {access}",
             self.child_label(),
@@ -103,24 +160,23 @@ impl SubagentPermissionEvent {
             fields.push(format!("Description: {description}"));
         }
         fields.extend([
-            format!("Tool: {}", self.tool_name),
+            format!(
+                "Tool: {}",
+                tools::util::truncate_str_with_marker(&self.tool_name, 128)
+            ),
             format!("Tool call: {}", self.tool_call_id),
-            format!("Access kind: {}", self.access_kind),
+            format!("Access kind: {}", self.safe_access_kind()),
         ]);
-        if let Some(detail) = self.access_detail.as_deref() {
-            fields.push(format!("Access request:\n{detail}"));
-        } else if let Some(summary) = self.access_summary.as_deref() {
-            fields.push(format!("Access summary (replay-safe): {summary}"));
-        }
+        fields.push(format!(
+            "Access summary (replay-safe): {}",
+            self.safe_access_summary()
+        ));
         fields.extend([
             format!("Outcome: {}", self.outcome_label()),
             format!("Source: {}", self.source),
         ]);
         if let Some(reason) = self.reason.as_deref() {
             fields.push(format!("Reason: {reason}"));
-        }
-        if let Some(reason) = self.classifier_reason.as_deref() {
-            fields.push(format!("Classifier reason:\n{reason}"));
         }
         if let Some(latency_ms) = self.latency_ms {
             fields.push(format!("Judgment latency: {latency_ms} ms"));
@@ -135,11 +191,12 @@ impl SubagentPermissionEvent {
             theme.fg(theme.accent_error)
         };
         let prefix = format!("Subagent permission · {} · ", self.child_label());
-        let access = self
-            .access_summary
-            .as_deref()
-            .map(|summary| format!(" · {} [{}: {summary}]", self.tool_name, self.access_kind))
-            .unwrap_or_else(|| format!(" · {} [{}]", self.tool_name, self.access_kind));
+        let access = format!(
+            " · {} [{}: {}]",
+            tools::util::truncate_str_with_marker(&self.tool_name, 128),
+            self.safe_access_kind(),
+            self.safe_access_summary()
+        );
         BlockLine::styled(Line::from(vec![
             Span::styled(prefix, theme.muted()),
             Span::styled(self.outcome_label(), outcome_style),
@@ -161,6 +218,8 @@ impl SubagentPermissionBlock {
     }
 
     pub(crate) fn new_in_epoch(first: SubagentPermissionEvent, epoch: u64) -> Self {
+        let mut first = first;
+        first.redact_audit_details();
         Self {
             epoch,
             members: vec![first],
@@ -171,12 +230,29 @@ impl SubagentPermissionBlock {
         self.epoch
     }
 
-    pub fn push(&mut self, event: SubagentPermissionEvent) {
+    pub(crate) fn push(&mut self, event: SubagentPermissionEvent, source_epoch: u64) -> bool {
+        if source_epoch != self.epoch {
+            return false;
+        }
+        let mut event = event;
+        event.redact_audit_details();
         self.members.push(event);
+        true
     }
 
-    pub fn extend(&mut self, events: impl IntoIterator<Item = SubagentPermissionEvent>) {
-        self.members.extend(events);
+    pub(crate) fn extend(
+        &mut self,
+        events: impl IntoIterator<Item = SubagentPermissionEvent>,
+        source_epoch: u64,
+    ) -> bool {
+        if source_epoch != self.epoch {
+            return false;
+        }
+        self.members.extend(events.into_iter().map(|mut event| {
+            event.redact_audit_details();
+            event
+        }));
+        true
     }
 
     pub fn members(&self) -> &[SubagentPermissionEvent] {
@@ -367,23 +443,30 @@ mod tests {
     }
 
     #[test]
-    fn detail_contains_the_complete_audit_record() {
+    fn detail_redacts_legacy_request_and_classifier_prose() {
         let mut permission = event(SubagentPermissionOutcome::Unavailable);
-        let full_request = "cd /workspace && TOKEN=visible-only-in-live-modal cargo test \
-            --features a,b,c --package shell --test deliberately_long_permission_request";
-        let full_reason = "The complete classifier explanation is preserved for the live modal, \
-            including its final sentence and punctuation.";
-        permission.access_detail = Some(full_request.into());
-        permission.classifier_reason = Some(full_reason.into());
-        let detail = permission.detail_text();
+        let full_request = format!("TOKEN=visible-only-in-live-modal {}", "x".repeat(1800));
+        let full_reason = format!("classifier secret {}", "rationale ".repeat(100));
+        permission.tool_name = "sensitive_tool_name".repeat(20);
+        permission.access_summary = Some("untrusted-summary-secret".repeat(20));
+        permission.access_detail = Some(full_request.clone());
+        permission.classifier_reason = Some(full_reason.clone());
+        let block = SubagentPermissionBlock::new(permission);
+        let stored = block.member(0).unwrap();
+        let detail = stored.detail_text();
         assert!(detail.contains("Child session: 019ff931-child"));
-        assert!(detail.contains(&format!("Access request:\n{full_request}")));
+        assert!(!detail.contains(&full_request));
+        assert!(!detail.contains("TOKEN=visible-only-in-live-modal"));
         assert!(detail.contains("Outcome: unavailable → denied"));
         assert!(detail.contains("Reason: within task scope"));
-        assert!(detail.contains(&format!("Classifier reason:\n{full_reason}")));
+        assert!(!detail.contains(&full_reason));
+        assert!(!detail.contains("Classifier reason:"));
         assert!(detail.contains("Judgment latency: 3727 ms"));
-        assert!(!detail.contains("truncated"));
-        assert!(!detail.contains("Access summary"));
+        assert!(detail.contains("Access summary (replay-safe): path details redacted"));
+        assert!(stored.access_detail.is_none());
+        assert!(stored.classifier_reason.is_none());
+        assert!(stored.access_summary.as_deref().unwrap().len() <= 240);
+        assert!(stored.tool_name.len() <= 128);
     }
 
     #[test]
@@ -391,15 +474,18 @@ mod tests {
         let mut permission = event(SubagentPermissionOutcome::Approved);
         permission.access_detail = None;
         permission.classifier_reason = None;
-        let detail = permission.detail_text();
-        assert!(detail.contains("Access summary (replay-safe): /workspace/docs/03-LM.md"));
+        let detail = SubagentPermissionBlock::new(permission)
+            .member(0)
+            .unwrap()
+            .detail_text();
+        assert!(detail.contains("Access summary (replay-safe): path details redacted"));
     }
 
     #[test]
     fn group_is_one_line_collapsed_and_one_line_per_member_expanded() {
         let mut block = SubagentPermissionBlock::new(event(SubagentPermissionOutcome::Approved));
         assert_eq!(block.output(&ctx(DisplayMode::Collapsed)).lines.len(), 1);
-        block.push(event(SubagentPermissionOutcome::Denied));
+        assert!(block.push(event(SubagentPermissionOutcome::Denied), block.epoch()));
         assert_eq!(block.output(&ctx(DisplayMode::Collapsed)).lines.len(), 1);
         assert_eq!(block.output(&ctx(DisplayMode::Expanded)).lines.len(), 3);
     }
@@ -414,7 +500,7 @@ mod tests {
         let single = SubagentPermissionBlock::new(event(SubagentPermissionOutcome::Approved));
         assert!(!single.has_vpad_for(&appearance));
         let mut multi = SubagentPermissionBlock::new(event(SubagentPermissionOutcome::Approved));
-        multi.push(event(SubagentPermissionOutcome::Denied));
+        assert!(multi.push(event(SubagentPermissionOutcome::Denied), multi.epoch()));
         assert!(!multi.has_vpad_for(&appearance));
     }
 
@@ -431,7 +517,7 @@ mod tests {
         assert!(!single.is_empty());
 
         let mut multi = SubagentPermissionBlock::new(event(SubagentPermissionOutcome::Approved));
-        multi.push(event(SubagentPermissionOutcome::Denied));
+        assert!(multi.push(event(SubagentPermissionOutcome::Denied), multi.epoch()));
         assert_eq!(multi.is_empty(), multi.len().eq(&0));
         assert!(!multi.is_empty());
     }
@@ -447,9 +533,10 @@ mod tests {
     fn header_aggregates_outcomes_in_first_appearance_order() {
         use SubagentPermissionOutcome::{Approved, Denied};
         let mut block = SubagentPermissionBlock::new(event_with_child(Denied, "child-a"));
-        block.push(event_with_child(Approved, "child-b"));
-        block.push(event_with_child(Denied, "child-a"));
-        block.push(event_with_child(Denied, "child-b"));
+        let epoch = block.epoch();
+        assert!(block.push(event_with_child(Approved, "child-b"), epoch));
+        assert!(block.push(event_with_child(Denied, "child-a"), epoch));
+        assert!(block.push(event_with_child(Denied, "child-b"), epoch));
         assert_eq!(
             header_text(&block),
             "Denied 3 requests, Approved 1 request · 2 subagents"
@@ -458,8 +545,9 @@ mod tests {
         // Reverse member order reverses the buckets: order is member
         // first-appearance, not outcome kind.
         let mut block = SubagentPermissionBlock::new(event_with_child(Approved, "child-a"));
-        block.push(event_with_child(Denied, "child-b"));
-        block.push(event_with_child(Denied, "child-a"));
+        let epoch = block.epoch();
+        assert!(block.push(event_with_child(Denied, "child-b"), epoch));
+        assert!(block.push(event_with_child(Denied, "child-a"), epoch));
         assert_eq!(
             header_text(&block),
             "Approved 1 request, Denied 2 requests · 2 subagents"
@@ -471,7 +559,7 @@ mod tests {
         use SubagentPermissionOutcome::{Approved, Denied};
         let theme = Theme::current();
         let mut block = SubagentPermissionBlock::new(event_with_child(Denied, "child-a"));
-        block.push(event_with_child(Approved, "child-a"));
+        assert!(block.push(event_with_child(Approved, "child-a"), block.epoch()));
         let line = &block.output(&ctx(DisplayMode::Collapsed)).lines[0].content;
         // Spans: [Denied, " 1 request", ", ", Approved, " 1 request", " · 1 subagent"].
         assert_eq!(line.spans[0].content, "Denied");
@@ -494,7 +582,7 @@ mod tests {
     fn header_uses_singular_nouns_for_single_counts() {
         use SubagentPermissionOutcome::{Approved, Denied};
         let mut block = SubagentPermissionBlock::new(event_with_child(Denied, "child-a"));
-        block.push(event_with_child(Approved, "child-a"));
+        assert!(block.push(event_with_child(Approved, "child-a"), block.epoch()));
         assert_eq!(
             header_text(&block),
             "Denied 1 request, Approved 1 request · 1 subagent"
@@ -505,8 +593,9 @@ mod tests {
     fn header_all_denied_has_no_stray_comma_or_title() {
         use SubagentPermissionOutcome::Denied;
         let mut block = SubagentPermissionBlock::new(event_with_child(Denied, "child-a"));
-        block.push(event_with_child(Denied, "child-a"));
-        block.push(event_with_child(Denied, "child-b"));
+        let epoch = block.epoch();
+        assert!(block.push(event_with_child(Denied, "child-a"), epoch));
+        assert!(block.push(event_with_child(Denied, "child-b"), epoch));
         let text = header_text(&block);
         assert_eq!(text, "Denied 3 requests · 2 subagents");
         assert!(
@@ -517,5 +606,17 @@ mod tests {
             !text.contains("◇"),
             "the old title must not be rendered: {text}"
         );
+    }
+
+    #[test]
+    fn membership_mutation_rejects_a_different_epoch() {
+        let mut block =
+            SubagentPermissionBlock::new_in_epoch(event(SubagentPermissionOutcome::Approved), 7);
+        let rejected = event(SubagentPermissionOutcome::Denied);
+
+        assert!(!block.push(rejected.clone(), 6));
+        assert!(!block.extend([rejected], 8));
+        assert_eq!(block.len(), 1);
+        assert!(block.members()[0].is_approved());
     }
 }

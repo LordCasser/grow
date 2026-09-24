@@ -107,6 +107,8 @@ Multi-word frontmatter keys use kebab-case (single-word keys like `model` are wr
 | `compatibility` | Environment requirements (for example, `Requires git, docker, jq`). |
 | `metadata` | Arbitrary string key-value pairs. Grow promotes `metadata.author` and `metadata.short-description` for display. |
 
+Text metadata values must be YAML strings; booleans and numbers are not converted to text. A non-string `name` uses the directory name, and a non-string `description` uses the body description fallback. Invalid optional text fields are omitted. `allowed-tools` is displayed only when its value is a delimited string or a list containing only strings. See the [configuration-rules contract](../../../../../openspec/specs/configuration-rules/spec.md#requirement-skill-descriptive-frontmatter-preserves-declared-string-types).
+
 ---
 
 ## Creating Skills with /create-skill

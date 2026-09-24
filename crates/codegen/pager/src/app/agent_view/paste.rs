@@ -194,8 +194,12 @@ impl AgentView {
                     .or_else(|| {
                         ctx.source.file_url_text_on_miss(urls).map(|text| {
                             match self.insert_prompt_text(Some(text), false, effects).1 {
-                                crate::app::actions::ClipboardTextInsertion::Inserted => ClipboardPasteCompletion::Handled,
-                                _ => ClipboardPasteCompletion::Failed(ClipboardPasteFailure::TargetInsertion),
+                                crate::app::actions::ClipboardTextInsertion::Inserted => {
+                                    ClipboardPasteCompletion::Handled
+                                }
+                                _ => ClipboardPasteCompletion::Failed(
+                                    ClipboardPasteFailure::TargetInsertion,
+                                ),
                             }
                         })
                     })
@@ -2070,6 +2074,36 @@ pub(super) mod paste_key_tests {
         assert!(agent.last_placed_ids.is_empty());
         assert!(agent.take_inline_media_clear_escapes().is_none());
     }
+    #[test]
+    fn take_inline_media_clear_escapes_shares_limit_with_child_and_retains_overflow() {
+        let mut agent = make_agent();
+        agent
+            .inline_media_ids
+            .insert(std::path::PathBuf::from("/tmp/a.png"), 2);
+        agent.inline_media_active = true;
+        let mut child = make_agent();
+        child
+            .inline_media_ids
+            .insert(std::path::PathBuf::from("/tmp/c.png"), 4);
+        child.inline_media_active = true;
+        agent
+            .subagent_views
+            .insert("child-sid".into(), Box::new(child));
+
+        let one_clear = crate::terminal::image::clear_kitty_image(2);
+        let mut escapes = String::new();
+        agent.append_inline_media_clear_tree_with_limit(&mut escapes, one_clear.len());
+
+        assert_eq!(escapes, one_clear);
+        assert!(agent.inline_media_ids.is_empty());
+        let child = agent.subagent_views.get("child-sid").unwrap();
+        assert_eq!(
+            child.inline_media_ids.len(),
+            1,
+            "child clear remains pending when the shared budget is full"
+        );
+        assert!(child.inline_media_active);
+    }
     /// An agent with no placements has nothing to clear.
     #[test]
     fn take_inline_media_clear_escapes_none_when_no_placements() {
@@ -2602,17 +2636,36 @@ pub(super) mod paste_key_tests {
     }
     #[test]
     fn agent_unclassified_file_urls_preserve_text_and_source_precedence() {
-        use crate::app::actions::{ClipboardPasteSource, ClipboardTextRead, ClipboardPasteCompletion, ProbedAttachment};
+        use crate::app::actions::{
+            ClipboardPasteCompletion, ClipboardPasteSource, ClipboardTextRead, ProbedAttachment,
+        };
         // Root URLs deliberately fail the shared drop classifier without
         // allocating a large image batch to trigger the same miss branch.
         let urls = "file:///";
-        for original in [ClipboardTextRead::Success(None), ClipboardTextRead::Success(Some(" \t".into())), ClipboardTextRead::Failed, ClipboardTextRead::Success(Some("caption".into()))] {
+        for original in [
+            ClipboardTextRead::Success(None),
+            ClipboardTextRead::Success(Some(" \t".into())),
+            ClipboardTextRead::Failed,
+            ClipboardTextRead::Success(Some("caption".into())),
+        ] {
             let mut agent = make_agent();
             agent.force_active_pane(ActivePane::Prompt);
-            let expected = if original.as_deref() == Some("caption") { "caption" } else { urls };
+            let expected = if original.as_deref() == Some("caption") {
+                "caption"
+            } else {
+                urls
+            };
             let mut ctx = agent_completion_ctx(&agent, None);
-            ctx.source = ClipboardPasteSource::ClipboardKey { text: original, tip_showing: false };
-            let completion = agent.complete_clipboard_attachment_paste(ctx, ProbedAttachment::NoRaster, Some(urls.into()), &mut Vec::new());
+            ctx.source = ClipboardPasteSource::ClipboardKey {
+                text: original,
+                tip_showing: false,
+            };
+            let completion = agent.complete_clipboard_attachment_paste(
+                ctx,
+                ProbedAttachment::NoRaster,
+                Some(urls.into()),
+                &mut Vec::new(),
+            );
             assert_eq!(completion, ClipboardPasteCompletion::Handled);
             assert_eq!(agent.prompt.text(), expected);
             assert!(agent.prompt.images.is_empty());
@@ -2624,17 +2677,31 @@ pub(super) mod paste_key_tests {
             text: "already inserted".into(),
             insertion: crate::app::actions::ClipboardTextInsertion::Inserted,
         };
-        agent.complete_clipboard_attachment_paste(ctx, ProbedAttachment::NoRaster, Some(urls.into()), &mut Vec::new());
+        agent.complete_clipboard_attachment_paste(
+            ctx,
+            ProbedAttachment::NoRaster,
+            Some(urls.into()),
+            &mut Vec::new(),
+        );
         assert_eq!(agent.prompt.text(), "already inserted");
     }
 
     #[test]
     fn agent_unclassified_file_urls_do_not_bypass_probe_errors() {
         use crate::app::actions::ProbedAttachment;
-        for probe in [ProbedAttachment::ProbeDropped, ProbedAttachment::ProbeFailed, ProbedAttachment::PersistFailed("failed".into())] {
+        for probe in [
+            ProbedAttachment::ProbeDropped,
+            ProbedAttachment::ProbeFailed,
+            ProbedAttachment::PersistFailed("failed".into()),
+        ] {
             let mut agent = make_agent();
             let ctx = agent_completion_ctx(&agent, None);
-            agent.complete_clipboard_attachment_paste(ctx, probe, Some("file:///".into()), &mut Vec::new());
+            agent.complete_clipboard_attachment_paste(
+                ctx,
+                probe,
+                Some("file:///".into()),
+                &mut Vec::new(),
+            );
             assert!(agent.prompt.text().is_empty());
         }
     }

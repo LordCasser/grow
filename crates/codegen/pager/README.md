@@ -46,6 +46,18 @@ Operations such as permission handling, replay terminal settlement, and workflow
 ingest that affect projection, scrollback, and overlays are committed by one
 `AgentView` domain method so the visible state cannot become partially updated.
 
+Session picker list requests carry a monotonically increasing generation and
+capture the issuing view's Agent/child binding and cwd. The request, selection
+anchor, and relaxed-scope notice use that cwd. A response applies only while
+its generation and visible binding are current; closing the picker invalidates
+pending responses. Deep content search has a separate generation. The
+[client surface contract](../../../openspec/specs/client-surfaces/spec.md)
+defines the user-visible result boundary.
+
+If focus returns to a picker that was still loading when another view
+superseded its request, dispatch issues a fresh list request for that view.
+Already loaded pickers keep their entries without refetching.
+
 ## Dependency and mutation rules
 
 The crate direction is fixed:
@@ -126,6 +138,8 @@ CLI/TUI 会话文件导出先写同目录临时文件并同步，再原子替换
 `/copy` 与 `/export` 的显式文件输出通过后台串行任务提交，UI 不再直接执行文件写入和同步。同一应用最多一个写入执行、八个等待，满载时明确提示；请求使用提交时的内容与目标快照，结果只通知原会话。正文渲染和剪贴板/默认备份仍同步，关闭进程不会持久化待处理队列。
 
 `/transcript` 的 Markdown 与 minimal ANSI 快照使用私有临时文件（Unix 0600），由待处理请求持有；替换请求、分页器结束或非重试错误都会释放并尝试清理。挂起超时保留同一文件供重试。正常应用释放也会清理，进程崩溃或强制终止不保证执行清理。契约见 [client-surfaces](../../../../openspec/specs/client-surfaces/spec.md)。
+
+minimal transcript 的 ANSI 正文仍按每帧 8ms 分片渲染；最终私有快照在后台阻塞任务写入。只有仍属于当前请求代次和原 root/child/session 的完整结果才会打开分页器。Full/TUI Markdown 快照写入保留同步路径，暂无归档的整体输入响应时限。
 
 外部分页器无法启动或失败退出时，终端恢复后会显示原因。请求及重试保留原 root/child 会话身份；通知不会写入后来切换到的其他会话正文。原会话可见时 minimal 使用正文通知，其他模式使用 toast；原会话不可见或已移除时，minimal 另在终端显示独立通知行，其他模式显示 toast。成功退出保持静默，挂起超时继续等待重试。
 

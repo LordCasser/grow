@@ -27,8 +27,9 @@ pub use fix::{
     verify_persistent_fix,
 };
 pub(crate) use fix::{
-    automatic_fix_choices, automatic_remediation_for, configure_doctor_report, format_applicable_automatic_fixes,
-    format_fix_preview, format_fix_success, human_fix_command, select_fix_plan,
+    automatic_fix_choices, automatic_remediation_for, configure_doctor_report,
+    format_applicable_automatic_fixes, format_fix_preview, format_fix_success, human_fix_command,
+    select_fix_plan,
 };
 pub(crate) use model::probe_requires_live_tui;
 pub(crate) use model::{
@@ -694,7 +695,9 @@ pub(crate) fn collect_agent_definition_findings(workspace: &Path) -> Vec<Diagnos
 const TMUX_DEFAULT_CANDIDATE_NOTE: &str = " This path is a default candidate, not a detected server config. Confirm the effective config file before editing or reloading it.";
 
 fn tmux_reload_note(config_path: &str) -> String {
-    let mut note = format!("Reload tmux with `tmux source-file {config_path}` to apply this file to the running server.");
+    let mut note = format!(
+        "Reload tmux with `tmux source-file {config_path}` to apply this file to the running server."
+    );
     if matches!(config_path, "~/.tmux.conf" | "~/.byobu/.tmux.conf") {
         note.push_str(TMUX_DEFAULT_CANDIDATE_NOTE);
     }
@@ -995,7 +998,11 @@ pub fn color_support_warning(
              `tmux source-file {tmux_config_path}`, then reattach the client and restart Grow."
         ));
         if matches!(tmux_config_path, "~/.tmux.conf" | "~/.byobu/.tmux.conf") {
-            warning.note.as_mut().unwrap().push_str(TMUX_DEFAULT_CANDIDATE_NOTE);
+            warning
+                .note
+                .as_mut()
+                .unwrap()
+                .push_str(TMUX_DEFAULT_CANDIDATE_NOTE);
         }
         return Some(warning);
     }

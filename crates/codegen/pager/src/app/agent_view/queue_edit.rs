@@ -39,14 +39,25 @@ pub enum PromptMode {
         original: String,
         /// When `Some`, this is a server-authoritative shared-queue row and
         /// `server_id` is the agent's stable `prompt_id`. On save we route
-        /// the change through `Action::QueueEditShared` (and rely on the
-        /// `grow/queue/changed` rebroadcast for the visual result) instead
-        /// of mutating the local `pending_prompts` mirror. `None` is the
+        /// the change through `Action::QueueEditShared` and wait for its
+        /// authoritative result instead of mutating the local
+        /// `pending_prompts` mirror. `None` is the
         /// pre-existing local-origin path.
         server_id: Option<String>,
         /// Kind snapshot for the interject guard's vanished-row fallback.
         kind: crate::app::session::QueueEntryKind,
     },
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ServerQueueEdit {
+    pub row_id: u64,
+    pub id: String,
+    pub version: u64,
+    pub edit_id: String,
+    pub pending: bool,
+    pub saving: bool,
+    pub lost: bool,
 }
 
 impl AgentView {
@@ -66,6 +77,14 @@ impl AgentView {
         key: &KeyEvent,
         effects: &mut Vec<crate::app::actions::Effect>,
     ) -> Option<InputOutcome> {
+        if self
+            .server_queue_edit
+            .as_ref()
+            .is_some_and(|hold| hold.saving)
+        {
+            self.show_toast("Waiting for queued prompt confirmation");
+            return Some(InputOutcome::Changed);
+        }
         if let PromptMode::EditingQueued { id, server_id, .. } = &self.prompt_mode {
             let (id, server_id) = (*id, server_id.clone());
             let ctrl_c_empty = key!('c', CONTROL).matches(key) && self.prompt.text().is_empty();
@@ -99,6 +118,14 @@ impl AgentView {
         target: AgentPane,
         effects: &mut Vec<crate::app::actions::Effect>,
     ) -> Option<bool> {
+        if self
+            .server_queue_edit
+            .as_ref()
+            .is_some_and(|hold| hold.saving)
+        {
+            self.show_toast("Waiting for queued prompt confirmation");
+            return Some(false);
+        }
         if let PromptMode::EditingQueued { ref original, .. } = self.prompt_mode
             && target != AgentPane::Prompt
         {
@@ -171,6 +198,13 @@ impl AgentView {
                             InputOutcome::Changed
                         }
                     };
+                    if self
+                        .server_queue_edit
+                        .as_ref()
+                        .is_some_and(|hold| hold.saving)
+                    {
+                        return outcome;
+                    }
                     self.force_active_pane(pending_target);
                     return outcome;
                 }
@@ -196,20 +230,19 @@ impl AgentView {
                         ..
                     } = self.prompt_mode.clone()
                     {
-                        let expected_version = self
-                            .session
-                            .shared_queue
-                            .iter()
-                            .find(|e| e.id == server_id)
-                            .map(|e| e.version)
-                            .unwrap_or(0);
-                        if let Some(effect) = self.exit_editing_mode() {
-                            effects.push(effect);
-                        }
-                        self.force_active_pane(pending_target);
+                        let Some(hold) = self
+                            .server_queue_edit
+                            .as_mut()
+                            .filter(|hold| hold.id == server_id && !hold.pending && !hold.saving)
+                        else {
+                            self.show_toast("Queued prompt edit is no longer protected");
+                            return InputOutcome::Changed;
+                        };
+                        hold.saving = true;
                         return InputOutcome::Action(Action::QueueRemoveShared {
                             id: server_id,
-                            expected_version,
+                            expected_version: hold.version,
+                            edit_id: Some(hold.edit_id.clone()),
                         });
                     }
                     if let PromptMode::EditingQueued { id, .. } = self.prompt_mode {
@@ -246,9 +279,105 @@ impl AgentView {
         row: Option<QueueRowRef>,
         effects: &mut Vec<crate::app::actions::Effect>,
     ) {
+        if is_server {
+            let Some((server_id, version, session_id)) = row.as_ref().and_then(|row| {
+                Some((
+                    row.server_id.clone()?,
+                    row.version,
+                    self.session.session_id.clone()?,
+                ))
+            }) else {
+                return;
+            };
+            if self.session.has_optimistic_queue_echo(&server_id) {
+                self.show_toast("Queued prompt is still being submitted");
+                return;
+            }
+            if self.server_queue_edit.is_some() {
+                return;
+            }
+            let edit_id = uuid::Uuid::new_v4().to_string();
+            self.server_queue_edit = Some(ServerQueueEdit {
+                row_id: id,
+                id: server_id.clone(),
+                version,
+                edit_id: edit_id.clone(),
+                pending: true,
+                saving: false,
+                lost: false,
+            });
+            effects.push(crate::app::actions::Effect::QueueHoldEdit {
+                agent_id: self.session.id,
+                session_id,
+                id: server_id,
+                expected_version: version,
+                edit_id,
+                binding_epoch: self.session_binding_epoch,
+            });
+            return;
+        }
+        self.enter_queue_edit_ready(id, false, row, effects);
+    }
+
+    pub(crate) fn confirm_server_queue_hold(
+        &mut self,
+        id: &str,
+        edit_id: &str,
+        version: u64,
+        effects: &mut Vec<crate::app::actions::Effect>,
+    ) {
+        let Some(hold) = self.server_queue_edit.as_ref().cloned() else {
+            return;
+        };
+        if !hold.pending || hold.id != id || hold.edit_id != edit_id || hold.version != version {
+            return;
+        }
+        let current_version = self
+            .session
+            .shared_queue
+            .iter()
+            .find(|entry| entry.id == id)
+            .map(|entry| entry.version);
+        if current_version.is_none() {
+            self.server_queue_edit = None;
+            self.show_toast("Queued prompt is no longer in the queue");
+            if let Some(effect) = self.release_server_queue_hold(&hold) {
+                effects.push(effect);
+            }
+            return;
+        }
+        if current_version != Some(version) {
+            self.server_queue_edit = None;
+            self.show_toast("Queued prompt changed; select it again to edit");
+            if let Some(effect) = self.release_server_queue_hold(&hold) {
+                effects.push(effect);
+            }
+            return;
+        }
+        self.server_queue_edit.as_mut().unwrap().pending = false;
+        let row_id = hold.row_id;
+        self.enter_queue_edit_ready(
+            row_id,
+            true,
+            Some(QueueRowRef {
+                origin: crate::views::queue_pane::QueueRowOrigin::Server,
+                server_id: Some(id.to_string()),
+                version,
+            }),
+            effects,
+        );
+    }
+
+    fn enter_queue_edit_ready(
+        &mut self,
+        id: u64,
+        is_server: bool,
+        row: Option<QueueRowRef>,
+        effects: &mut Vec<crate::app::actions::Effect>,
+    ) {
         use crate::app::session::QueueEntryKind;
         // Still an optimistic echo: its `session/prompt` RPC is in flight, so
-        // the shell has no row to hold yet — the `hold_edit` would no-op and
+        // the shell has no row to hold yet — a hold request would fail and
         // the later-confirmed row could be absorbed while the composer edits
         // it. Ignore until the confirming `grow/queue/changed` lands (mirrors
         // the send-now park gate in `force_interject_queue_row`).
@@ -320,7 +449,7 @@ impl AgentView {
                     chip_elements,
                 ));
             // `server_id: Some(_)` routes the save through
-            // `Action::QueueEditShared` (server LWW); `None` is
+            // `Action::QueueEditShared` (versioned server control); `None` is
             // the existing local-mirror mutation path.
             self.prompt_mode = PromptMode::EditingQueued {
                 id,
@@ -334,17 +463,12 @@ impl AgentView {
                 PromptInputMode::Normal
             };
             self.set_active_pane(AgentPane::Prompt, effects);
-            if let (Some(sid), Some(session_id)) = (server_id, self.session.session_id.clone()) {
-                effects.push(crate::app::actions::Effect::QueueHoldEdit {
-                    session_id,
-                    id: sid,
-                });
-            }
         }
     }
 
-    /// Save the edited composer text back to the queued row and exit edit
-    /// mode. Single owner of the save invariants for the bare-Enter
+    /// Save the edited composer text back to the queued row. Server rows
+    /// exit edit mode only after the control result confirms success. Single
+    /// owner of the save invariants for the bare-Enter
     /// intercept, the idle edit-interject, and the modal Save arm.
     ///
     /// `drain`: whether a local-row save requests a queue drain. Enter-save
@@ -362,13 +486,22 @@ impl AgentView {
         match server_id {
             Some(server_id) => {
                 let new_text = self.prompt.text().to_string();
-                // Server-origin row: route the edit through the agent (LWW); the
-                // rebroadcast updates every client's mirror, so don't mutate
-                // locally. Keep the hold until the edit lands — see
-                // `exit_editing_mode_keeping_hold`.
-                self.exit_editing_mode_keeping_hold();
+                let Some(hold) = self.server_queue_edit.as_mut() else {
+                    self.show_toast("Queued prompt edit is no longer protected");
+                    return InputOutcome::Changed;
+                };
+                if hold.pending || hold.saving || hold.id != server_id {
+                    return InputOutcome::Changed;
+                }
+                if hold.lost {
+                    self.show_toast("Queued prompt is gone; copy this text or press Esc");
+                    return InputOutcome::Changed;
+                }
+                hold.saving = true;
                 InputOutcome::Action(Action::QueueEditShared {
                     id: server_id,
+                    expected_version: hold.version,
+                    edit_id: hold.edit_id.clone(),
                     new_text,
                 })
             }
@@ -428,6 +561,14 @@ impl AgentView {
         &mut self,
         effects: &mut Vec<crate::app::actions::Effect>,
     ) -> Option<InputOutcome> {
+        if self
+            .server_queue_edit
+            .as_ref()
+            .is_some_and(|hold| hold.saving)
+        {
+            self.show_toast("Waiting for queued prompt confirmation");
+            return Some(InputOutcome::Changed);
+        }
         if let PromptMode::EditingQueued {
             id,
             server_id,
@@ -470,33 +611,8 @@ impl AgentView {
         }
         match server_id {
             Some(server_id) => {
-                // Server rows: the queue wire (`grow/queue/interject` newText)
-                // is text-only, so composer images can't ride along — known
-                // limitation, dropped with an accurate toast.
-                if !self.prompt.images.is_empty() {
-                    self.prompt.images.clear();
-                    self.show_toast("Images can't be attached when editing a shared queued prompt");
-                }
-                // new_text carries the edit — without it the agent would
-                // interject the original server-side text. Release is safe
-                // here: interject removes the row from the queue (no
-                // combine-on-stale-text window for a still-queued hold).
-                let expected_version = self.queue.row_ref(id).map(|r| r.version);
-                if let Some(effect) = self.exit_editing_mode() {
-                    effects.push(effect);
-                }
-                match expected_version {
-                    Some(expected_version) => InputOutcome::Action(Action::QueueInterjectShared {
-                        id: server_id,
-                        expected_version,
-                        new_text: Some(text),
-                    }),
-                    // Row vanished from the mirror — just interject the text.
-                    None => InputOutcome::Action(Action::Interject {
-                        text,
-                        images: vec![],
-                    }),
-                }
+                self.show_toast("Saving edit; use Send now after it is confirmed");
+                self.save_edited_queued_row(id, Some(server_id), false, effects)
             }
             None => {
                 // Exit before row removal so auto-hide cannot re-enter or strand edit mode.
@@ -548,8 +664,17 @@ impl AgentView {
         ) {
             return None;
         }
-        // Restore the pre-edit draft; keeping the orphaned edit text would look
-        // "duplicated" (the row is now the running turn). A concurrent-removal edit is lost.
+        if let PromptMode::EditingQueued { original, .. } = &self.prompt_mode
+            && self.prompt.text() != original
+        {
+            if let Some(hold) = self.server_queue_edit.as_mut()
+                && !hold.lost
+            {
+                hold.lost = true;
+                self.show_toast("Queued prompt is gone; copy this text or press Esc");
+            }
+            return None;
+        }
         let effect = self.exit_editing_mode();
         self.show_toast("Queued prompt is no longer in the queue");
         effect
@@ -557,7 +682,7 @@ impl AgentView {
 
     /// Exit editing mode: restore stashed text, clear mode, focus queue pane.
     /// No-op unless `EditingQueued`. The default exit; releases the
-    /// server-side combine hold (cancel, lost-row, interject, modal paths).
+    /// server-side edit hold (cancel, lost-row, interject, modal paths).
     ///
     /// Always resets `prompt_input_mode` to `Normal` so it doesn't leak
     /// into subsequent normal prompt entry.
@@ -583,24 +708,78 @@ impl AgentView {
         if !matches!(self.prompt_mode, PromptMode::EditingQueued { .. }) {
             return None;
         }
-        let release_effect = if release_hold
-            && let PromptMode::EditingQueued {
-                server_id: Some(sid),
-                ..
-            } = &self.prompt_mode
-            && let Some(session_id) = self.session.session_id.clone()
-        {
-            Some(crate::app::actions::Effect::QueueReleaseEdit {
-                session_id,
-                id: sid.clone(),
-            })
-        } else {
-            None
-        };
+        let release_effect = self
+            .server_queue_edit
+            .take()
+            .filter(|_| release_hold)
+            .and_then(|hold| self.release_server_queue_hold(&hold));
         let stash = self.stashed_prompt.take().unwrap_or_default();
         self.prompt.restore(stash);
         self.finish_editing_exit();
         release_effect
+    }
+
+    fn release_server_queue_hold(
+        &self,
+        hold: &ServerQueueEdit,
+    ) -> Option<crate::app::actions::Effect> {
+        Some(crate::app::actions::Effect::QueueReleaseEdit {
+            agent_id: self.session.id,
+            session_id: self.session.session_id.clone()?,
+            binding_epoch: self.session_binding_epoch,
+            id: hold.id.clone(),
+            expected_version: hold.version,
+            edit_id: hold.edit_id.clone(),
+        })
+    }
+
+    pub(crate) fn release_server_queue_edit_on_close(
+        &mut self,
+    ) -> Option<crate::app::actions::Effect> {
+        let hold = self.server_queue_edit.take()?;
+        self.release_server_queue_hold(&hold)
+    }
+
+    pub(crate) fn resolve_server_queue_save(
+        &mut self,
+        id: &str,
+        edit_id: &str,
+        result: Result<(), String>,
+    ) {
+        let matches_pending = self.server_queue_edit.as_ref().is_some_and(|hold| {
+            hold.id == id && hold.edit_id == edit_id && !hold.pending && hold.saving
+        });
+        if !matches_pending {
+            return;
+        }
+        match result {
+            Ok(()) => self.exit_editing_mode_keeping_hold(),
+            Err(error) => {
+                self.server_queue_edit.as_mut().unwrap().saving = false;
+                self.show_toast(&format!("Couldn't save queued prompt: {error}"));
+            }
+        }
+    }
+
+    pub(crate) fn resolve_server_queue_remove(
+        &mut self,
+        id: &str,
+        edit_id: &str,
+        result: Result<(), String>,
+    ) {
+        let matches_pending = self.server_queue_edit.as_ref().is_some_and(|hold| {
+            hold.id == id && hold.edit_id == edit_id && !hold.pending && hold.saving
+        });
+        if !matches_pending {
+            return;
+        }
+        match result {
+            Ok(()) => self.exit_editing_mode_keeping_hold(),
+            Err(error) => {
+                self.server_queue_edit.as_mut().unwrap().saving = false;
+                self.show_toast(&format!("Couldn't remove queued prompt: {error}"));
+            }
+        }
     }
 
     /// Shared tail of every edit exit — stash policy stays with the callers.

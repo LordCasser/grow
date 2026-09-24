@@ -234,38 +234,53 @@
         };
         assert!(!before);
 
-        let (tx, _rx) = tokio::sync::oneshot::channel();
-        let request = acp::SessionNotification::new(
-            acp::SessionId::new("sess-A"),
-            acp::SessionUpdate::AvailableCommandsUpdate(
-                acp::AvailableCommandsUpdate::new(vec![]).meta(
-                    serde_json::json!({
-                        "grow/behaviorAvailability": {
-                            "current": "normal",
-                            "choices": [{
-                                "behavior": "goal",
-                                "supported": true,
-                                "disposition": "available"
-                            }]
-                        }
-                    })
-                    .as_object()
-                    .cloned(),
+        let deliver = |app: &mut crate::app::root::AppView, revision: u64, disposition: &str| {
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            let request = acp::SessionNotification::new(
+                acp::SessionId::new("sess-A"),
+                acp::SessionUpdate::AvailableCommandsUpdate(
+                    acp::AvailableCommandsUpdate::new(vec![]).meta(
+                        serde_json::json!({
+                            "grow/behaviorAvailability": {
+                                "revision": revision,
+                                "current": "normal",
+                                "choices": [{
+                                    "behavior": "goal",
+                                    "supported": true,
+                                    "disposition": disposition
+                                }]
+                            }
+                        })
+                        .as_object()
+                        .cloned(),
+                    ),
                 ),
-            ),
-        );
-        let _ = handle(
-            AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
-                request,
-                response_tx: tx,
-            }),
-            &mut app,
-        );
+            );
+            let _ = handle(
+                AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
+                    request,
+                    response_tx: tx,
+                }),
+                app,
+            );
+        };
+
+        deliver(&mut app, 2, "available");
 
         match &app.agents[&AgentId(0)].active_modal {
             Some(ActiveModal::Settings { state }) => assert!(
                 state.pager_snapshot.goal_available,
                 "the open modal must consume the new structured projection"
+            ),
+            _ => panic!("expected settings modal"),
+        }
+
+        deliver(&mut app, 1, "unavailable");
+
+        match &app.agents[&AgentId(0)].active_modal {
+            Some(ActiveModal::Settings { state }) => assert!(
+                state.pager_snapshot.goal_available,
+                "a late older projection must not roll back the open modal"
             ),
             _ => panic!("expected settings modal"),
         }

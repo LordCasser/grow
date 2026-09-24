@@ -17,6 +17,7 @@
 
 mod common;
 
+mod leader_attach_during_active_turn;
 mod leader_n_clients_shared_session;
 mod leader_reattach_cancellation_roundtrips_durable_log;
 mod leader_reattach_completion_roundtrips_durable_log;

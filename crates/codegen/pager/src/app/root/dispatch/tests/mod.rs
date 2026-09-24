@@ -162,6 +162,7 @@ fn test_app() -> AppView {
         session_picker_content_loading: false,
         session_picker_deep_search_seq: 0,
         session_picker_list_seq: 0,
+        session_picker_list_binding: None,
         session_picker_detail_generation: 0,
         session_picker_entries_query: None,
         startup_warnings: Vec::new(),
@@ -632,17 +633,33 @@ fn agent_toast(app: &AppView) -> Option<String> {
 /// Use the `theme_cache::test_lock` to serialize tests that touch
 /// the in-memory theme state (single mutable global). Mirrors the
 /// pattern used by `theme::cache::tests`.
+struct ThemeTestReset;
+
+impl Drop for ThemeTestReset {
+    fn drop(&mut self) {
+        crate::theme::system_appearance::clear_mock();
+        crate::theme::cache::reset_for_test();
+    }
+}
+
 fn with_theme_test_env(f: impl FnOnce()) {
     let _guard = crate::theme::cache::test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
+    let _reset = ThemeTestReset;
     crate::theme::cache::reset_for_test();
     crate::theme::cache::seed_auto_theme_defaults_for_test();
     crate::theme::cache::set(crate::theme::ThemeKind::GrowNight);
     crate::theme::system_appearance::clear_mock();
     f();
-    crate::theme::system_appearance::clear_mock();
-    crate::theme::cache::reset_for_test();
+}
+
+struct MouseCaptureTestReset;
+
+impl Drop for MouseCaptureTestReset {
+    fn drop(&mut self) {
+        reset_mouse_capture_enabled(true);
+    }
 }
 fn agent_scrollback_len(app: &AppView) -> usize {
     app.agents.get(&AgentId(0)).unwrap().scrollback.len()

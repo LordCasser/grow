@@ -2345,12 +2345,15 @@ impl DashboardState {
         peek: bool,
         effects: &mut Vec<crate::app::actions::Effect>,
     ) -> Option<crate::app::actions::ClipboardPasteCompletion> {
-        use crate::app::actions::{ClipboardPasteCompletion, ClipboardPasteFailure, ClipboardTextInsertion};
+        use crate::app::actions::{
+            ClipboardPasteCompletion, ClipboardPasteFailure, ClipboardTextInsertion,
+        };
         let entries = crate::prompt_images::try_read_dropped_paths(text);
         if entries.is_empty() {
             return None;
         }
-        let mut completion = ClipboardPasteCompletion::Failed(ClipboardPasteFailure::AlreadyReported);
+        let mut completion =
+            ClipboardPasteCompletion::Failed(ClipboardPasteFailure::AlreadyReported);
         for entry in entries {
             let inserted = match entry {
                 crate::prompt_images::DroppedPath::Image(image) => {
@@ -2364,7 +2367,9 @@ impl DashboardState {
                     let text = format!("{} ", path.display());
                     match self.insert_pasted_caption(Some(&text), peek).1 {
                         ClipboardTextInsertion::Inserted => ClipboardPasteCompletion::Handled,
-                        _ => ClipboardPasteCompletion::Failed(ClipboardPasteFailure::TargetInsertion),
+                        _ => {
+                            ClipboardPasteCompletion::Failed(ClipboardPasteFailure::TargetInsertion)
+                        }
                     }
                 }
             };
@@ -2613,15 +2618,18 @@ impl DashboardState {
         }
         let file = if attachment == ClipboardPasteCompletion::FullMiss {
             file_urls.and_then(|urls| {
-                self.insert_dropped_paths(&urls, peek, effects)
-                    .or_else(|| {
-                        ctx.source.file_url_text_on_miss(&urls).map(|text| {
-                            match self.insert_pasted_caption(Some(text), peek).1 {
-                                crate::app::actions::ClipboardTextInsertion::Inserted => ClipboardPasteCompletion::Handled,
-                                _ => ClipboardPasteCompletion::Failed(ClipboardPasteFailure::TargetInsertion),
+                self.insert_dropped_paths(&urls, peek, effects).or_else(|| {
+                    ctx.source.file_url_text_on_miss(&urls).map(|text| {
+                        match self.insert_pasted_caption(Some(text), peek).1 {
+                            crate::app::actions::ClipboardTextInsertion::Inserted => {
+                                ClipboardPasteCompletion::Handled
                             }
-                        })
+                            _ => ClipboardPasteCompletion::Failed(
+                                ClipboardPasteFailure::TargetInsertion,
+                            ),
+                        }
                     })
+                })
             })
         } else {
             None
@@ -8965,13 +8973,24 @@ mod tests {
         let after = dir.path().join("after.txt");
         std::fs::write(&before, "before").unwrap();
         std::fs::write(&after, "after").unwrap();
-        let payload = format!("{}\n{}\n{}", before.display(), png.display(), after.display());
+        let payload = format!(
+            "{}\n{}\n{}",
+            before.display(),
+            png.display(),
+            after.display()
+        );
         for peek in [false, true] {
             for entry in 0..3 {
-                let mut state = if peek { state_with_open_peek() } else { DashboardState::new() };
+                let mut state = if peek {
+                    state_with_open_peek()
+                } else {
+                    DashboardState::new()
+                };
                 let mut effects = Vec::new();
                 match entry {
-                    0 => { state.handle_bracketed_paste(&payload, peek, false, &mut effects); }
+                    0 => {
+                        state.handle_bracketed_paste(&payload, peek, false, &mut effects);
+                    }
                     1 => {
                         state.handle_paste_key_deferred(
                             crate::app::actions::ClipboardTextRead::Success(Some(payload.clone())),
@@ -8987,7 +9006,10 @@ mod tests {
                             Some(payload.clone()),
                             &mut effects,
                         );
-                        assert_eq!(result, crate::app::actions::ClipboardPasteCompletion::Handled);
+                        assert_eq!(
+                            result,
+                            crate::app::actions::ClipboardPasteCompletion::Handled
+                        );
                         assert_eq!(state.paste_probe_in_flight, 0);
                     }
                 }
@@ -9016,16 +9038,34 @@ mod tests {
         let plain = dir.path().join("keep.txt");
         std::fs::write(&plain, "keep").unwrap();
         for peek in [false, true] {
-            let mut state = if peek { state_with_open_peek() } else { DashboardState::new() };
-            let target = if peek { &mut state.peek_reply } else { &mut state.dispatch };
+            let mut state = if peek {
+                state_with_open_peek()
+            } else {
+                DashboardState::new()
+            };
+            let target = if peek {
+                &mut state.peek_reply
+            } else {
+                &mut state.dispatch
+            };
             for _ in 0..crate::views::prompt_widget::PromptWidget::IMAGE_CAP {
                 target.insert_image(completion_pasted_image()).unwrap();
             }
             let payload = format!("{}\n{}", png.display(), plain.display());
             let result = state.insert_dropped_paths(&payload, peek, &mut Vec::new());
-            assert_eq!(result, Some(crate::app::actions::ClipboardPasteCompletion::Handled));
-            let target = if peek { &state.peek_reply } else { &state.dispatch };
-            assert_eq!(target.images.len(), crate::views::prompt_widget::PromptWidget::IMAGE_CAP);
+            assert_eq!(
+                result,
+                Some(crate::app::actions::ClipboardPasteCompletion::Handled)
+            );
+            let target = if peek {
+                &state.peek_reply
+            } else {
+                &state.dispatch
+            };
+            assert_eq!(
+                target.images.len(),
+                crate::views::prompt_widget::PromptWidget::IMAGE_CAP
+            );
             assert!(target.text().contains("keep.txt"));
             assert!(state.feedback.is_some());
         }
@@ -9323,16 +9363,43 @@ mod tests {
 
     #[test]
     fn dashboard_unclassified_file_urls_preserve_text_and_source_precedence() {
-        use crate::app::actions::{ClipboardPasteSource, ClipboardTextRead, ClipboardPasteCompletion, ProbedAttachment};
+        use crate::app::actions::{
+            ClipboardPasteCompletion, ClipboardPasteSource, ClipboardTextRead, ProbedAttachment,
+        };
         for peek in [false, true] {
-            for original in [ClipboardTextRead::Success(None), ClipboardTextRead::Success(Some(" \t".into())), ClipboardTextRead::Failed, ClipboardTextRead::Success(Some("caption".into()))] {
-                let mut state = if peek { state_with_open_peek() } else { DashboardState::new() };
-                let expected = if original.as_deref() == Some("caption") { "caption" } else { "file:///" };
+            for original in [
+                ClipboardTextRead::Success(None),
+                ClipboardTextRead::Success(Some(" \t".into())),
+                ClipboardTextRead::Failed,
+                ClipboardTextRead::Success(Some("caption".into())),
+            ] {
+                let mut state = if peek {
+                    state_with_open_peek()
+                } else {
+                    DashboardState::new()
+                };
+                let expected = if original.as_deref() == Some("caption") {
+                    "caption"
+                } else {
+                    "file:///"
+                };
                 let mut ctx = completion_ctx(None, peek);
-                ctx.source = ClipboardPasteSource::ClipboardKey { text: original, tip_showing: false };
-                let result = state.complete_clipboard_attachment_paste(ctx, ProbedAttachment::NoRaster, Some("file:///".into()), &mut Vec::new());
+                ctx.source = ClipboardPasteSource::ClipboardKey {
+                    text: original,
+                    tip_showing: false,
+                };
+                let result = state.complete_clipboard_attachment_paste(
+                    ctx,
+                    ProbedAttachment::NoRaster,
+                    Some("file:///".into()),
+                    &mut Vec::new(),
+                );
                 assert_eq!(result, ClipboardPasteCompletion::Handled);
-                let target = if peek { &state.peek_reply } else { &state.dispatch };
+                let target = if peek {
+                    &state.peek_reply
+                } else {
+                    &state.dispatch
+                };
                 assert_eq!(target.text(), expected);
                 assert!(target.images.is_empty());
             }
@@ -9342,17 +9409,34 @@ mod tests {
     #[test]
     fn dashboard_unclassified_file_urls_do_not_bypass_guards() {
         use crate::app::actions::ProbedAttachment;
-        for probe in [ProbedAttachment::ProbeDropped, ProbedAttachment::ProbeFailed, ProbedAttachment::PersistFailed("failed".into())] {
+        for probe in [
+            ProbedAttachment::ProbeDropped,
+            ProbedAttachment::ProbeFailed,
+            ProbedAttachment::PersistFailed("failed".into()),
+        ] {
             let mut state = DashboardState::new();
-            state.complete_clipboard_attachment_paste(completion_ctx(None, false), probe, Some("file:///".into()), &mut Vec::new());
+            state.complete_clipboard_attachment_paste(
+                completion_ctx(None, false),
+                probe,
+                Some("file:///".into()),
+                &mut Vec::new(),
+            );
             assert!(state.dispatch.text().is_empty());
         }
         for question in [false, true] {
             let mut state = state_with_open_peek();
             let ctx = completion_ctx(None, true);
-            if question { state.peek.as_mut().unwrap().question = Some("Allow?".into()); }
-            else { state.peek = None; }
-            state.complete_clipboard_attachment_paste(ctx, ProbedAttachment::NoRaster, Some("file:///".into()), &mut Vec::new());
+            if question {
+                state.peek.as_mut().unwrap().question = Some("Allow?".into());
+            } else {
+                state.peek = None;
+            }
+            state.complete_clipboard_attachment_paste(
+                ctx,
+                ProbedAttachment::NoRaster,
+                Some("file:///".into()),
+                &mut Vec::new(),
+            );
             assert!(state.peek_reply.text().is_empty());
         }
     }

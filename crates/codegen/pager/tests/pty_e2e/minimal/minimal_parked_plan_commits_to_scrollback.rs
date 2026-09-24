@@ -51,6 +51,8 @@ fn park_plan(
 #[ignore]
 async fn minimal_parked_plan_commits_to_scrollback() {
     let content = ContentController::start().await.expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
+    content.seed_llm_config().expect("seed mock LLM config");
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} first turn done."));
 
     // ~5x the screen, so live-region-only rendering is guaranteed to clip.

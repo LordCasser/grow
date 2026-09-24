@@ -10,9 +10,11 @@
 
 use std::sync::{
     Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
     mpsc::{SyncSender, sync_channel},
 };
 use std::thread::{self, JoinHandle};
+use std::{cmp::Reverse, collections::BinaryHeap};
 
 use nucleo::{
     Config, Matcher, Utf32String,
@@ -65,8 +67,13 @@ struct Daemon {
     shared: Arc<Mutex<Snapshot>>,
     tx: SyncSender<()>,
     pending: Arc<Mutex<Option<(usize, Msg)>>>,
+    stop: Arc<AtomicBool>,
     next_generation: std::cell::Cell<usize>,
     handle: Option<JoinHandle<()>>,
+    #[cfg(test)]
+    worker_started: Arc<AtomicBool>,
+    #[cfg(test)]
+    worker_exited: Arc<AtomicBool>,
 }
 
 const MAX_RESULTS: usize = 100;
@@ -77,6 +84,16 @@ impl Daemon {
         let (tx, rx) = sync_channel::<()>(1);
         let pending = Arc::new(Mutex::new(None));
         let worker_pending = Arc::clone(&pending);
+        let stop = Arc::new(AtomicBool::new(false));
+        let worker_stop = Arc::clone(&stop);
+        #[cfg(test)]
+        let worker_started = Arc::new(AtomicBool::new(false));
+        #[cfg(test)]
+        let worker_exited = Arc::new(AtomicBool::new(false));
+        #[cfg(test)]
+        let started_signal = Arc::clone(&worker_started);
+        #[cfg(test)]
+        let exited_signal = Arc::clone(&worker_exited);
 
         let out = shared.clone();
         let worker = move || {
@@ -87,16 +104,35 @@ impl Daemon {
 
             while rx.recv().is_ok() {
                 let msg = worker_pending.lock().unwrap().take();
-                let Some((generation, msg)) = msg else { continue };
+                let Some((generation, msg)) = msg else {
+                    continue;
+                };
+
+                #[cfg(test)]
+                started_signal.store(true, Ordering::Release);
 
                 match msg {
                     Msg::SetItems(new) => {
-                        items = build_items(new);
+                        let Some(new_items) = build_items(new, &worker_stop) else {
+                            continue;
+                        };
+                        items = new_items;
                         prev_q.clear();
-                        publish_matches(&items, "", &mut pattern, &mut matcher, &out, generation);
+                        publish_matches(
+                            &items,
+                            "",
+                            &mut pattern,
+                            &mut matcher,
+                            &out,
+                            generation,
+                            &worker_stop,
+                        );
                     }
                     Msg::SetItemsAndQuery(new, query) => {
-                        items = build_items(new);
+                        let Some(new_items) = build_items(new, &worker_stop) else {
+                            continue;
+                        };
+                        items = new_items;
                         prev_q.clear();
                         let trimmed = query.trim().to_string();
                         publish_matches(
@@ -106,6 +142,7 @@ impl Daemon {
                             &mut matcher,
                             &out,
                             generation,
+                            &worker_stop,
                         );
                         prev_q = trimmed;
                     }
@@ -120,6 +157,7 @@ impl Daemon {
                                 &mut matcher,
                                 &out,
                                 generation,
+                                &worker_stop,
                             );
                             prev_q.clear();
                         } else {
@@ -138,6 +176,7 @@ impl Daemon {
                                 &mut matcher,
                                 &out,
                                 generation,
+                                &worker_stop,
                             );
                             prev_q = trimmed;
                         }
@@ -146,6 +185,8 @@ impl Daemon {
                 }
                 crate::async_view::wake();
             }
+            #[cfg(test)]
+            exited_signal.store(true, Ordering::Release);
         };
         let handle = thread::Builder::new()
             .name("history-search".into())
@@ -162,19 +203,39 @@ impl Daemon {
             }
         };
 
-        Self { shared, tx, pending, next_generation: std::cell::Cell::new(0), handle }
+        Self {
+            shared,
+            tx,
+            pending,
+            stop,
+            next_generation: std::cell::Cell::new(0),
+            handle,
+            #[cfg(test)]
+            worker_started,
+            #[cfg(test)]
+            worker_exited,
+        }
     }
 }
 
-fn build_items(items: Vec<String>) -> Vec<(String, Utf32String)> {
-    items
-        .into_iter()
-        .filter(|s| !s.is_empty())
-        .map(|s| {
-            let u = Utf32String::from(s.as_str());
-            (s, u)
-        })
-        .collect()
+fn build_items(items: Vec<String>, stop: &AtomicBool) -> Option<Vec<(String, Utf32String)>> {
+    if stop.load(Ordering::Acquire) {
+        return None;
+    }
+    let mut built = Vec::with_capacity(items.len());
+    for text in items {
+        if stop.load(Ordering::Acquire) {
+            return None;
+        }
+        if !text.is_empty() {
+            let utf32 = Utf32String::from(text.as_str());
+            if stop.load(Ordering::Acquire) {
+                return None;
+            }
+            built.push((text, utf32));
+        }
+    }
+    Some(built)
 }
 
 fn publish_matches(
@@ -184,25 +245,27 @@ fn publish_matches(
     matcher: &mut Matcher,
     out: &Arc<Mutex<Snapshot>>,
     generation: usize,
+    stop: &AtomicBool,
 ) {
     if query.is_empty() {
         // Items arrive most-recent-first; reverse so the most recent prompt is
         // last (rendered at the bottom of the overlay, nearest the prompt).
-        let mut all: Vec<HistoryMatchResult> = items
-            .iter()
-            .take(MAX_RESULTS)
-            .map(|(s, _)| HistoryMatchResult {
+        let Some(mut all) = cancellable_collect(items.len().min(MAX_RESULTS), stop, |i| {
+            let (s, _) = &items[i];
+            Some(HistoryMatchResult {
                 text: s.clone(),
                 indices: Vec::new(),
             })
-            .collect();
+        }) else {
+            return;
+        };
         all.reverse();
         *out.lock().unwrap() = Snapshot {
             items: all.into(),
             generation,
         };
     } else {
-        publish_query_matches(items, query, false, pattern, matcher, out, generation);
+        publish_query_matches(items, query, false, pattern, matcher, out, generation, stop);
     }
 }
 
@@ -214,33 +277,49 @@ fn publish_query_matches(
     matcher: &mut Matcher,
     out: &Arc<Mutex<Snapshot>>,
     generation: usize,
+    stop: &AtomicBool,
 ) {
     pattern.reparse(0, query, CaseMatching::Smart, Normalization::Smart, append);
 
-    let mut hits: Vec<(usize, u32)> = Vec::new();
-    for (i, (_, u)) in items.iter().enumerate() {
-        if let Some(sc) = pattern.score(std::slice::from_ref(u), matcher) {
-            hits.push((i, sc));
+    // Keep only the best MAX_RESULTS scores while scanning. The heap root is
+    // the worst retained hit: lower score first, then later input index.
+    let mut hits = BinaryHeap::with_capacity(MAX_RESULTS);
+    for (i, (_, text)) in items.iter().enumerate() {
+        if stop.load(Ordering::Acquire) {
+            return;
+        }
+        if let Some(score) = pattern.score(std::slice::from_ref(text), matcher) {
+            let candidate = (Reverse(score), i);
+            if hits.len() < MAX_RESULTS {
+                hits.push(candidate);
+            } else if hits.peek().is_some_and(|worst| candidate < *worst) {
+                hits.pop();
+                hits.push(candidate);
+            }
+        }
+        if stop.load(Ordering::Acquire) {
+            return;
         }
     }
-    hits.sort_unstable_by(|a, b| b.1.cmp(&a.1));
-    if hits.len() > MAX_RESULTS {
-        hits.truncate(MAX_RESULTS);
-    }
+    let mut hits: Vec<(usize, u32)> = hits
+        .into_iter()
+        .map(|(Reverse(score), index)| (index, score))
+        .collect();
+    hits.sort_unstable_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
 
     let col = pattern.column_pattern(0);
-    let mut matched: Vec<HistoryMatchResult> = hits
-        .into_iter()
-        .map(|(i, _)| {
-            let (text, u) = &items[i];
-            let mut idx = Vec::new();
-            col.indices(u.slice(..), matcher, &mut idx);
-            HistoryMatchResult {
-                text: text.clone(),
-                indices: idx,
-            }
+    let Some(mut matched) = cancellable_collect(hits.len(), stop, |n| {
+        let i = hits[n].0;
+        let (text, u) = &items[i];
+        let mut idx = Vec::new();
+        col.indices(u.slice(..), matcher, &mut idx);
+        Some(HistoryMatchResult {
+            text: text.clone(),
+            indices: idx,
         })
-        .collect();
+    }) else {
+        return;
+    };
     // `hits` is sorted best-first; reverse so the best match is last (rendered
     // at the bottom of the overlay, selected by default).
     matched.reverse();
@@ -248,6 +327,26 @@ fn publish_query_matches(
         items: matched.into(),
         generation,
     };
+}
+
+fn cancellable_collect<T>(
+    len: usize,
+    stop: &AtomicBool,
+    mut process: impl FnMut(usize) -> Option<T>,
+) -> Option<Vec<T>> {
+    let mut values = Vec::new();
+    for index in 0..len {
+        if stop.load(Ordering::Acquire) {
+            return None;
+        }
+        if let Some(value) = process(index) {
+            values.push(value);
+        }
+        if stop.load(Ordering::Acquire) {
+            return None;
+        }
+    }
+    Some(values)
 }
 
 /// Preserve the latest item refresh together with its following query.
@@ -264,13 +363,20 @@ fn merge_pending(current: Msg, next: Msg) -> Msg {
 
 impl Daemon {
     fn submit(&self, msg: Msg) -> usize {
-        let generation = self.next_generation.get().checked_add(1).expect("history request generation exhausted");
+        let generation = self
+            .next_generation
+            .get()
+            .checked_add(1)
+            .expect("history request generation exhausted");
         self.next_generation.set(generation);
         let mut pending = self.pending.lock().unwrap();
-        *pending = Some((generation, match pending.take() {
-            Some((_, current)) => merge_pending(current, msg),
-            None => msg,
-        }));
+        *pending = Some((
+            generation,
+            match pending.take() {
+                Some((_, current)) => merge_pending(current, msg),
+                None => msg,
+            },
+        ));
         // A full channel already carries the required wake. Matching and
         // publishing happen outside this short pending-state critical section.
         let _ = self.tx.try_send(());
@@ -280,6 +386,9 @@ impl Daemon {
 
 impl Drop for Daemon {
     fn drop(&mut self) {
+        // Stop is visible to the matcher even while it is processing the
+        // current request; the queued message then terminates the receive loop.
+        self.stop.store(true, Ordering::Release);
         self.submit(Msg::Stop);
     }
 }
@@ -433,7 +542,8 @@ impl HistorySearchState {
         }
         let snap = self.daemon.shared.lock().unwrap().clone();
         if snap.generation != self.requested_generation
-            || snap.generation == self.snapshot.generation {
+            || snap.generation == self.snapshot.generation
+        {
             return false;
         }
         self.snapshot = snap;
@@ -551,7 +661,11 @@ mod tests {
         state.daemon.handle = Some(std::thread::spawn(|| {}));
         let make_snapshot = |generation, text: &str| Snapshot {
             generation,
-            items: vec![HistoryMatchResult { text: text.into(), indices: vec![] }].into(),
+            items: vec![HistoryMatchResult {
+                text: text.into(),
+                indices: vec![],
+            }]
+            .into(),
         };
         state.activate(&entries(&["old"]), "");
         let old = state.requested_generation;
@@ -588,7 +702,13 @@ mod tests {
             let pending = Arc::new(Mutex::new(None));
             let daemon = Daemon {
                 shared: Arc::new(Mutex::new(Snapshot::default())),
-                tx, pending: Arc::clone(&pending), next_generation: std::cell::Cell::new(0), handle: None,
+                tx,
+                pending: Arc::clone(&pending),
+                stop: Arc::new(AtomicBool::new(false)),
+                next_generation: std::cell::Cell::new(0),
+                handle: None,
+                worker_started: Arc::new(AtomicBool::new(false)),
+                worker_exited: Arc::new(AtomicBool::new(false)),
             };
             daemon.submit(Msg::SetItems(vec!["latest item".into()]));
             for index in 0..1000 {
@@ -604,7 +724,53 @@ mod tests {
             assert!(rx.try_recv().is_err());
             done_tx.send(()).unwrap();
         });
-        done_rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap();
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn drop_cancels_an_in_flight_match_without_waiting_for_it() {
+        let (tx, _rx) = sync_channel(1);
+        let pending = Arc::new(Mutex::new(None));
+        let stop = Arc::new(AtomicBool::new(false));
+        let daemon = Daemon {
+            shared: Arc::new(Mutex::new(Snapshot::default())),
+            tx,
+            pending,
+            stop: Arc::clone(&stop),
+            next_generation: std::cell::Cell::new(0),
+            handle: None,
+            worker_started: Arc::new(AtomicBool::new(false)),
+            worker_exited: Arc::new(AtomicBool::new(false)),
+        };
+
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let worker_stop = Arc::clone(&stop);
+        let worker = std::thread::spawn(move || {
+            let result = cancellable_collect(1, &worker_stop, |_| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                Some(())
+            });
+            finished_tx.send(result.is_none()).unwrap();
+        });
+
+        entered_rx
+            .recv_timeout(std::time::Duration::from_secs(2))
+            .unwrap();
+        let started = std::time::Instant::now();
+        drop(daemon);
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+        release_tx.send(()).unwrap();
+        assert!(
+            finished_rx
+                .recv_timeout(std::time::Duration::from_secs(2))
+                .unwrap()
+        );
         worker.join().unwrap();
     }
 
@@ -616,8 +782,83 @@ mod tests {
         let queried = merge_pending(refreshed, Msg::SetQuery("new-query".into()));
         assert!(matches!(queried, Msg::SetItemsAndQuery(items, query)
             if items == ["new"] && query == "new-query"));
-        assert!(matches!(merge_pending(Msg::Stop, Msg::SetQuery("late".into())), Msg::Stop));
-        assert!(matches!(merge_pending(Msg::SetQuery("old".into()), Msg::Stop), Msg::Stop));
+        assert!(matches!(
+            merge_pending(Msg::Stop, Msg::SetQuery("late".into())),
+            Msg::Stop
+        ));
+        assert!(matches!(
+            merge_pending(Msg::SetQuery("old".into()), Msg::Stop),
+            Msg::Stop
+        ));
+    }
+
+    #[test]
+    fn build_items_stops_cooperatively() {
+        let stop = AtomicBool::new(true);
+        assert!(build_items(vec!["first".into()], &stop).is_none());
+    }
+
+    #[test]
+    fn dropped_worker_exits_after_large_history_request() {
+        let daemon = Daemon::new();
+        let exited = Arc::clone(&daemon.worker_exited);
+        let started = Arc::clone(&daemon.worker_started);
+        let corpus = (0..30_000)
+            .map(|index| format!("history entry {index:05} {}", "x".repeat(192)))
+            .collect();
+        daemon.submit(Msg::SetItemsAndQuery(corpus, "entry".into()));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !started.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(
+            started.load(Ordering::Acquire),
+            "worker did not take request"
+        );
+
+        drop(daemon);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        while !exited.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert!(
+            exited.load(Ordering::Acquire),
+            "cancelled worker did not exit"
+        );
+    }
+
+    #[test]
+    fn query_matching_keeps_only_top_results_in_render_order() {
+        let items = (0..150)
+            .map(|index| {
+                let text = format!("needle {index:03}");
+                let utf32 = Utf32String::from(text.as_str());
+                (text, utf32)
+            })
+            .collect::<Vec<_>>();
+        let mut pattern = MultiPattern::new(1);
+        let mut matcher = Matcher::new(Config::DEFAULT);
+        let output = Arc::new(Mutex::new(Snapshot::default()));
+        let stop = AtomicBool::new(false);
+
+        publish_query_matches(
+            &items,
+            "needle",
+            false,
+            &mut pattern,
+            &mut matcher,
+            &output,
+            1,
+            &stop,
+        );
+
+        let snapshot = output.lock().unwrap();
+        let results = &snapshot.items;
+        assert_eq!(results.len(), MAX_RESULTS);
+        assert_eq!(results.first().unwrap().text, "needle 099");
+        assert_eq!(results.last().unwrap().text, "needle 000");
+        assert!(results.iter().all(|result| !result.indices.is_empty()));
     }
 
     fn entries(texts: &[&str]) -> Vec<HistoryEntry> {

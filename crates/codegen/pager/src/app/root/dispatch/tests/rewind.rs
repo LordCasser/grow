@@ -159,6 +159,123 @@ fn rewind_success(
     }
 }
 
+fn rewind_execute_owner(effect: &Effect) -> (acp::SessionId, u32) {
+    let Effect::RewindExecute {
+        session_id,
+        session_binding_epoch,
+        ..
+    } = effect
+    else {
+        panic!("expected rewind execution, got {effect:?}");
+    };
+    (session_id.clone(), *session_binding_epoch)
+}
+
+#[test]
+fn late_rewind_success_does_not_change_replacement_session() {
+    let mut app = app_mid_inline_edit("edited old prompt");
+    let id = AgentId(0);
+    let effects = drive_inline_submit_to_execute(&mut app);
+    let (session_id, session_binding_epoch) = rewind_execute_owner(&effects[0]);
+
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.bind_session_id(acp::SessionId::new("replacement-session"));
+    assert!(agent.rewind_state.is_none());
+    assert!(agent.rewind_read.is_none());
+    assert!(agent.rewind_points.is_none());
+    assert!(agent.pending_inline_resubmit.is_none());
+    assert!(agent.inline_edit.is_none());
+    assert_eq!(agent.prompt.text(), "composer draft\nedited old prompt");
+    agent.prompt.set_text("replacement draft");
+    let before_len = agent.scrollback.len();
+
+    let result = dispatch(
+        Action::TaskComplete(TaskResult::RewindExecuteComplete {
+            agent_id: id,
+            session_id,
+            session_binding_epoch,
+            response: rewind_success(0, "conversation_only", "old prompt"),
+        }),
+        &mut app,
+    );
+    assert!(result.is_empty(), "old inline edit must not resubmit");
+    let agent = &app.agents[&id];
+    assert_eq!(agent.scrollback.len(), before_len);
+    assert_eq!(agent.prompt.text(), "replacement draft");
+    assert!(agent.rewind_state.is_none());
+    assert!(agent.pending_inline_resubmit.is_none());
+    assert!(read_toast(&app).contains("Reload it to refresh"));
+}
+
+#[test]
+fn late_rewind_results_distinguish_rejection_and_unknown_outcome() {
+    let mut app = app_mid_inline_edit("edited old prompt");
+    let id = AgentId(0);
+    let effects = drive_inline_submit_to_execute(&mut app);
+    let (session_id, session_binding_epoch) = rewind_execute_owner(&effects[0]);
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.unbind_session_id();
+    assert_eq!(agent.prompt.text(), "composer draft\nedited old prompt");
+    agent.bind_session_id(session_id.clone());
+    agent.prompt.set_text("new binding draft");
+    let before_len = agent.scrollback.len();
+
+    let mut rejected = rewind_success(0, "all", "old prompt");
+    rejected.success = false;
+    rejected.error = Some("conflict".into());
+    dispatch(
+        Action::TaskComplete(TaskResult::RewindExecuteComplete {
+            agent_id: id,
+            session_id: session_id.clone(),
+            session_binding_epoch,
+            response: rejected,
+        }),
+        &mut app,
+    );
+    assert!(read_toast(&app).contains("was rejected"));
+    dispatch(
+        Action::TaskComplete(TaskResult::RewindExecuteFailed {
+            agent_id: id,
+            session_id,
+            session_binding_epoch,
+            error: "connection closed".into(),
+        }),
+        &mut app,
+    );
+    assert!(read_toast(&app).contains("outcome unknown"));
+    let agent = &app.agents[&id];
+    assert_eq!(agent.scrollback.len(), before_len);
+    assert_eq!(agent.prompt.text(), "new binding draft");
+    assert!(agent.rewind_state.is_none());
+}
+
+#[test]
+fn late_rewind_success_is_visible_in_minimal_mode() {
+    let mut app = app_mid_inline_edit("edited old prompt");
+    let id = AgentId(0);
+    let effects = drive_inline_submit_to_execute(&mut app);
+    let (session_id, session_binding_epoch) = rewind_execute_owner(&effects[0]);
+    app.agents.get_mut(&id).unwrap().unbind_session_id();
+    app.screen_mode = crate::app::ScreenMode::Minimal;
+    let before_len = app.agents[&id].scrollback.len();
+
+    dispatch(
+        Action::TaskComplete(TaskResult::RewindExecuteComplete {
+            agent_id: id,
+            session_id,
+            session_binding_epoch,
+            response: rewind_success(0, "all", "old prompt"),
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&id];
+    assert_eq!(agent.scrollback.len(), before_len + 1);
+    assert!(matches!(
+        &agent.scrollback.last().unwrap().block,
+        RenderBlock::Notice(notice) if notice.text.contains("Reload it to refresh")
+    ));
+}
+
 /// Drive an idle inline-edit submit through the classic flow up to the
 /// rewind execute: points fetch → ModeSelect → "conversation only" →
 /// last-prompt confirm popup → Executing. Returns the effects of the step
@@ -375,6 +492,8 @@ fn inline_edit_conversation_only_success_resubmits_and_closes_editor() {
     let effects = dispatch(
         Action::TaskComplete(TaskResult::RewindExecuteComplete {
             agent_id: id,
+            session_id: app.agents[&id].session.session_id.clone().unwrap(),
+            session_binding_epoch: app.agents[&id].session_binding_epoch,
             response: rewind_success(0, "conversation_only", "fix the bug"),
         }),
         &mut app,
@@ -465,6 +584,8 @@ fn inline_edit_all_mode_previews_confirms_and_resubmits() {
     let effects = dispatch(
         Action::TaskComplete(TaskResult::RewindExecuteComplete {
             agent_id: id,
+            session_id: app.agents[&id].session.session_id.clone().unwrap(),
+            session_binding_epoch: app.agents[&id].session_binding_epoch,
             response: rewind_success(0, "all", "fix the bug"),
         }),
         &mut app,
@@ -512,6 +633,8 @@ fn inline_edit_files_only_success_prefills_composer_without_resubmit() {
     let effects = dispatch(
         Action::TaskComplete(TaskResult::RewindExecuteComplete {
             agent_id: id,
+            session_id: app.agents[&id].session.session_id.clone().unwrap(),
+            session_binding_epoch: app.agents[&id].session_binding_epoch,
             response: rewind_success(0, "files_only", "fix the bug"),
         }),
         &mut app,
@@ -650,6 +773,8 @@ fn inline_edit_execute_failure_keeps_editor_open() {
     let effects = dispatch(
         Action::TaskComplete(TaskResult::RewindExecuteFailed {
             agent_id: id,
+            session_id: app.agents[&id].session.session_id.clone().unwrap(),
+            session_binding_epoch: app.agents[&id].session_binding_epoch,
             error: "boom".into(),
         }),
         &mut app,
@@ -691,6 +816,8 @@ fn inline_edit_unsuccessful_response_keeps_editor_open() {
     let effects = dispatch(
         Action::TaskComplete(TaskResult::RewindExecuteComplete {
             agent_id: id,
+            session_id: app.agents[&id].session.session_id.clone().unwrap(),
+            session_binding_epoch: app.agents[&id].session_binding_epoch,
             response,
         }),
         &mut app,
@@ -719,6 +846,8 @@ fn inline_edit_resubmit_sends_slash_text_literally() {
     let effects = dispatch(
         Action::TaskComplete(TaskResult::RewindExecuteComplete {
             agent_id: id,
+            session_id: app.agents[&id].session.session_id.clone().unwrap(),
+            session_binding_epoch: app.agents[&id].session_binding_epoch,
             response: rewind_success(0, "conversation_only", "fix the bug"),
         }),
         &mut app,
@@ -745,6 +874,8 @@ fn inline_edit_rewind_success_after_view_switch_appends_to_draft() {
     let effects = dispatch(
         Action::TaskComplete(TaskResult::RewindExecuteComplete {
             agent_id: id,
+            session_id: app.agents[&id].session.session_id.clone().unwrap(),
+            session_binding_epoch: app.agents[&id].session_binding_epoch,
             response: rewind_success(0, "conversation_only", "fix the bug"),
         }),
         &mut app,
@@ -790,6 +921,8 @@ fn inline_edit_view_switch_preserves_image_draft_when_appending_resubmit() {
     let effects = dispatch(
         Action::TaskComplete(TaskResult::RewindExecuteComplete {
             agent_id: id,
+            session_id: app.agents[&id].session.session_id.clone().unwrap(),
+            session_binding_epoch: app.agents[&id].session_binding_epoch,
             response: rewind_success(0, "conversation_only", "fix the bug"),
         }),
         &mut app,
@@ -894,6 +1027,8 @@ fn rewind_success_truncation_releases_retained_memory() {
     dispatch(
         Action::TaskComplete(TaskResult::RewindExecuteComplete {
             agent_id: id,
+            session_id: app.agents[&id].session.session_id.clone().unwrap(),
+            session_binding_epoch: app.agents[&id].session_binding_epoch,
             response: response("files_only"),
         }),
         &mut app,
@@ -910,6 +1045,8 @@ fn rewind_success_truncation_releases_retained_memory() {
     dispatch(
         Action::TaskComplete(TaskResult::RewindExecuteComplete {
             agent_id: id,
+            session_id: app.agents[&id].session.session_id.clone().unwrap(),
+            session_binding_epoch: app.agents[&id].session_binding_epoch,
             response: response("all"),
         }),
         &mut app,
@@ -949,6 +1086,8 @@ fn rewind_success_toasts_in_full_tui_and_commits_system_block_in_minimal() {
     dispatch(
         Action::TaskComplete(TaskResult::RewindExecuteComplete {
             agent_id: id,
+            session_id: app.agents[&id].session.session_id.clone().unwrap(),
+            session_binding_epoch: app.agents[&id].session_binding_epoch,
             response: response("all"),
         }),
         &mut app,
@@ -968,6 +1107,8 @@ fn rewind_success_toasts_in_full_tui_and_commits_system_block_in_minimal() {
     dispatch(
         Action::TaskComplete(TaskResult::RewindExecuteComplete {
             agent_id: id,
+            session_id: app.agents[&id].session.session_id.clone().unwrap(),
+            session_binding_epoch: app.agents[&id].session_binding_epoch,
             response: response("files_only"),
         }),
         &mut app,
@@ -1306,6 +1447,33 @@ fn dismissed_rewind_points_do_not_reopen_overlay() {
     assert!(agent.rewind_state.is_none());
     assert!(agent.rewind_points.is_none());
     assert_eq!(agent.prompt.text(), "draft");
+}
+
+#[test]
+fn failed_rewind_metadata_restores_draft_and_reports_error() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .prompt
+        .set_text("unfinished draft");
+    let request_id = begin_test_rewind_read(&mut app, false);
+    dispatch(
+        Action::TaskComplete(TaskResult::RewindPointsFailed {
+            request_id,
+            agent_id: id,
+            error: "pinned rewind metadata invalid".into(),
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&id];
+    assert!(agent.rewind_state.is_none());
+    assert_eq!(agent.prompt.text(), "unfinished draft");
+    assert_eq!(
+        agent.toast.as_ref().map(|(message, _)| message.as_str()),
+        Some("Rewind failed: pinned rewind metadata invalid")
+    );
 }
 
 fn begin_test_rewind_read(app: &mut AppView, preview: bool) -> uuid::Uuid {

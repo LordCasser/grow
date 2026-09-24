@@ -85,13 +85,13 @@ pub struct CheckOutcome {
 
 /// The `classify` step: the heavier native probe in one pasteboard pass — the
 /// changeCount plus the advertised type list (no image bytes, no subprocess),
-/// so it stays sub-millisecond and safe to call inline on the ~30fps loop.
+/// The Pager facade waits at most 10 ms for that work on its metadata worker.
 ///
 /// The throttled poll reaches here ONLY on a changeCount delta (see
 /// [`ClipboardFocusTipState::poll`]); the cheap changeCount-only read gates it.
 /// The expensive one-time AppKit `dlopen` is pre-warmed off the UI thread at the
 /// first focus-gain (see `clipboard::prewarm_image_probe`); if the warm-up
-/// hasn't finished yet the memoised `dlopen` happens here once as a fallback.
+/// hasn't finished yet the memoised `dlopen` happens on that worker.
 pub fn run_clipboard_check() -> CheckOutcome {
     let (change_count, has_image) = crate::clipboard::clipboard_image_snapshot();
     CheckOutcome {
@@ -246,9 +246,16 @@ mod tests {
     fn unavailable_classification_retries_the_same_version() {
         let mut state = ClipboardFocusTipState::default();
         let now = Instant::now();
-        assert_eq!(state.poll(now, || Some(42), || outcome(None, false)), Some(outcome(None, false)));
+        assert_eq!(
+            state.poll(now, || Some(42), || outcome(None, false)),
+            Some(outcome(None, false))
+        );
         let next = state.poll(now + POLL_INTERVAL, || Some(42), || outcome(Some(42), true));
-        assert_eq!(next, Some(outcome(Some(42), true)), "unknown classification must not consume the version");
+        assert_eq!(
+            next,
+            Some(outcome(Some(42), true)),
+            "unknown classification must not consume the version"
+        );
     }
 
     #[test]
@@ -256,7 +263,14 @@ mod tests {
         let mut state = ClipboardFocusTipState::default();
         let now = Instant::now();
         state.poll(now, || Some(41), || outcome(Some(42), false));
-        assert_eq!(state.poll(now + POLL_INTERVAL, || Some(42), || panic!("version 42 was already classified")), None);
+        assert_eq!(
+            state.poll(
+                now + POLL_INTERVAL,
+                || Some(42),
+                || panic!("version 42 was already classified")
+            ),
+            None
+        );
     }
 
     #[test]

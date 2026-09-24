@@ -71,12 +71,35 @@ pub fn app_active_view(app: &AppView) -> &ActiveView {
     &app.active_view
 }
 
-pub fn app_agent(app: &AppView, id: AgentId) -> Option<&AgentView> {
-    app.agents.get(&id)
+/// The Agent that owns Minimal's input and the whole visible frame. Root
+/// permissions interrupt child delegation, just as the shared input router does.
+pub fn app_visible_agent(app: &AppView, id: AgentId) -> Option<&AgentView> {
+    let root = app.agents.get(&id)?;
+    Some(
+        selected_child_key(root)
+            .and_then(|key| root.subagent_views.get(key))
+            .map_or(root, |child| child.as_ref()),
+    )
 }
 
-pub fn app_agent_mut(app: &mut AppView, id: AgentId) -> Option<&mut AgentView> {
-    app.agents.get_mut(&id)
+pub fn app_visible_agent_mut(app: &mut AppView, id: AgentId) -> Option<&mut AgentView> {
+    app.agents.get_mut(&id).map(visible_agent_mut)
+}
+
+fn visible_agent_mut(root: &mut AgentView) -> &mut AgentView {
+    if let Some(key) = selected_child_key(root).cloned() {
+        return root.subagent_views.get_mut(&key).expect("key checked");
+    }
+    root
+}
+
+fn selected_child_key(root: &AgentView) -> Option<&String> {
+    if !root.permission_queue.is_empty() {
+        return None;
+    }
+    root.active_subagent
+        .as_ref()
+        .filter(|key| root.subagent_views.contains_key(*key))
 }
 
 pub fn app_appearance(app: &AppView) -> &AppearanceConfig {
@@ -107,11 +130,47 @@ pub fn app_cwd(app: &AppView) -> &std::path::Path {
     app.cwd.as_path()
 }
 
-pub fn app_set_pending_pager(app: &mut AppView, owner: AgentId, content: &str, ansi: bool) -> std::io::Result<()> {
-    let agent = app.agents.get(&owner).ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "transcript owner removed"))?;
-    let path = crate::export_cmd::write_pager_transcript(content, ansi)?;
-    app.pending_pager = Some(crate::app::external_pager::PendingPager::new(path, ansi, owner, agent));
+pub fn app_set_pending_pager(
+    app: &mut AppView,
+    owner: AgentId,
+    content: &str,
+    ansi: bool,
+) -> std::io::Result<()> {
+    let agent = app.agents.get(&owner).ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::NotFound, "transcript owner removed")
+    })?;
+    let pending = pending_pager_for_agent(owner, agent, content, ansi)?;
+    app.pending_pager = Some(pending);
     Ok(())
+}
+
+pub fn app_set_pending_pager_for_transcript(
+    app: &mut AppView,
+    owner: &TranscriptBuild,
+    content: &str,
+    ansi: bool,
+) -> std::io::Result<()> {
+    let agent = transcript_owner_agent(app, owner).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "transcript owner removed or rebound",
+        )
+    })?;
+    let pending = pending_pager_for_agent(owner.agent, agent, content, ansi)?;
+    app.pending_pager = Some(pending);
+    Ok(())
+}
+
+fn pending_pager_for_agent(
+    owner: AgentId,
+    agent: &AgentView,
+    content: &str,
+    ansi: bool,
+) -> std::io::Result<crate::app::external_pager::PendingPager> {
+    let path = crate::export_cmd::write_pager_transcript(content, ansi)?;
+    Ok(crate::app::external_pager::PendingPager::new(
+        path, ansi, owner, agent,
+    ))
 }
 
 pub fn with_minimal_live_state<R>(
@@ -122,7 +181,9 @@ pub fn with_minimal_live_state<R>(
         ActiveView::Agent(id) => Some(*id),
         _ => None,
     };
-    let active_agent = active_id.and_then(|id| app.agents.get_mut(&id));
+    let active_agent = active_id
+        .and_then(|id| app.agents.get_mut(&id))
+        .map(visible_agent_mut);
     f(&mut app.cursor, active_agent, &app.appearance)
 }
 
@@ -361,6 +422,16 @@ pub struct TranscriptBuild {
     /// session's blocks. Keying by owner also keeps the build alive (and the
     /// pager opening) when the user tabs away mid-build.
     pub agent: crate::app::session::AgentId,
+    /// Root view identity used to reject a replaced/rebound root owner.
+    pub root_view_agent_id: crate::app::session::AgentId,
+    /// Root session identity at request time, including when the selected view is a child.
+    pub root_session_id: Option<acp_transport::protocol::SessionId>,
+    /// Exact view identity under the root; differs from `agent` for a child.
+    pub view_agent_id: crate::app::session::AgentId,
+    /// Captured child key, if the command was accepted by a child view.
+    pub child_session_id: Option<String>,
+    /// The selected view's session binding at request time.
+    pub session_id: Option<acp_transport::protocol::SessionId>,
     /// Reload invalidated the snapshot; refresh from final state before pumping.
     pub restart_after_reload: bool,
     /// Snapshot of the entry IDs to render, in conversation order. IDs are
@@ -371,6 +442,31 @@ pub struct TranscriptBuild {
     pub next: usize,
     /// Accumulated ANSI output.
     pub out: String,
+    /// Monotonic request generation used to discard superseded write results.
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptOwner {
+    pub(crate) root_agent: crate::app::session::AgentId,
+    pub(crate) root_view_agent_id: crate::app::session::AgentId,
+    pub(crate) root_session_id: Option<acp_transport::protocol::SessionId>,
+    pub(crate) view_agent_id: crate::app::session::AgentId,
+    pub(crate) child_session_id: Option<String>,
+    pub(crate) session_id: Option<acp_transport::protocol::SessionId>,
+}
+
+impl TranscriptBuild {
+    pub(crate) fn owner(&self) -> TranscriptOwner {
+        TranscriptOwner {
+            root_agent: self.agent,
+            root_view_agent_id: self.root_view_agent_id,
+            root_session_id: self.root_session_id.clone(),
+            view_agent_id: self.view_agent_id,
+            child_session_id: self.child_session_id.clone(),
+            session_id: self.session_id.clone(),
+        }
+    }
 }
 
 /// Minimal-mode-only state held on [`AppView::minimal_state`].
@@ -384,12 +480,48 @@ pub(crate) struct MinimalState {
     pub(crate) pending_expand: Vec<EntryId>,
     /// In-progress `/transcript` build, pumped one slice per frame.
     pub(crate) transcript: Option<TranscriptBuild>,
-    /// `tool_call_id` of the plan already emitted into native scrollback. Minimal
-    /// prints the whole plan as a normal committed conversation block (rather than
-    /// rendering it under the prompt), so this de-dupes the per-frame push — and,
-    /// because each revision is a fresh PlanControl call with a new id, still commits
-    /// every revised plan as its own block.
-    pub(crate) committed_plan_tool_call_id: Option<String>,
+    /// Current request generation; completions from earlier writes are dropped.
+    pub(crate) transcript_generation: u64,
+    /// Last plan appended to each view. Switching away and back reprints that
+    /// view's history, not a second copy of its current plan block.
+    pub(crate) committed_plans: Vec<(TranscriptOwner, String)>,
+    /// Exact owner printed in this terminal's visible Minimal screen epoch.
+    pub(crate) visible_owner: Option<TranscriptOwner>,
+}
+
+pub fn minimal_visible_owner(app: &AppView) -> Option<TranscriptOwner> {
+    let ActiveView::Agent(root_id) = app.active_view else {
+        return None;
+    };
+    let root = app.agents.get(&root_id)?;
+    let child_key = selected_child_key(root).cloned();
+    let visible = child_key
+        .as_ref()
+        .and_then(|key| root.subagent_views.get(key))
+        .map_or(root, |child| child.as_ref());
+    Some(TranscriptOwner {
+        root_agent: root_id,
+        root_view_agent_id: root.session.id,
+        root_session_id: root.session.session_id.clone(),
+        view_agent_id: visible.session.id,
+        child_session_id: child_key,
+        session_id: visible.session.session_id.clone(),
+    })
+}
+
+pub fn minimal_printed_owner(app: &AppView) -> Option<&TranscriptOwner> {
+    app.minimal_state.visible_owner.as_ref()
+}
+
+/// Called only after the terminal screen was successfully cleared for `owner`.
+pub fn begin_minimal_visible_epoch(app: &mut AppView, owner: Option<TranscriptOwner>) {
+    if let Some(id) = owner.as_ref().map(|owner| owner.root_agent)
+        && let Some(agent) = app_visible_agent_mut(app, id)
+    {
+        agent.scrollback.reset_minimal_native_frontier();
+    }
+    app.minimal_state.pending_expand.clear();
+    app.minimal_state.visible_owner = owner;
 }
 
 /// `AppView::minimal_state.show_todos`.
@@ -439,13 +571,26 @@ pub fn request_minimal_transcript(app: &mut AppView) {
         return;
     };
     let id = *id;
-    let Some(agent) = app.agents.get_mut(&id) else {
+    let Some(root) = app.agents.get_mut(&id) else {
         return;
     };
+    let root_session_id = root.session.session_id.clone();
+    let root_view_agent_id = root.session.id;
+    let child_session_id = selected_child_key(root).cloned();
+    let agent = if let Some(sid) = child_session_id.as_ref() {
+        let Some(child) = root.subagent_views.get_mut(sid) else {
+            return;
+        };
+        &mut **child
+    } else {
+        root
+    };
     if agent.session.loading_replay && agent.session_reload.is_none() {
-        agent.scrollback.push_block(crate::scrollback::block::RenderBlock::notice(
-            "Session history is still loading. Try /transcript again when loading finishes.",
-        ));
+        agent
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::notice(
+                "Session history is still loading. Try /transcript again when loading finishes.",
+            ));
         return;
     }
     let sb = &agent.scrollback;
@@ -460,12 +605,23 @@ pub fn request_minimal_transcript(app: &mut AppView) {
             ));
         return;
     }
+    let view_agent_id = agent.session.id;
+    let session_id = agent.session.session_id.clone();
+    let restart_after_reload = agent.session_reload.is_some();
+    app.minimal_state.transcript_generation =
+        app.minimal_state.transcript_generation.wrapping_add(1);
     app.minimal_state.transcript = Some(TranscriptBuild {
         agent: id,
-        restart_after_reload: agent.session_reload.is_some(),
+        root_view_agent_id,
+        root_session_id,
+        view_agent_id,
+        child_session_id,
+        session_id,
+        restart_after_reload,
         ids,
         next: 0,
         out: String::new(),
+        generation: app.minimal_state.transcript_generation,
     });
 }
 
@@ -474,26 +630,70 @@ pub fn request_minimal_transcript(app: &mut AppView) {
 /// double `&mut AppView` borrow). Put it back via [`set_minimal_transcript`]
 /// unless the slice finished it.
 pub fn take_minimal_transcript(app: &mut AppView) -> Option<TranscriptBuild> {
-    let build = app.minimal_state.transcript.as_mut()?;
-    if let Some(agent) = app.agents.get(&build.agent) {
-        if agent.session_reload.is_some() {
-            // Also cover requests created after the reconnect entry hook.
-            build.restart_after_reload = true;
-            build.ids.clear();
-            build.next = 0;
-            build.out.clear();
-            return None;
-        }
-        if build.restart_after_reload {
-            build.ids = (0..agent.scrollback.len())
-                .filter_map(|i| agent.scrollback.entry(i).map(|entry| entry.id))
-                .collect();
-            build.next = 0;
-            build.out.clear();
-            build.restart_after_reload = false;
-        }
+    let mut build = app.minimal_state.transcript.take()?;
+    let root_reloading = app
+        .agents
+        .get(&build.agent)
+        .is_some_and(|root| root.session_reload.is_some());
+    let Some(agent) = transcript_owner_agent(app, &build) else {
+        return None;
+    };
+    if root_reloading || agent.session_reload.is_some() {
+        // Also cover requests created after the reconnect entry hook.
+        build.restart_after_reload = true;
+        build.ids.clear();
+        build.next = 0;
+        build.out.clear();
+        app.minimal_state.transcript = Some(build);
+        return None;
     }
-    app.minimal_state.transcript.take()
+    if build.restart_after_reload {
+        build.ids = (0..agent.scrollback.len())
+            .filter_map(|i| agent.scrollback.entry(i).map(|entry| entry.id))
+            .collect();
+        build.next = 0;
+        build.out.clear();
+        build.restart_after_reload = false;
+    }
+    Some(build)
+}
+
+/// Resolve only the view captured by this build, never the current focus or a
+/// different session that reused the child map key.
+pub fn transcript_owner_agent<'a>(
+    app: &'a AppView,
+    build: &TranscriptBuild,
+) -> Option<&'a AgentView> {
+    let root = app.agents.get(&build.agent)?;
+    if root.session.id != build.root_view_agent_id
+        || root.session.session_id != build.root_session_id
+    {
+        return None;
+    }
+    let agent = match &build.child_session_id {
+        Some(sid) => root.subagent_views.get(sid).map(|child| &**child)?,
+        None => root,
+    };
+    (agent.session.id == build.view_agent_id && agent.session.session_id == build.session_id)
+        .then_some(agent)
+}
+
+pub fn transcript_owner_agent_mut<'a>(
+    app: &'a mut AppView,
+    build: &TranscriptBuild,
+) -> Option<&'a mut AgentView> {
+    let root = app.agents.get_mut(&build.agent)?;
+    if root.session.id != build.root_view_agent_id
+        || root.session.session_id != build.root_session_id
+    {
+        return None;
+    }
+    let agent = match &build.child_session_id {
+        Some(sid) => root.subagent_views.get_mut(sid).map(|child| &mut **child)?,
+        None => root,
+    };
+    (agent.session.id == build.view_agent_id && agent.session.session_id == build.session_id)
+        .then_some(agent)
 }
 
 /// Invalidate before replay can begin and finish between two render frames.
@@ -513,6 +713,73 @@ pub fn set_minimal_transcript(app: &mut AppView, build: Option<TranscriptBuild>)
     app.minimal_state.transcript = build;
 }
 
+/// Queue the final Minimal transcript snapshot write as an async Effect.
+pub fn queue_minimal_transcript_snapshot(app: &mut AppView, build: TranscriptBuild) {
+    app.pending_effects.push(
+        crate::app::actions::Effect::WriteMinimalTranscriptSnapshot {
+            generation: build.generation,
+            owner: build.owner(),
+            content: build.out,
+        },
+    );
+}
+
+/// Apply a finished worker result only while its request and owner are still current.
+pub(crate) fn complete_minimal_transcript_snapshot(
+    app: &mut AppView,
+    generation: u64,
+    owner: TranscriptOwner,
+    result: Result<tempfile::TempPath, String>,
+) {
+    if app.minimal_state.transcript_generation != generation {
+        return;
+    }
+    let Some(root) = app.agents.get(&owner.root_agent) else {
+        return;
+    };
+    if root.session.id != owner.root_view_agent_id
+        || root.session.session_id != owner.root_session_id
+    {
+        return;
+    }
+    let agent = match &owner.child_session_id {
+        Some(sid) => root.subagent_views.get(sid).map(|child| &**child),
+        None => Some(root),
+    };
+    let Some(agent) = agent.filter(|agent| {
+        agent.session.id == owner.view_agent_id && agent.session.session_id == owner.session_id
+    }) else {
+        return;
+    };
+
+    match result {
+        Ok(path) => {
+            let pending =
+                crate::app::external_pager::PendingPager::new(path, true, owner.root_agent, agent);
+            app.pending_pager = Some(pending);
+        }
+        Err(error) => {
+            let message = format!("Failed to write transcript: {error}");
+            let root = app
+                .agents
+                .get_mut(&owner.root_agent)
+                .expect("owner validated");
+            let target = match &owner.child_session_id {
+                Some(sid) => root.subagent_views.get_mut(sid).map(|child| &mut **child),
+                None => Some(root),
+            };
+            if let Some(agent) = target.filter(|agent| {
+                agent.session.id == owner.view_agent_id
+                    && agent.session.session_id == owner.session_id
+            }) {
+                agent
+                    .scrollback
+                    .push_block(crate::scrollback::block::RenderBlock::notice(message));
+            }
+        }
+    }
+}
+
 /// Progress of the in-flight transcript build (`rendered`, `total`), for the
 /// status row. `None` when no build is running.
 pub fn minimal_transcript_progress(app: &AppView) -> Option<(usize, usize)> {
@@ -522,9 +789,14 @@ pub fn minimal_transcript_progress(app: &AppView) -> Option<(usize, usize)> {
         .map(|b| (b.next, b.ids.len()))
 }
 
-/// `AppView::minimal_state.committed_plan_tool_call_id` (read).
+/// Last plan appended to the currently selected Minimal view.
 pub fn minimal_committed_plan_id(app: &AppView) -> Option<&str> {
-    app.minimal_state.committed_plan_tool_call_id.as_deref()
+    let owner = minimal_visible_owner(app)?;
+    app.minimal_state
+        .committed_plans
+        .iter()
+        .find(|(previous, _)| *previous == owner)
+        .map(|(_, id)| id.as_str())
 }
 
 /// Whether minimal's Ctrl+O remap opens the full-transcript pager *right now*.
@@ -561,7 +833,7 @@ pub fn minimal_ctrl_o_opens_transcript(app: &AppView) -> bool {
     let ActiveView::Agent(id) = &app.active_view else {
         return true;
     };
-    let Some(agent) = app.agents.get(id) else {
+    let Some(agent) = app_visible_agent(app, *id) else {
         return true;
     };
     // Editing a queued row: the interject key saves (idle) or interjects
@@ -582,9 +854,18 @@ pub fn minimal_ctrl_o_opens_transcript(app: &AppView) -> bool {
     )
 }
 
-/// `AppView::minimal_state.committed_plan_tool_call_id` (write).
+/// Record the plan appended to the currently selected Minimal view.
 pub fn set_minimal_committed_plan_id(app: &mut AppView, id: Option<String>) {
-    app.minimal_state.committed_plan_tool_call_id = id;
+    let Some(owner) = minimal_visible_owner(app) else {
+        return;
+    };
+    app.minimal_state.committed_plans.retain(|(previous, _)| {
+        previous.root_agent != owner.root_agent
+            || previous.child_session_id != owner.child_session_id
+    });
+    if let Some(id) = id {
+        app.minimal_state.committed_plans.push((owner, id));
+    }
 }
 
 // ── AgentView field accessors ────────────────────────────────────────────────
@@ -1101,6 +1382,17 @@ pub fn record_committed_for_expand(sb: &mut ScrollbackState, id: EntryId) {
 #[cfg(any(test, feature = "test-support"))]
 pub fn test_agent_view(session_id: Option<&str>, cwd: std::path::PathBuf) -> AgentView {
     crate::app::agent_view::test_agent_view(session_id, cwd)
+}
+
+/// Test-only Minimal frame fixture without a live ACP peer.
+#[cfg(any(test, feature = "test-support"))]
+pub fn test_minimal_app() -> AppView {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    AppView::new(
+        tx,
+        crate::acp::model_state::ModelState::default(),
+        Vec::new(),
+    )
 }
 
 /// Test-only: configure an unwired agent for Minimal's process-local behavior.

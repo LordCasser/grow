@@ -1,6 +1,6 @@
 //! Transcript export, block copying, viewer/modal, and input-log dump dispatchers.
 
-use super::ctx::with_active_agent;
+use super::ctx::{find_transcript_file_owner, with_active_agent};
 use super::session::lifecycle::skip_picker_and_create_session;
 use crate::app::actions::Effect;
 use crate::app::root::{ActiveView, AppView};
@@ -195,9 +195,12 @@ fn enqueue_file_write(app: &mut AppView, request: Option<TranscriptFileWrite>) -
         return vec![];
     };
     let agent_id = request.agent_id;
+    let session_id = request.session_id.clone();
     match app.transcript_file_writes.enqueue(request) {
         Ok(effect) => {
-            if let Some(agent) = app.agents.get_mut(&agent_id) {
+            if let Some(agent) =
+                find_transcript_file_owner(&mut app.agents, agent_id, session_id.as_ref())
+            {
                 agent
                     .scrollback
                     .push_block(RenderBlock::notice("Saving file…"));
@@ -205,7 +208,9 @@ fn enqueue_file_write(app: &mut AppView, request: Option<TranscriptFileWrite>) -
             effect.into_iter().collect()
         }
         Err(()) => {
-            if let Some(agent) = app.agents.get_mut(&agent_id) {
+            if let Some(agent) =
+                find_transcript_file_owner(&mut app.agents, agent_id, session_id.as_ref())
+            {
                 agent.scrollback.push_block(RenderBlock::notice(
                     "Too many file writes pending. Try again after a write finishes.",
                 ));
@@ -515,12 +520,11 @@ pub(super) fn dispatch_open_config_agents_modal(
     app: &mut AppView,
     initial_tab: Option<crate::views::agents_modal::AgentsTab>,
 ) -> Vec<Effect> {
-    use crate::views::agents_modal::{AgentsModalState, load_agent_toggle};
+    use crate::views::agents_modal::AgentsModalState;
 
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
     };
-    let bundle = app.bundle_state.clone();
     let Some(agent) = app.agents.get_mut(&id) else {
         return vec![];
     };
@@ -529,23 +533,28 @@ pub(super) fn dispatch_open_config_agents_modal(
     agent.extensions_modal = None;
 
     let cwd = agent.session.cwd.clone();
-    let toggle = load_agent_toggle();
     let session_id = agent.session.session_id.clone();
     let active_agent = agent.session.agent_name().map(str::to_owned);
-    let mut modal = AgentsModalState::new(&cwd, &toggle, &bundle, active_agent);
+    let mut modal = AgentsModalState::new_loading(&cwd, active_agent);
     if let Some(tab) = initial_tab {
         modal.active_tab = tab;
     }
+    let load_token = modal.load_token;
     agent.agents_modal = Some(modal);
+    let mut effects = vec![Effect::LoadAgentsModal {
+        agent_id: id,
+        cwd,
+        load_token,
+    }];
     if let Some(session_id) = session_id {
         let revision = agent.session.begin_agent_metadata_read();
-        return vec![Effect::FetchSessionAgentName {
+        effects.push(Effect::FetchSessionAgentName {
             agent_id: id,
             session_id,
             revision,
-        }];
+        });
     }
-    vec![]
+    effects
 }
 
 /// Copy the selected block's metadata (e.g., command) to clipboard.
@@ -878,6 +887,7 @@ mod input_diagnostic_tests {
     #[test]
     fn input_diagnostic_child_records_and_dump_resolves_same_surface() {
         let mut app = child_app();
+        app.screen_mode = crate::app::ScreenMode::Minimal;
         let _ = app.handle_input(&Event::Key(KeyEvent::new(
             KeyCode::Char('x'),
             KeyModifiers::NONE,

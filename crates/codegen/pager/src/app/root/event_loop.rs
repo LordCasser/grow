@@ -396,9 +396,11 @@ impl Presenter {
     /// Request now when cadence permits; otherwise schedule the earliest draw.
     fn request_throttled(&mut self, now: Instant, min_draw_interval: Duration) -> bool {
         if now.duration_since(self.last_draw_at) < min_draw_interval {
-            if self.draw_scheduled_at.is_none() {
-                self.draw_scheduled_at = Some(self.last_draw_at + min_draw_interval);
-            }
+            let deadline = self.last_draw_at + min_draw_interval;
+            self.draw_scheduled_at = Some(
+                self.draw_scheduled_at
+                    .map_or(deadline, |old| old.min(deadline)),
+            );
             return false;
         }
         self.request(false);
@@ -1448,6 +1450,10 @@ pub(crate) async fn run(
     let mut appearance_watcher =
         SystemAppearanceWatcher::start_if_auto(theme_cache::is_auto_mode());
 
+    let local_draft_ready = app
+        .local_draft_ready_notify()
+        .unwrap_or_else(|| std::sync::Arc::new(tokio::sync::Notify::new()));
+
     // Registered so the signal handler can request a graceful quit; see signal_handler.
     let quit_notify = std::sync::Arc::new(tokio::sync::Notify::new());
     crate::app::signal_handler::set_quit_notify(quit_notify.clone());
@@ -1621,6 +1627,10 @@ pub(crate) async fn run(
                 app.sync_local_drafts(std::time::Instant::now());
             }
 
+            _ = local_draft_ready.notified() => {
+                app.sync_local_drafts(std::time::Instant::now());
+            }
+
             // Biased order: cancellation/quit, writer acks/failures, ACP,
             // task/progress results, updates, input, and render/poll timers all
 
@@ -1639,7 +1649,7 @@ pub(crate) async fn run(
                 // A continuously-ready ACP stream must not outrank an expired
                 // animation deadline. Check once before every bounded batch.
                 if take_due_deadline(&mut animation_deadline, Instant::now()) {
-                    presenter.request(false);
+                    presenter.request_throttled(Instant::now(), automatic_draw_interval(&app, min_draw_interval));
                     schedule_animation_frame(&mut animation_deadline, &app, tick_interval);
                 }
                 let now = Instant::now();
@@ -1648,7 +1658,7 @@ pub(crate) async fn run(
                     // derived wall-clock pixels (Dashboard age/freshness) can
                     // change exactly at this deadline.
                     app.maintain_ui(now.into_std());
-                    presenter.request(false);
+                    presenter.request_throttled(now, automatic_draw_interval(&app, min_draw_interval));
                     schedule_ui_maintenance(&mut ui_state_deadline, &mut app, tick_interval);
                 }
                 if lifecycle_deadline_due(lifecycle_tick_at, now.into_std())
@@ -1691,7 +1701,7 @@ pub(crate) async fn run(
                     // Cap paint rate so terminal input isn't starved during
                     // heavy ACP streaming.
                     let now = Instant::now();
-                    presenter.request_throttled(now, min_draw_interval);
+                    presenter.request_throttled(now, automatic_draw_interval(&app, min_draw_interval));
                 }
             }
 
@@ -1823,14 +1833,15 @@ pub(crate) async fn run(
 
             _ = animation_frame => {
                 animation_deadline = None;
-                presenter.request(false);
+                presenter.request_throttled(Instant::now(), automatic_draw_interval(&app, min_draw_interval));
                 schedule_animation_frame(&mut animation_deadline, &app, tick_interval);
             }
 
             _ = ui_state_maintenance => {
                 ui_state_deadline = None;
-                app.maintain_ui(Instant::now().into_std());
-                presenter.request(false);
+                let now = Instant::now();
+                app.maintain_ui(now.into_std());
+                presenter.request_throttled(now, automatic_draw_interval(&app, min_draw_interval));
                 if !app.pending_effects.is_empty() {
                     let effects = std::mem::take(&mut app.pending_effects);
                     if process_effects(effects, &mut tasks, &mut app) {
@@ -2362,9 +2373,12 @@ pub(crate) async fn run(
 
         app.reconcile_activity_phases(Instant::now().into_std());
         presenter.present_if_dirty(&mut app, terminal);
+        if process_draw_effects(&mut tasks, &mut app) {
+            break;
+        }
     }
 
-    app.flush_local_drafts();
+    app.checkpoint_local_drafts().await?;
     app.notification_service.shutdown();
 
     Ok(make_run_result(&app))
@@ -2431,9 +2445,10 @@ fn load_initial_config_session_bools() -> InitialConfigSessionBools {
 /// rolled out session recap (`session_recap_available`), the user has not opted
 /// out via `ui.notifications.session_recap`, and the active agent has *finished
 /// its turn* with nothing pending that could wake it — i.e. idle, no modal, no
-/// pending question, an established session, and no running background task (a
-/// bg task completing can auto-wake the agent). Generating it now means the
-/// recap is already in the scrollback when the user returns.
+/// pending question, an established session, no running background task, and no
+/// reconnect/session reload in progress. A bg task completing can auto-wake the
+/// agent. Generating it now means the recap is already in the scrollback when
+/// the user returns.
 /// Sync shell `sessionRecap` into execution gate + every existing slash surface.
 /// Dashboard created later is seeded in `dispatch_open_dashboard`.
 fn apply_session_recap_available(app: &mut AppView, available: bool) {
@@ -2447,7 +2462,10 @@ fn apply_session_recap_available(app: &mut AppView, available: bool) {
 }
 
 fn active_session_recap_due(app: &AppView) -> bool {
-    if !app.session_recap_available || !app.notification_service.config().session_recap {
+    if app.reconnect_pending
+        || !app.session_recap_available
+        || !app.notification_service.config().session_recap
+    {
         return false;
     }
     let ActiveView::Agent(id) = app.active_view else {
@@ -2476,6 +2494,21 @@ fn should_pregenerate_away_recap(app: &AppView) -> bool {
 }
 
 /// Keep the visible-frame deadline aligned to the shared motion origin.
+fn automatic_draw_interval(app: &AppView, configured: Duration) -> Duration {
+    let ActiveView::Agent(id) = app.active_view else {
+        return configured;
+    };
+    if app
+        .agents
+        .get(&id)
+        .is_some_and(|agent| agent.session.loading_replay)
+    {
+        configured.max(Duration::from_millis(100))
+    } else {
+        configured
+    }
+}
+
 fn schedule_animation_frame(deadline: &mut Option<Instant>, app: &AppView, cap: Duration) {
     let now = Instant::now();
     if deadline.is_some_and(|at| at <= now) {
@@ -3049,27 +3082,11 @@ fn is_pasteable_key_event(ev: &Event) -> bool {
 ///    Windows Terminal versions deliver dropped paths as keystrokes
 ///    instead of a bracketed paste; this branch recovers them.
 ///
-/// No-op when bracketed paste already arrives as `Event::Paste`.
+/// A completed bracketed `Event::Paste` separates adjacent key runs.
 fn coalesce_rapid_keys(events: Vec<TimedInputEvent>) -> Vec<TimedInputEvent> {
     // Fast path: not enough events for coalescing to trigger.
     if events.len() < PASTE_COALESCE_THRESHOLD {
         return events;
-    }
-
-    // If Event::Paste fragments are mixed with key events (Windows
-    // Terminal can split a large bracketed paste across read boundaries),
-    // merge everything into a single Event::Paste.
-    let (mut has_paste, mut has_keys) = (false, false);
-    for e in &events {
-        has_paste |= matches!(e.event, Event::Paste(_));
-        has_keys |= is_pasteable_key_event(&e.event);
-    }
-    if has_paste {
-        return if has_keys {
-            merge_paste_fragments(events)
-        } else {
-            events
-        };
     }
 
     // Remove Release events — handlers ignore them and they'd break run detection.
@@ -3159,56 +3176,6 @@ pub(crate) fn is_bare_esc_press(ev: &Event) -> bool {
     )
 }
 
-/// Merge `Event::Paste` fragments and interleaved key events into a
-/// single `Event::Paste`.  Non-paste, non-key events (Resize, Mouse,
-/// Focus) are preserved in order around the merged paste.
-fn merge_paste_fragments(events: Vec<TimedInputEvent>) -> Vec<TimedInputEvent> {
-    let mut result = Vec::new();
-    let mut merged_text = String::new();
-    let mut merged_arrived_at = None;
-
-    for ev in events {
-        match &ev.event {
-            Event::Paste(text) => {
-                merged_arrived_at.get_or_insert(ev.arrived_at);
-                merged_text.push_str(text);
-            }
-            Event::Key(ke) if is_pasteable_key_event(&ev.event) => {
-                merged_arrived_at.get_or_insert(ev.arrived_at);
-                match ke.code {
-                    KeyCode::Char(c) => merged_text.push(c),
-                    KeyCode::Enter => merged_text.push('\n'),
-                    KeyCode::Tab => merged_text.push('\t'),
-                    _ => {}
-                }
-            }
-            // Non-pasteable keys (Ctrl+C, Backspace, arrows, Release
-            // events, etc.) are artifacts of paste fragmentation — drop.
-            Event::Key(_) => {}
-            _ => {
-                if !merged_text.is_empty() {
-                    result.push(TimedInputEvent {
-                        event: Event::Paste(std::mem::take(&mut merged_text)),
-                        arrived_at: merged_arrived_at
-                            .take()
-                            .expect("non-empty merged paste has an arrival time"),
-                    });
-                }
-                result.push(ev);
-            }
-        }
-    }
-
-    if !merged_text.is_empty() {
-        result.push(TimedInputEvent {
-            event: Event::Paste(merged_text),
-            arrived_at: merged_arrived_at.expect("non-empty merged paste has an arrival time"),
-        });
-    }
-
-    result
-}
-
 /// Spawn effects into the task set. Returns `true` if the app should quit.
 fn process_effects(
     effs: Vec<super::super::actions::Effect>,
@@ -3229,17 +3196,63 @@ fn process_effects(
         app.transfer_local_draft_ownership(&eff);
         let (quit, _meta) = effects::execute(eff, tasks, &app.acp_tx, &app.cwd, &flags);
         if quit {
-            app.flush_local_drafts();
             return true;
         }
     }
     false
 }
 
+/// A draw hook may arm one async handoff after a time-sliced Minimal frame.
+/// Start those effects at the loop tail so they do not wait for another input
+/// or ACP event to wake the dispatcher.
+fn process_draw_effects(tasks: &mut JoinSet<TaskResult>, app: &mut AppView) -> bool {
+    if app.pending_effects.is_empty() {
+        return false;
+    }
+    process_effects(std::mem::take(&mut app.pending_effects), tasks, app)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyEventState};
+
+    #[tokio::test]
+    async fn draw_queued_minimal_snapshot_starts_without_another_event() {
+        let mut app = crate::app::root::tests::test_app();
+        let agent = crate::app::session::AgentId(0);
+        app.screen_mode = crate::app::ScreenMode::Minimal;
+        app.agents.insert(
+            agent,
+            crate::test_util::make_agent_view(Some("minimal"), "/tmp"),
+        );
+        app.pending_effects.push(
+            super::super::super::actions::Effect::WriteMinimalTranscriptSnapshot {
+                generation: 1,
+                owner: crate::minimal_api::TranscriptOwner {
+                    root_agent: agent,
+                    root_view_agent_id: agent,
+                    root_session_id: None,
+                    view_agent_id: agent,
+                    child_session_id: None,
+                    session_id: None,
+                },
+                content: "snapshot".into(),
+            },
+        );
+
+        let mut tasks = JoinSet::new();
+        assert!(process_draw_effects(&mut tasks, &mut app) == false);
+        let result = tasks.join_next().await.unwrap().unwrap();
+        assert!(matches!(
+            result,
+            TaskResult::MinimalTranscriptSnapshotWritten {
+                generation: 1,
+                result: Ok(_),
+                ..
+            }
+        ));
+    }
 
     #[test]
     fn token_firehose_rechecks_expired_animation_within_one_acp_batch() {
@@ -4010,6 +4023,43 @@ mod tests {
     }
 
     #[test]
+    fn replay_automatic_draws_use_slow_cadence_until_load_completes() {
+        let mut app = crate::app::root::tests::test_app();
+        let id = crate::app::session::AgentId(0);
+        let mut agent = crate::test_util::make_agent_view(Some("replay"), "/tmp");
+        agent.session.loading_replay = true;
+        app.agents.insert(id, agent);
+        app.active_view = ActiveView::Agent(id);
+
+        let normal = Duration::from_millis(16);
+        assert_eq!(
+            automatic_draw_interval(&app, normal),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            automatic_draw_interval(&app, Duration::from_millis(150)),
+            Duration::from_millis(150)
+        );
+
+        let now = Instant::now();
+        let mut presenter = Presenter::new();
+        presenter.last_draw_at = now;
+        assert!(!presenter.request_throttled(now, automatic_draw_interval(&app, normal)));
+        assert_eq!(
+            presenter.draw_scheduled_at,
+            Some(now + Duration::from_millis(100))
+        );
+
+        app.agents.get_mut(&id).unwrap().session.loading_replay = false;
+        assert_eq!(automatic_draw_interval(&app, normal), normal);
+        assert!(!presenter.request_throttled(now, automatic_draw_interval(&app, normal)));
+        assert_eq!(presenter.draw_scheduled_at, Some(now + normal));
+
+        app.active_view = ActiveView::Welcome;
+        assert_eq!(automatic_draw_interval(&app, normal), normal);
+    }
+
+    #[test]
     fn presenter_no_output_does_not_wedge() {
         let mut presenter = Presenter::new();
         presenter.request(false);
@@ -4112,9 +4162,12 @@ mod tests {
                 start + Duration::from_millis(8),
             ),
         ];
-        let merged = merge_paste_fragments(fragments);
-        assert_eq!(merged[0].arrived_at, start);
-        assert_eq!(merged[0].event, Event::Paste("a\nb".to_owned()));
+        let separate = coalesce_rapid_keys(fragments);
+        assert_eq!(separate.len(), 3);
+        assert_eq!(separate[0].arrived_at, start);
+        assert_eq!(separate[0].event, Event::Paste("a".to_owned()));
+        assert_eq!(separate[1].arrived_at, start + Duration::from_millis(4));
+        assert_eq!(separate[2].arrived_at, start + Duration::from_millis(8));
     }
 
     #[test]
@@ -4615,35 +4668,46 @@ mod tests {
         assert!(!should_extend_for_paste(&events));
     }
 
-    // ── merge_paste_fragments tests ─────────────────────────────────
+    // ── completed bracketed-paste boundaries ───────────────────────
 
     #[test]
-    fn merge_paste_and_key_fragments() {
-        // Fragmented bracketed paste: Event::Paste + loose key events.
+    fn bracketed_paste_keeps_following_keys_separate() {
+        let ctrl_c = TimedInputEvent::now(Event::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        )));
         let events = vec![
-            TimedInputEvent::now(Event::Paste("hello\nwor".into())),
-            press(KeyCode::Char('l')),
-            press(KeyCode::Char('d')),
+            TimedInputEvent::now(Event::Paste("hello\nworld".into())),
+            press(KeyCode::Enter),
+            press(KeyCode::Char('x')),
+            press(KeyCode::Left),
+            ctrl_c.clone(),
         ];
         let result = coalesce_rapid_keys(events);
-        assert_eq!(result.len(), 1);
+        assert_eq!(result.len(), 5);
         assert_eq!(result[0].event, Event::Paste("hello\nworld".to_string()));
+        assert_eq!(result[1].event, press(KeyCode::Enter).event);
+        assert_eq!(result[2].event, press(KeyCode::Char('x')).event);
+        assert_eq!(result[3].event, press(KeyCode::Left).event);
+        assert_eq!(result[4], ctrl_c);
     }
 
     #[test]
-    fn merge_multiple_paste_fragments() {
+    fn two_bracketed_pastes_remain_separate() {
         let events = vec![
             TimedInputEvent::now(Event::Paste("aa\n".into())),
             TimedInputEvent::now(Event::Paste("bb\n".into())),
             press(KeyCode::Char('c')),
         ];
         let result = coalesce_rapid_keys(events);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].event, Event::Paste("aa\nbb\nc".to_string()));
+        assert_eq!(result.len(), 3);
+        assert_eq!(result[0].event, Event::Paste("aa\n".to_string()));
+        assert_eq!(result[1].event, Event::Paste("bb\n".to_string()));
+        assert_eq!(result[2].event, press(KeyCode::Char('c')).event);
     }
 
     #[test]
-    fn merge_preserves_non_key_events() {
+    fn bracketed_paste_preserves_interleaved_non_key_events() {
         let events = vec![
             TimedInputEvent::now(Event::Paste("hello".into())),
             TimedInputEvent::now(Event::Resize(80, 24)),
@@ -4653,19 +4717,20 @@ mod tests {
         assert_eq!(result.len(), 3);
         assert_eq!(result[0].event, Event::Paste("hello".to_string()));
         assert!(matches!(result[1].event, Event::Resize(80, 24)));
-        assert_eq!(result[2].event, Event::Paste("x".to_string()));
+        assert_eq!(result[2].event, press(KeyCode::Char('x')).event);
     }
 
     #[test]
-    fn merge_skips_release_events() {
+    fn bracketed_paste_discards_only_ignored_release_events() {
         let events = vec![
             TimedInputEvent::now(Event::Paste("ab".into())),
             press(KeyCode::Char('c')),
             release(KeyCode::Char('c')),
         ];
         let result = coalesce_rapid_keys(events);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].event, Event::Paste("abc".to_string()));
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0].event, Event::Paste("ab".to_string()));
+        assert_eq!(result[1].event, press(KeyCode::Char('c')).event);
     }
 
     #[test]
@@ -5030,6 +5095,100 @@ mod tests {
 mod recap_session_tests {
     use super::*;
     use crate::app::session::AgentId;
+
+    #[test]
+    fn automatic_recap_dispatch_carries_the_current_away_period() {
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        app.session_recap_available = true;
+        app.notification_service.focus_tracker.on_focus_lost();
+        let away_period_id = app.notification_service.focus_tracker.away_period_id();
+        app.notification_service.focus_tracker.on_focus_gained();
+        assert!(matches!(
+            dispatch::dispatch(Action::SendRecap { auto: true }, &mut app).as_slice(),
+            [Effect::SendRecap { auto: true, away_period_id: sent, .. }] if *sent == away_period_id
+        ));
+    }
+
+    #[test]
+    fn recap_poll_is_suppressed_while_reconnect_load_keeps_old_enabled_gate() {
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        // The old shell advertised recap. The replacement shell has disabled
+        // it, but Initialize's new capability is applied only after session
+        // reload finishes, so this models the delayed-load interval.
+        app.session_recap_available = true;
+        app.reconnect_pending = true;
+        app.notification_service.focus_tracker =
+            crate::notifications::focus::FocusTracker::new(0, 0);
+        app.notification_service.focus_tracker.on_focus_lost();
+        let sid = app.agents[&AgentId(0)]
+            .session
+            .session_id
+            .as_ref()
+            .unwrap()
+            .0
+            .clone();
+
+        assert!(app.notification_service.focus_tracker.recap_due(&sid));
+        assert!(!active_session_recap_due(&app));
+        assert!(!should_pregenerate_away_recap(&app));
+        assert!(
+            dispatch::dispatch(Action::SendRecap { auto: true }, &mut app).is_empty(),
+            "automatic dispatch must not reach the replacement endpoint during delayed load"
+        );
+        assert!(
+            app.notification_service.focus_tracker.recap_due(&sid),
+            "a suppressed poll must not record retry backoff"
+        );
+
+        // Reconnect completion applies the disabled replacement capability.
+        apply_session_recap_available(&mut app, false);
+        app.reconnect_pending = false;
+        assert!(!active_session_recap_due(&app));
+        assert!(dispatch::dispatch(Action::SendRecap { auto: true }, &mut app).is_empty());
+        assert!(dispatch::dispatch(Action::SendRecap { auto: false }, &mut app).is_empty());
+    }
+
+    #[test]
+    fn focus_return_during_reconnect_drops_only_that_away_opportunity() {
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        app.session_recap_available = true;
+        app.reconnect_pending = true;
+        app.notification_service.focus_tracker =
+            crate::notifications::focus::FocusTracker::new(0, 0);
+        app.notification_service.focus_tracker.on_focus_lost();
+        let sid = app.agents[&AgentId(0)]
+            .session
+            .session_id
+            .as_ref()
+            .unwrap()
+            .0
+            .clone();
+
+        // FocusGained captures this value before clearing FocusTracker's away
+        // state; a false result means no automatic dispatch is attempted.
+        let recap_due_on_return = active_session_recap_due(&app);
+        assert!(!recap_due_on_return);
+        app.notification_service.focus_tracker.on_focus_gained();
+        assert!(!app.notification_service.focus_tracker.recap_due(&sid));
+        assert!(dispatch::dispatch(Action::SendRecap { auto: true }, &mut app).is_empty());
+
+        // After an enabled reconnect, manual recap and a later away period use
+        // the regular gate and are not suppressed by the dropped opportunity.
+        app.reconnect_pending = false;
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .scrollback
+            .push_block(crate::scrollback::block::RenderBlock::user_prompt("hello"));
+        assert!(matches!(
+            dispatch::dispatch(Action::SendRecap { auto: false }, &mut app).as_slice(),
+            [Effect::SendRecap { auto: false, .. }]
+        ));
+        app.notification_service.focus_tracker.on_focus_lost();
+        assert!(active_session_recap_due(&app));
+        assert!(should_pregenerate_away_recap(&app));
+    }
+
     #[test]
     fn recap_eligibility_resolves_active_session_at_each_check() {
         let mut app = crate::app::root::tests::test_app_with_agent();

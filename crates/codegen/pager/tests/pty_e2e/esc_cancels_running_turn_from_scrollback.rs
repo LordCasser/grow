@@ -12,6 +12,8 @@ use super::common::*;
 #[ignore]
 async fn esc_cancels_running_turn_from_scrollback() {
     let content = ContentController::start().await.expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
+    content.seed_llm_config().expect("seed mock LLM config");
     let long_response = format!(
         "{MOCK_RESPONSE_SENTINEL} {}",
         "streaming filler words for the cancellation window. ".repeat(120)

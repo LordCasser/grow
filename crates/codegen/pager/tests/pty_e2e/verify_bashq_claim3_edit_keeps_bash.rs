@@ -9,6 +9,7 @@ use super::common::*;
 #[cfg(unix)]
 async fn verify_bashq_claim3_edit_keeps_bash() {
     let content = ContentController::start().await.expect("start content");
+    content.seed_llm_config().expect("seed mock LLM config");
     content.set_chunk_delay(Some(Duration::from_millis(150)));
     let step_one = {
         let mut s = String::from("STEPONE");

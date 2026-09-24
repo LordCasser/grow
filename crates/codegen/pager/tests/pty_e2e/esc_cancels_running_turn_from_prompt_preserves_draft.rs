@@ -12,6 +12,8 @@ use super::common::*;
 #[ignore]
 async fn esc_cancels_running_turn_from_prompt_preserves_draft() {
     let content = ContentController::start().await.expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
+    content.seed_llm_config().expect("seed mock LLM config");
     // Long paced stream so the turn is still visibly running when Esc lands.
     let long_response = format!(
         "{MOCK_RESPONSE_SENTINEL} {}",

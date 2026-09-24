@@ -76,14 +76,17 @@ pub struct FileSearchState {
     hovered: Option<usize>,
     /// Scroll offset for the dropdown list.
     scroll_offset: usize,
-    /// Floor for accepted result generations: the stale-result fence.
+    /// Floor for accepted daemon tick generations, as a secondary stale-result fence.
     ///
     /// Rises monotonically and is never lowered. Each new query bumps it (see
     /// `start_query`); the daemon paces its own per-tick `generation`
     /// independently, so `poll` drops any snapshot whose `generation` predates
     /// the floor and, on accept, raises the floor to the accepted snapshot's
-    /// generation. This keeps matches from a prior query from flickering in.
+    /// generation. Request identity in `query_id` is the primary fence.
     min_generation: usize,
+    /// Identity assigned when the latest query was queued. Daemon generation
+    /// advances per tick and cannot fence an unprocessed query request.
+    query_id: usize,
     /// Directory being drilled into; keeps the @-token alive when its name has
     /// whitespace (`my dir`). Self-validating — applies only while the path matches.
     drill_prefix: Option<String>,
@@ -103,6 +106,7 @@ impl FileSearchState {
             hovered: None,
             scroll_offset: 0,
             min_generation: 0,
+            query_id: 0,
             drill_prefix: None,
         }
     }
@@ -149,7 +153,10 @@ impl FileSearchState {
         if let RestartWalk::Restart { hidden } = restart {
             daemon.restart_walk(hidden);
         }
-        daemon.set_query(query, false);
+        self.query_id = daemon.set_query(query, false);
+        // The daemon is asynchronous and may still expose the prior query's
+        // snapshot until it processes this request.
+        self.results = FuzzyMatcherDaemonResults::default();
         // Advance the stale-result fence past the prior query (see `min_generation`).
         self.min_generation += 1;
         self.selected = 0;
@@ -287,6 +294,21 @@ impl FileSearchState {
             return false;
         };
         let results = daemon.get();
+
+        self.apply_results(results)
+    }
+
+    fn apply_results(&mut self, results: FuzzyMatcherDaemonResults) -> bool {
+        // `generation` is a daemon tick counter, not a query identity. A prior
+        // query can therefore have a larger generation than this state's
+        // per-query stale-result floor while the queued SetQuery is pending.
+        let disabled = results.generation == usize::MAX;
+        let current_query = self.context.as_ref().map(AtContext::matcher_query);
+        if !disabled
+            && (current_query != Some(results.query.as_str()) || results.query_id != self.query_id)
+        {
+            return false;
+        }
 
         if Arc::ptr_eq(&results.topk, &self.results.topk) {
             return false;
@@ -428,12 +450,15 @@ impl FileSearchState {
         results: Vec<FuzzyMatchResult>,
         selected: usize,
     ) {
+        let query = context.matcher_query().to_owned();
         self.context = Some(context);
         self.results = FuzzyMatcherDaemonResults {
             topk: Arc::from(results),
             num_items: 0,
             status: Default::default(),
             generation: self.min_generation,
+            query,
+            query_id: self.query_id,
         };
         self.min_generation += 1;
         self.selected = selected;
@@ -543,5 +568,64 @@ mod tests {
         state.update_context("@alpha_marker", "@alpha_marker".len());
         assert!(state.daemon_is_built());
         assert_eq!(state.daemon_build_count(), 1);
+    }
+
+    #[test]
+    fn reopening_after_clear_starts_with_fresh_interaction_state() {
+        let mut state = FileSearchState::new(Path::new("."));
+        let results = (0..10)
+            .map(|index| dir_result(&format!("entry-{index}")))
+            .collect();
+        let first = context::detect("@first", 6).expect("first context");
+        state.set_test_state(first, results, 8);
+        assert!(state.set_hovered(Some(8)));
+        state.ensure_visible(3);
+        assert_eq!(state.selected(), 8);
+        assert_eq!(state.hovered(), Some(8));
+        assert_eq!(state.scroll_offset(), 6);
+
+        state.clear_context();
+        assert_eq!(state.result_count(), 0);
+        assert!(!state.poll(), "a closed search must ignore daemon results");
+
+        // Reopen the same query text: only the request identity distinguishes
+        // this request from the old one.
+        state.update_context("@first", 6);
+        assert_eq!(state.selected(), 0);
+        assert_eq!(state.hovered(), None);
+        assert_eq!(state.scroll_offset(), 0);
+
+        let stale = FuzzyMatcherDaemonResults {
+            topk: Arc::from(vec![dir_result("old-result")]),
+            num_items: 1,
+            status: workspace::file_system::FuzzyMatcherStatus {
+                changed: true,
+                done: true,
+            },
+            generation: 100,
+            query: "first".to_owned(),
+            query_id: 0,
+        };
+        assert!(!state.apply_results(stale));
+        assert_eq!(state.result_count(), 0);
+
+        let current = FuzzyMatcherDaemonResults {
+            topk: Arc::from(vec![dir_result("new-result")]),
+            num_items: 1,
+            status: workspace::file_system::FuzzyMatcherStatus {
+                changed: true,
+                done: true,
+            },
+            generation: 100,
+            query: "first".to_owned(),
+            query_id: state.query_id,
+        };
+        assert!(state.apply_results(current));
+        assert_eq!(
+            state
+                .selected_result()
+                .map(|result| result.path.to_string()),
+            Some("new-result".to_owned())
+        );
     }
 }

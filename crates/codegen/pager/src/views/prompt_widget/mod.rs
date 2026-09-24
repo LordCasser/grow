@@ -538,9 +538,10 @@ impl PromptWidget {
             .bg(theme.bg_base);
         textarea.scrollbar_padding = 1;
         let mut slash_controller = crate::slash::SlashController::with_builtins(cwd.to_path_buf());
-        // Main-session switch catalog (native + plugin); no subagents.toggle.
+        // Built-ins are immediately available; live definitions arrive from
+        // the bounded picker discovery effect.
         slash_controller
-            .set_agent_catalog(crate::views::agents_modal::build_switch_agent_catalog(cwd));
+            .set_agent_catalog(crate::views::agents_modal::builtin_switch_agent_catalog());
         Self {
             textarea,
             textarea_state: TextAreaState::default(),

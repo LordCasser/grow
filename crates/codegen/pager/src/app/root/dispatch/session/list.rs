@@ -1,6 +1,6 @@
 use crate::app::actions::Effect;
-use crate::app::root::dispatch::ctx::get_active_agent_mut;
-use crate::app::root::{AppView, SessionPickerEntry};
+use crate::app::root::dispatch::ctx::{get_active_agent, get_active_agent_mut};
+use crate::app::root::{ActiveView, AppView, SessionPickerBinding, SessionPickerEntry};
 use crate::views::modal::ActiveModal;
 use crate::views::picker::PickerState;
 use crate::views::session_picker::{
@@ -85,9 +85,77 @@ impl PickerSurface<'_> {
     }
 }
 
+fn current_picker_binding(app: &AppView) -> Option<SessionPickerBinding> {
+    match app.active_view {
+        ActiveView::Welcome => Some(SessionPickerBinding {
+            root_agent_id: None,
+            child_session_key: None,
+            session_id: None,
+            session_binding_epoch: None,
+            cwd: app.cwd.clone(),
+        }),
+        ActiveView::Agent(root_agent_id) => {
+            let root = app.agents.get(&root_agent_id)?;
+            let child_session_key = if root.permission_queue.is_empty() {
+                root.active_subagent
+                    .as_ref()
+                    .filter(|key| root.subagent_views.contains_key(*key))
+                    .cloned()
+            } else {
+                None
+            };
+            let agent = get_active_agent(app)?;
+            Some(SessionPickerBinding {
+                root_agent_id: Some(root_agent_id),
+                child_session_key,
+                session_id: agent.session.session_id.clone(),
+                session_binding_epoch: Some(agent.session_binding_epoch),
+                cwd: agent.session.cwd.clone(),
+            })
+        }
+        _ => None,
+    }
+}
+
+fn picker_visible(app: &AppView) -> bool {
+    if app.session_picker_list_binding.as_ref() != current_picker_binding(app).as_ref() {
+        return false;
+    }
+    (matches!(app.active_view, ActiveView::Welcome)
+        && (app.session_picker_loading || app.session_picker_entries.is_some()))
+        || get_active_agent(app).is_some_and(|agent| {
+            matches!(
+                agent.active_modal.as_ref(),
+                Some(ActiveModal::SessionPicker { .. })
+            )
+        })
+}
+
+pub(in crate::app::root::dispatch) fn refresh_pending_picker_after_owner_switch(
+    app: &mut AppView,
+) -> Vec<Effect> {
+    let loading = match app.active_view {
+        ActiveView::Welcome => app.session_picker_loading,
+        ActiveView::Agent(_) => get_active_agent(app)
+            .and_then(|agent| agent.active_modal.as_ref())
+            .is_some_and(|modal| matches!(modal, ActiveModal::SessionPicker { loading: true, .. })),
+        _ => false,
+    };
+    if !loading || app.session_picker_list_binding.as_ref() == current_picker_binding(app).as_ref()
+    {
+        return vec![];
+    }
+    dispatch_fetch_session_list(app)
+}
+
 pub(in crate::app::root::dispatch) fn dispatch_fetch_session_list(
     app: &mut AppView,
 ) -> Vec<Effect> {
+    let Some(binding) = current_picker_binding(app) else {
+        return vec![];
+    };
+    app.session_picker_list_seq += 1;
+    app.session_picker_list_binding = Some(binding.clone());
     app.session_picker_detail_generation += 1;
     app.session_picker_loading = true;
     app.session_picker_entries = None;
@@ -99,6 +167,7 @@ pub(in crate::app::root::dispatch) fn dispatch_fetch_session_list(
     app.session_picker_content_loading = false;
     app.session_picker_entries_query = None;
     vec![Effect::FetchSessionList {
+        cwd: binding.cwd,
         query: None,
         seq: app.session_picker_list_seq,
         kind_filter: None,
@@ -115,6 +184,16 @@ pub(in crate::app::root::dispatch) fn handle_session_list_loaded(
     if seq != app.session_picker_list_seq {
         return vec![];
     }
+    if !picker_visible(app) {
+        return vec![];
+    }
+    let Some(request_cwd) = app
+        .session_picker_list_binding
+        .as_ref()
+        .map(|binding| binding.cwd.clone())
+    else {
+        return vec![];
+    };
     app.session_picker_detail_generation += 1;
     let empty_notice = "No sessions found for this directory".to_owned();
     let is_browse = query.is_none();
@@ -149,7 +228,9 @@ pub(in crate::app::root::dispatch) fn handle_session_list_loaded(
             );
         }
     }
-    if let Some(sessions) = sessions {
+    if let Some(sessions) = sessions
+        && matches!(app.active_view, crate::app::root::ActiveView::Welcome)
+    {
         let current_repo = repo_name_from_cwd(&app.cwd.to_string_lossy());
         notice = PickerSurface {
             entries: &mut app.session_picker_entries,
@@ -166,13 +247,13 @@ pub(in crate::app::root::dispatch) fn handle_session_list_loaded(
     if let Some(notice) = notice {
         app.show_toast(&notice);
     } else if scope.is_relaxed()
-        && app.session_picker_relaxed_notified_for.as_deref() != Some(app.cwd.as_path())
+        && app.session_picker_relaxed_notified_for.as_deref() != Some(request_cwd.as_path())
     {
         // Welcome view drops toasts; don't consume the one-shot notice unless
         // it can render.
         if !matches!(app.active_view, crate::app::root::ActiveView::Welcome) {
-            // Notify once per directory; the browse is scoped to `app.cwd`.
-            app.session_picker_relaxed_notified_for = Some(app.cwd.clone());
+            // Notify once per directory using the same cwd as the list request.
+            app.session_picker_relaxed_notified_for = Some(request_cwd);
             let message = match scope {
                 ListScope::Repo => {
                     "No sessions in this directory. Showing other sessions from this repository."
@@ -197,6 +278,9 @@ pub(in crate::app::root::dispatch) fn handle_session_list_failed(
     query: Option<String>,
 ) -> Vec<Effect> {
     if seq != app.session_picker_list_seq {
+        return vec![];
+    }
+    if !picker_visible(app) {
         return vec![];
     }
     app.session_picker_detail_generation += 1;
@@ -231,7 +315,7 @@ pub(in crate::app::root::dispatch) fn handle_session_list_failed(
             handled = true;
         }
     }
-    if !handled {
+    if !handled && matches!(app.active_view, crate::app::root::ActiveView::Welcome) {
         let current_repo = repo_name_from_cwd(&app.cwd.to_string_lossy());
         notice = PickerSurface {
             entries: &mut app.session_picker_entries,

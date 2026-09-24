@@ -182,7 +182,11 @@ fn collect_tmux_fix(
             (TmuxProbeResult::Unavailable, TmuxProbeResult::Unavailable)
         };
     TmuxProbeFacts {
-        config_files: if id == Some(crate::diagnostics::SSH_WRAP_ID) { TmuxProbeResult::Unavailable } else { tmux.config_files() },
+        config_files: if id == Some(crate::diagnostics::SSH_WRAP_ID) {
+            TmuxProbeResult::Unavailable
+        } else {
+            tmux.config_files()
+        },
         version: TmuxProbeResult::Unavailable,
         extended_keys,
         set_clipboard,
@@ -376,7 +380,9 @@ mod tests {
     }
 
     impl TmuxOptionQuery for FakeTmuxQuery {
-        fn config_files(&self) -> TmuxProbeResult<String> { self.show_option("config-files") }
+        fn config_files(&self) -> TmuxProbeResult<String> {
+            self.show_option("config-files")
+        }
 
         fn show_option(&self, option: &str) -> TmuxProbeResult<String> {
             self.calls.borrow_mut().push(option.to_owned());
@@ -520,15 +526,42 @@ mod tests {
     }
     #[test]
     fn configuration_candidates_flow_through_report_and_fix_collection() {
-        let terminal = TerminalContext { multiplexer: crate::terminal::MultiplexerKind::Tmux, ..Default::default() };
+        let terminal = TerminalContext {
+            multiplexer: crate::terminal::MultiplexerKind::Tmux,
+            ..Default::default()
+        };
         let mut fake = empty_fake();
         let candidates = "/tmp/custom config,/tmp/other";
-        fake.values.insert("config-files", TmuxProbeResult::Available(candidates.into()));
-        assert_eq!(collect_common(&terminal, runtime(), None, &fake, false, None).tmux.config_files, TmuxProbeResult::Available(candidates.into()));
-        assert_eq!(collect_tmux_fix(&terminal, Some(crate::diagnostics::TMUX_CLIPBOARD_ID), &fake).config_files, TmuxProbeResult::Available(candidates.into()));
+        fake.values.insert(
+            "config-files",
+            TmuxProbeResult::Available(candidates.into()),
+        );
+        assert_eq!(
+            collect_common(&terminal, runtime(), None, &fake, false, None)
+                .tmux
+                .config_files,
+            TmuxProbeResult::Available(candidates.into())
+        );
+        assert_eq!(
+            collect_tmux_fix(
+                &terminal,
+                Some(crate::diagnostics::TMUX_CLIPBOARD_ID),
+                &fake
+            )
+            .config_files,
+            TmuxProbeResult::Available(candidates.into())
+        );
         fake.calls.borrow_mut().clear();
-        assert_eq!(collect_tmux_fix(&terminal, Some(crate::diagnostics::SSH_WRAP_ID), &fake).config_files, TmuxProbeResult::Unavailable);
-        assert!(!fake.calls.borrow().iter().any(|call| call == "config-files"));
+        assert_eq!(
+            collect_tmux_fix(&terminal, Some(crate::diagnostics::SSH_WRAP_ID), &fake).config_files,
+            TmuxProbeResult::Unavailable
+        );
+        assert!(
+            !fake
+                .calls
+                .borrow()
+                .iter()
+                .any(|call| call == "config-files")
+        );
     }
-
 }

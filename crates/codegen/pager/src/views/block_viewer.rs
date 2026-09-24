@@ -1544,7 +1544,7 @@ impl BlockViewerPane {
         let virtual_y = self.list_state.scroll_offset() + (row - pane.y) as usize;
         let item_idx = self.list_state.layout().item_at_y(virtual_y)?;
         let item = items.get(item_idx)?;
-        let item_top = self.list_state.layout().virtual_y(item_idx);
+        let item_top = self.list_state.layout().virtual_y(item_idx)?;
         let sub_row = virtual_y.saturating_sub(item_top) as u16;
         let col_in_sub = col.saturating_sub(pane.x);
 
@@ -1721,8 +1721,12 @@ impl BlockViewerPane {
             let Some(item) = self.cached_unified.get(idx) else {
                 break;
             };
-            let item_top = self.list_state.layout().virtual_y(idx);
-            let item_h = self.list_state.layout().item_height(idx) as usize;
+            let Some(item_top) = self.list_state.layout().virtual_y(idx) else {
+                continue;
+            };
+            let Some(item_h) = self.list_state.layout().item_height(idx).map(usize::from) else {
+                continue;
+            };
             // Skip items entirely above / below the viewport.
             if item_top + item_h <= scroll {
                 continue;

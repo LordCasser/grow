@@ -13,6 +13,8 @@ use crate::common::*;
 #[ignore]
 async fn minimal_transcript_opens_in_pager() {
     let content = ContentController::start().await.expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
+    content.seed_llm_config().expect("seed mock LLM config");
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} transcript body."));
 
     // Minimal env + PAGER=cat (non-interactive). Response forwarding on so the

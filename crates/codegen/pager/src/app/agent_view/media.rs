@@ -11,6 +11,59 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 
+// Keep filesystem-backed inline-media work from scaling with the number of
+// distinct paths in one frame. Saturated requests remain eligible on the next
+// render pass, so backpressure does not become a sticky load failure.
+const INLINE_MEDIA_MAX_WORKERS: usize = 2;
+const INLINE_MEDIA_MAX_PENDING_PER_VIEW: usize = 2;
+const INLINE_MEDIA_MAX_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+static INLINE_MEDIA_WORKERS: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(0);
+
+struct InlineMediaWorkerPermit;
+
+impl InlineMediaWorkerPermit {
+    fn try_acquire() -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        INLINE_MEDIA_WORKERS
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |active| {
+                (active < INLINE_MEDIA_MAX_WORKERS).then_some(active + 1)
+            })
+            .ok()
+            .map(|_| Self)
+    }
+}
+
+impl Drop for InlineMediaWorkerPermit {
+    fn drop(&mut self) {
+        INLINE_MEDIA_WORKERS.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+fn read_inline_media_bounded(path: &std::path::Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+
+    let file = std::fs::File::open(path).ok()?;
+    if file.metadata().ok()?.len() > INLINE_MEDIA_MAX_IMAGE_BYTES as u64 {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(INLINE_MEDIA_MAX_IMAGE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    (bytes.len() <= INLINE_MEDIA_MAX_IMAGE_BYTES).then_some(bytes)
+}
+
+fn append_escape_with_limit(output: &mut String, escape: &str, limit: usize) -> Option<()> {
+    let new_len = output.len().checked_add(escape.len())?;
+    if new_len > limit {
+        return None;
+    }
+    output.try_reserve(escape.len()).ok()?;
+    output.push_str(escape);
+    Some(())
+}
+
 impl AgentView {
     pub(crate) fn has_visible_inline_media_load(&self) -> bool {
         self.inline_media_loading_visible
@@ -88,6 +141,12 @@ impl AgentView {
         {
             return;
         }
+        if self.inline_media_pending.len() >= INLINE_MEDIA_MAX_PENDING_PER_VIEW {
+            return;
+        }
+        let Some(permit) = InlineMediaWorkerPermit::try_acquire() else {
+            return;
+        };
         let path = path.to_path_buf();
         self.inline_media_pending.insert(path.clone());
         let mailbox = self.inline_media_completions.clone();
@@ -96,16 +155,19 @@ impl AgentView {
         let spawn = std::thread::Builder::new()
             .name("inline-media-load".into())
             .spawn(move || {
+                let _permit = permit;
                 let mut result = None;
                 // Tool output can announce a path just before its final rename.
                 // Retry off-thread for a bounded window instead of using frame
                 // ticks as a file-existence poller.
                 for _ in 0..40 {
-                    result = std::fs::read(&worker_path).ok().and_then(|raw| {
-                        crate::terminal::image::prepare_overlay_image_bytes_for_protocol(
-                            &raw, protocol,
-                        )
-                    });
+                    result = read_inline_media_bounded(&worker_path)
+                        .and_then(|raw| {
+                            crate::terminal::image::prepare_overlay_image_bytes_for_protocol(
+                                &raw, protocol,
+                            )
+                        })
+                        .filter(|prepared| prepared.len() <= INLINE_MEDIA_MAX_IMAGE_BYTES);
                     if result.is_some() {
                         break;
                     }
@@ -177,7 +239,12 @@ impl AgentView {
             }
             let image_id = self.get_or_alloc_media_id(path);
             let bytes = self.inline_media_cache.get(path)?;
-            transmit_esc = crate::terminal::image::transmit_inline_image(bytes, image_id)?;
+            let Some(escape) = crate::terminal::image::transmit_inline_image(bytes, image_id)
+            else {
+                self.discard_unplaced_inline_media(path);
+                return None;
+            };
+            transmit_esc = escape;
         }
 
         let image_id = self.get_or_alloc_media_id(path);
@@ -190,7 +257,7 @@ impl AgentView {
             .inline_media_iterm_emitted
             .get(path)
             .is_none_or(|last| *last != placement.screen_rect);
-        let place_esc = crate::terminal::image::place_inline_image(
+        let Some(place_esc) = crate::terminal::image::place_inline_image(
             image_data,
             w,
             h,
@@ -199,7 +266,23 @@ impl AgentView {
             placement.top_crop_rows,
             image_id,
             emit_iterm,
-        )?;
+        ) else {
+            self.discard_unplaced_inline_media(path);
+            return None;
+        };
+
+        let mut escapes = transmit_esc;
+        let Some(combined_len) = escapes.len().checked_add(place_esc.len()) else {
+            self.discard_unplaced_inline_media(path);
+            return None;
+        };
+        if combined_len > crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES
+            || escapes.try_reserve(place_esc.len()).is_err()
+        {
+            self.discard_unplaced_inline_media(path);
+            return None;
+        }
+        escapes.push_str(&place_esc);
         if emit_iterm
             && crate::terminal::image::detect_graphics_protocol()
                 == crate::terminal::image::GraphicsProtocol::ITerm2
@@ -207,8 +290,27 @@ impl AgentView {
             self.inline_media_iterm_emitted
                 .insert(path.clone(), placement.screen_rect);
         }
+        Some(escapes)
+    }
 
-        Some(format!("{transmit_esc}{place_esc}"))
+    /// Discard an ID allocated for a failed first upload, but keep a previously
+    /// placed ID until the bounded stale-clear path has emitted its delete.
+    pub(super) fn discard_unplaced_inline_media(&mut self, path: &std::path::Path) {
+        let was_placed = self
+            .inline_media_ids
+            .get(path)
+            .is_some_and(|id| self.last_placed_ids.contains(id));
+        if !was_placed {
+            self.inline_media_ids.remove(path);
+            self.inline_media_iterm_emitted.remove(path);
+        }
+    }
+
+    /// The escape was built but the draw accumulator rejected it, so iTerm2
+    /// must not treat the attempted rectangle as one it has already received.
+    pub(super) fn reject_inline_media_escape(&mut self, path: &std::path::Path) {
+        self.discard_unplaced_inline_media(path);
+        self.inline_media_iterm_emitted.remove(path);
     }
 
     /// Paint each visible Mermaid affordance row (`◇ mermaid [Open Image]
@@ -345,14 +447,25 @@ impl AgentView {
     ///
     /// Returns `None` when this agent (and its subagent views) has no
     /// placements.
+    #[cfg(test)]
     pub(crate) fn take_inline_media_clear_escapes(&mut self) -> Option<String> {
-        let mut clear_esc = self
-            .take_own_inline_media_clear_escapes()
-            .unwrap_or_default();
-        if let Some(esc) = self.take_subagent_inline_media_clear_escapes() {
-            clear_esc.push_str(&esc);
-        }
+        let mut clear_esc = String::new();
+        self.append_inline_media_clear_tree_with_limit(
+            &mut clear_esc,
+            crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES,
+        );
         (!clear_esc.is_empty()).then_some(clear_esc)
+    }
+
+    pub(crate) fn append_inline_media_clear_tree_with_limit(
+        &mut self,
+        output: &mut String,
+        limit: usize,
+    ) {
+        self.append_inline_media_clears_with_limit(output, limit);
+        for child in self.subagent_views.values_mut() {
+            child.append_inline_media_clear_tree_with_limit(output, limit);
+        }
     }
 
     /// This view's own placements only, leaving `subagent_views` untouched.
@@ -364,15 +477,91 @@ impl AgentView {
         if !self.inline_media_active && self.inline_media_ids.is_empty() {
             return None;
         }
-        self.inline_media_active = false;
         let mut clear_esc = String::new();
-        for &id in self.inline_media_ids.values() {
-            clear_esc.push_str(&crate::terminal::image::clear_kitty_image(id));
-        }
-        self.inline_media_ids.clear();
-        self.inline_media_iterm_emitted.clear();
-        self.last_placed_ids.clear();
+        self.append_inline_media_clears_with_limit(
+            &mut clear_esc,
+            crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES,
+        );
         (!clear_esc.is_empty()).then_some(clear_esc)
+    }
+
+    #[cfg(test)]
+    pub(super) fn append_inline_media_clears(&mut self, output: &mut String) {
+        self.append_inline_media_clears_with_limit(
+            output,
+            crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES,
+        );
+    }
+
+    pub(super) fn append_inline_media_clears_with_budget(
+        &mut self,
+        output: &mut String,
+        limit: usize,
+    ) {
+        self.append_inline_media_clears_with_limit(output, limit);
+    }
+
+    #[cfg(test)]
+    pub(super) fn append_obsolete_inline_media_clears(
+        &mut self,
+        output: &mut String,
+        current_ids: &mut std::collections::HashSet<u32>,
+    ) {
+        self.append_obsolete_inline_media_clears_with_limit(
+            output,
+            current_ids,
+            crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES,
+        );
+    }
+
+    pub(super) fn append_obsolete_inline_media_clears_with_budget(
+        &mut self,
+        output: &mut String,
+        current_ids: &mut std::collections::HashSet<u32>,
+        limit: usize,
+    ) {
+        self.append_obsolete_inline_media_clears_with_limit(output, current_ids, limit);
+    }
+
+    fn append_inline_media_clears_with_limit(&mut self, output: &mut String, limit: usize) {
+        let last_placed_ids = &mut self.last_placed_ids;
+        let inline_media_ids = &mut self.inline_media_ids;
+        inline_media_ids.retain(|_, id| {
+            let clear = crate::terminal::image::clear_kitty_image(*id);
+            if append_escape_with_limit(output, &clear, limit).is_some() {
+                last_placed_ids.remove(id);
+                false
+            } else {
+                true
+            }
+        });
+        self.inline_media_iterm_emitted
+            .retain(|path, _| self.inline_media_ids.contains_key(path));
+        self.inline_media_active = !self.inline_media_ids.is_empty();
+    }
+
+    fn append_obsolete_inline_media_clears_with_limit(
+        &mut self,
+        output: &mut String,
+        current_ids: &mut std::collections::HashSet<u32>,
+        limit: usize,
+    ) {
+        let inline_media_ids = &mut self.inline_media_ids;
+        inline_media_ids.retain(|_, id| {
+            if current_ids.contains(id) {
+                return true;
+            }
+            let clear = crate::terminal::image::clear_kitty_image(*id);
+            if append_escape_with_limit(output, &clear, limit).is_some() {
+                false
+            } else {
+                current_ids.insert(*id);
+                true
+            }
+        });
+        self.inline_media_iterm_emitted
+            .retain(|path, _| self.inline_media_ids.contains_key(path));
+        self.inline_media_active = !self.inline_media_ids.is_empty();
     }
 
     /// Subagent fullscreen views render inline media with their own ids —
@@ -380,9 +569,10 @@ impl AgentView {
     pub(super) fn take_subagent_inline_media_clear_escapes(&mut self) -> Option<String> {
         let mut clear_esc = String::new();
         for child in self.subagent_views.values_mut() {
-            if let Some(esc) = child.take_inline_media_clear_escapes() {
-                clear_esc.push_str(&esc);
-            }
+            child.append_inline_media_clear_tree_with_limit(
+                &mut clear_esc,
+                crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES,
+            );
         }
         (!clear_esc.is_empty()).then_some(clear_esc)
     }
@@ -596,6 +786,42 @@ mod tests {
     }
 
     #[test]
+    fn inline_media_read_rejects_oversized_input_before_allocating_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("oversized.png");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len((super::INLINE_MEDIA_MAX_IMAGE_BYTES + 1) as u64)
+            .unwrap();
+        assert!(super::read_inline_media_bounded(&path).is_none());
+    }
+
+    #[test]
+    fn inline_media_requests_have_a_per_view_pending_limit() {
+        let _protocol = crate::terminal::image::set_protocol_for_test(
+            crate::terminal::image::GraphicsProtocol::ITerm2,
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            1,
+            1,
+            image::Rgba([1, 2, 3, 255]),
+        ))
+        .write_to(&mut encoded, image::ImageFormat::Png)
+        .unwrap();
+        let mut agent = make_agent();
+        for name in ["one.png", "two.png", "three.png"] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, encoded.get_ref()).unwrap();
+            agent.request_inline_media_load(&path);
+        }
+        assert_eq!(
+            agent.inline_media_pending.len(),
+            super::INLINE_MEDIA_MAX_PENDING_PER_VIEW
+        );
+    }
+
+    #[test]
     fn session_boundary_detaches_late_inline_media_completion() {
         let mut agent = make_agent();
         let old_mailbox = agent.inline_media_completions.clone();
@@ -625,5 +851,104 @@ mod tests {
             "the next draw still needs the id to clear the old GPU placement"
         );
         assert!(agent.last_placed_ids.contains(&7));
+    }
+
+    #[test]
+    fn inline_media_clear_state_is_removed_only_after_escape_append() {
+        let mut agent = make_agent();
+        let path = std::path::PathBuf::from("/tmp/inline-media-clear.png");
+        agent.inline_media_ids.insert(path.clone(), 7);
+        agent
+            .inline_media_iterm_emitted
+            .insert(path.clone(), ratatui::layout::Rect::new(0, 0, 10, 5));
+        agent.last_placed_ids.insert(7);
+        agent.inline_media_active = true;
+
+        let mut clear = String::new();
+        agent.append_inline_media_clears_with_limit(&mut clear, 0);
+        assert!(clear.is_empty());
+        assert_eq!(agent.inline_media_ids.get(&path), Some(&7));
+        assert!(agent.inline_media_iterm_emitted.contains_key(&path));
+        assert!(agent.last_placed_ids.contains(&7));
+        assert!(agent.inline_media_active);
+
+        agent.append_inline_media_clears(&mut clear);
+        assert_eq!(clear, crate::terminal::image::clear_kitty_image(7));
+        assert!(!agent.inline_media_ids.contains_key(&path));
+        assert!(!agent.inline_media_iterm_emitted.contains_key(&path));
+        assert!(!agent.last_placed_ids.contains(&7));
+        assert!(!agent.inline_media_active);
+    }
+
+    #[test]
+    fn failed_inline_media_escape_keeps_previously_placed_id_for_cleanup() {
+        let mut agent = make_agent();
+        let placed = std::path::PathBuf::from("/tmp/placed-inline-media.png");
+        agent.inline_media_ids.insert(placed.clone(), 17);
+        agent.last_placed_ids.insert(17);
+        agent
+            .inline_media_iterm_emitted
+            .insert(placed.clone(), ratatui::layout::Rect::new(1, 2, 10, 5));
+
+        agent.discard_unplaced_inline_media(&placed);
+
+        assert_eq!(agent.inline_media_ids.get(&placed), Some(&17));
+        assert!(agent.last_placed_ids.contains(&17));
+        assert!(agent.inline_media_iterm_emitted.contains_key(&placed));
+        let mut clear = String::new();
+        agent.append_inline_media_clears_with_limit(&mut clear, usize::MAX);
+        assert_eq!(clear, crate::terminal::image::clear_kitty_image(17));
+        assert!(!agent.inline_media_ids.contains_key(&placed));
+
+        let unplaced = std::path::PathBuf::from("/tmp/unplaced-inline-media.png");
+        agent.inline_media_ids.insert(unplaced.clone(), 18);
+        agent.discard_unplaced_inline_media(&unplaced);
+        assert!(!agent.inline_media_ids.contains_key(&unplaced));
+    }
+
+    #[test]
+    fn aggregate_rejection_forces_iterm2_to_retry_placement() {
+        let mut agent = make_agent();
+        let path = std::path::PathBuf::from("/tmp/rejected-inline-media.png");
+        agent.inline_media_ids.insert(path.clone(), 19);
+        agent.last_placed_ids.insert(19);
+        agent
+            .inline_media_iterm_emitted
+            .insert(path.clone(), ratatui::layout::Rect::new(1, 2, 10, 5));
+
+        agent.reject_inline_media_escape(&path);
+
+        assert_eq!(agent.inline_media_ids.get(&path), Some(&19));
+        assert!(agent.last_placed_ids.contains(&19));
+        assert!(
+            !agent.inline_media_iterm_emitted.contains_key(&path),
+            "the next escape build must include a fresh iTerm2 placement"
+        );
+    }
+
+    #[test]
+    fn obsolete_inline_media_clear_remains_pending_when_frame_budget_is_full() {
+        let mut agent = make_agent();
+        let path = std::path::PathBuf::from("/tmp/obsolete-inline-media.png");
+        agent.inline_media_ids.insert(path.clone(), 11);
+        agent.last_placed_ids.insert(11);
+        agent.inline_media_active = true;
+
+        let mut output = String::new();
+        let mut current_ids = std::collections::HashSet::new();
+        agent.append_obsolete_inline_media_clears_with_limit(&mut output, &mut current_ids, 0);
+        agent.last_placed_ids = current_ids;
+        assert!(output.is_empty());
+        assert_eq!(agent.inline_media_ids.get(&path), Some(&11));
+        assert!(agent.last_placed_ids.contains(&11));
+        assert!(agent.inline_media_active);
+
+        let mut next_frame_ids = std::collections::HashSet::new();
+        agent.append_obsolete_inline_media_clears(&mut output, &mut next_frame_ids);
+        agent.last_placed_ids = next_frame_ids;
+        assert_eq!(output, crate::terminal::image::clear_kitty_image(11));
+        assert!(!agent.inline_media_ids.contains_key(&path));
+        assert!(!agent.last_placed_ids.contains(&11));
+        assert!(!agent.inline_media_active);
     }
 }

@@ -135,8 +135,18 @@ impl FpsOverlay {
         if rows == 0 {
             return area;
         }
-        self.render(Rect { height: rows, ..area }, buf);
-        Rect { y: area.y + rows, height: area.height - rows, ..area }
+        self.render(
+            Rect {
+                height: rows,
+                ..area
+            },
+            buf,
+        );
+        Rect {
+            y: area.y + rows,
+            height: area.height - rows,
+            ..area
+        }
     }
 
     /// Paint the two-line panel in the top-right corner of `area`, in the
@@ -232,7 +242,8 @@ mod tests {
             }
             if rows > 0 {
                 let line: String = (area.x..area.right())
-                    .map(|x| buf[(x, area.y + 1)].symbol()).collect();
+                    .map(|x| buf[(x, area.y + 1)].symbol())
+                    .collect();
                 assert!(line.contains("fps:100"));
             }
         }

@@ -721,7 +721,10 @@ fn keyboard_fact_and_formatter_use_snapshot_host() {
 
 #[test]
 fn report_keeps_raw_configuration_candidates() {
-    let terminal = TerminalContext { multiplexer: MultiplexerKind::Tmux, ..Default::default() };
+    let terminal = TerminalContext {
+        multiplexer: MultiplexerKind::Tmux,
+        ..Default::default()
+    };
     let mut tmux = plain_tmux();
     let candidates = "/tmp/a,b ";
     tmux.config_files = TmuxProbeResult::Available(candidates.into());

@@ -62,8 +62,31 @@ impl PostFlush {
         }
     }
 
+    pub fn append_bounded(&mut self, other: Self, limit: usize) -> Option<()> {
+        let new_len = self.bytes.len().checked_add(other.bytes.len())?;
+        if new_len > limit {
+            return None;
+        }
+        self.bytes.try_reserve(other.bytes.len()).ok()?;
+        self.bytes.push_str(&other.bytes);
+        if let Some(ownership) = other.ownership {
+            self.ownership = Some(ownership);
+        }
+        Some(())
+    }
+
     pub fn append_plain(&mut self, bytes: &str) {
         self.bytes.push_str(bytes);
+    }
+
+    pub fn append_plain_bounded(&mut self, bytes: &str, limit: usize) -> Option<()> {
+        let new_len = self.bytes.len().checked_add(bytes.len())?;
+        if new_len > limit {
+            return None;
+        }
+        self.bytes.try_reserve(bytes.len()).ok()?;
+        self.bytes.push_str(bytes);
+        Some(())
     }
 
     pub fn as_str(&self) -> &str {

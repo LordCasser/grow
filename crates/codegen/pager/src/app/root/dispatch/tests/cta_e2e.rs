@@ -178,24 +178,17 @@ fn plugin_cta_catalog_reload_empty_candidates_preserves_installed_checkmark() {
 
 #[test]
 fn plugin_cta_catalog_load_recomputes_match_for_typed_draft() {
-    use crate::app::agent_view::CtaPhase;
-    // Redirect config reads to an empty temp home so the catalog-load
-    // dismissed-set read is hermetic, not just deterministic.
-    {
-        use std::sync::OnceLock;
-        static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
-        HOME.get_or_init(|| {
-            let tmp = tempfile::tempdir().expect("tempdir creation");
-            unsafe {
-                std::env::set_var("GROW_HOME", tmp.path());
-            }
-            tmp
-        });
+    if crate::test_util::run_with_isolated_grow_home(concat!(
+        module_path!(),
+        "::plugin_cta_catalog_load_recomputes_match_for_typed_draft"
+    )) {
+        return;
     }
+    use crate::app::agent_view::CtaPhase;
     // User typed a matching word and the debounce already fired against the
     // (still-empty) catalog -> Hidden. When the async catalog lands, the CTA
     // must surface without waiting for another keystroke. Uses a unique name
-    // so the cached dismissed-set read can't suppress it.
+    // so the user's dismissed set cannot suppress it.
     let mut app = test_app_with_agent();
     app.plugin_cta_enabled = true;
     let id = AgentId(0);
@@ -1282,15 +1275,10 @@ mod cta_e2e {
     }
 
     fn isolate_grow_home() {
-        use std::sync::OnceLock;
-        static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
-        HOME.get_or_init(|| {
-            let tmp = tempfile::tempdir().expect("tempdir creation");
-            unsafe {
-                std::env::set_var("GROW_HOME", tmp.path());
-            }
-            tmp
-        });
+        assert!(
+            std::env::var_os("GROW_PAGER_ISOLATED_HOME_TEST").is_some(),
+            "CTA persistence tests must run in an isolated child"
+        );
     }
 
     fn app_matched() -> AppView {
@@ -1360,6 +1348,12 @@ mod cta_e2e {
 
     #[test]
     fn no_reload_path_enters_awaiting_mcps_directly() {
+        if crate::test_util::run_with_isolated_grow_home(concat!(
+            module_path!(),
+            "::no_reload_path_enters_awaiting_mcps_directly"
+        )) {
+            return;
+        }
         let mut app = app_matched();
         let id = AgentId(0);
         connect(&mut app);
@@ -1385,6 +1379,12 @@ mod cta_e2e {
 
     #[test]
     fn no_auth_path_settles_installed_without_modal() {
+        if crate::test_util::run_with_isolated_grow_home(concat!(
+            module_path!(),
+            "::no_auth_path_settles_installed_without_modal"
+        )) {
+            return;
+        }
         let mut app = app_awaiting_mcps();
         let id = AgentId(0);
         // All of the plugin's servers are Ready (terminal, no auth) -> settle.
@@ -1432,6 +1432,12 @@ mod cta_e2e {
 
     #[test]
     fn skills_only_install_settles_installed_without_fetch() {
+        if crate::test_util::run_with_isolated_grow_home(concat!(
+            module_path!(),
+            "::skills_only_install_settles_installed_without_fetch"
+        )) {
+            return;
+        }
         let mut app = app_matched();
         let id = AgentId(0);
         // Skills-only plugin: canonical inventory contains no MCP servers.
@@ -1468,6 +1474,12 @@ mod cta_e2e {
 
     #[test]
     fn install_error_settles_error() {
+        if crate::test_util::run_with_isolated_grow_home(concat!(
+            module_path!(),
+            "::install_error_settles_error"
+        )) {
+            return;
+        }
         let mut app = app_matched();
         let id = AgentId(0);
         connect(&mut app);
@@ -1496,6 +1508,12 @@ mod cta_e2e {
 
     #[test]
     fn reload_error_settles_error() {
+        if crate::test_util::run_with_isolated_grow_home(concat!(
+            module_path!(),
+            "::reload_error_settles_error"
+        )) {
+            return;
+        }
         let mut app = app_matched();
         let id = AgentId(0);
         connect(&mut app);
@@ -1527,6 +1545,12 @@ mod cta_e2e {
 
     #[test]
     fn mcps_error_settles_error() {
+        if crate::test_util::run_with_isolated_grow_home(concat!(
+            module_path!(),
+            "::mcps_error_settles_error"
+        )) {
+            return;
+        }
         let mut app = app_awaiting_mcps();
         let id = AgentId(0);
         let effects = dispatch(

@@ -272,6 +272,8 @@ fn expand_thinking_to_show_sentinel(harness: &mut PtyHarness) {
 #[ignore]
 async fn show_thinking_blocks_toggle_hides_existing_pty() {
     let content = ContentController::start().await.expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
+    content.seed_llm_config().expect("seed mock LLM config");
     // Default is off (rollout); opt in so the turn can create/show thinking first.
     seed_ui_config(&content, "show_thinking_blocks = true");
     let model = "test-model";

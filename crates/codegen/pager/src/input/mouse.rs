@@ -875,7 +875,9 @@ impl MouseScrollState {
 
     /// Whether the flight recorder is active (the `/debug` status line).
     pub fn scroll_log_active(&self) -> bool {
-        self.recorder.as_ref().is_some_and(ScrollLogRecorder::is_active)
+        self.recorder
+            .as_ref()
+            .is_some_and(ScrollLogRecorder::is_active)
     }
 
     /// `cancel_backlog` (direction flips only): skip the catch-up flush and

@@ -10,6 +10,7 @@ use super::common::*;
 #[ignore]
 async fn removed_queued_prompt_never_sent() {
     let content = ContentController::start().await.expect("start content");
+    content.seed_llm_config().expect("seed mock LLM config");
     let mut turn_one = content.expect_agent_turn_blocked(
         "running turn while queued prompt is removed",
         slow_turn_text("TURNONE"),
@@ -19,17 +20,28 @@ async fn removed_queued_prompt_never_sent() {
         "TURNTWO promoted prompt response.",
     );
 
+    let project = tempfile::tempdir().expect("create project dir");
+    std::fs::create_dir_all(project.path().join(".git")).expect("create .git");
+    let cwd = dunce::canonicalize(project.path()).expect("canonicalize project");
     let binary = pager_binary().expect("resolve pager binary");
-    let mut harness =
-        PtyHarness::spawn_with_content(&binary, DEFAULT_ROWS, DEFAULT_COLS, &content, &[])
-            .expect("spawn pager");
+    let mut harness = PtyHarness::spawn_with_content_in_dir(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        &[],
+        Some(cwd.as_path()),
+    )
+    .expect("spawn pager");
 
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
         .expect("welcome text");
+    harness.inject_keys(PROMPT.as_bytes()).expect("type prompt");
     harness
-        .inject_keys(format!("{PROMPT}\r").as_bytes())
-        .expect("submit prompt");
+        .wait_for_text(PROMPT, Duration::from_secs(10))
+        .expect("prompt echoed before Enter");
+    harness.inject_keys(b"\r").expect("submit prompt");
     harness
         .wait_for_text("TURNONE", Duration::from_secs(30))
         .expect("turn 1 streaming");
@@ -38,16 +50,24 @@ async fn removed_queued_prompt_never_sent() {
         .expect("turn 1 reached completion barrier");
 
     harness
-        .inject_keys(b"queued alpha\r")
-        .expect("queue first prompt");
+        .inject_keys(b"queued alpha")
+        .expect("type first queued prompt");
     harness
         .wait_for_text("queued alpha", Duration::from_secs(10))
+        .expect("first queued prompt echoed");
+    harness.inject_keys(b"\r").expect("queue first prompt");
+    harness
+        .wait_for_text("#1 queued alpha", Duration::from_secs(10))
         .expect("queue pane shows first row");
     harness
-        .inject_keys(b"queued bravo\r")
-        .expect("queue second prompt");
+        .inject_keys(b"queued bravo")
+        .expect("type second queued prompt");
     harness
         .wait_for_text("queued bravo", Duration::from_secs(10))
+        .expect("second queued prompt echoed");
+    harness.inject_keys(b"\r").expect("queue second prompt");
+    harness
+        .wait_for_text("#2 queued bravo", Duration::from_secs(10))
         .expect("queue pane shows second row");
 
     // Focus the auto-shown pane (visible+unfocused -> focused) and remove
@@ -68,11 +88,9 @@ async fn removed_queued_prompt_never_sent() {
         harness.update(Duration::from_millis(100));
     }
 
-    // `queued alpha` vanished optimistically the instant `x` was handled; give
-    // the `grow/queue/remove` RPC time to reach the shell and mutate the
-    // authoritative queue before we let turn 1 complete. Turn 1 stays gated
-    // throughout, so the removal always lands while `alpha` is still queued
-    // (never promoted) — the survivor `bravo` is the only thing left to run.
+    // The row disappears only after the authoritative remove result or queue
+    // broadcast. Turn 1 stays gated throughout, so removal lands while
+    // `alpha` is still queued; `bravo` is the only thing left to run.
     harness.update(Duration::from_millis(500));
 
     // Now let turn 1 finish: the sole survivor `queued bravo` promotes FIFO

@@ -337,17 +337,13 @@ impl AgentView {
             match event {
                 QueueEvent::DeleteSelected { id } => {
                     if is_server {
-                        // Optimistic remove; server rebroadcast is authoritative.
                         if let (Some(_sid), Some(row)) = (self.session.session_id.as_ref(), row)
                             && let Some(server_id) = row.server_id
                         {
-                            self.session.shared_queue.retain(|e| e.id != server_id);
-                            if self.visible_queue_is_empty() {
-                                self.hide_queue_pane(effects);
-                            }
                             return InputOutcome::Action(Action::QueueRemoveShared {
                                 id: server_id,
                                 expected_version: row.version,
+                                edit_id: None,
                             });
                         }
                         return InputOutcome::Changed;
@@ -477,6 +473,158 @@ mod queue_steering_tests {
     use super::*;
 
     #[test]
+    fn goal_active_queue_keys_edit_and_remove_pending_row_without_stopping_goal() {
+        let mut agent = make_running_agent();
+        agent.session.goal_state = Some(crate::app::session::GoalDisplayState::test_stub());
+        agent.session.current_prompt_id = Some("foreground".into());
+        let goal = agent.session.goal_state.clone();
+        let running = agent.session.current_prompt_id.clone();
+        let mut effects = Vec::new();
+        let registry = ActionRegistry::defaults();
+        let server_row = agent
+            .queue
+            .entry_ids()
+            .into_iter()
+            .find(|id| {
+                agent
+                    .queue
+                    .row_ref(*id)
+                    .is_some_and(|row| row.server_id.as_deref() == Some("p1"))
+            })
+            .unwrap();
+        agent.queue.list_state.select_by_id(server_row);
+
+        let edit = agent.handle_queue_key(
+            &crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('e'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &registry,
+            &mut effects,
+        );
+        assert!(matches!(edit, InputOutcome::Changed));
+        assert!(matches!(
+            effects.as_slice(),
+            [crate::app::actions::Effect::QueueHoldEdit { id, .. }] if id == "p1"
+        ));
+        assert!(matches!(agent.prompt_mode, PromptMode::Normal));
+        assert_eq!(
+            agent.session.goal_state.as_ref().map(|goal| &goal.goal_id),
+            goal.as_ref().map(|goal| &goal.goal_id)
+        );
+        assert_eq!(agent.session.current_prompt_id, running);
+
+        let mut agent = make_running_agent();
+        agent.session.goal_state = goal.clone();
+        agent.session.current_prompt_id = running.clone();
+        agent.queue.list_state.select_by_id(server_row);
+        let delete = agent.handle_queue_key(
+            &crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Char('x'),
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &registry,
+            &mut Vec::new(),
+        );
+        assert!(matches!(
+            delete,
+            InputOutcome::Action(Action::QueueRemoveShared {
+                id,
+                expected_version: 2,
+                edit_id: None,
+            }) if id == "p1"
+        ));
+        assert_eq!(agent.session.shared_queue.len(), 1);
+        assert_eq!(
+            agent.session.goal_state.as_ref().map(|goal| &goal.goal_id),
+            goal.as_ref().map(|goal| &goal.goal_id)
+        );
+        assert_eq!(agent.session.current_prompt_id, running);
+    }
+
+    #[test]
+    fn goal_active_queue_edit_click_focuses_queue_before_hold_ack() {
+        use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::{buffer::Buffer, layout::Rect};
+
+        let mut agent = make_running_agent();
+        agent.session.goal_state = Some(crate::app::session::GoalDisplayState::test_stub());
+        agent.session.current_prompt_id = Some("foreground".into());
+        let running = agent.session.current_prompt_id.clone();
+        let area = Rect::new(0, 0, 90, 12);
+        agent.pane_areas.queue = area;
+        agent.queue.render(
+            area,
+            &mut Buffer::empty(area),
+            true,
+            &crate::appearance::LayoutConfig::default(),
+            None,
+            true,
+        );
+        let (column, row) = (area.x..area.right())
+            .flat_map(|column| (area.y..area.bottom()).map(move |row| (column, row)))
+            .find(|&(column, row)| agent.queue.edit_click(column, row).is_some())
+            .expect("rendered edit button");
+        agent.force_active_pane(AgentPane::Scrollback);
+
+        let mut effects = Vec::new();
+        let outcome = agent.handle_mouse(
+            &MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut effects,
+        );
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert_eq!(agent.active_pane, AgentPane::Queue);
+        assert!(matches!(
+            effects.as_slice(),
+            [crate::app::actions::Effect::QueueHoldEdit { id, .. }] if id == "p1"
+        ));
+        assert_eq!(agent.session.current_prompt_id, running);
+        assert!(agent.session.goal_state.is_some());
+
+        let mut agent = make_running_agent();
+        agent.session.goal_state = Some(crate::app::session::GoalDisplayState::test_stub());
+        agent.session.current_prompt_id = running.clone();
+        agent.pane_areas.queue = area;
+        agent.queue.render(
+            area,
+            &mut Buffer::empty(area),
+            true,
+            &crate::appearance::LayoutConfig::default(),
+            None,
+            true,
+        );
+        let (column, row) = (area.x..area.right())
+            .flat_map(|column| (area.y..area.bottom()).map(move |row| (column, row)))
+            .find(|&(column, row)| agent.queue.delete_click(column, row).is_some())
+            .expect("rendered cancel button");
+        let outcome = agent.handle_mouse(
+            &MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            },
+            &mut Vec::new(),
+        );
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::QueueRemoveShared {
+                id,
+                expected_version: 2,
+                edit_id: None,
+            }) if id == "p1"
+        ));
+        assert_eq!(agent.session.shared_queue.len(), 1);
+        assert_eq!(agent.session.current_prompt_id, running);
+        assert!(agent.session.goal_state.is_some());
+    }
+
+    #[test]
     fn local_queue_row_becomes_same_turn_steering() {
         let mut agent = running_agent_local_only();
         let running_id = agent.session.current_prompt_id.clone();
@@ -505,6 +653,30 @@ mod queue_steering_tests {
             Some(("queued-1".into(), 3))
         );
         assert!(!agent.session.has_optimistic_queue_echo("queued-1"));
+    }
+
+    #[test]
+    fn optimistic_shared_queue_echo_cannot_claim_an_edit_hold() {
+        let mut agent = make_running_agent();
+        agent.prompt.set_text("existing draft");
+        agent.session.mark_optimistic_queue_echo("p1");
+        let row_id = agent
+            .queue
+            .entry_ids()
+            .into_iter()
+            .find(|id| {
+                agent
+                    .queue
+                    .row_ref(*id)
+                    .is_some_and(|row| row.server_id.as_deref() == Some("p1"))
+            })
+            .unwrap();
+        let mut effects = Vec::new();
+        agent.enter_queue_edit(row_id, true, agent.queue.row_ref(row_id), &mut effects);
+        assert!(effects.is_empty());
+        assert!(agent.server_queue_edit.is_none());
+        assert!(matches!(agent.prompt_mode, PromptMode::Normal));
+        assert_eq!(agent.prompt.text(), "existing draft");
     }
 
     #[test]
@@ -539,6 +711,15 @@ mod queue_steering_tests {
             server_id: Some("q1".into()),
             kind: crate::app::session::QueueEntryKind::Prompt,
         };
+        agent.server_queue_edit = Some(super::super::queue_edit::ServerQueueEdit {
+            row_id: 7,
+            id: "q1".into(),
+            version: 0,
+            edit_id: "edit-1".into(),
+            pending: false,
+            saving: false,
+            lost: false,
+        });
         agent.prompt.set_text("queued");
         agent.force_active_pane(AgentPane::Prompt);
 
@@ -548,8 +729,122 @@ mod queue_steering_tests {
         assert!(matches!(agent.prompt_mode, PromptMode::Normal));
         assert!(matches!(
             effects.as_slice(),
-            [crate::app::actions::Effect::QueueReleaseEdit { session_id, id }]
-                if session_id == &agent_client_protocol::schema::v1::SessionId::new("s1") && id == "q1"
+            [crate::app::actions::Effect::QueueReleaseEdit { session_id, id, edit_id, .. }]
+                if session_id == &agent_client_protocol::schema::v1::SessionId::new("s1") && id == "q1" && edit_id == "edit-1"
+        ));
+    }
+
+    #[test]
+    fn shared_queue_edit_waits_for_hold_and_preserves_text_on_failed_save() {
+        let mut agent = make_running_agent();
+        agent.prompt.set_text("existing composer draft");
+        let row_id = agent
+            .queue
+            .entry_ids()
+            .into_iter()
+            .find(|id| {
+                agent
+                    .queue
+                    .row_ref(*id)
+                    .is_some_and(|row| row.server_id.as_deref() == Some("p1"))
+            })
+            .unwrap();
+        let row = agent.queue.row_ref(row_id);
+        let mut effects = Vec::new();
+        agent.enter_queue_edit(row_id, true, row, &mut effects);
+        assert!(matches!(agent.prompt_mode, PromptMode::Normal));
+        assert_eq!(agent.prompt.text(), "existing composer draft");
+        let edit_id = match effects.as_slice() {
+            [
+                crate::app::actions::Effect::QueueHoldEdit {
+                    id,
+                    expected_version,
+                    edit_id,
+                    ..
+                },
+            ] if id == "p1" && *expected_version == 2 => edit_id.clone(),
+            other => panic!("expected one hold request, got {other:?}"),
+        };
+        effects.clear();
+        agent.confirm_server_queue_hold("p1", &edit_id, 2, &mut effects);
+        assert!(effects.is_empty());
+        assert!(matches!(
+            agent.prompt_mode,
+            PromptMode::EditingQueued { .. }
+        ));
+        assert_eq!(agent.prompt.text(), "server one");
+        agent.prompt.set_text("revised text");
+        let save = agent.handle_editing_queued_key(
+            &crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &mut effects,
+        );
+        assert!(matches!(
+            save,
+            Some(InputOutcome::Action(Action::QueueEditShared {
+                expected_version: 2,
+                ..
+            }))
+        ));
+        assert_eq!(agent.prompt.text(), "revised text");
+        agent.resolve_server_queue_save("p1", &edit_id, Err("admission_failed".into()));
+        assert!(matches!(
+            agent.prompt_mode,
+            PromptMode::EditingQueued { .. }
+        ));
+        assert_eq!(agent.prompt.text(), "revised text");
+        let retry = agent.handle_editing_queued_key(
+            &crossterm::event::KeyEvent::new(
+                crossterm::event::KeyCode::Enter,
+                crossterm::event::KeyModifiers::NONE,
+            ),
+            &mut effects,
+        );
+        assert!(matches!(
+            retry,
+            Some(InputOutcome::Action(Action::QueueEditShared { .. }))
+        ));
+        agent.resolve_server_queue_save("p1", &edit_id, Ok(()));
+        assert!(matches!(agent.prompt_mode, PromptMode::Normal));
+        assert_eq!(agent.prompt.text(), "existing composer draft");
+    }
+
+    #[test]
+    fn rebinding_a_view_releases_its_old_session_edit_hold() {
+        let mut agent = make_running_agent();
+        let row_id = agent
+            .queue
+            .entry_ids()
+            .into_iter()
+            .find(|id| {
+                agent
+                    .queue
+                    .row_ref(*id)
+                    .is_some_and(|row| row.server_id.as_deref() == Some("p1"))
+            })
+            .unwrap();
+        let mut effects = Vec::new();
+        let row = agent.queue.row_ref(row_id);
+        agent.enter_queue_edit(row_id, true, row, &mut effects);
+        let edit_id = agent.server_queue_edit.as_ref().unwrap().edit_id.clone();
+        agent.confirm_server_queue_hold("p1", &edit_id, 2, &mut effects);
+        agent.prompt.set_text("unsaved queue edit");
+        agent.bind_session_id(agent_client_protocol::schema::v1::SessionId::new(
+            "new-session",
+        ));
+        assert!(agent.server_queue_edit.is_none());
+        assert_eq!(agent.prompt.text(), "unsaved queue edit");
+        assert!(matches!(
+            agent.prompt_mode,
+            PromptMode::EditingQueued { .. }
+        ));
+        assert!(matches!(
+            agent.pending_queue_release.take(),
+            Some(crate::app::actions::Effect::QueueReleaseEdit { session_id, id, edit_id: token, .. })
+                if session_id == agent_client_protocol::schema::v1::SessionId::new("test-session")
+                    && id == "p1" && token == edit_id
         ));
     }
 }

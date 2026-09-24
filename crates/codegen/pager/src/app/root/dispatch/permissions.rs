@@ -58,6 +58,21 @@ pub(super) fn dispatch_permission_select(
     let Some(agent) = get_active_agent_mut(app) else {
         return vec![];
     };
+    // The queued request's option list is the authority for this answer. In
+    // particular, do not allow a stale or malformed global-mode option ID to
+    // reach its side effect when the current request never offered that row.
+    let Some(front) = agent.permission_queue.front() else {
+        return vec![];
+    };
+    if !front
+        .request
+        .request
+        .options
+        .iter()
+        .any(|option| option.option_id == option_id)
+    {
+        return vec![];
+    }
     let Some(perm) = agent.pop_permission_front() else {
         return vec![];
     };

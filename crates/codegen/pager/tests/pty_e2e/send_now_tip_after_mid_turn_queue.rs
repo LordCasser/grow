@@ -9,6 +9,8 @@ use super::common::*;
 #[ignore]
 async fn send_now_tip_after_mid_turn_queue() {
     let content = ContentController::start().await.expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
+    content.seed_llm_config().expect("seed mock LLM config");
     content.set_chunk_delay(Some(Duration::from_millis(150)));
     let _turn_one = content.expect_agent_turn(
         "running turn while send-now tip appears",

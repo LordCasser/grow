@@ -136,6 +136,7 @@ crash-handler = { path = "../crash-handler" }
 
 # Non-poisoning mutex for signal handler (active-sessions crash recovery).
 parking_lot.workspace = true
+fs2 = { workspace = true }
 
 # nix: signal handling in notifications/.
 # signal-hook: SIGWINCH handler for the `grow wrap` PTY wrapper (pty_wrap.rs).
@@ -160,6 +161,7 @@ windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
 # Enable the render crate's test-only helpers for the pager's test build.
 pager-render = { path = "../pager-render", features = ["test-support"] }
 shell = { workspace = true, features = ["test-support"] }
+sampling-types = { path = "../sampling-types" }
 pretty_assertions = { workspace = true }
 insta = { workspace = true }
 criterion = { workspace = true }

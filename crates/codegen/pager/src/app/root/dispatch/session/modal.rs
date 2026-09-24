@@ -13,7 +13,15 @@ pub(in crate::app::root::dispatch) fn remove_agent_and_cleanup(
     app: &mut AppView,
     agent_id: AgentId,
 ) {
-    let removed = app.agents.shift_remove(&agent_id);
+    let mut removed = app.agents.shift_remove(&agent_id);
+    if let Some(agent) = removed.as_mut() {
+        if let Some(effect) = agent.pending_queue_release.take() {
+            app.pending_effects.push(effect);
+        }
+        if let Some(effect) = agent.release_server_queue_edit_on_close() {
+            app.pending_effects.push(effect);
+        }
+    }
     for agent in app.agents.values_mut() {
         if agent.session.forked_from == Some(agent_id) {
             agent.session.forked_from = None;

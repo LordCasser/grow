@@ -31,6 +31,7 @@ use std::io::{BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
+use fs2::FileExt;
 use serde::Serialize;
 
 const MAX_RECORDING_BYTES: usize = 64 * 1024 * 1024;
@@ -255,7 +256,11 @@ impl ScrollLogRecorder {
         if !self.is_active() {
             return;
         }
-        let Some(bytes) = line.len().checked_add(1).filter(|bytes| *bytes <= self.remaining_bytes) else {
+        let Some(bytes) = line
+            .len()
+            .checked_add(1)
+            .filter(|bytes| *bytes <= self.remaining_bytes)
+        else {
             self.stop_at_byte_limit();
             return;
         };
@@ -313,8 +318,12 @@ fn open_writer(path: &Path) -> std::io::Result<BufWriter<File>> {
     }
     let file = options.open(path)?;
     if !file.metadata()?.is_file() {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidInput, "scroll log target is not a regular file"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "scroll log target is not a regular file",
+        ));
     }
+    file.try_lock_exclusive()?;
     file.set_len(0)?;
     Ok(BufWriter::new(file))
 }
@@ -390,6 +399,36 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn scroll_log_second_recorder_cannot_truncate_owned_target_or_alias() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("capture.jsonl");
+        let alias = directory.path().join("alias.jsonl");
+        std::os::unix::fs::symlink(&path, &alias).unwrap();
+
+        let mut first = ScrollLogRecorder::new(path.clone(), Instant::now());
+        first.write_line("{\"owner\":1}", true);
+        assert!(first.is_active());
+
+        let mut second = ScrollLogRecorder::new(alias, Instant::now());
+        second.write_line("{\"owner\":2}", true);
+        assert!(!second.is_active());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"owner\":1}\n");
+
+        first.write_line("{\"owner\":1,\"continued\":true}", true);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "{\"owner\":1}\n{\"owner\":1,\"continued\":true}\n"
+        );
+
+        drop(first);
+        let mut after_release = ScrollLogRecorder::new(path.clone(), Instant::now());
+        after_release.write_line("{\"owner\":3}", true);
+        assert!(after_release.is_active());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "{\"owner\":3}\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn scroll_log_fifo_and_directory_disable_without_waiting() {
         use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
         let directory = tempfile::tempdir().unwrap();
@@ -400,8 +439,13 @@ mod tests {
         let (tx, rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
             for with_reader in [false, true] {
-                let _reader = with_reader.then(|| std::fs::OpenOptions::new().read(true)
-                    .custom_flags(libc::O_NONBLOCK).open(&fifo).unwrap());
+                let _reader = with_reader.then(|| {
+                    std::fs::OpenOptions::new()
+                        .read(true)
+                        .custom_flags(libc::O_NONBLOCK)
+                        .open(&fifo)
+                        .unwrap()
+                });
                 let mut recorder = ScrollLogRecorder::new(fifo.clone(), Instant::now());
                 recorder.write_line("{}", true);
                 assert!(!recorder.is_active());
@@ -428,7 +472,12 @@ mod tests {
         std::os::unix::fs::symlink(&target, &link).unwrap();
         let mut recorder = ScrollLogRecorder::new(link.clone(), Instant::now());
         recorder.write_line("{}", true);
-        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert!(
+            std::fs::symlink_metadata(&link)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
         assert_eq!(std::fs::read(&target).unwrap(), b"{}\n");
     }
 
@@ -436,7 +485,9 @@ mod tests {
     fn scroll_log_same_time_defaults_are_independent_and_lazy() {
         let directory = tempfile::tempdir().unwrap();
         let logs = directory.path().join("logs");
-        let now = chrono::DateTime::parse_from_rfc3339("2026-09-07T12:34:56Z").unwrap().to_utc();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-07T12:34:56Z")
+            .unwrap()
+            .to_utc();
         let first = default_log_path_at(&logs, now);
         let second = default_log_path_at(&logs, now);
         assert_ne!(first, second);
@@ -449,11 +500,22 @@ mod tests {
         assert!(!second.exists());
         recorder.write_line(r#"{"capture":2}"#, true);
         drop(recorder);
-        assert_eq!(std::fs::read_to_string(&first).unwrap(), "{\"capture\":1}\n");
-        assert_eq!(std::fs::read_to_string(&second).unwrap(), "{\"capture\":2}\n");
+        assert_eq!(
+            std::fs::read_to_string(&first).unwrap(),
+            "{\"capture\":1}\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&second).unwrap(),
+            "{\"capture\":2}\n"
+        );
         assert_eq!(std::fs::read_dir(logs).unwrap().count(), 2);
         for path in [first, second] {
-            assert!(path.file_name().unwrap().to_string_lossy().starts_with("scroll-log-20260907-123456-"));
+            assert!(
+                path.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("scroll-log-20260907-123456-")
+            );
             assert_eq!(path.extension().unwrap(), "jsonl");
         }
     }

@@ -3936,6 +3936,12 @@ impl AgentView {
         self.inline_media_hits = InlineMediaHitAreas::default();
         if !placements.is_empty() {
             let mut all_escapes = String::new();
+            let escape_limit = crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES
+                .saturating_sub(
+                    prompt_post_flush
+                        .as_ref()
+                        .map_or(0, |post| post.as_str().len()),
+                );
             let mut this_frame_ids: HashSet<u32> = HashSet::new();
             for placement in placements {
                 let path = &placement.info.path;
@@ -3980,7 +3986,16 @@ impl AgentView {
                     buf.set_string_safe(x, y, label, Style::default().fg(theme.gray_dim));
                 }
                 if let Some(esc) = self.build_inline_media_escapes(placement) {
-                    all_escapes.push_str(&esc);
+                    if crate::terminal::image::append_image_escape_with_limit(
+                        &mut all_escapes,
+                        &esc,
+                        escape_limit,
+                    )
+                    .is_none()
+                    {
+                        self.reject_inline_media_escape(path);
+                        continue;
+                    }
                     if let Some(&id) = self.inline_media_ids.get(path) {
                         this_frame_ids.insert(id);
                     }
@@ -4035,36 +4050,42 @@ impl AgentView {
                     }
                 }
             }
-            for &old_id in &self.last_placed_ids {
-                if !this_frame_ids.contains(&old_id) {
-                    all_escapes.push_str(&crate::terminal::image::clear_kitty_image(old_id));
-                    self.inline_media_ids.retain(|_, &mut v| v != old_id);
-                    self.inline_media_iterm_emitted
-                        .retain(|p, _| self.inline_media_ids.contains_key(p));
-                }
-            }
+            self.append_obsolete_inline_media_clears_with_budget(
+                &mut all_escapes,
+                &mut this_frame_ids,
+                escape_limit,
+            );
             self.last_placed_ids = this_frame_ids;
             if !all_escapes.is_empty() {
                 self.inline_media_active = true;
                 match prompt_post_flush.as_mut() {
-                    Some(existing) => existing.append_plain(&all_escapes),
+                    Some(existing) => {
+                        let _ = existing.append_plain_bounded(
+                            &all_escapes,
+                            crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES,
+                        );
+                    }
                     None => {
                         prompt_post_flush =
                             Some(crate::terminal::overlay::PostFlush::plain(all_escapes));
                     }
                 }
             } else if self.inline_media_active {
-                self.inline_media_active = false;
                 let mut clear_esc = String::new();
-                for &id in self.inline_media_ids.values() {
-                    clear_esc.push_str(&crate::terminal::image::clear_kitty_image(id));
-                }
-                self.inline_media_ids.clear();
-                self.inline_media_iterm_emitted.clear();
-                self.last_placed_ids.clear();
+                let limit = crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES.saturating_sub(
+                    prompt_post_flush
+                        .as_ref()
+                        .map_or(0, |post| post.as_str().len()),
+                );
+                self.append_inline_media_clears_with_budget(&mut clear_esc, limit);
                 if !clear_esc.is_empty() {
                     match prompt_post_flush.as_mut() {
-                        Some(existing) => existing.append_plain(&clear_esc),
+                        Some(existing) => {
+                            let _ = existing.append_plain_bounded(
+                                &clear_esc,
+                                crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES,
+                            );
+                        }
                         None => {
                             prompt_post_flush =
                                 Some(crate::terminal::overlay::PostFlush::plain(clear_esc));
@@ -4073,17 +4094,21 @@ impl AgentView {
                 }
             }
         } else if self.inline_media_active {
-            self.inline_media_active = false;
             let mut clear_esc = String::new();
-            for &id in self.inline_media_ids.values() {
-                clear_esc.push_str(&crate::terminal::image::clear_kitty_image(id));
-            }
-            self.inline_media_iterm_emitted.clear();
-            self.inline_media_ids.clear();
-            self.last_placed_ids.clear();
+            let limit = crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES.saturating_sub(
+                prompt_post_flush
+                    .as_ref()
+                    .map_or(0, |post| post.as_str().len()),
+            );
+            self.append_inline_media_clears_with_budget(&mut clear_esc, limit);
             if !clear_esc.is_empty() {
                 match prompt_post_flush.as_mut() {
-                    Some(existing) => existing.append_plain(&clear_esc),
+                    Some(existing) => {
+                        let _ = existing.append_plain_bounded(
+                            &clear_esc,
+                            crate::terminal::image::MAX_TERMINAL_IMAGE_ESCAPE_BYTES,
+                        );
+                    }
                     None => {
                         prompt_post_flush =
                             Some(crate::terminal::overlay::PostFlush::plain(clear_esc));

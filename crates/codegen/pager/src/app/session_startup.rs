@@ -766,6 +766,12 @@ mod tests {
         #[serial_test::serial(GROW_HOME)]
         #[tokio::test]
         async fn title_fallback_resumes_single_match_case_insensitively() {
+            if crate::test_util::run_with_isolated_grow_home(concat!(
+                module_path!(),
+                "::title_fallback_resumes_single_match_case_insensitively"
+            )) {
+                return;
+            }
             let mut fx = GrowHomeFixture::new();
             let cwd_str = fx.cwd_str();
             let id = "bbbbbbbb-1111-2222-3333-444444444444";
@@ -811,6 +817,12 @@ mod tests {
         #[serial_test::serial(GROW_HOME)]
         #[tokio::test]
         async fn id_hit_beats_title_fallback() {
+            if crate::test_util::run_with_isolated_grow_home(concat!(
+                module_path!(),
+                "::id_hit_beats_title_fallback"
+            )) {
+                return;
+            }
             let mut fx = GrowHomeFixture::new();
             let cwd_str = fx.cwd_str();
             fx.write_summary(
@@ -851,6 +863,12 @@ mod tests {
         #[serial_test::serial(GROW_HOME)]
         #[tokio::test]
         async fn worktree_defer_flags_local_miss_and_local_hit_does_not() {
+            if crate::test_util::run_with_isolated_grow_home(concat!(
+                module_path!(),
+                "::worktree_defer_flags_local_miss_and_local_hit_does_not"
+            )) {
+                return;
+            }
             let mut fx = GrowHomeFixture::new();
             let cwd_str = fx.cwd_str();
             fx.write_summary(&cwd_str, "release-notes", serde_json::json!({}));

@@ -14,6 +14,8 @@ const DONE_SENTINEL: &str = "VERB_GROUP_DONE";
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored (see Cargo.toml)"]
 async fn verb_group_fold_expand_collapse_pty() {
     let content = ContentController::start().await.expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
+    content.seed_llm_config().expect("seed mock LLM config");
     // Pin ON via the config tier so the test doesn't ride the client default.
     seed_ui_config(&content, "group_tool_verbs = true");
 

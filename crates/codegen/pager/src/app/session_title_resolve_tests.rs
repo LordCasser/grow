@@ -141,6 +141,12 @@ fn worktree_failure_message_hint_follows_threaded_provenance() {
 #[serial_test::serial(GROW_HOME)]
 #[test]
 fn pin_title_resume_finds_saved_profile_and_conflicts() {
+    if crate::test_util::run_with_isolated_grow_home(concat!(
+        module_path!(),
+        "::pin_title_resume_finds_saved_profile_and_conflicts"
+    )) {
+        return;
+    }
     let mut fx = GrowHomeFixture::new();
     let cwd_str = fx.cwd_str();
     let id = "abcdabcd-1111-2222-3333-444444444444";
@@ -183,6 +189,12 @@ fn pin_title_resume_finds_saved_profile_and_conflicts() {
 #[serial_test::serial(GROW_HOME)]
 #[tokio::test]
 async fn materialization_consumes_pinned_id_after_concurrent_rename() {
+    if crate::test_util::run_with_isolated_grow_home(concat!(
+        module_path!(),
+        "::materialization_consumes_pinned_id_after_concurrent_rename"
+    )) {
+        return;
+    }
     let mut fx = GrowHomeFixture::new();
     let cwd_str = fx.cwd_str();
     let pinned = "dadadada-1111-2222-3333-444444444444";
@@ -247,6 +259,12 @@ fn pinned_local_ctx() -> crate::app::session_startup::MaterializeCtx {
 #[serial_test::serial(GROW_HOME)]
 #[test]
 fn pin_ambiguous_title_errors_before_sandbox() {
+    if crate::test_util::run_with_isolated_grow_home(concat!(
+        module_path!(),
+        "::pin_ambiguous_title_errors_before_sandbox"
+    )) {
+        return;
+    }
     let mut fx = GrowHomeFixture::new();
     let cwd_str = fx.cwd_str();
     fx.write_summary(
@@ -293,6 +311,12 @@ fn pin_ambiguous_title_errors_before_sandbox() {
 #[serial_test::serial(GROW_HOME)]
 #[tokio::test]
 async fn pinned_no_match_does_not_retry_title_after_sandbox() {
+    if crate::test_util::run_with_isolated_grow_home(concat!(
+        module_path!(),
+        "::pinned_no_match_does_not_retry_title_after_sandbox"
+    )) {
+        return;
+    }
     let mut fx = GrowHomeFixture::new();
     let cwd_str = fx.cwd_str();
 
@@ -348,6 +372,12 @@ async fn pinned_no_match_does_not_retry_title_after_sandbox() {
 #[serial_test::serial(GROW_HOME)]
 #[tokio::test]
 async fn pinned_non_uuid_id_is_not_reinterpreted_as_title() {
+    if crate::test_util::run_with_isolated_grow_home(concat!(
+        module_path!(),
+        "::pinned_non_uuid_id_is_not_reinterpreted_as_title"
+    )) {
+        return;
+    }
     let mut fx = GrowHomeFixture::new();
     let cwd_str = fx.cwd_str();
     fx.write_summary(&cwd_str, "legacy-remote-7", serde_json::json!({}));
@@ -390,6 +420,12 @@ async fn pinned_non_uuid_id_is_not_reinterpreted_as_title() {
 #[serial_test::serial(GROW_HOME)]
 #[tokio::test]
 async fn duplicate_legacy_id_title_pin_keeps_the_cwd_scoped_profile() {
+    if crate::test_util::run_with_isolated_grow_home(concat!(
+        module_path!(),
+        "::duplicate_legacy_id_title_pin_keeps_the_cwd_scoped_profile"
+    )) {
+        return;
+    }
     let mut fx = GrowHomeFixture::new();
     let cwd_str = fx.cwd_str();
     fx.write_summary(

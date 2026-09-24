@@ -41,6 +41,8 @@ async fn minimal_transcript_pager_restore_no_artifacts() {
     }
 
     let content = ContentController::start().await.expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
+    content.seed_llm_config().expect("seed mock LLM config");
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} transcript body."));
 
     let mut overrides: Vec<(String, String)> = vec![("PAGER".to_string(), "less".to_string())];
@@ -72,7 +74,12 @@ async fn minimal_transcript_pager_restore_no_artifacts() {
         .expect("submit prompt");
     harness
         .wait_for_full_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(30))
-        .expect("turn committed");
+        .unwrap_or_else(|error| {
+            panic!(
+                "turn committed: {error}; requests: {:?}",
+                content.requests()
+            )
+        });
     // Let the (delayed) writer queue fully drain at idle so the burst below is
     // the only thing in flight when the suspend arms.
     harness.update(Duration::from_secs(3));

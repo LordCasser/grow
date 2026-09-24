@@ -157,12 +157,11 @@ pub enum Action {
     AcceptWordSelectTip,
     /// Try to drain the next queued prompt (after editing completes, etc.).
     DrainQueue,
-    /// Remove a server-authoritative (shared) queued prompt by its stable
-    /// `prompt_id`. Routed to the agent as `grow/queue/remove`;
-    /// the resulting `grow/queue/changed` rebroadcast is the source of truth.
+    /// Remove a server-authoritative queued prompt after Shell acknowledges it.
     QueueRemoveShared {
         id: String,
         expected_version: u64,
+        edit_id: Option<String>,
     },
     /// Reorder the server-authoritative (shared) queued prompts to match
     /// `ordered_ids`. Routed as `grow/queue/reorder`.
@@ -172,21 +171,12 @@ pub enum Action {
     /// Clear the caller's server-authoritative (shared) queued prompts.
     /// Routed as `grow/queue/clear`.
     QueueClearShared,
-    /// Replace the text of a server-authoritative (shared) queued prompt.
-    /// Routed to the agent as `grow/queue/edit`; the rebroadcast of
-    /// `grow/queue/changed` is the source of truth. Last write wins via the
-    /// session actor's serialized mailbox; no client-side conflict resolution.
+    /// Replace a held server-authoritative queued prompt.
     QueueEditShared {
         id: String,
+        expected_version: u64,
+        edit_id: String,
         new_text: String,
-    },
-    /// Hold a server-authoritative row out of combine-on-promote while editing.
-    QueueHoldEditShared {
-        id: String,
-    },
-    /// Release a previous [`Self::QueueHoldEditShared`].
-    QueueReleaseEditShared {
-        id: String,
     },
     /// Interject a server-authoritative (shared) queued prompt into the running
     /// turn: the agent atomically removes it from the queue and
@@ -1251,6 +1241,11 @@ pub enum Effect {
         id: u64,
         request: crate::app::transcript_file_writes::TranscriptFileWrite,
     },
+    WriteMinimalTranscriptSnapshot {
+        generation: u64,
+        owner: crate::minimal_api::TranscriptOwner,
+        content: String,
+    },
     /// Create a new ACP session.
     CreateSession {
         agent_id: AgentId,
@@ -1313,8 +1308,19 @@ pub enum Effect {
         session_id: String,
         session_cwd: Option<std::path::PathBuf>,
     },
+    /// Rebuild an already attached session from canonical history after the
+    /// leader could not deliver an accepted transient candidate.
+    ResyncSession {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        cwd: std::path::PathBuf,
+        generation: u64,
+        permission_mode: shell::util::config::PermissionMode,
+    },
     /// Fetch session list for the welcome screen session picker.
     FetchSessionList {
+        /// Directory of the visible picker, frozen with the request owner.
+        cwd: std::path::PathBuf,
         /// Text search pushed down to `grow/session/list` as `query`.
         /// `None` fetches the unfiltered list.
         query: Option<String>,
@@ -1491,12 +1497,14 @@ pub enum Effect {
     },
     /// Toggle plan mode — fire-and-forget signal to the shell.
     TogglePlanMode { session_id: acp::SessionId },
-    /// Remove a server-owned queued prompt: fire-and-forget
-    /// `grow/queue/remove`. The agent re-broadcasts the authoritative queue.
+    /// Remove a server-owned queued prompt with an authoritative result.
     QueueRemove {
+        agent_id: AgentId,
         session_id: acp::SessionId,
+        binding_epoch: u32,
         id: String,
         expected_version: u64,
+        edit_id: Option<String>,
     },
     /// Reorder server-owned queued prompts: fire-and-forget `grow/queue/reorder`.
     QueueReorder {
@@ -1506,25 +1514,33 @@ pub enum Effect {
     /// Clear the caller's server-owned queued prompts: fire-and-forget
     /// `grow/queue/clear`.
     QueueClear { session_id: acp::SessionId },
-    /// Replace the text of a server-owned queued prompt in place: fire-and-forget
-    /// `grow/queue/edit`. The session actor's serialized mailbox makes this
-    /// last-writer-wins for concurrent edits; the rebroadcast of
-    /// `grow/queue/changed` is the truth signal.
+    /// Save a held server-owned row after durable admission.
     QueueEdit {
+        agent_id: AgentId,
         session_id: acp::SessionId,
+        binding_epoch: u32,
         id: String,
+        expected_version: u64,
+        edit_id: String,
         new_text: String,
     },
-    /// Hold a server-owned row out of combine-on-promote while the composer
-    /// edits it: fire-and-forget `grow/queue/hold_edit`.
+    /// Acquire an edit hold before moving a shared row into the composer.
     QueueHoldEdit {
+        agent_id: AgentId,
         session_id: acp::SessionId,
         id: String,
+        expected_version: u64,
+        edit_id: String,
+        binding_epoch: u32,
     },
-    /// Release a previous [`Self::QueueHoldEdit`]: `grow/queue/release_edit`.
+    /// Release the exact edit hold; a stale release cannot affect a new edit.
     QueueReleaseEdit {
+        agent_id: AgentId,
         session_id: acp::SessionId,
+        binding_epoch: u32,
         id: String,
+        expected_version: u64,
+        edit_id: String,
     },
     /// Interject a server-owned queued prompt into the running turn:
     /// fire-and-forget `grow/queue/interject`. The session actor atomically
@@ -1564,6 +1580,18 @@ pub enum Effect {
         agent_id: AgentId,
         session_id: acp::SessionId,
         revision: u64,
+    },
+    LoadAgentsModal {
+        agent_id: AgentId,
+        cwd: std::path::PathBuf,
+        load_token: u64,
+    },
+    LoadSwitchAgentCatalog {
+        agent_id: AgentId,
+        cwd: std::path::PathBuf,
+        request_token: u64,
+        binding_epoch: u32,
+        session_id: Option<acp::SessionId>,
     },
     /// Fetch MCP server list from the shell (grow/mcp/list).
     FetchMcpsList {
@@ -1764,6 +1792,7 @@ pub enum Effect {
     SendRecap {
         session_id: acp::SessionId,
         auto: bool,
+        away_period_id: Option<uuid::Uuid>,
     },
     /// Steer the active regular turn via `grow/steer`.
     SendInterject {
@@ -1856,6 +1885,7 @@ pub enum Effect {
     RewindExecute {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        session_binding_epoch: u32,
         target_prompt_index: usize,
         mode: crate::views::rewind::RewindMode,
     },
@@ -2015,6 +2045,22 @@ pub struct ControlRequestFailure {
 /// Result from a completed async [`Effect`].
 ///
 /// Wrapped in `Action::TaskComplete` and dispatched synchronously.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QueueControlOperation {
+    Hold,
+    Save,
+    Release,
+    Remove,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct QueueControlWire {
+    pub applied: bool,
+    pub version: Option<u64>,
+    pub reason: Option<String>,
+}
+
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum TaskResult {
@@ -2023,6 +2069,11 @@ pub enum TaskResult {
         agent_id: AgentId,
         session_id: Option<acp::SessionId>,
         result: Result<String, String>,
+    },
+    MinimalTranscriptSnapshotWritten {
+        generation: u64,
+        owner: crate::minimal_api::TranscriptOwner,
+        result: Result<tempfile::TempPath, String>,
     },
     /// Session was created successfully.
     SessionCreated {
@@ -2039,6 +2090,16 @@ pub enum TaskResult {
         agent_id: AgentId,
         prompt_id: String,
         status: Result<PromptStatusWire, String>,
+    },
+    QueueControlResolved {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
+        operation: QueueControlOperation,
+        id: String,
+        expected_version: u64,
+        edit_id: Option<String>,
+        result: Result<QueueControlWire, String>,
     },
     /// Worktree session was created successfully (worktree + ACP session).
     WorktreeSessionCreated {
@@ -2082,6 +2143,12 @@ pub enum TaskResult {
         agent_id: AgentId,
         session_id: acp::SessionId,
         error: String,
+    },
+    SessionResynced {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        generation: u64,
+        result: Result<Option<crate::app::prompt_queue::ForegroundSnapshot>, String>,
     },
     /// Local `summary.json` title read for [`Effect::HydrateSessionTitleFromDisk`].
     SessionTitleFromDisk {
@@ -2253,6 +2320,18 @@ pub enum TaskResult {
         session_id: acp::SessionId,
         revision: u64,
         agent_name: Option<String>,
+    },
+    AgentsModalLoaded {
+        agent_id: AgentId,
+        load_token: u64,
+        result: Result<(Vec<crate::views::agents_modal::AgentListEntry>, String), String>,
+    },
+    SwitchAgentCatalogLoaded {
+        agent_id: AgentId,
+        request_token: u64,
+        binding_epoch: u32,
+        session_id: Option<acp::SessionId>,
+        result: Result<Vec<crate::slash::command::AgentArg>, String>,
     },
     /// MCP server list fetched from shell.
     McpsListLoaded {
@@ -2558,10 +2637,14 @@ pub enum TaskResult {
     },
     RewindExecuteComplete {
         agent_id: AgentId,
+        session_id: acp::SessionId,
+        session_binding_epoch: u32,
         response: crate::views::rewind::RewindResponse,
     },
     RewindExecuteFailed {
         agent_id: AgentId,
+        session_id: acp::SessionId,
+        session_binding_epoch: u32,
         error: String,
     },
     /// Debounce timer for shell suggestions expired. Routed by the arming

@@ -56,13 +56,11 @@ impl Drop for EnvVarGuard {
 /// Shared GROW_HOME boundary fixture for the resume-by-title startup and
 /// pre-sandbox tests.
 ///
-/// `grow_home()` is OnceLock-cached process-wide, so summaries land under the
-/// *resolved* home (possibly the real `~/.grow` when another test pinned the
-/// cache first); cwd-encoded dirnames are tempdir-unique, and cleanup runs on
-/// drop so it survives assertion panics. Callers must hold
-/// `#[serial_test::serial(GROW_HOME)]`.
+/// Callers run in an exact-test child process with `GROW_HOME` set before the
+/// test harness starts. The parent owns the temporary directory for the full
+/// child lifetime, so this fixture never mutates process environment.
 pub struct GrowHomeFixture {
-    _home: tempfile::TempDir,
+    home: std::path::PathBuf,
     cwd: tempfile::TempDir,
     cleanup: Vec<std::path::PathBuf>,
 }
@@ -80,11 +78,12 @@ impl Default for GrowHomeFixture {
 }
 impl GrowHomeFixture {
     pub fn new() -> Self {
-        let home = tempfile::tempdir().expect("home tempdir");
-        unsafe { std::env::set_var("GROW_HOME", home.path()) };
+        let home = std::env::var_os("GROW_HOME")
+            .map(std::path::PathBuf::from)
+            .expect("isolated child test must receive GROW_HOME");
         let cwd = tempfile::tempdir().expect("cwd tempdir");
         Self {
-            _home: home,
+            home,
             cwd,
             cleanup: Vec::new(),
         }
@@ -104,7 +103,7 @@ impl GrowHomeFixture {
     /// Write a minimal valid summary.json (every non-defaulted `Summary`
     /// field) for `id` under `cwd`, merging `extra` fields on top.
     pub fn write_summary(&mut self, cwd: &str, id: &str, extra: serde_json::Value) {
-        let sessions_cwd_dir = Self::sessions_cwd_dir(cwd);
+        let sessions_cwd_dir = self.sessions_cwd_dir(cwd);
         if !self.cleanup.contains(&sessions_cwd_dir) {
             self.cleanup.push(sessions_cwd_dir.clone());
         }
@@ -127,12 +126,50 @@ impl GrowHomeFixture {
     }
     /// Delete a previously written session dir (concurrent-delete simulation).
     pub fn remove_session(&self, cwd: &str, id: &str) {
-        let _ = std::fs::remove_dir_all(Self::sessions_cwd_dir(cwd).join(id));
+        let _ = std::fs::remove_dir_all(self.sessions_cwd_dir(cwd).join(id));
     }
-    fn sessions_cwd_dir(cwd: &str) -> std::path::PathBuf {
+    fn sessions_cwd_dir(&self, cwd: &str) -> std::path::PathBuf {
         let encoded = shell::util::grow_home::encode_cwd_dirname(cwd);
-        shell::util::grow_home::grow_home()
-            .join("sessions")
-            .join(&encoded)
+        self.home.join("sessions").join(&encoded)
     }
+}
+
+/// Run a process-global-home test in its own exact-test child.
+///
+/// `grow_home()` is cached process-wide. Setting `GROW_HOME` inside the normal
+/// parallel unit-test process races with both other environment readers and
+/// the first cache initialization, so tests that need a private home must get
+/// it from the environment before their process starts.
+pub fn run_with_isolated_grow_home(test_name: &str) -> bool {
+    const CHILD_MARKER: &str = "GROW_PAGER_ISOLATED_HOME_TEST";
+    if std::env::var_os(CHILD_MARKER).is_some() {
+        return false;
+    }
+
+    // `module_path!()` includes the crate name, while libtest's exact test
+    // names start at the first module inside the crate.
+    let test_name = test_name.strip_prefix("pager::").unwrap_or(test_name);
+
+    let home = tempfile::tempdir().expect("isolated GROW_HOME");
+    let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+        .arg("--exact")
+        .arg(test_name)
+        .arg("--nocapture")
+        .env("GROW_HOME", home.path())
+        .env(CHILD_MARKER, "1")
+        .output()
+        .expect("run isolated test child");
+    assert!(
+        output.status.success(),
+        "isolated test {test_name} failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!("test {test_name} ... ok")),
+        "isolated child did not run exact test {test_name}\nstdout:\n{stdout}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+    );
+    true
 }

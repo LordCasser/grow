@@ -283,3 +283,23 @@ pub(super) fn find_agent_view_by_session_id<'a>(
     }
     None
 }
+
+/// Resolve feedback for an already-admitted transcript file job, including a
+/// child view that is no longer active. Both identities must still match.
+pub(super) fn find_transcript_file_owner<'a>(
+    agents: &'a mut indexmap::IndexMap<AgentId, AgentView>,
+    agent_id: AgentId,
+    session_id: Option<&acp::SessionId>,
+) -> Option<&'a mut AgentView> {
+    match session_id {
+        Some(session_id) => {
+            find_agent_view_by_session_id(agents, session_id.0.as_ref()).filter(|agent| {
+                agent.session.id == agent_id
+                    && agent.session.session_id.as_ref() == Some(session_id)
+            })
+        }
+        None => agents
+            .get_mut(&agent_id)
+            .filter(|agent| agent.session.session_id.is_none()),
+    }
+}

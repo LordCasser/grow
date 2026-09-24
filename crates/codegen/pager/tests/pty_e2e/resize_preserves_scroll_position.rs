@@ -182,6 +182,8 @@ fn park_marker_mid(h: &mut PtyHarness) -> Option<(u16, u16)> {
 #[ignore]
 async fn resize_preserves_scroll_position() {
     let content = ContentController::start().await.expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
+    content.seed_llm_config().expect("seed mock LLM config");
     content.set_response(scroll_anchor_response());
 
     // Spawn FULLSCREEN (alt-screen). `Viewport::Fullscreen` is autoresized on a

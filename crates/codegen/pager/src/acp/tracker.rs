@@ -1144,7 +1144,13 @@ impl AcpUpdateTracker {
                     self.pending_acp_tools = Some(t);
                 }
                 if let Some(availability) = parse_behavior_availability_meta(update.meta.as_ref()) {
-                    self.behavior_availability = Some(availability);
+                    let is_newer = self
+                        .behavior_availability
+                        .as_ref()
+                        .is_none_or(|current| availability.revision > current.revision);
+                    if is_newer {
+                        self.behavior_availability = Some(availability);
+                    }
                 }
                 self.pending_workflow_definitions = update
                     .meta

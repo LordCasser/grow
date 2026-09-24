@@ -68,7 +68,7 @@ pub(crate) fn apply_ui_notice(
     event_id: Option<String>,
     is_replay: bool,
 ) -> bool {
-    use crate::scrollback::blocks::tool::{CoordinationRow, OtherToolCallBlock};
+    use crate::scrollback::blocks::tool::{CoordinationPhase, CoordinationRow, OtherToolCallBlock};
     use shell::extensions::notification::AgentMessageNotice;
     if notice.tone == shell::extensions::notification::UiNoticeTone::Progress {
         if is_replay
@@ -135,14 +135,27 @@ pub(crate) fn apply_ui_notice(
                     scrollback.push_block(ui_notice_block(notice, event_id));
                     return true;
                 };
-                let terminal = audit.outcome.is_some();
+                if notice.correlation_id.is_empty() {
+                    // An empty inquiry ID cannot safely correlate approval or
+                    // completion with a start. Keep the durable fact visible
+                    // without entering the passive row lifecycle.
+                    scrollback.push_block(ui_notice_block(notice, event_id));
+                    return true;
+                }
+                let phase = if audit.outcome.is_some() {
+                    CoordinationPhase::Terminal
+                } else if audit.approval.is_some() {
+                    CoordinationPhase::Approved
+                } else {
+                    CoordinationPhase::Received
+                };
                 let coordination = CoordinationRow {
                     source_peer_id: audit.source_peer_id.clone(),
                     inquiry_id: notice.correlation_id.clone(),
-                    terminal,
+                    phase,
                 };
                 let raw_details = notice.details.clone();
-                let failed = terminal
+                let failed = phase == CoordinationPhase::Terminal
                     && notice.tone != shell::extensions::notification::UiNoticeTone::Success;
                 let RenderBlock::Notice(notice) = ui_notice_block(notice, event_id) else {
                     unreachable!()
@@ -1310,10 +1323,27 @@ fn handle_session_notification_inner(
                 true
             }
         }
-        GrowSessionUpdate::SessionRecap { summary, auto } => {
+        GrowSessionUpdate::SessionRecap {
+            summary,
+            auto,
+            away_period_id,
+        } => {
             use crate::scrollback::block::RenderBlock;
             use crate::scrollback::blocks::SessionEvent;
-            if should_drop_late_auto_recap(auto, meta.is_replay, agent.session.state.is_idle()) {
+            if !meta.is_replay
+                && auto
+                && !app
+                    .notification_service
+                    .focus_tracker
+                    .accepts_auto_recap(away_period_id)
+            {
+                tracing::debug!("dropping auto SessionRecap from a different away period");
+                false
+            } else if should_drop_late_auto_recap(
+                auto,
+                meta.is_replay,
+                agent.session.state.is_idle(),
+            ) {
                 tracing::debug!(
                     "dropping late auto SessionRecap; agent busy (turn or command in flight)"
                 );

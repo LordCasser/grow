@@ -283,7 +283,13 @@ pub(crate) fn finish(
                 && let Some(agent) = app.agents.get_mut(&id)
                 && let Some(ref mut modal) = agent.agents_modal
             {
-                modal.refresh_after_editor(tab);
+                let load_token = modal.refresh_after_editor(tab);
+                app.pending_effects
+                    .push(crate::app::actions::Effect::LoadAgentsModal {
+                        agent_id: id,
+                        cwd: modal.cwd.clone(),
+                        load_token,
+                    });
             }
         }
         PreparedEditorRequest::PromptDraft {
@@ -543,6 +549,42 @@ mod tests {
                 .any(|(_, entry)| entry.block.searchable_text().as_deref()
                     == Some(PROMPT_EDITOR_NONZERO))
         );
+    }
+
+    #[test]
+    fn config_editor_refresh_queues_agent_catalog_load() {
+        let id = AgentId(0);
+        let mut app = crate::app::root::tests::test_app();
+        let mut agent = crate::test_util::make_agent_view(Some("session"), "/work");
+        agent.session.id = id;
+        agent.agents_modal = Some(crate::views::agents_modal::AgentsModalState::new_loading(
+            std::path::Path::new("/work"),
+            None,
+        ));
+        let old_token = agent.agents_modal.as_ref().unwrap().load_token;
+        app.agents.insert(id, agent);
+        app.active_view = ActiveView::Agent(id);
+
+        finish(
+            &mut app,
+            PreparedEditorRequest::ConfigFile {
+                launch: EditorLaunch {
+                    argv: vec!["editor".into()],
+                    path: PathBuf::from("/work/agent.md"),
+                },
+                refresh_agents_modal: Some(crate::views::agents_modal::AgentsTab::Agents),
+            },
+            Ok(success_status()),
+        );
+
+        let modal = app.agents[&id].agents_modal.as_ref().unwrap();
+        assert_ne!(modal.load_token, old_token);
+        assert!(modal.loading);
+        assert!(matches!(
+            app.pending_effects.as_slice(),
+            [crate::app::actions::Effect::LoadAgentsModal { agent_id, load_token, .. }]
+                if *agent_id == id && *load_token == modal.load_token
+        ));
     }
 
     #[test]

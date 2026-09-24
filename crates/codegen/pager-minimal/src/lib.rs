@@ -39,10 +39,24 @@ pub mod welcome;
 mod guard;
 
 use crossterm::QueueableCommand;
-use crossterm::terminal::BeginSynchronizedUpdate;
+use crossterm::terminal::{BeginSynchronizedUpdate, EndSynchronizedUpdate};
+use std::io::Write;
 
 use pager::app::PagerTerminal;
 use pager::app::root::AppView;
+
+/// Advance the native screen owner only after its clear has been accepted.
+fn try_begin_visible_epoch(
+    app: &mut AppView,
+    owner: Option<pager::minimal_api::TranscriptOwner>,
+    clear: impl FnOnce() -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    if pager::minimal_api::minimal_printed_owner(app) != owner.as_ref() {
+        clear()?;
+        pager::minimal_api::begin_minimal_visible_epoch(app, owner);
+    }
+    Ok(())
+}
 
 /// Per-frame entry point for minimal mode, called from [`AppView::draw`].
 ///
@@ -84,13 +98,31 @@ use pager::app::root::AppView;
 /// visible scroll/paint bursts before the live region repaints. Opening the
 /// synchronized update *before* the commits batches the whole frame — commits,
 /// viewport reposition, and live redraw — into one atomic present. The
-/// matching `EndSynchronizedUpdate` is emitted by `draw_frame` (step 4), which
-/// every path through this function reaches; its own inner
+/// matching `EndSynchronizedUpdate` is emitted by `draw_frame` (step 4) on
+/// successful frames; a failed owner-switch clear closes the update explicitly.
+/// Its own inner
 /// `BeginSynchronizedUpdate` is redundant-but-harmless (DEC 2026 is a mode,
 /// not a counter — the first End closes it).
 pub fn draw(app: &mut AppView, terminal: &mut PagerTerminal, frame: pager::motion::FrameStamp) {
     let _ = terminal.backend_mut().queue(BeginSynchronizedUpdate);
     let _ = terminal.autoresize();
+    let owner = pager::minimal_api::minimal_visible_owner(app);
+    if pager::minimal_api::minimal_printed_owner(app) != owner.as_ref() {
+        // A native viewport cannot turn an earlier child epoch back into the
+        // parent's current screen. Clear the visible screen, then replay the
+        // selected view through its own normal commit frontier.
+        let area = terminal.viewport_area();
+        terminal.set_viewport_area(ratatui::layout::Rect { y: 0, ..area });
+        if try_begin_visible_epoch(app, owner, || {
+            terminal.clear()?;
+            terminal.backend_mut().flush()
+        })
+        .is_err()
+        {
+            let _ = terminal.backend_mut().queue(EndSynchronizedUpdate);
+            return;
+        }
+    }
     // Pending permission/question marks are synced ONCE, up front, so the
     // viewport sizing (`sync_viewport` / `tail_height` / `will_commit`) and the
     // commit pass judge committability against the same state (see
@@ -126,4 +158,43 @@ pub fn draw(app: &mut AppView, terminal: &mut PagerTerminal, frame: pager::motio
 /// subsequent calls are ignored (see [`pager::minimal_hook`]).
 pub fn install() {
     pager::minimal_hook::install(pager::minimal_hook::MinimalHooks { draw });
+}
+
+#[cfg(test)]
+mod owner_tests {
+    use super::*;
+    use pager::app::root::ActiveView;
+    use pager::app::session::AgentId;
+    use pager::minimal_api;
+    use pager::scrollback::block::RenderBlock;
+
+    #[test]
+    fn failed_clear_does_not_claim_or_reset_the_new_owner() {
+        let mut app = minimal_api::test_minimal_app();
+        let mut agent = minimal_api::test_agent_view(Some("root"), "/tmp/root".into());
+        agent
+            .scrollback
+            .push_block(RenderBlock::notice("already printed"));
+        minimal_api::mark_committed(&mut agent.scrollback, 0);
+        app.agents.insert(AgentId(0), agent);
+        app.active_view = ActiveView::Agent(AgentId(0));
+        let owner = minimal_api::minimal_visible_owner(&app).unwrap();
+
+        assert!(
+            try_begin_visible_epoch(&mut app, Some(owner.clone()), || {
+                Err(std::io::Error::other("clear failed"))
+            })
+            .is_err()
+        );
+        assert!(minimal_api::minimal_printed_owner(&app).is_none());
+        assert!(minimal_api::is_committed(
+            &app.agents[&AgentId(0)].scrollback,
+            app.agents[&AgentId(0)].scrollback.get(0).unwrap()
+        ));
+
+        try_begin_visible_epoch(&mut app, Some(owner.clone()), || Ok(())).unwrap();
+        assert_eq!(minimal_api::minimal_printed_owner(&app), Some(&owner));
+        let state = &app.agents[&AgentId(0)].scrollback;
+        assert!(!minimal_api::is_committed(state, state.get(0).unwrap()));
+    }
 }

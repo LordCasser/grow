@@ -23,8 +23,8 @@ pub use hook::{HookPhase, HookRunEntry, HookRunStatus, ToolCallHookData};
 pub use lifecycle::LifecycleEventBlock;
 pub use list_dir::ListDirToolCallBlock;
 pub use memory_search::MemorySearchToolCallBlock;
-pub use other::CoordinationRow;
 pub use other::OtherToolCallBlock;
+pub use other::{CoordinationPhase, CoordinationRow};
 pub use read::{ReadMediaKind, ReadToolCallBlock};
 pub use search::{
     SearchFileMatch, SearchInputMeta, SearchLineMatch, SearchOutputMode, SearchToolCallBlock,

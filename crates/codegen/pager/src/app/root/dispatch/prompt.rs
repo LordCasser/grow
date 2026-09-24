@@ -72,10 +72,16 @@ fn doctor_fix_target(agent: &AgentView) -> DoctorFixTarget {
 }
 
 pub(super) fn dispatch_doctor(request: DoctorRequest, app: &mut AppView) -> Vec<Effect> {
-    let ActiveView::Agent(agent_id) = app.active_view else { return vec![]; };
-    let Some(agent) = app.agents.get_mut(&agent_id) else { return vec![]; };
+    let ActiveView::Agent(agent_id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&agent_id) else {
+        return vec![];
+    };
     let Ok(permit) = app.doctor_collection.clone().try_acquire_owned() else {
-        agent.scrollback.push_block(RenderBlock::notice("Diagnostics are already being checked. Please wait for the current result."));
+        agent.scrollback.push_block(RenderBlock::notice(
+            "Diagnostics are already being checked. Please wait for the current result.",
+        ));
         return vec![];
     };
     let target = doctor_fix_target(agent);

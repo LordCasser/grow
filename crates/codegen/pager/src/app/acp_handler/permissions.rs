@@ -24,7 +24,7 @@ pub(super) fn handle_permission_request(
     app: &mut AppView,
 ) -> bool {
     // 1. Look up the owning agent by session_id (root or subagent view).
-    let matched = match find_session_match(app, &perm.request.session_id) {
+    let matched = match find_permission_session_match(app, &perm.request.session_id) {
         Some(m) => m,
         None => {
             tracing::warn!(
@@ -122,23 +122,11 @@ fn enqueue_permission(
     // 1b. Parse MCP scope state from the `allow-always-mcp` option's meta.
     //     Mutually exclusive with the bash flow at the per-request level —
     //     the same prompt cannot carry both.
-    let mcp_scope = perm
-        .request
-        .options
-        .iter()
-        .find(|o| o.option_id.0.as_ref() == "allow-always-mcp")
-        .and_then(|opt| opt.meta.as_ref())
-        .and_then(|m| {
-            serde_json::from_value::<workspace::permission::McpToolPermission>(
-                serde_json::Value::Object(m.clone()),
-            )
-            .ok()
-        })
-        .map(|perm| McpScopeState {
-            tool_name: perm.tool_name,
-            server_prefix: perm.server_prefix,
-            selected: McpScope::Tool,
-        });
+    let mcp_scope = mcp_scope_permission(&perm.request).map(|perm| McpScopeState {
+        tool_name: perm.tool_name,
+        server_prefix: perm.server_prefix,
+        selected: McpScope::Tool,
+    });
 
     // 2. Build subagent provenance label.
     //    If session_id differs from the root session, look up subagent info.
@@ -210,6 +198,35 @@ fn enqueue_permission(
     agent.session.last_active_at = Some(std::time::Instant::now());
 
     true // needs redraw
+}
+
+pub(super) fn mcp_scope_permission(
+    request: &acp::RequestPermissionRequest,
+) -> Option<workspace::permission::McpToolPermission> {
+    let permission = request
+        .options
+        .iter()
+        .find(|option| option.option_id.0.as_ref() == "allow-always-mcp")?
+        .meta
+        .as_ref()
+        .and_then(|meta| {
+            serde_json::from_value::<workspace::permission::McpToolPermission>(
+                serde_json::Value::Object(meta.clone()),
+            )
+            .ok()
+        })?;
+    let title = request.tool_call.fields.title.as_deref()?;
+    if permission.tool_name != title {
+        return None;
+    }
+    let server_prefix_is_valid = match permission.server_prefix.as_deref() {
+        None => !title.contains("__"),
+        Some(server) => title
+            .strip_prefix(server)
+            .and_then(|rest| rest.strip_prefix("__"))
+            .is_some_and(|action| !action.is_empty() && !action.contains("__")),
+    };
+    server_prefix_is_valid.then_some(permission)
 }
 
 /// Build a subagent provenance label for display.

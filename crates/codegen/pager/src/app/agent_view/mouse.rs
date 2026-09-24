@@ -8,8 +8,8 @@
 //! Hit-tests here assume the cached rects come from the last rendered frame.
 use super::{
     AgentPane, AgentView, CONTEXT_CLICK_DEBOUNCE_MS, CtaPhase, MULTI_CLICK_TIMEOUT_MS,
-    PromptInputMode, PromptMode, TextClickState, app_should_open_link_on_click,
-    has_native_link_hover, is_link_modifier_held, is_text_selection_on_double_click,
+    PromptInputMode, TextClickState, app_should_open_link_on_click, has_native_link_hover,
+    is_link_modifier_held, is_text_selection_on_double_click,
 };
 use crate::app::actions::Action;
 use crate::app::root::InputOutcome;
@@ -434,13 +434,10 @@ impl AgentView {
                                     (self.session.session_id.as_ref(), row)
                                     && let Some(server_id) = row.server_id
                                 {
-                                    self.session.shared_queue.retain(|e| e.id != server_id);
-                                    if self.visible_queue_is_empty() {
-                                        self.hide_queue_pane(effects);
-                                    }
                                     return InputOutcome::Action(Action::QueueRemoveShared {
                                         id: server_id,
                                         expected_version: row.version,
+                                        edit_id: None,
                                     });
                                 }
                                 return InputOutcome::Changed;
@@ -461,8 +458,7 @@ impl AgentView {
                             }
                         }
                         if let Some(id) = self.queue.edit_click(mouse.column, mouse.row)
-                            && (!matches!(self.prompt_mode, PromptMode::EditingQueued { .. })
-                                || self.set_active_pane(AgentPane::Queue, effects))
+                            && self.set_active_pane(AgentPane::Queue, effects)
                         {
                             let row = self.queue.row_ref(id);
                             let is_server = matches!(
