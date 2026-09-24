@@ -138,7 +138,7 @@ GitHub Actions / ubuntu-24.04-arm
 - release.yml：新增 `asset_platform: ohos-aarch64` / `target: aarch64-unknown-linux-ohos` / `runner: ubuntu-24.04-arm` / `smoke: false`；**3 处** 9→10 资产清单（`Verify staged binaries`、`Verify and publish` 的 `required` 数组 + 资产校验段）。
 - `.cargo/config.toml` 只加 `[target.aarch64-unknown-linux-ohos]` 的 **rustflags**（`force-unwind-tables` + `-Wl,-z,relro,-z,now,-z,noexecstack`，与 linux 段一致）；**不硬编码 SDK 路径** —— linker/sysroot/SDK 根由 CI 环境注入：`CARGO_TARGET_AARCH64_UNKNOWN_LINUX_OHOS_LINKER`、`CC_/CXX_`、`OHOS_NDK_HOME`、PATH 追加 SDK `llvm/bin` 与 `build-tools/cmake/bin`。
 - rust 版本：OHOS 宿主工具链从 1.93 起才发布。构建脚本将官方 Harmonybrew core 固定到
-  `e3a9ec87f881ce05d563912f5f0cbd6f1693b4f3`，使用其 OHOS host Rust 1.98.0 bottle，并拒绝其他版本；CI 内 `RUSTUP_TOOLCHAIN=system`。这避免 pinned ci-runner 内旧 formula 指向已被上游清理的 bottle。
+  `e3a9ec87f881ce05d563912f5f0cbd6f1693b4f3`，按拓扑顺序从源码安装 Rust 公式的依赖，再由 Rust 公式安装官方 OHOS host 1.98.0 dist，并拒绝其他版本；CI 内 `RUSTUP_TOOLCHAIN=system`。这避免 pinned core 中指向已被上游清理的 bottle。
   其他正式目标与仓库 `rust-toolchain.toml` 的 1.93.1 保持一致。
 - `scripts/build-ohos.sh --smoke` 的语义是“只冒烟现有产物”，不会调用 Cargo。发布链不得在 strip 后再次构建，否则会把带 DWARF 的 ELF 写回并使最终包从约 36 MB 膨胀到约 159 MB。
 - 已实测的容器网络坑（重要）：

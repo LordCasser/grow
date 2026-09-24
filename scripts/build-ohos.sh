@@ -158,14 +158,22 @@ if [ -z "$RUST_PREFIX" ] \
   || [ ! -x "$RUST_PREFIX/bin/rustc" ] \
   || [ ! -d "$RUST_PREFIX/lib/rustlib" ] \
   || [ "$("$RUST_PREFIX/bin/rustc" --version | awk '{ print $2 }')" != "$EXPECTED_OHOS_RUST_VERSION" ]; then
-  # Pinned formula bottles can disappear from the mirror independently of the
-  # checked-in core commit. Build the runtime toolchain formulas from their
-  # pinned sources to avoid stale bottle URLs. Rust's formula installs the
-  # official prebuilt OHOS host distribution.
-  log "Installing OHOS toolchain formulas from source via Harmonybrew"
-  HOMEBREW_NO_AUTO_UPDATE=1 brew install --build-from-source \
-    ca-certificates cmake ncurses openssl@3 zlib-ng-compat \
-    bzip2 unzip ohos-sdk llvm-gcc-compat xz patchelf rust
+  # --build-from-source applies to requested formulas, not their dependencies.
+  # Install the pinned dependency closure first, one formula at a time, so a
+  # missing transitive bottle cannot interrupt the toolchain bootstrap.
+  log "Installing OHOS toolchain dependencies from source via Harmonybrew"
+  if ! rust_deps="$(HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_FROM_API=1 \
+      brew deps --include-build --include-implicit --topological rust)"; then
+    echo "error: failed to resolve pinned OHOS Rust dependencies" >&2
+    exit 1
+  fi
+  while IFS= read -r formula; do
+    [ -n "$formula" ] || continue
+    HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_FROM_API=1 \
+      brew install --build-from-source "$formula"
+  done <<< "$rust_deps"
+  HOMEBREW_NO_AUTO_UPDATE=1 HOMEBREW_NO_INSTALL_FROM_API=1 \
+    brew install --build-from-source rust
   RUST_PREFIX="$(brew --prefix rust)"
 fi
 if ! command -v rustup >/dev/null 2>&1 && [ ! -x "$CARGO_HOME/bin/rustup" ]; then

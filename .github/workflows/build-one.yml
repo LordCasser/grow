@@ -227,10 +227,8 @@ jobs:
       # can fail with "manifest unknown" even while this tag is available.
       # --pull always below also prevents a stale runner-local tag from being
       # reused. The build script pins the Harmonybrew core commit and Rust
-      # version that must remain stable for the toolchain.
-      # The script pins the official Harmonybrew core commit that owns the
-      # verified Rust bottle, bootstraps the toolchain, and installs the
-      # rsproxy cargo mirror (crates.io/USTC TLS is flaky), then builds with
+      # version, builds the Rust formula's dependency closure from source, and
+      # installs the rsproxy cargo mirror (crates.io/USTC TLS is flaky), then builds with
       # jemalloc off (its configure does not know the ohos triplet) and WITHOUT
       # a bundled ripgrep (runtime resolves `rg` from PATH; search tools error
       # with an install hint when missing). CARGO_TARGET_DIR lives under the mounted
