@@ -1,0 +1,3 @@
+- [x] Run matched 128/512-turn Shell end-to-end load benchmarks.
+- [x] Record timings, comparison limits, and the next bottleneck in verification/backlog.
+- [x] Validate OpenSpec strictly; archive the measurement change.

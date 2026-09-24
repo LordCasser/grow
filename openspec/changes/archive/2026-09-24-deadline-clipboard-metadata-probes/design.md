@@ -1,0 +1,9 @@
+# Design
+
+The Pager clipboard facade is the boundary between event-loop callers and `client-support`'s native clipboard implementation. Add one lazy `sync_channel(1)` worker only on macOS. Requests are `ChangeCount` or `Snapshot`, each with a zero-capacity reply channel. The facade uses `try_send` and `recv_timeout(10 ms)`; full/disconnected/unavailable requests return `None` or `(None, false)`. The worker performs the existing native functions, so AppKit initialization and the entire message sequence occur outside the event loop. A timed-out caller drops its reply receiver; a late result is discarded. A hung worker can retain only its active request plus one queued request, with no retry thread growth.
+
+`client-support` keeps the pasteboard mutex around native calls. Its image read changes from blocking `lock` to `try_lock`: if metadata or a previous image call is stuck, an explicit paste takes the current AppleScript path with its five-second process deadline. No native thread is force-killed; a call already inside AppKit may remain there. The existing focus-tip state machine treats unknown as retryable, and paste admission treats unknown metadata as unable to rule out attachments.
+
+The attachment probe's second change-count check already runs on a blocking-pool thread under a five-second outer timeout. It uses the direct native function, preserving its TOCTOU decision instead of interpreting the UI facade's 10 ms scheduling deadline as a clipboard change. A stalled native call retains the pasteboard mutex; later calls skip the occupied lock.
+
+Test the facade with a controlled stalled receiver and bounded channel, verifying the caller's deadline and queue saturation. Test that an occupied native lock causes image read to take the fallback decision without waiting; no real pasteboard content is needed. Existing version-race tests still cover classification correctness.

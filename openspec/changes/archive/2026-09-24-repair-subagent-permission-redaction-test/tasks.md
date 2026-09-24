@@ -1,0 +1,2 @@
+- [x] Update the stale ACP handler test assertions.
+- [x] Run the focused test and strict OpenSpec validation, record results, and archive this test-only change.

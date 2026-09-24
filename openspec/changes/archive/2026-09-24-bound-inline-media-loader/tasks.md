@@ -1,0 +1,4 @@
+- [x] Add bounded process-wide inline-media worker admission and per-view pending limit.
+- [x] Bound file reads and prepared completion payloads; preserve retry and reset semantics.
+- [x] Add focused tests for input size rejection and pending admission.
+- [x] Update client-surfaces delta, developer guidance, backlog, and record validation.

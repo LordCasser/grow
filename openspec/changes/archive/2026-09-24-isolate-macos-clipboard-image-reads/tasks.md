@@ -1,0 +1,4 @@
+- [x] Route both macOS image-read entry points through the bounded `osascript` + temporary-file path.
+- [x] Remove the in-process image reader, its kill switch, and tests that exist only for that path; preserve metadata-only native probes.
+- [x] Update the client-surfaces delta and developer/backlog documentation with the latency and process-memory boundaries.
+- [x] Run focused validation and `openspec validate --all --strict --no-interactive` after the shared Cargo run is released.

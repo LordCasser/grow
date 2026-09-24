@@ -120,7 +120,7 @@ Sampling client construction/request events and sampling request spans SHALL des
 
 ### Requirement: Image normalization uses the bounded compute path
 
-Image normalization SHALL run through its existing cancellation-safe worker admission without an inactive process-wide normalization cache or its unused remote activation flag. Image format conversion, integrity checks, size and pixel limits, original-content fallback and attachment metadata SHALL retain their existing behavior. Drop outcomes SHALL remain attributable to individual input indexes but SHALL be grouped by identical reason before rendering; one normalization batch SHALL produce at most one model reminder and one `ImageDropped` update, with each distinct reason rendered once and all affected indexes listed in stable input order.
+Image normalization SHALL run through its cancellation-safe worker admission without an inactive process-wide normalization cache or its unused remote activation flag. Image format conversion, integrity checks, original-content fallback and attachment metadata SHALL retain their existing behavior. Full pixel decode SHALL reject source images above 50,000,000 pixels before allocating their pixel buffer. One normalization batch SHALL admit at most 25 images and 80,000,000 bytes of encoded image data before awaiting compute. Concurrent normalization batches SHALL reserve at most 160,000,000 encoded bytes process-wide; a batch that cannot reserve capacity SHALL promptly drop its images instead of retaining them as unbounded waiters. A running blocking worker SHALL retain its batch reservation after caller cancellation until that work exits. Drop outcomes SHALL remain attributable to individual input indexes but SHALL be grouped by identical reason before rendering; one normalization batch SHALL produce at most one model reminder and one `ImageDropped` update, with each distinct reason rendered once and all affected indexes listed in stable input order.
 
 #### Scenario: Normalize repeated attachments
 
@@ -130,22 +130,37 @@ Image normalization SHALL run through its existing cancellation-safe worker admi
 #### Scenario: Cancel a normalization waiter
 
 - **WHEN** a caller is cancelled after blocking normalization has started
-- **THEN** the running worker retains admission capacity until its actual work completes.
+- **THEN** the running worker retains both compute admission and its encoded-byte reservation until its actual work completes.
 
 #### Scenario: Re-encoding cannot meet the bound
 
-- **WHEN** normalization cannot produce an encoding under its byte limit
+- **WHEN** normalization cannot produce an encoding under its byte limit for an admitted image
 - **THEN** the original attachment and its indexed fallback notice remain available.
 
 #### Scenario: Several images fail for the same reason
 
-- **WHEN** one normalization batch drops multiple images for an identical integrity, dimension or pixel-count reason
+- **WHEN** one normalization batch drops multiple images for an identical integrity, dimension, pixel-count or admission reason
 - **THEN** the model reminder and `ImageDropped` notes contain one summary line for that reason with every affected image index, and the client receives one NOTICE block rather than one repeated sentence per image.
 
 #### Scenario: Images fail for different reasons
 
 - **WHEN** one normalization batch drops images for more than one reason
 - **THEN** each distinct reason appears on one line in first-occurrence order, indexes within each line preserve input order, and the user-attachment and tool-result paths use the same summaries.
+
+#### Scenario: Too many images or encoded bytes
+
+- **WHEN** a normalization batch contains more than 25 images or its encoded payload exceeds 80,000,000 bytes
+- **THEN** excess images are released before compute starts, admitted images remain in input order, and excess indexes receive explicit dropped-image outcomes.
+
+#### Scenario: Concurrent batches exhaust encoded-byte capacity
+
+- **WHEN** a new batch would raise live normalization input reservations above 160,000,000 bytes
+- **THEN** its admitted images are promptly dropped with indexed capacity reasons; no encoded payload waits uncharged for the compute worker.
+
+#### Scenario: Source exceeds client decode budget
+
+- **WHEN** an image above 50,000,000 source pixels requires re-encoding
+- **THEN** the normalizer drops it before full decode even if it is below the provider's larger persisted-image validity ceiling.
 
 ### Requirement: Session image descriptions retain original media
 
@@ -547,3 +562,87 @@ Chat Completions, Responses, and Messages SHALL recognize a complete `event:erro
 #### Scenario: Missing fields or unknown code
 - **WHEN** a non-error SSE frame lacks a required event type, a named error lacks required fields, or a named error has an unknown provider code
 - **THEN** missing-field frames remain protocol failures and unknown provider errors preserve their code/message without being assumed transient.
+
+### Requirement: Cross-segment tool IDs identify one exchange
+
+在一个 provider 请求中，工具关联 ID SHALL 只标识一个调用。原生 span 的工具调用 ID 若被 span 外另一个中性 Assistant 调用复用，请求投影 SHALL 按完整中性历史重新投影，并拒绝该 ID 的歧义工具协议；此回退 SHALL NOT 改写 Timeline 或执行工具。原生调用的持久化镜像位于同一 span 内，及其后续中性结果，SHALL 仍可保留原生 continuation。
+
+#### Scenario: Neutral and native exchanges reuse an ID
+- **WHEN** a neutral assistant call outside a native span reuses the ID of a distinct native tool use inside that span
+- **THEN** request projection discards native continuation for that request and omits the ambiguous call/result protocol through the full portable projection while preserving other conversation facts; no provider request contains both owners of the same ID.
+
+#### Scenario: Native use has a later neutral result
+- **WHEN** a native tool use's durable assistant mirror is inside its span and a matching neutral tool result follows it
+- **THEN** the native span and result retain their shared ID and are each encoded once without falling back to portable projection.
+
+### Requirement: Streamed Sideband attempts retain evidence through body completion
+
+A Sideband provider attempt SHALL remain within its admitted evidence and usage lifetime until its streamed response has been read, decoded, and classified. Raw provider bytes, observed native terminal, and any observed stream end SHALL be attached to that attempt before its Sideband result or failure is committed. A backend that completes at a native terminal without polling to transport EOF SHALL NOT fabricate a stream-end marker. A partial or malformed stream SHALL NOT be reported as a completed provider attempt merely because HTTP stream opening succeeded.
+
+#### Scenario: AI shell suggestion receives a complete streamed response
+
+- **WHEN** an AI shell-command suggestion receives a complete stream from Chat Completions, Responses, or Messages
+- **THEN** the Sideband attempt evidence retains the raw response bytes and native terminal, and provider work is marked returned only after the response is collected.
+
+#### Scenario: AI shell suggestion stream fails after opening
+
+- **WHEN** an AI shell-command suggestion stream ends without completion evidence or contains malformed SSE after HTTP stream opening succeeds
+- **THEN** the owning Timeline retains the observed response bytes and failure classification, plus any actually observed stream-end marker, before the Sideband fails; no suggestion is accepted.
+
+### Requirement: Portable Responses history retains output message phases
+
+来自 Responses 的 Assistant 文本 SHALL 在中性历史中保留逐条输出消息边界和 `commentary`/`final_answer` 阶段，不保留原生输出消息 ID 或状态。构造 portable Responses 请求时 SHALL 按原消息顺序及阶段投影，切换到 Chat Completions 或 Messages 时继续使用扁平正文。已有本地工具调用/结果配对和 native continuation 规则保持有效。
+
+#### Scenario: Portable Responses phase after recovery or route switch
+- **WHEN** accepted Responses output has multiple assistant messages with different phases and its native continuation is unavailable
+- **THEN** durable neutral history retains their text boundaries and phases, and a subsequent Responses request emits separate assistant input messages in order with those phases.
+
+#### Scenario: Local tool exchange follows phased messages
+- **WHEN** one Responses output also contains local function calls and the corresponding results have been admitted
+- **THEN** portable requests keep the complete call/result batch paired exactly once after the phased assistant messages.
+
+#### Scenario: Legacy or transformed Assistant text
+- **WHEN** an Assistant record has no boundaries or its text has been redacted/truncated so stored ranges cannot describe it
+- **THEN** Responses request projection emits the existing single phase-less text message, without slicing invalid offsets or inventing a phase.
+
+#### Scenario: Compaction replaces source messages
+- **WHEN** compaction replaces a source range with a summary
+- **THEN** exact phase replay is retained for un-compacted Assistant items, while the summary makes no claim to preserve discarded messages' phases.
+
+### Requirement: Session sampler preview handoff bounds fragment backlog
+
+A live session's sampler-to-Shell event handoff SHALL reserve capacity before forwarding each candidate text, reasoning, tool-argument, response-start, or reasoning-signature fragment. At most 4096 such fragments and approximately 64 MiB of charged fragment payload SHALL be pending across the sampler and session-event channels. The producer SHALL await capacity asynchronously so a slow session actor backpressures the provider stream, and cancellation SHALL interrupt that wait. A fragment's reservation SHALL be returned only after its translated events have been consumed from the session event FIFO. A closed downstream consumer SHALL release blocked producers. The ReplayBuffer SHALL retain at most one pending notification with a coalescing threshold no greater than the fragment byte budget. Attempt ownership, chunk indexes, control-event order, and canonical admission SHALL remain unchanged.
+
+#### Scenario: Session consumer stalls
+
+- **WHEN** the session actor stops consuming events while the sampler drainer continues receiving L2 fragments
+- **THEN** the drainer retains credit for the unacknowledged fragment, the producer stops forwarding once its remaining credit budget fills, and the second session event channel does not accumulate additional candidate payloads without bound.
+
+#### Scenario: Cancellation while waiting for credits
+
+- **WHEN** an attempt is canceled after its fragment budget fills but before the actor acknowledges another fragment
+- **THEN** the provider drive stops without forwarding the waiting fragment, and its attempt-discard terminal follows already-forwarded fragments in channel order.
+
+#### Scenario: Downstream actor closes
+
+- **WHEN** the session actor closes before acknowledging a translated fragment
+- **THEN** the drainer closes the credit budget and sampler receiver, so a producer waiting for capacity exits without retaining the payload indefinitely.
+
+#### Scenario: Drainer resumes
+
+- **WHEN** the actor consumes the queued translated notification and its acknowledgement fence
+- **THEN** the corresponding credits are returned, the producer may continue, and text/reasoning/tool fragment order and chunk indexes remain unchanged through the terminal event.
+
+### Requirement: Oversized sampler preview events fail before enqueue
+
+A live session sampler handoff SHALL reject an individual charged preview fragment whose payload exceeds its 64 MiB credit capacity. It SHALL fail the current attempt locally before acquiring credits or forwarding the event, rather than charging a capped cost for an oversized item. Control and terminal events SHALL retain their existing uncharged path.
+
+#### Scenario: One fragment exceeds all credits
+
+- **WHEN** a text, reasoning, tool-argument, response-start or signature fragment has more charged bytes than the per-session handoff capacity
+- **THEN** the producer fails the attempt without enqueuing that fragment, and no downstream credit accounting is corrupted.
+
+#### Scenario: Fragment exactly fits all credits
+
+- **WHEN** a charged fragment exactly equals the handoff capacity
+- **THEN** it can reserve all credits and proceed under the ordinary acknowledgement fence.

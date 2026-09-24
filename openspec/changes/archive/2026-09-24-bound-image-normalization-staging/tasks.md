@@ -1,0 +1,4 @@
+- [x] 1.1 Move the complete per-image normalization pipeline into one admitted blocking closure.
+- [x] 1.2 Preserve stage-specific failures and retain focused coverage for the cancellation-safe worker boundary.
+- [x] 1.3 Narrow the image resource-boundary backlog entry to the remaining unbounded dimensions.
+- [x] 1.4 Run focused Shell image-normalization tests and strict validation for this change.

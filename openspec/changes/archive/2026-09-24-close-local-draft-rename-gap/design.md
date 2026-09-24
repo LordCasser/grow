@@ -1,0 +1,5 @@
+# Decision
+
+Do not add a separate quarantine transaction or platform-specific filesystem service solely for the final check→rename gap. Local drafts live in a private local application directory; the competing mutation requires another same-user process to replace that exact entry during one syscall interval. Recovery already reads from a pinned file handle, checks dev/inode or file ID before and after directory setup, and publishes quarantine with no-replace semantics. The check→rename interval has no portable conditional-rename primitive: Linux `RENAME_NOREPLACE` and macOS `RENAME_EXCL` protect the destination, not the source identity. Copying from the pinned handle would still require deciding whether to remove an active path and would change symlink quarantine behavior. The residual risk is a same-user concurrent mutation, not an untrusted-input parse or ordinary recovery failure.
+
+The sync slow-filesystem issue remains open because it has a separate, user-visible UI responsiveness mechanism and can be measured with an injected delay. This change does not alter the local-draft contract or imply an atomic source-identity guarantee.

@@ -1,0 +1,4 @@
+- [x] 1. Add a bounded per-record JSON writer and explicit oversized-record replacement at the shared Shell/Pager serialization boundary.
+- [x] 2. Add regressions for an oversized record and an unchanged in-budget record.
+- [x] 3. Run focused diagnostics tests, formatting, diff checks and strict OpenSpec validation; review verification evidence.
+- [x] 4. Archive the change and validate active and archived specs.

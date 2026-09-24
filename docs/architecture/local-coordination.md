@@ -10,6 +10,10 @@
 
 清单发布串行化整个“快照 + 原子替换”过程，heartbeat 独立于 accept loop。进程终身持有 peer lock；清理必须拿到该锁并重新核对过期记录，不能因一次探测失败删掉活进程清单。清理方不删除别人的 socket，避免 Unix 上路径被 unlink 但旧 listener 仍运行的情况。
 
+`MvpAgent` 的本地协调 publisher、heartbeat、子 Agent coordinator、会话 supervisor 与延迟公告会访问 Agent 自身。它们由 Agent 登记并在 Agent 销毁时中止；leader generation 的所属任务即使被直接 abort、而进程 `LocalSet` 继续运行，也不能让旧任务再读取已销毁的 Agent。这个生命周期边界见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md)。
+
+Agent 销毁时也向仍驻留的主会话和活跃子会话 actor 发送既有 `Shutdown` 命令，让专属线程释放 writer lease。进程内 leader 替换必须等旧 lease 释放后才加载同一 session；真实进程退出则由进程边界终止旧线程。这里不在本地事件循环里同步等待线程退出。
+
 询问的执行顺序：
 
 1. 来源先将结构化 `OutgoingStarted` 写入 Timeline 并等待 durable ACK，再解析目标；首次解析的 peer/incarnation 固定在该请求上。
@@ -38,9 +42,9 @@
 
 来源还需要完整的 ACP 结果转换：`ListActiveSessions`、`CoordinationInquiry`、`CoordinationInquiryState` 都输出带 `content` 和 `rawOutput` 的 `ToolCallUpdate`。询问失败时状态为 `Failed`，结果查询成功则仍是 `Completed`，即使查询出来的是一个失败的 inquiry。漏掉这个转换时，模型能读到工具结果，但 TUI 只能看到没有正文的占位工具，不能靠修复双击事件解决。
 
-接收侧按 `(sourcePeerId, InquiryId)` 把开始、审批、结束事件投影到同一条工具样式记录，与运行时的去重范围一致。来源身份和结果以 Timeline 为准，并投影到 `UiNotice.details` 的结构化 JSON 中，TUI 再生成可读正文，不从标题猜测身份。跨 Session 协调以 `session <sourceSessionId>` 标识参与方，例如开始是 `Answering session <sourceSessionId>`，成功后原位变成 `Answered session <sourceSessionId>`；直接委派 audit 持久保存 `direction`（`parent_to_child | child_to_parent | peer`）。父 Agent 收到子 Agent 询问时，用 coordinator 核定的子任务名标识参与方，例如 `Answering subagent <taskName>`；子 Agent 收到父 Agent 询问时，显示 `Answering parent agent`，自身任务名保留在详情。任务描述为空时使用子 Agent ID。失败、拒绝、取消和超时复用同一参与方标识。展开后保留来源、工作目录、subagent 任务名（如有）、问题和回答/错误。这个显示行不进入主 turn 的工具 tracker，也不接收主 turn 的工具 hook，所以主 turn 结束不能顺带结束 sideband 的展示。重载时不重复插入同一个 inquiry，旧开始事件不能覆盖终态；只有历史开始记录时，不把它当作仍在线执行的证明。
+接收侧按 `(sourcePeerId, InquiryId)` 把开始、审批、结束事件投影到同一条工具样式记录，与运行时的去重范围一致。显示投影只按接收、审批、终态的顺序前进：迟到的开始不能抹去审批详情，终态也不能被重放或旧通知重启；同 ID 的不同来源独立更新。来源身份和结果以 Timeline 为准，并投影到 `UiNotice.details` 的结构化 JSON 中，TUI 再生成可读正文，不从标题猜测身份。跨 Session 协调以 `session <sourceSessionId>` 标识参与方，例如开始是 `Answering session <sourceSessionId>`，成功后原位变成 `Answered session <sourceSessionId>`；直接委派 audit 持久保存 `direction`（`parent_to_child | child_to_parent | peer`）。父 Agent 收到子 Agent 询问时，用 coordinator 核定的子任务名标识参与方，例如 `Answering subagent <taskName>`；子 Agent 收到父 Agent 询问时，显示 `Answering parent agent`，自身任务名保留在详情。任务描述为空时使用子 Agent ID。失败、拒绝、取消和超时复用同一参与方标识。展开后保留来源、工作目录、subagent 任务名（如有）、问题和回答/错误。这个显示行不进入主 turn 的工具 tracker，也不接收主 turn 的工具 hook，所以主 turn 结束不能顺带结束 sideband 的展示。重载时不重复插入同一个 inquiry，旧开始事件不能覆盖终态；只有历史开始记录时，不把它当作仍在线执行的证明。
 
-Minimal 模式的原生终端历史只能追加，不能修改已经打印的行。因此询问接收侧保留一条可更新记录，默认显示标题和最多两行问题预览，并且必须等 inquiry 自己的终态再提交到原生历史，不能用“主 Agent 已空闲”推断它完成。执行中的同一行留在 live region，完成后只打印 `Answered` 一次。
+Minimal 模式的原生终端历史只能追加，不能修改已经打印的行。因此询问接收侧保留一条可更新记录，默认显示标题和最多两行问题预览；Received 和 Approved 阶段都留在 live region，只有 typed Terminal 阶段才能提交到原生历史，不能用“主 Agent 已空闲”推断它完成。完成后只打印 `Answered` 一次。
 
 Coordination capability、私有 IPC 和 peer manifest schema 现在为 **2**，ACP wire 仍是稳定 **v1**。本次不做旧协调协议兼容，更新后二进制对应的 Grow 进程需要全部重启。
 
@@ -90,7 +94,7 @@ Windows 新增 accept cancellation、pipe busy、私有 DACL、长路径和持�
 
 ## 单独处理的边界
 
-- `acp_tool_update` 的通配分支会静默忽略没有接入的新返回值类型；本次只补齐协调工具。其余工具的覆盖审计和穷举约束需要单独处理，不能顺带改变所有工具的通知策略。
+- 协调工具最初只补齐自身结果转换；后续工具展示覆盖核对已让 `ToolInput` 和 `ToolOutput` 的 ACP 投影显式列举变体。新增变体需同时决定开始身份与终态展示，不能只让模型收到结果而让 Pager 工具行保持运行。
 - 已完成的询问可以跨来源进程重启回查；尚未持久化终态的询问没有进程崩溃后的 exactly-once 保证。不要自动把它作为新进程的新请求重放。若要提供这种保证，需要单独设计持久化受理/不确定结果语义，而不是把普通重连等同于进程级恢复。
 - SIGKILL 可能留下失效 socket 的小型私有目录和 lock 文件。它们不再是在线会话；跨进程回收这些资源必须先证明所有权，不能按路径猜测并删除。本次优先避免误删活 endpoint。
 - `GROW_HOME` 的网络文件系统、跨主机、Windows/WSL 混合域和 subagent 独立寻址不在本期范围。父 Agent 的 sideband 可以读取父会话上下文，但不会因此自动拥有子 Agent 的全部内部进度。

@@ -1,0 +1,4 @@
+- [x] Inspect ListLayoutCache construction and incremental append arithmetic.
+- [x] Verify supported release target architectures and derive overflow bounds.
+- [x] Remove only the prefix-sum overflow concern from the geometry backlog.
+- [x] Validate and archive this audit-only change without modifying the behavior spec.

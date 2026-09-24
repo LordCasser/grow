@@ -1,0 +1,4 @@
+- [x] Review unified log writer, caller and shutdown paths, existing spec, and tests.
+- [x] Move append/trim behind one bounded writer queue with loss feedback and bounded flush.
+- [x] Add blocked-worker and recovery regression tests; update developer explanation.
+- [x] Run focused tests, format and strict OpenSpec validation; archive after recording evidence.

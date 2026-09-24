@@ -1,0 +1,3 @@
+# Design
+
+The sampler drainer processes one fragment, enqueues its translated notifications in the existing session event FIFO, then enqueues a payload-free acknowledgement fence and awaits it before returning the fragment's credits. The actor acknowledges the fence after preceding notifications have entered the ReplayBuffer or been dispatched. A control/terminal event needs no fence; FIFO still keeps it behind earlier fragments. If the actor closes before acknowledgement, the drainer closes the credit semaphore and its receiver so a waiting provider exits instead of hanging. The ReplayBuffer retains at most one notification; clamp its configurable byte threshold to the preview budget as a separate guard against excessive coalescing.

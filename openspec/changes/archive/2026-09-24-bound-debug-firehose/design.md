@@ -1,0 +1,9 @@
+# Design
+
+The tracing layer only formats and tries to enqueue a complete bounded line. It does no filesystem work. Its single worker owns one read/write file handle and performs every append under an exclusive advisory inode lock. The live inode length, rather than a process-local counter, determines when to retain a bounded complete-line tail. This follows the existing unified log's lock and in-place retention model without sending verbose debug payloads into that operational log.
+
+One file is the necessary simplification: a per-session layout cannot strictly bound directory bytes while sessions and peer processes continue to open distinct files. The line prefix carries process role, PID and sanitized session ID so attribution survives interleaving. The default stream has a 32 MiB file ceiling, 64 KiB complete-line ceiling and 64-record pending queue; an explicit path uses the same resource bounds. Old per-session `.txt` files are pruned after seven days if no cooperating writer holds them, but legacy files are not part of the new stream's file ceiling.
+
+The worker keeps an opened descriptor and compares its identity with the path while holding the inode lock. On replacement it reopens and retries the record; if reopening fails it drops the record. The check cannot prevent an uncooperative external replacement immediately afterward, so it is a bounded diagnostic writer, not a filesystem security boundary. A coalesced loss marker accounts for queue overflow; individual dropped payloads are not retained. Flush sends an ordered barrier with a two-second deadline and reports whether accepted records reached the worker, without asserting `fsync` durability or interrupting an OS write.
+
+The old per-session tracing layer and global vector of worker guards are deleted. The existing unified log remains separate and is flushed first on exit.

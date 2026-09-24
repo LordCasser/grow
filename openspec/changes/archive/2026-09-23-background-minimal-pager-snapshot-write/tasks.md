@@ -1,0 +1,6 @@
+- [x] 1.1 核对 Minimal 8ms 分片、临时文件 owner 和现有 Effect/TaskResult 执行路径。
+- [x] 1.2 加入当前请求代次及 root/child/session owner 校验，保证新请求替代和 owner 失效时旧结果被丢弃。
+- [x] 1.3 将 Minimal 最终私有快照写入迁入后台阻塞任务，成功后直接移交 TempPath，失败按原 owner 反馈。
+- [x] 1.4 用受控阻塞验证事件循环输入可继续前进，并覆盖完整快照、权限、失败清理、替代请求和失效 owner。
+- [x] 1.5 更新 Pager 开发说明，记录 1/10/100 MiB 测量、边界判定与未测限制。
+- [x] 1.6 运行受影响验证与 OpenSpec 校验，归档 change 并复验 archive。

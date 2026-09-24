@@ -1,0 +1,4 @@
+- [x] Implement bounded geometry queries and variant-safe incremental append.
+- [x] Add focused regressions for empty/single/out-of-range queries and both append variants.
+- [x] Update developer guidance and narrow the backlog entry to unresolved geometry.
+- [x] Run targeted validation, validate OpenSpec, then archive the change.

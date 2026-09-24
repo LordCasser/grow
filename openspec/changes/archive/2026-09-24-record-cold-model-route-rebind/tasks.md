@@ -1,0 +1,4 @@
+- [x] Review model route construction, Timeline fold, fresh initialization, cold load, resident reconnect, and existing contracts.
+- [x] Persist a fresh route baseline and a cold-load bridge before actor publication.
+- [x] Test changed and unchanged route recovery, strict discontinuity, and restart after the bridge.
+- [x] Update developer explanation, run focused tests and strict validation, then archive with evidence.

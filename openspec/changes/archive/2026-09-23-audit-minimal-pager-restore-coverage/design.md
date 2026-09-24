@@ -1,0 +1,3 @@
+# Design
+
+Keep `minimal_transcript_pager_restore_no_artifacts` ignored. Its PTY scenario launches `less`, waits for the transcript child UI, sends `q`, and asserts that the idle screen returns without stale output. The candidate default Cargo command began compiling the wide Pager dependency graph and reached the test runner, but it was interrupted for disk-space recovery before a result. Thus the source proves the regression exists, while this attempt does not verify its runtime behavior or establish a safe default build cost. The backlog continues to track real external-pager restore as missing from default coverage.

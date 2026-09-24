@@ -1,0 +1,3 @@
+- [x] Add ignored PTY measurement for 128/512-turn resume with isolated session state and unique echo markers.
+- [x] Run the measurement, record timings and any fixture limitations.
+- [x] Validate the change strictly and update developer benchmark instructions; keep the backlog entry until the full matrix is measured and addressed.

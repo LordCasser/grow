@@ -1,0 +1,4 @@
+- [x] Add per-session fragment credits and cancellation-aware producer backpressure.
+- [x] Release credits at Shell receive while preserving event and attempt order.
+- [x] Test stalled receivers, cancellation during admission, and existing preview/turn delivery.
+- [x] Update developer documentation and backlog, run relevant tests and strict OpenSpec validation, then archive.

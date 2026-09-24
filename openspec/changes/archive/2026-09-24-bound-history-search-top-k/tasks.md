@@ -1,0 +1,4 @@
+- [x] Replace all-hit collection and full-corpus sorting with a bounded top-100 candidate heap while preserving best-result-last rendering.
+- [x] Add cooperative cancellation to history item preprocessing and avoid installing partial items.
+- [x] Add focused tests for result cap/order and canceled preprocessing.
+- [x] Run focused Pager tests and validate the OpenSpec change.

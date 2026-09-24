@@ -1,0 +1,5 @@
+`openspec validate bound-macos-clipboard-transfer-file --strict --no-interactive` passed. `git diff --check` passed for the scoped changes.
+
+On macOS, `CARGO_INCREMENTAL=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_BUILD_JOBS=2 cargo test --locked --offline -p client-support --lib clipboard -- --nocapture` passed: 57 tests passed, 0 failed, and 3 real-pasteboard tests remained ignored. The subprocess case uses a 16-byte injected child limit to verify exact-fit success, limit-plus-one failure, file length never exceeding the limit, the existing nonzero-status error conversion, and private-directory cleanup. The generated image and attachment scripts compiled by `osacompile` in the focused suite, and structural assertions verify all PNG/TIFF/JPEG writes occur after their coercion-only `end try`; the unified script retains the file-URL-first condition.
+
+Source review confirms the production runner lowers both soft and hard `RLIMIT_FSIZE` ceilings to at most 50,000,000 bytes before exec. This is a per-file disk-write boundary only; it makes no helper/AppKit RSS claim.

@@ -52,13 +52,22 @@ sensitive transport contract 时才重新附着实时 credential，否则 fail c
 
 admission 在写入 `Workflow::Spawned` 之前，用 writer 自己的 canonical encoder 对 credential-free
 初始 manifest 执行一次精确预检；当前上限为 512 KiB。Spawn 还冻结 canonical script/args 的 BLAKE3
-摘要。任一预检或 Timeline commit 失败都在 Spawn 前统一回滚 tracker 与 store，不留下 ghost Run。
+摘要。预检失败或 Timeline 在持久化前明确拒绝 Spawned 时回滚 tracker 与 store；持久化回执丢失等
+不确定结果保留 Run 源，返回 Run identity 供重连后核对。恢复仅按 Timeline Spawned 发现 Run，
+不会把未提交事实的孤立脚本目录当成 Run，也不会用 sidecar tombstone 掩盖已提交事实。
 
 Timeline 的 Spawn seed 与 lifecycle 是恢复权威；`state.json` 只是同一冻结 Run 契约下的可变进度
 sidecar。恢复 resolver 总是先校验 seed 的版本、Run identity、Definition provenance、runtime route、
 phase metadata 和 journal path，再接受冻结字段一致且语义有效的 sidecar；sidecar 缺失、损坏或漂移时
 回退 seed，script/args 文件则必须匹配 Spawn 摘要。JSONL loader 与 Trajectory 共用这一个 resolver，
-不能各自发明恢复规则。一个无效 Run 只被隔离并告警，不阻断同 session 其他有效 Run。
+不能各自发明恢复规则。冷 writer restore 使用损坏 sidecar 的 seed 时，在 actor 初始化完成前经 persistence ACK
+写回；锁内快照已变化或写入未确认时初始化返回错误。有效 sidecar 的 revision CAS 规则不变。一个无效
+Run 只被隔离并告警，不阻断同 session 其他有效 Run。详见 [Workflow 恢复契约](../../openspec/specs/workflow-execution/spec.md#requirement-workflow-restore-retains-the-latest-valid-runs)。
+
+回退 seed 时，阶段、Agent 行和累计展示进度无法从 Spawn 事实完整还原，恢复结果会将
+`agent_usage_incomplete` 标为 true；终态仍由 Timeline 决定。再次执行前从 durable journal
+重算 agent 调用额度，因此展示进度丢失不放宽预算准入。此处接受 sidecar 丢失后的展示降级，
+不为每个可变 UI 更新另建 Timeline checkpoint 权威。
 
 `<session>/workflows/<run-id>/script.rhai` 是该 Run 的不可变执行快照，不是另一个可发现
 Definition，也不是自动释放到 `.grow/workflows` 或 `~/.grow/workflows` 的来源。Registry

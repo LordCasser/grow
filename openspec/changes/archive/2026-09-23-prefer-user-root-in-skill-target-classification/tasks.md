@@ -1,0 +1,3 @@
+- [x] Add regression for a Repo descendant link into User root while cwd `.grow` aliases that root.
+- [x] Check User target roots before overlapping Local/Repo target roots without changing selected root alias behavior.
+- [x] Run focused skill tests, strict OpenSpec validation, and archive the correction.

@@ -1,0 +1,4 @@
+- [x] Poison and release a failed candidate without disconnecting subscribers; signal resync only after Accepted.
+- [x] Delay resync until any already-running load finishes, including descendant sessions.
+- [x] Make Pager perform a full in-place canonical reload for the affected root and handle stale/failing reloads.
+- [x] Verify overflow, discard, in-flight load, late attach and Pager recovery; update docs, validate and archive.

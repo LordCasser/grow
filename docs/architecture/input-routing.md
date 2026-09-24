@@ -16,6 +16,8 @@ The pager mirrors shell state. It does not infer ownership from Goal status, pro
 
 Pager crash recovery owns only input that has not crossed an ACP prompt RPC. Its versioned local draft store is keyed by bound session identity, or by canonical cwd before binding, and persists the normal composer, cursor/chip metadata, deferred Behavior latch, and at most one plain staged prompt. A restored staged prompt returns to the composer and is never enqueued or auto-sent. Modal inputs, expanded commands, Shell state, and temporary image paths never enter this store; image-bearing or ambiguous multi-prompt state fails closed. Starting either text or structured-block prompt RPC atomically disarms the in-memory draft and removes both the current cwd/session key and the request's session key. This local cache is not Timeline and never becomes a second input authority.
 
+Invalid draft sources are moved under the store's private `quarantine` directory. It retains at most 64 regular-file or symbolic-link entries and 16 MiB, evicting oldest modification times first and using filename as a stable tie-breaker. Symlinks are measured without following them. This limits accumulated diagnostic recovery data without changing which records are restored; the [client-surfaces contract](../../openspec/specs/client-surfaces/spec.md#requirement-local-draft-quarantine-retention-is-bounded) is authoritative.
+
 Behavior capability follows the same ownership rule. Once the Shell publishes
 `grow/behaviorAvailability`, Pager settings, pickers, and transition guards all
 consume that projection. The advertised command catalog is an execution and
@@ -25,7 +27,7 @@ structured projection arrives.
 
 ## Terminal paste collection
 
-Unbracketed paste arrives as key events. Pager retains a detected paste across bounded collection passes; an exhausted per-pass event budget yields to the event loop without inserting a partial chip. The existing idle deadline flushes the complete insertion even when no next event arrives. Real bracketed paste and clipboard reads retain their existing paths. This timing heuristic cannot identify a clipboard transaction across arbitrary transport gaps. See [client-surfaces](../../openspec/specs/client-surfaces/spec.md).
+Unbracketed paste arrives as key events. Pager retains a detected paste across bounded collection passes; an exhausted per-pass event budget yields to the event loop without inserting a partial chip. The existing idle deadline flushes the complete insertion even when no next event arrives. A completed bracketed paste remains its own event, so later keys and another paste in the same collection batch keep their order and identity. Clipboard reads retain their existing path. This timing heuristic cannot identify a clipboard transaction across arbitrary transport gaps. See [client-surfaces](../../openspec/specs/client-surfaces/spec.md).
 
 ## Input classes
 
@@ -50,6 +52,8 @@ payload 必须先以 content-addressed immutable JSON 发布，Timeline 再提�
 3. Double Enter 和 queue-row “Send now”都在 `step_control_gate` 内执行 `Fifo → Steer{exact TurnId}`；目标、row 或版本在取得栅栏前已变化时保持原 FIFO 不动，持久路由提交后内存 row 必须在同一栅栏内转移，不存在向活跃 Turn 做 `Steer → Fifo` 的非法回滚。
 4. leading slash / bash 仍先以普通 Prompt intent 完成 Hook admission 并进入 FIFO。`TurnStarted` 取得预留后，若命令在 host plane 内闭合而没有生成模型消息，则以 `InputHandled` 终止；命令产生的内部 prompt 不再冒充第二个 HumanIntent。
 5. 仅内部 synthetic/test interjection 可以没有 input identity；生产用户 steer 一律携带可回退 payload。turn 的最后安全点未消费的 residual steer 在目标 turn 结束后 durable `Steer → Fifo`，再以原始 input identity 回到队首，绝不能泄漏进 successor 的 interjection buffer。
+
+Shell 已接纳的 shared queue 行仍属于同一用户 FIFO。Pager 请求编辑时携带队列 id、版本和一次编辑身份，等 Shell 在 `step_control_gate` 内确认 hold 后才将行文本放入 composer；held 队首不能合并、提升，也不能让后项、notification 或 Goal continuation 越过。保存通过同一控制 request 完成新的 durable input admission、原位置替换及 hold 解除；失败保持旧输入、hold 和编辑稿。撤回先 durably dismiss，再从 FIFO 移除。`grow/queue/changed` 是各客户端共享投影，操作成败只由控制 request 的回执决定。Leader 为控制 request 注入真实连接身份，断线后释放该连接的临时 hold。
 
 Steering 的模型消息与展示消息使用不同文本：Timeline 保留给 LLM 的 interjection 包装及 skill expansion，`updates.jsonl` 只保存清理图片路径后的用户原文和独立图片块。实时与 resume 展示不得改用模型包装；用户自己输入的标签仍是原文，不通过标签解析反推展示内容。契约见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md)。
 
@@ -168,4 +172,4 @@ An Active Goal reload restores the v9 objective, definition revision, lifecycle 
 
 ### `/usage` 统计展示
 
-`/usage` 统一展示当前统计窗口的总消耗及各 `provider/model` 分项，包括输入、输出、总 token、缓存命中输入和命中率。总量包含缓存输入，命中率为缓存命中输入除以全部输入；总体命中率按累计输入加权，不平均模型百分比。无输入时显示 N/A；不完整用量下的比例仅代表已记录部分。统计窗口沿用启动或最近 resume 之后，命令标题明确标注；`/session-info` 不承载这些统计。见 [client-surfaces 规范](../../openspec/specs/client-surfaces/spec.md)。
+`/usage` 统一展示当前统计窗口的总消耗及各 `provider/model` 分项，包括输入、输出、总 token、缓存命中输入和命中率。同一会话内的主循环请求、每次 Sideband 辅助采样（包括重试）、以及子 Agent 最终账单都计入；Sideband 不增加主循环轮数，子 Agent 的 Sideband 只经子账单折入一次。请求开始与结算记录在 owner Timeline，恢复时未结算的请求使原统计段标为不完整。总量包含缓存输入，命中率为缓存命中输入除以全部输入；总体命中率按累计输入加权，不平均模型百分比。无输入时显示 N/A；不完整用量下的比例仅代表已记录部分。统计窗口沿用启动或最近 resume 之后，命令标题明确标注；`/session-info` 不承载这些统计。见 [client-surfaces 规范](../../openspec/specs/client-surfaces/spec.md)。

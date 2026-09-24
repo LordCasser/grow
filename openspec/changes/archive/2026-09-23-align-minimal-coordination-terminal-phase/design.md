@@ -1,0 +1,1 @@
+The existing typed `CoordinationPhase` is the only source of terminality. `is_committable` keeps a passive row live for both `Received` and `Approved` and releases the print-once frontier only for `Terminal`. Tests construct each phase directly so a future shape change must update the Minimal behavior explicitly.

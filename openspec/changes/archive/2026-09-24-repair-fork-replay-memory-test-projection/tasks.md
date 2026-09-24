@@ -1,0 +1,2 @@
+- [x] Repair the integration test reference conversion.
+- [x] Run the affected test and OpenSpec validation, then archive.

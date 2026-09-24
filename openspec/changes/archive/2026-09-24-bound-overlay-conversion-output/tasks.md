@@ -1,0 +1,4 @@
+- [x] Review overlay conversion sources, output reads, process ownership, existing spec, and tests.
+- [x] Enforce a child file-size ceiling and a bounded Rust PNG output writer.
+- [x] Add boundary regressions and update developer documentation.
+- [x] Run focused tests, format and strict OpenSpec validation; archive with evidence.

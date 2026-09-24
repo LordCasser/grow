@@ -1,0 +1,9 @@
+# Design
+
+`Effect::RewindExecute` already has the target session. Capture the current `session_binding_epoch` at each of its three emission sites. Return both fields in `RewindExecuteComplete/Failed`. The result dispatcher first checks the referenced Agent's current session ID and epoch. An exact match retains the existing success/explicit-rejection reconciliation, including scrollback truncation, draft restoration and inline resubmit. A view switch without a binding change remains an exact match.
+
+If the binding has changed or the Agent has gone, an explicit success is surfaced as a transient notice for the previous session with a reload instruction; an explicit rejection is surfaced as a rejection; a transport or parse failure is labeled outcome unknown. No stale result edits the current Agent's scrollback, composer, inline editor or rewind overlay. A reload obtains authoritative history rather than trying to replay the old request's local UI operations into a new binding lifetime.
+
+On a real session binding change, the Agent view closes its rewind picker/read and pending inline resubmit. It restores the stashed composer draft into the local view and appends the edited prompt as unsent text, then closes the inline editor owned by the old rewind. This avoids losing user input while ensuring the stale result cannot submit it. An explicit replacement binding can carry that local draft in the same Agent view, matching existing composer ownership; loading the old session into a new Agent view does not copy it there. Reiterating the same binding ID leaves the ongoing rewind untouched. These operations do not cancel a committed or in-flight server rewind.
+
+The result has no separate request nonce. The executing overlay blocks user input until the result or a binding change, so a second execution within the same binding cannot normally be issued while the first is in flight. The session epoch is the relevant fence for this backlog issue.

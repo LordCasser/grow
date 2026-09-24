@@ -1,0 +1,3 @@
+- [x] Extend the ignored PTY resume probe to measure key echo during marked replay with the 40 ms test writer delay.
+- [x] Assert p95 key echo is at most 100 ms and the in-replay draft survives the session-loaded boundary.
+- [x] Run strict OpenSpec validation; compile and run the ignored PTY probe in the parent task.

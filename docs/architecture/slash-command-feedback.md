@@ -12,6 +12,10 @@
 
 `invocation_id` 标识用户调用，`event_id` 标识不可变事件。不能用文案或当前 Behavior 去重，也不能把相同 correlation 的不同事实全部删掉。TUI 仅用调用 ID 判断晚到的 RPC 错误或进度是否已被后台结果取代。重复执行相同命令仍有不同调用 ID。
 
+交互式 `/export` 和 `/copy` 的显式文件任务在派发时冻结活动视图的内容、cwd、Agent ID 与 session ID。后台写入完成后，状态反馈按这两个身份查找原根视图或子 Agent 视图；切换当前视图不会转移反馈，原视图移除或重绑后也不会向新会话显示旧结果。任务队列仍按提交顺序继续。行为契约见 [子视图文件反馈](../../openspec/specs/client-surfaces/spec.md#requirement-child-transcript-file-notices-retain-the-export-origin)。
+
+Minimal 的 `/transcript` 也在请求时冻结根或子视图及 session 身份。逐帧渲染始终读取该视图的条目、cwd 和媒体路径；切换焦点不改变来源，原视图重连则从最终正文重建，移除或重绑则放弃旧构建。分页器失败反馈仍由请求时的视图接收。行为契约见 [Minimal transcript 归属](../../openspec/specs/client-surfaces/spec.md#requirement-minimal-transcripts-retain-the-selected-view-owner)。
+
 `grow/commands/execute` 的 `accepted` 只表示受理。排队的 Goal 修改保存原调用身份，完成、拒绝、clear 和正常关闭都沿原身份结算。进度不进入原生终端历史，因此 Minimal 不需要重写已经提交的行。
 
 手动压缩的成功、失败、取消由 Shell 发布，RPC 不再复制终态；手动成功携带本次耗时和 token 数，立即展示。自动压缩仍可等待本轮模型确认 token 数，不能让手动操作遗留到下一轮。

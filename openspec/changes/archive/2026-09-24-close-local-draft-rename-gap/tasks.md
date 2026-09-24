@@ -1,0 +1,3 @@
+- [x] Recheck the archived source-identity change, current quarantine code and client-surfaces contract.
+- [x] Record a bounded decision and narrow the backlog entry without changing behavior.
+- [x] Validate and archive the documentation-only change.

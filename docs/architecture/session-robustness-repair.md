@@ -326,7 +326,7 @@ configuration, or Session data was removed.
 
 搜索缓存隔离与恢复从 `search_recovery.rs::heal_unusable` 阅读：返回值决定调用方能否重新打开，namespace epoch 同时覆盖部分隔离。两个入口位于 `search_fts.rs`；行为约束见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md#requirement-search-quarantine-failure-stops-recreation)。
 
-全量搜索回填的句柄预算从 `search.rs::reindex_all` 的 admission 开始阅读；`jsonl/mod.rs` 的摘要枚举投影和只读 Timeline 打开路径避免向 writer cache 加入扫描目录。契约见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md#requirement-search-bootstrap-bounds-live-timeline-readers)。
+全量搜索回填的句柄预算从 `search.rs::reindex_all` 的 admission 开始阅读；`jsonl/mod.rs` 的搜索专用严格摘要枚举与只读 Timeline 打开路径避免向 writer cache 加入扫描目录。普通 `list_sessions` 和 TTL cleanup 仍跳过 InvalidData 候选；搜索扫描遇到已打开目录内缺失或无效的摘要、或任何必要索引任务失败时保留既有行、不 prune，并让完成标记缺失以便修复后的 Recheck 重建。claim 与 marker 决策在同一 Immediate 事务中完成：首轮 Launch 强制清标记重建，非强制 Recheck/等待者若在竞争中看到刚完成的 marker 则释放 claim 并 adopt，避免重复全量扫描。契约见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md#requirement-search-bootstrap-bounds-live-timeline-readers) 和 [不完整回填保护](../../openspec/specs/client-surfaces/spec.md#requirement-incomplete-search-bootstrap-preserves-index-state)。
 
 TTL 候选处理从 `jsonl/mod.rs::cleanup_stale_sessions_sync` 阅读：发现阶段只保留摘要，删除阶段的临时 adapter 共享已固定的根目录、单独持有维护资源。`delete_if_still_stale` 继续负责锁内当前状态重检；契约见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md#requirement-ttl-cleanup-bounds-candidate-handle-ownership)。
 

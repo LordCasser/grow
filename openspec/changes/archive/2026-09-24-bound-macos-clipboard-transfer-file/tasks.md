@@ -1,0 +1,5 @@
+- [x] Apply a child-local 50,000,000-byte `RLIMIT_FSIZE` to macOS clipboard AppleScript subprocesses.
+- [x] Add a bounded subprocess regression proving exact-limit writes succeed and limit-plus-one writes cannot grow the file past the limit and fail.
+- [x] Add a cleanup-path regression proving an oversized image helper failure removes its owned private temporary directory.
+- [x] Update developer documentation and the backlog boundary description.
+- [x] Run focused client-support clipboard tests on macOS and validate the OpenSpec change.

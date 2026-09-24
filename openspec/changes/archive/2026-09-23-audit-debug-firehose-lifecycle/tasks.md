@@ -1,0 +1,5 @@
+- [x] 核对 firehose 规范草稿、实现、调用方和已有生命周期测试。
+- [x] 增加不同 session 的 worker、字节增长及 flush 释放的可控测试。
+- [x] 增加非协作打开文件与 retention 的 Unix 对照测试。
+- [x] 记录量测边界和验证状态，精确收窄 backlog 条目。
+- [x] 运行 OpenSpec strict validation；Cargo 验证待构建槽位协调。

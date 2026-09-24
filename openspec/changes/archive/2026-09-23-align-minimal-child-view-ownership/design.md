@@ -1,0 +1,9 @@
+# Design
+
+The root `ActiveView::Agent` ID names the container, not necessarily the visible Agent. Keep selection in `pager::minimal_api`, which can inspect `active_subagent`, `subagent_views` and the root permission queue without exposing that storage to `pager-minimal`. Return the root whenever a permission belongs to it or the child key is stale; match Minimal input's delegation rule.
+
+At frame start, compare a captured root/child/session identity to the owner last rendered into this terminal. When it changes, reset the viewport to row zero, clear the visible screen, and reset only the new owner's Minimal native commit bookkeeping. Then run pending-mark sync, plan insertion, viewport sizing, commit, expansion and live drawing against the same owner. The owner marker advances only after terminal clear succeeds; a failed clear retries without claiming the new content is printed. Native scrollback before this screen epoch remains terminal history. This deliberately reprints a view's retained content after returning to it, since the terminal cannot turn a previous child epoch back into the parent's current screen.
+
+Keep the existing per-view committed set for normal frames and reconnect reconciliation; reset it only at a successful view switch. The app-level pending expansion queue is cleared on switch because its entry IDs are only meaningful in the originating view. Resolve `Ctrl+E` from the selected view. Avoid a second copy of view-selection logic in the Minimal crate. Tests cover the selected owner, frontier retry, viewport gate and native terminal output.
+
+Plan insertion de-duplicates by the exact visible view identity. Returning from a child reprints an existing root plan block through the new native epoch without appending another plan block to the root's retained conversation.

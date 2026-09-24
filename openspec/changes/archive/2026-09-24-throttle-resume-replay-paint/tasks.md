@@ -1,0 +1,4 @@
+- [x] Define replay-only automatic paint interval and wire ACP/animation/UI-maintenance triggers.
+- [x] Add focused scheduling and input-during-replay validation.
+- [x] Run current-binary 128/512-turn PTY comparison and record timing/frame results.
+- [x] Update backlog and developer notes, validate strictly, and archive.

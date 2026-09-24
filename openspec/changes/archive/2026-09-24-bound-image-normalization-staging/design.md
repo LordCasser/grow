@@ -1,0 +1,5 @@
+Keep the existing process-wide semaphore and `spawn_blocking` adapter. Move the synchronous body of `normalize_one` into one blocking closure: decode the source base64, optionally transcode to PNG and encode that PNG into `ImageContent`, validate/decode/re-encode through `compute_normalized_blocking`, and base64-encode compressed output. The closure's permit therefore spans every allocation owned by these stages and is released only when the complete pipeline returns or unwinds.
+
+Do not add another worker pool or hold intermediate `Vec`/`String` values across a permit release. Preserve the current error text at each stage and the current fallback for images too large to re-encode. Waiting for the permit remains asynchronous; once admitted, cancellation detaches the blocking task while the closure retains the permit.
+
+The permit bounds concurrent per-image pipeline work, not encoded images waiting to acquire admission, unrelated image consumers, OS/terminal allocations, or a process-wide aggregate byte budget.

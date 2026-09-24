@@ -1,0 +1,5 @@
+After draining any coalesced notification, take the matching `PendingSamplingWindow` out of `self.pending_sampling` and keep its owned notification vector for the existing two-attempt exact-append sequence. A mismatched window must be put back untouched. Read the first-candidate anchor from the transferred window and append by reference, preserving the existing pre-anchor → response projection → post-anchor ordering and exact-key idempotent retry.
+
+If either permitted commit attempt ends in an error, put the same window back into `self.pending_sampling` before returning the error. On success, drop the transferred window and advance the terminal attempt state as before. This keeps existing retry authority and FIFO behavior while removing the full vector clone. The persistence actor processes one message at a time, so no newer window can replace this temporary ownership during the awaited commit.
+
+Test a failure after an earlier exact append has committed and after the existing retry also fails; assert that the original window and anchor remain staged, then disable the fault, retry the same projection, and verify a single ordered `pre, projection, post` result.

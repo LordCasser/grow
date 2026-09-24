@@ -312,7 +312,7 @@ Agent skills 声明解析 SHALL 在名称解析后尊重选定技能的 enabled 
 - **THEN** 只统计 foo 本身或其后代，添加响应复用相同语义。
 
 ### Requirement: Skill management compares resolved path aliases
-技能管理 SHALL 在添加去重、取消 ignore、移除和来源计数时比较解析后的文件系统路径。比较不得重写保留条目的配置原文。配置相对路径沿用发现器的进程工作目录基准，请求相对路径使用请求工作目录。
+技能管理 SHALL 在添加去重、取消 ignore、移除和来源计数时比较解析后的文件系统路径。比较不得重写保留条目的配置原文。配置相对路径沿用发现器的进程工作目录基准，请求相对路径使用请求工作目录。目标不存在时，保存或比较的是当次锚定路径表达式；后续请求按当前文件系统重新解析，不从已删除符号链接推断历史目标。移除无匹配项 SHALL 明确报告未匹配，不声称已经移除。
 
 #### Scenario: Add already configured symlink target
 - **WHEN** 配置 paths 和 ignore 使用指向现有技能目录的符号链接，用户添加其真实路径
@@ -321,6 +321,10 @@ Agent skills 声明解析 SHALL 在名称解析后尊重选定技能的 enabled 
 #### Scenario: Remove or count a symlink source
 - **WHEN** 配置使用现有符号链接，用户按真实路径移除，或统计该来源
 - **THEN** 移除对应配置项，来源计数包含真实路径下的技能且不包含相邻目录。
+
+#### Scenario: Symlink removed after a canonical path was saved
+- **WHEN** 添加时别名解析为现有目标并保存规范路径，随后符号链接被删除，用户按旧别名请求移除
+- **THEN** 不凭旧别名删除无法证明的目标，响应明确报告未匹配；按保存的规范路径移除时仍能删除该项。
 
 ### Requirement: Raw skill config comparisons expand environment references
 技能管理 SHALL 在比较原始配置路径时应用运行时配置的环境变量展开规则，再解析路径；不得将该展开写回保留条目，也不得对普通请求路径额外展开。
@@ -334,15 +338,23 @@ Agent skills 声明解析 SHALL 在名称解析后尊重选定技能的 enabled 
 - **THEN** 路径解析保留该字面文本，不将配置展开规则应用到请求。
 
 ### Requirement: Missing skill paths are anchored before canonicalization
-在进程工作目录可读取时，技能路径解析 SHALL 先将相对请求 cwd 与路径锚定为绝对路径，不以目标是否存在为条件。
+在进程工作目录可读取时，技能路径解析 SHALL 先将相对请求 cwd 与路径锚定为绝对路径，不以目标是否存在为条件。缺失目标的 `..` 组件 SHALL 保留，不能词法折叠跨过将来可能出现的符号链接。技能 add/remove 的请求 cwd 若不能规范化为可读取目录，SHALL 在配置更新前失败，而不保存相对或猜测路径。
 
 #### Scenario: Missing target with default cwd
 - **WHEN** 目标不存在，技能请求使用默认点 cwd 和相对路径
 - **THEN** 返回锚定到当前进程目录的绝对路径，添加保存该路径。
 
 #### Scenario: Missing target with relative cwd
-- **WHEN** 目标不存在，请求 cwd 本身为相对目录
+- **WHEN** 目标不存在，请求 cwd 本身为现有的相对目录
 - **THEN** 将 cwd 与目标一起锚定到当前进程目录，不返回相对配置路径。
+
+#### Scenario: Missing target contains parent traversal
+- **WHEN** 缺失路径的中间组件后带有 `..`
+- **THEN** 目标仍缺失时，锚定表达式保留该组件，不把它词法折叠成另一个路径；目标实际存在后才按真实文件系统解析。
+
+#### Scenario: Request cwd cannot be read
+- **WHEN** 技能 add/remove 的 cwd 不存在、不是目录或无法读取
+- **THEN** 返回参数错误，不更新配置，也不把相对路径保存到配置中。
 
 ### Requirement: Skill reset and config reject invalid parameters
 技能 reset 与 config 接口 SHALL 在执行配置读写或发现之前校验可选 cwd 参数，类型错误 SHALL 返回 invalid_params，不回退为有效默认请求。
@@ -648,3 +660,85 @@ On Unix, builtin extraction SHALL synchronize renamed managed files through a re
 #### Scenario: Managed parent is invalid
 - **WHEN** a managed parent is a file or a symlink
 - **THEN** extraction fails without publishing a successful generation marker or writing through the symlink.
+
+### Requirement: File-backed skill body reads are bounded
+显式读取文件中的技能正文 SHALL 最多消费 1 MiB 加一个探测字节；源文件超过 1 MiB 时 SHALL 返回明确的超限错误，不得返回、注入或冻结截断正文。该约束适用于普通正文加载和工作流正文快照。`load_skill_content` 已携带的内存正文快照继续按现有规则返回；工作流快照创建继续读取当前文件。
+
+#### Scenario: File-backed body is exactly at the limit
+- **WHEN** 显式加载的技能文件总大小恰为 1 MiB
+- **THEN** 加载完整正文，不因探测边界拒绝该文件。
+
+#### Scenario: File-backed body exceeds the limit
+- **WHEN** 普通技能正文加载或工作流正文冻结读取到超过 1 MiB 的技能文件
+- **THEN** 返回包含文件路径和大小上限的错误，不提供部分正文。
+
+#### Scenario: Preloaded body snapshot is already available during content loading
+- **WHEN** `load_skill_content` 收到携带已加载正文快照的技能条目
+- **THEN** 返回原快照，不重新读取或应用文件大小上限。
+
+证据：`crates/codegen/tools/src/implementations/skills/skill.rs` — `load_skill_content`、`load_skill_with_body`；调用方为 `crates/codegen/shell/src/session/slash_commands.rs`、`crates/codegen/agent/src/prompt/skills.rs` 与 `crates/codegen/shell/src/session/workflow/tracker.rs`。
+
+### Requirement: Skill descriptive frontmatter preserves declared string types
+技能 `name`、`description`、`when-to-use`（及其 `when_to_use` 别名）、`license`、`compatibility` 和 `argument-hint` SHALL 仅把 YAML 字符串作为文本。非字符串 `name` SHALL 使用既有目录名回退；非字符串 `description` SHALL 使用既有正文描述回退；其他可选字段 SHALL 视为未提供。数值或布尔 SHALL NOT 被字符串化为技能身份、模型选择文本或展示文本。
+
+#### Scenario: Wrong scalar type does not become skill identity
+- **WHEN** `name` 为 YAML 布尔或数字，且存在有效目录名
+- **THEN** 技能使用目录名，而不是字符串化后的布尔或数字。
+
+#### Scenario: Wrong scalar type does not become selection text
+- **WHEN** `description` 或 `when-to-use` 为 YAML 布尔或数字
+- **THEN** description 使用现有正文回退且不标记为用户声明；when-to-use 为空，不作为模型选择短语或插件可见性条件。
+
+#### Scenario: Optional display scalars require strings
+- **WHEN** `license`、`compatibility` 或 `argument-hint` 为非字符串 YAML 标量
+- **THEN** 对应字段未提供，其他合法技能元数据继续解析。
+
+### Requirement: Skill allowed-tools declarations are displayed atomically
+技能 `allowed-tools` SHALL 接受现有的分隔字符串或纯字符串列表。错误顶层类型或含非字符串元素的列表 SHALL 使整个展示字段缺省，不得静默显示部分列表；该字段 SHALL 继续只作为元数据，不改变工具授权。
+
+#### Scenario: Mixed allowed-tools list
+- **WHEN** `allowed-tools` 列表至少包含一个非字符串元素
+- **THEN** 不展示部分工具声明，技能其他元数据仍正常解析。
+
+#### Scenario: Valid allowed-tools forms
+- **WHEN** `allowed-tools` 是现有分隔字符串或全字符串列表
+- **THEN** 保持既有拆分结果与展示值。
+
+### Requirement: Skill source aliases cannot increase precedence
+自动与显式配置根发现的技能 SHALL 保留根来源边界：规范目标仍在规范配置根内的文件继承根 scope；递归链接目标离开该根时，按规范目标位置分类并选择根 scope 与目标 scope 中优先级较低者（Local < Repo < User），未知位置按 User。User `.grow` 根与 home 的路径别名 SHALL 按规范身份识别；显式选择的 `.grow` 根别名仍保留其入口 scope。发现路径原文 SHALL 保持用于来源展示与加载。
+
+#### Scenario: Repo link reaches User root through a Local alias
+- **WHEN** cwd `.grow` aliases the User root and a Repo config root has a descendant link to a skill in that User root
+- **THEN** the linked skill remains User scope and is not promoted to Repo
+
+#### Scenario: Home root uses an alias spelling
+- **WHEN** User `.grow` is reached through a home-directory alias whose canonical root is the same
+- **THEN** the source remains User even if the alias spelling is lexically inside a repository
+
+#### Scenario: Repository root links to an external skill
+- **WHEN** a skill below a Repo config root is reached through a descendant symlink whose canonical target is outside known project roots
+- **THEN** the skill is classified as User rather than Repo
+
+#### Scenario: User root links into a repository
+- **WHEN** a skill below a User config root is reached through a descendant symlink into a repository
+- **THEN** the skill remains User and is not promoted to Repo
+
+#### Scenario: Explicit Local root alias retains entry scope
+- **WHEN** cwd `.grow` itself is a symlink to a shared root and a skill target remains inside that resolved root
+- **THEN** the skill remains Local
+
+#### Scenario: Descendant link from aliased Local root leaves its root
+- **WHEN** a skill below an explicitly selected Local `.grow` root alias is reached through a child symlink outside the resolved root
+- **THEN** the skill is classified by its canonical target, capped at Local precedence, and cannot retain Local scope for an external User target
+
+### Requirement: Skill configuration source summary uses the bounded discovery worker
+
+`grow/skills/config` SHALL compute its automatic source summary off the asynchronous request thread under a bounded worker permit and deadline. Timeout or worker failure SHALL fail the request rather than return a partial successful summary; a timed-out worker SHALL retain its permit until it exits.
+
+#### Scenario: Source filesystem scan blocks
+- **WHEN** the source summary's filesystem scan remains blocked beyond its deadline
+- **THEN** the request returns an error while the worker retains the shared discovery permit, and later requests cannot create unlimited replacement scans.
+
+#### Scenario: Source scan completes
+- **WHEN** the source summary scan finishes within the deadline
+- **THEN** the response includes the existing source counts and full skill list.

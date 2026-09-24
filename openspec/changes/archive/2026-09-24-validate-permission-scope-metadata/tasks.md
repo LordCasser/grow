@@ -1,0 +1,5 @@
+- [x] Add the tool-authorization delta for request-bound remembered scopes.
+- [x] Validate MCP and Bash response metadata against the current AccessKind.
+- [x] Validate Pager MCP option metadata against the request's tool identity.
+- [x] Add regression tests for mismatched and valid metadata.
+- [x] Run focused tests and strict OpenSpec validation; record evidence.

@@ -1,0 +1,5 @@
+# Design: Reject tool ID collisions across portable and native exchanges
+
+The projection knows the index range represented by each native span. Collect only tool-use IDs in that span's native fragment, then compare them with neutral assistant calls outside that span. A matching call outside the range is a distinct exchange using the same provider correlation key. The request cannot retain both faithfully without inventing new native identity, so it falls back to the existing full portable projector. That projector already counts duplicate neutral calls across the request and drops their call/result protocol while keeping non-tool facts. The durable Timeline is unchanged.
+
+Tool results after a native span are not treated as conflicting calls: they legitimately reference the native use. A neutral assistant call inside the span is the native use's durable mirror and is not a second owner. The check belongs before backend-specific wire conversion, so Chat, Responses and Messages receive the same safe projection. Valid same-route native continuation remains unchanged when there is no cross-span duplicate.

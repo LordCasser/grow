@@ -1,0 +1,4 @@
+- [x] Add exclusive nonblocking ownership before truncation while preserving regular-file validation and byte limits.
+- [x] Add a two-recorder regression proving the second recorder cannot truncate or overwrite the first recorder's data, and ownership releases on drop.
+- [x] Update the Pager architecture explanation and remove the resolved backlog item.
+- [x] Run focused Rust formatting and the pager scroll-log unit tests; validate OpenSpec strictly.

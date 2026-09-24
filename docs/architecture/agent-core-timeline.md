@@ -24,11 +24,11 @@ Grow 的会话核心以不可变 Timeline 为唯一事实源。模型上下文�
 
 ChatState 在请求副本中冻结 `source_projection`：来源 Timeline identity/high-water、SurfaceId 顺序、当前 Goal scope、图片预算和逐出的 `(item_index, part_index)`、continuation epoch、portable prefix 与 native span 范围。它是审计元数据，不进入 provider body。Shell 将它绑定到实际 Request identity；Sampler 完成 provider 编码后，先保存精确 body，再允许 HTTP emission。因此审计可以看到当时实际发送的 native 内容，而无需让 `NativeContinuationFragment` 可反序列化。恢复仍从 portable Timeline 重建，创建新 epoch，不从审计 artifact 注入 native state。
 
-请求和响应 body 复用实体目录下的不可变存储，按 64 KiB 固定块存为 `artifacts/sampling/<chunk-blake3>.bin`。有序 chunk 引用精确还原 body，相同前缀复用已有块，避免每轮重复保存完整历史。父 Timeline 的 `Observation(scope="sampling_evidence")` 保存 request/response/retry、owner、attempt number、总长度与有序 chunk 的长度/hash；Sideband 的记录绑定其 identity 和 attempt number，输入选择与最终处置继续由 Sideband ledger 负责。空 body 不创建 artifact。请求记录保留去除凭据和 query 的 route，不保存认证 headers；实际请求 body 与来源清单是投影证据，不是完整 HTTP 连接的重放包。
+请求和响应 body 复用实体目录下的不可变存储，按 64 KiB 固定块存为 `artifacts/sampling/<chunk-blake3>.bin`。有序 chunk 引用精确还原 body，相同前缀复用已有块，避免每轮重复保存完整历史。父 Timeline 的 `Observation(scope="sampling_evidence")` 保存 request/response/retry/recovery_stop、owner、attempt number、总长度与有序 chunk 的长度/hash；Sideband 的记录绑定其 identity 和 attempt number，输入选择与最终处置继续由 Sideband ledger 负责。空 body 不创建 artifact。请求记录保留去除凭据和 query 的 route，不保存认证 headers；实际请求 body 与来源清单是投影证据，不是完整 HTTP 连接的重放包。
 
 响应证据在 BOM 去除、SSE 解码和未知事件过滤前捕获，HTTP 错误正文和被中止的部分流也保留原始字节。单 attempt 响应证据上限为 64 MiB；超过上限保存已接收的有界前缀并显式标记截断，停止该 attempt。主采样接受响应或重试前等待响应 artifact 与引用的 ACK；transport、empty-response、HTTP/1 fallback 和 doom-loop 重试还要等待完整决定及 typed `Request::Retrying` 的 ACK，随后才退避或发出下一次请求。`SamplingEvent::Retrying` 仅供实时显示。持久化失败保持独立且不可重试，不能降级为网络错误。
 
-Sideband 在提交下一 attempt、接受 result 或写入失败终态前完成证据确认；丢失确认时关闭后续 admission。导入导出按 Timeline 引用搬运这些 artifact，二进制 body 在 `blobs` 传输列使用 base64，落盘仍为原始字节；恢复校验长度与 hash，缺失或篡改直接拒绝。进程若在接收期间退出，尚未确认的响应仍是 interrupted/unknown，不能补猜成功或重新使用旧 native state。
+Sideband 在提交下一 attempt、接受 result 或写入失败终态前完成证据确认；丢失确认时关闭后续 admission。流式 Sideband 的 provider attempt 持续到 body 读取、SSE 解码与结果归类结束，AI 命令建议也在同一作用域内收集响应，保证原生 terminal 与 stream-end 归属该 attempt。导入导出按 Timeline 引用搬运这些 artifact，二进制 body 在 `blobs` 传输列使用 base64，落盘仍为原始字节；恢复校验长度与 hash，缺失或篡改直接拒绝。进程若在接收期间退出，尚未确认的响应仍是 interrupted/unknown，不能补猜成功或重新使用旧 native state。契约见 [流式 Sideband 证据](../../openspec/specs/model-sampling/spec.md#requirement-streamed-sideband-attempts-retain-evidence-through-body-completion)。
 
 ## 分层与依赖方向
 
@@ -161,6 +161,8 @@ Trajectory 展示 `Received`、`Consumed` 与 `Dismissed` 的完整通知事实�
 同步和异步复用同一范围选择器：保留最近因果 prompt turn 和约 16% context window 的原文尾部，只选择一个闭合的旧范围；后续压缩把紧邻最早待压缩 turn 的上一条 `CompactionMeta` 一并纳入，形成单个滚动摘要。单个超长轮次只选择较旧且已闭合的 response/tool group，边界不能落在工具交换或 `Reasoning/BackendToolCall/Assistant` 组中间。摘要提示词、输入降级和重试也只有一份实现。`purpose=compaction-summary` 的 Sideband 使用冻结的 `input_ref`，摘要正文只保存在其 result 中。Sideband 完成不代表上下文已替换：主 Timeline 只在提交边界依次记录 `Summary → MessageCause::Compaction replacement → Completed`。Summary 持有输入引用、单事件 Sideband result 引用、`SurfaceRange {start,end,shadowed}` 和计量；通用 replacement 入口拒绝 Compaction，只能通过 `replace_compaction_range` 提交。
 
 摘要请求使用独立输出上限（窗口的 1/8、最多 32768 tokens、不超过显式模型上限），输入另留 5% 估算余量并计入 System 与摘要指令。原选区超预算时，在完整响应组边界缩短旧历史前缀；provider 明确输入超长时至多再缩小两次，普通暂态重试复用同一输入。每次 attempt 的 manifest 记录冻结 revision、System context IDs 和实际 selected IDs，成功时 Summary target 只覆盖最终选区；被排除的历史继续保留原身份。`verbatim_input=false` 使用 portable 投影，也保留已完成工具调用、参数、结果及附件，不再采用丢结果的 simplified 降级。无合法选区时保留原历史并失败。大小失败及已替换但仍超窗只抑制当前 turn，下一真实 turn 和手动 `/compact` 可重新尝试；持久化错误仍 fail closed。行为契约见 [摘要预算与恢复](../../openspec/specs/context-compaction/spec.md)。
+
+Memory flush 独立冻结当前 Surface、身份与 revision，用 portable 投影把已完成且无歧义的工具调用、结果正文和附件送入只读 Sideband；没有后续 Assistant 总结时，工具结果仍可成为记忆依据。选区从最近消息扩展到 User 边界，整轮裁剪以满足 32k 估算输入 token 与 4 MiB 图片 URL 预算；最新一轮仍超预算则不写记忆。attempt manifest 记录冻结 revision 和读取的 Surface IDs。工具输出仅作为不可信历史数据，不参与授权。行为契约见 [记忆检索与 flush](../../openspec/specs/memory-search/spec.md)。
 
 Timeline 校验器强制 summary 引用的 Sideband spawn 已存在、purpose 与 input ref 完全匹配、result ref 是单事件引用。提交按目标范围校验，不再要求整份 Surface revision 与启动时一致：目标 ID 必须连续、完整且未被改写，replacement 的 `start/end/shadowed` 必须逐项等于 summary target。范围外的正常追加不使任务失效；未选中的 prefix、tail 和后台期间新增消息都保留原 ID 与原文。后台生成允许 Step/Turn 正常结束，提升或进入 Summary 提交后则禁止下一次 Step 交错。无 summary、范围漂移、重复 summary 和重复 replacement 全部拒绝。失败写入 Failed，未提交时不得包含 replacement；已经替换后，即使新 Surface 仍超过窗口或修复失败，也必须记录 Completed，再让 enclosing turn 报错。
 
@@ -304,6 +306,10 @@ Grow 不为旧的可变 Chat 快照格式或旧 Timeline schema 保留执行兼�
 Messages thinking 的起始 signature 可由后续 delta 补齐；完整响应仍未签名时，只保留可见事实，不保留该响应的 native continuation。携带 native 的请求遇到明确缺失 signature 的序列化错误时，Shell 确认清理后用 portable 上下文重试。见 [签名与恢复契约](../../openspec/specs/model-sampling/spec.md#requirement-proxy-thinking-signatures-recover-without-losing-portable-history)。
 
 响应接纳时工具可能尚未执行，因此 native reset 保存的 prefix 不能直接作为下一请求的切点。`NativeContinuationProjection::portable_prefix_end` 在新消息及 native span 边界内吸收后续工具结果；wire、token 估算和来源证据共享该范围。完整往返保留结构化工具协议，图片预算替换的文本也保留；不明确或无效记录不伪造成协议，原始 Timeline 仍可审计。见 [工具往返边界](../../openspec/specs/model-sampling/spec.md#requirement-portable-boundaries-keep-tool-exchanges-together)。
+
+Responses 接纳时在中性 Assistant 正文上记录每条输出消息的 UTF-8 范围和 `commentary` / `final_answer` 阶段；同路由仍使用 native 片段，native 失效后的 portable Responses 请求按范围恢复消息边界和阶段，Chat/Messages 继续读取扁平正文。记录不重复保存正文，也不保留原生消息 ID/状态；正文被安全改写或截断时清除过期范围，压缩替换掉的原文只以摘要代表。见 [阶段保留契约](../../openspec/specs/model-sampling/spec.md#requirement-portable-responses-history-retains-output-message-phases)。
+
+若中性 Assistant 调用与另一 native span 的调用复用工具 ID，`request_segments` 放弃本次 native continuation 并用完整 portable 历史重新投影。重复 ID 的调用/结果由既有无歧义过滤器剔除，普通会话事实仍保留；native span 内的调用镜像与 span 后对应的中性结果不是冲突。三种 provider wire 都采用同一判断，Timeline 不改写。见 [跨片段工具身份](../../openspec/specs/model-sampling/spec.md#requirement-cross-segment-tool-ids-identify-one-exchange)。
 
 模型选择与配置热重载由 `shell/session/actor/model_switch.rs` 分别处理；核对同 ID 路由变化时应查看 `apply_model_config_reload` 的 `replace_sampling_route`，不能只看用户选择的 `route_changed` 判定。测试入口为 `same_model_catalog_reload_discards_signed_native_history`。
 

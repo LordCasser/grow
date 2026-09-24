@@ -1,0 +1,4 @@
+- [x] 检查缓冲和普通 Grow 通知转发路径及当前协议契约。
+- [x] 两条路径均直接序列化为 `RawValue`。
+- [x] 运行覆盖缓冲及普通 Grow 通知 wire payload 的聚焦测试。
+- [x] 运行 OpenSpec 全量严格校验并归档 change。

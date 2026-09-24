@@ -1,0 +1,9 @@
+# Design
+
+The pinned file descriptor remains the history identity. Both metadata and full readers use a shared bounded line reader, counting physical bytes including blank lines and newlines. Each JSONL record is capped at 64 MiB, one scan at 256 MiB and one scan at 50,000 records. An over-budget scan fails with `InvalidData`, leaves the pinned source available, and never merges a valid prefix. These values bound the reader's line buffer and deferred record collection; they do not claim to bound in-memory live snapshots created during the current session or decoded-object amplification.
+
+The tracker moves the owned `lazy_source` mutex guard into a `spawn_blocking` closure for each pinned scan. A cancelled caller cannot release the guard while its worker still seeks/reads the cloned descriptor. The full-load caller receives the guard and parsed points, merges while it owns that guard, and only then clears the source. Metadata combines live points after the scan while still holding the returned guard. On scan error it returns `io::Error` rather than an in-memory-only success. The ordinary no-source path stays in memory.
+
+Metadata deserializes both snapshot maps into a counting visitor whose values validate the same snapshot path, optional string content and timestamp shape as `FileSnapshot`, without retaining content in the resulting metadata. Escaped JSON strings can still require a transient parser buffer within the per-record limit. It rejects unknown fields and absent required top-level fields. The shell propagates metadata errors through the existing ACP error path; Pager's existing `RewindPointsFailed` handling closes the interaction, restores the draft and reports the error. `GetRewindFileCounts` is an unused internal command but adopts the same result semantics.
+
+The bounded reader applies to the active pinned source only. Legacy test-only path fixtures and session storage's distinct ledger reader are outside this change.

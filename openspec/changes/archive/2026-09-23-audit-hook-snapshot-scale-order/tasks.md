@@ -1,0 +1,4 @@
+- [x] 1.1 Read the active Hook snapshot contract and trace generation, query, serialization, and client application paths.
+- [x] 1.2 Measure synthetic completed Hook histories and unrelated Timeline history with a focused ignored probe; record host/toolchain and measurement scope.
+- [x] 1.3 State the ordering guarantees supported by each ledger and narrow the backlog only where evidence closes an item.
+- [x] 1.4 Run relevant checks, strict OpenSpec validation, and archive this audit.

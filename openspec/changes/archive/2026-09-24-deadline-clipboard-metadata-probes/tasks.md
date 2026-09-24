@@ -1,0 +1,4 @@
+- [x] Review clipboard facade, native lock, UI callers, timeout handling, and existing spec.
+- [x] Move Pager metadata calls to a bounded worker and avoid waiting for a held native image-read lock.
+- [x] Add controlled slow-call regressions and update developer explanation.
+- [x] Run focused tests, format and strict OpenSpec validation; archive with evidence.

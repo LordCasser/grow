@@ -1,0 +1,3 @@
+- [x] Add checked single-event credit calculation and reject overflow in the producer.
+- [x] Verify exact-boundary and oversized handling, and existing sampler event handoff tests.
+- [x] Update developer documentation, validate, record evidence and archive.

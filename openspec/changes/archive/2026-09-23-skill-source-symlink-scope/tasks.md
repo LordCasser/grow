@@ -1,0 +1,4 @@
+- [x] Canonicalize User home-root identity and classify discovered skill files at source boundaries.
+- [x] Add focused regressions for home aliases, Repo→outside, User→Repo, and Local root/descendant aliases.
+- [x] Update developer-facing contract link and narrow only resolved skill-source backlog clauses.
+- [x] Run focused tests and strict OpenSpec validation; record results before archive.

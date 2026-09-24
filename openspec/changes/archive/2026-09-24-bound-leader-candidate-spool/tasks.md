@@ -1,0 +1,4 @@
+- [x] Replace the candidate Vec with a bounded memory/disk spool and streaming accepted flush.
+- [x] Fail closed on spool limit or I/O error without leaking provisional payloads.
+- [x] Verify ordering, discard, spill, limits, mixed clients and load overlap.
+- [x] Update developer documentation, validate, record evidence and archive.

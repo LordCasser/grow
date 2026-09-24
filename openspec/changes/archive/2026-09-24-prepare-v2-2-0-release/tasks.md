@@ -1,0 +1,3 @@
+- [x] Set the workspace and local lockfile package versions to 2.2.0.
+- [x] Add detailed v2.2.0 release notes and index them in the shell changelog.
+- [x] Validate version metadata, release note links, OpenSpec, and whitespace.

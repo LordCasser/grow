@@ -1,0 +1,4 @@
+- [x] 1.1 Transfer matching staged-window ownership into projection commit without cloning its notifications; restore it on failure.
+- [x] 1.2 Add a failure/recovery regression that checks staged-window retention, exact-append idempotence, and FIFO projection order.
+- [x] 1.3 Narrow the candidate-preview backlog entry to the remaining staging and aggregate-memory boundaries.
+- [x] 1.4 Run focused persistence tests, strict OpenSpec validation, and `git diff --check`.

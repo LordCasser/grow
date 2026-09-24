@@ -1,0 +1,4 @@
+- [x] Keep only provisional candidate notifications in the leader's mixed-client buffer.
+- [x] Verify independent notifications flow live to non-retracting observers while discarded candidates remain hidden.
+- [x] Update the developer explanation and validate the change.
+- [x] Archive the change after checking the contract and verification record.

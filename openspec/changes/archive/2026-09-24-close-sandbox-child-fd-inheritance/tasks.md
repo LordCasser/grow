@@ -1,0 +1,4 @@
+- [x] Confirm the child launch and `command_fds` hook order and define the descriptor contract.
+- [x] Implement close-on-exec admission and the narrow state-pipe exceptions at all restricted launch paths.
+- [x] Add Linux pre-connected socket and shell-state pipe regressions; run focused checks.
+- [x] Update developer guidance, validate OpenSpec strictly, and archive with verification evidence.

@@ -40,6 +40,8 @@ flowchart LR
 - `simulation_deadline` 只为 Gboom 一类真正的模拟器推进 wall-clock step；它不借用
   motion phase，也不进入 UI expiry reducer。
 
+`GROW_SCROLL_LOG` 是滚动状态机的单向诊断记录器。显式文件目标在首条记录时延迟打开，确认是普通文件后取得非阻塞独占锁，再截断并写入；另一个 Grow 进程即使用路径别名指向同一文件也会停用自己的记录器，不会改写当前捕获。所有权随打开的文件句柄释放。行为契约见 [scroll log writer ownership](../../openspec/specs/client-surfaces/spec.md#requirement-explicit-scroll-log-paths-have-exclusive-writer-ownership)。
+
 所有周期 deadline 都对齐到 AppView 的共同 origin 的下一个严格未来边界，不能用
 `now + interval` 反复续期。持续 ACP 流在每个有界 batch 前领取已到期 deadline，
 因此 motion 延迟上界是一个采样周期加一个 batch；writer 正忙时 Presenter 继续合并
@@ -67,9 +69,22 @@ Goal stage 与 subagent wait 都是显式 demand，不依赖 foreground Running 
 文件、history、scrollback 搜索、inline media 读取/解码、edit 全文件高亮与 Mermaid 渲染
 都由后台 worker 发布 snapshot 后触发单一 async-view wake edge；event loop 在 UI 线程
 一次性领取所有已完成 snapshot。Tracing 已有独立 channel arm，同样不借任何 clock。
+Inline-media loader 限制为进程内两个 worker、每个 AgentView 两个 pending path，并将输入与
+准备后的单图字节限制为 16 MiB；行为要求记录在
+[当前 change](../../openspec/changes/bound-inline-media-loader/specs/client-surfaces/spec.md)。
 这个 edge 会合并 burst，但不充当 frame clock，也不经过 `ui_state_deadline`。modal image
 viewer 继续通过 Effect/TaskResult 回送，并用 overlay owner id 丢弃关闭或替换后的迟到
 结果。
+
+Mermaid flowchart 的静态解析、分组边预算与失败回退遵循
+[client-surfaces 规范](../../openspec/specs/client-surfaces/spec.md#requirement-flowchart-class-annotations-preserve-node-meaning)。
+这个解析预算在 worker 的源码大小、期限和像素限制之前检查；worker 只发布完整 PNG。
+
+Scrollback 搜索提交只保留一份待扫描的最新 query 与 corpus 更新，通知队列容量为一；快速输入不会按键数积累后台请求。关闭搜索时停止标记优先于待扫描请求，worker 在扫描中核对停止标记并自然退出，UI 不等待线程 join。结果仍按请求代次和 query 双重核对，旧扫描不能覆盖当前搜索。
+
+文件模糊搜索的重扫模式与最新 query 同样合并为一份待处理状态，并通过单槽非阻塞通知唤醒 worker。搜索关闭或切换目录时，UI 标记停止和取消旧 walk 后直接返回；matcher 与 walk 由 worker 自己收尾，UI 不在 Drop 中等待文件系统扫描。结果保留提交时分配的 query ID；Pager 下拉列表和 Workspace 状态通知都按该 ID 拒绝旧结果，合并跳过的 generation 不会让最新状态一直等待。
+
+History search uses the same one-slot pending state and nonblocking Drop edge. Drop sets a worker-visible stop flag before queuing Stop; scoring and highlight collection check it between entries and abandon partial results. One nucleo score, highlight-index calculation, or current sort can finish after Drop, so cancellation has no wall-clock deadline. The history worker contract is recorded in [client surfaces](../../openspec/specs/client-surfaces/spec.md#requirement-history-search-submission-does-not-wait-for-worker-capacity).
 
 ## 持久化边界
 

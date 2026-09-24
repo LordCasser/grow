@@ -1,0 +1,3 @@
+- [x] Replace retained candidate payloads with a first-candidate ordering anchor.
+- [x] Preserve untagged event order for projected, discarded, and unprojected windows.
+- [x] Add a fragmented-candidate staging bound test and run focused validation.

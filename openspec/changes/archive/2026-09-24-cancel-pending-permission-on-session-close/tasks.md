@@ -1,0 +1,3 @@
+- [x] Add the focused Pager regression for session close with a pending permission.
+- [x] Run the focused test, formatting check, and strict OpenSpec validation.
+- [x] Update only the matching backlog subclaim and archive this test-only change.

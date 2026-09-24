@@ -1,0 +1,3 @@
+- [x] Update the sever/replay test to select expected ACP frames despite id-less disconnect notifications.
+- [x] Run the focused integration test and strict OpenSpec validation.
+- [x] Archive the completed test-maintenance change.

@@ -1,0 +1,4 @@
+- [x] Read the session-timeline contract and inspect projection construction and its callers.
+- [x] Stream JSON serialization into SHA-256 and add exact digest equivalence coverage.
+- [x] Update only the corresponding preview-memory backlog wording.
+- [x] Run the focused digest equivalence test, validate and archive this change.

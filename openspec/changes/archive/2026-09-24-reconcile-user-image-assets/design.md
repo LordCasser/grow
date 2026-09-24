@@ -1,0 +1,7 @@
+# Design
+
+The existing `<image_files>` envelope is the durable asset reference carried by a User item; no second metadata store is needed. Extract batch names only from generated-looking `assets/images-<lowercase BLAKE3>/image-N.ext` paths inside committed User envelopes. False positive references may retain extra files but cannot delete a referenced batch. Scan physical Timeline events, not the current projected Surface, so compaction and rewind cannot erase retention roots.
+
+The session's existing writer lease excludes another writer. The actor's input-artifact gate spans image publication through message commit; the background sweep takes the same gate. The sweep opens `assets` through the pinned session directory and only touches exactly recognized batch and staging names. It reads and validates the committed Timeline before any removal; malformed or unavailable data fails closed. File enumeration/removal runs off the local executor. A lost commit acknowledgement is treated identically to any other failure: the sweep consults committed facts rather than the error result. Startup reconciliation handles process crashes, while a failed live admission can request another sweep after its gate is released.
+
+This is eventual cleanup; an unreferenced directory can exist until a successful sweep. The image bytes remain content-addressed and the existing retry verification behavior is unchanged.

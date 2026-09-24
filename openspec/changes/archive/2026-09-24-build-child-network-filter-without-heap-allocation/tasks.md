@@ -1,0 +1,2 @@
+- [x] 用栈上固定数组替换 child network filter builder 的 Vec。
+- [x] 在 Linux 实际环境运行 sandbox crate 测试，并完成 OpenSpec strict 校验。

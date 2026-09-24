@@ -1,0 +1,3 @@
+- [x] Confirm the archived measurement and current evidence boundary.
+- [x] Remove only the conditional online Timeline append cost observation from the backlog.
+- [x] Record the closure rationale and archived measurement link; validate and archive this documentation-only change.

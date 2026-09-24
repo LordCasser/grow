@@ -619,19 +619,23 @@ macOS附件和图片AppleScript调用 SHALL 限制执行为5秒、stdout和stder
 - **THEN** 返回清理错误，不宣称成功；已有执行失败原因同时保留。
 
 ### Requirement: macOS clipboard encoded images have a read budget
-macOS剪贴板图片读取 SHALL 限制编码数据为50,000,000字节；空结果保持无图片语义，超限返回错误。
+macOS 剪贴板图片 SHALL 经由 `osascript` 子进程和私有临时文件传输。Grow 对编码数据的实际读取 SHALL 限制为最多 50,000,001 字节，并拒绝超过 50,000,000 字节的结果；空结果保持无图片语义。该边界隔离 Grow 进程免受 AppKit `dataForType:` 图片物化分配影响，但不限制 `osascript`/AppKit 子进程内存、图片写入临时文件前的磁盘用量或图片解码内存。元数据探测仍可通过原生 AppKit 读取 `changeCount` 与 `types`，不得读取图片数据。
 
 #### Scenario: Native image exceeds the budget
-- **WHEN** NSData报告长度超过预算
-- **THEN** 在分配Rust图片buffer和复制前拒绝，不把超限当作不可用转入脚本回退。
+- **WHEN** the pasteboard advertises an image whose encoded data exceeds 50,000,000 bytes
+- **THEN** Grow SHALL NOT request image data through `dataForType:` and SHALL route the explicit image read through `osascript`; the helper-process allocation is outside the Grow-process memory boundary.
 
 #### Scenario: Fallback image file exceeds the budget
-- **WHEN** 脚本回退图片文件读取超出预算
-- **THEN** 实际最多读取预算加1字节后报错，临时目录按既有所有权释放。
+- **WHEN** AppleScript writes an encoded image larger than 50,000,000 bytes to its transfer file
+- **THEN** Grow reads at most 50,000,001 bytes, returns an error, and cleans up the file through the owned private temporary directory; the oversized result is not treated as an empty image.
 
 #### Scenario: Image fits the budget
-- **WHEN** 编码数据非空且不超过预算
-- **THEN** 保留全部数据与既有MIME/图片类型优先级。
+- **WHEN** encoded image data is non-empty and no larger than 50,000,000 bytes
+- **THEN** Grow returns the full encoded data with the existing MIME/type priority through the AppleScript transfer path.
+
+#### Scenario: Image data is acquired
+- **WHEN** `get_image` or `get_attachments` reads an explicit image paste
+- **THEN** image bytes are acquired by the `osascript` subprocess and Grow does not call `NSPasteboard dataForType:`; native metadata probes remain data-free.
 
 ### Requirement: Clipboard RGBA encoding validates input shape
 剪贴板RGBA编码 SHALL 在编码和输出分配前验证非零宽高、u32尺寸可表示性、宽高乘4可表示性及精确字节长度；无效输入返回错误，不因尺寸截断、整数溢出或编码器长度断言panic。
@@ -643,36 +647,6 @@ macOS剪贴板图片读取 SHALL 限制编码数据为50,000,000字节；空结�
 #### Scenario: Valid RGBA input
 - **WHEN** 尺寸有效且buffer字节数恰好为宽乘高乘4
 - **THEN** 保持PNG编码并保留像素内容。
-
-### Requirement: Placeholder image caps bound actual reads
-占位图片文件加载 SHALL 对实际读取执行预算加1字节上限，而非仅在完整读取后检查；现有授权、扩展名和MIME验证继续适用。
-
-#### Scenario: File grows after size inspection
-- **WHEN** 前置文件大小检查后内容超出预算
-- **THEN** 最多读取预算加1字节并返回TooLarge，不继续读取完整内容。
-
-#### Scenario: Exact budget and read failure
-- **WHEN** 图片恰好在预算内或读取发生I/O错误
-- **THEN** 分别保留完整有效图片或返回既有ReadFailed分类。
-
-#### Scenario: Reporting observed excess
-- **WHEN** 有界读取发现超限
-- **THEN** 错误中的actual表示已观察字节，不宣称它是完整文件长度。
-
-### Requirement: Orphan image reads honor remaining recovery budget
-占位图片恢复 SHALL 在读取前使用单图上限与本次恢复剩余总预算的较小值作为读取上限；预算耗尽时停止恢复。
-
-#### Scenario: Remaining budget is tighter
-- **WHEN** 剩余总预算小于单图上限且候选文件超过该余额
-- **THEN** 有界拒绝并停止后续恢复，保留已恢复图片，不为先验证MIME而完整读取超额候选。
-
-#### Scenario: Per-image cap is the limiting factor
-- **WHEN** 单图上限小于或等于剩余额度且候选超过单图上限
-- **THEN** 该候选失败后仍允许后续合法更小图片恢复。
-
-#### Scenario: Exact remaining budget
-- **WHEN** 有效图片大小等于剩余额度
-- **THEN** 完整恢复该图片，并在下一候选前停止；已有附图及图片编号保持。
 
 ### Requirement: Image file URIs preserve literal path bytes
 图片附件file URI SHALL 通过标准file-path URL转换生成与解析，百分号只解码一次；不在literal路径和解码路径之间猜测。
@@ -870,15 +844,27 @@ Slash MRU persistence SHALL retain at most one pending complete snapshot in addi
 - **THEN** persistence reports failure without writing the file on the submitting thread and the controller retains dirty state for a future command
 
 ### Requirement: History search submission does not wait for worker capacity
-History search SHALL retain a coalesced latest pending request and submit updates without waiting for worker queue capacity. Closing its daemon SHALL not wait for notification capacity or ongoing matching.
+History search SHALL retain a coalesced latest pending request and submit updates without waiting for worker queue capacity. Closing its daemon SHALL not wait for notification capacity or ongoing matching. Drop SHALL signal cooperative cancellation of the active request, and the worker SHALL observe that signal between per-item history conversion, scoring, and highlight-index operations, abandoning the request without publishing partial results. A query request SHALL retain at most 100 scored candidates while scanning the corpus, then order those candidates by descending score; the best match SHALL remain last in the rendered result list. A single conversion, scoring, or index operation is indivisible and may finish after Drop returns.
 
 #### Scenario: Worker is busy while inputs accumulate
 - **WHEN** item refreshes and queries arrive before the worker can process pending work
 - **THEN** submissions return without waiting for channel capacity and the next request retains the latest item refresh with its latest following query
 
 #### Scenario: Closing with pending work
-- **WHEN** the history search daemon is dropped while work is pending or being matched
+- **WHEN** the history search daemon is dropped while work is pending
 - **THEN** stop takes precedence over pending work without blocking the UI on channel capacity
+
+#### Scenario: Closing during active matching
+- **WHEN** the history search daemon is dropped while a score, highlight-index operation, or result sort is in progress
+- **THEN** Drop returns without waiting for that operation, and the worker abandons the request after the current operation completes without publishing partial results
+
+#### Scenario: Closing during item preprocessing
+- **WHEN** the history search daemon is dropped while history items are being converted for matching
+- **THEN** Drop returns without waiting for the current conversion, the worker abandons preprocessing after that operation, and no partial item set is published
+
+#### Scenario: Query matches exceed the visible result limit
+- **WHEN** more than 100 history items match a query
+- **THEN** matching retains only the 100 highest-scoring candidates, orders them from lower to higher score for rendering, and keeps the best match last
 
 ### Requirement: History search accepts only current request results
 History search SHALL identify results by the originating request and expose only results matching the latest submitted request. Submitting a query or item refresh SHALL invalidate previously selectable results immediately.
@@ -892,7 +878,8 @@ History search SHALL identify results by the originating request and expose only
 - **THEN** stale results are hidden while waiting and the retained selection index is clamped to current results without resetting the existing navigation intent
 
 ### Requirement: Local draft recovery bounds source reads
-Local draft recovery SHALL accept only regular file sources, read at most 262,145 bytes, and reject actual content above 262,144 bytes before JSON parsing. Oversized regular files SHALL follow the existing quarantine policy.
+Local draft recovery SHALL accept only regular file sources, read at most 262,145 bytes, and reject actual content above 262,144 bytes before JSON parsing. Oversized regular files SHALL follow the existing quarantine policy. Immediately before quarantine rename, recovery SHALL verify that the active path still resolves to the source entity opened for validation. If that check observes a replacement, recovery SHALL leave the replacement at the active path and SHALL NOT move or remove it as quarantine for the opened source.
+Quarantine publication SHALL fail without replacing an existing quarantine entry.
 
 #### Scenario: File grows after metadata observation
 - **WHEN** a draft grows beyond the byte allowance after opening and metadata inspection
@@ -905,6 +892,14 @@ Local draft recovery SHALL accept only regular file sources, read at most 262,14
 #### Scenario: Regular file at allowance
 - **WHEN** valid draft JSON including trailing whitespace exactly fits the allowance, including through a regular-file symlink
 - **THEN** recovery preserves the existing record validation and restoration behavior
+
+#### Scenario: Draft path is replaced before quarantine identity check
+- **WHEN** recovery reads an invalid or oversized draft from an opened file and the active path is replaced with a different valid draft before the final quarantine identity check
+- **THEN** the replacement remains at the active path, is not moved into quarantine, and is not removed
+
+#### Scenario: Quarantine name collides
+- **WHEN** a generated quarantine name already belongs to an existing entry
+- **THEN** recovery preserves that entry and retries with another name
 
 ### Requirement: Local draft records contain at most one prompt source
 Local draft validation SHALL reject records containing both composer and staged_prompt, including empty values. Invalid writes SHALL not replace or remove an existing record; invalid loaded records SHALL follow quarantine policy and SHALL not restore either prompt or its deferred behavior.
@@ -1008,30 +1003,42 @@ Input diagnostic recording and dumping SHALL describe the agent view that owns t
 - **THEN** a nonempty diagnostic snapshot can be produced for that surface instead of silently returning because the top-level view is the dashboard
 
 ### Requirement: Pager log dispatch preserves initialized ownership
-Pager log forwarding SHALL use its successfully initialized transport and runtime independently of the calling thread. Flush before initialization SHALL preserve buffered entries, and repeated initialization SHALL not create additional periodic flush tasks.
+Pager log forwarding SHALL use its successfully initialized transport and runtime independently of the calling thread. It SHALL retain no more than 256 pending entries or 1 MiB of their encoded content, reject an entry whose encoded content exceeds 64 KiB before materializing a full encoding, and forward accepted entries in FIFO batches no larger than 16 entries or 256 KiB through one sender. Flush before initialization SHALL preserve accepted buffered entries within these limits. Repeated initialization SHALL not create another sender. New over-budget entries SHALL be dropped without displacing accepted entries or affecting session state.
 
 #### Scenario: Plain thread dispatch
 - **WHEN** a thread without an entered Tokio runtime emits a flushable log batch after initialization
-- **THEN** forwarding uses the initialization runtime instead of discarding the batch because the producer lacks a runtime
+- **THEN** forwarding uses the initialization runtime instead of discarding the batch because the producer lacks a runtime.
 
 #### Scenario: Flush before initialization
 - **WHEN** buffered entries exist and a flush is requested before sender initialization
-- **THEN** the entries remain available to the eventual initialized forwarder
+- **THEN** accepted entries remain available to the eventual initialized forwarder within the pending budget.
 
 #### Scenario: Repeated initialization
 - **WHEN** initialization is called after a forwarder is already installed
-- **THEN** the existing owner is retained without starting another periodic consumer
+- **THEN** the existing owner is retained without starting another sender.
+
+#### Scenario: Slow peer or oversized entry
+- **WHEN** producers exceed a pending count/byte budget before initialization or while the peer holds an acknowledgement, or submit one oversized encoded entry
+- **THEN** new over-budget entries are dropped while accepted entries retain their order; pending plus one in-flight batch remains bounded.
 
 ### Requirement: Pager log flush has a bounded delivery wait
-An initialized pager log flush SHALL stop waiting for its current batch after two seconds if ACP acknowledgement has not completed. An acknowledged or failed send SHALL finish without waiting out that deadline. Timeout SHALL not retry the batch or claim cancellation of already enqueued remote processing.
+An initialized Pager `flush_blocking` SHALL wait for all entries accepted before the call to settle through its one sender, including earlier batches already removed from the pending queue. Its total local wait SHALL stop after two seconds if ACP acknowledgement has not completed. Acknowledged, failed or timed-out sends SHALL not be retried by this forwarder; settlement SHALL NOT claim remote persistence or cancellation of already enqueued remote processing.
 
 #### Scenario: Peer retains acknowledgement
-- **WHEN** the peer holds a log notification without acknowledging it
-- **THEN** the current-batch flush releases its local wait after the two-second budget
+- **WHEN** the peer holds a log notification without acknowledging it, including one dispatched before `flush_blocking`
+- **THEN** the flush releases its local wait after the two-second budget without treating the earlier batch as delivered.
 
 #### Scenario: Peer acknowledges or disconnects
-- **WHEN** the current log batch is acknowledged or its channel fails
-- **THEN** flush completes without waiting for the deadline
+- **WHEN** all prior accepted log batches are acknowledged or their channel fails
+- **THEN** flush completes without waiting for the deadline.
+
+#### Scenario: Earlier batch remains in flight
+- **WHEN** a count-triggered or periodic batch is in flight and another entry is accepted before shutdown flush
+- **THEN** flush does not complete until the earlier batch and the later accepted entry both settle, unless its two-second wait expires.
+
+#### Scenario: Concurrent flushes
+- **WHEN** two callers flush the same accepted frontier while its batch awaits acknowledgement
+- **THEN** both wait for the same settlement without duplicating the batch.
 
 ### Requirement: Recap admission reflects command enqueue
 An enabled recap request SHALL report acceptance only after its session command is queued. A closed command channel SHALL produce an ACP error for manual and automatic requests instead of an accepted response.
@@ -1071,10 +1078,10 @@ Pager SHALL restore historical recap blocks without marking the current away per
 - **THEN** it marks the away period satisfied and clears manual progress only for a manual recap
 
 ### Requirement: Automatic recap bookkeeping is session scoped
-Within an away period, showing a recap or attempting automatic recap for one session SHALL not suppress another session's eligibility. Polling and focus-return eligibility SHALL use the active root session identity. A new away period SHALL reset all session recap bookkeeping while retaining the existing timing thresholds.
+Within an away period, showing a recap or attempting automatic recap for one session SHALL not suppress another session's eligibility. Polling and focus-return eligibility SHALL use the active root session identity. A new away period SHALL reset all session recap bookkeeping while retaining the existing timing thresholds. Each automatic request SHALL carry the owning away-period ID, and its successful live notification SHALL echo that ID. Pager SHALL display and count a live automatic recap only when the ID matches its current away period. A replayed recap SHALL restore display without changing current eligibility; manual recap behavior SHALL remain independent of this automatic request identity.
 
 #### Scenario: Background result arrives
-- **WHEN** a live recap is displayed for a background session
+- **WHEN** a live recap is displayed for a background session in the current away period
 - **THEN** only that session's shown state is consumed
 
 #### Scenario: Another session is in backoff
@@ -1083,7 +1090,19 @@ Within an away period, showing a recap or attempting automatic recap for one ses
 
 #### Scenario: New away period
 - **WHEN** focus is lost for a new away period
-- **THEN** prior per-session shown and retry state is cleared
+- **THEN** prior per-session shown and retry state is cleared, and a new ID is minted
+
+#### Scenario: Old automatic result arrives in a new away period
+- **WHEN** an automatic recap for away period A arrives live after period B has begun
+- **THEN** Pager does not display the A result or mark B shown, and B remains eligible under its own backoff
+
+#### Scenario: Current automatic result arrives after focus return
+- **WHEN** a recap for the current away period arrives after focus returns but before another focus loss
+- **THEN** Pager may display it if the session remains eligible and counts it against that period
+
+#### Scenario: Historical or manual recap
+- **WHEN** a historical recap is replayed or a manual recap is produced
+- **THEN** replay affects only display, and manual feedback follows the manual path without requiring an away-period ID
 
 ### Requirement: Hidden announcement state commits complete snapshots
 Hidden announcement state persistence SHALL publish complete canonical snapshots without truncating the current destination during preparation. A failed commit SHALL propagate failure to the pager persistence result and clean up only its own temporary artifacts.
@@ -1126,35 +1145,6 @@ A running pager AppView SHALL have at most one announcement preference write in 
 - **WHEN** an announcement update prunes hidden IDs during another write
 - **THEN** the pruned state participates in the same serialized scheduling
 
-### Requirement: Debug latest-link updates preserve unowned temporaries
-Unix debug latest-link updates SHALL NOT remove an existing temporary entry before symlink creation. A failed creation SHALL preserve that entry and the current latest link. Cleanup after failed publication SHALL only be attempted after this update successfully created the temporary link.
-
-#### Scenario: Temporary path collision
-- **WHEN** a regular file or symlink already occupies the latest-link temporary path
-- **THEN** updating latest leaves both the pre-existing entry and current latest target unchanged.
-
-#### Scenario: Publication failure
-- **WHEN** temporary creation succeeds but renaming over latest fails
-- **THEN** the newly created temporary is removed and the blocking destination remains.
-
-### Requirement: Debug routing retains only selected writer guards
-For concurrent first writes to a debug routing sink, only the selected writer guard SHALL be parked for process lifetime. Unselected writer guards SHALL be dropped outside the routing mutex so accepted first lines can flush and redundant workers retire. File opening SHALL remain outside that mutex.
-
-#### Scenario: Concurrent first writes
-- **WHEN** several threads first write to the same session sink or fallback sink
-- **THEN** one guard per sink remains parked after those writes return, and successfully queued lines remain available after flushing.
-
-### Requirement: Debug pruning respects live cooperating writers
-Debug file writers SHALL hold shared advisory locks for their file lifetime. Age-based pruning of ordinary log files SHALL acquire a nonblocking exclusive lock and recheck opened-file age before removal; unavailable locks SHALL cause the file to be spared.
-
-#### Scenario: Old idle writer
-- **WHEN** an ordinary log is older than retention but a cooperating writer still owns its shared lock
-- **THEN** pruning from another process preserves the log path.
-
-#### Scenario: Writer retired
-- **WHEN** all writer handles close and the ordinary file is still older than retention
-- **THEN** pruning may acquire exclusive ownership and remove it.
-
 ### Requirement: Unified log trimming reads a bounded tail
 Unified log trimming SHALL read at most MAX_SIZE / 2 bytes (2.5 MiB) from the later of the opened file midpoint and its final MAX_SIZE / 2 bytes. It SHALL retain only bytes after the first newline in that window, preserve the inode, and leave the file unchanged if no newline exists there.
 
@@ -1174,11 +1164,15 @@ Unified log writers SHALL capture their initial identity from the opened descrip
 - **THEN** the writer tracks the old descriptor identity and the next due maintenance can reopen the live path for visible writes.
 
 ### Requirement: Image normalization workers have process-wide admission
-The shell normalization blocking adapter SHALL run at most one normalize/transcode closure at a time per process. Its permit SHALL remain owned by the blocking closure until that closure returns or unwinds, even when its async caller is canceled.
+The shell image normalization pipeline for each `normalize_one` call SHALL run in one process-wide single-worker blocking closure. That closure SHALL include input base64 decoding, optional endpoint transcoding and its PNG base64 encoding, normalization validation/decoding/re-encoding, and output base64 encoding. Its permit SHALL remain owned by the closure until every stage returns or unwinds, even when its async caller is canceled.
+
+#### Scenario: Normalization stages share admission
+- **WHEN** an image requires optional endpoint transcoding and/or compression
+- **THEN** input decode, conversion, compute, and output encoding all execute while the same worker permit is held
 
 #### Scenario: Caller canceled during decode
-- **WHEN** a blocking image normalization task continues after its async waiter is canceled and another normalization is requested
-- **THEN** the new task waits until the existing blocking task finishes before entering its closure.
+- **WHEN** a normalization closure continues after its async waiter is canceled and another image normalization is requested
+- **THEN** the new image waits until every stage in the existing closure finishes before entering its own normalization pipeline.
 
 ### Requirement: Session rename participates in lifecycle serialization
 Within one agent, session rename SHALL share the per-session lifecycle gate with load and delete from authoritative lookup through title commit. It SHALL preserve the distinction between resident actor mutation and dormant storage mutation without waiting on a loader queued behind its own guard.
@@ -1350,7 +1344,7 @@ Full-history rewind queries and mutations SHALL return a failed historical load 
 - **THEN** that internal rewind reports failure before committing its conversation rewind or truncating checkpoints; already committed cancellation terminal facts are retained.
 
 ### Requirement: Pinned rewind parsing rejects malformed records
-Pinned rewind JSONL readers SHALL reject a nonblank record that fails deserialization, returning InvalidData with its one-based physical line number rather than a successful partial record set. Historical load failure SHALL retain the source and live points for retry.
+Pinned rewind JSONL readers SHALL reject a nonblank record that fails deserialization, returning InvalidData with its one-based physical line number rather than a successful partial record set. Historical load failure SHALL retain the source and live points for retry. Metadata scans SHALL validate nested snapshot types without retaining file content and SHALL report a parse failure to the picker.
 
 #### Scenario: Invalid record among valid records
 - **WHEN** a pinned history contains valid records surrounding an invalid record
@@ -1365,8 +1359,8 @@ Pinned rewind JSONL readers SHALL reject a nonblank record that fails deserializ
 - **THEN** blank lines remain accepted and count toward diagnostic line numbers.
 
 #### Scenario: Metadata parse failure
-- **WHEN** the pinned metadata reader encounters a record it cannot deserialize
-- **THEN** the existing picker fallback uses in-memory points without consuming the historical source.
+- **WHEN** the pinned metadata reader encounters a record it cannot deserialize, including a malformed nested snapshot
+- **THEN** the picker request reports failure without consuming the historical source or presenting in-memory points as a complete checkpoint list.
 
 ### Requirement: Rewind file modes consider the affected checkpoint range
 Rewind mode selection SHALL consider file changes at the target prompt and all later checkpoints when determining file-mode availability. It SHALL recompute the same range when returning from preview. Inline edit SHALL retain its existing FilesOnly exclusion.
@@ -1403,7 +1397,7 @@ Returning to rewind mode selection SHALL preserve the current phase's explicit t
 - **THEN** the target remains zero even if newer checkpoints exist.
 
 ### Requirement: Rewind reads belong to the requesting interaction
-The client SHALL apply points and preview results only to their current requesting interaction, session and phase. Dismissal SHALL invalidate the pending read. Starting a new read SHALL supersede the previous read. Execution results SHALL retain their existing reconciliation behavior.
+The client SHALL apply points and preview results only to their current requesting interaction, session and phase. Dismissal SHALL invalidate the pending read. Starting a new read SHALL supersede the previous read. Execution results SHALL follow the separate session-binding reconciliation requirement.
 
 #### Scenario: Dismissed read completes
 - **WHEN** points or preview completes or fails after its interaction was dismissed
@@ -1469,7 +1463,7 @@ Pager SHALL NOT register or run the GBOOM game, its renderer, game simulation cl
 ACP image construction SHALL omit the unused grow.dev/imageDisplayNumber metadata key. Visible image numbers and textual image anchors, image bytes, URIs, durable identities and generic ACP metadata preservation SHALL remain unchanged.
 
 #### Scenario: Recovered image retains its visible identity
-- **WHEN** a numbered image placeholder is recovered into an attachment
+- **WHEN** a numbered image anchor accompanies an explicit attachment submitted or restored by the client
 - **THEN** the textual anchor preserves its number and the attachment preserves its content and URI without emitting dedicated display-number metadata.
 
 #### Scenario: Other metadata survives normalization
@@ -1532,7 +1526,7 @@ Mid-turn user input SHALL persist its user-facing text separately from model-onl
 - **THEN** those tags remain part of the user text and are not parsed or removed as runtime framing.
 
 ### Requirement: Paste collection preserves input-batch boundaries
-A detected unbracketed multiline paste SHALL remain one pending insertion across bounded input collection passes. Reaching an event budget SHALL yield without committing the paste prefix. The existing idle boundary SHALL flush the complete insertion even without a subsequent input event.
+A detected unbracketed multiline paste SHALL remain one pending insertion across bounded input collection passes. Reaching an event budget SHALL yield without committing the paste prefix. The existing idle boundary SHALL flush the complete insertion even without a subsequent input event. A completed bracketed `Event::Paste` SHALL retain its own boundary and SHALL NOT absorb or discard later events merely because they were collected in the same input batch.
 
 #### Scenario: Large paste exceeds collection budget
 - **WHEN** one continuous multiline paste exceeds the input extension event budget and ends with an unterminated line
@@ -1553,6 +1547,14 @@ A detected unbracketed multiline paste SHALL remain one pending insertion across
 #### Scenario: Control key interrupts pending collection
 - **WHEN** a control key arrives during detection or at the next pending-paste batch
 - **THEN** collection returns without waiting for the remaining paste tail and retains the control key for normal routing.
+
+#### Scenario: Bracketed paste followed by ordinary input
+- **WHEN** one input batch contains a completed bracketed paste followed by Enter, text, navigation or a control key
+- **THEN** Pager routes the paste and each subsequent key separately in arrival order without adding the keys to paste text or dropping them.
+
+#### Scenario: Two completed bracketed pastes
+- **WHEN** one input batch contains two completed `Event::Paste` values
+- **THEN** Pager preserves two paste events in their original order rather than combining their content.
 
 ### Requirement: Usage exposes provider-model totals and cache-hit rates
 `/usage` SHALL display total token consumption and provider/model breakdowns using full input plus output including cache-hit input. It SHALL show cached input and cache-hit percentages overall and per provider/model, within the labeled ledger reporting window. The identity SHALL be captured from the selected catalog route before sampling, not from provider-returned model aliases.
@@ -1970,7 +1972,7 @@ Resident reconnect SHALL 不越过尚未由其 Timeline snapshot 覆盖的 respo
 
 ### Requirement: Minimal native scrollback preserves semantic lines and links
 
-Grow minimal 模式将稳定条目提交到原生终端 scrollback 时 SHALL 以本次渲染的源行 provenance 区分软接续和硬换行，去除无语义的布局尾部填充，并保留已在 `BlockLine.content` 中的源末尾空格、可见文本、必要背景、宽字和 OSC 8 链接目标。生产者在生成 `BlockLine` 前已丢弃的源空白不属于可恢复范围。提交仍 SHALL 遵守现有 print-once frontier：终端写入报告成功后才标记条目已提交；失败时条目保持 live、布局重新测量。不承诺部分终端写入后的重试恰好一次。
+Grow minimal 模式将稳定条目提交到原生终端 scrollback 时 SHALL 以本次渲染的源行 provenance 区分软接续和硬换行，去除无语义的布局尾部填充，并保留已在 `BlockLine.content` 中的源末尾空格、可见文本、必要背景、宽字和 OSC 8 链接目标。生产者在生成 `BlockLine` 前已丢弃的源空白不属于可恢复范围。每个可见视图 epoch 的提交 SHALL 遵守 print-once frontier：终端写入报告成功后才标记条目已提交；失败时条目保持 live、布局重新测量。切换 root/child 视图后，当前 epoch 可重新打印该视图的已保留历史，旧 epoch 的打印仍保留在终端原生历史。不承诺部分终端写入后的重试恰好一次。
 
 #### Scenario: Short structured text has no copied layout padding
 - **WHEN** 短 YAML/Markdown 条目比终端宽度短并被提交
@@ -2023,3 +2025,855 @@ Grow 在正常终端退出中 SHALL 先确认输入 reader 不再消费 TTY，�
 #### Scenario: Forced exit remains fast
 - **WHEN** 首次受控退出信号转为正常 quit，或 panic/第二次信号走强制退出
 - **THEN** 前者在条件满足时经过正常 fence；后者只做快速 best-effort teardown，不等待 reader、writer 或 DA1。
+
+### Requirement: Slash MRU snapshot writes obey the encoded input allowance
+Slash MRU persistence SHALL reject encoded snapshots larger than 1,048,576 bytes before background handoff and before filesystem publication. Rejected snapshots SHALL leave the destination unchanged; a rejected handoff SHALL be reported to the controller so its store remains dirty for retry. Snapshots at or below the allowance SHALL retain atomic publication behavior.
+
+#### Scenario: Snapshot fits the encoded allowance
+- **WHEN** a serialized Slash MRU snapshot is at most 1,048,576 bytes
+- **THEN** it may be handed to the background writer and is published as a complete atomic replacement
+
+#### Scenario: Snapshot exceeds the encoded allowance
+- **WHEN** a serialized Slash MRU snapshot is larger than 1,048,576 bytes
+- **THEN** background handoff and filesystem publication reject it, preserve any existing destination, and the controller retains dirty state after the handoff failure
+
+Evidence: `crates/codegen/pager/src/slash/mru.rs` (`MAX_STORE_BYTES`, `MruSnapshot::write`, `persist_async`, `snapshot_write_enforces_the_reader_byte_allowance_before_publication`) and `crates/codegen/pager/src/slash/mod.rs` (`SlashController::record_command_use`, exercised by `controller_rejects_oversized_snapshot_and_retains_dirty_state`).
+
+### Requirement: Incomplete search bootstrap preserves index state
+Session search bootstrap SHALL treat a missing or invalid summary inside an opened session directory, or a failure in any required Timeline read or index write, as an incomplete attempt. An incomplete attempt SHALL NOT prune existing index rows or publish a completed-bootstrap marker. After the source is repaired, a bootstrap recheck SHALL be able to rebuild the affected index row. Evidence: `crates/codegen/shell/src/session/storage/search.rs` (`reindex_all`, `SearchIndexJob::RecheckBootstrap`) and `crates/codegen/shell/src/session/storage/jsonl/mod.rs` (session summary enumeration).
+
+#### Scenario: Missing or invalid summary
+- **WHEN** bootstrap opens a session directory whose summary is missing, cannot be decoded, or cannot be validated
+- **THEN** it fails the attempt before orphan pruning, preserves existing indexed rows, and leaves no completed-bootstrap marker
+
+#### Scenario: Required Timeline or index operation fails
+- **WHEN** a session's required Timeline read or index write fails during bootstrap
+- **THEN** the attempt remains incomplete, existing index rows are not pruned, and no completed-bootstrap marker is published
+
+#### Scenario: Recheck after source repair
+- **WHEN** a failed bootstrap is followed by repair of the invalid summary or Timeline and a bootstrap recheck
+- **THEN** the recheck indexes the repaired session and publishes the completed-bootstrap marker
+
+### Requirement: Automatic recap is suppressed during reconnect
+Pager SHALL NOT dispatch automatic recap requests while reconnect initialization or session reload is pending. Suppressed poll attempts SHALL remain no-ops and SHALL NOT record automatic retry backoff. A focus-return event during reconnect SHALL drop that away-period recap opportunity under the existing best-effort behavior. After reconnect completes, recap availability SHALL follow the replacement shell's refreshed capability; manual requests and a later away period SHALL use the normal admission path.
+
+#### Scenario: Replacement disables recap while session reload is delayed
+- **WHEN** the previous shell advertised recap, a replacement shell disables it, session reload is still pending, and the automatic recap poll fires
+- **THEN** Pager sends no recap request and records no automatic retry attempt; after reload completes, the refreshed disabled capability remains authoritative
+
+#### Scenario: Focus returns during reconnect
+- **WHEN** focus returns after the recap threshold while reconnect is pending
+- **THEN** Pager sends no automatic recap request and drops only that away-period opportunity; after reconnect, manual requests and a later away period follow the refreshed capability normally
+
+### Requirement: Registered tool calls retain visible identity and terminal state
+
+Shell SHALL give every registered tool input an explicit ACP start presentation and every tool output an explicit ACP projection with the original tool-call identity. Successful completed outputs SHALL close their rows; a backgrounded Bash output MAY remain in progress until its task finishes. Adding a new closed tool input or output variant SHALL require an explicit projection decision instead of silently falling through a wildcard.
+
+#### Scenario: LSP and dynamic tool starts
+- **WHEN** an LSP call or a dynamically registered tool starts
+- **THEN** the Pager receives a start update identifying the actual operation or tool name, with the original raw input; neither starts as an anonymous `Tool call`.
+
+#### Scenario: Context recall and dynamic tool results
+- **WHEN** ContextRecall or a dynamic tool returns successfully
+- **THEN** the same tool-call ID receives a Completed update with its result evidence, so the row stops running before the model turn ends.
+
+### Requirement: Unified log appends coordinate with in-place trimming
+Unified log writers SHALL acquire the opened log inode's exclusive advisory lock before appending a complete encoded entry, using the same lock that guards in-place trim rewrite and truncate. A trim encountering an active append SHALL yield under its existing nonblocking lock policy. An append encountering an active trim SHALL wait until that trim releases the lock before writing, so a successfully written line is not removed by that trim's truncation.
+
+#### Scenario: Trim owns the inode while a writer appends
+- **WHEN** trimming has locked the log inode and a writer starts an append before trimming rewrites and truncates it
+- **THEN** the append completes after the trim releases the lock and remains after the retained tail
+
+#### Scenario: Append owns the inode while trim is attempted
+- **WHEN** a writer holds the inode lock for an append and another process attempts a nonblocking trim
+- **THEN** that trim leaves the inode unchanged and may be retried on later maintenance
+
+### Requirement: Unified log records have a bounded complete encoding
+Unified log writers SHALL encode each JSONL record, including its terminating LF, within 65,536 bytes. Serialization SHALL stop before appending bytes that exceed this budget. An oversized record SHALL be replaced by a complete, valid diagnostic record identifying the omitted entry and the byte limit; no prefix of the rejected encoding SHALL be written.
+
+#### Scenario: Entry fits the record budget
+- **WHEN** a Shell or Pager log entry serializes to at most 65,536 bytes including LF
+- **THEN** the writer appends that complete encoded entry unchanged.
+
+#### Scenario: Entry exceeds the record budget
+- **WHEN** a Shell or Pager log entry would exceed 65,536 bytes including LF
+- **THEN** the writer appends one valid diagnostic JSONL record identifying `record_omitted` and the 65,536-byte limit, with no bytes from the rejected encoding.
+
+#### Scenario: One oversized record has no line boundary
+- **WHEN** an entry contains a message or context too large for the record budget
+- **THEN** serialization memory remains bounded by the per-record budget and the persisted file receives the bounded diagnostic line with its terminating LF.
+
+### Requirement: Explicit scroll log paths have exclusive writer ownership
+A scroll log recorder opening an explicit target SHALL acquire a nonblocking exclusive advisory lock on the opened regular file before truncating it, and SHALL retain ownership while writing. If ownership is unavailable, the recorder SHALL disable itself without modifying the existing file. The existing non-regular target rejection and per-recorder byte limit SHALL remain in effect.
+
+#### Scenario: Second recorder targets the same file
+- **WHEN** one recorder owns an explicit scroll log path and a second recorder attempts to open that same file, including through a path alias resolving to the same file
+- **THEN** the second recorder disables itself without truncating or writing, and the first recorder's complete records remain intact
+
+#### Scenario: Ownership is released
+- **WHEN** the owning recorder is dropped and another recorder opens the target
+- **THEN** the later recorder can acquire ownership and begin a new recording using the existing truncate-on-first-record behavior
+
+### Requirement: Child transcript file notices retain the export origin
+
+An explicit `/export` or `/copy` file job started from a child Agent view SHALL snapshot that child's content, cwd, Agent identity and session identity. Admission and completion notices SHALL appear in that same child view even if the user switches to the parent before the job completes. A removed or rebound child SHALL NOT receive the old job's feedback; the file queue SHALL still advance.
+
+#### Scenario: Minimal child export completes after a view switch
+
+- **WHEN** `/export` is submitted from a Minimal child view whose content and cwd differ from its parent, then the user switches to the parent before the write completes
+- **THEN** the file contains the child's transcript at the child's resolved path, the child receives saving and completion notices, and the parent receives neither notice
+
+#### Scenario: Child is removed or rebound before completion
+
+- **WHEN** the child view that submitted a file job is removed or bound to another session before the result arrives
+- **THEN** the file job settles and the queue advances without publishing the old completion to a different view or session
+
+### Requirement: Minimal transcripts retain the selected view owner
+
+Minimal `/transcript` SHALL capture the selected root or child Agent view and session identity when invoked. Its incremental rendering, cwd/media resolution, external pager handoff and failure notices SHALL use that captured view across focus changes. A removed or rebound child SHALL NOT be replaced by a parent or another child with matching entry IDs.
+
+#### Scenario: Child transcript survives a focus switch
+
+- **WHEN** `/transcript` begins in a Minimal child view with content and cwd distinct from the parent, and focus returns to the parent during the build
+- **THEN** every slice and the pager file use the child content and cwd; pager failure feedback targets the same child
+
+#### Scenario: Captured child is removed or rebound
+
+- **WHEN** the child view disappears or binds to a different session before the build finishes
+- **THEN** the in-flight build is dropped without opening a pager or publishing feedback to another conversation
+
+#### Scenario: Owner reload during a build
+
+- **WHEN** the captured view enters session reload while its transcript is still being rendered
+- **THEN** the old prefix is discarded and the build waits for that view's final state before restarting
+
+### Requirement: Minimal transcript snapshots write outside the interactive loop
+Minimal 全文 transcript 的渲染 SHALL 继续按每帧 8ms 预算分片；渲染完成后的 ANSI 临时快照文件 I/O SHALL 在后台阻塞任务执行，避免最终写入占用 UI 事件循环。
+
+#### Scenario: Snapshot write is slow
+- **WHEN** Minimal transcript 的完整 ANSI 正文已渲染且快照写入尚未完成
+- **THEN** UI 事件循环继续处理输入和绘制；分页器请求只在完整私有快照写入成功后提交。
+
+#### Scenario: A newer request replaces an in-flight write
+- **WHEN** 旧 transcript 快照仍在后台写入时产生更新的 Minimal transcript 请求
+- **THEN** 旧结果完成后被释放，不启动旧分页器；仅当前请求的完整快照可交给分页器。
+
+#### Scenario: Original owner disappears or changes binding
+- **WHEN** 快照写入完成时原 root、选中 child view 或 session identity 已不存在或不匹配
+- **THEN** 丢弃并清理该快照，不将文件或错误反馈交给当前其他会话。
+
+#### Scenario: Snapshot write fails
+- **WHEN** 后台创建或写入 ANSI 快照失败
+- **THEN** 清理未完成的私有临时文件，并将错误反馈给仍匹配的原 owner；UI 事件循环不等待磁盘操作。
+
+### Requirement: Usage surfaces include auxiliary model consumption
+
+`/usage` SHALL display the owning session's known main, child and Sideband model consumption in lifetime and resume segments, grouped by the frozen provider/model route. Full input plus output includes cache-hit input. Incomplete Sideband attempts SHALL preserve the lower-bound marker and prevent unknown cost from appearing exact. Sideband calls SHALL NOT increment the public main-loop turn count. Existing aggregate UI and headless usage shapes remain unchanged.
+
+#### Scenario: Auxiliary calls across a resume
+
+- **WHEN** a session's main loop, recap and memory Sidebands consume known tokens across two incarnations
+- **THEN** `/usage` and the ordinary status projection include all three charges once, each in its proper segment and route group, while `numTurns` counts only main-loop rounds
+
+#### Scenario: Auxiliary call with unknown usage
+
+- **WHEN** a Sideband provider request completes or fails without trustworthy usage
+- **THEN** `/usage` and headless reporting show recorded totals as an incomplete lower bound and do not present unknown cost as exact
+
+### Requirement: Agent-local tasks end with their owner
+Local background tasks that access an `MvpAgent` SHALL stop before the agent is destroyed, even when the agent's owning task is aborted while its `LocalSet` remains active.
+
+#### Scenario: Abrupt owner task abort
+- **WHEN** the task owning a leader agent is aborted with its local session supervisor and coordination work pending
+- **THEN** those local tasks are cancelled before the agent's state is destroyed and cannot execute a later tick against the old agent.
+
+### Requirement: Session picker list results belong to the latest visible fetch
+Pager SHALL apply a session picker list result only when it belongs to the latest list fetch and a picker surface is still visible. Dismissal SHALL invalidate in-flight list results.
+
+#### Scenario: Rapid successive fetches
+- **WHEN** two list requests are issued and the older request completes last
+- **THEN** only the newer result remains visible.
+
+#### Scenario: Modal closes before a response
+- **WHEN** an Agent session picker modal is dismissed while its list request is pending
+- **THEN** the late response does not repopulate the closed modal or the welcome picker.
+
+#### Scenario: Welcome closes before a response
+- **WHEN** the welcome picker is dismissed while its list request is pending
+- **THEN** the late response does not restore its entries or loading state.
+
+### Requirement: Session picker list scope follows the visible owner
+Pager SHALL request an Agent picker list using that visible Agent or child session's cwd. A list result SHALL update only the same visible picker and session binding that requested it. Relaxed-scope notices SHALL use the request cwd.
+
+#### Scenario: Agent cwd differs from launch cwd
+- **WHEN** a picker opens in an Agent whose session cwd differs from the app launch cwd
+- **THEN** the list request uses the Agent session cwd, and the result's selection anchor and relaxed-scope notice use that same cwd.
+
+#### Scenario: View or session binding changes before result
+- **WHEN** the user switches Agent or child view, changes cwd, or rebinds the session while a list fetch is pending
+- **THEN** the old result does not update the new visible picker, loading state, or toast.
+
+### Requirement: Pending session pickers recover after owner switches
+When a visible session picker remains loading after another view supersedes its list request, Pager SHALL issue a new request for the visible picker. A late result from the former owner SHALL NOT update the new picker.
+
+#### Scenario: Switch between pending Agent pickers
+- **WHEN** Agent A and Agent B have pending picker modals and focus switches between them
+- **THEN** each newly visible pending modal receives a fresh list request bound to its own cwd; late results from the other modal do not replace its entries.
+
+#### Scenario: Switch to a loaded picker
+- **WHEN** focus moves to a picker whose list has already loaded
+- **THEN** its entries remain available without an unnecessary refetch.
+
+### Requirement: Agent teardown retires its session writers
+When an `MvpAgent` is destroyed while its process runtime continues, it SHALL request shutdown of every primary and active child session actor it owns. A replacement agent SHALL not load the same session until the old writer has released its lease.
+
+#### Scenario: Agent owner ends with resident sessions
+- **WHEN** the Agent owner is dropped while primary or child session actors remain resident
+- **THEN** each actor receives the existing shutdown command and the owner releases its handles without blocking the local event loop.
+
+#### Scenario: In-process leader replacement
+- **WHEN** a leader generation is stopped and a replacement generation will load the same session
+- **THEN** the replacement waits until the old session writer lease is released before loading; it does not overlap writers or treat an active lease as a successful load.
+
+### Requirement: List layout queries respect cached item bounds
+The Pager list layout cache SHALL report per-item geometry only for indexes represented by the cache, and SHALL support appending items to either fixed-height or variable-height layouts without panicking.
+
+#### Scenario: Query outside an empty or populated cache
+- **WHEN** a caller requests an item's virtual y or height at an index greater than or equal to the cached item count
+- **THEN** the query returns no geometry instead of fabricating a position or height.
+
+#### Scenario: Append to either layout representation
+- **WHEN** incremental item heights are appended to a fixed-height cache
+- **THEN** the cache count grows by the number of appended items and each appended item has height one.
+- **WHEN** incremental item heights are appended to a variable-height cache
+- **THEN** each height and its corresponding prefix sum are added consistently.
+
+### Requirement: Scrollback search retains bounded pending work
+Scrollback search SHALL retain at most one pending merged request while a worker scans and SHALL submit query updates without waiting for worker capacity. Its result identity SHALL continue to prevent an older scan from replacing the visible query result.
+
+#### Scenario: Query burst during a scan
+- **WHEN** a new corpus and several newer queries arrive before the worker can take pending work
+- **THEN** the pending request retains the newest corpus and query, submission does not wait for scanning, and only the latest matching result is applied to the current search view.
+
+#### Scenario: Search owner closes with pending work
+- **WHEN** search closes while a scan or pending request exists
+- **THEN** stop takes precedence over the pending request without waiting for worker notification capacity; the worker does not apply that pending request after closing.
+
+### Requirement: File search results belong to the current query
+Pager file search SHALL expose results only when they belong to the currently active query request. Submitting a new query SHALL immediately make prior results unavailable for display and selection.
+
+#### Scenario: Previous query completes after dismiss and reopen
+- **WHEN** a user dismisses file search, opens it again with another query, and the daemon publishes a snapshot from the previous query before processing the new request
+- **THEN** the previous snapshot is not displayed or selectable, and results from the current request can be applied
+
+#### Scenario: Previous query remains visible during an edit
+- **WHEN** the active `@` query changes while an earlier daemon snapshot is still available
+- **THEN** the old snapshot is cleared immediately and cannot be restored by a late poll
+
+证据：`crates/codegen/pager/src/views/file_search/state.rs` — `start_query`, `poll`, `apply_results`；`crates/codegen/workspace/src/file_system/fuzzy.rs` — `FuzzyFileMatcherDaemon::set_query` 与结果快照的 `query_id`。
+
+### Requirement: Fuzzy file-search submissions and teardown do not wait for worker capacity
+Fuzzy file search SHALL submit the latest restart and query without waiting for the worker's notification channel or an ongoing filesystem walk. Closing its daemon SHALL not join the worker on the caller's thread and SHALL prevent pending requests from running after stop is observed.
+
+#### Scenario: Slow walk with rapid input
+- **WHEN** a worker is occupied while multiple restart and query updates arrive
+- **THEN** submission remains nonblocking, only the newest pending restart and query remain, and the published result retains that query's request identity.
+
+#### Scenario: Coalesced query and workspace status polling
+- **WHEN** workspace fuzzy-search status polling starts after several query changes were coalesced by the worker
+- **THEN** it waits for the latest query identity, does not publish an older query's result, and can publish the latest result without waiting for skipped worker generations.
+
+#### Scenario: Search closes during worker activity
+- **WHEN** the daemon is dropped with pending work or an active walk
+- **THEN** stop supersedes pending work, the current walk is asked to cancel, and the caller returns without waiting for channel capacity or worker join.
+
+### Requirement: macOS clipboard text subprocesses have bounded execution
+macOS `pbpaste -Prefer txt` 文本读取 SHALL 使用有界子进程运行器：执行时间最多 5 秒，stdout 和 stderr 各最多 1 MiB，并在调用结束时回收其所属进程组；超时、任一流超限、启动或非零退出 SHALL 返回读取错误。
+
+#### Scenario: Text command hangs or exceeds an output allowance
+- **WHEN** `pbpaste` 超过 5 秒，或 stdout/stderr 任一流超过 1 MiB
+- **THEN** 读取失败且所属进程组被回收，不继续无限等待或收集输出。
+
+#### Scenario: Text command succeeds within budget
+- **WHEN** `pbpaste` 在期限内以零状态退出且两条流均在限额内
+- **THEN** 保留原有语义：空 stdout 返回无文本，非空 stdout 按 UTF-8 有损解码返回文本。
+
+### Requirement: Invalid passive inquiry identities remain finite notices
+Pager SHALL coalesce an incoming coordination notice into a passive inquiry row only when its structured audit and non-empty correlation ID provide a valid identity. A notice without valid identity SHALL remain visible as a finite raw notice and SHALL NOT enter passive running lifecycle. The scrollback upsert SHALL reject absent or empty identity without panicking or mutating state.
+
+#### Scenario: Incoming notice has no structured audit or usable inquiry ID
+- **WHEN** an incoming inquiry has missing or malformed structured audit data, or an empty correlation ID
+- **THEN** Pager retains the original notice as a finite row and creates no passive coordination entry.
+
+#### Scenario: Internal upsert receives absent or empty identity
+- **WHEN** `upsert_coordination_row` receives a block without a coordination identity, or with empty source peer or inquiry ID
+- **THEN** it returns without mutation and does not panic or create a running row.
+
+#### Scenario: Valid inquiry identity
+- **WHEN** a non-empty source peer ID and correlation ID accompany a valid audit
+- **THEN** the existing correlated passive row behavior and running/terminal projection remain unchanged.
+
+### Requirement: Flowchart class annotations preserve node meaning
+
+Grow 的 Mermaid flowchart 静态预览 SHALL 在识别节点尾部 `:::class` 时保留节点原有 ID、形状和标签，并将已定义 `classDef` 的 `fill`、`stroke`、`color` 分别用于节点填充、边框和文字。节点的显式 `style` SHALL 优先于 class 样式；无法静态执行的交互类指令 SHALL 不变成伪节点。本要求只覆盖 `classDef` 与内联 `:::` 子集，不承诺完整 Mermaid class 语法。
+
+#### Scenario: 带形状和 API 路径的 class 节点
+- **WHEN** flowchart 包含 `PIN{machine claimed?}:::cond` 和 `CALL["POST /v1/items/{id}"]:::dark`，并定义对应 `classDef`
+- **THEN** 预览保留菱形、矩形及完整标签，已定义的填充、边框和文字颜色体现在 SVG/PNG 中，不以 ID 或被截断的标签替代。
+
+#### Scenario: 显式 style 与 class 并存
+- **WHEN** 同一节点同时引用 `classDef` 并拥有显式 `style` 语句
+- **THEN** 显式 `style` 继续决定该节点的有效样式，class 不在解析结束时覆盖它。
+
+#### Scenario: 不支持的静态指令
+- **WHEN** flowchart 含 `class`、`click`、`linkStyle`、`direction`、`accTitle` 或 `accDescr` 指令
+- **THEN** 静态预览不将这些整行指令画成节点；本要求不意味着指令的交互、链接或方向语义已经实现。
+
+#### Scenario: 样式值包含 SVG 属性定界字符
+- **WHEN** `classDef` 或既有 `style` 的颜色值含引号、尖括号或 `&`
+- **THEN** 输出 SVG 的颜色属性保持 XML 结构完整，不因该值新增属性或元素；有效普通颜色仍按原值显示。
+
+目标实现入口：`third_party/mermaid-to-svg/src/parser.rs` — `parse_statements`、`try_parse_node`；`src/layout.rs` — `get_node_colors`；`src/svg_renderer.rs` — `render_text_lines` 与各节点形状渲染器。
+
+### Requirement: Flowchart ampersand groups represent individual edges
+
+Grow 的 Mermaid flowchart 静态预览 SHALL 把形状与引号之外、两侧有空白的 `&` 解释为节点组分隔符，将每对相邻组展开为笛卡尔积边；形状或引号内的 `&` SHALL 保留为标签内容，不得生成包含整组文本的伪节点。
+
+#### Scenario: 分组连接和边链
+- **WHEN** 输入为 `A & B --> C --> D & E`
+- **THEN** 图中有 `A→C`、`B→C`、`C→D`、`C→E` 四条逻辑边，节点 ID 不包含 `A & B` 或 `D & E`。
+
+#### Scenario: 标签中的字面 ampersand
+- **WHEN** 输入含 `REP["GET /v1/items?sku=&status=READY"]:::dark`
+- **THEN** 标签中的 `&` 保留，不拆成多个节点或边。
+
+目标实现入口：`third_party/mermaid-to-svg/src/parser.rs` — `parse_edge_chain`、节点解析；`crates/codegen/mermaid/src/pure.rs` — `PureRustEngine::render`。
+
+### Requirement: Flowchart group expansion is bounded before allocation
+
+单个 flowchart 中由 `&` 节点组产生的逻辑边 SHALL 至多为 4096 条。解析器 SHALL 在构造超额边之前拒绝输入，并返回可由现有 Mermaid 错误路径处理的解析失败；失败 SHALL 不发布部分 SVG 或 PNG。
+
+#### Scenario: 刚好达到预算
+- **WHEN** 分组语句累计恰好展开 4096 条逻辑边
+- **THEN** 解析阶段接受该展开，不因边数预算单独拒绝；后续布局和像素限制仍独立适用。
+
+#### Scenario: 超过预算或乘积溢出
+- **WHEN** 新组连接会使累计展开边数超过 4096，或组大小乘积无法安全计算
+- **THEN** 在构造该组边之前返回解析失败；Pager 走现有渲染失败路径，不展示不完整图片。
+
+目标实现入口：`third_party/mermaid-to-svg/src/parser.rs` — `Parser::parse_edge_chain`；`crates/codegen/pager/src/app/agent_view/mermaid_worker.rs` — 渲染失败处理。
+
+### Requirement: Goal Active queued inputs are directly editable and retractable
+
+Pager SHALL let the user edit or remove a still-pending queued message while Goal is Active through the queue item's existing edit and cancel actions, without selecting Stop Goal or Stop Turn. It SHALL distinguish a confirmed pending item from an optimistic submission and an already-running item, and SHALL report the Shell's authoritative result instead of treating local UI mutation as success.
+
+#### Scenario: Edit a pending message during Goal execution
+- **WHEN** Goal is Active, another turn is running, and the user selects `[edit]` or the queue edit key for a confirmed pending message
+- **THEN** Pager enters protected editing only after the Shell confirms the hold; the current turn, subagents, and Goal lifecycle remain unchanged.
+
+#### Scenario: Retract a pending message during Goal execution
+- **WHEN** Goal is Active and the user selects `[cancel]` or the queue delete key for a confirmed pending message
+- **THEN** successful authoritative removal makes the message disappear and prevents its later execution without opening a Goal／turn stop choice.
+
+#### Scenario: Pending submission or stale row
+- **WHEN** the selected row is still an optimistic echo, has already started running, was removed elsewhere, or changed version before an edit or remove request is confirmed
+- **THEN** Pager does not claim the operation succeeded; it reconciles with the authoritative queue and preserves any unsaved editing text for recovery or explicit user action.
+
+#### Scenario: Failed edit save
+- **WHEN** the Shell rejects or cannot durably admit edited content
+- **THEN** Pager keeps the editing draft and shows a failure; it does not silently return to normal composer mode or send the old text as the edit result.
+
+#### Scenario: Turn-stop shortcut remains distinct
+- **WHEN** the user invokes Ctrl+C without selecting a queued item action
+- **THEN** the existing current-turn／Goal interruption semantics remain unchanged; queued-message withdrawal is not inferred from a turn-stop gesture.
+
+### Requirement: Minimal frames render the selected Agent view
+
+When a root Agent selects a child view and has no root permission pending, Minimal SHALL use that child's prompt, controls, live tail, viewport measurements and native scrollback commit frontier for the whole frame. Root permissions SHALL temporarily retain root ownership. The selected view SHALL remain the input owner and the rendering owner together; a missing or rebound child SHALL NOT cause a child input with root rendering.
+
+#### Scenario: Selected child has different content
+
+- **WHEN** a child with a distinct prompt, running tail and finalized history is selected from a root Agent
+- **THEN** Minimal measures, commits and draws the child's content and controls without committing new root entries as the child's history.
+
+#### Scenario: Switch away and return
+
+- **WHEN** Minimal switches between a root and a child whose histories were each already printed in an earlier visible epoch
+- **THEN** it clears the old visible screen, reprints the selected view's retained history through that view's commit frontier, and draws its own live prompt; older native terminal scrollback remains historical.
+
+#### Scenario: Root permission interrupts child selection
+
+- **WHEN** a root permission arrives while a child remains selected
+- **THEN** input and the entire Minimal frame use the root permission owner until it resolves, then return to the selected child.
+
+#### Scenario: Child disappears or is rebound
+
+- **WHEN** the selected child key no longer resolves to that child view or its session binding changes
+- **THEN** Minimal does not reuse the former child's committed frontier or render its content for another owner; a missing child key falls back to root input and rendering.
+
+#### Scenario: Native clear or commit fails during a switch
+
+- **WHEN** the terminal cannot clear for a new owner or a new owner's native block write fails
+- **THEN** Minimal does not mark missing content as committed; it retries the failed boundary on a later frame and keeps the failed block in the live tail.
+
+### Requirement: Pinned rewind history reads have bounded and visible failure
+Pinned rewind metadata and full-history reads SHALL reject a nonblank record above 64 MiB, a scan above 256 MiB, or more than 50,000 records before accepting a partial history projection. A pinned read SHALL not block the async request executor while scanning the file. Failed or cancelled scans SHALL retain the pinned source and live points for a later retry.
+
+#### Scenario: Oversized pinned record or scan
+- **WHEN** a pinned rewind record exceeds 64 MiB, a scan exceeds 256 MiB, or a scan has more than 50,000 records
+- **THEN** metadata and full-history reads fail without merging a valid prefix or treating the file as empty.
+
+#### Scenario: Cancelled read
+- **WHEN** a metadata or full-history request is cancelled while its blocking scan remains in progress
+- **THEN** another scan cannot seek the same pinned source until the worker releases its read ownership, and the source remains available for retry.
+
+#### Scenario: Damaged nested snapshot
+- **WHEN** metadata encounters a record whose nested snapshot shape cannot be loaded as a rewind point
+- **THEN** the picker request fails instead of claiming that checkpoint has no file changes.
+
+#### Scenario: Picker failure feedback
+- **WHEN** metadata scanning fails for the active pinned source
+- **THEN** the points request reports an error to the client; the current rewind interaction closes, restores its draft, and shows failure rather than a conversation-only choice.
+
+### Requirement: Rewind execution feedback belongs to its source session binding
+The client SHALL carry the source session ID and binding epoch with an executing rewind. A result for the same binding SHALL reconcile its committed success or explicit rejection with that Agent view even when another view is active. A result for an obsolete binding SHALL NOT mutate the replacement transcript, composer, inline editor or rewind overlay; it SHALL visibly report the previous session's confirmed success, explicit rejection or unknown transport outcome. A confirmed success outside its original binding SHALL direct the user to reload that session for an authoritative projection.
+
+#### Scenario: Source binding remains active
+- **WHEN** an execution result arrives after the user switches to another view without unbinding its source session
+- **THEN** the result reconciles against the owning Agent's unchanged binding.
+
+#### Scenario: Source binding is replaced
+- **WHEN** an execution result arrives after its Agent unbinds or binds another session
+- **THEN** the replacement view's transcript, overlay and draft remain unchanged and a previous-session notice describes the result.
+
+#### Scenario: Same session ID is rebound
+- **WHEN** the source session ID is unbound and later rebound before an execution result arrives
+- **THEN** the old binding's result does not mutate the new binding and the user is told to reload or verify the session.
+
+#### Scenario: Session changes during inline resubmit
+- **WHEN** a binding change interrupts an executing inline-edit rewind
+- **THEN** the old pending resubmit cannot be sent into the replacement binding, the old rewind overlay cannot appear there, and unsent draft/edit text remains in the local composer.
+
+#### Scenario: Execution response is lost
+- **WHEN** transport or response parsing fails after an execution was sent
+- **THEN** the client reports an unknown outcome and directs verification rather than asserting that no rewind committed.
+
+### Requirement: Textual image placeholders do not load files
+
+Pager and Shell SHALL treat a numbered image placeholder in text as an anchor only. They SHALL NOT infer an image attachment by opening the path embedded in that text. Image bytes SHALL enter through an explicit attachment admission path.
+
+#### Scenario: Placeholder without attachment
+- **WHEN** submitted text contains `[Image #N: <path>]` without a corresponding image attachment
+- **THEN** the model-visible text retains the numbered anchor without the path, and the path is not opened to synthesize an attachment.
+
+#### Scenario: Placeholder with attachment
+- **WHEN** submitted text contains a numbered image placeholder and the client submits image content as an attachment
+- **THEN** the numbered anchor and attachment content remain available without re-reading the path from placeholder text.
+
+### Requirement: Passive inquiry rows converge by participant and phase
+
+Pager SHALL correlate an incoming passive inquiry row by structured source peer and inquiry ID. Received, approved and terminal facts SHALL advance that row monotonically without consuming the primary turn's tool state. A lower phase or equal-phase replay SHALL NOT replace a newer live projection; terminal state SHALL remain final. A distinct peer with the same inquiry ID SHALL own a distinct row.
+
+#### Scenario: Approval arrives before an older start
+- **WHEN** a valid approval notice is displayed and a delayed start for the same source peer and inquiry ID arrives
+- **THEN** the existing row retains approval detail and identity without a second row.
+
+#### Scenario: Completion precedes older notices
+- **WHEN** a terminal inquiry outcome arrives before start or approval and those older notices later arrive live or by replay
+- **THEN** the terminal row remains final and is not duplicated or restarted.
+
+#### Scenario: Parent and child sources interleave
+- **WHEN** distinct source peers deliver notices carrying the same inquiry ID in alternating order
+- **THEN** each peer's row advances independently and neither consumes the other's completion.
+
+### Requirement: Pre-session command discovery has a bounded execution boundary
+
+Pre-session non-chat `grow/commands/list` SHALL perform folder-trust resolution and plugin, skill, and workflow discovery in the shared single-permit blocking worker under a five-second deadline that includes waiting for capacity. A timeout SHALL NOT claim to interrupt an already-running filesystem operation. Chat catalog requests and live-session command requests SHALL retain their existing paths without this pre-session discovery.
+
+#### Scenario: Pre-session discovery remains blocked after timeout
+- **WHEN** pre-session command discovery remains blocked beyond its deadline and another pre-session listing arrives
+- **THEN** the first request returns an RPC error, its worker retains the shared discovery permit until it exits, and the later request cannot start an additional scan beyond the concurrency bound
+
+#### Scenario: Pre-session discovery fails or times out
+- **WHEN** the discovery worker fails or the deadline expires
+- **THEN** `grow/commands/list` returns an RPC error rather than a successful empty command catalog
+
+#### Scenario: Discovery completes with no commands
+- **WHEN** all pre-session scans finish successfully and find no commands
+- **THEN** the request returns the existing successful empty catalog shape
+
+#### Scenario: Chat and live-session command paths
+- **WHEN** `kind="chat"` or `sessionId` selects its existing early-return branch
+- **THEN** the request bypasses pre-session plugin, skill, and workflow discovery and preserves its existing response behavior
+
+### Requirement: Agent configuration modal discovery does not block the event path
+
+Pager SHALL display the agent configuration modal immediately while its filesystem-backed catalog loads in a bounded background worker. A timed-out or failed scan SHALL report failure in the modal without making the UI wait for the underlying filesystem call to finish. A result SHALL apply only to the modal instance that requested it.
+
+#### Scenario: Discovery stalls
+- **WHEN** opening the modal starts a filesystem scan that remains blocked
+- **THEN** the modal opens and remains dismissible, other UI events remain responsive, and the request eventually reports a load error while the worker keeps its execution permit until exit.
+
+#### Scenario: Modal closes and reopens before an older scan completes
+- **WHEN** a first modal instance is closed, another instance opens, and the first scan later returns
+- **THEN** the old result does not overwrite the newer modal's state.
+
+#### Scenario: Configuration editor returns
+- **WHEN** an external editor completes while the modal is still open
+- **THEN** catalog refresh runs through the same bounded worker and retains modal identity.
+
+### Requirement: Minimal passive inquiry frontier follows typed terminal phase
+
+Minimal Pager SHALL retain a passive inquiry row in its live region while its phase is Received or Approved, regardless of the primary turn's animation state. It SHALL commit the row to native scrollback only after the row reaches Terminal.
+
+#### Scenario: An inquiry progresses while the primary turn is idle
+- **WHEN** a passive row is Received or Approved and the primary turn is idle
+- **THEN** the row remains live and can accept a later terminal update before print-once commit.
+
+#### Scenario: Inquiry reaches terminal
+- **WHEN** the row's typed phase becomes Terminal
+- **THEN** Minimal may commit it to native scrollback regardless of the primary turn state.
+
+### Requirement: Switch Agent discovery does not block Pager input
+
+Pager SHALL construct a prompt and open the `/agent` picker without filesystem-backed Agent discovery on the UI event path. The picker SHALL immediately offer built-in Agents and refresh from a bounded background scan of normal and plugin definitions. A failed or timed-out scan SHALL preserve the valid built-in choices; a late result SHALL apply only to the Agent view, session binding, and picker request that initiated it. Workflow Run children SHALL use their frozen Agent snapshot without a live scan.
+
+#### Scenario: Filesystem-backed discovery stalls
+- **WHEN** the user opens an Agent view or `/agent` picker while definition discovery remains blocked
+- **THEN** prompt creation and picker input remain responsive, built-in choices remain selectable, and the request reports a finite failure after its deadline while the worker retains its permit until exit.
+
+#### Scenario: Picker changes before discovery returns
+- **WHEN** the user closes or replaces the picker, changes the Agent view's session binding, or opens a newer picker before an older scan finishes
+- **THEN** the old result does not reopen or replace the current picker or catalog.
+
+#### Scenario: Workflow child opens Agent picker
+- **WHEN** a Workflow Run child has frozen Agent names
+- **THEN** its picker lists exactly that snapshot and starts no live discovery.
+
+### Requirement: Unified log disk writes do not block producers
+Shell and Pager unified-log producers SHALL enqueue complete bounded records without waiting for a filesystem append, an inode lock, or trim. The process-local queue SHALL have a fixed record count and record byte bound. Overflow SHALL be observable as a coalesced diagnostic loss count; it SHALL NOT block a caller indefinitely or silently claim delivery. Snapshot and normal shutdown SHALL use a bounded flush wait and SHALL NOT claim to cancel an OS write already in progress.
+
+#### Scenario: Filesystem append remains blocked
+- **WHEN** the unified-log worker is held inside a slow append or inode lock
+- **THEN** producer calls return after enqueue or bounded-queue overflow without waiting for that write.
+
+#### Scenario: Queue saturates and later drains
+- **WHEN** the worker falls behind enough to fill the queue and later resumes
+- **THEN** dropped records are counted and a complete diagnostic record reports the coalesced loss before subsequent accepted records.
+
+#### Scenario: Snapshot or shutdown meets a blocked worker
+- **WHEN** a flush barrier cannot enter or cross the queue within its deadline
+- **THEN** the caller stops waiting and does not claim all queued records were written.
+
+### Requirement: Unified log appends enforce the shared file limit
+Each Grow unified-log append SHALL check the live opened inode's length while holding the same exclusive advisory lock as in-place trimming. If the complete append would exceed 5 MiB, the writer SHALL retain only the most recent complete JSONL lines from the existing bounded trim window before appending. The writer SHALL refuse an append that still cannot fit or whose inode cannot be safely trimmed. A completed Grow append SHALL NOT leave a valid shared log larger than 5 MiB; this guarantee assumes other appenders honor the same advisory lock.
+
+#### Scenario: Several writers cross the capacity threshold
+- **WHEN** independent Grow writers append enough complete records to cross 5 MiB between maintenance ticks
+- **THEN** each completed append leaves the shared inode within 5 MiB and the retained tail consists of complete lines followed by the new record.
+
+#### Scenario: Existing tail cannot be trimmed safely
+- **WHEN** the append would exceed 5 MiB and the bounded trim window has no complete line boundary, or on Unix the path no longer names the locked inode
+- **THEN** the append is rejected without increasing that inode's length.
+
+### Requirement: Kitty overlay conversion bounds created output
+On Unix, the spawned `sips` converter SHALL inherit a 100,000,000-byte process file-size limit before it writes output. The Rust PNG fallback SHALL accept at most 100,000,000 encoded result bytes, including an exact-fit result. Converter failure at either limit SHALL produce no converted preview bytes and release owned temporary files. These limits SHALL NOT be described as a bound on source decode memory or direct terminal rendering.
+
+#### Scenario: Converter writes beyond its artifact limit
+- **WHEN** the `sips` child attempts to grow an output file past 100,000,000 bytes
+- **THEN** its write fails or the child terminates without creating a larger file, and Grow rejects and cleans up the conversion.
+
+#### Scenario: Rust encoder crosses its output limit
+- **WHEN** the PNG encoder writes an exact-limit result or attempts one more byte
+- **THEN** the exact-limit result is accepted, while overflow fails without extending the result buffer or returning a converted preview.
+
+### Requirement: Pager clipboard metadata probes have a caller deadline
+On macOS, Pager SHALL run native clipboard change-count and image-type snapshot probes on one bounded background worker. Pager callers SHALL wait at most 10 ms for AppKit initialization and native messaging; a missed deadline or unavailable worker SHALL return unknown metadata. Late results SHALL NOT be applied to a newer probe. The native worker SHALL retain at most one queued probe beyond the active call. Explicit image reads SHALL use the bounded subprocess transfer path and SHALL NOT read image data through AppKit.
+
+#### Scenario: Native metadata call stalls
+- **WHEN** AppKit initialization or an Objective-C clipboard message does not return promptly
+- **THEN** the Pager caller receives unknown metadata within its deadline, remains interactive, and a later probe may retry without spawning another native worker.
+
+#### Scenario: Paste arrives during a native metadata stall
+- **WHEN** a native metadata probe holds the pasteboard lock during an explicit image paste
+- **THEN** image acquisition proceeds through the independent deadline-bound AppleScript subprocess path without waiting for the metadata lock.
+
+#### Scenario: A metadata reply arrives after the caller's deadline
+- **WHEN** a timed-out native probe finishes after another probe has started
+- **THEN** its reply is discarded and cannot replace the newer probe's metadata.
+
+### Requirement: Local draft quarantine retention is bounded
+Local draft quarantine SHALL retain at most 64 regular-file or symbolic-link entries and at most 16 MiB in total. When either limit is exceeded, it SHALL delete the oldest quarantined entries first; entries with equal or unavailable modification times SHALL be ordered by filename. Symlinks SHALL be measured by their own metadata and SHALL not be followed. Other non-regular entries SHALL not be counted.
+
+#### Scenario: Quarantine exceeds the file count
+- **WHEN** a local draft is quarantined while the quarantine directory contains more than 64 regular-file or symbolic-link entries
+- **THEN** the oldest files are removed until at most 64 remain, with filename ordering deciding equal-time entries
+
+#### Scenario: Quarantine exceeds the byte budget
+- **WHEN** a local draft is quarantined and regular-file plus symbolic-link metadata bytes exceed 16 MiB
+- **THEN** oldest entries are removed until retained bytes are at most 16 MiB, even if the remaining entry count is below 64
+
+#### Scenario: Quarantine timestamps are unavailable or tied
+- **WHEN** multiple quarantine entries have equal or unavailable modification times
+- **THEN** reclamation order is resolved by filename and is independent of directory enumeration order
+
+#### Scenario: Symlink and other special quarantine entries
+- **WHEN** the quarantine directory contains a symlink or another special entry
+- **THEN** reclamation counts a symlink using its own metadata without following it, ignores other special entries, and continues to apply both limits
+
+### Requirement: Image viewer loading owns an aggregate memory reservation
+
+Background image viewer loads SHALL acquire a process-wide reservation before copying encoded source bytes and before allocating conversion workspace or output. The reservation SHALL cover conservatively budgeted in-process conversion memory and the actual retained encoded buffers, and SHALL remain owned by a loaded viewer or undelivered result until that owner is dropped. Admission failure SHALL complete the current viewer as a failed preview without blocking the input thread or installing partially loaded bytes.
+
+#### Scenario: Concurrent viewers approach the process allowance
+
+- **WHEN** retained viewer buffers and in-flight conversions would exceed the aggregate allowance
+- **THEN** the next load fails before its unreserved allocation, while existing viewers remain usable and input remains responsive.
+
+#### Scenario: Viewer closes or a stale result is discarded
+
+- **WHEN** a viewer closes/reopens or a delayed background result no longer matches its target owner
+- **THEN** its reservation is released with the dropped viewer/result, and that result cannot replace the current viewer.
+
+#### Scenario: Conversion fails after admission
+
+- **WHEN** decoding or conversion fails after source admission
+- **THEN** temporary reservation is released and the viewer settles through the existing failed-preview path.
+
+### Requirement: Debug firehose is a bounded attributed stream
+
+When enabled, the debug firehose SHALL write complete lines to one selected file with role, process ID and session ID attribution; payload line breaks SHALL be escaped inside their record. Its producer SHALL enqueue without filesystem I/O through one bounded process queue and one disk worker. Each complete line SHALL be at most 65,536 bytes and the queue SHALL hold no more than 64 records. Oversized lines SHALL end with a truncation marker; queue overflow SHALL be observable as a coalesced loss marker when writing resumes. A bounded flush SHALL wait for previously accepted records without claiming to cancel a blocked OS write or guarantee durable sync.
+
+#### Scenario: Concurrent sessions
+
+- **WHEN** several sessions and fallback events produce debug records
+- **THEN** the one selected stream contains independently attributable complete lines without creating per-session writer workers or files.
+
+#### Scenario: Producer outpaces disk
+
+- **WHEN** disk writing stalls and the pending queue fills
+- **THEN** producers return without waiting for disk and the next successful write reports the number of lost records.
+
+### Requirement: Debug firehose retains a bounded complete-line tail
+
+Each cooperating debug writer SHALL lock the opened inode exclusively, check its live size and keep the file at or below 32 MiB after a completed append. An overflowing append SHALL retain only complete recent lines from a bounded tail before adding the new complete record. The writer SHALL detect path replacement before append and reopen or drop rather than knowingly write to a detached descriptor. Age-based cleanup of legacy per-session files SHALL spare cooperating open writers.
+
+#### Scenario: Shared path reaches its ceiling
+
+- **WHEN** multiple Grow processes append enough complete records to exceed 32 MiB
+- **THEN** each completed append preserves complete recent lines and the shared file does not exceed the ceiling.
+
+#### Scenario: Selected path is replaced
+
+- **WHEN** the debug path no longer names the worker's opened inode before its next append
+- **THEN** the worker reopens the selected path or drops the record without continuing on the known detached inode.
+
+### Requirement: Non-macOS clipboard image work has an in-process allowance
+Non-macOS arboard image reads SHALL hold one process-wide permit through read and PNG encode, including after a caller timeout. Grow SHALL reject returned RGBA images over 16,000,000 pixels before PNG encoding, and SHALL refuse PNG output over 50,000,000 bytes. The limits SHALL NOT be described as a bound on platform RGBA allocation before `get_image` returns.
+
+#### Scenario: Timed-out image reader remains active
+- **WHEN** an arboard image worker has not returned by the caller deadline and a second image read starts
+- **THEN** the second read does not start another in-process image worker while the first remains active.
+
+#### Scenario: Oversized RGBA image or PNG output
+- **WHEN** returned dimensions exceed the pixel allowance or PNG encoding would exceed the output allowance
+- **THEN** Grow returns an error without retaining an over-limit encoded image.
+
+### Requirement: Linux clipboard image helper capture is bounded
+Linux CLI image fallback SHALL retain at most 50,000,001 stdout bytes, and SHALL reject an image whose output exceeds 50,000,000 bytes. A failed or over-limit helper SHALL not be reported as an empty clipboard image.
+
+#### Scenario: Helper writes beyond the image allowance
+- **WHEN** a Linux clipboard helper writes more than 50,000,000 image bytes
+- **THEN** Grow reports an over-limit error and reaps or kills the helper within the existing deadline.
+
+### Requirement: Subagent permission groups preserve their source epoch
+
+Pager SHALL append or merge subagent permission events into a permission group only when the source permission epoch matches that group's epoch. Membership mutation SHALL be mediated by the scrollback state path that owns and compares those epochs; an event from an older or newer epoch SHALL NOT alter the group.
+
+#### Scenario: Append within the active epoch
+- **WHEN** a permission event is appended while its source epoch matches the active group
+- **THEN** the group retains the event and invalidates its rendered projection.
+
+#### Scenario: Append across an epoch boundary
+- **WHEN** a permission event from a different epoch is offered to an existing group
+- **THEN** the group remains unchanged and the state handles the event in the appropriate current group.
+
+#### Scenario: Reconnect merge crosses a terminal boundary
+- **WHEN** reconnect tail groups are merged and a source group's epoch differs from the destination group's epoch
+- **THEN** their members remain separate and no event crosses the terminal boundary.
+
+### Requirement: Subagent permission audit details are bounded and redacted
+
+Live and durable subagent permission audit projections SHALL use the same bounded, redacted access summary and harness-owned decision reason. They SHALL NOT expose raw access detail or free-form classifier prose. The visible summary SHALL retain the tool identity and access kind where available; request arguments, paths, commands, URL credentials, path, query and fragment SHALL remain redacted. The projected access summary SHALL be at most 240 bytes, including its tool identity.
+
+#### Scenario: Live permission decision contains sensitive request data
+- **WHEN** a subagent permission decision contains a command, path, MCP arguments, URL credentials, or classifier prose with sensitive content
+- **THEN** the live Pager detail displays only bounded redacted audit fields and contains none of the raw request or classifier prose.
+
+#### Scenario: Permission decision is replayed
+- **WHEN** Pager reconstructs the same decision from durable session updates
+- **THEN** it displays the same bounded redacted audit projection as the live notification.
+
+### Requirement: Pager validates permission selection against the queued request
+
+Pager SHALL accept a permission selection only when its option ID belongs to the exact front request in the active Agent's permission queue. It SHALL perform this check before removing the request, sending a response, changing session permission mode, or applying any other selection side effect. An invalid selection SHALL leave the request queued and its response channel open, with no permission-mode change.
+
+#### Scenario: Selection ID was not offered for the front request
+- **WHEN** a selection names an option ID absent from the front request, including the global Always Approve ID on a child request
+- **THEN** Pager leaves the queue and session mode unchanged and sends no response.
+
+#### Scenario: Selection ID belongs to the front request
+- **WHEN** a selection names an option ID offered by the front request
+- **THEN** Pager handles it using the existing response, queue-transition, and applicable mode-change behavior.
+
+### Requirement: Pager permission routing requires an exact session owner
+
+Pager SHALL admit an ACP permission request only when its session ID exactly matches a registered root session or registered child view. The startup fallback used to route ordinary notifications to an active root whose session ID has not yet been assigned SHALL NOT apply to permission requests. An unmatched request SHALL be cancelled without being queued or changing session permission mode.
+
+#### Scenario: Stranger permission arrives during root startup
+- **WHEN** a permission request carries an unmatched session ID while the active root has no assigned session ID
+- **THEN** Pager cancels the request and does not queue it on the active root.
+
+#### Scenario: Benign update arrives during root startup
+- **WHEN** an ordinary session update arrives before the active root's session ID is assigned
+- **THEN** Pager retains the existing startup routing behavior for that update.
+
+#### Scenario: Exact root or registered child requests permission
+- **WHEN** a permission request carries an exact registered root or child session ID
+- **THEN** Pager routes it to the owning root interaction queue using the existing behavior.
+
+### Requirement: Terminal image escape buffers have a strict output budget
+Grow SHALL construct each iTerm2 or Kitty image-upload escape buffer, and each buffered inline-media draw or clear accumulator, with no more than 100,000,000 serialized bytes, including protocol headers and chunk framing. Accumulators SHALL share that budget across placements, obsolete-ID clears, and recursively drained agent/subagent clear state; dashboard stale clears SHALL also reserve space for the popup inline-media output they precede. Grow SHALL reject an image upload whose complete escape output does not fit and SHALL NOT return a partial upload sequence. Grow SHALL encode into the bounded output buffer without first materializing a full-size base64 string. This budget covers Grow-owned escape output only and SHALL NOT be described as limiting terminal-process decode or cache memory. Fixed-size modal/subsession clears written directly to stderr and unrelated notification escapes are separate output paths, not members of the inline-media buffer budget.
+
+#### Scenario: Kitty upload fits the output budget
+- **WHEN** the complete Kitty upload escape sequence is at most 100,000,000 bytes
+- **THEN** Grow returns the complete sequence with its existing chunk framing and transmission semantics
+
+#### Scenario: Image upload exceeds the output budget
+- **WHEN** Kitty or iTerm2 framing plus encoded image data would exceed 100,000,000 bytes
+- **THEN** Grow returns no image upload sequence and does not retain or expose a partial sequence
+
+#### Scenario: Buffered inline-media accumulator exceeds the output budget
+- **WHEN** appending another complete placement or clear escape would make its buffered inline-media accumulator exceed 100,000,000 bytes
+- **THEN** Grow omits that escape atomically and keeps the accumulator within the limit
+
+#### Scenario: An old Kitty image clear does not fit
+- **WHEN** the current frame has no room for an old Kitty image's complete clear escape
+- **THEN** Grow leaves the clear out of the frame and retains its image ID for a later clear attempt
+
+#### Scenario: Recursive or dashboard clear aggregation exceeds the output budget
+- **WHEN** own, child, or another dashboard agent's Kitty clear does not fit the shared clear budget
+- **THEN** Grow retains that image ID for a later clear attempt and emits no bytes beyond the budget
+
+#### Scenario: Terminal decodes an accepted image
+- **WHEN** a terminal receives an image escape sequence returned by Grow
+- **THEN** Grow's output limit makes no claim about memory allocated by the terminal to decode or cache that image
+
+### Requirement: Inline-media loading has bounded worker and payload admission
+Pager SHALL perform inline-media filesystem reads and image preparation off the UI thread. It SHALL admit at most two such workers process-wide, at most two pending paths per AgentView, read at most 16 MiB of source bytes per path, and retain at most 16 MiB of prepared bytes per completion. Preparation may use its existing transient 100 MB conversion-output allowance per worker; output over 16 MiB SHALL be discarded before mailbox admission. A request rejected only because of worker or pending saturation SHALL remain eligible for a later render retry. Genuine read or preparation failures SHALL retain the existing bounded rename-race retry and failed-path behavior. A result from a mailbox detached at a session boundary SHALL NOT enter the replacement session's cache.
+
+#### Scenario: Worker capacity is saturated
+- **WHEN** an inline-media path is requested while both worker permits are occupied
+- **THEN** Pager does not block the UI, does not mark the path pending or failed, and may request it again on a later render
+
+#### Scenario: Per-view pending capacity is saturated
+- **WHEN** an AgentView already has two inline-media paths pending
+- **THEN** another path is not admitted or marked failed and remains eligible for a later render retry
+
+#### Scenario: Source or prepared image exceeds the byte limit
+- **WHEN** source bytes or prepared image bytes exceed 16 MiB
+- **THEN** Pager does not retain those bytes in a completion mailbox or CPU cache
+
+#### Scenario: Session changes during inline-media loading
+- **WHEN** a worker completes after its AgentView has reset the inline-media loader
+- **THEN** the completion remains in the detached old mailbox and cannot populate the replacement session cache
+
+### Requirement: Cold replay paint work is bounded by a visible progress cadence
+While a visible session is replaying historical notifications, Pager SHALL apply a minimum 100 ms interval between automatically requested paints from ACP replay, animation deadlines, and periodic UI maintenance, unless the configured interval is slower. Explicit user input and other direct UI actions SHALL retain their existing immediate redraw behavior. When the session-loaded boundary arrives, Pager SHALL return to the normal configured cadence and show the final replay state and prompt without waiting for another replay interval. The paint policy SHALL NOT drop notifications, reorder replay, or admit a prompt before the existing load barrier.
+
+#### Scenario: Long history streams faster than painting
+- **WHEN** a visible cold session receives many historical notifications while `loading_replay` is true
+- **THEN** automatic ACP, animation, and periodic maintenance paints use at least a 100 ms interval while notifications continue to be processed in order.
+
+#### Scenario: User types during replay
+- **WHEN** terminal input arrives during a replay interval
+- **THEN** its existing immediate handling and redraw are not delayed by the automatic paint cadence, and the draft remains until the load barrier permits submission.
+
+#### Scenario: Replay completes
+- **WHEN** the session-loaded boundary ends `loading_replay`
+- **THEN** the final history and prompt use the normal configured paint cadence rather than waiting for a pending replay-only interval.
+
+### Requirement: macOS clipboard transfer files have a per-file write budget
+macOS clipboard AppleScript subprocesses SHALL inherit a regular-file size limit no greater than 50,000,000 bytes. Format fallback SHALL catch image coercion failures only; once coercion succeeds, transfer-file open/write/close failures SHALL propagate as an image-read error and the owned private temporary directory SHALL be cleaned. This bounds each file, not aggregate temporary storage, helper/AppKit memory, or later image decoding.
+
+#### Scenario: Transfer file exceeds the write budget
+- **WHEN** an AppleScript subprocess attempts to write more than 50,000,000 bytes to one transfer file
+- **THEN** the write cannot extend that file beyond the limit, the clipboard operation returns an error, and its private temporary directory is removed.
+
+#### Scenario: Transfer file fits the write budget
+- **WHEN** an AppleScript subprocess writes at most 50,000,000 bytes to one transfer file
+- **THEN** the child file-size limit does not prevent the write and existing clipboard result handling remains available.
+
+### Requirement: Local draft filesystem latency does not block Pager interaction
+
+Pager SHALL perform local-draft cwd resolution, load, rekey, write, remove, and quarantine I/O outside its input and paint event loop. A stalled draft filesystem operation SHALL NOT delay key handling or drawing. Ordered worker commands SHALL preserve prompt-RPC invalidation before a later local draft write. A recovered draft SHALL apply only to its still-current agent/session/cwd binding and only when live unsent input has not superseded the load. Normal quit SHALL wait for a checkpoint of the latest eligible draft and pending invalidations; a filesystem failure SHALL retain retry intent without a busy loop.
+
+#### Scenario: Slow draft store during editing
+
+- **WHEN** a draft read or write is held by a controlled slow filesystem operation while the user types
+- **THEN** Pager continues to handle and draw the new input, and the eventual disk completion cannot replace that newer input.
+
+#### Scenario: Prompt ownership changes while disk work is pending
+
+- **WHEN** a prompt RPC transfers draft ownership while an older write or load is in flight
+- **THEN** invalidation is ordered after old work, a stale recovery cannot restore submitted text, and a subsequent new draft can persist without being deleted by the old invalidation.
+
+#### Scenario: Quit with pending draft work
+
+- **WHEN** Pager quits while the latest eligible draft or invalidation is still pending
+- **THEN** its checkpoint waits for the ordered worker outcome and does not report a successful normal exit before the attempt completes.
+
+### Requirement: Independent notifications bypass retractable candidate buffering
+
+The leader SHALL retain only attempt-owned provisional notifications in its mixed-client retractable candidate buffer. Untagged independent ACP and Grow notifications SHALL continue through the normal live route to observers that cannot retract provisional output, even while a candidate is active. A discarded candidate SHALL remain hidden from those observers; an accepted candidate SHALL be delivered after admission. Durable replay SHALL retain its canonical ordering.
+
+#### Scenario: Independent update during an active candidate
+
+- **WHEN** an untagged independent ACP or Grow notification arrives between provisional candidate fragments
+- **THEN** a non-retracting observer receives that independent notification live, while the candidate remains withheld until its terminal boundary.
+
+#### Scenario: Candidate is discarded after independent update
+
+- **WHEN** an independent notification has been delivered during a candidate that is later discarded
+- **THEN** the independent notification remains visible exactly once and no candidate fragment is delivered to a non-retracting observer.
+
+### Requirement: Leader candidate retention has a finite spool budget
+
+The leader SHALL retain retractable candidate payloads for non-retracting observers in one transient spool per session. The spool SHALL keep no more than 8 MiB in its in-process buffer before spilling to an unlinked temporary file, and SHALL accept no more than 512 MiB of length-prefixed serialized payloads or 1,000,000 records for one candidate. An accepted candidate SHALL be forwarded in order without materializing the full spool again. A discarded or superseded candidate SHALL release the spool without delivery. A spool budget or I/O failure SHALL discard that candidate's transient spool while preserving subscriptions and independent notification delivery. If the candidate is Accepted, the leader SHALL request an in-place full canonical reload for non-retracting observers after any in-flight load; Grow Pager SHALL perform that reload for its attached root, including when the failed candidate belongs to a child session. If Discarded, the leader SHALL NOT request resync. No unaccepted candidate payload SHALL reach those observers.
+
+#### Scenario: Long candidate crosses memory threshold
+
+- **WHEN** a retractable candidate's serialized records exceed 8 MiB but remain below the disk and record limits
+- **THEN** the leader spills them to a temporary file and delivers them in original order only after Accepted.
+
+#### Scenario: Candidate is discarded after spill
+
+- **WHEN** an attempt is discarded after its provisional records have spilled
+- **THEN** the spool is released and a non-retracting observer receives none of those records.
+
+#### Scenario: Candidate exceeds spool budget
+
+- **WHEN** a candidate record exceeds the byte or count ceiling before Accepted
+- **THEN** the leader releases its spool, keeps its clients and session ownership, and withholds all provisional records from non-retracting observers.
+
+#### Scenario: Failed candidate is accepted or discarded
+
+- **WHEN** a failed candidate reaches Accepted, including after a spool read fails mid-flush
+- **THEN** the leader signals each affected non-retracting observer after any in-flight load; Grow Pager reloads canonical history in place, replacing any partial presentation.
+- **WHEN** a failed candidate reaches Discarded
+- **THEN** those observers receive no candidate record and require no resync.
+
+#### Scenario: Observer attaches after failure
+
+- **WHEN** an observer loads the session after the failed candidate has reached a terminal boundary
+- **THEN** its normal durable load supplies accepted history without transient backfill.

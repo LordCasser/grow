@@ -1,0 +1,4 @@
+- [x] Add opt-in timers at Pager replay, render, queue, and writer I/O boundaries.
+- [x] Capture and summarize instrumentation in the ignored PTY benchmark at 128/512 turns.
+- [x] Run current-binary PTY probe, record observations and any next production fix in backlog.
+- [x] Validate strictly and archive measurement change.

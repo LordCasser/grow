@@ -172,3 +172,87 @@ Evidence targets: `crates/codegen/workspace/src/permission/types.rs` — permiss
 #### Scenario: Reply arguments cannot bypass routing
 - **WHEN** 调用方同时提供 target 和 reply_to、请求 reply interrupt，或引用没有收件证据的消息
 - **THEN** runtime 拒绝该精确调用，即使回复的 RWX 投影为空，也不能向第三方写入消息。
+
+### Requirement: Search-replace creation requires confirmed absence
+
+When `search_replace` receives an empty old string, it SHALL treat a failed read as evidence of absence only if the filesystem explicitly reports NotFound. Other read failures SHALL stop before any write or file-written notification. A confirmed missing target SHALL be created only through a filesystem operation that atomically refuses to replace an existing target; if that operation is unsupported or another writer creates the target first, the tool SHALL report failure without a file-written notification. Existing empty-file updates remain allowed; this requirement does not claim cross-writer conflict protection for those updates or ordinary replacement.
+
+#### Scenario: Existing file cannot be read
+- **WHEN** the target read fails with PermissionDenied or an error without a preserved NotFound kind
+- **THEN** the tool returns a failure that identifies the read error, without attempting a write or publishing a file-written notification.
+
+#### Scenario: Target is absent
+- **WHEN** the target read explicitly reports NotFound and the filesystem supports exclusive creation
+- **THEN** the full new content is committed to the target without exposing a partial result, and a file-written notification is published after success.
+
+#### Scenario: Another writer creates the target after the read
+- **WHEN** the target read explicitly reports NotFound but a competing process creates the final path before the exclusive commit
+- **THEN** `search_replace` reports a conflict without replacing the competitor's bytes or publishing a file-written notification.
+
+#### Scenario: Filesystem cannot create exclusively
+- **WHEN** the target read explicitly reports NotFound but its filesystem lacks a no-replace creation operation
+- **THEN** `search_replace` reports that limitation before any ordinary write or file-written notification.
+
+#### Scenario: Parent component is a file
+- **WHEN** the target read reports that a path component is not a directory
+- **THEN** the tool reports that read failure before attempting to create the target.
+
+#### Scenario: Existing file is empty
+- **WHEN** the target read succeeds with an empty byte sequence
+- **THEN** the ordinary empty-file update path remains available.
+
+### Requirement: Local search-replace commits compare the source bytes
+
+For an existing target, `search_replace` SHALL commit an edit only when its filesystem adapter can conditionally write the exact bytes read for that edit. The local adapter SHALL serialize cooperating writers across processes on the opened file with a bounded lock acquisition, and reject a mismatch or replaced target before reporting success. An adapter without this operation SHALL fail the edit. A failed conditional commit SHALL not emit a file-written notification. This contract does not assert atomicity against an external writer that ignores advisory locks.
+
+#### Scenario: Two Grow edits read the same version
+- **WHEN** two Grow writers read the same existing file and propose different replacements
+- **THEN** at most one commits against that version; the other reports a conflict without publishing a file-written notification.
+
+#### Scenario: Existing empty file changes before commit
+- **WHEN** an empty target is read for `old_string = ""` and another writer changes it before the conditional commit
+- **THEN** the creation-style edit reports a conflict and preserves the newer bytes.
+
+#### Scenario: Path no longer names the opened source
+- **WHEN** a target path is replaced after the local adapter opens its source file
+- **THEN** the conditional edit refuses to report a successful write to the replacement path.
+
+#### Scenario: Adapter lacks conditional write
+- **WHEN** an existing-file edit is routed through a filesystem adapter without conditional write support
+- **THEN** the edit fails without an unconditional fallback or file-written notification.
+
+#### Scenario: Target lock remains held
+- **WHEN** a competing process holds the target lock past the local acquisition deadline
+- **THEN** the edit fails without writing or publishing a file-written notification.
+
+### Requirement: Permission classifier details are bounded and complete
+
+Permission classification SHALL use the full request detail only while evaluating that request. A classifier SHALL NOT issue an inference or produce an allowing verdict from a truncated request detail. Classifier detail SHALL be bounded to 1,024 bytes for MCP calls and 2,048 bytes for other access kinds. Classifier explanation text SHALL be capped at 240 bytes. If the complete detail exceeds its budget, classification SHALL return Unavailable before heuristic or model classification; request-local Auto authorization SHALL follow its existing unavailable fail-closed behavior. A completed permission audit event SHALL NOT retain raw access detail or model-generated classifier prose.
+
+#### Scenario: Request detail exceeds classifier budget
+- **WHEN** an Auto permission request contains access detail larger than the classifier's bounded input allowance
+- **THEN** the classifier returns Unavailable without sending a partial detail for inference, and the request is not automatically authorized from incomplete evidence.
+
+#### Scenario: Permission decision completes
+- **WHEN** a permission request reaches an allow, deny, timeout, cancellation, or prompt outcome
+- **THEN** the emitted audit event contains no raw access detail or untrusted classifier explanation, while the active request retains the exact input needed to make that decision until it resolves.
+
+### Requirement: Remembered permission scopes are bound to the current access
+
+A remembered MCP or Bash permission scope SHALL be derived from, or validated against, the actual `AccessKind` for the permission request. MCP tool scope SHALL name that exact tool; MCP server scope SHALL name the server parsed from that tool's qualified identity. Bash selected command terms SHALL be a non-empty prefix of the request's primary command terms. Invalid, mismatched, or access-inappropriate selection metadata SHALL NOT create a remembered scope from the supplied metadata and SHALL fall back to the request-derived scope where one exists.
+
+#### Scenario: MCP response names another tool
+- **WHEN** an allow-always MCP response contains a well-formed tool scope naming a different tool
+- **THEN** the remembered outcome is limited to the current request's MCP tool.
+
+#### Scenario: MCP response names another server
+- **WHEN** an allow-always MCP response contains a well-formed server scope that differs from the server parsed from the current tool identity
+- **THEN** the remembered outcome is limited to the current request's MCP tool.
+
+#### Scenario: Bash response selects unrelated command terms
+- **WHEN** an always-allow or always-reject Bash response contains well-formed command terms that are not a non-empty prefix of the current primary command terms
+- **THEN** the outcome uses the scope derived from the current command script.
+
+#### Scenario: Request option metadata disagrees with MCP tool identity
+- **WHEN** Pager receives a permission request whose MCP scope option metadata names another tool or an inconsistent server prefix
+- **THEN** Pager does not expose a server scope toggle from that metadata.

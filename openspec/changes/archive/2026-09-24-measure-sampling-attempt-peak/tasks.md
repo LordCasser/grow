@@ -1,0 +1,4 @@
+- [x] Add the ignored macOS built-binary RSS benchmark for a small SSE baseline and an approximately 12 MiB streamed single attempt.
+- [x] Run the benchmark with a pre-built macOS binary and record its printed measurements when available.
+- [x] Reconcile the completed Grow queue audit and clear the resolved backlog entry.
+- [x] Review and validate the OpenSpec change, then archive it.

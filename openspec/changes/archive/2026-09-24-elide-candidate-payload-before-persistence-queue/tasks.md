@@ -1,0 +1,3 @@
+- [x] Send a compact sampling candidate marker at the ACP producer fork and preserve live delivery.
+- [x] Stage marker ordering in persistence without candidate payload; cover interleaving and discard.
+- [x] Run focused Shell tests and strict OpenSpec validation.

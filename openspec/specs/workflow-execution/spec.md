@@ -63,4 +63,54 @@ Workflow 恢复 SHALL 至多返回最新 128 个通过既有恢复校验的 run�
 - **WHEN** 较新候选因 cleared、文件缺失或校验失败被跳过，但较旧候选有效
 - **THEN** 继续检查较旧候选，直至获得 128 个有效 run 或候选耗尽。
 
-证据：crates/codegen/shell/src/session/storage/jsonl/mod.rs 的 load_workflow_runs_sync 及 tests.rs。
+#### Scenario: Corrupt sidecar is repaired before writer startup completes
+- **WHEN** 冷恢复使用 Timeline seed 替代无法解码的 Workflow sidecar，且 sidecar 自读取后未变化
+- **THEN** 将 reconciled seed 以持久化 ACK 写回后才完成 actor 初始化。
+
+#### Scenario: Sidecar changes during repair
+- **WHEN** 冷恢复读取到损坏 sidecar 后，该文件在修复锁取得前被替换或删除
+- **THEN** 修复返回可观察的错误，不覆盖新内容，也不把 actor 初始化报告为成功。
+
+证据：`crates/codegen/shell/src/session/storage/jsonl/mod.rs` — `load_workflow_runs_sync`；`crates/codegen/shell/src/session/workflow/store.rs` — `WorkflowRunStore::from_restored` 和 manifest 写入；`crates/codegen/shell/src/session/persistence.rs` — Workflow persistence ACK；`crates/codegen/shell/src/session/actor/spawn.rs` — restored store 初始化。
+
+### Requirement: Workflow listing has a bounded execution boundary
+Asynchronous workflow listing SHALL isolate filesystem scans from runtime worker threads, bound concurrent scans to one, and apply a five-second deadline that includes waiting for scan capacity and scan completion. A timeout SHALL NOT claim to have interrupted an already-running filesystem operation.
+
+#### Scenario: Scan stays blocked after request timeout
+- **WHEN** a workflow scan remains blocked past the listing deadline and another listing request arrives
+- **THEN** the first request returns an error, its worker retains the scan slot until it exits, and the later request cannot start an additional scan beyond the concurrency bound
+
+#### Scenario: Listing scan fails or times out
+- **WHEN** the scan worker fails or the listing deadline expires
+- **THEN** `grow/workflows/list` returns an error rather than a successful empty workflow list
+
+#### Scenario: Listing completes without results
+- **WHEN** the scan completes successfully and discovers no workflows
+- **THEN** the request returns a successful empty workflow list
+
+### Requirement: Ambiguous Workflow spawn preserves recovery authority
+Workflow launch SHALL treat a durable Spawned acknowledgment loss or other uncertain Timeline write failure as an unknown commit outcome. It SHALL NOT erase the run source or publish a clear tombstone unless the Timeline proves Spawned was rejected before persistence. Recovery SHALL use the actual Timeline facts to decide whether the run exists.
+
+#### Scenario: Spawned persisted but caller acknowledgment is lost
+- **WHEN** the Timeline writer appends Spawned but launch loses its acknowledgment
+- **THEN** launch reports the run identity and uncertainty, leaves source files available, and cold recovery can restore the run from the Spawned seed.
+
+#### Scenario: Spawned was rejected before persistence
+- **WHEN** Timeline validation rejects Spawned without attempting an append
+- **THEN** launch may roll back the local run and tombstone its sidecar; no recoverable Spawned fact exists.
+
+#### Scenario: No Spawned fact was committed
+- **WHEN** a launch fails before Spawned or its uncertain append never became durable
+- **THEN** cold recovery ignores any remaining source files because run discovery is based on Timeline Spawned facts.
+
+### Requirement: Workflow seed restore reports incomplete progress
+
+When no valid mutable Workflow sidecar survives, restore SHALL derive Run identity and lifecycle from Timeline and SHALL mark agent usage incomplete. It SHALL NOT present the Spawn seed's zero usage as a complete cumulative count. Resume admission SHALL continue to reconcile agent calls from the durable journal.
+
+#### Scenario: Completed run loses its progress sidecar
+- **WHEN** a run has a durable terminal lifecycle but its sidecar is missing or invalid
+- **THEN** restore retains the terminal status and reports `agent_usage_incomplete = true`, even if the seed contains zero agent rows and zero used calls.
+
+#### Scenario: Valid progress sidecar survives
+- **WHEN** a valid sidecar matches the Timeline frozen contract and lifecycle
+- **THEN** restore uses its mutable progress and does not introduce an incomplete-usage marker solely because restore occurred.

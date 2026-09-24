@@ -1,0 +1,3 @@
+- [x] Add a metadata-only actor terminal event while preserving Layer-2 `Completed`.
+- [x] Update Shell completion bookkeeping and focused sampler/Shell tests.
+- [x] Run focused tests, OpenSpec validation, and diff checks; record results.

@@ -1,0 +1,4 @@
+- [x] Check Workflow restore, Timeline write errors, launch rollback call sites, and existing tests.
+- [x] Preserve source/tracker on uncertain Spawned commit and report run identity.
+- [x] Add an acknowledgment-loss regression and update developer documentation.
+- [x] Run focused tests, formatting, strict OpenSpec validation, and record results.

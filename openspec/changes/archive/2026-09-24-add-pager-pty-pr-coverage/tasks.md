@@ -1,0 +1,5 @@
+- [x] 1. Repair mock provider and project-picker fixtures for the selected PTY scenarios; preserve custom backend and UI config.
+- [x] 2. Add a serial full-path `--exact` PTY loop for four Pager targets in core-regression CI and provide `PAGER_BINARY`.
+- [x] 3. Install the real interactive pager dependency in CI and verify the `less` restoration case.
+- [x] 4. Update the Pager backlog and developer validation notes to reflect PR coverage and the unresolved leader boundary.
+- [x] 5. Run strict OpenSpec validation and diff checks; record actual outcomes and remaining validation limits.

@@ -1,0 +1,7 @@
+- `cargo fmt --all -- --check`: passed.
+- `cargo test --locked --offline -p pager --lib scrollback::blocks::subagent_permission::tests`: passed, 11 passed, 0 failed. Linker emitted a warning that the `__eh_frame` section exceeded compact-unwind encoding size; test build and execution completed successfully.
+- `cargo test --locked --offline -p pager --lib reconnect_`: passed, 53 passed, 0 failed, 1 ignored. This includes the same-epoch merge and terminal-boundary split tests for permission groups.
+- `openspec validate guard-subagent-permission-block-epochs --strict --no-interactive`: passed.
+- `openspec validate --all --strict --no-interactive`: passed, 16 items.
+- Post-archive `openspec validate --all --strict --no-interactive`: passed, 15 items.
+- `openspec validate --archived --no-interactive`: passed, 466 archived changes.

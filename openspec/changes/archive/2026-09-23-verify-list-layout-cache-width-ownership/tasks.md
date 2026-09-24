@@ -1,0 +1,4 @@
+- [x] Trace ListPaneState width keys, resize decisions, scrollbar width correction, and explicit invalidation.
+- [x] Inspect production Wrap-mode callers and their content rebuild paths.
+- [x] Record existing width-change and scrollbar-width regressions.
+- [x] Remove only the cached-width clause from the backlog and validate/archive this audit-only change.

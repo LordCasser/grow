@@ -1,0 +1,5 @@
+# Verification
+
+- The archived [conditional-commit verification](../2026-09-24-guard-local-search-replace-commits/verification.md) records two separate Grow test processes, parent alias and stale-source injection; conflict paths emit no success notification.
+- [Linux rename(2)](https://man7.org/linux/man-pages/man2/rename.2.html) documents replace, no-replace and exchange; [Apple exclusive rename](https://developer.apple.com/documentation/foundation/urlresourcevalues/volumesupportsexclusiverenaming) and [Windows ReplaceFileW](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilew) likewise expose namespace replacement, not an expected-content predicate. The absence of a generic atomic content CAS is inferred from these interfaces.
+- The main [tool authorization contract](../../../specs/tool-authorization/spec.md#requirement-local-search-replace-commits-compare-the-source-bytes) and [developer guide](../../../../docs/development.md) expressly exclude nonparticipating concurrent writers from the guarantee.

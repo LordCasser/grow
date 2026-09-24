@@ -1,0 +1,7 @@
+# Design
+
+Follow `SessionCommand::PublishControlState` through `SessionActor::publish_completed_hook_projections`, the ChatState actor query, Hook DTO projection/serialization, gateway delivery, and Pager occurrence handling. Use synthetic completed Hook histories to measure ChatState query latency, actor-to-gateway publication latency, and exact serialized `params` bytes; add unrelated Timeline message events to expose the full scan cost. Keep user session data out of the probe. The bounded probe measures 100 completed Hooks with 0/10,000 unrelated events and 1,000 completed Hooks with 0 unrelated events.
+
+Timeline iterates durable `Completed` Hook events in Timeline order and looks up each occurrence in its lifecycle fold. This can establish completion order among returned Hook facts. `updates.jsonl`/ACP replay and the Timeline ledger have no shared sequence number, so they cannot establish one total order for unrelated UI facts. Pager joins tool Hooks through `tool_call_id`; historical unanchored Hooks are collected into a compact history view and deduplicated by occurrence identity.
+
+Do not add a second persistent projection, invent a cross-ledger timestamp order, or change transport in this audit. The measured low-thousand Hook case remains in the millisecond range, so retain the scale item as a conditional follow-up: propose identity-cursor incremental queries only if real session or multi-client restore exceeds its load-latency/traffic budget. Cross-ledger order is an explicit boundary, not an open design task.

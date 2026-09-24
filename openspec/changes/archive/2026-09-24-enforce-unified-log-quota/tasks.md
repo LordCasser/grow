@@ -1,0 +1,4 @@
+- [x] Review the unified-log trim and append paths, archived contract, and callers.
+- [x] Enforce capacity within the inode-locked append using the existing complete-line tail policy.
+- [x] Add burst and multiple-writer regressions, and update the developer explanation.
+- [x] Run diagnostics tests, format and strict OpenSpec validation; archive with evidence.

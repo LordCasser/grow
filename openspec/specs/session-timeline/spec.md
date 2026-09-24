@@ -222,7 +222,7 @@ Timeline restoration SHALL validate all events and expose only a fully validated
 
 ### Requirement: Attempt evidence and accepted response have distinct authority
 
-被废弃 attempt 的原始证据、用量及恢复决定 SHALL 保留在既有 Timeline 证据链或其不可变 artifact 引用中，但 SHALL NOT 投影成模型有效上下文、native continuation 或可执行工具。候选只有在会话 durable admission 与其 Timeline-derived replay projection 均确认后才能发布已接纳状态。每个产生 canonical assistant response 事件的新 admission SHALL 在该事件上携带原 sampler request 与最终 attempt 组成的不可变 identity 及确定性 admission result；同 identity、同 response payload 的本地 admission 重放 SHALL 幂等返回原结果，同 identity、不同 payload SHALL fail closed。Replay projection SHALL 以 Timeline response 为 authority 并按 identity、Timeline event、payload digest 和 projection version 幂等提交；接纳或 projection 失败/确认不明 SHALL NOT 触发盲目重新采样，也 SHALL NOT 越过到 continuation、工具或成功 Turn terminal。
+被废弃 attempt 的原始证据、用量及恢复决定 SHALL 保留在既有 Timeline 证据链或其不可变 artifact 引用中，但 SHALL NOT 投影成模型有效上下文、native continuation 或可执行工具。候选只有在会话 durable admission 与其 Timeline-derived replay projection 均确认后才能发布已接纳状态。每个产生 canonical assistant response 事件的新 admission SHALL 在该事件上携带原 sampler request 与最终 attempt 组成的不可变 identity 及确定性 admission result；同 identity、同 response payload 的本地 admission 重放 SHALL 幂等返回原结果，同 identity、不同 payload SHALL fail closed。Replay projection SHALL 以 Timeline response 为 authority 并按 identity、Timeline event、payload digest 和 projection version 幂等提交；投影准备 SHALL 共享 canonical assistant/reasoning 文本存储而不复制整个正文，回放或 fork 外发 ACP 时才可建立其独立展示载荷。接纳或 projection 失败/确认不明 SHALL NOT 触发盲目重新采样，也 SHALL NOT 越过到 continuation、工具或成功 Turn terminal。
 
 #### Scenario: Failed generation is followed by a valid attempt
 
@@ -259,7 +259,10 @@ Timeline restoration SHALL validate all events and expose only a fully validated
 - **WHEN** 进程在 provider 调用后、证据/结算/接纳/projection 闭合前终止
 - **THEN** 恢复保留未确认状态、原 response admission identity 和可用证据；已接纳但未投影的 response 只做本地 UI reconciliation，不把未确认 attempt 自动重放为成功消息，也不据此自动重发 provider 请求；历史无 identity 的 response 不能被猜测为该提交。
 
-证据入口：`crates/codegen/chat-state/src/timeline.rs` 的 response admission/branch fold，`crates/codegen/chat-state/src/actor/mutations.rs::push_response_durably`，`crates/codegen/shell/src/session/actor/turn/mod.rs` 的 response admission/projection gate，以及 `crates/codegen/shell/src/session/persistence.rs`/storage replay 的 projection reconciliation。
+#### Scenario: Large response projection and independent replay
+
+- **WHEN** 已接纳响应含较大的 assistant 或 visible-reasoning 正文，随后被冷恢复、resident delta 或 fork 回放
+- **THEN** admission 阶段投影的正文与 canonical response 共享内存，持久投影仍可独立重建相同顺序的 ACP 内容；回放与 fork 的展示载荷不泄漏父 session 的候选身份。
 
 ### Requirement: Turn terminals identify their actual authority
 
@@ -592,3 +595,127 @@ Subagent resume SHALL reject a source while its original runtime remains live, e
 #### Scenario: Rejected image is explicit
 - **WHEN** 一个图片附件因类型、解码或预算被拒收
 - **THEN** Surface 有明确替代说明，后续有效附件仍按原序处理，不产生损坏的图片 part。
+
+### Requirement: Auxiliary provider attempts enter the owning session usage projection
+
+Session Timeline SHALL durably record known or unknown usage for each admitted main and Sideband provider attempt, each child's final usage bill and session-level incomplete facts. Sideband attempt identity SHALL be `(sideband_id, attempt_no)` in its owning session; each attempt SHALL be counted at most once, including failed and retried requests. A cold recovery with an admitted Sideband attempt lacking terminal usage SHALL retain an incomplete lower-bound ledger. Recovery SHALL reject malformed or conflicting known billing facts before publishing an actor. A child Sideband SHALL be charged to its child ledger and reach the parent only through the child's final bill.
+
+#### Scenario: Failed attempt followed by a successful retry
+
+- **WHEN** one Sideband issues two provider requests under successive attempt numbers, the first fails with known usage and the second succeeds
+- **THEN** the owning session records both usages once under the selected route model, while the Sideband Result is not billed again
+
+#### Scenario: Cancellation or crash after admission
+
+- **WHEN** a Sideband provider request has been admitted but usage cannot be confirmed before owner cancellation or cold recovery
+- **THEN** the owning session retains an incomplete usage lower bound rather than an exact zero, without fabricating token counts
+
+#### Scenario: Duplicate and conflicting Sideband bills
+
+- **WHEN** a Sideband attempt settlement is repeated with an identical payload or with a different payload
+- **THEN** the identical payload is a no-op and the conflicting payload fails closed in live and restored projections
+
+#### Scenario: Child Sideband final bill
+
+- **WHEN** a child consumes tokens in its main loop and a Sideband, then settles its final bill to its parent
+- **THEN** the child ledger includes both attempts and the parent includes their aggregate once under that child identity
+
+### Requirement: Resident reconnect preserves live turn ownership
+
+A viewer reconnecting to a resident session SHALL NOT run interrupted-scope recovery against that session's live turn. Such recovery SHALL occur only after a replacement writer claims a new incarnation. Subagent fact reconciliation MAY continue during resident reconnect without closing unrelated active work.
+
+#### Scenario: Viewer attaches during a live turn
+
+- **WHEN** a leader viewer loads a resident session while its original writer still has an active turn
+- **THEN** the viewer receives replay/live updates without an interrupted Recovery terminal for that turn, and the original actor records its matching real terminal before later prompts run.
+
+### Requirement: Cold model route changes continue durable selection
+Fresh sessions SHALL durably record a secret-free baseline for the selected catalog model, reasoning effort, provider-facing model, and backend/endpoint transport identity before admitting prompts. Cold load SHALL compare the last durable model route with the currently resolved catalog route and, when they differ, durably append an exact from/to transition before publishing the actor or admitting sampling. A failed append SHALL prevent publication. A historical Timeline without a route observation SHALL receive an explicit current-route baseline without inventing an earlier route. Resident reconnect SHALL retain its live route. Stored discontinuous transitions SHALL still be rejected.
+
+#### Scenario: Catalog route changes across restart
+- **WHEN** the same catalog model ID resolves to a different backend, endpoint, query route, or wire model after a cold restart
+- **THEN** the replacement writer records a transition from the last durable route to the selected current route before the resumed actor can sample, and a later reload validates the continuous chain.
+
+#### Scenario: Catalog route is unchanged
+- **WHEN** a cold load resolves the same model, effort, provider model, and transport identity as the latest durable observation
+- **THEN** it does not append a redundant transition.
+
+#### Scenario: Stored history is already discontinuous
+- **WHEN** two existing model observations disagree on the exact preceding route
+- **THEN** load rejects the invalid history rather than bridging or rewriting it.
+
+### Requirement: Candidate preview uses a durable payload-free anchor
+
+Transient session persistence SHALL retain neither candidate notification payloads nor an unbounded window of independent notifications. The first candidate SHALL create one durable, payload-free ordering anchor before canonical Timeline admission. During an active attempt, independent untagged ACP and one-shot Grow notifications emitted by the session actor SHALL be appended in arrival order with acknowledgement before another notification from that actor is delivered; previously buffered notifications SHALL be flushed first. A failed anchor or independent append SHALL prevent canonical admission. Live preview notifications from the session actor, including Grow notifications emitted during the attempt, SHALL have a per-session byte budget through gateway completion; exhaustion or an oversized single item SHALL fail the attempt's preview boundary before canonical admission. Replay SHALL suppress an anchor for a discarded attempt and SHALL insert admitted canonical content at that anchor before later independent updates. Live delivery MAY carry candidate notifications independently of persistence.
+
+#### Scenario: Long interleaved attempt
+
+- **WHEN** an attempt emits many candidate chunks interleaved with independent untagged ACP or one-shot Grow notifications
+- **THEN** only one payload-free candidate anchor is persisted, earlier buffered updates are flushed first, independent updates stream to storage with acknowledgement rather than accumulating in the sender, and admitted replay places canonical content at the first candidate position.
+
+#### Scenario: Preview persistence fails
+
+- **WHEN** an anchor or independent append cannot be confirmed before response admission
+- **THEN** the response is not admitted to the canonical Timeline, no candidate body enters replay, and the turn reports a projection-boundary failure.
+
+#### Scenario: Discarded or interrupted attempt
+
+- **WHEN** an attempt is discarded or stops without canonical admission
+- **THEN** its anchor is suppressed in replay, while independently committed untagged notifications remain in their arrival order.
+
+#### Scenario: Slow live gateway exhausts preview credits
+
+- **WHEN** client completion stalls until the per-session preview byte budget is full, or one preview notification exceeds that budget
+- **THEN** no additional candidate or Grow preview payload is enqueued to the gateway, the attempt records a preview-boundary failure, and canonical admission is refused without persisting candidate body text.
+
+#### Scenario: Buffered update precedes an independent Grow notification
+
+- **WHEN** a persistence writer holds an earlier merged ACP update while an active-attempt Grow notification arrives
+- **THEN** it writes the earlier update first, confirms the Grow append before the actor can deliver another independent notification, and rejects canonical admission if either write fails.
+
+### Requirement: Auxiliary Grow delivery shares the session preview budget
+
+Goal and Workflow Grow presentation snapshots SHALL reserve the session's shared byte credits before entering persistence or gateway queues; their credits SHALL remain held through the respective consumer completion. A failed auxiliary reservation or append during an active attempt SHALL prevent canonical admission. A subagent progress publisher SHALL retain no more than one outstanding transient gateway delivery and SHALL remain cancellable while it waits. Canonical Goal control and Workflow run state persistence SHALL remain independent of optional presentation snapshots.
+
+#### Scenario: Auxiliary Grow sender meets a slow consumer
+
+- **WHEN** Goal or Workflow snapshots are produced faster than persistence or gateway delivery completes
+- **THEN** retained snapshot payloads stay within the shared session byte credits, and an exhausted sender skips the optional presentation snapshot instead of growing either queue without bound.
+
+#### Scenario: Auxiliary Grow delivery fails during an attempt
+
+- **WHEN** a Goal or Workflow snapshot cannot reserve credits or its durable append fails during an active attempt
+- **THEN** the attempt's admission barrier or projection commit fails, and no candidate body becomes durable replay content.
+
+#### Scenario: Transient child progress meets a slow client
+
+- **WHEN** a subagent progress notification is awaiting gateway completion while further progress ticks occur
+- **THEN** its publisher does not enqueue another progress notification and remains cancellable.
+
+### Requirement: Subagent lifecycle projections are bounded metadata
+
+Subagent lifecycle Grow notifications SHALL carry status and identity metadata without duplicating the child final output. The canonical child result and admitted completion receipt SHALL remain the source of that output. The parent actor SHALL persist and forward one stamped event under the existing independent-update and active-attempt gateway budget boundaries. A failed preview gateway reservation SHALL reject that exact attempt's canonical admission. Client-origin Grow notifications SHALL remain persist-only.
+
+#### Scenario: Child finishes with a large answer during parent sampling
+
+- **WHEN** a child result contains a large final answer and its parent has an active sampling attempt
+- **THEN** the lifecycle Grow projection contains only metadata, its forwarded event uses the same event ID as its durable record, and the completion receipt continues to reference the full answer.
+
+#### Scenario: Lifecycle preview gateway budget is exhausted
+
+- **WHEN** the parent actor cannot reserve preview gateway credits for a child lifecycle projection
+- **THEN** no uncredited lifecycle payload enters the gateway queue, that attempt fails preview admission, and canonical child lifecycle facts remain available for reconnect projection.
+
+### Requirement: Tool bridge Grow projections share preview credits
+
+Background task completion Grow projections SHALL omit copied task output while preserving full output through the task file and model-facing notification. The tool bridge SHALL reserve session preview credits for queued TaskBackgrounded, TaskCompleted, and ScheduledTaskCreated Grow persistence and live gateway copies, and for ScheduledTaskFired and MonitorEvent live copies, holding each reservation until its consumer completes. A failed reservation or append during an active sampling attempt SHALL prevent canonical response admission. Durable task-completion acknowledgement SHALL remain a prerequisite for acknowledged UI projection publication. Monitor events SHALL retain their model notification.
+
+#### Scenario: Completed task has a large output file
+
+- **WHEN** a background task completes with a large retained output file during an active attempt
+- **THEN** the Grow completion snapshot contains status metadata but no copied output, the model notification retains its existing truncated text and output-file pointer, and queued Grow copies stay within preview credits.
+
+#### Scenario: Monitor events outrun a slow client
+
+- **WHEN** monitor events arrive while the gateway has not completed prior Grow delivery
+- **THEN** additional live Grow events cannot exceed the session preview budget, while model notification commands retain their normal admission path.

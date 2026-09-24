@@ -1,0 +1,4 @@
+- [x] Add synchronous per-batch and process-wide encoded-payload admission, preserving indexed drop notices and cancellation ownership.
+- [x] Limit full decode to 50 MP while preserving the 20 MP camera case and provider-side persisted-image validation.
+- [x] Test count, byte, concurrent-reservation, cancellation, and pixel boundaries; measure representative RSS.
+- [x] Update developer documentation and backlog, run relevant tests and strict OpenSpec validation, then archive.

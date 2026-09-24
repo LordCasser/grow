@@ -1,0 +1,4 @@
+- [x] Derive retained batch names from committed physical User messages and add focused extraction tests.
+- [x] Sweep only recognized orphan batch/staging directories through the pinned session handle, with failure-closed tests.
+- [x] Serialize live publication/commit and background cleanup under the existing gate; trigger cleanup after failed admission and on resume.
+- [x] Run focused tests and strict OpenSpec validation; document results and archive.

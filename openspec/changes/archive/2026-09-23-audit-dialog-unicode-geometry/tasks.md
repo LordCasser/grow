@@ -1,0 +1,4 @@
+- [x] Trace production dialog sizing and input viewport render paths.
+- [x] Inspect byte-counted label/header widths and production sources for dynamic Unicode labels.
+- [x] Record existing Unicode viewport and dialog geometry regressions.
+- [x] Remove only the dialog/viewport/header clause from the geometry backlog and validate/archive this audit-only change.
