@@ -164,7 +164,8 @@ if [ -z "$RUST_PREFIX" ] \
   # official prebuilt OHOS host distribution.
   log "Installing OHOS toolchain formulas from source via Harmonybrew"
   HOMEBREW_NO_AUTO_UPDATE=1 brew install --build-from-source \
-    ca-certificates openssl@3 zlib-ng-compat ohos-sdk llvm-gcc-compat rust
+    ca-certificates cmake ncurses openssl@3 zlib-ng-compat \
+    bzip2 unzip ohos-sdk llvm-gcc-compat xz patchelf rust
   RUST_PREFIX="$(brew --prefix rust)"
 fi
 if ! command -v rustup >/dev/null 2>&1 && [ ! -x "$CARGO_HOME/bin/rustup" ]; then
