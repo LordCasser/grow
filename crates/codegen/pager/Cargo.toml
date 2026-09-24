@@ -156,6 +156,7 @@ core-foundation = { workspace = true }
 # in-repo consumers (for example crash-handler).
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
+same-file = "1.0.6"
 
 [dev-dependencies]
 # Enable the render crate's test-only helpers for the pager's test build.

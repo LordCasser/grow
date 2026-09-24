@@ -401,30 +401,37 @@ impl LocalDraftStore {
 }
 
 fn path_still_names_source(path: &Path, source: &File) -> io::Result<bool> {
-    let path_metadata = match fs::metadata(path) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error),
-    };
-    let source_metadata = source.metadata()?;
-    Ok(same_file_identity(&path_metadata, &source_metadata))
+    #[cfg(windows)]
+    {
+        let named = match same_file::Handle::from_path(path) {
+            Ok(handle) => handle,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let opened = same_file::Handle::from_file(source.try_clone()?)?;
+        return Ok(named == opened);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let path_metadata = match fs::metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let source_metadata = source.metadata()?;
+        Ok(same_file_identity(&path_metadata, &source_metadata))
+    }
 }
 
+#[cfg(not(windows))]
 fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         left.dev() == right.dev() && left.ino() == right.ino()
     }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::MetadataExt;
-        left.volume_serial_number().is_some()
-            && left.volume_serial_number() == right.volume_serial_number()
-            && left.file_index().is_some()
-            && left.file_index() == right.file_index()
-    }
-    #[cfg(not(any(unix, windows)))]
+    #[cfg(not(unix))]
     {
         let _ = (left, right);
         false

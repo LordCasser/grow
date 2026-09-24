@@ -6453,6 +6453,7 @@ dependencies = [
  "ratatui-inline",
  "ratatui-textarea",
  "regex",
+ "same-file",
  "sampling-types",
  "sandbox",
  "serde",

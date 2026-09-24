@@ -1,0 +1,3 @@
+- [x] Replace unstable Windows identity APIs with stable file-handle comparison.
+- [x] Verify the local draft replacement regression and locked build checks.
+- [ ] Verify both Windows release targets and complete strict OpenSpec validation.
