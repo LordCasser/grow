@@ -511,8 +511,9 @@ context_window = 200000
             before = len(b.notices)
             b.call("session/load", {"sessionId": sb, "cwd": str(cwd), "mcpServers": []})
             for id in (orphan_id, queued_orphan_id):
-                terminals = [n["params"]["update"] for n in receiver_notices(b, id, before)
-                             if n["params"]["update"].get("subject") == "inquiry completed"]
+                terminals = eventually(lambda: [n["params"]["update"]
+                                                for n in receiver_notices(b, id, before)
+                                                if n["params"]["update"].get("subject") == "inquiry completed"])
                 assert len(terminals) == 1, terminals
                 audit = json.loads(terminals[0]["details"])
                 assert audit["outcome"]["status"] == "unavailable", audit
