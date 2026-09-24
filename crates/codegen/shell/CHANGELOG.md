@@ -1,5 +1,11 @@
 # Changelog
 
+# 2.2.0 — 2026-09-24
+
+本版本强化长会话与高负载下的恢复、资源边界和交互响应，并改进 Agent 上下文、协作通知及终端媒体处理。
+
+完整发布说明见 [changelogs/2.2.0.md](changelogs/2.2.0.md)。
+
 # 2.1.0 — 2026-09-01
 
 2.1.0 把本地多 Session coordination、15 类 Hook 生命周期与 HumanIntent admission 纳入 Timeline，并重构 Plan、Goal、Workflow 的控制流交接。Plan 获批后会在同一 Turn 自动继续执行；Hook client callback 严格按注册顺序短路；ACP stable v1 stack 迁移到 Rust SDK 2.0.0，MCP 继续保持 client-only。Timeline 从 v21 升到 v24，旧 Timeline 不做迁移。
