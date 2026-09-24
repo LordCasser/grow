@@ -1,4 +1,4 @@
 - [x] Update the OHOS bootstrap and its developer guide to build the affected formulas from source.
 - [x] Check shell syntax and strict OpenSpec validation.
 - [x] Verify topological source installation against the pinned Harmonybrew core and align release documentation.
-- [ ] Complete the OHOS release workflow and record its result.
+- [x] Complete the OHOS release workflow and record its result.

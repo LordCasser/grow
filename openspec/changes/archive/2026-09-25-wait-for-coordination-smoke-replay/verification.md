@@ -1,0 +1,6 @@
+# Verification
+
+- The macOS ARM64 asset in [release run 36031134530](https://github.com/LordCasser/grow/actions/runs/36031134530) built and passed signing, then failed `scripts/test_local_coordination.py` at the immediate second-load assertion (`terminals == []`). Its fixture dump contains completed notices for both interrupted inquiries from the preceding load.
+- Python AST parsing of the modified smoke script, `git diff --check`, and `openspec validate --all --strict --no-interactive` passed.
+- A local `cargo build --locked --profile release-dist --features release-dist -p cli --bin grow` with pinned Rust 1.93.1 completed on macOS ARM64. `python3 scripts/test_local_coordination.py --binary target/release-dist/grow` then passed every stage, including the running and queued crash receipts across repeated reloads. Local build artifacts were cleaned afterward.
+- The macOS ARM64 job in [release run 36036784721](https://github.com/LordCasser/grow/actions/runs/36036784721) completed successfully. Its native coordination smoke logged `PASS running and queued crash receipts get one durable interrupted terminal across reloads`; signing, packaging, attestation, and artifact upload also passed.

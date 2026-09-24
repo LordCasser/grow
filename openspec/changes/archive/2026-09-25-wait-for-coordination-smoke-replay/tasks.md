@@ -1,0 +1,2 @@
+- [x] Wait for the fixture reader to observe each recovered terminal notice.
+- [x] Validate Python syntax, strict OpenSpec, and the release smoke on macOS ARM64.
