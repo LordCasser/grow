@@ -13,7 +13,7 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{self, BufRead, Seek as _};
+use std::io::{self, BufRead, Read as _, Seek as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -145,6 +145,10 @@ pub struct RewindPointMeta {
     pub num_file_snapshots: usize,
 }
 
+const MAX_REWIND_RECORD_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_REWIND_SCAN_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_REWIND_RECORDS: usize = 50_000;
+
 #[cfg(test)]
 fn open_rewind_points(path: &Path) -> io::Result<Option<io::BufReader<std::fs::File>>> {
     match std::fs::File::open(path) {
@@ -187,25 +191,87 @@ fn read_rewind_jsonl_from_file<T: serde::de::DeserializeOwned>(
     file: &std::fs::File,
     label: &Path,
 ) -> io::Result<Vec<T>> {
+    read_rewind_jsonl_from_file_with_limits(
+        file,
+        label,
+        MAX_REWIND_RECORD_BYTES,
+        MAX_REWIND_SCAN_BYTES,
+    )
+}
+
+fn read_rewind_jsonl_from_file_with_limits<T: serde::de::DeserializeOwned>(
+    file: &std::fs::File,
+    label: &Path,
+    max_record_bytes: u64,
+    max_scan_bytes: u64,
+) -> io::Result<Vec<T>> {
     let mut file = file.try_clone()?;
     file.seek(io::SeekFrom::Start(0))?;
     let mut reader = io::BufReader::new(file);
     let mut out = Vec::new();
-    let mut line = String::new();
+    let mut line = Vec::new();
     let mut line_number = 0usize;
-    while reader.read_line(&mut line)? != 0 {
+    let mut scanned_bytes = 0u64;
+    loop {
+        line.clear();
+        let read = reader
+            .by_ref()
+            .take(max_record_bytes.saturating_add(1))
+            .read_until(b'\n', &mut line)?;
+        if read == 0 {
+            break;
+        }
         line_number += 1;
-        let trimmed = line.trim();
+        if read as u64 > max_record_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{}:{line_number}: rewind record exceeds {max_record_bytes} bytes",
+                    label.display()
+                ),
+            ));
+        }
+        scanned_bytes = scanned_bytes.saturating_add(read as u64);
+        if scanned_bytes > max_scan_bytes {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{}:{line_number}: rewind scan exceeds {max_scan_bytes} bytes",
+                    label.display()
+                ),
+            ));
+        }
+        let trimmed = std::str::from_utf8(&line).map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{}:{line_number}: invalid rewind record: {error}",
+                    label.display()
+                ),
+            )
+        })?;
+        let trimmed = trimmed.trim();
         if !trimmed.is_empty() {
             let value = serde_json::from_str::<T>(trimmed).map_err(|error| {
                 io::Error::new(
                     io::ErrorKind::InvalidData,
-                    format!("{}:{line_number}: invalid rewind record: {error}", label.display()),
+                    format!(
+                        "{}:{line_number}: invalid rewind record: {error}",
+                        label.display()
+                    ),
                 )
             })?;
+            if out.len() == MAX_REWIND_RECORDS {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{}:{line_number}: rewind scan exceeds {MAX_REWIND_RECORDS} records",
+                        label.display()
+                    ),
+                ));
+            }
             out.push(value);
         }
-        line.clear();
     }
     Ok(out)
 }
@@ -216,8 +282,54 @@ fn read_rewind_points_file(path: &Path) -> io::Result<Vec<RewindPoint>> {
     read_rewind_jsonl_lines(path)
 }
 
-/// Counts the entries of a JSON map without allocating its keys or values.
+/// Counts snapshots without retaining their content, while validating the
+/// same nested field types that a full rewind-point load requires.
 struct MapEntryCount(usize);
+
+struct SkippedString;
+
+impl<'de> Deserialize<'de> for SkippedString {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct V;
+        impl serde::de::Visitor<'_> for V {
+            type Value = SkippedString;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a string")
+            }
+            fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self::Value, E> {
+                Ok(SkippedString)
+            }
+            fn visit_borrowed_str<E: serde::de::Error>(self, _: &'_ str) -> Result<Self::Value, E> {
+                Ok(SkippedString)
+            }
+            fn visit_string<E: serde::de::Error>(self, _: String) -> Result<Self::Value, E> {
+                Ok(SkippedString)
+            }
+        }
+        deserializer.deserialize_string(V)
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SnapshotMeta {
+    #[serde(rename = "path")]
+    _path: RelPathBuf,
+    #[serde(rename = "content")]
+    _content: Option<SkippedString>,
+    #[serde(rename = "captured_at")]
+    _captured_at: DateTime<Utc>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetaRow {
+    prompt_index: usize,
+    created_at: DateTime<Utc>,
+    file_snapshots: MapEntryCount,
+    #[serde(rename = "after_snapshots")]
+    _after_snapshots: MapEntryCount,
+}
 
 impl<'de> Deserialize<'de> for MapEntryCount {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -232,10 +344,7 @@ impl<'de> Deserialize<'de> for MapEntryCount {
                 mut map: A,
             ) -> Result<usize, A::Error> {
                 let mut n = 0;
-                while map
-                    .next_entry::<serde::de::IgnoredAny, serde::de::IgnoredAny>()?
-                    .is_some()
-                {
+                while map.next_entry::<RelPathBuf, SnapshotMeta>()?.is_some() {
                     n += 1;
                 }
                 Ok(n)
@@ -245,19 +354,12 @@ impl<'de> Deserialize<'de> for MapEntryCount {
     }
 }
 
-/// Cheaply scan `rewind_points.jsonl` for per-point metadata, streaming without
-/// allocating file-content `String`s (`MapEntryCount` just counts `file_snapshots`;
-/// other fields are skipped by serde). `file_snapshots` is required — mirroring
+/// Scan `rewind_points.jsonl` for per-point metadata without retaining snapshot
+/// content (`MapEntryCount` validates and counts the snapshot maps). `file_snapshots` is required — mirroring
 /// `RewindPoint` — so the picker rejects exactly the lines the on-rewind full load
 /// would (never advertising a target that won't materialize).
 #[cfg(test)]
 fn scan_rewind_point_metas(path: &Path) -> io::Result<Vec<RewindPointMeta>> {
-    #[derive(Deserialize)]
-    struct MetaRow {
-        prompt_index: usize,
-        created_at: DateTime<Utc>,
-        file_snapshots: MapEntryCount,
-    }
     Ok(read_rewind_jsonl_lines::<MetaRow>(path)?
         .into_iter()
         .map(|r| RewindPointMeta {
@@ -272,12 +374,6 @@ fn scan_rewind_point_metas_from_file(
     file: &std::fs::File,
     label: &Path,
 ) -> io::Result<Vec<RewindPointMeta>> {
-    #[derive(Deserialize)]
-    struct MetaRow {
-        prompt_index: usize,
-        created_at: DateTime<Utc>,
-        file_snapshots: MapEntryCount,
-    }
     Ok(read_rewind_jsonl_from_file::<MetaRow>(file, label)?
         .into_iter()
         .map(|row| RewindPointMeta {
@@ -307,6 +403,22 @@ impl std::fmt::Debug for PinnedRewindSource {
             .field("label", &self.label)
             .finish_non_exhaustive()
     }
+}
+
+/// Move the pinned-source guard into the blocking worker. If the awaiting
+/// request is cancelled, that worker still owns the guard until its read
+/// finishes, so another request cannot seek the same file description.
+async fn scan_pinned_source<T: Send + 'static>(
+    source: tokio::sync::OwnedMutexGuard<Option<PinnedRewindSource>>,
+    read: impl FnOnce(&PinnedRewindSource) -> io::Result<T> + Send + 'static,
+) -> io::Result<(tokio::sync::OwnedMutexGuard<Option<PinnedRewindSource>>, T)> {
+    let (source, result) = tokio::task::spawn_blocking(move || {
+        let result = read(source.as_ref().expect("pinned rewind source"));
+        (source, result)
+    })
+    .await
+    .map_err(io::Error::other)?;
+    Ok((source, result?))
 }
 
 /// Fold rewind points at indices `>= target_index` into the point at
@@ -419,22 +531,18 @@ impl FileStateTracker {
     /// only on a SUCCESSFUL read, so a transient error leaves it set to retry
     /// (never operating on or persisting a partial set).
     async fn ensure_historical_loaded(&self) -> io::Result<()> {
-        let mut source = self.lazy_source.lock().await;
-        let Some(lazy_file) = source.as_ref() else {
+        let source = self.lazy_source.clone().lock_owned().await;
+        if source.is_none() {
             return Ok(()); // already loaded, or never lazy
-        };
-        let loaded =
-            match read_rewind_jsonl_from_file::<RewindPoint>(&lazy_file.file, &lazy_file.label) {
-                Ok(points) => points,
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        path = %lazy_file.label.display(),
-                        "deferred rewind-point load failed; leaving lazy source set to retry"
-                    );
-                    return Err(e);
-                }
-            };
+        }
+        let (mut source, loaded) = scan_pinned_source(source, |lazy_file| {
+            read_rewind_jsonl_from_file::<RewindPoint>(&lazy_file.file, &lazy_file.label)
+        })
+        .await
+        .map_err(|error| {
+            tracing::warn!(error = %error, "deferred rewind-point load failed; leaving lazy source set to retry");
+            error
+        })?;
         if !loaded.is_empty() {
             let mut points = self.rewind_points.lock().await;
             for p in loaded {
@@ -643,8 +751,20 @@ impl FileStateTracker {
     /// `rewind_points` inner): holding `lazy_source` across both the in-memory
     /// snapshot and the disk scan stops a concurrent rewind's take→read→merge from
     /// interleaving and making the picker miss points.
-    pub async fn get_rewind_point_metas(&self) -> Vec<RewindPointMeta> {
-        let source = self.lazy_source.lock().await;
+    pub async fn get_rewind_point_metas(&self) -> io::Result<Vec<RewindPointMeta>> {
+        let mut source = self.lazy_source.clone().lock_owned().await;
+        let scanned = if source.is_some() {
+            let (guard, result) = scan_pinned_source(source, |lazy_file| {
+                scan_rewind_point_metas_from_file(&lazy_file.file, &lazy_file.label)
+            })
+            .await?;
+            source = guard;
+            Some(result)
+        } else {
+            None
+        };
+        // Keep scan and live snapshot in one source epoch.
+        let _source_guard = source;
         let mut metas: HashMap<usize, RewindPointMeta> = {
             let points = self.rewind_points.lock().await;
             points
@@ -661,23 +781,14 @@ impl FileStateTracker {
                 })
                 .collect()
         };
-        if let Some(lazy_file) = source.as_ref() {
-            match scan_rewind_point_metas_from_file(&lazy_file.file, &lazy_file.label) {
-                Ok(scanned) => {
-                    for meta in scanned {
-                        metas.entry(meta.prompt_index).or_insert(meta);
-                    }
-                }
-                Err(e) => tracing::warn!(
-                    error = %e,
-                    path = %lazy_file.label.display(),
-                    "rewind-point metadata scan failed; picker shows in-memory points only"
-                ),
+        if let Some(scanned) = scanned {
+            for meta in scanned {
+                metas.entry(meta.prompt_index).or_insert(meta);
             }
         }
         let mut result: Vec<RewindPointMeta> = metas.into_values().collect();
         result.sort_by_key(|m| m.prompt_index);
-        result
+        Ok(result)
     }
 
     /// Get a specific rewind point by prompt index. Intentionally does NOT trigger
@@ -714,8 +825,6 @@ impl FileStateTracker {
         );
         *source = None;
     }
-
-
 }
 
 /// Handle for sending file state capture requests.
@@ -782,16 +891,137 @@ mod tests {
             let error = tracker.get_rewind_points().await.unwrap_err();
             assert_eq!(error.kind(), io::ErrorKind::InvalidData);
             assert!(error.to_string().contains(":4:"), "{error}");
-            assert!(tracker.get_rewind_point(0).await.is_none(), "valid prefix must not leak into live state");
+            assert!(
+                tracker.get_rewind_point(0).await.is_none(),
+                "valid prefix must not leak into live state"
+            );
             assert!(tracker.truncate_from(5).await.is_err());
             assert!(tracker.get_rewind_point(5).await.is_some());
-            assert_eq!(tracker.get_rewind_point_metas().await.iter().map(|p| p.prompt_index).collect::<Vec<_>>(), [5]);
+            let metadata_error = tracker.get_rewind_point_metas().await.unwrap_err();
+            assert_eq!(metadata_error.kind(), io::ErrorKind::InvalidData);
+            assert!(metadata_error.to_string().contains(":4:"));
             assert!(tracker.lazy_source.lock().await.is_some());
             // Repair the same inode; a valid final record without LF remains accepted.
             std::fs::write(file.path(), format!("\n{p0}\n  \n{p2}")).unwrap();
-            assert_eq!(tracker.get_rewind_points().await.unwrap().iter().map(|p| p.prompt_index).collect::<Vec<_>>(), [0, 2, 5]);
+            assert_eq!(
+                tracker
+                    .get_rewind_points()
+                    .await
+                    .unwrap()
+                    .iter()
+                    .map(|p| p.prompt_index)
+                    .collect::<Vec<_>>(),
+                [0, 2, 5]
+            );
             assert!(tracker.lazy_source.lock().await.is_none());
         }
+    }
+
+    #[tokio::test]
+    async fn pinned_metadata_rejects_nested_snapshot_damage_without_claiming_no_changes() {
+        let valid = point_with_files(0, &[("valid.rs", "old")]);
+        let mut damaged = serde_json::to_value(point_with_files(1, &[("bad.rs", "old")])).unwrap();
+        damaged["file_snapshots"]["bad.rs"]["content"] = serde_json::json!(42);
+        let file = write_rewind_raw(&format!(
+            "{}\n{}\n",
+            serde_json::to_string(&valid).unwrap(),
+            damaged
+        ));
+        let tracker = lazy_tracker(&file);
+        tracker.begin_prompt(3).await;
+
+        let metadata_error = tracker.get_rewind_point_metas().await.unwrap_err();
+        assert_eq!(metadata_error.kind(), io::ErrorKind::InvalidData);
+        assert!(metadata_error.to_string().contains(":2:"));
+        assert_eq!(
+            tracker.get_rewind_points().await.unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+        assert!(tracker.get_rewind_point(0).await.is_none());
+        assert!(tracker.get_rewind_point(3).await.is_some());
+        assert!(tracker.lazy_source.lock().await.is_some());
+
+        std::fs::write(
+            file.path(),
+            format!("{}\n", serde_json::to_string(&valid).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(tracker.get_rewind_point_metas().await.unwrap().len(), 2);
+    }
+
+    #[test]
+    fn pinned_reader_rejects_record_and_total_byte_budgets() {
+        let row = serde_json::to_string(&point_with_files(0, &[])).unwrap();
+        let file = write_rewind_raw(&format!("{row}\n{row}\n"));
+        let label = file.path();
+        let record_limit = row.len() as u64;
+        let error = read_rewind_jsonl_from_file_with_limits::<RewindPoint>(
+            file.as_file(),
+            label,
+            record_limit,
+            MAX_REWIND_SCAN_BYTES,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("record exceeds"), "{error}");
+        let error = read_rewind_jsonl_from_file_with_limits::<RewindPoint>(
+            file.as_file(),
+            label,
+            record_limit + 1,
+            record_limit + 1,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("scan exceeds"), "{error}");
+    }
+
+    #[test]
+    fn pinned_reader_rejects_record_count_budget() {
+        let row = serde_json::to_string(&point_with_files(0, &[])).unwrap();
+        let file = write_rewind_raw(&format!("{}\n", row).repeat(MAX_REWIND_RECORDS + 1));
+        let error =
+            read_rewind_jsonl_from_file::<RewindPoint>(file.as_file(), file.path()).unwrap_err();
+        assert!(error.to_string().contains("records"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn cancelled_pinned_scan_keeps_source_locked_until_worker_finishes() {
+        let file = write_rewind_file(&[point_with_files(0, &[])]);
+        let tracker = lazy_tracker(&file);
+        let source = tracker.lazy_source.clone().lock_owned().await;
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let request = tokio::spawn(async move {
+            scan_pinned_source(source, move |_| {
+                let _ = entered_tx.send(());
+                release_rx.recv().unwrap();
+                Ok(())
+            })
+            .await
+        });
+        entered_rx.await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_millis(100), async {
+            tokio::task::yield_now().await;
+        })
+        .await
+        .expect("a blocked scan must not block the async executor");
+        request.abort();
+        assert!(request.await.is_err());
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(20),
+                tracker.lazy_source.lock()
+            )
+            .await
+            .is_err(),
+            "cancelled caller must not release a still-running worker's guard"
+        );
+        release_tx.send(()).unwrap();
+        let source = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            tracker.lazy_source.lock(),
+        )
+        .await
+        .unwrap();
+        assert!(source.is_some(), "cancelled read must remain retryable");
     }
 
     #[tokio::test]
@@ -802,11 +1032,21 @@ mod tests {
         tracker.begin_prompt(5).await;
         assert!(tracker.get_rewind_points().await.is_err());
         assert!(tracker.truncate_from(5).await.is_err());
-        assert!(tracker.get_rewind_point(5).await.is_some(), "failed historical read must not truncate live points");
+        assert!(
+            tracker.get_rewind_point(5).await.is_some(),
+            "failed historical read must not truncate live points"
+        );
         let historical = point_with_files(0, &[("old.rs", "history")]);
-        std::fs::write(file.path(), format!("{}\n", serde_json::to_string(&historical).unwrap())).unwrap();
+        std::fs::write(
+            file.path(),
+            format!("{}\n", serde_json::to_string(&historical).unwrap()),
+        )
+        .unwrap();
         let points = tracker.get_rewind_points().await.unwrap();
-        assert_eq!(points.iter().map(|p| p.prompt_index).collect::<Vec<_>>(), [0, 5]);
+        assert_eq!(
+            points.iter().map(|p| p.prompt_index).collect::<Vec<_>>(),
+            [0, 5]
+        );
     }
 
     #[tokio::test]
@@ -1064,7 +1304,7 @@ mod tests {
         ]);
         let tracker = lazy_tracker(&file);
 
-        let metas = tracker.get_rewind_point_metas().await;
+        let metas = tracker.get_rewind_point_metas().await.unwrap();
         assert_eq!(metas.len(), 3);
         assert_eq!(metas[0].prompt_index, 0);
         assert_eq!(metas[0].num_file_snapshots, 2);
@@ -1160,7 +1400,7 @@ mod tests {
             .add_before_snapshot_for_prompt(1, Path::new("/repo/b.rs"), cwd, Some("new".into()))
             .await;
 
-        let metas = tracker.get_rewind_point_metas().await;
+        let metas = tracker.get_rewind_point_metas().await.unwrap();
         assert_eq!(metas.len(), 2);
         assert_eq!(metas[0].prompt_index, 0); // from disk
         assert_eq!(metas[0].num_file_snapshots, 1);
@@ -1172,7 +1412,7 @@ mod tests {
     async fn tracker_without_historical_file_is_empty() {
         let tracker = FileStateTracker::new();
         assert!(tracker.get_rewind_points().await.unwrap().is_empty());
-        assert!(tracker.get_rewind_point_metas().await.is_empty());
+        assert!(tracker.get_rewind_point_metas().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -1187,7 +1427,11 @@ mod tests {
 
         let history = tracker.get_rewind_points().await.unwrap();
         let points = merge_rewind_points_from(history, 1);
-        assert_eq!(tracker.get_rewind_points().await.unwrap().len(), 3, "preview must not mutate the tracker");
+        assert_eq!(
+            tracker.get_rewind_points().await.unwrap().len(),
+            3,
+            "preview must not mutate the tracker"
+        );
         assert_eq!(points.len(), 1);
         assert_eq!(points[0].prompt_index, 0);
         // Point 0 should now also carry the merged files from points 1 and 2.
@@ -1383,7 +1627,10 @@ mod tests {
         );
 
         let tracker = lazy_tracker(&file);
-        assert_eq!(tracker.get_rewind_points().await.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(
+            tracker.get_rewind_points().await.unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
         assert!(tracker.lazy_source.lock().await.is_some());
     }
 
@@ -1395,8 +1642,16 @@ mod tests {
         assert!(scan_rewind_point_metas(file.path()).unwrap().is_empty());
         for bytes in ["", "\n  \n\t\n"] {
             std::fs::write(file.path(), bytes).unwrap();
-            assert!(read_rewind_jsonl_from_file::<RewindPoint>(file.as_file(), file.path()).unwrap().is_empty());
-            assert!(scan_rewind_point_metas_from_file(file.as_file(), file.path()).unwrap().is_empty());
+            assert!(
+                read_rewind_jsonl_from_file::<RewindPoint>(file.as_file(), file.path())
+                    .unwrap()
+                    .is_empty()
+            );
+            assert!(
+                scan_rewind_point_metas_from_file(file.as_file(), file.path())
+                    .unwrap()
+                    .is_empty()
+            );
         }
     }
 

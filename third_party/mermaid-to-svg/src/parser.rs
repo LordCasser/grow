@@ -3,6 +3,9 @@ use crate::ast::{
     Subgraph,
 };
 use crate::error::MermaidError;
+use std::collections::{HashMap, HashSet};
+
+const GROUP_EDGE_LIMIT: usize = 4096;
 
 pub fn parse_mermaid(input: &str) -> Result<FlowchartGraph, MermaidError> {
     if let Some(first_line) = first_non_empty_non_comment_line(input) {
@@ -100,6 +103,10 @@ struct Parser<'a> {
     lines: Vec<&'a str>,
     current_line: usize,
     next_subgraph_index: usize,
+    class_defs: HashMap<String, Vec<(String, String)>>,
+    class_refs: Vec<(String, String)>,
+    explicit_styles: HashSet<String>,
+    expanded_group_edges: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -109,12 +116,27 @@ impl<'a> Parser<'a> {
             lines,
             current_line: 0,
             next_subgraph_index: 0,
+            class_defs: HashMap::new(),
+            class_refs: Vec::new(),
+            explicit_styles: HashSet::new(),
+            expanded_group_edges: 0,
         }
     }
 
     fn parse(&mut self) -> Result<FlowchartGraph, MermaidError> {
         let direction = self.parse_graph_declaration()?;
-        let statements = self.parse_statements()?;
+        let mut statements = self.parse_statements()?;
+        for (node_id, class_name) in &self.class_refs {
+            if self.explicit_styles.contains(node_id) {
+                continue;
+            }
+            if let Some(properties) = self.class_defs.get(class_name) {
+                statements.push(Statement::Style(StyleStatement {
+                    node_id: node_id.clone(),
+                    properties: properties.clone(),
+                }));
+            }
+        }
 
         Ok(FlowchartGraph {
             direction,
@@ -201,16 +223,39 @@ impl<'a> Parser<'a> {
 
             if line.starts_with("subgraph ") {
                 statements.push(Statement::Subgraph(self.parse_subgraph()?));
+            } else if let Some(definition) = line.strip_prefix("classDef ") {
+                let mut parts = definition.trim().splitn(2, char::is_whitespace);
+                if let Some(class_name) = parts.next() {
+                    self.class_defs.insert(
+                        class_name.to_string(),
+                        parse_properties(parts.next().unwrap_or("")),
+                    );
+                }
+                self.advance();
             } else if line.starts_with("style ") {
                 statements.push(Statement::Style(self.parse_style()?));
+            } else if [
+                "class ",
+                "click ",
+                "linkStyle ",
+                "direction ",
+                "accTitle:",
+                "accDescr:",
+            ]
+            .iter()
+            .any(|prefix| line.starts_with(prefix))
+            {
+                self.advance();
             } else if self.line_contains_edge(line) {
                 let edge_statements = self.parse_edge_chain(line)?;
                 statements.extend(edge_statements);
                 self.advance();
             } else {
-                if let Some(node) = self.try_parse_node(line) {
-                    statements.push(Statement::Node(node));
-                }
+                statements.extend(
+                    self.parse_node_group(line)?
+                        .into_iter()
+                        .filter_map(|(_, node)| node.map(Statement::Node)),
+                );
                 self.advance();
             }
         }
@@ -225,16 +270,13 @@ impl<'a> Parser<'a> {
     fn parse_edge_chain(&mut self, line: &str) -> Result<Vec<Statement>, MermaidError> {
         let mut statements = Vec::new();
         let mut remaining = line.trim();
-        let mut collected_nodes: Vec<(String, Option<Node>)> = Vec::new();
-
         let first_node_end = self.find_edge_start(remaining).unwrap_or(remaining.len());
         let first_node_str = remaining[..first_node_end].trim();
-        if let Some(node) = self.try_parse_node(first_node_str) {
-            collected_nodes.push((node.id.clone(), Some(node)));
-        } else {
-            let id = self.extract_node_id(first_node_str);
-            collected_nodes.push((id, None));
-        }
+        let mut previous = self.parse_node_group(first_node_str)?;
+        let mut node_statements = previous
+            .iter()
+            .filter_map(|(_, node)| node.clone().map(Statement::Node))
+            .collect::<Vec<_>>();
         remaining = &remaining[first_node_end..];
 
         while !remaining.is_empty() {
@@ -248,34 +290,73 @@ impl<'a> Parser<'a> {
                 break;
             }
 
-            let (next_id, next_node) = if let Some(node) = self.try_parse_node(next_node_str) {
-                (node.id.clone(), Some(node))
-            } else {
-                let id = self.extract_node_id(next_node_str);
-                (id, None)
-            };
-
-            if let Some((from_id, _)) = collected_nodes.last() {
-                statements.push(Statement::Edge(Edge {
-                    from: from_id.clone(),
-                    to: next_id.clone(),
-                    label,
-                    style: edge_style,
-                }));
+            let next = self.parse_node_group(next_node_str)?;
+            if previous.len() > 1 || next.len() > 1 {
+                let count = previous.len().checked_mul(next.len()).ok_or_else(|| {
+                    MermaidError::ParseError {
+                        line: self.current_line + 1,
+                        message: "Flowchart group edge limit exceeded".to_string(),
+                    }
+                })?;
+                self.expanded_group_edges = self
+                    .expanded_group_edges
+                    .checked_add(count)
+                    .filter(|total| *total <= GROUP_EDGE_LIMIT)
+                    .ok_or_else(|| MermaidError::ParseError {
+                        line: self.current_line + 1,
+                        message: "Flowchart group edge limit exceeded".to_string(),
+                    })?;
             }
-
-            collected_nodes.push((next_id, next_node));
+            for (from_id, _) in &previous {
+                for (to_id, _) in &next {
+                    statements.push(Statement::Edge(Edge {
+                        from: from_id.clone(),
+                        to: to_id.clone(),
+                        label: label.clone(),
+                        style: edge_style,
+                    }));
+                }
+            }
+            node_statements.extend(
+                next.iter()
+                    .filter_map(|(_, node)| node.clone().map(Statement::Node)),
+            );
+            previous = next;
             remaining = &remaining[next_node_end..];
         }
-
-        let mut node_statements: Vec<Statement> = collected_nodes
-            .into_iter()
-            .filter_map(|(_, node_opt)| node_opt.map(Statement::Node))
-            .collect();
         node_statements.append(&mut statements);
-        statements = node_statements;
+        Ok(node_statements)
+    }
 
-        Ok(statements)
+    fn parse_node_group(
+        &mut self,
+        source: &str,
+    ) -> Result<Vec<(String, Option<Node>)>, MermaidError> {
+        split_node_group(source)
+            .into_iter()
+            .map(|part| {
+                if part.is_empty() {
+                    return Err(MermaidError::ParseError {
+                        line: self.current_line + 1,
+                        message: "Empty flowchart group member".to_string(),
+                    });
+                }
+                Ok(match self.parse_node_with_class(part) {
+                    Some(node) => (node.id.clone(), Some(node)),
+                    None => (self.extract_node_id(part), None),
+                })
+            })
+            .collect()
+    }
+
+    fn parse_node_with_class(&mut self, source: &str) -> Option<Node> {
+        let (source, class_name) = split_inline_class(source);
+        let node = self.try_parse_node(source)?;
+        if let Some(class_name) = class_name {
+            self.class_refs
+                .push((node.id.clone(), class_name.to_string()));
+        }
+        Some(node)
     }
 
     /// Byte index where the first edge token starts, ignoring tokens inside
@@ -398,12 +479,10 @@ impl<'a> Parser<'a> {
 
     fn extract_node_id(&self, s: &str) -> String {
         let s = s.trim();
-        for (open, _close) in [('[', ']'), ('(', ')'), ('{', '}'), ('<', '>')] {
-            if let Some(idx) = s.find(open) {
-                return s[..idx].trim().to_string();
-            }
-        }
-        s.to_string()
+        s.char_indices()
+            .find(|(_, ch)| matches!(ch, '[' | '(' | '{' | '>'))
+            .map(|(idx, _)| s[..idx].trim().to_string())
+            .unwrap_or_else(|| s.to_string())
     }
 
     fn try_parse_node(&self, s: &str) -> Option<Node> {
@@ -633,18 +712,9 @@ impl<'a> Parser<'a> {
         }
 
         let node_id = parts[0].to_string();
+        self.explicit_styles.insert(node_id.clone());
         let properties = if parts.len() > 1 {
-            parts[1]
-                .split(',')
-                .filter_map(|prop| {
-                    let kv: Vec<&str> = prop.splitn(2, ':').collect();
-                    if kv.len() == 2 {
-                        Some((kv[0].trim().to_string(), kv[1].trim().to_string()))
-                    } else {
-                        None
-                    }
-                })
-                .collect()
+            parse_properties(parts[1])
         } else {
             Vec::new()
         };
@@ -656,4 +726,69 @@ impl<'a> Parser<'a> {
             properties,
         })
     }
+}
+
+fn parse_properties(source: &str) -> Vec<(String, String)> {
+    source
+        .split(',')
+        .filter_map(|property| {
+            let (name, value) = property.split_once(':')?;
+            Some((name.trim().to_string(), value.trim().to_string()))
+        })
+        .collect()
+}
+
+fn split_inline_class(source: &str) -> (&str, Option<&str>) {
+    let source = source.trim();
+    let Some(marker) = source.rfind(":::") else {
+        return (source, None);
+    };
+    let class = &source[marker + 3..];
+    if class.is_empty()
+        || !class
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-'))
+        || !outside_node_label(source, marker)
+    {
+        return (source, None);
+    }
+    (source[..marker].trim_end(), Some(class))
+}
+
+fn split_node_group(source: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut start = 0;
+    for (index, ch) in source.char_indices() {
+        if ch == '&'
+            && index > start
+            && source.as_bytes()[index - 1].is_ascii_whitespace()
+            && source
+                .as_bytes()
+                .get(index + 1)
+                .is_some_and(u8::is_ascii_whitespace)
+            && outside_node_label(source, index)
+        {
+            parts.push(source[start..index].trim());
+            start = index + 1;
+        }
+    }
+    parts.push(source[start..].trim());
+    parts
+}
+
+fn outside_node_label(source: &str, index: usize) -> bool {
+    let mut depth = 0usize;
+    let mut quoted = false;
+    for ch in source[..index].chars() {
+        if ch == '"' {
+            quoted = !quoted;
+        } else if !quoted {
+            match ch {
+                '[' | '(' | '{' => depth += 1,
+                ']' | ')' | '}' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+        }
+    }
+    depth == 0 && !quoted
 }

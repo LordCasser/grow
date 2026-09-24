@@ -702,7 +702,11 @@ impl LocalTerminalActor {
         #[cfg(target_os = "linux")]
         if sandbox::should_restrict_child_network() {
             unsafe {
-                cmd.pre_exec(|| sandbox::child_net::install_child_network_filter());
+                cmd.pre_exec(|| {
+                    sandbox::child_net::install_child_network_filter(
+                        sandbox::child_net::ChildFdAllowance::StateInputPipe,
+                    )
+                });
             }
         }
 
@@ -823,7 +827,11 @@ impl LocalTerminalActor {
         #[cfg(target_os = "linux")]
         if sandbox::should_restrict_child_network() {
             unsafe {
-                cmd.pre_exec(|| sandbox::child_net::install_child_network_filter());
+                cmd.pre_exec(|| {
+                    sandbox::child_net::install_child_network_filter(
+                        sandbox::child_net::ChildFdAllowance::StateInputAndOutputPipes,
+                    )
+                });
             }
         }
 
@@ -3155,7 +3163,11 @@ fn spawn_shell_command(
         #[cfg(target_os = "linux")]
         if sandbox::should_restrict_child_network() {
             unsafe {
-                cmd.pre_exec(|| sandbox::child_net::install_child_network_filter());
+                cmd.pre_exec(|| {
+                    sandbox::child_net::install_child_network_filter(
+                        sandbox::child_net::ChildFdAllowance::StdioOnly,
+                    )
+                });
             }
         }
         cmd

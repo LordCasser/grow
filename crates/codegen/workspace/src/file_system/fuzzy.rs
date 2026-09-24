@@ -2,7 +2,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         mpsc::{RecvTimeoutError, SyncSender, sync_channel},
     },
     thread::{self, JoinHandle},
@@ -542,6 +542,11 @@ pub struct FuzzyMatcherDaemonResults {
     pub num_items: usize,
     pub status: FuzzyMatcherStatus,
     pub generation: usize,
+    /// Query that produced this snapshot. Generations advance on matcher ticks,
+    /// so they cannot identify which queued query a snapshot belongs to.
+    pub query: String,
+    /// Identity assigned synchronously when this query is submitted.
+    pub query_id: usize,
 }
 
 impl AsRef<[FuzzyMatchResult]> for FuzzyMatcherDaemonResults {
@@ -550,22 +555,25 @@ impl AsRef<[FuzzyMatchResult]> for FuzzyMatcherDaemonResults {
     }
 }
 
-#[derive(Debug, Clone)]
-enum FuzzyMatcherDaemonMessage {
-    RestartWalk { hidden: bool },
-    SetQuery { query: String, dirs: bool },
-    Stop,
+#[derive(Default)]
+struct PendingFuzzyWork {
+    restart_hidden: Option<bool>,
+    query: Option<(String, bool, usize)>,
+    stop: bool,
 }
 
 pub struct FuzzyFileMatcherDaemon {
     results: Arc<Mutex<FuzzyMatcherDaemonResults>>,
-    tx: SyncSender<FuzzyMatcherDaemonMessage>,
-    /// `None` when the daemon thread cannot be spawned; messages are dropped.
-    /// Joined in `Drop` for deterministic teardown.
-    handle: Option<JoinHandle<()>>,
+    pending: Arc<Mutex<PendingFuzzyWork>>,
+    tx: SyncSender<()>,
+    next_query_id: AtomicUsize,
+    stop_requested: Arc<AtomicBool>,
+    cancel_walk: Arc<AtomicBool>,
     /// Served capability. `Disabled` means the worker thread was refused, so
     /// `get` yields only empty results; `BrowseOnly` still returns browse hits.
     mode: MatcherMode,
+    #[cfg(test)]
+    worker_exited: Arc<AtomicBool>,
 }
 
 impl FuzzyFileMatcherDaemon {
@@ -575,54 +583,81 @@ impl FuzzyFileMatcherDaemon {
         on_update: Option<Arc<dyn Fn() + Send + Sync>>,
     ) -> Self {
         let results = Arc::new(Mutex::new(FuzzyMatcherDaemonResults::default()));
-        let (tx, rx) = sync_channel(1024);
+        let pending = Arc::new(Mutex::new(PendingFuzzyWork::default()));
+        let (tx, rx) = sync_channel::<()>(1);
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let cancel_walk = matcher.cancel.clone();
 
         let matcher_mode = matcher.mode();
         let res = results.clone();
+        let worker_pending = pending.clone();
+        let worker_stop = stop_requested.clone();
+        #[cfg(test)]
+        let worker_exited = Arc::new(AtomicBool::new(false));
+        #[cfg(test)]
+        let worker_exit_signal = worker_exited.clone();
         let handle = thread::Builder::new()
             .name("fuzzy-daemon".into())
             .spawn(move || {
                 let results = res;
                 let mut done = false;
-                let mut generation = 0;
+                let mut generation = 0usize;
+                let mut query_id = 0;
                 let mut last_update_wake = Instant::now();
                 loop {
-                    let msg = if !done {
+                    let wake = if !done {
                         rx.recv_timeout(Duration::from_micros(250))
                     } else {
                         rx.recv().map_err(|_| RecvTimeoutError::Disconnected)
                     };
-                    match msg {
-                        Ok(FuzzyMatcherDaemonMessage::RestartWalk { hidden }) => {
-                            if !hidden {
-                                tracing::trace!("restarting normal walk");
-                                matcher.restart_walk();
-                            } else {
-                                tracing::trace!("restarting hidden walk");
-                                matcher.restart_walk_with(|w| {
-                                    w.hidden(false).ignore(false).git_ignore(false)
-                                });
+                    match wake {
+                        Ok(()) => {
+                            let work = std::mem::take(&mut *worker_pending.lock().unwrap());
+                            if work.stop || worker_stop.load(Ordering::Relaxed) {
+                                break;
                             }
-                            generation += 1;
-                            *results.lock().unwrap() = FuzzyMatcherDaemonResults::default();
-                            if let Some(on_update) = on_update.as_ref() {
-                                on_update();
-                                last_update_wake = Instant::now();
+                            if let Some(hidden) = work.restart_hidden {
+                                if !hidden {
+                                    tracing::trace!("restarting normal walk");
+                                    matcher.restart_walk();
+                                } else {
+                                    tracing::trace!("restarting hidden walk");
+                                    matcher.restart_walk_with(|w| {
+                                        w.hidden(false).ignore(false).git_ignore(false)
+                                    });
+                                }
+                                if worker_stop.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                                generation += 1;
+                                *results.lock().unwrap() = FuzzyMatcherDaemonResults::default();
+                                if let Some(on_update) = on_update.as_ref() {
+                                    on_update();
+                                    last_update_wake = Instant::now();
+                                }
+                                done = false;
                             }
-                            done = false;
-                        }
-                        Ok(FuzzyMatcherDaemonMessage::SetQuery { query, dirs }) => {
-                            matcher.set_query(&query, dirs);
-                            generation += 1;
-                            done = false;
-                        }
-                        Ok(FuzzyMatcherDaemonMessage::Stop)
-                        | Err(RecvTimeoutError::Disconnected) => {
-                            break;
+                            if let Some((query, dirs, next_query_id)) = work.query {
+                                if worker_stop.load(Ordering::Relaxed) {
+                                    break;
+                                }
+                                matcher.set_query(&query, dirs);
+                                query_id = next_query_id;
+                                // The workspace poller's per-query floor also
+                                // advances for requests coalesced in pending.
+                                generation = generation.saturating_add(1).max(query_id);
+                                done = false;
+                            }
                         }
                         Err(RecvTimeoutError::Timeout) => {
+                            if worker_stop.load(Ordering::Relaxed) {
+                                break;
+                            }
                             if !done {
                                 let status = matcher.tick(10);
+                                if worker_stop.load(Ordering::Relaxed) {
+                                    break;
+                                }
                                 done = status.done;
                                 let num_items = matcher.num_items();
                                 let topk: Arc<[_]> = matcher.get_top_k(topk).into();
@@ -631,6 +666,8 @@ impl FuzzyFileMatcherDaemon {
                                     num_items,
                                     status,
                                     generation,
+                                    query: matcher.query.clone(),
+                                    query_id,
                                 };
                                 if status.done
                                     || (status.changed
@@ -644,12 +681,20 @@ impl FuzzyFileMatcherDaemon {
                                 generation += 1;
                             }
                         }
+                        Err(RecvTimeoutError::Disconnected) => break,
                     }
                 }
+                #[cfg(test)]
+                worker_exit_signal.store(true, Ordering::Release);
             });
 
-        let (handle, mode) = match handle {
-            Ok(handle) => (Some(handle), matcher_mode),
+        let mode = match handle {
+            Ok(handle) => {
+                // The worker owns the matcher. Joining here on Drop would wait
+                // for an active filesystem walk on the UI thread.
+                drop(handle);
+                matcher_mode
+            }
             Err(e) => {
                 // nucleo built but the daemon thread was refused: degrade to
                 // fully disabled, so `get` reads empty and terminal.
@@ -657,15 +702,20 @@ impl FuzzyFileMatcherDaemon {
                     error = %e,
                     "fuzzy daemon thread spawn failed; file search disabled"
                 );
-                (None, MatcherMode::Disabled)
+                MatcherMode::Disabled
             }
         };
 
         Self {
             results,
+            pending,
             tx,
-            handle,
+            next_query_id: AtomicUsize::new(0),
+            stop_requested,
+            cancel_walk,
             mode,
+            #[cfg(test)]
+            worker_exited,
         }
     }
 
@@ -683,34 +733,38 @@ impl FuzzyFileMatcherDaemon {
                     changed: false,
                 },
                 generation: usize::MAX,
+                query_id: self.next_query_id.load(Ordering::Relaxed),
                 ..Default::default()
             };
         }
         self.results.lock().unwrap().clone()
     }
 
-    pub fn set_query(&self, query: impl AsRef<str>, dirs: bool) {
+    pub fn set_query(&self, query: impl AsRef<str>, dirs: bool) -> usize {
         let query = query.as_ref().to_owned();
-        let _ = self
-            .tx
-            .send(FuzzyMatcherDaemonMessage::SetQuery { query, dirs });
+        let mut pending = self.pending.lock().unwrap();
+        let query_id = self.next_query_id.fetch_add(1, Ordering::Relaxed) + 1;
+        pending.query = Some((query, dirs, query_id));
+        drop(pending);
+        let _ = self.tx.try_send(());
+        query_id
     }
 
     pub fn restart_walk(&self, hidden: bool) {
-        let _ = self
-            .tx
-            .send(FuzzyMatcherDaemonMessage::RestartWalk { hidden });
+        self.pending.lock().unwrap().restart_hidden = Some(hidden);
+        let _ = self.tx.try_send(());
     }
 }
 
 impl Drop for FuzzyFileMatcherDaemon {
     fn drop(&mut self) {
-        let _ = self.tx.send(FuzzyMatcherDaemonMessage::Stop);
-        // Join for deterministic teardown: the loop breaks on Stop and dropping
-        // the matcher cancels the walk. `None` if the thread never spawned.
-        if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
-        }
+        self.stop_requested.store(true, Ordering::Relaxed);
+        self.cancel_walk.store(true, Ordering::Relaxed);
+        *self.pending.lock().unwrap() = PendingFuzzyWork {
+            stop: true,
+            ..PendingFuzzyWork::default()
+        };
+        let _ = self.tx.try_send(());
     }
 }
 
@@ -809,6 +863,94 @@ mod tests {
             NUM_IGNORE_THREADS + 1,
             "probe reserves the outer fuzzy-walk thread that builds the pool"
         );
+    }
+
+    #[test]
+    fn full_wake_does_not_block_query_restart_or_drop() {
+        let (tx, _wake_rx) = sync_channel::<()>(1);
+        tx.try_send(()).unwrap();
+        let pending = Arc::new(Mutex::new(PendingFuzzyWork::default()));
+        let stop_requested = Arc::new(AtomicBool::new(false));
+        let cancel_walk = Arc::new(AtomicBool::new(false));
+        let daemon = FuzzyFileMatcherDaemon {
+            results: Arc::new(Mutex::new(FuzzyMatcherDaemonResults::default())),
+            pending: pending.clone(),
+            tx,
+            next_query_id: AtomicUsize::new(0),
+            stop_requested: stop_requested.clone(),
+            cancel_walk: cancel_walk.clone(),
+            mode: MatcherMode::Full,
+            worker_exited: Arc::new(AtomicBool::new(false)),
+        };
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let submitter = thread::spawn(move || {
+            daemon.restart_walk(false);
+            let first = daemon.set_query("first", false);
+            daemon.restart_walk(true);
+            let latest = daemon.set_query("latest", true);
+            let pending_before_drop = {
+                let work = daemon.pending.lock().unwrap();
+                (work.restart_hidden, work.query.clone())
+            };
+            drop(daemon);
+            done_tx.send((first, latest, pending_before_drop)).unwrap();
+        });
+        let (first, latest, (restart, query)) = done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("submitting and closing search must not wait for a full wake channel");
+        submitter.join().unwrap();
+        assert_eq!(latest, first + 1);
+        assert_eq!(restart, Some(true));
+        assert_eq!(query, Some(("latest".into(), true, latest)));
+        assert!(pending.lock().unwrap().stop);
+        assert!(stop_requested.load(Ordering::Relaxed));
+        assert!(cancel_walk.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn dropping_daemon_eventually_exits_worker() {
+        let dir = temp_repo();
+        let daemon = FuzzyFileMatcherDaemon::new(
+            FuzzyFileMatcher::new_inner(dir.path(), false),
+            10,
+            None,
+        );
+        if daemon.mode == MatcherMode::Disabled {
+            return;
+        }
+        let worker_exited = daemon.worker_exited.clone();
+        drop(daemon);
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while !worker_exited.load(Ordering::Acquire) && std::time::Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(
+            worker_exited.load(Ordering::Acquire),
+            "fuzzy worker should leave its receive loop after Drop requests stop"
+        );
+    }
+
+    #[test]
+    fn daemon_publishes_latest_query_identity_after_burst() {
+        let dir = temp_repo();
+        let daemon =
+            FuzzyFileMatcherDaemon::new(FuzzyFileMatcher::new_inner(dir.path(), false), 10, None);
+        if daemon.mode == MatcherMode::Disabled {
+            return;
+        }
+        daemon.restart_walk(false);
+        daemon.set_query("alpha", false);
+        daemon.set_query("beta", false);
+        let latest = daemon.set_query("gamma", false);
+        for _ in 0..1_000 {
+            let result = daemon.get();
+            if result.query_id == latest {
+                assert_eq!(result.query, "gamma");
+                return;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        panic!("fuzzy daemon did not publish its latest query");
     }
 }
 

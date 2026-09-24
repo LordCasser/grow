@@ -11,6 +11,7 @@ arc-swap = { workspace = true }
 derive_more = { workspace = true, features = ["from", "try_into"] }
 dunce = { workspace = true }
 fs2 = { workspace = true }
+same-file = "1.0.6"
 educe = { workspace = true, features = ["Debug"] }
 tty-utils = { workspace = true }
 config = { path = "../config" }

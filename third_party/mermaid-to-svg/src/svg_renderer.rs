@@ -228,19 +228,28 @@ impl<'a> SvgRenderer<'a> {
     }
 
     fn render_node(&mut self, node: &LayoutNode) {
+        let mut node = node.clone();
+        node.fill_color = Some(Self::escape_xml(
+            node.fill_color.as_deref().unwrap_or(&self.theme.node_fill),
+        ));
+        node.stroke_color = Some(Self::escape_xml(
+            node.stroke_color
+                .as_deref()
+                .unwrap_or(&self.theme.node_stroke),
+        ));
         match node.shape {
-            NodeShape::Rectangle => self.render_rectangle(node, 0.0),
-            NodeShape::RoundedRectangle => self.render_rectangle(node, 5.0),
-            NodeShape::Stadium => self.render_rectangle(node, node.height / 2.0),
-            NodeShape::Diamond => self.render_diamond(node),
-            NodeShape::Circle => self.render_circle(node),
-            NodeShape::StartState => self.render_start_state(node),
-            NodeShape::EndState => self.render_end_state(node),
-            NodeShape::ForkJoin => self.render_fork_join(node),
-            NodeShape::Hexagon => self.render_hexagon(node),
-            NodeShape::Cylinder => self.render_cylinder(node),
-            NodeShape::Subroutine => self.render_subroutine(node),
-            NodeShape::Asymmetric => self.render_asymmetric(node),
+            NodeShape::Rectangle => self.render_rectangle(&node, 0.0),
+            NodeShape::RoundedRectangle => self.render_rectangle(&node, 5.0),
+            NodeShape::Stadium => self.render_rectangle(&node, node.height / 2.0),
+            NodeShape::Diamond => self.render_diamond(&node),
+            NodeShape::Circle => self.render_circle(&node),
+            NodeShape::StartState => self.render_start_state(&node),
+            NodeShape::EndState => self.render_end_state(&node),
+            NodeShape::ForkJoin => self.render_fork_join(&node),
+            NodeShape::Hexagon => self.render_hexagon(&node),
+            NodeShape::Cylinder => self.render_cylinder(&node),
+            NodeShape::Subroutine => self.render_subroutine(&node),
+            NodeShape::Asymmetric => self.render_asymmetric(&node),
         }
     }
 
@@ -259,7 +268,7 @@ impl<'a> SvgRenderer<'a> {
             x, y, node.width, node.height, rx, fill, stroke
         ));
 
-        self.render_text(node.x, node.y, &node.label);
+        self.render_text(node.x, node.y, node);
     }
 
     fn render_start_state(&mut self, node: &LayoutNode) {
@@ -323,7 +332,7 @@ impl<'a> SvgRenderer<'a> {
             points, fill, stroke
         ));
 
-        self.render_text(node.x, node.y, &node.label);
+        self.render_text(node.x, node.y, node);
     }
 
     fn render_circle(&mut self, node: &LayoutNode) {
@@ -340,7 +349,7 @@ impl<'a> SvgRenderer<'a> {
             node.x, node.y, r, fill, stroke
         ));
 
-        self.render_text(node.x, node.y, &node.label);
+        self.render_text(node.x, node.y, node);
     }
 
     fn render_hexagon(&mut self, node: &LayoutNode) {
@@ -375,7 +384,7 @@ impl<'a> SvgRenderer<'a> {
             points, fill, stroke
         ));
 
-        self.render_text(node.x, node.y, &node.label);
+        self.render_text(node.x, node.y, node);
     }
 
     fn render_cylinder(&mut self, node: &LayoutNode) {
@@ -422,7 +431,7 @@ impl<'a> SvgRenderer<'a> {
 
         // Center text in the cylinder body (below the top ellipse cap)
         let body_center_y = (body_top + body_bottom) / 2.0;
-        self.render_text(node.x, body_center_y, &node.label);
+        self.render_text(node.x, body_center_y, node);
     }
 
     fn render_subroutine(&mut self, node: &LayoutNode) {
@@ -460,7 +469,7 @@ impl<'a> SvgRenderer<'a> {
             stroke
         ));
 
-        self.render_text(node.x, node.y, &node.label);
+        self.render_text(node.x, node.y, node);
     }
 
     fn render_asymmetric(&mut self, node: &LayoutNode) {
@@ -494,16 +503,16 @@ impl<'a> SvgRenderer<'a> {
             points, fill, stroke
         ));
 
-        self.render_text(node.x + point_offset / 4.0, node.y, &node.label);
+        self.render_text(node.x + point_offset / 4.0, node.y, node);
     }
 
-    fn render_text(&mut self, x: f64, y: f64, text: &str) {
+    fn render_text(&mut self, x: f64, y: f64, node: &LayoutNode) {
         let char_width = if self.is_state_diagram {
             scale_char_width(STATE_CHAR_WIDTH, self.options.font_size)
         } else {
             scale_char_width(DEFAULT_CHAR_WIDTH, self.options.font_size)
         };
-        let lines = wrap_text_lines(text, self.options.wrapping_width, char_width);
+        let lines = wrap_text_lines(&node.label, self.options.wrapping_width, char_width);
         if lines.is_empty() {
             return;
         }
@@ -513,7 +522,7 @@ impl<'a> SvgRenderer<'a> {
             &lines,
             self.options.font_size,
             DEFAULT_LINE_HEIGHT,
-            &self.theme.text_color,
+            node.text_color.as_deref().unwrap_or(&self.theme.text_color),
         );
     }
 
@@ -535,7 +544,7 @@ impl<'a> SvgRenderer<'a> {
         self.output.push_str(&format!(
             r#"<text text-anchor="middle" dominant-baseline="central" font-family="{}" font-size="{:.0}" fill="{}">
 "#,
-            font_family, font_size, color
+            font_family, font_size, Self::escape_xml(color)
         ));
 
         for (i, line) in lines.iter().enumerate() {

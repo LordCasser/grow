@@ -84,7 +84,19 @@ fn reference_load_all(updates_path: &Path) -> Vec<acp::SessionUpdate> {
             SessionUpdate::ResponseReplayProjection(projection) => projection
                 .updates
                 .into_iter()
-                .map(|notification| strip_context_wrappers(notification.update))
+                .map(|chunk| {
+                    let compact = serde_json::to_value(chunk).expect("projected text");
+                    let reasoning = compact["channel"] == "reasoning";
+                    let text = compact["text"].as_str().expect("projected text body");
+                    let content = acp::ContentChunk::new(acp::ContentBlock::Text(
+                        acp::TextContent::new(text.to_owned()),
+                    ));
+                    if reasoning {
+                        acp::SessionUpdate::AgentThoughtChunk(content)
+                    } else {
+                        acp::SessionUpdate::AgentMessageChunk(content)
+                    }
+                })
                 .collect(),
         })
         .collect()

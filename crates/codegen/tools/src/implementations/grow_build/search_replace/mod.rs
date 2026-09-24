@@ -263,7 +263,13 @@ async fn handle_new_file_creation(
                 )));
             }
         }),
-        Err(_) => None,
+        Err(e) if e.io_error_kind() == Some(std::io::ErrorKind::NotFound) => None,
+        Err(e) => {
+            return Ok(SearchReplaceOutput::InvalidInput(format!(
+                "Error: failed to read {} before creating or updating it: {e}",
+                input.file_path
+            )));
+        }
     };
     let file_exists = old_text.is_some();
     if old_text.as_deref().is_some_and(|text| !text.is_empty()) {
@@ -280,7 +286,14 @@ async fn handle_new_file_creation(
             old_string_name
         )));
     }
-    if let Err(e) = fs.write_file(path, input.new_string.as_bytes()).await {
+    let write_result = if file_exists {
+        fs.replace_file_if_unchanged(path, b"", input.new_string.as_bytes())
+            .await
+    } else {
+        fs.create_file_if_absent(path, input.new_string.as_bytes())
+            .await
+    };
+    if let Err(e) = write_result {
         return Ok(match e.io_error_kind() {
             Some(std::io::ErrorKind::NotFound) => {
                 let display_dcwd = display_cwd_or_cwd(cwd, display_cwd);
@@ -295,8 +308,30 @@ async fn handle_new_file_creation(
                 .await;
                 SearchReplaceOutput::FileNotFound(msg)
             }
+            Some(std::io::ErrorKind::AlreadyExists) if !file_exists => {
+                SearchReplaceOutput::InvalidInput(format!(
+                    "Error: cannot create {} because the target now exists or a parent path changed. The target was not overwritten; read the path again before editing.",
+                    input.file_path
+                ))
+            }
             Some(std::io::ErrorKind::AlreadyExists) => SearchReplaceOutput::InvalidInput(format!(
-                "Error: cannot create {}. A component of the path already exists as a file where a directory is expected.",
+                "Error: cannot update {}. A component of the path already exists as a file where a directory is expected.",
+                input.file_path
+            )),
+            Some(std::io::ErrorKind::InvalidData) if file_exists => {
+                SearchReplaceOutput::InvalidInput(format!(
+                    "Error: {} changed since it was read. Read the file again before editing.",
+                    input.file_path
+                ))
+            }
+            Some(std::io::ErrorKind::Unsupported) if !file_exists => {
+                SearchReplaceOutput::InvalidInput(format!(
+                    "Error: cannot create {} because this filesystem does not support exclusive creation; the target was not written.",
+                    input.file_path
+                ))
+            }
+            Some(std::io::ErrorKind::Unsupported) => SearchReplaceOutput::InvalidInput(format!(
+                "Error: cannot edit {} because this filesystem does not support conditional writes; the target was not written.",
                 input.file_path
             )),
             Some(std::io::ErrorKind::InvalidFilename) => {
@@ -652,8 +687,19 @@ async fn handle_replacement(
     };
     let (new_text, new_positions) = replace_at_ranges(&old_text, &ranges, &replacement);
     let write_text = new_text.clone();
-    if let Err(e) = fs.write_file(path, write_text.as_bytes()).await {
+    if let Err(e) = fs
+        .replace_file_if_unchanged(path, old_text.as_bytes(), write_text.as_bytes())
+        .await
+    {
         return Ok(match e.io_error_kind() {
+            Some(std::io::ErrorKind::InvalidData) => SearchReplaceOutput::InvalidInput(format!(
+                "Error: {} changed since it was read. Read the file again before editing.",
+                input.file_path
+            )),
+            Some(std::io::ErrorKind::Unsupported) => SearchReplaceOutput::InvalidInput(format!(
+                "Error: cannot edit {} because this filesystem does not support conditional writes; the target was not written.",
+                input.file_path
+            )),
             Some(std::io::ErrorKind::AlreadyExists) => SearchReplaceOutput::InvalidInput(format!(
                 "Error: cannot write {}. A component of the path already exists as a file where a directory is expected.",
                 input.file_path
@@ -778,9 +824,13 @@ impl tool_runtime::Tool for SearchReplaceTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::computer::types::{AsyncFileSystem, ComputerError};
     use crate::types::tool_metadata::{test_ctx, test_ctx_with_call_id};
     use crate::{computer::local::LocalFs, types::resources::Resources};
-    use std::sync::Arc;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
     use tempfile::TempDir;
     /// Set up Resources with real filesystem for tests.
     fn test_resources(cwd: &std::path::Path) -> Resources {
@@ -915,6 +965,259 @@ mod tests {
             other => panic!("Expected EditsApplied, got {:?}", other),
         }
     }
+    struct FailingReadFs {
+        error: ComputerError,
+        writes: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl AsyncFileSystem for FailingReadFs {
+        async fn read_file(&self, _path: &std::path::Path) -> Result<Vec<u8>, ComputerError> {
+            Err(self.error.clone())
+        }
+
+        async fn write_file(
+            &self,
+            _path: &std::path::Path,
+            _data: &[u8],
+        ) -> Result<(), ComputerError> {
+            self.writes.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        }
+
+        async fn delete_file(&self, _path: &std::path::Path) -> Result<(), ComputerError> {
+            unreachable!("search_replace must not delete a file")
+        }
+    }
+
+    #[tokio::test]
+    async fn new_file_read_errors_do_not_write() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("existing.txt");
+        std::fs::write(&path, "keep me").unwrap();
+        for error in [
+            ComputerError::io_with_kind("permission denied", std::io::ErrorKind::PermissionDenied),
+            ComputerError::io("unclassified read failure"),
+        ] {
+            let writes = Arc::new(AtomicUsize::new(0));
+            let mut resources = test_resources(tmp.path());
+            resources.insert(FileSystem(Arc::new(FailingReadFs {
+                error,
+                writes: writes.clone(),
+            })));
+            let result = tool_runtime::Tool::run(
+                &SearchReplaceTool,
+                test_ctx(resources.into_shared()),
+                make_input("existing.txt", "", "replacement"),
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(result, SearchReplaceOutput::InvalidInput(ref message) if message.contains("failed to read existing.txt")),
+                "unexpected result: {result:?}"
+            );
+            assert_eq!(writes.load(Ordering::SeqCst), 0);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "keep me");
+        }
+    }
+    struct RacingCreateFs;
+
+    #[async_trait::async_trait]
+    impl AsyncFileSystem for RacingCreateFs {
+        async fn read_file(&self, path: &std::path::Path) -> Result<Vec<u8>, ComputerError> {
+            #[cfg(unix)]
+            {
+                let status = std::process::Command::new("sh")
+                    .args(["-c", "printf competitor > \"$1\"", "sh"])
+                    .arg(path)
+                    .status()
+                    .unwrap();
+                assert!(status.success());
+            }
+            #[cfg(not(unix))]
+            std::fs::write(path, b"competitor").unwrap();
+            Err(ComputerError::io_with_kind(
+                "target was absent when read began",
+                std::io::ErrorKind::NotFound,
+            ))
+        }
+
+        async fn write_file(
+            &self,
+            _path: &std::path::Path,
+            _data: &[u8],
+        ) -> Result<(), ComputerError> {
+            panic!("confirmed absence must never use ordinary write")
+        }
+
+        async fn create_file_if_absent(
+            &self,
+            path: &std::path::Path,
+            data: &[u8],
+        ) -> Result<(), ComputerError> {
+            LocalFs.create_file_if_absent(path, data).await
+        }
+
+        async fn delete_file(&self, _path: &std::path::Path) -> Result<(), ComputerError> {
+            unreachable!("search_replace must not delete a file")
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_file_creation_rejects_competing_writer_without_notification() {
+        let tmp = TempDir::new().unwrap();
+        let (handle, mut rx) = ToolNotificationHandle::channel();
+        let mut resources = test_resources(tmp.path());
+        resources.insert(FileSystem(Arc::new(RacingCreateFs)));
+        resources.insert(NotificationHandle(handle));
+        let result = tool_runtime::Tool::run(
+            &SearchReplaceTool,
+            test_ctx(resources.into_shared()),
+            make_input("new.txt", "", "ours"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result, SearchReplaceOutput::InvalidInput(ref message) if message.contains("target now exists")),
+            "unexpected result: {result:?}"
+        );
+        assert_eq!(
+            std::fs::read(tmp.path().join("new.txt")).unwrap(),
+            b"competitor"
+        );
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn missing_file_creation_rejects_unsupported_filesystem_without_write() {
+        let tmp = TempDir::new().unwrap();
+        let writes = Arc::new(AtomicUsize::new(0));
+        let (handle, mut rx) = ToolNotificationHandle::channel();
+        let mut resources = test_resources(tmp.path());
+        resources.insert(FileSystem(Arc::new(FailingReadFs {
+            error: ComputerError::io_with_kind("missing", std::io::ErrorKind::NotFound),
+            writes: writes.clone(),
+        })));
+        resources.insert(NotificationHandle(handle));
+        let result = tool_runtime::Tool::run(
+            &SearchReplaceTool,
+            test_ctx(resources.into_shared()),
+            make_input("new.txt", "", "ours"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result, SearchReplaceOutput::InvalidInput(ref message) if message.contains("does not support exclusive creation")),
+            "unexpected result: {result:?}"
+        );
+        assert_eq!(writes.load(Ordering::SeqCst), 0);
+        assert!(rx.try_recv().is_err());
+    }
+
+    struct RacingUpdateFs;
+
+    #[async_trait::async_trait]
+    impl AsyncFileSystem for RacingUpdateFs {
+        async fn read_file(&self, path: &std::path::Path) -> Result<Vec<u8>, ComputerError> {
+            let bytes = LocalFs.read_file(path).await?;
+            std::fs::write(path, b"competitor")?;
+            Ok(bytes)
+        }
+
+        async fn write_file(
+            &self,
+            _path: &std::path::Path,
+            _data: &[u8],
+        ) -> Result<(), ComputerError> {
+            panic!("existing edit must never use unconditional write")
+        }
+
+        async fn replace_file_if_unchanged(
+            &self,
+            path: &std::path::Path,
+            expected: &[u8],
+            data: &[u8],
+        ) -> Result<(), ComputerError> {
+            LocalFs
+                .replace_file_if_unchanged(path, expected, data)
+                .await
+        }
+
+        async fn delete_file(&self, _path: &std::path::Path) -> Result<(), ComputerError> {
+            unreachable!("search_replace must not delete a file")
+        }
+    }
+
+    #[tokio::test]
+    async fn existing_edits_reject_stale_source_without_notification() {
+        for old_string in ["before", ""] {
+            let tmp = TempDir::new().unwrap();
+            let path = tmp.path().join("file.txt");
+            std::fs::write(&path, old_string).unwrap();
+            let (handle, mut rx) = ToolNotificationHandle::channel();
+            let mut resources = test_resources(tmp.path());
+            resources.insert(FileSystem(Arc::new(RacingUpdateFs)));
+            resources.insert(NotificationHandle(handle));
+            let result = tool_runtime::Tool::run(
+                &SearchReplaceTool,
+                test_ctx(resources.into_shared()),
+                make_input("file.txt", old_string, "ours"),
+            )
+            .await
+            .unwrap();
+            assert!(
+                matches!(result, SearchReplaceOutput::InvalidInput(ref message) if message.contains("changed since it was read")),
+                "unexpected result: {result:?}"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), b"competitor");
+            assert!(rx.try_recv().is_err());
+        }
+    }
+
+    struct UnsupportedExistingFs;
+
+    #[async_trait::async_trait]
+    impl AsyncFileSystem for UnsupportedExistingFs {
+        async fn read_file(&self, _path: &std::path::Path) -> Result<Vec<u8>, ComputerError> {
+            Ok(b"before".to_vec())
+        }
+
+        async fn write_file(
+            &self,
+            _path: &std::path::Path,
+            _data: &[u8],
+        ) -> Result<(), ComputerError> {
+            panic!("unsupported adapter must not receive unconditional write")
+        }
+
+        async fn delete_file(&self, _path: &std::path::Path) -> Result<(), ComputerError> {
+            unreachable!("search_replace must not delete a file")
+        }
+    }
+
+    #[tokio::test]
+    async fn existing_edit_rejects_unsupported_adapter_without_notification() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("file.txt");
+        std::fs::write(&path, b"before").unwrap();
+        let (handle, mut rx) = ToolNotificationHandle::channel();
+        let mut resources = test_resources(tmp.path());
+        resources.insert(FileSystem(Arc::new(UnsupportedExistingFs)));
+        resources.insert(NotificationHandle(handle));
+        let result = tool_runtime::Tool::run(
+            &SearchReplaceTool,
+            test_ctx(resources.into_shared()),
+            make_input("file.txt", "before", "ours"),
+        )
+        .await
+        .unwrap();
+        assert!(
+            matches!(result, SearchReplaceOutput::InvalidInput(ref message) if message.contains("does not support conditional writes")),
+            "unexpected result: {result:?}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), b"before");
+        assert!(rx.try_recv().is_err());
+    }
     #[test]
     fn removed_search_replace_params_are_rejected() {
         for json in [
@@ -1014,7 +1317,7 @@ mod tests {
             .unwrap();
         match result {
             SearchReplaceOutput::InvalidInput(msg) => {
-                assert!(msg.contains("already exists as a file"), "got: {msg}");
+                assert!(msg.contains("Not a directory"), "got: {msg}");
             }
             other => panic!("Expected InvalidInput, got {:?}", other),
         }

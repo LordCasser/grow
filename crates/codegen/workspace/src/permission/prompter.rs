@@ -780,35 +780,31 @@ fn map_selected_outcome(
             acp::PermissionOptionKind::AllowOnce => PromptOutcome::AllowOnce,
             acp::PermissionOptionKind::AllowAlways => {
                 if option_id.to_string() == "allow-always-mcp" {
-                    if let Some(selection) = meta.and_then(|m| {
-                        serde_json::from_value::<McpScopeSelection>(serde_json::Value::Object(
-                            m.clone(),
-                        ))
-                        .ok()
-                    }) {
+                    if let AccessKind::MCPTool { name, .. } = access {
+                        let selection = meta.and_then(|m| {
+                            serde_json::from_value::<McpScopeSelection>(serde_json::Value::Object(
+                                m.clone(),
+                            ))
+                            .ok()
+                        });
+                        let expected_server =
+                            parse_mcp_qualified_name(name).map(|(_, server, _)| server);
                         match selection {
-                            McpScopeSelection::Tool { tool_name } => {
-                                PromptOutcome::AllowAlwaysMcpTool(tool_name)
+                            Some(McpScopeSelection::Tool { tool_name }) if tool_name == *name => {
+                                PromptOutcome::AllowAlwaysMcpTool(name.clone())
                             }
-                            McpScopeSelection::Server { server } => {
-                                if server.is_empty() {
-                                    if let AccessKind::MCPTool { name, .. } = access {
-                                        PromptOutcome::AllowAlwaysMcpTool(name.clone())
-                                    } else {
-                                        PromptOutcome::AllowAlways
-                                    }
-                                } else {
-                                    PromptOutcome::AllowAlwaysMcpServer(server)
-                                }
+                            Some(McpScopeSelection::Server { server })
+                                if expected_server == Some(server.as_str()) =>
+                            {
+                                PromptOutcome::AllowAlwaysMcpServer(server)
                             }
+                            _ => PromptOutcome::AllowAlwaysMcpTool(name.clone()),
                         }
-                    } else if let AccessKind::MCPTool { name, .. } = access {
+                    } else {
                         // No scope meta. TUI case: the renderer
                         // shows the option but does not build the toggle
                         // response. Default to tool-scope using the
                         // access-kind name.
-                        PromptOutcome::AllowAlwaysMcpTool(name.clone())
-                    } else {
                         PromptOutcome::AllowAlways
                     }
                 } else if option_id.to_string() == "allow-always-domain" {
@@ -823,19 +819,11 @@ fn map_selected_outcome(
                         PromptOutcome::AllowOnce
                     }
                 } else if option_id.to_string() == "allow-always-command" {
-                    if let Some(bash_selected_commands) = meta.and_then(|m| {
-                        serde_json::from_value::<BashCommandSelectedTerms>(
-                            serde_json::Value::Object(m.clone()),
-                        )
-                        .ok()
-                    }) {
-                        PromptOutcome::AllowAlwaysBashCommand(
-                            bash_selected_commands.command_parts.join(" "),
-                        )
-                    } else if let AccessKind::Bash(cmd) = access {
-                        // No interactive selection metadata.
-                        // Compute the primary command from the script.
-                        if let Some(primary) = primary_command_from_script(cmd) {
+                    if let AccessKind::Bash(cmd) = access {
+                        let selected = validated_bash_selection(meta, cmd);
+                        if let Some(words) = selected {
+                            PromptOutcome::AllowAlwaysBashCommand(words.join(" "))
+                        } else if let Some(primary) = primary_command_from_script(cmd) {
                             PromptOutcome::AllowAlwaysBashCommand(
                                 primary.highlighted_words.join(" "),
                             )
@@ -866,17 +854,10 @@ fn map_selected_outcome(
             }
             acp::PermissionOptionKind::RejectAlways => {
                 if option_id.to_string() == "reject-always-command" {
-                    if let Some(bash_selected_commands) = meta.and_then(|m| {
-                        serde_json::from_value::<BashCommandSelectedTerms>(
-                            serde_json::Value::Object(m.clone()),
-                        )
-                        .ok()
-                    }) {
-                        PromptOutcome::RejectAlwaysBashCommand(
-                            bash_selected_commands.command_parts.join(" "),
-                        )
-                    } else if let AccessKind::Bash(cmd) = access {
-                        if let Some(primary) = primary_command_from_script(cmd) {
+                    if let AccessKind::Bash(cmd) = access {
+                        if let Some(words) = validated_bash_selection(meta, cmd) {
+                            PromptOutcome::RejectAlwaysBashCommand(words.join(" "))
+                        } else if let Some(primary) = primary_command_from_script(cmd) {
                             PromptOutcome::RejectAlwaysBashCommand(
                                 primary.highlighted_words.join(" "),
                             )
@@ -894,6 +875,16 @@ fn map_selected_outcome(
             _ => PromptOutcome::Error("unknown permission option kind".to_owned()),
         })
         .unwrap_or_else(|| PromptOutcome::Error("unknown permission option".to_owned()))
+}
+
+fn validated_bash_selection(meta: Option<&acp::Meta>, command: &str) -> Option<Vec<String>> {
+    let selected = meta.and_then(|m| {
+        serde_json::from_value::<BashCommandSelectedTerms>(serde_json::Value::Object(m.clone()))
+            .ok()
+    })?;
+    let actual = primary_command_from_script(command)?.highlighted_words;
+    let parts = selected.command_parts;
+    (!parts.is_empty() && actual.starts_with(&parts)).then_some(parts)
 }
 
 #[cfg(test)]
@@ -1056,6 +1047,42 @@ mod tests {
     }
 
     #[test]
+    fn bash_scope_metadata_must_be_a_prefix_of_the_request_command() {
+        let p = prompter(ClientType::GrowPager);
+        let access = AccessKind::Bash("cargo test --workspace".to_owned());
+        let opts = p.build_options(&access);
+        let meta = |parts: &[&str]| {
+            serde_json::to_value(BashCommandSelectedTerms {
+                command_parts: parts.iter().map(|part| (*part).to_owned()).collect(),
+            })
+            .unwrap()
+            .as_object()
+            .cloned()
+            .unwrap()
+        };
+
+        let outcome = outcome_for(
+            &opts,
+            "allow-always-command",
+            Some(meta(&["rm", "-rf"])),
+            &access,
+        );
+        assert!(
+            matches!(outcome, PromptOutcome::AllowAlwaysBashCommand(ref s) if s == "cargo test --workspace")
+        );
+
+        let outcome = outcome_for(
+            &opts,
+            "allow-always-command",
+            Some(meta(&["cargo", "test"])),
+            &access,
+        );
+        assert!(
+            matches!(outcome, PromptOutcome::AllowAlwaysBashCommand(ref s) if s == "cargo test")
+        );
+    }
+
+    #[test]
     fn gate_off_keeps_edit_session_allow() {
         // The edit session allow is governed separately, not by this gate.
         let p = prompter_with_gate(ClientType::GrowPager, false);
@@ -1158,6 +1185,30 @@ mod tests {
             outcome,
             PromptOutcome::AllowAlwaysMcpServer(ref s) if s == "linear"
         ));
+    }
+
+    #[test]
+    fn mismatched_mcp_scope_metadata_falls_back_to_current_tool() {
+        let p = prompter(ClientType::GrowPager);
+        let access = AccessKind::MCPTool {
+            name: "linear__list".to_owned(),
+            input: serde_json::Value::Null,
+        };
+        let opts = p.build_options(&access);
+        for meta in [
+            serde_json::json!({"kind": "tool", "tool_name": "slack__post"}),
+            serde_json::json!({"kind": "server", "server": "slack"}),
+        ] {
+            let outcome = outcome_for(
+                &opts,
+                "allow-always-mcp",
+                Some(meta.as_object().unwrap().clone()),
+                &access,
+            );
+            assert!(
+                matches!(outcome, PromptOutcome::AllowAlwaysMcpTool(ref name) if name == "linear__list")
+            );
+        }
     }
 
     #[test]

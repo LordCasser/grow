@@ -167,6 +167,9 @@ pub struct FuzzySearchContext {
     pub last_activity: Instant,
     pub hidden: bool,
     pub min_generation: usize,
+    /// Latest request submitted to the matcher. Its worker generation may
+    /// advance independently while an older query is still running.
+    pub query_id: usize,
     pub has_query: bool,
     pub query_version: usize,
     /// The root path for this search (used to convert relative paths to absolute).
@@ -196,6 +199,7 @@ impl FuzzySearchContext {
             last_activity: Instant::now(),
             hidden,
             min_generation: 0,
+            query_id: 0,
             has_query: false,
             query_version: 0,
             root: root.to_path_buf(),
@@ -275,7 +279,7 @@ impl FuzzySearchManager {
             ctx.daemon.restart_walk(ctx.hidden);
         }
 
-        ctx.daemon.set_query(query, dirs_only);
+        ctx.query_id = ctx.daemon.set_query(query, dirs_only);
         ctx.min_generation += 1;
         ctx.has_query = !query.is_empty();
         ctx.query_version += 1;
@@ -313,7 +317,7 @@ impl FuzzySearchManager {
 
         let results = ctx.daemon.get();
 
-        if results.generation < min_gen {
+        if results.query_id != ctx.query_id || results.generation < min_gen {
             return None;
         }
 

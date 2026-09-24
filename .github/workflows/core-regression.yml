@@ -60,3 +60,37 @@ jobs:
           -- --test-threads=4
       - name: Build the application entry point
         run: cargo build --locked -p cli --bin grow
+      - name: Install interactive pager for transcript restoration regression
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes less
+      - name: Run selected Pager PTY regressions
+        env:
+          PAGER_BINARY: ${{ github.workspace }}/target/debug/grow
+        run: |
+          set -euo pipefail
+          while read -r target test_name; do
+            echo "Running ${target}::${test_name}"
+            cargo test --locked -p pager --test "$target" "$test_name" -- --ignored --exact --test-threads=1
+          done <<'CASES'
+          pty_e2e_minimal minimal::minimal_thinking_is_visually_distinct_from_output::minimal_thinking_is_visually_distinct_from_output
+          pty_e2e_minimal minimal::minimal_transcript_opens_in_pager::minimal_transcript_opens_in_pager
+          pty_e2e_minimal minimal::minimal_parked_plan_commits_to_scrollback::minimal_parked_plan_commits_to_scrollback
+          pty_e2e_minimal minimal::minimal_parked_plan_survives_quit::minimal_parked_plan_survives_quit
+          pty_e2e_minimal minimal::minimal_new_session_keeps_history_and_resets::minimal_new_session_keeps_history_and_resets
+          pty_e2e_minimal minimal::minimal_resize_preserves_committed_scrollback::minimal_resize_preserves_committed_scrollback
+          pty_e2e_minimal minimal::minimal_esc_cancels_running_turn::minimal_esc_cancels_running_turn
+          pty_e2e_minimal minimal::minimal_ctrl_c_arms_and_quits::minimal_ctrl_c_arms_and_quits
+          pty_e2e_minimal minimal::minimal_transcript_pager_restore_no_artifacts::minimal_transcript_pager_restore_no_artifacts
+          pty_e2e_config_ui show_thinking_blocks_toggle_hides_existing_pty::show_thinking_blocks_toggle_hides_existing_pty
+          pty_e2e_config_ui verb_group_fold_expand_collapse_pty::verb_group_fold_expand_collapse_pty
+          pty_e2e_scroll_selection resize_preserves_scroll_position::resize_preserves_scroll_position
+          pty_e2e_scroll_selection read_tool_header_selection_copies_path_only_pty::read_tool_header_selection_copies_path_only_pty
+          pty_e2e_queue queued_bash_promotion_renders_output_pty::queued_bash_promotion_renders_output_pty
+          pty_e2e_queue send_now_tip_after_mid_turn_queue::send_now_tip_after_mid_turn_queue
+          pty_e2e_queue esc_cancels_running_turn_from_prompt_preserves_draft::esc_cancels_running_turn_from_prompt_preserves_draft
+          pty_e2e_queue esc_cancels_running_turn_from_scrollback::esc_cancels_running_turn_from_scrollback
+          leader_pty_e2e leader_two_clients_shared_session::leader_two_clients_shared_session
+          leader_pty_e2e leader_n_clients_shared_session::leader_n_clients_shared_session
+          leader_pty_e2e leader_attach_during_active_turn::leader_attach_during_active_turn
+          CASES

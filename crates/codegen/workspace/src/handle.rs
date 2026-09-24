@@ -2239,6 +2239,58 @@ pub(crate) mod tests {
             "expected alpha_widget in matches, got: {last}"
         );
     }
+
+    #[tokio::test]
+    async fn fuzzy_change_burst_streams_only_the_latest_query() {
+        use crate::file_system::TargetClientId;
+        let handle = make_handle();
+        let cwd = handle.root_cwd().unwrap();
+        std::fs::write(cwd.join("alpha_widget.rs"), b"").unwrap();
+        std::fs::write(cwd.join("beta_gadget.rs"), b"").unwrap();
+        let captured = Arc::new(parking_lot::Mutex::new(Vec::<serde_json::Value>::new()));
+        let sink_captured = captured.clone();
+        handle.set_client_ext_sink(Arc::new(move |method, params| {
+            if method == "grow/search/fuzzy/status" {
+                sink_captured.lock().push(params);
+            }
+        }));
+        let search_id = handle
+            .fuzzy_open(Some(&cwd), None, false, None, TargetClientId::None)
+            .await;
+        let mut latest = None;
+        for index in 0..100 {
+            let query = if index % 2 == 0 {
+                "alpha_widget"
+            } else {
+                "beta_gadget"
+            };
+            latest = handle.fuzzy_change(&search_id, query, false).await;
+        }
+        let (min_gen, has_query, query_version) = latest.unwrap();
+        handle
+            .run_fuzzy_notifications(search_id, min_gen, has_query, query_version, 50)
+            .await;
+        let got = captured.lock();
+        assert!(!got.is_empty(), "coalesced latest query must publish");
+        let last = got.last().unwrap();
+        assert!(last["done"].as_bool().unwrap_or(false));
+        assert!(
+            last["matches"]
+                .as_array()
+                .is_some_and(|matches| matches.iter().any(|m| m["path"]
+                    .as_str()
+                    .is_some_and(|path| path.contains("beta_gadget"))))
+        );
+        assert!(got.iter().all(|update| {
+            update["matches"].as_array().is_some_and(|matches| {
+                !matches.iter().any(|m| {
+                    m["path"]
+                        .as_str()
+                        .is_some_and(|path| path.contains("alpha_widget"))
+                })
+            })
+        }));
+    }
     /// `WorkspaceHandle::new` (the test/default path, not `connect_local_workspace`)
     /// must use an ephemeral temp `workspace_home` — never the real
     /// `$GROW_WORKSPACE_HOME`; `new` stays runtime-light and never touches

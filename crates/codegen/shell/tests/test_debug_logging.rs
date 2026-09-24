@@ -3,27 +3,25 @@
 //! Runs the built grow binary against the mock inference server with a
 //! caller-owned `$GROW_HOME`, then inspects `~/.grow/debug/`:
 //! - the `--debug` FLAG drives the firehose end to end through the master switch:
-//!   a live `agent` session launched with `--debug` writes a non-empty per-session
-//!   `~/.grow/debug/<sessionId>.txt` with first-party content, and does NOT enable
-//!   sampling/instrumentation. Regression for the master switch having bundled
+//!   a live `agent` session launched with `--debug` writes a non-empty
+//!   `~/.grow/debug/firehose.txt` with first-party content and `sid=<sessionId>`,
+//!   and does NOT enable sampling/instrumentation. Regression for the master switch having bundled
 //!   `GROW_LOG_SAMPLING`/`GROW_INSTRUMENTATION`, whose global `TargetFilterLayer`
 //!   suppressed every other target and starved the firehose.
 //! - `--debug` (headless) runs cleanly without crashing arg-parsing (smoke).
 //! - no `--debug` writes no firehose files.
-//! - a live `agent` session (explicit `GROW_DEBUG_LOG=1`) writes a per-session
-//!   `~/.grow/debug/<sessionId>.txt` with real first-party content + `latest.txt`.
-//! - `--debug-file <path>` writes one explicit file and bypasses per-session
-//!   routing entirely (no `~/.grow/debug/` files).
-//! - `GROW_LOG_FILE=<path>` writes that explicit file (back-compat single file).
+//! - a live `agent` session (explicit `GROW_DEBUG_LOG=1`) writes
+//!   `~/.grow/debug/firehose.txt` with real first-party content and `sid=`.
+//! - `--debug-file <path>` writes one explicit file and no default stream.
+//! - `GROW_LOG_FILE=<path>` writes that explicit file.
 //!
-//! Per-session content is asserted via the live `agent`, not the headless run:
+//! Session attribution is asserted via the live `agent`, not the headless run:
 //! the agent's `run_session` future runs under the `session` span (carrying
-//! `session_id`), so its first-party debug events route to `<sessionId>.txt`.
+//! `session_id`), so its first-party debug events include `sid=<sessionId>`.
 //! This is the same `init_tracing_simple("agent")` path the spawned leader uses,
 //! so it covers leader capture deterministically without a flaky detached
-//! process. Buffered logs from runs that DO log are not lost: the firehose
-//! worker guards are flushed at process exit via `debug_log::flush()` (normal +
-//! signal exit paths).
+//! process. Accepted records are flushed at process exit via
+//! `debug_log::flush()` (normal and signal exit paths).
 //!
 //! `#[ignore]` (they need a built binary). Run locally (auto-builds the pager):
 //! ```bash
@@ -46,13 +44,24 @@ where
     tokio::task::LocalSet::new().run_until(f()).await;
 }
 
-/// The per-session firehose directory under a pinned `$GROW_HOME`.
+/// The firehose directory under a pinned `$GROW_HOME`.
 fn debug_dir(home: &Path) -> PathBuf {
     home.join(".grow").join("debug")
 }
 
-/// List firehose `*.txt` files under `~/.grow/debug` (excluding the `latest.txt`
-/// symlink). Empty if the dir is missing.
+fn configure_mock_model(grow_home: &Path, server: &MockInferenceServer) {
+    std::fs::create_dir_all(grow_home).expect("create mock grow home");
+    std::fs::write(
+        grow_home.join("config.toml"),
+        format!(
+            "[models]\ndefault = \"mock/test-model\"\n\n[provider.mock.options]\nbase_url = {:?}\nenv_key = \"GROW_API_KEY\"\n\n[provider.mock.models.test-model]\ncontext_window = 200000\n",
+            server.url()
+        ),
+    )
+    .expect("write mock model config");
+}
+
+/// List firehose `*.txt` files under `~/.grow/debug`. Empty if the dir is missing.
 fn firehose_txt_files(home: &Path) -> Vec<PathBuf> {
     let Ok(entries) = std::fs::read_dir(debug_dir(home)) else {
         return Vec::new();
@@ -63,7 +72,7 @@ fn firehose_txt_files(home: &Path) -> Vec<PathBuf> {
         .filter(|p| {
             p.file_name()
                 .and_then(|n| n.to_str())
-                .is_some_and(|n| n.ends_with(".txt") && n != "latest.txt")
+                .is_some_and(|n| n.ends_with(".txt"))
         })
         .collect()
 }
@@ -78,6 +87,7 @@ fn debug_cmd(
     extra: &[&str],
 ) -> (tokio::process::Command, TestSandbox) {
     let mut sandbox = TestSandbox::builder().mock_url(server.url()).build();
+    configure_mock_model(&home.join(".grow"), server);
     sandbox
         .set_env("HOME", home)
         .set_env("USERPROFILE", home)
@@ -103,7 +113,7 @@ fn debug_cmd(
     (cmd, sandbox)
 }
 
-/// Poll up to 50×100ms for the per-session firehose at `path` to become non-empty
+/// Poll up to 50×100ms for the firehose at `path` to become non-empty
 /// (its worker flushes asynchronously while the agent process stays alive), then
 /// assert it carries first-party (`grow`) content. Panics with the captured
 /// stderr tail if it never fills. Shared by the live-agent tests.
@@ -176,19 +186,20 @@ async fn no_debug_flag_writes_no_debug_dir() {
     );
 }
 
-/// A live `agent` session writes `~/.grow/debug/<sessionId>.txt` with real
-/// first-party content, and points `latest.txt` at it. This is the same
+/// A live `agent` session writes `~/.grow/debug/firehose.txt` with real
+/// first-party content and session attribution. This is the same
 /// `init_tracing_simple("agent")` path the spawned leader uses, so it covers
 /// leader capture deterministically without a flaky detached process.
 #[tokio::test]
 #[ignore] // requires pre-built binary; run with --ignored
-async fn agent_session_writes_named_session_file() {
+async fn agent_session_writes_firehose_with_session_attribution() {
     with_local_set(|| async {
         let server = MockInferenceServer::start()
             .await
             .expect("start mock server");
         let workdir = git_workdir();
         let mut sandbox = TestSandbox::new();
+        configure_mock_model(sandbox.grow_home(), &server);
         sandbox.set_env("GROW_DEBUG_LOG", "1");
         let grow_home = sandbox.grow_home().to_path_buf();
 
@@ -198,23 +209,19 @@ async fn agent_session_writes_named_session_file() {
         let session_id = client
             .create_session_with_timeout(workdir.workspace())
             .await;
-        // New session ids are UUID v7 (filesystem-safe), so the firehose file is
-        // named verbatim `<sessionId>.txt`.
         let sid = session_id.0.to_string();
         let _ = client.prompt_with_timeout(&session_id, "say hi").await;
 
-        let session_file = grow_home.join("debug").join(format!("{sid}.txt"));
-        read_session_firehose_when_ready(&session_file, &client).await;
-
-        // `latest.txt` is a sibling symlink pointing at the just-opened session
-        // file, so `tail -f ~/.grow/debug/latest.txt` follows the live session.
-        #[cfg(unix)]
-        {
-            let link = grow_home.join("debug").join("latest.txt");
-            let target = std::fs::read_link(&link)
-                .unwrap_or_else(|e| panic!("latest.txt should be a symlink ({link:?}): {e}"));
-            assert_eq!(target, Path::new(&format!("{sid}.txt")));
-        }
+        let firehose = grow_home.join("debug").join("firehose.txt");
+        let content = read_session_firehose_when_ready(&firehose, &client).await;
+        assert!(
+            content.contains(&format!("sid={sid}")),
+            "firehose should attribute session {sid}"
+        );
+        assert_eq!(
+            firehose_txt_files(grow_home.parent().unwrap()),
+            vec![firehose]
+        );
     })
     .await;
 }
@@ -224,7 +231,7 @@ async fn agent_session_writes_named_session_file() {
 /// `GROW_LOG_SAMPLING`/`GROW_INSTRUMENTATION`, whose `TargetFilterLayer` globally
 /// suppresses every non-matching target — starving the firehose so `--debug`
 /// produced no logs. Drives a real agent session with `--debug` and asserts the
-/// per-session file has first-party content (would FAIL pre-fix), and that
+/// default firehose has first-party content and session attribution (would FAIL pre-fix), and that
 /// sampling/instrumentation are NOT enabled by `--debug`.
 #[tokio::test]
 #[ignore] // requires pre-built binary; run with --ignored
@@ -235,6 +242,7 @@ async fn debug_flag_master_switch_enables_firehose() {
             .expect("start mock server");
         let workdir = git_workdir();
         let sandbox = TestSandbox::new();
+        configure_mock_model(sandbox.grow_home(), &server);
         let grow_home = sandbox.grow_home().to_path_buf();
 
         // Drive `grow --debug agent stdio`: the master switch (which runs before
@@ -256,8 +264,12 @@ async fn debug_flag_master_switch_enables_firehose() {
         let sid = session_id.0.to_string();
         let _ = client.prompt_with_timeout(&session_id, "say hi").await;
 
-        let session_file = grow_home.join("debug").join(format!("{sid}.txt"));
-        read_session_firehose_when_ready(&session_file, &client).await;
+        let firehose = grow_home.join("debug").join("firehose.txt");
+        let content = read_session_firehose_when_ready(&firehose, &client).await;
+        assert!(
+            content.contains(&format!("sid={sid}")),
+            "firehose should attribute session {sid}"
+        );
 
         // Slimming guard: `--debug` must NOT enable sampling. The agent spawn
         // clears GROW_LOG_SAMPLING (hermetic), so the sampling layer stays off and
@@ -275,8 +287,7 @@ async fn debug_flag_master_switch_enables_firehose() {
     .await;
 }
 
-/// `--debug-file <path>` writes one explicit file and bypasses per-session
-/// routing entirely (no `~/.grow/debug/` files created).
+/// `--debug-file <path>` writes one explicit file instead of the default stream.
 #[tokio::test]
 #[ignore] // requires pre-built binary; run with --ignored
 async fn debug_file_flag_writes_single_file_and_bypasses_routing() {
@@ -303,15 +314,15 @@ async fn debug_file_flag_writes_single_file_and_bypasses_routing() {
         "explicit --debug-file path not written: {explicit:?}\nstderr tail:\n{}",
         stderr_tail(&result.stderr, 800)
     );
-    // Routing bypassed: nothing should land in the per-session debug dir.
+    // The explicit path does not also create the default stream.
     assert!(
         firehose_txt_files(home.path()).is_empty(),
-        "--debug-file must bypass per-session routing, found: {:?}",
+        "--debug-file must bypass the default stream, found: {:?}",
         firehose_txt_files(home.path())
     );
 }
 
-/// `GROW_LOG_FILE=<path>` (no `--debug`) writes that exact file (back-compat).
+/// `GROW_LOG_FILE=<path>` (no `--debug`) writes that exact file.
 #[tokio::test]
 #[ignore] // requires pre-built binary; run with --ignored
 async fn grow_log_file_explicit_path_is_written() {
@@ -333,10 +344,10 @@ async fn grow_log_file_explicit_path_is_written() {
         "explicit GROW_LOG_FILE path not written: {custom:?}\nstderr tail:\n{}",
         stderr_tail(&result.stderr, 800)
     );
-    // Single-file mode bypasses per-session routing.
+    // The explicit path does not also create the default stream.
     assert!(
         firehose_txt_files(home.path()).is_empty(),
-        "GROW_LOG_FILE must bypass per-session routing, found: {:?}",
+        "GROW_LOG_FILE must bypass the default stream, found: {:?}",
         firehose_txt_files(home.path())
     );
 }

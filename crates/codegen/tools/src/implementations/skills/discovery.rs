@@ -118,17 +118,15 @@ fn walk_skill_descendants(
     }
 }
 
-/// Coerce a scalar YAML value to a trimmed, non-empty string. Numbers and bools
-/// are stringified; null, blank, and non-scalars yield `None`.
-fn coerce_to_string(value: Option<&serde_yaml::Value>) -> Option<String> {
+/// Read a YAML string as trimmed, non-empty text. Booleans, numbers, null, blank
+/// strings and non-scalars are not descriptive text.
+fn frontmatter_string(value: Option<&serde_yaml::Value>) -> Option<String> {
     use serde_yaml::Value;
     match value? {
         Value::String(s) => {
             let t = s.trim();
             (!t.is_empty()).then(|| t.to_string())
         }
-        Value::Bool(b) => Some(b.to_string()),
-        Value::Number(n) => Some(n.to_string()),
         _ => None,
     }
 }
@@ -153,18 +151,22 @@ fn parse_boolean_frontmatter(
 
 /// Coerce `allowed-tools`: a comma- or space-delimited string, or a YAML list.
 /// Separators inside `()` are kept whole so a spec like `Bash(git diff:*)`
-/// survives. A wrong type yields `None`.
+/// survives. A wrong type or a mixed-type list yields `None` rather than a
+/// partial display declaration.
 fn coerce_tool_list(value: Option<&serde_yaml::Value>) -> Option<Vec<String>> {
     use serde_yaml::Value;
     match value? {
         Value::String(s) => Some(split_top_level(s, '(', ')', true)),
-        Value::Sequence(seq) => Some(
-            seq.iter()
-                .filter_map(|v| v.as_str())
-                .filter(|t| !t.is_empty())
-                .map(str::to_string)
-                .collect(),
-        ),
+        Value::Sequence(seq) => {
+            let strings = seq.iter().map(Value::as_str).collect::<Option<Vec<_>>>()?;
+            Some(
+                strings
+                    .into_iter()
+                    .filter(|t| !t.is_empty())
+                    .map(str::to_string)
+                    .collect(),
+            )
+        }
         _ => None,
     }
 }
@@ -370,7 +372,7 @@ pub fn parse_skill_frontmatter(
     // Prefer the frontmatter `name`, but fall back to the directory name when it
     // is absent or normalizes to an invalid slug, so one bad `name:` field
     // doesn't drop an otherwise-usable skill.
-    let fm_name = coerce_to_string(frontmatter.get("name"));
+    let fm_name = frontmatter_string(frontmatter.get("name"));
     if fm_name.is_none() && fallback_name.is_none() {
         return Err(SkillParseError::YamlError(
             "missing 'name' and no directory fallback".to_string(),
@@ -391,7 +393,7 @@ pub fn parse_skill_frontmatter(
         })?;
 
     let description_value = frontmatter.get("description");
-    let coerced_description = coerce_to_string(description_value);
+    let coerced_description = frontmatter_string(description_value);
     if coerced_description.is_none()
         && matches!(
             description_value,
@@ -405,7 +407,7 @@ pub fn parse_skill_frontmatter(
         .map(|d| cap_string(d, MAX_DESCRIPTION_LEN))
         .unwrap_or_default();
 
-    let when_to_use = coerce_to_string(
+    let when_to_use = frontmatter_string(
         frontmatter
             .get("when-to-use")
             .or_else(|| frontmatter.get("when_to_use")),
@@ -419,12 +421,12 @@ pub fn parse_skill_frontmatter(
     Ok(ParsedFrontmatter {
         name,
         description,
-        license: coerce_to_string(frontmatter.get("license")),
-        compatibility: coerce_to_string(frontmatter.get("compatibility")),
+        license: frontmatter_string(frontmatter.get("license")),
+        compatibility: frontmatter_string(frontmatter.get("compatibility")),
         short_description,
         author,
         metadata,
-        argument_hint: coerce_to_string(frontmatter.get("argument-hint")),
+        argument_hint: frontmatter_string(frontmatter.get("argument-hint")),
         allowed_tools: coerce_tool_list(frontmatter.get("allowed-tools")),
 
         // Absent `user-invocable` defaults to true; `disable-model-invocation` to false.
@@ -1062,6 +1064,35 @@ mod tests {
     }
 
     #[test]
+    fn non_string_descriptive_fields_are_not_stringified() {
+        let wrong_name = parse_one(
+            "directory-name",
+            "---\nname: true\ndescription: Valid description\n---\n",
+        );
+        assert_eq!(wrong_name.name, "directory-name");
+
+        let wrong_description = parse_one(
+            "description-fallback",
+            "---\nname: description-fallback\ndescription: 42\n---\n\nBody-derived description.\n",
+        );
+        assert_eq!(wrong_description.description, "Body-derived description.");
+        assert!(!wrong_description.has_user_specified_description);
+
+        let wrong_optional_fields = parse_one(
+            "optional-fields",
+            concat!(
+                "---\nname: optional-fields\ndescription: Valid description\n",
+                "when-to-use: true\nlicense: 7\ncompatibility: false\n",
+                "argument-hint: 12\n---\n",
+            ),
+        );
+        assert!(wrong_optional_fields.when_to_use.is_none());
+        assert!(wrong_optional_fields.license.is_none());
+        assert!(wrong_optional_fields.compatibility.is_none());
+        assert!(wrong_optional_fields.argument_hint.is_none());
+    }
+
+    #[test]
     fn allowed_tools_keep_specs_with_spaces_and_inner_commas() {
         let skill = parse_one(
             "d",
@@ -1071,6 +1102,16 @@ mod tests {
             skill.allowed_tools,
             Some(vec!["Read".into(), "Bash(git log --format=%h,%s)".into()])
         );
+    }
+
+    #[test]
+    fn mixed_allowed_tools_list_is_omitted_as_a_whole() {
+        let skill = parse_one(
+            "mixed-tools",
+            "---\nname: mixed-tools\ndescription: Valid description\nallowed-tools: [Read, 42, Write]\n---\n",
+        );
+        assert!(skill.allowed_tools.is_none());
+        assert_eq!(skill.description, "Valid description");
     }
 
     #[test]

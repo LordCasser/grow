@@ -1614,14 +1614,9 @@ fn spawn_permission_manager_inner(
                         AccessKind::Grep { path, glob: _ } => ("grep".to_string(), path.clone()),
                         AccessKind::Edit(path) => ("edit".to_string(), Some(path.clone())),
                         AccessKind::Bash(cmd) => ("bash".to_string(), Some(cmd.clone())),
-                        // Preserve the complete live request for the detail
-                        // modal. Durable audit and model context use separate
-                        // bounded/redacted projections below.
                         AccessKind::MCPTool { name, input } => (
                             "mcp".to_string(),
-                            Some(crate::permission::auto_mode::mcp_access_detail_full(
-                                name, input,
-                            )),
+                            Some(crate::permission::auto_mode::mcp_access_detail(name, input)),
                         ),
                         AccessKind::WebFetch(url) => ("web_fetch".to_owned(), Some(url.clone())),
                         AccessKind::InternalControl { name } => {
@@ -1640,7 +1635,6 @@ fn spawn_permission_manager_inner(
                         auto_denials_total: auto_runtime.total_denials,
                     });
                     let classifier_verdict = std::cell::Cell::new(None);
-                    let classifier_reason = std::cell::RefCell::new(None::<String>);
                     // `decision_reason` is the trigger (always set); `prompt_outcome` is
                     // the user's choice, so it is None on auto/non-prompt decisions.
                     let emit_event =
@@ -1681,7 +1675,6 @@ fn spawn_permission_manager_inner(
                                 tool_id: tool_id.clone(),
                                 tool_name: tool_name.clone(),
                                 access_kind: access_kind_str.clone(),
-                                access_detail: access_detail.clone(),
                                 auto_approved,
                                 user_prompted,
                                 decision: decision_str,
@@ -1713,7 +1706,6 @@ fn spawn_permission_manager_inner(
                                     }
                                     .to_owned()
                                 }),
-                                classifier_reason: classifier_reason.borrow().clone(),
                                 classifier_latency_ms: diagnostics
                                     .classifier
                                     .and_then(ClassifierDiagnosticSnapshot::latency_ms),
@@ -2098,8 +2090,6 @@ fn spawn_permission_manager_inner(
                                     },
                                 ));
                                 classifier_verdict.set(Some(outcome.verdict()));
-                                *classifier_reason.borrow_mut() =
-                                    outcome.reason().map(str::to_owned);
                                 tracing::info!(
                                     tool = %tool_name,
                                     verdict = ?outcome.verdict(),
@@ -2154,15 +2144,9 @@ fn spawn_permission_manager_inner(
                                             tool = %tool_name,
                                             "subagent auto mode: primary-context judgment denied"
                                         );
-                                        let reason = match outcome.reason() {
-                                            Some(reason) => format!(
-                                                "The primary agent denied this permission ({}). {AUTO_DENY_GUIDANCE}",
-                                                reason.trim_end_matches('.')
-                                            ),
-                                            None => format!(
-                                                "The primary agent denied this permission. {AUTO_DENY_GUIDANCE}"
-                                            ),
-                                        };
+                                        let reason = format!(
+                                            "The primary agent denied this permission. {AUTO_DENY_GUIDANCE}"
+                                        );
                                         let decision = Decision::PolicyDeny(reason);
                                         if respond_to.send(decision.clone()).is_err() {
                                             emit_event(
@@ -2215,17 +2199,9 @@ fn spawn_permission_manager_inner(
                                             total = auto_runtime.total_denials,
                                             "auto mode: classifier blocked — denying and continuing"
                                         );
-                                        let reason = match outcome.reason() {
-                                            Some(r) => format!(
-                                                "Auto mode blocked this action ({}). \
-                                                 {AUTO_DENY_GUIDANCE}",
-                                                r.trim_end_matches('.')
-                                            ),
-                                            None => format!(
-                                                "Auto mode blocked this action. \
-                                                 {AUTO_DENY_GUIDANCE}"
-                                            ),
-                                        };
+                                        let reason = format!(
+                                            "Auto mode blocked this action. {AUTO_DENY_GUIDANCE}"
+                                        );
                                         let decision = Decision::PolicyDeny(reason);
                                         emit_event(
                                             &decision,
@@ -2259,15 +2235,9 @@ fn spawn_permission_manager_inner(
                                                 "The primary agent permission judgment was unavailable",
                                             )
                                         };
-                                        let reason = match outcome.reason() {
-                                            Some(reason) => format!(
-                                                "{failure} ({}). The tool was not granted; continue with available capabilities and report the limitation if it blocks the task.",
-                                                reason.trim_end_matches('.')
-                                            ),
-                                            None => format!(
-                                                "{failure}. The tool was not granted; continue with available capabilities and report the limitation if it blocks the task."
-                                            ),
-                                        };
+                                        let reason = format!(
+                                            "{failure}. The tool was not granted; continue with available capabilities and report the limitation if it blocks the task."
+                                        );
                                         tracing::info!(
                                             tool = %tool_name,
                                             source = outcome.source().as_str(),
@@ -4131,17 +4101,16 @@ mod tests {
                     .await;
 
                 assert!(
-                    matches!(&decision, Decision::PolicyDeny(reason) if reason.contains("outside the assigned task")),
+                    matches!(&decision, Decision::PolicyDeny(reason) if reason.contains("primary agent denied") && !reason.contains("outside the assigned task")),
                     "an exact locked call must honor the primary-context verdict, got {decision:?}"
                 );
                 let event = events.try_recv().expect("permission event");
                 assert_eq!(event.user_prompted, false);
                 assert_eq!(event.classifier_source.as_deref(), Some("llm"));
                 assert_eq!(event.classifier_verdict.as_deref(), Some("block"));
-                assert_eq!(
-                    event.classifier_reason.as_deref(),
-                    Some("outside the assigned task")
-                );
+                assert!(event.reject_reason.as_deref().is_some_and(|reason| {
+                    !reason.contains("outside the assigned task")
+                }));
                 assert_eq!(
                     event.decision_reason.as_deref(),
                     Some(reasons::AUTO_CLASSIFIER_DENY)

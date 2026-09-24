@@ -70,6 +70,44 @@ impl AsyncFileSystem for MockFs {
         Ok(())
     }
 
+    async fn replace_file_if_unchanged(
+        &self,
+        path: &Path,
+        expected: &[u8],
+        data: &[u8],
+    ) -> Result<(), ComputerError> {
+        let mut files = self.files.write().await;
+        let current = files.get_mut(path).ok_or_else(|| {
+            ComputerError::io_with_kind(
+                format!("File not found: {}", path.display()),
+                std::io::ErrorKind::NotFound,
+            )
+        })?;
+        if current != expected {
+            return Err(ComputerError::io_with_kind(
+                format!("File changed since read: {}", path.display()),
+                std::io::ErrorKind::InvalidData,
+            ));
+        }
+        *current = data.to_vec();
+        Ok(())
+    }
+
+    async fn create_file_if_absent(&self, path: &Path, data: &[u8]) -> Result<(), ComputerError> {
+        use std::collections::hash_map::Entry;
+
+        match self.files.write().await.entry(path.to_path_buf()) {
+            Entry::Vacant(entry) => {
+                entry.insert(data.to_vec());
+                Ok(())
+            }
+            Entry::Occupied(_) => Err(ComputerError::io_with_kind(
+                format!("File already exists: {}", path.display()),
+                std::io::ErrorKind::AlreadyExists,
+            )),
+        }
+    }
+
     async fn delete_file(&self, path: &Path) -> Result<(), ComputerError> {
         self.files.write().await.remove(path);
         Ok(())
@@ -118,5 +156,18 @@ mod tests {
 
         let content = fs.read_file(Path::new("/preset.txt")).await.unwrap();
         assert_eq!(content, b"preset content");
+    }
+
+    #[tokio::test]
+    async fn test_mock_fs_exclusive_create_preserves_existing_file() {
+        let fs = MockFs::new();
+        let path = Path::new("/created.txt");
+        fs.create_file_if_absent(path, b"first").await.unwrap();
+        let error = fs.create_file_if_absent(path, b"second").await.unwrap_err();
+        assert_eq!(
+            error.io_error_kind(),
+            Some(std::io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(fs.get_file(path).await.unwrap(), b"first");
     }
 }

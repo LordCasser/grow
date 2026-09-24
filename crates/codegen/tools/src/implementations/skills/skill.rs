@@ -509,6 +509,33 @@ pub fn extract_skill_body(content: &str) -> String {
         .to_string()
 }
 
+const MAX_SKILL_BODY_FILE_BYTES: usize = 1024 * 1024;
+
+/// Read a complete skill source file with a bounded probe for oversized input.
+/// Frontmatter counts toward the source limit, though it is stripped later.
+async fn read_skill_body_file(path: &std::path::Path) -> Result<String, String> {
+    use tokio::io::AsyncReadExt;
+
+    let file = tokio::fs::File::open(path)
+        .await
+        .map_err(|e| format!("Failed to read skill file '{}': {e}", path.display()))?;
+    let mut bytes = Vec::new();
+    file.take((MAX_SKILL_BODY_FILE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|e| format!("Failed to read skill file '{}': {e}", path.display()))?;
+
+    if bytes.len() > MAX_SKILL_BODY_FILE_BYTES {
+        return Err(format!(
+            "Skill file '{}' exceeds the maximum body file size of {MAX_SKILL_BODY_FILE_BYTES} bytes (1 MiB)",
+            path.display()
+        ));
+    }
+
+    String::from_utf8(bytes)
+        .map_err(|e| format!("Skill file '{}' is not valid UTF-8: {e}", path.display()))
+}
+
 /// Load skill content from its file, stripping YAML frontmatter.
 ///
 /// Public entrypoint for the shell crate to load skill content at
@@ -527,7 +554,7 @@ pub async fn load_skill_content(skill: &SkillInfo) -> Result<String, String> {
         ));
     }
     let path = std::path::Path::new(&skill.path);
-    match tokio::fs::read_to_string(path).await {
+    match read_skill_body_file(path).await {
         Ok(content) => {
             let body = extract_skill_body(&content);
             Ok(match path.parent() {
@@ -535,16 +562,14 @@ pub async fn load_skill_content(skill: &SkillInfo) -> Result<String, String> {
                 None => body,
             })
         }
-        Err(e) => Err(format!("Failed to read skill file '{}': {}", skill.path, e)),
+        Err(e) => Err(e),
     }
 }
 
 /// Load skill body into SkillInfo.
 pub async fn load_skill_with_body(skill: &SkillInfo) -> Result<SkillInfo, String> {
     let path = std::path::Path::new(&skill.path);
-    let content = tokio::fs::read_to_string(path)
-        .await
-        .map_err(|e| format!("Failed to read {}: {}", skill.path, e))?;
+    let content = read_skill_body_file(path).await?;
     let body = extract_skill_body(&content);
     let body = match path.parent() {
         Some(skill_dir) => resolve_skill_internal_links(&body, skill_dir),
@@ -663,6 +688,45 @@ It has multiple lines."#;
         std::fs::remove_file(&path).unwrap();
         assert_eq!(load_skill_content(&frozen).await.unwrap(), "");
         assert_eq!(frozen.body.as_deref(), Some(""));
+    }
+
+    #[tokio::test]
+    async fn explicit_skill_body_read_accepts_file_at_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("SKILL.md");
+        let content = "x".repeat(MAX_SKILL_BODY_FILE_BYTES);
+        std::fs::write(&path, &content).unwrap();
+        let skill = SkillInfo {
+            name: "at-limit".into(),
+            path: path.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+
+        assert_eq!(load_skill_content(&skill).await.unwrap(), content);
+        assert_eq!(
+            load_skill_with_body(&skill).await.unwrap().body.as_deref(),
+            Some(content.as_str())
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_skill_body_read_rejects_file_over_limit_without_partial_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("SKILL.md");
+        std::fs::write(&path, "x".repeat(MAX_SKILL_BODY_FILE_BYTES + 1)).unwrap();
+        let skill = SkillInfo {
+            name: "over-limit".into(),
+            path: path.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+
+        let content_error = load_skill_content(&skill).await.unwrap_err();
+        assert!(content_error.contains(path.to_string_lossy().as_ref()));
+        assert!(content_error.contains("1048576 bytes (1 MiB)"));
+
+        let snapshot_error = load_skill_with_body(&skill).await.unwrap_err();
+        assert!(snapshot_error.contains(path.to_string_lossy().as_ref()));
+        assert!(snapshot_error.contains("1048576 bytes (1 MiB)"));
     }
 
     #[tokio::test]

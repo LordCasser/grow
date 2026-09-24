@@ -54,6 +54,29 @@ pub trait AsyncFileSystem: Send + Sync {
 
     async fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), ComputerError>;
 
+    /// Update an existing file only if it still contains the bytes the caller read.
+    /// Adapters without a conditional commit must fail closed.
+    async fn replace_file_if_unchanged(
+        &self,
+        _path: &Path,
+        _expected: &[u8],
+        _data: &[u8],
+    ) -> Result<(), ComputerError> {
+        Err(ComputerError::io_with_kind(
+            "conditional file replacement is not supported by this filesystem",
+            std::io::ErrorKind::Unsupported,
+        ))
+    }
+
+    /// Publish a complete new file without replacing a path created by another writer.
+    /// Filesystems without this operation must fail rather than emulate it with read/write.
+    async fn create_file_if_absent(&self, _path: &Path, _data: &[u8]) -> Result<(), ComputerError> {
+        Err(ComputerError::io_with_kind(
+            "exclusive file creation is not supported by this filesystem",
+            std::io::ErrorKind::Unsupported,
+        ))
+    }
+
     async fn delete_file(&self, path: &Path) -> Result<(), ComputerError>;
 }
 

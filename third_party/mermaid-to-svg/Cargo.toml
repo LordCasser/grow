@@ -119,6 +119,14 @@
 #     stays unsupported (ignored). Covered by `xychart_diagram::tests` here and
 #     the `categorical_xychart_*` raster test in
 #     crates/codegen/mermaid/tests/pure_engine.rs.
+# 13. LOCAL FLOWCHART PORT (src/parser.rs, src/layout.rs,
+#     src/svg_renderer.rs): inline `:::class` and `classDef` static colors,
+#     whitespace-separated `&` node groups, ordered shape delimiters, and
+#     XML-escaped node color attributes. Group expansion is capped at 4096
+#     edges before allocation. The experimental dagre port remains disabled;
+#     its LayoutNode construction only gets a neutral text-color field.
+#     Covered by `flowchart_*` tests here, the PNG integration test in
+#     crates/codegen/mermaid, and the Pager worker failure test.
 #
 # Re-audit checklist:
 #  - This crate's own source contains no `unsafe` and no filesystem / network I/O.

@@ -16,7 +16,7 @@ libfuzzer-sys = "0.4"
 [dependencies.markdown]
 path = ".."
 
-# All render modes: pretty/non-pretty × syntect/no-syntect × full/streaming
+# Four full/streaming render calls: pretty/non-pretty, with Syntect disabled.
 [[bin]]
 name = "render_all"
 path = "fuzz_targets/render_all.rs"

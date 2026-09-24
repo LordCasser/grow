@@ -1607,7 +1607,9 @@ mod tests {
         );
         let back = wire_to_hook_registry(&wire).expect("wire → heavy");
         let matcher = back.hooks_for(hooks::event::HookEventName::PreToolUse)[0]
-            .matcher.as_ref().expect("wire restore must rebuild matcher");
+            .matcher
+            .as_ref()
+            .expect("wire restore must rebuild matcher");
         assert!(matcher.is_match("Bash"));
         assert!(!matcher.is_match("Read"));
         assert_eq!(

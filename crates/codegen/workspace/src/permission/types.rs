@@ -19,9 +19,6 @@ pub struct PermissionEvent {
     pub tool_name: String,
     /// Type of access requested (read, edit, bash, mcp)
     pub access_kind: String,
-    /// Additional context (e.g., file path for edit, command for bash)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub access_detail: Option<String>,
     /// Whether this was auto-approved (by always-approve mode or policy rules)
     pub auto_approved: bool,
     /// Whether the user was prompted for this decision
@@ -75,10 +72,6 @@ pub struct PermissionEvent {
     /// permission decision: "allow" | "block" | "unavailable".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub classifier_verdict: Option<String>,
-    /// Concise model/failure reason. The model's hidden reasoning is never
-    /// retained in permission events.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub classifier_reason: Option<String>,
     /// Elapsed milliseconds spent in classification alone, including heuristic work;
     /// absent when no classifier ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -503,7 +496,6 @@ mod tests {
             tool_id: "tc1".into(),
             tool_name: "bash".into(),
             access_kind: "bash".into(),
-            access_detail: None,
             auto_approved: false,
             user_prompted: true,
             decision: "allow".into(),
@@ -518,7 +510,6 @@ mod tests {
             decision_reason: Some("needs_user".into()),
             classifier_source: Some("llm".into()),
             classifier_verdict: Some("allow".into()),
-            classifier_reason: Some("required for the task".into()),
             classifier_latency_ms: Some(42),
             auto_denials_consecutive: Some(2),
             auto_denials_total: Some(5),
@@ -534,7 +525,7 @@ mod tests {
         assert_eq!(json["decision_reason"], "needs_user");
         assert_eq!(json["classifier_source"], "llm");
         assert_eq!(json["classifier_verdict"], "allow");
-        assert_eq!(json["classifier_reason"], "required for the task");
+        assert!(json.get("classifier_reason").is_none());
         assert_eq!(json["classifier_latency_ms"], 42);
         assert_eq!(json["auto_denials_consecutive"], 2);
         assert_eq!(json["auto_denials_total"], 5);
@@ -553,7 +544,6 @@ mod tests {
             tool_id: "tc1".into(),
             tool_name: "bash".into(),
             access_kind: "bash".into(),
-            access_detail: None,
             auto_approved: true,
             user_prompted: false,
             decision: "allow".into(),
@@ -568,7 +558,6 @@ mod tests {
             decision_reason: None,
             classifier_source: None,
             classifier_verdict: None,
-            classifier_reason: None,
             classifier_latency_ms: None,
             auto_denials_consecutive: None,
             auto_denials_total: None,

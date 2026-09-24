@@ -34,6 +34,7 @@ pub enum ClassifierSource {
     Heuristic,
     Timeout,
     TransportError,
+    InputTooLarge,
 }
 
 impl ClassifierSource {
@@ -43,6 +44,7 @@ impl ClassifierSource {
             Self::Heuristic => "heuristic",
             Self::Timeout => "timeout",
             Self::TransportError => "transport_error",
+            Self::InputTooLarge => "input_too_large",
         }
     }
 }
@@ -52,6 +54,7 @@ impl ClassifierSource {
 pub enum ClassifierFailure {
     Timeout,
     TransportError(String),
+    InputTooLarge,
 }
 
 impl ClassifierFailure {
@@ -59,6 +62,7 @@ impl ClassifierFailure {
         match self {
             Self::Timeout => ClassifierSource::Timeout,
             Self::TransportError(_) => ClassifierSource::TransportError,
+            Self::InputTooLarge => ClassifierSource::InputTooLarge,
         }
     }
 }
@@ -68,6 +72,9 @@ impl std::fmt::Display for ClassifierFailure {
         match self {
             Self::Timeout => f.write_str("permission auto classifier timed out"),
             Self::TransportError(reason) => f.write_str(reason),
+            Self::InputTooLarge => {
+                f.write_str("permission request detail exceeded classifier budget")
+            }
         }
     }
 }
@@ -374,6 +381,9 @@ impl HeuristicPermissionClassifier {
         access_detail: Option<&str>,
         context: &ClassifierContext,
     ) -> ClassifierVerdict {
+        if classifier_detail_exceeds_budget(access, access_detail) {
+            return ClassifierVerdict::Block;
+        }
         let detail = access_detail.unwrap_or("").to_ascii_lowercase();
         let tool = tool_name.to_ascii_lowercase();
         // Flatten the structured turns (user text + assistant tool_use args) into
@@ -1118,6 +1128,11 @@ impl PermissionClassifier for HeuristicPermissionClassifier {
         access_detail: Option<&'a str>,
         context: ClassifierContext,
     ) -> Pin<Box<dyn Future<Output = ClassifierOutcome> + Send + 'a>> {
+        if classifier_detail_exceeds_budget(access, access_detail) {
+            return Box::pin(async {
+                ClassifierOutcome::failure(ClassifierFailure::InputTooLarge)
+            });
+        }
         let v = Self::classify_sync(tool_name, access, access_detail, &context);
         Box::pin(async move { v.into() })
     }
@@ -1271,34 +1286,108 @@ pub fn classifier_output_json_schema() -> serde_json::Value {
     })
 }
 
-/// Char cap for the compact-JSON MCP args carried in `access_detail`. MCP tool
-/// inputs are arbitrary JSON (file contents, large payloads), so they are
-/// bounded here to keep the classifier prompt and diagnostics from blowing up.
+/// Byte cap for compact-JSON MCP arguments carried into classifier input.
 pub const MCP_ACCESS_DETAIL_MAX_LEN: usize = 1024;
+pub const CLASSIFIER_ACCESS_DETAIL_MAX_LEN: usize = 2_048;
+pub const CLASSIFIER_REASON_MAX_LEN: usize = 240;
 
-/// Full MCP request text for the ephemeral, user-opened permission detail
-/// modal. This value is never persisted by the audit bridge and is never used
-/// directly as classifier context; those consumers use the bounded projection
-/// below.
-pub fn mcp_access_detail_full(name: &str, input: &serde_json::Value) -> String {
-    if input.is_null() {
-        return name.to_string();
-    }
-    let compact = serde_json::to_string(input).unwrap_or_default();
-    format!("{name} {compact}")
+struct BoundedJsonWriter {
+    bytes: Vec<u8>,
+    limit: usize,
 }
 
-/// Render an MCP tool call's `access_detail`: the tool name followed by its
-/// compact (not pretty) JSON args, truncated so oversized inputs never bloat the
-/// classifier prompt. `null` input (no args) renders the name only, preserving
-/// the pre-args behavior for arg-less calls. Reuses the shared char-safe
-/// truncator so the cut/marker behavior matches read_file/grep.
+impl BoundedJsonWriter {
+    fn new(limit: usize) -> Self {
+        Self {
+            bytes: Vec::with_capacity(limit),
+            limit,
+        }
+    }
+
+    fn exceeded(&self) -> bool {
+        self.bytes.len() == self.limit
+    }
+}
+
+impl std::io::Write for BoundedJsonWriter {
+    fn write(&mut self, input: &[u8]) -> std::io::Result<usize> {
+        let remaining = self.limit.saturating_sub(self.bytes.len());
+        let mut accepted = input.len().min(remaining);
+        while accepted > 0 && std::str::from_utf8(&input[..accepted]).is_err() {
+            accepted -= 1;
+        }
+        self.bytes.extend_from_slice(&input[..accepted]);
+        if accepted != input.len() {
+            return Err(std::io::Error::other("bounded permission detail"));
+        }
+        Ok(input.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn mcp_detail_fits_budget(name: &str, input: &serde_json::Value) -> bool {
+    if name.len() > MCP_ACCESS_DETAIL_MAX_LEN {
+        return false;
+    }
+    if input.is_null() {
+        return true;
+    }
+    let prefix_len = name.len() + 1;
+    let Some(json_budget) = MCP_ACCESS_DETAIL_MAX_LEN.checked_sub(prefix_len) else {
+        return false;
+    };
+    let mut writer = BoundedJsonWriter::new(json_budget);
+    serde_json::to_writer(&mut writer, input).is_ok()
+}
+
+fn classifier_detail_exceeds_budget(access: &AccessKind, detail: Option<&str>) -> bool {
+    let limit = if matches!(access, AccessKind::MCPTool { .. }) {
+        MCP_ACCESS_DETAIL_MAX_LEN
+    } else {
+        CLASSIFIER_ACCESS_DETAIL_MAX_LEN
+    };
+    if detail.is_some_and(|detail| detail.len() > limit) {
+        return true;
+    }
+    match access {
+        AccessKind::Read(path) => path.as_ref().is_some_and(|path| path.len() > limit),
+        AccessKind::Grep { path, glob } => {
+            path.as_ref().is_some_and(|path| path.len() > limit)
+                || glob.as_ref().is_some_and(|glob| glob.len() > limit)
+        }
+        AccessKind::Edit(path) | AccessKind::Bash(path) | AccessKind::WebFetch(path) => {
+            path.len() > limit
+        }
+        AccessKind::MCPTool { name, input } => !mcp_detail_fits_budget(name, input),
+        AccessKind::InternalControl { name } => name.len() > limit,
+    }
+}
+
+/// Render bounded compact MCP arguments. Large calls are marked as truncated;
+/// the classifier separately detects their full AccessKind and fails closed.
 pub fn mcp_access_detail(name: &str, input: &serde_json::Value) -> String {
-    tools::util::truncate_line(
-        &mcp_access_detail_full(name, input),
-        MCP_ACCESS_DETAIL_MAX_LEN,
-    )
-    .into_owned()
+    const TRUNCATION: &str = "…";
+    if input.is_null() {
+        return tools::util::truncate_str_with_marker(name, MCP_ACCESS_DETAIL_MAX_LEN).into_owned();
+    }
+    let mut prefix = format!("{name} ");
+    if prefix.len() > MCP_ACCESS_DETAIL_MAX_LEN {
+        return tools::util::truncate_str_with_marker(name, MCP_ACCESS_DETAIL_MAX_LEN).into_owned();
+    }
+    let remaining = MCP_ACCESS_DETAIL_MAX_LEN - prefix.len();
+    let mut writer = BoundedJsonWriter::new(remaining);
+    let serialization = serde_json::to_writer(&mut writer, input);
+    let json = String::from_utf8(writer.bytes).expect("bounded JSON prefix is valid UTF-8");
+    prefix.push_str(&json);
+    if serialization.is_err() {
+        let target = MCP_ACCESS_DETAIL_MAX_LEN - TRUNCATION.len();
+        let truncated = tools::util::truncate_str(&prefix, target);
+        prefix = format!("{truncated}{TRUNCATION}");
+    }
+    prefix
 }
 
 pub const CLASSIFIER_TURN_MAX_LEN: usize = 400;
@@ -1502,7 +1591,9 @@ enum ClassifierModelDecision {
 
 fn classifier_reason(reason: &str) -> Option<String> {
     let reason = reason.trim();
-    (!reason.is_empty()).then(|| reason.to_owned())
+    (!reason.is_empty()).then(|| {
+        tools::util::truncate_str_with_marker(reason, CLASSIFIER_REASON_MAX_LEN).into_owned()
+    })
 }
 
 pub fn parse_classifier_model_output(text: &str) -> ClassifierOutcome {
@@ -1631,6 +1722,9 @@ impl PermissionClassifier for LlmPermissionClassifier {
         context: ClassifierContext,
     ) -> Pin<Box<dyn Future<Output = ClassifierOutcome> + Send + 'a>> {
         Box::pin(async move {
+            if classifier_detail_exceeds_budget(access, access_detail) {
+                return ClassifierOutcome::failure(ClassifierFailure::InputTooLarge);
+            }
             let uses_primary_context = context.subagent_session_id.is_some();
             // Deterministic pre-pass: a provable heuristic Allow skips the model
             // for the primary session. Child Auto requests always reach the
@@ -2349,15 +2443,16 @@ mod tests {
             ClassifierVerdict::Unavailable
         );
 
-        let full_reason = format!("line one\n{}\nfinal line", "detail ".repeat(200));
+        let full_reason = format!("line one\n{}\nfinal line", "细节 ".repeat(200));
         let response = serde_json::json!({
             "decision": "allow",
             "reason": full_reason,
         })
         .to_string();
         let parsed = parse_classifier_model_output(&response);
-        assert_eq!(parsed.reason(), Some(full_reason.as_str()));
-        assert!(!parsed.reason().unwrap().contains("truncated"));
+        let reason = parsed.reason().expect("bounded reason");
+        assert!(reason.len() <= CLASSIFIER_REASON_MAX_LEN);
+        assert!(reason.ends_with('…'));
     }
 
     #[test]
@@ -2646,24 +2741,13 @@ mod tests {
             "srv__noargs"
         );
 
-        // Oversized args are truncated to the cap with the shared marker; the
-        // kept content (before the marker) is exactly the cap.
+        // Oversized args are bounded for UI presentation. Classification checks
+        // the original AccessKind and refuses to infer from this prefix.
         let big = "x".repeat(MCP_ACCESS_DETAIL_MAX_LEN * 4);
         let detail = mcp_access_detail("srv__big", &serde_json::json!({ "blob": big }));
         assert!(detail.starts_with("srv__big {"));
-        assert!(
-            detail.contains("[... truncated"),
-            "expected truncation marker, got: {detail}"
-        );
-        let kept = detail.split(" [... truncated").next().unwrap();
-        assert_eq!(kept.chars().count(), MCP_ACCESS_DETAIL_MAX_LEN);
-
-        let full = mcp_access_detail_full(
-            "srv__big",
-            &serde_json::json!({ "blob": "x".repeat(MCP_ACCESS_DETAIL_MAX_LEN * 4) }),
-        );
-        assert!(!full.contains("truncated"));
-        assert!(full.chars().count() > MCP_ACCESS_DETAIL_MAX_LEN * 4);
+        assert!(detail.ends_with('…'));
+        assert!(detail.len() <= MCP_ACCESS_DETAIL_MAX_LEN);
     }
 
     #[test]
@@ -3226,6 +3310,55 @@ mod tests {
             empty.reason(),
             Some("primary agent judgment returned an empty structured response")
         );
+    }
+
+    #[tokio::test]
+    async fn oversized_access_detail_is_unavailable_before_model_inference() {
+        let invoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let invoked_by_model = invoked.clone();
+        let classifier = LlmPermissionClassifier {
+            classify_text: Some(Arc::new(move |_messages: Vec<ClassifierMessage>| {
+                invoked_by_model.store(true, std::sync::atomic::Ordering::SeqCst);
+                Box::pin(async { Ok(r#"{"decision":"allow","reason":"routine"}"#.into()) })
+            })),
+            classify_channel: None,
+            fallback: HeuristicPermissionClassifier,
+            prompt_type: ClassifierPromptType::Full,
+        };
+        let command = "x".repeat(CLASSIFIER_ACCESS_DETAIL_MAX_LEN + 1);
+        let outcome = classifier
+            .classify(
+                "run_terminal_command",
+                &AccessKind::Bash(command.clone()),
+                Some(&command),
+                ClassifierContext {
+                    subagent_session_id: Some("child".into()),
+                    ..ClassifierContext::default()
+                },
+            )
+            .await;
+        assert_eq!(outcome.verdict(), ClassifierVerdict::Unavailable);
+        assert_eq!(outcome.source(), ClassifierSource::InputTooLarge);
+        assert!(!invoked.load(std::sync::atomic::Ordering::SeqCst));
+
+        let oversized_mcp = AccessKind::MCPTool {
+            name: "srv__large".into(),
+            input: serde_json::json!({ "blob": "x".repeat(MCP_ACCESS_DETAIL_MAX_LEN) }),
+        };
+        let mcp = classifier
+            .classify(
+                "srv__large",
+                &oversized_mcp,
+                Some("srv__large {\"blob\":\"bounded presentation\"}"),
+                ClassifierContext {
+                    subagent_session_id: Some("child".into()),
+                    ..ClassifierContext::default()
+                },
+            )
+            .await;
+        assert_eq!(mcp.verdict(), ClassifierVerdict::Unavailable);
+        assert_eq!(mcp.source(), ClassifierSource::InputTooLarge);
+        assert!(!invoked.load(std::sync::atomic::Ordering::SeqCst));
     }
 
     /// The routine-prefix additions cover everyday read-only / navigation

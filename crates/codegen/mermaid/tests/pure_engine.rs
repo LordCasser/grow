@@ -22,6 +22,41 @@ fn default_engine_renders_a_flowchart() {
     assert_eq!(img.height(), diagram.height_px);
 }
 
+#[test]
+fn grouped_class_flowchart_renders_colored_png_on_both_themes() {
+    let source = "flowchart LR\n    A[One] & B[Two] --> C{Ready?}:::ready\n    classDef ready fill:#ff0000,stroke:#0000ff,color:#00ff00";
+    let engine = default_engine();
+    for theme in [MermaidTheme::Light, MermaidTheme::Dark] {
+        let diagram = render_checked(
+            engine.as_ref(),
+            source,
+            &RenderParams {
+                theme,
+                ..Default::default()
+            },
+            &RenderLimits::default(),
+        )
+        .unwrap_or_else(|error| panic!("grouped flowchart must render ({theme:?}): {error}"));
+        let image = image::load_from_memory(&diagram.png)
+            .expect("rendered flowchart is a PNG")
+            .to_rgb8();
+        assert_eq!(image.width(), diagram.width_px);
+        assert_eq!(image.height(), diagram.height_px);
+        assert!(
+            image.pixels().any(|pixel| pixel.0 == [255, 0, 0]),
+            "class fill must appear in the {theme:?} PNG"
+        );
+        assert!(
+            image.pixels().any(|pixel| pixel.0 == [0, 0, 255]),
+            "class stroke must appear in the {theme:?} PNG"
+        );
+        assert!(
+            image.pixels().any(|pixel| pixel.0 == [0, 255, 0]),
+            "class text color must appear in the {theme:?} PNG"
+        );
+    }
+}
+
 /// Untrusted-input contract through the real engine: a panic would surface as
 /// `MermaidError::Panic`, which we assert against. Unparseable input may return
 /// other errors (which degrade to the code-block fallback), never a panic.

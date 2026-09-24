@@ -1,5 +1,12 @@
-use std::{future::Future, io, path::Path, time::Duration};
+use std::{
+    future::Future,
+    io::{self, Read, Seek, SeekFrom, Write},
+    path::Path,
+    time::Duration,
+};
 
+use fs2::FileExt;
+use same_file::Handle;
 use tokio::{fs, time::sleep};
 
 use crate::computer::types::{AsyncFileSystem, ComputerError};
@@ -86,6 +93,71 @@ async fn write_file_with_transient_lock_retries(path: &Path, data: &[u8]) -> io:
     .await
 }
 
+fn changed_since_read(path: &Path) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::InvalidData,
+        format!("file changed since read: {}", path.display()),
+    )
+}
+
+fn lock_edit_file(file: &std::fs::File, path: &Path, wait: Duration) -> io::Result<()> {
+    let deadline = std::time::Instant::now() + wait;
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if error.kind() == io::ErrorKind::WouldBlock
+                    || is_transient_write_lock_error(&error) =>
+            {
+                let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!("timed out waiting to edit {}", path.display()),
+                    ));
+                }
+                std::thread::sleep(remaining.min(Duration::from_millis(25)));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn replace_file_if_unchanged_blocking(path: &Path, expected: &[u8], data: &[u8]) -> io::Result<()> {
+    let mut file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(path)?;
+    lock_edit_file(&file, path, Duration::from_secs(5))?;
+    let source = Handle::from_file(file.try_clone()?)?;
+    if Handle::from_path(path)? != source {
+        return Err(changed_since_read(path));
+    }
+    if file.metadata()?.len() != expected.len() as u64 {
+        return Err(changed_since_read(path));
+    }
+    let mut buffer = [0_u8; 8192];
+    for chunk in expected.chunks(buffer.len()) {
+        file.read_exact(&mut buffer[..chunk.len()])?;
+        if buffer[..chunk.len()] != *chunk {
+            return Err(changed_since_read(path));
+        }
+    }
+    if file.metadata()?.len() != expected.len() as u64 || Handle::from_path(path)? != source {
+        return Err(changed_since_read(path));
+    }
+    // Write through the locked descriptor. Path replacement after the check
+    // cannot redirect this write to another file. The final identity check
+    // suppresses a false success if the source was unlinked during the write.
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(data)?;
+    file.set_len(data.len() as u64)?;
+    if Handle::from_path(path)? != source {
+        return Err(changed_since_read(path));
+    }
+    Ok(())
+}
+
 async fn write_file_with_retry_hooks<W, WFut, S, SFut, Success, Retry, Exhausted, IsRetryable>(
     mut write: W,
     mut sleep_for: S,
@@ -164,6 +236,53 @@ impl AsyncFileSystem for LocalFs {
         Ok(())
     }
 
+    #[tracing::instrument(name = "fs.replace_file_if_unchanged", skip_all)]
+    async fn replace_file_if_unchanged(
+        &self,
+        path: &Path,
+        expected: &[u8],
+        data: &[u8],
+    ) -> Result<(), ComputerError> {
+        let path = path.to_path_buf();
+        let expected = expected.to_vec();
+        let data = data.to_vec();
+        let result = tokio::task::spawn_blocking(move || {
+            replace_file_if_unchanged_blocking(&path, &expected, &data)
+        })
+        .await
+        .map_err(|error| ComputerError::io(error.to_string()))?;
+        result.map_err(Into::into)
+    }
+
+    #[tracing::instrument(name = "fs.create_file_if_absent", skip_all)]
+    async fn create_file_if_absent(&self, path: &Path, data: &[u8]) -> Result<(), ComputerError> {
+        let write_path = path.to_path_buf();
+        let data = data.to_vec();
+        let result = tokio::task::spawn_blocking(move || -> io::Result<()> {
+            let parent = write_path
+                .parent()
+                .filter(|dir| !dir.as_os_str().is_empty())
+                .unwrap_or(Path::new("."));
+            std::fs::create_dir_all(parent)?;
+            let mut staged = tempfile::NamedTempFile::new_in(parent)?;
+            staged.write_all(&data)?;
+            staged.as_file_mut().sync_all()?;
+            staged
+                .persist_noclobber(&write_path)
+                .map_err(|error| error.error)?;
+            Ok(())
+        })
+        .await
+        .map_err(|error| ComputerError::io(error.to_string()))?;
+        if let Err(error) = result {
+            if is_permission_error(&error) {
+                sandbox::log_violation(&path.display().to_string(), "write");
+            }
+            return Err(error.into());
+        }
+        Ok(())
+    }
+
     #[tracing::instrument(name = "fs.delete_file", skip_all)]
     async fn delete_file(&self, path: &Path) -> Result<(), ComputerError> {
         if let Err(e) = fs::remove_file(path).await {
@@ -181,6 +300,205 @@ mod tests {
     use super::*;
     use std::cell::Cell;
     use std::rc::Rc;
+
+    #[tokio::test]
+    async fn conditional_edit_rejects_stale_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        std::fs::write(&path, b"before").unwrap();
+        std::fs::write(&path, b"newer").unwrap();
+        let error = LocalFs
+            .replace_file_if_unchanged(&path, b"before", b"ours")
+            .await
+            .unwrap_err();
+        assert_eq!(error.io_error_kind(), Some(io::ErrorKind::InvalidData));
+        assert_eq!(std::fs::read(&path).unwrap(), b"newer");
+    }
+
+    #[tokio::test]
+    async fn conditional_edits_on_same_file_allow_only_one_source_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        std::fs::write(&path, b"before").unwrap();
+        let (first, second) = tokio::join!(
+            LocalFs.replace_file_if_unchanged(&path, b"before", b"first"),
+            LocalFs.replace_file_if_unchanged(&path, b"before", b"second"),
+        );
+        assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+        let bytes = std::fs::read(&path).unwrap();
+        assert!(bytes == b"first" || bytes == b"second");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn conditional_edit_through_parent_alias_checks_same_inode() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        std::fs::create_dir(&real).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let path = real.join("file.txt");
+        let alias_path = alias.join("file.txt");
+        std::fs::write(&path, b"before").unwrap();
+        let (first, second) = tokio::join!(
+            LocalFs.replace_file_if_unchanged(&path, b"before", b"first"),
+            LocalFs.replace_file_if_unchanged(&alias_path, b"before", b"second"),
+        );
+        assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn conditional_edit_does_not_write_replacement_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        std::fs::write(&path, b"before").unwrap();
+        let source = std::fs::File::open(&path).unwrap();
+        source.lock_exclusive().unwrap();
+        let edit = LocalFs.replace_file_if_unchanged(&path, b"before", b"ours");
+        tokio::pin!(edit);
+        // The edit is queued while the old inode is locked. It may open
+        // either side of the rename; both paths must reject the stale edit.
+        tokio::select! {
+            result = &mut edit => panic!("edit unexpectedly completed before replacement: {result:?}"),
+            _ = tokio::time::sleep(Duration::from_millis(25)) => {}
+        }
+        std::fs::rename(&path, dir.path().join("old.txt")).unwrap();
+        std::fs::write(&path, b"replacement").unwrap();
+        drop(source);
+        let error = edit.await.unwrap_err();
+        assert_eq!(error.io_error_kind(), Some(io::ErrorKind::InvalidData));
+        assert_eq!(std::fs::read(&path).unwrap(), b"replacement");
+    }
+
+    #[test]
+    fn conditional_edit_lock_wait_is_bounded() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        std::fs::write(&path, b"before").unwrap();
+        let held = std::fs::File::open(&path).unwrap();
+        held.lock_exclusive().unwrap();
+        let contender = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        let error = lock_edit_file(&contender, &path, Duration::from_millis(20)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(std::fs::read(&path).unwrap(), b"before");
+    }
+
+    #[test]
+    fn cooperating_processes_allow_one_commit_per_source_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.txt");
+        std::fs::write(&path, b"before").unwrap();
+        let binary = std::env::current_exe().unwrap();
+        let mut children = (0..2)
+            .map(|index| {
+                std::process::Command::new(&binary)
+                    .arg("conditional_commit_child_process")
+                    .env("GROW_CONDITIONAL_COMMIT_TEST_ROOT", dir.path())
+                    .env("GROW_CONDITIONAL_COMMIT_TEST_INDEX", index.to_string())
+                    .spawn()
+                    .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !(0..2).all(|index| dir.path().join(format!("ready-{index}")).exists()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "child did not reach read barrier"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        std::fs::write(dir.path().join("go"), b"").unwrap();
+        for child in &mut children {
+            assert!(child.wait().unwrap().success());
+        }
+        let results = (0..2)
+            .map(|index| {
+                std::fs::read_to_string(dir.path().join(format!("result-{index}"))).unwrap()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result.as_str() == "ok")
+                .count(),
+            1
+        );
+        assert_eq!(
+            results
+                .iter()
+                .filter(|result| result.as_str() == "conflict")
+                .count(),
+            1
+        );
+        let final_bytes = std::fs::read(&path).unwrap();
+        assert!(final_bytes == b"first" || final_bytes == b"second");
+    }
+
+    #[test]
+    fn conditional_commit_child_process() {
+        let Ok(root) = std::env::var("GROW_CONDITIONAL_COMMIT_TEST_ROOT") else {
+            return;
+        };
+        let index = std::env::var("GROW_CONDITIONAL_COMMIT_TEST_INDEX").unwrap();
+        let root = Path::new(&root);
+        let path = root.join("file.txt");
+        let expected = std::fs::read(&path).unwrap();
+        std::fs::write(root.join(format!("ready-{index}")), b"").unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !root.join("go").exists() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "parent did not release commit barrier"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let proposed: &[u8] = if index == "0" { b"first" } else { b"second" };
+        let result = match replace_file_if_unchanged_blocking(&path, &expected, proposed) {
+            Ok(()) => "ok",
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => "conflict",
+            Err(error) => panic!("unexpected conditional commit error: {error}"),
+        };
+        std::fs::write(root.join(format!("result-{index}")), result).unwrap();
+    }
+
+    #[tokio::test]
+    async fn exclusive_creation_publishes_complete_content_and_preserves_existing_target() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested/file.txt");
+        LocalFs
+            .create_file_if_absent(&path, b"first")
+            .await
+            .unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+
+        let error = LocalFs
+            .create_file_if_absent(&path, b"second")
+            .await
+            .unwrap_err();
+        assert_eq!(error.io_error_kind(), Some(io::ErrorKind::AlreadyExists));
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        assert_eq!(
+            std::fs::read_dir(path.parent().unwrap()).unwrap().count(),
+            1
+        );
+
+        #[cfg(unix)]
+        {
+            let alias = dir.path().join("alias.txt");
+            std::os::unix::fs::symlink(&path, &alias).unwrap();
+            let error = LocalFs
+                .create_file_if_absent(&alias, b"third")
+                .await
+                .unwrap_err();
+            assert_eq!(error.io_error_kind(), Some(io::ErrorKind::AlreadyExists));
+            assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        }
+    }
 
     #[test]
     fn classifies_windows_transient_write_lock_errors() {

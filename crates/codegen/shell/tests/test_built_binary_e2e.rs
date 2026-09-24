@@ -193,6 +193,125 @@ async fn test_headless_session_in_non_git_dir() {
     assert_no_crashes(&result.stderr);
 }
 
+/// Measure the built binary's peak RSS for a normal small response and a
+/// multi-megabyte streamed Chat Completions response. This is an observation
+/// benchmark, not a pass/fail memory threshold; run it manually on macOS with
+/// a pre-built binary.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+#[ignore = "manual macOS peak-RSS benchmark; requires a pre-built binary"]
+async fn test_headless_sampling_attempt_peak_rss() {
+    const BIG_RESPONSE_BYTES: usize = 12 * 1024 * 1024;
+    const SSE_DELTA_BYTES: usize = 16 * 1024;
+
+    fn report_max_rss(label: &str, result: &HeadlessResult) -> u64 {
+        let rss = result
+            .stderr
+            .lines()
+            .find_map(|line| {
+                let (value, _) = line.split_once("maximum resident set size")?;
+                value.split_whitespace().last()?.parse::<u64>().ok()
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "{label}: /usr/bin/time -l did not report maximum resident set size\n{}",
+                    result.stderr
+                )
+            });
+        println!(
+            "sampling RSS {label}: {rss} bytes ({:.1} MiB)",
+            rss as f64 / (1024.0 * 1024.0)
+        );
+        rss
+    }
+
+    fn chat_completion_attempts(server: &MockInferenceServer) -> usize {
+        server
+            .requests()
+            .iter()
+            .filter(|request| request.method == "POST" && request.path == "/v1/chat/completions")
+            .count()
+    }
+
+    async fn run_measured_attempt(
+        server: &MockInferenceServer,
+        title_server: &MockInferenceServer,
+        label: &str,
+    ) -> HeadlessResult {
+        let sandbox = TestSandbox::builder().mock_url(server.url()).git().build();
+        std::fs::write(
+            sandbox.grow_home().join("config.toml"),
+            format!(
+                "[models]\ndefault = \"mock/{CHAT_COMPLETIONS_MODEL}\"\nsession_title = \"title/title-model\"\n\n[provider.mock.options]\nbase_url = {:?}\nenv_key = \"GROW_API_KEY\"\n\n[provider.mock.models.{CHAT_COMPLETIONS_MODEL}]\nmodel = \"{CHAT_COMPLETIONS_MODEL}\"\napi_backend = \"chat_completions\"\ncontext_window = 200000\nagent_type = \"grow-build\"\n\n[provider.title.options]\nbase_url = {:?}\nenv_key = \"GROW_API_KEY\"\n\n[provider.title.models.title-model]\nmodel = \"title-model\"\napi_backend = \"chat_completions\"\ncontext_window = 200000\nagent_type = \"grow-build\"\n",
+                server.url(),
+                title_server.url()
+            ),
+        )
+        .expect("write benchmark model config");
+        let binary = grow_binary();
+        let mut cmd = tokio::process::Command::new("/usr/bin/time");
+        cmd.arg("-l")
+            .arg(binary)
+            .args([
+                "-p",
+                "say hello",
+                "--permission-mode",
+                "always-approve",
+                "--model",
+                "mock/chat-completions-model",
+                "--max-turns",
+                "1",
+                "--output-format",
+                "json",
+            ])
+            .current_dir(sandbox.workspace());
+        let result = run_headless_in_sandbox(cmd, sandbox).await;
+        assert_headless_success(&result, label, Some(server));
+        assert_no_crashes(&result.stderr);
+        report_max_rss(label, &result);
+        result
+    }
+
+    let server = single_model_server(CHAT_COMPLETIONS_MODEL, "chat_completions").await;
+    let title_server = single_model_server("title-model", "chat_completions").await;
+    title_server.set_response("{\"session_title\":\"RSS benchmark\"}");
+    server.set_response("small baseline response");
+    let attempts_before_baseline = chat_completion_attempts(&server);
+    let baseline = run_measured_attempt(&server, &title_server, "small SSE baseline").await;
+    assert_eq!(
+        chat_completion_attempts(&server) - attempts_before_baseline,
+        1,
+        "baseline should exercise exactly one Chat Completions attempt\n{}",
+        server.request_log_summary()
+    );
+    assert!(
+        !baseline.stdout.is_empty(),
+        "baseline response should be emitted"
+    );
+
+    let delta = "x".repeat(SSE_DELTA_BYTES);
+    let delta_count = BIG_RESPONSE_BYTES.div_ceil(SSE_DELTA_BYTES);
+    let large_response = std::iter::repeat(delta.as_str())
+        .take(delta_count)
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        (BIG_RESPONSE_BYTES..=BIG_RESPONSE_BYTES + delta_count).contains(&large_response.len()),
+        "large response size was {} bytes",
+        large_response.len()
+    );
+    server.set_response(large_response);
+    let attempts_before_large = chat_completion_attempts(&server);
+    let large = run_measured_attempt(&server, &title_server, "12 MiB streamed SSE").await;
+    assert_eq!(
+        chat_completion_attempts(&server) - attempts_before_large,
+        1,
+        "large response should exercise exactly one Chat Completions attempt\n{}",
+        server.request_log_summary()
+    );
+    assert!(!large.stdout.is_empty(), "large response should be emitted");
+}
+
 #[tokio::test]
 #[ignore] // requires pre-built binary; run with --ignored
 async fn test_headless_tools_allowlist_keeps_enabled_web_fetch() {

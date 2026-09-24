@@ -363,7 +363,8 @@ async fn phase_breakdown_real_functions() {
         rewind_path.clone(),
     )
     .get_rewind_point_metas()
-    .await;
+    .await
+    .expect("scan rewind fixture metadata");
     let lazy_metas_scan = t.elapsed();
     let t = Instant::now();
     let lazy_points = FileStateTracker::with_lazy_file(

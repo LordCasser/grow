@@ -266,6 +266,7 @@ async fn test_extract_total_tokens_from_mixed_updates() {
                 .as_ref()
                 .and_then(|m| m.get("totalTokens"))
                 .and_then(|v| v.as_u64()),
+            SessionUpdate::ResponseReplayProjection(_) => None,
         })
         .unwrap_or(0);
 

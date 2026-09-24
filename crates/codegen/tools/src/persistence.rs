@@ -140,11 +140,16 @@ impl ResourcesStateStore for LocalResourcesStateStore {
                 // Linux directory capabilities may use O_PATH, which cannot
                 // be synced. Reopen relative to the same pinned capability.
                 #[cfg(unix)]
-                let parent = self.directory.open(".")
+                let parent = self
+                    .directory
+                    .open(".")
                     .map_err(published_persistence_error)?;
                 #[cfg(not(unix))]
-                let parent = self.directory.try_clone()
-                    .map_err(published_persistence_error)?.into_std_file();
+                let parent = self
+                    .directory
+                    .try_clone()
+                    .map_err(published_persistence_error)?
+                    .into_std_file();
                 parent.sync_all().map_err(published_persistence_error)?;
             }
             Ok(())
@@ -509,9 +514,7 @@ mod tests {
     // ResourcesPersistence tests
     // -----------------------------------------------------------------------
 
-    use crate::types::resources::{
-        ModelImageInputState, Resources, State, WebCitationCounter,
-    };
+    use crate::types::resources::{ModelImageInputState, Resources, State, WebCitationCounter};
 
     #[tokio::test]
     async fn resources_save_and_load_roundtrip() {

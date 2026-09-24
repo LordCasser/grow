@@ -189,6 +189,130 @@ mod tests {
     use super::*;
 
     #[test]
+    fn flowchart_inline_classes_preserve_shapes_labels_and_colors() {
+        let source = r##"flowchart TD
+    PIN{machine claimed?}:::cond --> CALL["POST /v1/items/{id}"]:::dark
+    classDef cond fill:#112233,stroke:#445566,color:#778899
+    classDef dark fill:#aabbcc,stroke:#ddeeff,color:#123456"##;
+        let graph = parser::parse_mermaid(source).expect("class flowchart parses");
+        assert!(graph.statements.iter().any(|statement| matches!(statement,
+            ast::Statement::Node(node) if node.id == "PIN" && node.label.as_deref() == Some("machine claimed?") && node.shape == ast::NodeShape::Diamond
+        )));
+        assert!(graph.statements.iter().any(|statement| matches!(statement,
+            ast::Statement::Node(node) if node.id == "CALL" && node.label.as_deref() == Some("POST /v1/items/{id}") && node.shape == ast::NodeShape::Rectangle
+        )));
+        let svg = render_mermaid_to_svg(source, None).expect("class flowchart renders");
+        for color in [
+            "#112233", "#445566", "#778899", "#aabbcc", "#ddeeff", "#123456",
+        ] {
+            assert!(svg.contains(color), "missing {color}: {svg}");
+        }
+    }
+
+    #[test]
+    fn flowchart_explicit_style_wins_over_inline_class() {
+        let source = "flowchart TD\n    A[one]:::cond\n    style A fill:#123456,color:#654321\n    classDef cond fill:#abcdef,color:#fedcba";
+        let svg = render_mermaid_to_svg(source, None).expect("styled flowchart renders");
+        assert!(svg.contains("#123456"));
+        assert!(svg.contains("#654321"));
+        assert!(!svg.contains("#abcdef"));
+        assert!(!svg.contains("#fedcba"));
+    }
+
+    #[test]
+    fn flowchart_unsupported_directives_do_not_create_nodes() {
+        let source = "flowchart TD\n    A --> B\n    class A dark\n    click A \"https://example.test\"\n    linkStyle 0 stroke:red\n    direction LR\n    accTitle: Example\n    accDescr: Example";
+        let graph = parser::parse_mermaid(source).expect("directives are ignored");
+        assert_eq!(
+            graph
+                .statements
+                .iter()
+                .filter(|statement| matches!(statement, ast::Statement::Edge(_)))
+                .count(),
+            1
+        );
+        assert!(graph.statements.iter().all(|statement| !matches!(statement,
+            ast::Statement::Node(node) if node.id.starts_with("class") || node.id.starts_with("click") || node.id.starts_with("direction")
+        )));
+    }
+
+    #[test]
+    fn flowchart_group_edges_expand_and_label_ampersand_stays_literal() {
+        let source = "flowchart TD\n    A & B --> C --> D & E\n    REP[\"GET /v1/items?sku=&status=READY & more\"]:::dark";
+        let graph = parser::parse_mermaid(source).expect("groups parse");
+        let edges = graph
+            .statements
+            .iter()
+            .filter_map(|statement| match statement {
+                ast::Statement::Edge(edge) => Some((edge.from.as_str(), edge.to.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(edges, [("A", "C"), ("B", "C"), ("C", "D"), ("C", "E")]);
+        assert!(graph.statements.iter().any(|statement| matches!(statement,
+            ast::Statement::Node(node) if node.id == "REP" && node.label.as_deref() == Some("GET /v1/items?sku=&status=READY & more")
+        )));
+        let standalone =
+            parser::parse_mermaid("flowchart TD\n    A & B").expect("standalone group parses");
+        assert_eq!(
+            standalone
+                .statements
+                .iter()
+                .filter(|statement| matches!(statement, ast::Statement::Node(_)))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn flowchart_group_edge_budget_is_checked_before_expansion() {
+        let line = "A & B --> C & D";
+        let at_limit = format!(
+            "flowchart TD\n{}",
+            std::iter::repeat_n(line, 1024)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        let graph = parser::parse_mermaid(&at_limit).expect("4096 group edges accepted");
+        assert_eq!(
+            graph
+                .statements
+                .iter()
+                .filter(|statement| matches!(statement, ast::Statement::Edge(_)))
+                .count(),
+            4096
+        );
+        let above_limit = format!(
+            "flowchart TD\n{}\nA & B --> C\nA & B & C --> D",
+            std::iter::repeat_n(line, 1023)
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+        assert!(matches!(
+            parser::parse_mermaid(&above_limit),
+            Err(error::MermaidError::ParseError { .. })
+        ));
+    }
+
+    #[test]
+    fn flowchart_style_values_are_escaped_in_svg_attributes() {
+        let source = "flowchart TD\n    A[one]:::unsafe\n    classDef unsafe fill:red\" onload=\"bad&amp;,stroke:blue<bad>,color:green&bad";
+        let svg = render_mermaid_to_svg(source, None).expect("styled flowchart renders");
+        assert!(svg.contains("fill=\"red&quot; onload=&quot;bad&amp;amp;\""));
+        assert!(!svg.contains("fill=\"red\" onload="));
+        assert!(svg.contains("blue&lt;bad&gt;"));
+        assert!(svg.contains("green&amp;bad"));
+
+        let direct = render_mermaid_to_svg(
+            "flowchart TD\n    B[two]\n    style B fill:red\" onload=\"bad",
+            None,
+        )
+        .expect("explicit style renders");
+        assert!(direct.contains("fill=\"red&quot; onload=&quot;bad\""));
+        assert!(!direct.contains("fill=\"red\" onload="));
+    }
+
+    #[test]
     fn test_open_edge_label_syntax_parses_as_labels_not_nodes() {
         // `B -- 是 --> C`: the `-- text -->` open-label form must produce an
         // edge label, not a literal node named "B -- 是".

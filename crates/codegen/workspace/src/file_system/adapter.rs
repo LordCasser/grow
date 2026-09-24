@@ -4,6 +4,7 @@
 //! It translates tools' `AsyncFileSystem` trait into ACP protocol calls:
 //!   `read_file()` → read_text_file
 //!   `write_file()` → write_text_file
+//!   `create_file_if_absent()` → unsupported (ACP has no conditional write)
 //!   `delete_file()` → not supported by ACP (returns error)
 //!
 //! Mirrors the pattern of `AcpTerminalAdapter` for terminal execution.

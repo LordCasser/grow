@@ -15,9 +15,9 @@
 //! - `TaskModelValidator` — validates explicit model slugs before spawn
 
 pub mod backend;
-pub mod interaction;
 pub mod coordinator;
 mod coordinator_state;
+pub mod interaction;
 pub use coordinator_state::{cap_completion_output, completion_summary};
 pub mod types;
 

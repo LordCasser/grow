@@ -27,14 +27,23 @@ fn unified_log_redirect_precedes_test_start() {
         diagnostics::unified_log::info("leader-integration-log-isolation", None, None);
         let snapshot = diagnostics::unified_log::snapshot_log().unwrap();
         assert!(String::from_utf8_lossy(&snapshot).contains("leader-integration-log-isolation"));
-        assert!(!real_path.exists(), "unified log escaped process temp redirect");
+        assert!(
+            !real_path.exists(),
+            "unified log escaped process temp redirect"
+        );
         return;
     }
     let home = tempfile::tempdir().unwrap();
     let status = std::process::Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "unified_log_redirect_precedes_test_start", "--nocapture"])
-        .env("GROW_HOME", home.path()).env(CHILD_HOME, home.path())
-        .status().unwrap();
+        .args([
+            "--exact",
+            "unified_log_redirect_precedes_test_start",
+            "--nocapture",
+        ])
+        .env("GROW_HOME", home.path())
+        .env(CHILD_HOME, home.path())
+        .status()
+        .unwrap();
     assert!(status.success());
 }
 
@@ -3027,6 +3036,26 @@ async fn raw_recv_acp(reader: &mut tokio::io::ReadHalf<UnixStream>) -> serde_jso
     }
 }
 
+/// Read the next agent-channel frame for an RPC, skipping the server's
+/// id-less client-disconnect housekeeping notification.
+async fn recv_forwarded_method(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<String>,
+    expected_method: &str,
+) -> serde_json::Value {
+    loop {
+        let frame = rx.recv().await.expect("agent channel closed");
+        let json: serde_json::Value = serde_json::from_str(&frame).unwrap();
+        if json["method"] == "grow/internal/queue_client_disconnected" {
+            continue;
+        }
+        assert_eq!(
+            json["method"], expected_method,
+            "unexpected ACP frame: {json}"
+        );
+        return json;
+    }
+}
+
 /// Count `unified.jsonl` orphan-drop entries for `request_id`. Namespaced
 /// request ids are unique per process (global `ClientId` counter) and the pid
 /// filter fences off other test processes appending to the same shared log.
@@ -3169,8 +3198,7 @@ async fn test_sever_mid_rpc_orphans_response_and_replay_recovers() {
     )
     .await
     .unwrap();
-    let new_fwd = acp_rx.recv().await.unwrap();
-    let new_json: serde_json::Value = serde_json::from_str(&new_fwd).unwrap();
+    let new_json = recv_forwarded_method(&mut acp_rx, "session/new").await;
     let new_id = new_json["id"].as_str().unwrap().to_string();
     response_tx
         .send(format!(
@@ -3188,8 +3216,7 @@ async fn test_sever_mid_rpc_orphans_response_and_replay_recovers() {
     )
     .await
     .unwrap();
-    let prompt_fwd = acp_rx.recv().await.unwrap();
-    let prompt_json: serde_json::Value = serde_json::from_str(&prompt_fwd).unwrap();
+    let prompt_json = recv_forwarded_method(&mut acp_rx, "session/prompt").await;
     let prompt_id = prompt_json["id"].as_str().unwrap().to_string();
 
     // Sever: abrupt socket close with the prompt RPC still in flight.
@@ -3198,9 +3225,7 @@ async fn test_sever_mid_rpc_orphans_response_and_replay_recovers() {
 
     // The eviction notification on the agent channel is the deterministic
     // signal that the server processed the disconnect.
-    let evict = acp_rx.recv().await.unwrap();
-    let evict_json: serde_json::Value = serde_json::from_str(&evict).unwrap();
-    assert_eq!(evict_json["method"], "grow/internal/evict_sessions");
+    let _evict_json = recv_forwarded_method(&mut acp_rx, "grow/internal/evict_sessions").await;
 
     // The agent completes the turn anyway: durable terminal notification plus
     // the RPC response addressed to the dead client.
@@ -3226,9 +3251,7 @@ async fn test_sever_mid_rpc_orphans_response_and_replay_recovers() {
     )
     .await
     .unwrap();
-    let load_fwd = acp_rx.recv().await.unwrap();
-    let load_json: serde_json::Value = serde_json::from_str(&load_fwd).unwrap();
-    assert_eq!(load_json["method"], "session/load");
+    let load_json = recv_forwarded_method(&mut acp_rx, "session/load").await;
     let load_id = load_json["id"].as_str().unwrap().to_string();
     response_tx
         .send(format!(

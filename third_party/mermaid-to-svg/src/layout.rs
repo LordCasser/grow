@@ -41,6 +41,7 @@ pub struct LayoutNode {
     pub label: String,
     pub fill_color: Option<String>,
     pub stroke_color: Option<String>,
+    pub text_color: Option<String>,
 }
 
 fn graph_contains_state_shapes(statements: &[Statement]) -> bool {
@@ -285,7 +286,7 @@ impl<'a> LayoutEngine<'a> {
             .into_iter()
             .filter_map(|(id, (x, y))| {
                 let info = self.nodes.get(&id)?;
-                let (fill_color, stroke_color) = self.get_node_colors(&id);
+                let (fill_color, stroke_color, text_color) = self.get_node_colors(&id);
                 Some((
                     id.clone(),
                     LayoutNode {
@@ -298,6 +299,7 @@ impl<'a> LayoutEngine<'a> {
                         label: info.label.clone(),
                         fill_color,
                         stroke_color,
+                        text_color,
                     },
                 ))
             })
@@ -1630,6 +1632,7 @@ impl<'a> LayoutEngine<'a> {
                     .unwrap_or_else(|| subgraph.id.clone()),
                 fill_color: None,
                 stroke_color: None,
+                text_color: None,
             })
     }
 
@@ -1736,7 +1739,7 @@ impl<'a> LayoutEngine<'a> {
         Some((width, height))
     }
 
-    fn get_node_colors(&self, node_id: &str) -> (Option<String>, Option<String>) {
+    fn get_node_colors(&self, node_id: &str) -> (Option<String>, Option<String>, Option<String>) {
         self.node_styles
             .get(node_id)
             .map(|props| {
@@ -1748,9 +1751,13 @@ impl<'a> LayoutEngine<'a> {
                     .iter()
                     .find(|(k, _)| k == "stroke")
                     .map(|(_, v)| v.clone());
-                (fill, stroke)
+                let text = props
+                    .iter()
+                    .find(|(k, _)| k == "color")
+                    .map(|(_, v)| v.clone());
+                (fill, stroke, text)
             })
-            .unwrap_or((None, None))
+            .unwrap_or((None, None, None))
     }
 
     #[allow(dead_code)]
@@ -1768,7 +1775,7 @@ impl<'a> LayoutEngine<'a> {
             .into_iter()
             .map(|(id, (x, y))| {
                 let info = &self.nodes[&id];
-                let (fill_color, stroke_color) = self.get_node_colors(&id);
+                let (fill_color, stroke_color, text_color) = self.get_node_colors(&id);
                 (
                     id.clone(),
                     LayoutNode {
@@ -1781,6 +1788,7 @@ impl<'a> LayoutEngine<'a> {
                         label: info.label.clone(),
                         fill_color,
                         stroke_color,
+                        text_color,
                     },
                 )
             })
@@ -3712,6 +3720,7 @@ mod tests {
             label: String::new(),
             fill_color: None,
             stroke_color: None,
+            text_color: None,
         }
     }
 

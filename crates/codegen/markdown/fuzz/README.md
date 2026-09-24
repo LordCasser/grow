@@ -13,11 +13,13 @@ rustup toolchain install nightly
 
 | Target | What it fuzzes |
 |---|---|
-| `render_all` | All 8 combos: `pretty × syntect × {full, streaming}` for every input |
+| `render_all` | Four renderer calls: pretty and non-pretty full and streaming renders, all with Syntect disabled |
 
-Each iteration runs:
-- `render_markdown_ratatui_full()` — 4 combos (pretty/non-pretty × syntect/no-syntect)
-- `StreamingMarkdownRenderer` char-by-char — same 4 combos
+For each valid UTF-8 input, `render_all` runs:
+- `render_markdown_ratatui_full()` with pretty enabled and disabled, passing `None` for Syntect.
+- `StreamingMarkdownRenderer` with pretty enabled and disabled, also passing `None` for Syntect. It cycles through 1-, 16-, and 32-byte chunk targets, extending each chunk end to a UTF-8 character boundary before calling `push_and_render()`.
+
+This target is crash/panic-oriented: it discards rendered output, does not call `finish()`, and does not compare full and streaming output or check structured properties. It does not exercise Syntect or ANSI-rendering paths.
 
 ## Running
 
