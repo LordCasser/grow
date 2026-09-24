@@ -158,8 +158,14 @@ if [ -z "$RUST_PREFIX" ] \
   || [ ! -x "$RUST_PREFIX/bin/rustc" ] \
   || [ ! -d "$RUST_PREFIX/lib/rustlib" ] \
   || [ "$("$RUST_PREFIX/bin/rustc" --version | awk '{ print $2 }')" != "$EXPECTED_OHOS_RUST_VERSION" ]; then
+  # The pinned formulas retain usable source inputs, but their OHOS bottles
+  # can disappear from the mirror independently of the checked-in core commit.
+  # Build the formula install steps locally to avoid stale bottle URLs. Rust's
+  # formula installs the official prebuilt OHOS host distribution.
+  log "Installing OpenSSL from source via Harmonybrew"
+  HOMEBREW_NO_AUTO_UPDATE=1 brew install --build-from-source openssl@3
   log "Installing rust via Harmonybrew (official OHOS-host dist, rpath-patched)"
-  HOMEBREW_NO_AUTO_UPDATE=1 brew install rust
+  HOMEBREW_NO_AUTO_UPDATE=1 brew install --build-from-source rust
   RUST_PREFIX="$(brew --prefix rust)"
 fi
 if ! command -v rustup >/dev/null 2>&1 && [ ! -x "$CARGO_HOME/bin/rustup" ]; then

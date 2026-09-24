@@ -191,7 +191,7 @@ GitHub Release 形成两套版本、签名和更新契约。`distro-pm` feature 
 | 4 | 容器：官方 dist 1.92.0 ohos 宿主 | ❌ 不存在（404）；1.93+ 有 |
 | 5 | 容器：rustup 1.98.0 ohos 宿主（`--force-non-host`） | ✅ rustc 可跑；cargo 缺 libssl/libcrypto/libz |
 | 6 | 容器：LD_LIBRARY_PATH 指 OHOS 改名库 | ❌ 符号版本不全 |
-| 7 | 容器：`brew install rust`（1.98.0，官方 bottle，rpath 已修） | ✅ cargo 可运行 |
+| 7 | 容器：从源码执行 Harmonybrew 的 `openssl@3` 与 `rust` 配方（Rust 配方安装官方 1.98.0 OHOS host dist 并修复 rpath） | ✅ cargo 可运行 |
 | 8 | 容器：cargo fetch | ⚠️ crates.io 索引 TLS 间歇失败 → USTC 镜像收敛；随后 USTC 下载端点全挂 → 切 rsproxy（下载 5/5 成功） |
 | 9 | 容器：ohos-ripgrep 预编译 rg 15.1.0 直接执行 | ✅ 原生运行（ELF interpreter `/lib/ld-musl-aarch64.so.1`，DYNAMIC musl，NEON）—— 参考资料产物可用 |
 | 10 | 容器：`cargo build --release -p cli --bin grow`（默认 feature） | ❌ nix 0.26.4 编译失败（libc 缺 `O_FSYNC`/`__fsword_t`/`XFS_SUPER_MAGIC`/`ST_RELATIME`）；sqlite-vec C 代码用 glibc 专有 `u_int*_t`；jemalloc configure 不认 ohos 三元组 |
