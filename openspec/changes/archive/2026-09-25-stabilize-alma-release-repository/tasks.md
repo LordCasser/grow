@@ -1,4 +1,4 @@
 - [x] Confirm the official AlmaLinux 8 repository paths and reproduce the DNF override in a container.
 - [x] Update the AlmaLinux release build command without changing target or package list.
-- [ ] Validate workflow syntax and OpenSpec, then run the full v2.2.0 publication workflow.
-- [ ] Verify the public release, record evidence, and archive the change.
+- [x] Validate workflow syntax and OpenSpec, then run the full v2.2.0 publication workflow.
+- [x] Verify the public release, record evidence, and archive the change.
