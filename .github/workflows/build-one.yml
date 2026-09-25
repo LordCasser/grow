@@ -191,7 +191,14 @@ jobs:
             -e "GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1" \
             -e "TARGET_TRIPLE=${TARGET_TRIPLE}" -e "CARGO_INCREMENTAL=0" \
             almalinux:8 bash -euo pipefail -c '
-              dnf install -y gcc gcc-c++ make cmake git perl pkgconf util-linux >/dev/null
+              arch="$(rpm --eval "%{_arch}")"
+              dnf --setopt=baseos.mirrorlist= \
+                --setopt="baseos.baseurl=https://repo.almalinux.org/almalinux/8/BaseOS/${arch}/os/" \
+                --setopt=appstream.mirrorlist= \
+                --setopt="appstream.baseurl=https://repo.almalinux.org/almalinux/8/AppStream/${arch}/os/" \
+                --setopt=extras.mirrorlist= \
+                --setopt="extras.baseurl=https://repo.almalinux.org/almalinux/8/extras/${arch}/os/" \
+                install -y gcc gcc-c++ make cmake git perl pkgconf util-linux >/dev/null
               setpriv --reuid="${HOST_UID}" --regid="${HOST_GID}" --clear-groups \
                 cargo build --locked --profile release-dist \
                 --features release-dist -p cli --bin grow --target "${TARGET_TRIPLE}"
