@@ -676,7 +676,7 @@ impl SessionActor {
             }
             BuiltinAction::SetPermissionMode { mode } => {
                 let was = self.permissions.mode();
-                self.permissions.set_mode(mode);
+                self.permissions.set_mode(mode).await;
                 let actual = self.permissions.mode();
                 if permission_mode_change(was, actual).is_some() {
                     self.emit_event(crate::session::events::Event::PermissionModeChanged {

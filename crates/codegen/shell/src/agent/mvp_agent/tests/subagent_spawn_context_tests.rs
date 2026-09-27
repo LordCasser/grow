@@ -61,12 +61,22 @@ async fn subagent_spawn_context_inherits_parent_permission_handle() {
                 workspace::permission::AccessKind::Bash("cat .env".into()),
             ] {
                 let decision = inherited
-                    .request(
+                    .request_with_context(
                         access.clone(),
                         acp::ToolCallUpdate::new(acp::ToolCallId::new("tc"), Default::default()),
-                        Some("child-session".to_owned()),
-                        Some("general-purpose".to_owned()),
-                        Some("permission inheritance regression".to_owned()),
+                        None,
+                        workspace::permission::types::PermissionRequestContext {
+                            source: workspace::permission::types::PermissionRequestSource::Child {
+                                session_id: "child-session".to_owned(),
+                                subagent_type: Some("general-purpose".to_owned()),
+                                subagent_description: Some("permission inheritance regression".to_owned()),
+                            },
+                            request_mode: None,
+                            within_capability_fence: false,
+                            execution_cwd: None,
+                            classifier_turns: None,
+                            call_evidence: None,
+                        },
                     )
                     .await;
                 assert!(

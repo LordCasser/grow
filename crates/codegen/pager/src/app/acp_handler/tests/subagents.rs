@@ -2,6 +2,66 @@
     use super::*;
 
     #[test]
+    fn late_subagent_lifecycle_preserves_running_status_and_live_cursor() {
+        let mut app = make_app_with_agent("parent-late");
+        let owner = AgentId(0);
+        let live = |update, event_id| {
+            let payload = SessionNotification {
+                session_id: acp::SessionId::new("parent-late"),
+                update,
+                meta: Some(serde_json::json!({ "eventId": event_id })),
+            };
+            acp::ExtNotification::new(
+                "grow/session_notification",
+                std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
+            )
+        };
+
+        assert!(handle_ext_notification(
+            &grow_model_switch_notif("parent-late", "parent-late-10"),
+            &mut app
+        ));
+        let spawned = live(
+            test_subagent_spawned("parent-late", "child-late"),
+            "parent-late-9",
+        );
+        assert!(handle_ext_notification(&spawned, &mut app));
+        assert!(app.agents[&owner].session.subagent_sessions["child-late"].is_running());
+        assert_eq!(app.agents[&owner].session.last_applied_grow_event_seq, Some(10));
+        assert_eq!(
+            app.agents[&owner].session.last_seen_event_id.as_deref(),
+            Some("parent-late-10")
+        );
+        assert!(!handle_ext_notification(&spawned, &mut app));
+
+        assert!(handle_ext_notification(
+            &grow_model_switch_notif("parent-late", "parent-late-12"),
+            &mut app
+        ));
+        let finished = live(test_subagent_finished("child-late"), "parent-late-11");
+        assert!(handle_ext_notification(&finished, &mut app));
+        assert!(app.agents[&owner].session.subagent_sessions["child-late"].finished);
+        assert_eq!(app.agents[&owner].session.last_applied_grow_event_seq, Some(12));
+        assert_eq!(
+            app.agents[&owner].session.last_seen_event_id.as_deref(),
+            Some("parent-late-12")
+        );
+        assert!(!handle_ext_notification(&finished, &mut app));
+
+        let unseen_finished = live(test_subagent_finished("child-done"), "parent-late-13");
+        assert!(handle_ext_notification(&unseen_finished, &mut app));
+        let stale_spawn = live(
+            test_subagent_spawned("parent-late", "child-done"),
+            "parent-late-8",
+        );
+        assert!(!handle_ext_notification(&stale_spawn, &mut app));
+        assert!(!app.agents[&owner]
+            .session
+            .subagent_sessions
+            .contains_key("child-done"));
+    }
+
+    #[test]
     fn nested_subagent_lifecycle_registers_flat_descendant_route() {
         let mut app = make_app_with_agent("root-session");
         handle(
@@ -398,6 +458,88 @@
             .expect("child view created");
         assert!(child.session.is_auto());
         assert!(!child.session.is_always_approve());
+    }
+
+    #[test]
+    fn child_spawn_and_model_change_keep_parent_effort_current() {
+        let mut app = make_app_with_agent("sess-1");
+        let model_id = shell::agent::models::ModelId::new("grow-3");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .session
+            .models
+            .available
+            .insert(
+                model_id.clone(),
+                shell::agent::models::ModelInfo::new(model_id, "Grow 3"),
+            );
+        let child_sid = "child-effort";
+        let mut spawned = test_subagent_spawned("sess-1", child_sid);
+        let GrowSessionUpdate::SubagentSpawned {
+            model,
+            reasoning_effort,
+            ..
+        } = &mut spawned
+        else {
+            unreachable!();
+        };
+        *model = Some("grow-3".into());
+        *reasoning_effort = Some("max".into());
+        assert!(handle(
+            make_ext_session_notification("sess-1", spawned),
+            &mut app,
+        ));
+
+        let root = &app.agents[&AgentId(0)];
+        let info = &root.session.subagent_sessions[child_sid];
+        assert_eq!(info.reasoning_effort, Some(shell::sampling::types::ReasoningEffort::Max));
+        assert_eq!(
+            root.subagent_views[child_sid].session.models.reasoning_effort,
+            Some(shell::sampling::types::ReasoningEffort::Max)
+        );
+
+        let current_model = root.subagent_views[child_sid]
+            .session
+            .models
+            .current_model_id_str()
+            .unwrap()
+            .to_owned();
+        assert!(handle(
+            make_ext_session_notification(
+                child_sid,
+                GrowSessionUpdate::ModelChanged {
+                    model_id: current_model,
+                    reasoning_effort: Some("high".into()),
+                },
+            ),
+            &mut app,
+        ));
+        let info = &app.agents[&AgentId(0)].session.subagent_sessions[child_sid];
+        assert_eq!(info.reasoning_effort, Some(shell::sampling::types::ReasoningEffort::High));
+
+        let mut replayed = test_subagent_spawned("sess-1", child_sid);
+        let GrowSessionUpdate::SubagentSpawned {
+            model,
+            reasoning_effort,
+            ..
+        } = &mut replayed
+        else {
+            unreachable!();
+        };
+        *model = Some("grow-3".into());
+        *reasoning_effort = Some("max".into());
+        let replay = SessionNotification {
+            session_id: acp::SessionId::new("sess-1"),
+            update: replayed,
+            meta: Some(serde_json::json!({ "isReplay": true })),
+        };
+        let raw = serde_json::value::to_raw_value(&replay).unwrap();
+        let notif = acp::ExtNotification::new("grow/session_notification", std::sync::Arc::from(raw));
+        handle_ext_notification(&notif, &mut app);
+        let root = &app.agents[&AgentId(0)];
+        assert_eq!(root.session.subagent_sessions[child_sid].reasoning_effort, Some(shell::sampling::types::ReasoningEffort::High));
+        assert_eq!(root.subagent_views[child_sid].session.models.reasoning_effort, Some(shell::sampling::types::ReasoningEffort::High));
     }
 
     /// On resume, a replayed spawn+finish pair leaves the subagent terminal.

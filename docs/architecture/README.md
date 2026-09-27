@@ -9,6 +9,7 @@
 | [Behavior](behavior-state-overview.md)、[Goal](goal-continuation.md) | 协作协议与跨 turn 续跑 | [behavior-goal](../../openspec/specs/behavior-goal/spec.md) |
 | [压缩](compaction-pre-prune.md) | 冻结输入与边界提交 | [context-compaction](../../openspec/specs/context-compaction/spec.md) |
 | [Workflow](workflow-workspace.md) | Definition、Run 与持久化 | [workflow-execution](../../openspec/specs/workflow-execution/spec.md) |
+| [权限 Sideband](permission-sideband.md) | 主/子 Agent 来源、并行裁决、准入与重置 | [tool-authorization](../../openspec/specs/tool-authorization/spec.md) |
 | [本机协调](local-coordination.md) | peer、询问与取消 | [local-coordination](../../openspec/specs/local-coordination/spec.md) |
 | [Pager Motion](pager-motion.md)、[链接](pager-hyperlinks.md) | 展示层机制，具体细节尚未穷举为规范 | [client-surfaces](../../openspec/specs/client-surfaces/spec.md) |
 | [依赖 workaround](dependency-workarounds.md) | Cargo patch 保留原因 | [模块与覆盖范围](../../openspec/baseline.md) |

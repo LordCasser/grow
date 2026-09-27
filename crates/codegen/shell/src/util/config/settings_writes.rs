@@ -221,6 +221,11 @@ pub async fn set_render_mermaid(value: String) -> Result<()> {
     update_config(|cfg| cfg.ui.render_mermaid = Some(value)).await
 }
 
+/// Persist the prompt footer provider/model display preference.
+pub async fn set_show_model_provider(value: bool) -> Result<()> {
+    update_config(|cfg| cfg.ui.show_model_provider = Some(value)).await
+}
+
 /// Persist `[ui].hunk_tracker_mode` via `update_config`. Value is one of the
 /// canonical strings `agent_only` | `all_dirty` | `off`.
 /// Restart-required: the mode is read once at connect time.

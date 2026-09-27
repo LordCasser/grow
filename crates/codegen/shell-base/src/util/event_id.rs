@@ -40,9 +40,10 @@ pub fn generate_event_id(session_id: &str) -> String {
 /// Stamping chokepoints (stamp BEFORE the persist/broadcast fork, so both
 /// copies share one id): `SessionActor::emit_notification_direct` (all actor
 /// ACP notifications, including the buffered pipeline), `send_grow_notification` /
-/// `persist_update_only` / `handle_grow_session_notification`,
-/// `notification_bridge::stamp_event_id` (bridge), `emit_subagent_notification`
-/// (subagent), `GoalNotifySender::send_update` (goal mode), plus the inline
+/// `persist_update_only` / `handle_grow_session_notification` (including
+/// parent-owned subagent lifecycle; the producer stamps only its direct gateway
+/// fallback), `notification_bridge::stamp_event_id` (bridge),
+/// `GoalNotifySender::send_update` (goal mode), plus the inline
 /// `build_notification_meta` user-echo persists. An emitter outside these is
 /// not a correctness bug — `prepare_replay_lines` refuses cursors over id-less
 /// tails (full replay, safe) — but it silently disables incremental reconnect

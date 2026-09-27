@@ -1934,6 +1934,7 @@ pub(crate) mod test_fixtures {
             description: Arc::from("test"),
             subagent_type: Arc::from("general-purpose"),
             model: None,
+            reasoning_effort: None,
             context_source: None,
             resumed_from: None,
             capability_mode: None,

@@ -716,6 +716,7 @@ fn canonical_spawn_fact_reconstructs_the_complete_ui_projection() {
         permission_mode,
         effective_permission_mode,
         model,
+        reasoning_effort,
         model_state,
         workflow_agent_names,
         resumed_from,
@@ -737,6 +738,7 @@ fn canonical_spawn_fact_reconstructs_the_complete_ui_projection() {
     assert_eq!(permission_mode.as_deref(), Some("ask"));
     assert_eq!(effective_permission_mode.as_deref(), Some("deny-writes"));
     assert_eq!(model.as_deref(), Some("grow-3"));
+    assert_eq!(reasoning_effort, None);
     assert_eq!(
         model_state
             .as_ref()
@@ -852,6 +854,7 @@ fn notification_subagent_spawned_includes_resumed_from() {
         permission_mode: None,
         effective_permission_mode: None,
         model: None,
+        reasoning_effort: None,
         model_state: None,
         workflow_agent_names: None,
         resumed_from: Some("prev-agent-id".into()),
@@ -875,6 +878,7 @@ fn notification_subagent_spawned_includes_resumed_from() {
         permission_mode: None,
         effective_permission_mode: None,
         model: None,
+        reasoning_effort: None,
         model_state: None,
         workflow_agent_names: None,
         resumed_from: None,

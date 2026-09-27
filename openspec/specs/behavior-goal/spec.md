@@ -196,3 +196,27 @@ The Shell SHALL publish a versioned Behavior availability projection when a fore
 #### Scenario: Older projection arrives late
 - **WHEN** Pager has accepted a Behavior availability projection with a newer revision and then receives an older revision
 - **THEN** Pager retains the newer projection and its visible availability
+
+### Requirement: Independent permission Sidebands coexist with live foreground attempts
+
+Goal 用量准入 SHALL 允许独立后台权限 Sideband 与同 owner 当前 epoch、同一 active Goal 内仍在运行的前台或后台 attempt 并行。已返回但未确认结算、已认领结算、旧 epoch 的 attempt SHALL 继续阻止对应 owner 后续准入，关闭的 Goal SHALL 不接纳新请求。并发 attempt 的使用量 SHALL 各自确认且只计一次。
+
+#### Scenario: Child permission arrives during foreground inference
+- **WHEN** 主模型 attempt 正在运行且子 Agent 提交需主会话裁决的权限请求
+- **THEN** 权限 Sideband 可以发出 provider 请求，无需等待主模型结束；运行中的权限 Sideband 也不阻止主会话的独立模型准入。
+
+#### Scenario: A concurrent attempt returned but usage is unsettled
+- **WHEN** 并发 attempt 已返回或开始结算但 owner 尚未确认其用量
+- **THEN** 新准入等待对应结算；epoch 改变或 Goal 关闭后不利用后台身份绕过边界。
+
+### Requirement: Concurrent Goal attempts use settled usage for admission
+
+有 token_budget 的 Active Goal SHALL 根据已持久确认的累计用量决定是否接纳新的 provider attempt。累计值达到阈值后 SHALL 立即关闭新准入；此前已准入的并行 attempt SHALL 继续结算并完整计入累计值，即使最终总量超过阈值。权限 Sideband 与前台的既有独立并行 SHALL 保留；未知用量仍按既有精确预算规则关闭准入。
+
+#### Scenario: Concurrent attempts cross the threshold together
+- **WHEN** 前台和权限后台 attempt 均在累计值尚未达到预算时准入，两者已确认用量之和随后超过预算
+- **THEN** 两次用量均准确且仅一次计入；阈值后的新准入被拒绝，既有 attempt 的结果不因后一次结算而被丢弃。
+
+#### Scenario: First settlement exhausts budget while another attempt is active
+- **WHEN** 一个已准入 attempt 的已确认用量先达到预算，另一个 attempt 仍在运行
+- **THEN** 新请求不能准入，仍在运行的 attempt 可完成并按实际用量结算。

@@ -2016,7 +2016,7 @@ pub(super) async fn run_session(
                             mode
                         };
                         tracing::info!(?mode, "Session received SetPermissionMode");
-                        session.permissions.set_mode(mode);
+                        session.permissions.set_mode(mode).await;
                         let actual = session.permissions.mode();
                         if permission_mode_change(was, actual).is_some() {
                             session.emit_event(
@@ -2033,11 +2033,34 @@ pub(super) async fn run_session(
                         }
                     }
                     SessionCommand::ResetPermissionState => {
-                        session.permissions.reset_state();
-                        tracing::info!(
-                            session_id = %session.session_info.id,
-                            "Permission state reset via notification"
-                        );
+                        match session.permissions.reset_state().await {
+                            Ok(()) => tracing::info!(
+                                session_id = %session.session_info.id,
+                                "Permission state reset and persisted via notification"
+                            ),
+                            Err(error) => {
+                                tracing::error!(
+                                    session_id = %session.session_info.id,
+                                    %error,
+                                    "Permission state reset could not be persisted"
+                                );
+                                session
+                                    .send_ui_notice(crate::extensions::notification::UiNotice {
+                                        correlation_id: format!(
+                                            "permission-reset-{}",
+                                            uuid::Uuid::now_v7()
+                                        ),
+                                        category:
+                                            crate::extensions::notification::UiNoticeCategory::Command,
+                                        subject: Some("permissions/reset".into()),
+                                        description: None,
+                                        message: "Permissions were revoked for this session, but the reset could not be saved. Previous grants may reappear after restart.".into(),
+                                        tone: crate::extensions::notification::UiNoticeTone::Error,
+                                        details: Some(error.to_string()),
+                                    })
+                                    .await;
+                            }
+                        }
                     }
                     SessionCommand::Rewind { request, respond_to } => {
                         let result = session.handle_rewind(request).await;

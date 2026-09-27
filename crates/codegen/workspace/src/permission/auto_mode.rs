@@ -35,6 +35,7 @@ pub enum ClassifierSource {
     Timeout,
     TransportError,
     InputTooLarge,
+    Overloaded,
 }
 
 impl ClassifierSource {
@@ -45,6 +46,7 @@ impl ClassifierSource {
             Self::Timeout => "timeout",
             Self::TransportError => "transport_error",
             Self::InputTooLarge => "input_too_large",
+            Self::Overloaded => "overloaded",
         }
     }
 }
@@ -55,6 +57,7 @@ pub enum ClassifierFailure {
     Timeout,
     TransportError(String),
     InputTooLarge,
+    Overloaded,
 }
 
 impl ClassifierFailure {
@@ -63,6 +66,7 @@ impl ClassifierFailure {
             Self::Timeout => ClassifierSource::Timeout,
             Self::TransportError(_) => ClassifierSource::TransportError,
             Self::InputTooLarge => ClassifierSource::InputTooLarge,
+            Self::Overloaded => ClassifierSource::Overloaded,
         }
     }
 }
@@ -75,6 +79,7 @@ impl std::fmt::Display for ClassifierFailure {
             Self::InputTooLarge => {
                 f.write_str("permission request detail exceeded classifier budget")
             }
+            Self::Overloaded => f.write_str("permission classifier capacity is full"),
         }
     }
 }
@@ -1643,6 +1648,7 @@ pub type ClassifyTextFn = Arc<
 /// or the standalone classifier messages (primary) and returns only model text.
 pub type ClassifyTextChannel = tokio::sync::mpsc::UnboundedSender<(
     PermissionJudgmentRequest,
+    tokio::time::Instant,
     tokio::sync::oneshot::Sender<Result<String, ClassifierFailure>>,
 )>;
 
@@ -1755,7 +1761,10 @@ impl PermissionClassifier for LlmPermissionClassifier {
             // Prefer channel (session sampling) then direct fn.
             let model_text = if let Some(ref tx) = self.classify_channel {
                 let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-                if tx.send((request.clone(), resp_tx)).is_err() {
+                if tx
+                    .send((request.clone(), tokio::time::Instant::now(), resp_tx))
+                    .is_err()
+                {
                     Err(ClassifierFailure::TransportError(
                         "permission auto classifier request channel closed".to_owned(),
                     ))
@@ -3134,6 +3143,7 @@ mod tests {
     async fn classify_channel_closed_is_unavailable() {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<(
             PermissionJudgmentRequest,
+            tokio::time::Instant,
             tokio::sync::oneshot::Sender<Result<String, ClassifierFailure>>,
         )>();
         drop(rx); // closed channel
@@ -3151,6 +3161,41 @@ mod tests {
                 "permission auto classifier request channel closed".into(),
             ))
         );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn classify_channel_carries_request_enqueue_time() {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(
+            PermissionJudgmentRequest,
+            tokio::time::Instant,
+            tokio::sync::oneshot::Sender<Result<String, ClassifierFailure>>,
+        )>();
+        let clf = LlmPermissionClassifier::with_channel(tx, ClassifierPromptType::Full);
+        let queued_at = tokio::time::Instant::now();
+        let classify = tokio::spawn(async move {
+            clf.classify(
+                "run_terminal_command",
+                &AccessKind::Bash("cargo test -p workspace".into()),
+                Some("cargo test -p workspace"),
+                ClassifierContext {
+                    subagent_session_id: Some("child".into()),
+                    ..ClassifierContext::default()
+                },
+            )
+            .await
+        });
+        let (request, stamped_at, response) = rx.recv().await.unwrap();
+        assert_eq!(request.tool_name, "run_terminal_command");
+        assert_eq!(stamped_at, queued_at);
+        tokio::time::advance(std::time::Duration::from_secs(5)).await;
+        assert_eq!(
+            tokio::time::Instant::now() - stamped_at,
+            std::time::Duration::from_secs(5),
+        );
+        response
+            .send(Ok(r#"{"decision":"allow","reason":"within task"}"#.into()))
+            .unwrap();
+        assert_eq!(classify.await.unwrap().verdict(), ClassifierVerdict::Allow);
     }
 
     /// Deterministic pre-pass: a provably routine command allows WITHOUT the

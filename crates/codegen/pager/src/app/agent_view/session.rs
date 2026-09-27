@@ -1770,6 +1770,7 @@ mod resolve_turn_activity_tests {
                 description: Arc::from("explore the auth module"),
                 subagent_type: Arc::from("explore"),
                 model: None,
+                reasoning_effort: None,
                 context_source: None,
                 resumed_from: None,
                 capability_mode: None,

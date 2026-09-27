@@ -1989,12 +1989,10 @@ fn emit_subagent_notification(
     if let SessionUpdate::SubagentFinished { output, .. } = &mut update {
         *output = None;
     }
-    let mut meta = None;
-    crate::util::event_id::ensure_event_id_meta(parent_session_id, &mut meta);
-    let notification = SessionNotification {
+    let mut notification = SessionNotification {
         session_id: acp::SessionId::new(parent_session_id),
         update,
-        meta: meta.map(serde_json::Value::Object),
+        meta: None,
     };
     if let Some(cmd_tx) = parent_cmd_tx {
         if cmd_tx
@@ -2007,6 +2005,9 @@ fn emit_subagent_notification(
             return;
         }
     }
+    let mut meta = None;
+    crate::util::event_id::ensure_event_id_meta(parent_session_id, &mut meta);
+    notification.meta = meta.map(serde_json::Value::Object);
     let params = serde_json::value::to_raw_value(&notification).ok();
     if let Some(params) = params {
         let ext_notification =
@@ -2495,6 +2496,7 @@ fn spawn_from_fact(
         permission_mode: spawn.permission_mode.clone(),
         effective_permission_mode: spawn.effective_permission_mode.clone(),
         model: Some(spawn.effective_model_id.clone()),
+        reasoning_effort: spawn.reasoning_effort.map(|effort| effort.to_string()),
         model_state,
         workflow_agent_names,
         resumed_from: spawn.resumed_from.clone(),

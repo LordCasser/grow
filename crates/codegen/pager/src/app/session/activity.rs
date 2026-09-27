@@ -213,6 +213,7 @@ mod tests {
             description: std::sync::Arc::from("test child"),
             subagent_type: std::sync::Arc::from("general-purpose"),
             model: None,
+            reasoning_effort: None,
             context_source: None,
             resumed_from: None,
             capability_mode: None,

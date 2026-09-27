@@ -40,6 +40,7 @@ const SHOW_THINKING_BLOCKS_DEFAULT: bool = true;
 const GROUP_TOOL_VERBS_DEFAULT: bool = true;
 /// Next-prompt suggestions (tab autocomplete ghost text) default ON.
 const PROMPT_SUGGESTIONS_DEFAULT: bool = true;
+const SHOW_MODEL_PROVIDER_DEFAULT: bool = false;
 const KEEP_TEXT_SELECTION_DEFAULT: TextSelection = TextSelection::Flash;
 /// Scroll speed default (1-100 scale, matches the legacy `[ui].scroll_speed`).
 const SCROLL_SPEED_DEFAULT: u8 = 50;
@@ -519,6 +520,34 @@ pub fn set_scroll_lines(lines: u8) {
     SCROLL_LINES_LOADED.with(|l| l.set(true));
 }
 
+// -- Prompt model provider --------------------------------------------------
+
+thread_local! {
+    static SHOW_MODEL_PROVIDER_CURRENT: Cell<bool> = const { Cell::new(SHOW_MODEL_PROVIDER_DEFAULT) };
+    static SHOW_MODEL_PROVIDER_LOADED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Prompt footer model identity; both session and Dashboard render paths use it.
+pub fn load_show_model_provider() -> bool {
+    SHOW_MODEL_PROVIDER_LOADED.with(|loaded| {
+        if !loaded.get() {
+            SHOW_MODEL_PROVIDER_CURRENT.with(|current| {
+                current.set(load_bool_from_effective_config(
+                    "show_model_provider",
+                    SHOW_MODEL_PROVIDER_DEFAULT,
+                ));
+            });
+            loaded.set(true);
+        }
+    });
+    SHOW_MODEL_PROVIDER_CURRENT.with(|current| current.get())
+}
+
+pub fn set_show_model_provider(enabled: bool) {
+    SHOW_MODEL_PROVIDER_CURRENT.with(|current| current.set(enabled));
+    SHOW_MODEL_PROVIDER_LOADED.with(|loaded| loaded.set(true));
+}
+
 // -- Render mermaid (auto | on | off) ---------------------------------------
 
 thread_local! {
@@ -576,6 +605,10 @@ pub fn prime(ui: &UiConfig) {
             .unwrap_or(COMBINE_QUEUED_PROMPTS_DEFAULT),
     );
     set_simple_mode(ui.simple_mode.unwrap_or(SIMPLE_MODE_DEFAULT));
+    set_show_model_provider(
+        ui.show_model_provider
+            .unwrap_or(SHOW_MODEL_PROVIDER_DEFAULT),
+    );
     set_keep_text_selection(text_selection_from_ui(ui));
     // Layered-config keys (not the `UiConfig` arg) — seed so the first frame
     // skips disk. `load_*` is a no-op when already set (e.g. resolve at startup).
@@ -1004,6 +1037,7 @@ mod tests {
                 compact_mode: true,
                 show_timestamps: Some(false),
                 simple_mode: Some(false),
+                show_model_provider: Some(true),
                 keep_text_selection: Some("hold".into()),
                 ..UiConfig::default()
             };
@@ -1011,6 +1045,7 @@ mod tests {
             assert!(load());
             assert!(!load_timestamps());
             assert!(!load_simple_mode());
+            assert!(load_show_model_provider());
             assert_eq!(load_keep_text_selection(), TextSelection::Hold);
         })
         .join()

@@ -170,22 +170,17 @@ async fn persist_state_to_dir(
     dir: &std::path::Path,
     state: &PermissionState,
     client_identifier: Option<&str>,
-) {
-    if let Err(e) = tokio::fs::create_dir_all(dir).await {
-        tracing::warn!(?e, "failed creating permission state directory");
-        return;
-    }
+) -> std::io::Result<()> {
+    tokio::fs::create_dir_all(dir).await?;
     let path = state_file_path(dir, client_identifier);
-    if let Err(e) = persist_state_to_path(&path, state).await {
-        tracing::warn!(?e, path = %path.display(), "failed writing permission state");
-    }
+    persist_state_to_path(&path, state).await
 }
 
 pub(crate) async fn persist_state(
     cwd: &AbsPathBuf,
     state: &PermissionState,
     client_identifier: Option<&str>,
-) {
+) -> std::io::Result<()> {
     persist_state_to_dir(&state_dir_for_cwd(cwd), state, client_identifier).await
 }
 
@@ -233,7 +228,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let mut granted = PermissionState::default();
         granted.allow_bash_execute = true;
-        persist_state_to_dir(tmp.path(), &granted, None).await;
+        persist_state_to_dir(tmp.path(), &granted, None)
+            .await
+            .unwrap();
         let path = state_file_path(tmp.path(), Some("bounded"));
         let mut exact = toml::to_string(&granted).unwrap();
         exact.extend(std::iter::repeat_n(
@@ -507,7 +504,9 @@ mod tests {
             .insert("cargo build".to_string());
         state.disallowed_bash_commands.insert("rm -rf".to_string());
 
-        persist_state_to_dir(tmp.path(), &state, None).await;
+        persist_state_to_dir(tmp.path(), &state, None)
+            .await
+            .unwrap();
         let restored = load_state_from_dir(tmp.path(), None).await;
         assert!(restored.allow_bash_execute);
         assert!(restored.allowed_bash_commands.contains("cargo build"));
@@ -581,7 +580,9 @@ mod tests {
         for id in ids {
             let mut state = PermissionState::default();
             state.allowed_bash_commands.insert(id.to_string());
-            persist_state_to_dir(tmp.path(), &state, Some(id)).await;
+            persist_state_to_dir(tmp.path(), &state, Some(id))
+                .await
+                .unwrap();
         }
         for id in ids {
             let state = load_state_from_dir(tmp.path(), Some(id)).await;
@@ -628,7 +629,9 @@ mod tests {
         state.allow_bash_execute = true;
         state.allowed_bash_commands.insert("cargo test".to_string());
 
-        persist_state_to_dir(dir, &state, Some("client_a")).await;
+        persist_state_to_dir(dir, &state, Some("client_a"))
+            .await
+            .unwrap();
 
         let loaded = load_state_from_dir(dir, Some("client_a")).await;
         assert!(loaded.allow_bash_execute);
@@ -645,7 +648,9 @@ mod tests {
             .allowed_web_fetch_domains
             .insert("example.com".into());
         shared.allowed_mcp_servers.insert("shared-server".into());
-        persist_state_to_dir(tmp.path(), &shared, None).await;
+        persist_state_to_dir(tmp.path(), &shared, None)
+            .await
+            .unwrap();
         let invalid = state_file_path(tmp.path(), Some("invalid"));
         tokio::fs::write(&invalid, [0xff, 0xfe]).await.unwrap();
         let directory = state_file_path(tmp.path(), Some("directory"));
@@ -683,7 +688,9 @@ mod tests {
         shared_state
             .allowed_bash_commands
             .insert("cargo test".to_string());
-        persist_state_to_dir(dir, &shared_state, None).await;
+        persist_state_to_dir(dir, &shared_state, None)
+            .await
+            .unwrap();
 
         let loaded = load_state_from_dir(dir, Some("new_client")).await;
         assert!(loaded.allow_bash_execute);
@@ -697,14 +704,18 @@ mod tests {
 
         let mut shared_state = PermissionState::default();
         shared_state.allow_bash_execute = true;
-        persist_state_to_dir(dir, &shared_state, None).await;
+        persist_state_to_dir(dir, &shared_state, None)
+            .await
+            .unwrap();
 
         let mut client_state = PermissionState::default();
         client_state.allow_bash_execute = false;
         client_state
             .allowed_bash_commands
             .insert("npm test".to_string());
-        persist_state_to_dir(dir, &client_state, Some("my-client")).await;
+        persist_state_to_dir(dir, &client_state, Some("my-client"))
+            .await
+            .unwrap();
 
         let loaded = load_state_from_dir(dir, Some("my-client")).await;
         assert!(!loaded.allow_bash_execute);
@@ -731,11 +742,15 @@ mod tests {
         state_a
             .allowed_bash_commands
             .insert("cargo test".to_string());
-        persist_state_to_dir(dir, &state_a, Some("client_a")).await;
+        persist_state_to_dir(dir, &state_a, Some("client_a"))
+            .await
+            .unwrap();
 
         let mut state_b = PermissionState::default();
         state_b.allowed_bash_commands.insert("npm test".to_string());
-        persist_state_to_dir(dir, &state_b, Some("client_b")).await;
+        persist_state_to_dir(dir, &state_b, Some("client_b"))
+            .await
+            .unwrap();
 
         let loaded_a = load_state_from_dir(dir, Some("client_a")).await;
         assert!(loaded_a.allowed_bash_commands.contains("cargo test"));

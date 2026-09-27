@@ -694,7 +694,7 @@ Goal and Workflow Grow presentation snapshots SHALL reserve the session's shared
 
 ### Requirement: Subagent lifecycle projections are bounded metadata
 
-Subagent lifecycle Grow notifications SHALL carry status and identity metadata without duplicating the child final output. The canonical child result and admitted completion receipt SHALL remain the source of that output. The parent actor SHALL persist and forward one stamped event under the existing independent-update and active-attempt gateway budget boundaries. A failed preview gateway reservation SHALL reject that exact attempt's canonical admission. Client-origin Grow notifications SHALL remain persist-only.
+Subagent lifecycle Grow notifications SHALL carry status and identity metadata without duplicating the child final output. The canonical child result and admitted completion receipt SHALL remain the source of that output. The parent actor SHALL persist and forward one stamped event under the existing independent-update and active-attempt gateway budget boundaries. It SHALL forward a spawned lifecycle projection before emitting a later-stamped Goal status refresh caused by that spawn, so live clients can retain the running child. If an independent live update overtakes a lifecycle projection, the client SHALL reconcile missing spawn/finish facts by child identity without regressing its Grow highwater or reconnect cursor or reviving an already terminal child. A failed preview gateway reservation SHALL reject that exact attempt's canonical admission. Client-origin Grow notifications SHALL remain persist-only.
 
 #### Scenario: Child finishes with a large answer during parent sampling
 
@@ -705,6 +705,16 @@ Subagent lifecycle Grow notifications SHALL carry status and identity metadata w
 
 - **WHEN** the parent actor cannot reserve preview gateway credits for a child lifecycle projection
 - **THEN** no uncredited lifecycle payload enters the gateway queue, that attempt fails preview admission, and canonical child lifecycle facts remain available for reconnect projection.
+
+#### Scenario: Goal-owned child spawn refreshes Goal status
+
+- **WHEN** a Goal-owned child spawn reaches the parent actor and triggers a Goal status refresh
+- **THEN** the stamped SubagentSpawned projection is persisted and forwarded before the later-stamped GoalUpdated projection, and the live Tasks pane retains the running child.
+
+#### Scenario: Independent live update overtakes a child lifecycle projection
+
+- **WHEN** a higher-ID Grow update reaches a live client before a child spawn or finish whose durable projection is still pending
+- **THEN** the client applies the missing child lifecycle fact once by child identity, retains its higher Grow highwater and reconnect cursor, and does not resurrect a child with an already visible terminal row.
 
 ### Requirement: Tool bridge Grow projections share preview credits
 
@@ -719,3 +729,17 @@ Background task completion Grow projections SHALL omit copied task output while 
 
 - **WHEN** monitor events arrive while the gateway has not completed prior Grow delivery
 - **THEN** additional live Grow events cannot exceed the session preview budget, while model notification commands retain their normal admission path.
+
+### Requirement: Subagent spawn projections retain effective reasoning effort
+
+The subagent spawn Grow projection SHALL carry the effective reasoning effort selected for the child when one exists. Live publication and reconnect projection SHALL derive it from the same durable spawn fact, without substituting the model catalog's default effort.
+
+#### Scenario: Child overrides its model's default effort
+
+- **WHEN** a child is launched with an effective effort different from the catalog default
+- **THEN** both its live spawn notification and a later projection from the durable spawn fact identify that effective effort.
+
+#### Scenario: Model has no effort
+
+- **WHEN** a child has no effective reasoning effort
+- **THEN** the spawn projection omits the optional effort field.

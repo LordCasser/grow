@@ -1234,6 +1234,7 @@ pub(crate) async fn run_shell_child(
     let effective_inference_idle_timeout_secs = effective_sampling_config
         .idle_timeout_secs
         .unwrap_or(effective_route.inference_idle_timeout.as_secs());
+    let effective_reasoning_effort = effective_sampling_config.reasoning_effort;
     let _ = persistence
         .tx
         .send(crate::session::persistence::PersistenceMsg::CurrentModel {
@@ -1448,7 +1449,9 @@ pub(crate) async fn run_shell_child(
         .await;
     if !promoted {
         if let Some(permission_handle) = &ctx.permission_handle {
-            permission_handle.release_child(child_session_id.0.to_string());
+            permission_handle
+                .release_child(child_session_id.0.to_string())
+                .await;
         }
         ctx.workspace_ops
             .end_local_session(child_session_id.0.as_ref());
@@ -1494,6 +1497,7 @@ pub(crate) async fn run_shell_child(
             permission_mode,
             effective_permission_mode,
             model: Some(effective_model_name),
+            reasoning_effort: effective_reasoning_effort.map(|effort| effort.to_string()),
             model_state: Some(child_model_state),
             workflow_agent_names,
             resumed_from: request.resume_from.clone(),
@@ -1956,7 +1960,9 @@ pub(crate) async fn run_shell_child(
     }
     let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown);
     if let Some(permission_handle) = &ctx.permission_handle {
-        permission_handle.release_child(child_session_id.0.to_string());
+        permission_handle
+            .release_child(child_session_id.0.to_string())
+            .await;
     }
     ctx.workspace_ops
         .end_local_session(child_session_id.0.as_ref());

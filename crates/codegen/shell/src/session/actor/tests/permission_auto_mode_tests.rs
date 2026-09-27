@@ -22,6 +22,17 @@ fn dummy_gateway() -> AcpAgentGatewaySender {
     AcpAgentGatewaySender::new(tx)
 }
 
+fn primary_permission_context() -> workspace::permission::types::PermissionRequestContext {
+    workspace::permission::types::PermissionRequestContext {
+        source: workspace::permission::types::PermissionRequestSource::Primary { session_id: None },
+        request_mode: None,
+        within_capability_fence: false,
+        execution_cwd: None,
+        classifier_turns: None,
+        call_evidence: None,
+    }
+}
+
 fn acking_sideband_persistence() -> tokio::sync::mpsc::UnboundedSender<PersistenceMsg> {
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::task::spawn_local(async move {
@@ -35,10 +46,12 @@ fn acking_sideband_persistence() -> tokio::sync::mpsc::UnboundedSender<Persisten
 }
 
 /// Replace allow-all permissions with a real permission actor (auto-capable).
-fn install_real_permissions(actor: &mut SessionActor) {
+fn install_real_permissions(
+    actor: &mut SessionActor,
+) -> tokio::sync::mpsc::UnboundedReceiver<workspace::permission::PermissionEvent> {
     let cwd = AbsPathBuf::new(std::path::PathBuf::from(actor.session_info.cwd.clone()))
         .unwrap_or_else(|_| AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap());
-    let (handle, _ev) = spawn_permission_manager(
+    let (handle, events) = spawn_permission_manager(
         actor.session_info.id.clone(),
         dummy_gateway(),
         cwd,
@@ -52,6 +65,326 @@ fn install_real_permissions(actor: &mut SessionActor) {
         false,
     );
     actor.permissions = handle;
+    events
+}
+
+async fn request_child_judgment(
+    permissions: workspace::permission::PermissionHandle,
+    child_id: &'static str,
+) -> workspace::permission::Decision {
+    use workspace::permission::types::{
+        PermissionRequestContext, PermissionRequestSource, RequestPermissionMode,
+    };
+    permissions
+        .request_with_context(
+            AccessKind::Bash("cargo test -p workspace".into()),
+            acp::ToolCallUpdate::new(acp::ToolCallId::new(child_id), Default::default()),
+            None,
+            PermissionRequestContext {
+                source: PermissionRequestSource::Child {
+                    session_id: child_id.into(),
+                    subagent_type: Some("explore".into()),
+                    subagent_description: Some("verify permissions".into()),
+                },
+                request_mode: Some(RequestPermissionMode::Auto),
+                within_capability_fence: false,
+                execution_cwd: Some(std::path::PathBuf::from("/tmp")),
+                classifier_turns: Some(vec![]),
+                call_evidence: None,
+            },
+        )
+        .await
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn child_permission_waits_do_not_serialize_independent_work() {
+    use test_support::{
+        InferenceEndpoint, InferenceRequestMatcher, MockInferenceServer, ScriptedResponse,
+    };
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for active_goal in [false, true] {
+                let server = MockInferenceServer::start().await.unwrap();
+                let response = || {
+                    ScriptedResponse::sse(test_support::sse::chat_completion_script_exact(
+                        r#"{"decision":"allow","reason":"required by task"}"#,
+                        "test-model",
+                    ))
+                };
+                let mut first = server.expect_response_blocked(
+                    "slow child A",
+                    InferenceRequestMatcher::auxiliary(InferenceEndpoint::ChatCompletions),
+                    response(),
+                );
+                let mut second = server.expect_response(
+                    "independent child B",
+                    InferenceRequestMatcher::auxiliary(InferenceEndpoint::ChatCompletions),
+                    response(),
+                );
+                let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let mut actor =
+                    create_test_actor(0, 256_000, 85, gateway_tx, acking_sideband_persistence())
+                        .await;
+                install_real_permissions(&mut actor);
+                let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                config.base_url = server.url();
+                config.api_backend = sampling_types::ApiBackend::ChatCompletions;
+                actor.chat_state_handle.replace_sampling_route(config);
+                if active_goal {
+                    actor
+                        .goal_tracker
+                        .lock()
+                        .create_goal(
+                            "parallel-goal".into(),
+                            "finish".into(),
+                            Some(100_000),
+                            "now".into(),
+                        )
+                        .unwrap();
+                    actor
+                        .behavior
+                        .lock()
+                        .select_behavior(tool_types::BehaviorId::Goal);
+                    actor.sync_goal_usage_window();
+                }
+                let actor = Arc::new(actor);
+                let owner = actor.session_info.id.to_string();
+                let epoch = actor.goal_usage_window.owner_epoch(&owner);
+                let foreground = actor
+                    .goal_usage_window
+                    .begin_model_attempt(&owner, epoch, active_goal.then_some("parallel-goal"))
+                    .await
+                    .unwrap();
+                actor.wire_permission_auto_llm_classifier().await;
+                let a = tokio::task::spawn_local(request_child_judgment(
+                    actor.permissions.clone(),
+                    "child-a",
+                ));
+                tokio::time::timeout(std::time::Duration::from_secs(2), first.wait_blocked())
+                    .await
+                    .expect("A must reach provider");
+
+                let primary = tokio::time::timeout(
+                    std::time::Duration::from_secs(1),
+                    actor.permissions.request_with_context(
+                        AccessKind::Read(None),
+                        acp::ToolCallUpdate::new(
+                            acp::ToolCallId::new("primary-read"),
+                            Default::default(),
+                        ),
+                        None,
+                        primary_permission_context(),
+                    ),
+                )
+                .await
+                .expect("child A must not block a local primary permission decision");
+                assert_eq!(primary, workspace::permission::Decision::Allow);
+
+                let b = tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    request_child_judgment(actor.permissions.clone(), "child-b"),
+                )
+                .await
+                .expect("child B must finish while A's provider is still blocked");
+                assert_eq!(b, workspace::permission::Decision::Allow);
+                second.wait_satisfied().await;
+                assert!(!a.is_finished());
+                if let Some(foreground) = foreground {
+                    assert!(actor.goal_usage_window.finish_attempt(&foreground));
+                    let next = tokio::time::timeout(
+                        std::time::Duration::from_secs(1),
+                        actor.goal_usage_window.begin_model_attempt(
+                            &owner,
+                            epoch,
+                            Some("parallel-goal"),
+                        ),
+                    )
+                    .await
+                    .expect("live permission Sideband must not block foreground admission")
+                    .unwrap()
+                    .unwrap();
+                    assert!(actor.goal_usage_window.finish_attempt(&next));
+                }
+                first.release();
+                assert_eq!(a.await.unwrap(), workspace::permission::Decision::Allow);
+                first.wait_satisfied().await;
+                actor.permissions.shutdown_and_drain().await;
+            }
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn child_permission_sideband_saturation_fails_fast_without_queuing() {
+    use test_support::{
+        InferenceEndpoint, InferenceRequestMatcher, MockInferenceServer, ScriptedResponse,
+    };
+
+    const CHILD_IDS: [&str; 16] = [
+        "capacity-00",
+        "capacity-01",
+        "capacity-02",
+        "capacity-03",
+        "capacity-04",
+        "capacity-05",
+        "capacity-06",
+        "capacity-07",
+        "capacity-08",
+        "capacity-09",
+        "capacity-10",
+        "capacity-11",
+        "capacity-12",
+        "capacity-13",
+        "capacity-14",
+        "capacity-15",
+    ];
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            let mut blocked = Vec::new();
+            for child_id in CHILD_IDS {
+                blocked.push(server.expect_response_blocked(
+                    child_id,
+                    InferenceRequestMatcher::auxiliary(InferenceEndpoint::ChatCompletions),
+                    ScriptedResponse::sse(test_support::sse::chat_completion_script_exact(
+                        r#"{"decision":"allow","reason":"required by task"}"#,
+                        "test-model",
+                    )),
+                ));
+            }
+            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut actor =
+                create_test_actor(0, 256_000, 85, gateway_tx, acking_sideband_persistence()).await;
+            let mut events = install_real_permissions(&mut actor);
+            actor.subagent_classifier_input = crate::config::SubagentClassifierInput::RequestOnly;
+            let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            config.base_url = server.url();
+            config.api_backend = sampling_types::ApiBackend::ChatCompletions;
+            actor.chat_state_handle.replace_sampling_route(config);
+            let actor = Arc::new(actor);
+            actor.wire_permission_auto_llm_classifier().await;
+
+            let children: Vec<_> = CHILD_IDS
+                .into_iter()
+                .map(|child_id| {
+                    tokio::task::spawn_local(request_child_judgment(
+                        actor.permissions.clone(),
+                        child_id,
+                    ))
+                })
+                .collect();
+            for expected in &mut blocked {
+                tokio::time::timeout(std::time::Duration::from_secs(10), expected.wait_blocked())
+                    .await
+                    .expect("all admitted Sidebands must reach the provider in parallel");
+            }
+            let overloaded = tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                request_child_judgment(actor.permissions.clone(), "capacity-overflow"),
+            )
+            .await
+            .expect("saturated classifier must not queue another provider wait");
+            assert!(matches!(
+                overloaded,
+                workspace::permission::Decision::PolicyDeny(_)
+            ));
+            let event = tokio::time::timeout(std::time::Duration::from_secs(1), events.recv())
+                .await
+                .expect("overload must emit a permission audit event")
+                .expect("permission event stream must remain open");
+            assert_eq!(event.classifier_source.as_deref(), Some("overloaded"));
+            assert_eq!(event.classifier_verdict.as_deref(), Some("unavailable"));
+            assert_eq!(
+                server
+                    .requests()
+                    .iter()
+                    .filter(|r| r.path.contains("chat/completions"))
+                    .count(),
+                CHILD_IDS.len(),
+            );
+
+            for expected in &mut blocked {
+                expected.release();
+            }
+            for child in children {
+                assert_eq!(child.await.unwrap(), workspace::permission::Decision::Allow);
+            }
+            for expected in &mut blocked {
+                expected.wait_satisfied().await;
+            }
+        })
+        .await;
+}
+
+/// A stuck durable Sideband admission must not leave a child Auto permission
+/// call waiting beyond its model-judgment deadline.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn permission_judgment_deadline_covers_sideband_admission() {
+    use workspace::permission::types::{
+        PermissionRequestContext, PermissionRequestSource, RequestPermissionMode,
+    };
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            install_real_permissions(&mut actor);
+            actor.subagent_classifier_input =
+                crate::config::SubagentClassifierInput::RequestOnly;
+            let actor = Arc::new(actor);
+            actor.wire_permission_auto_llm_classifier().await;
+
+            let permissions = actor.permissions.clone();
+            let child = tokio::task::spawn_local(async move {
+                permissions
+                    .request_with_context(
+                        AccessKind::Bash("cargo test -p workspace".into()),
+                        acp::ToolCallUpdate::new(
+                            acp::ToolCallId::new("stalled-sideband"),
+                            Default::default(),
+                        ),
+                        None,
+                        PermissionRequestContext {
+                            source: PermissionRequestSource::Child {
+                                session_id: "child-stalled".into(),
+                                subagent_type: Some("explore".into()),
+                                subagent_description: Some("check authorization".into()),
+                            },
+                            request_mode: Some(RequestPermissionMode::Auto),
+                            within_capability_fence: false,
+                            execution_cwd: Some(std::path::PathBuf::from("/tmp")),
+                            classifier_turns: Some(vec![]),
+                            call_evidence: None,
+                        },
+                    )
+                    .await
+            });
+            let pending = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                persistence_rx.recv(),
+            )
+                .await
+                .expect("permission Sideband admission deadline")
+                .expect("permission Sideband admission reached persistence");
+            assert!(matches!(&pending, PersistenceMsg::SidebandDurablyAndAck { .. }));
+            // Keep the writer acknowledgement pending past the maximum
+            // configurable classifier deadline. The response must fail closed.
+            tokio::time::advance(std::time::Duration::from_secs(121)).await;
+            let decision = child.await.unwrap();
+            assert!(
+                matches!(decision, workspace::permission::Decision::PolicyDeny(reason) if reason.contains("judgment timed out")),
+                "stalled admission must fail only the child's exact call"
+            );
+            let PersistenceMsg::SidebandDurablyAndAck { respond_to, .. } = pending else {
+                unreachable!()
+            };
+            assert!(
+                respond_to.send(Ok(())).is_err(),
+                "late Sideband admission cannot resume an expired judgment"
+            );
+        })
+        .await;
 }
 
 /// Child Auto judgments see the primary task context through an ephemeral
@@ -314,6 +647,118 @@ async fn live_child_judge_receives_primary_context_without_chat_state_pollution(
         .await;
 }
 
+/// Reproduce a child permission wait with the provider response held after the
+/// primary session has already dispatched its independent judgment request.
+/// The old 30s deadline split cancelled a valid first response after 15s.
+#[tokio::test(flavor = "current_thread", start_paused = true)]
+async fn child_judgment_distinguishes_slow_provider_from_stalled_primary() {
+    use test_support::{
+        InferenceEndpoint, InferenceRequestMatcher, MockInferenceServer, ScriptedResponse,
+    };
+    use workspace::permission::types::{
+        PermissionRequestContext, PermissionRequestSource, RequestPermissionMode,
+    };
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for (provider_delay, should_allow) in [
+                (std::time::Duration::from_secs(20), true),
+                (std::time::Duration::from_secs(31), false),
+            ] {
+                let server = MockInferenceServer::start().await.unwrap();
+                let mut expected = server.expect_response_blocked(
+                    "child permission provider response",
+                    InferenceRequestMatcher::auxiliary(InferenceEndpoint::ChatCompletions),
+                    ScriptedResponse::sse(test_support::sse::chat_completion_script_exact(
+                        r#"{"decision":"allow","reason":"matches the assigned task"}"#,
+                        "test-model",
+                    )),
+                );
+                let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let persistence_tx = acking_sideband_persistence();
+                let mut actor =
+                    create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                install_real_permissions(&mut actor);
+                actor
+                    .permissions
+                    .set_mode(diagnostics::enums::PermissionMode::AlwaysApprove).await;
+                actor.subagent_classifier_input =
+                    crate::config::SubagentClassifierInput::RequestOnly;
+                let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                config.base_url = server.url();
+                config.api_backend = sampling_types::ApiBackend::ChatCompletions;
+                actor.chat_state_handle.replace_sampling_route(config);
+                let actor = Arc::new(actor);
+                actor.wire_permission_auto_llm_classifier().await;
+
+                let permissions = actor.permissions.clone();
+                let child = tokio::task::spawn_local(async move {
+                    permissions
+                        .request_with_context(
+                            AccessKind::Bash("cargo test -p workspace".into()),
+                            acp::ToolCallUpdate::new(
+                                acp::ToolCallId::new("delayed-child-judgment"),
+                                Default::default(),
+                            ),
+                            None,
+                            PermissionRequestContext {
+                                source: PermissionRequestSource::Child {
+                                    session_id: "delayed-child".into(),
+                                    subagent_type: Some("explore".into()),
+                                    subagent_description: Some("verify the task".into()),
+                                },
+                                request_mode: Some(RequestPermissionMode::Auto),
+                                within_capability_fence: false,
+                                execution_cwd: Some(std::path::PathBuf::from("/tmp")),
+                                classifier_turns: Some(vec![]),
+                                call_evidence: None,
+                            },
+                        )
+                        .await
+                });
+
+                expected.wait_blocked().await;
+                assert_eq!(
+                    server
+                        .requests()
+                        .iter()
+                        .filter(|request| request.path.contains("chat/completions"))
+                        .count(),
+                    1,
+                    "the primary session must dispatch the judgment before the wait"
+                );
+                tokio::time::advance(provider_delay).await;
+                tokio::task::yield_now().await;
+                if should_allow {
+                    assert!(!child.is_finished(), "the first attempt was cancelled early");
+                    assert_eq!(
+                        server
+                            .requests()
+                            .iter()
+                            .filter(|request| request.path.contains("chat/completions"))
+                            .count(),
+                        1,
+                        "a slow but live first response must not trigger a retry"
+                    );
+                    expected.release();
+                    let decision = child.await.unwrap();
+                    assert!(matches!(decision, workspace::permission::Decision::Allow));
+                    expected.wait_satisfied().await;
+                } else {
+                    let decision = child.await.unwrap();
+                    assert!(
+                        matches!(decision, workspace::permission::Decision::PolicyDeny(reason) if reason.contains("judgment timed out")),
+                        "a provider that never answers must fail the exact call closed"
+                    );
+                    assert_eq!(server.requests().iter().filter(|r| r.path.contains("chat/completions")).count(), 1,
+                        "expiry must cancel the original call, not retransmit it");
+                    expected.release();
+                }
+            }
+        })
+        .await;
+}
+
 #[tokio::test(flavor = "current_thread")]
 async fn chat_child_judge_retries_empty_invalid_and_transient_responses_once() {
     use test_support::{MockInferenceServer, ScriptedResponse};
@@ -473,7 +918,7 @@ async fn set_auto_mode_path_wires_live_side_query_via_session_actor() {
             install_real_permissions(&mut actor);
 
             // SetAutoMode { enabled: true } body (session actor handler):
-            actor.permissions.set_mode(crate::util::config::PermissionMode::Auto);
+            actor.permissions.set_mode(crate::util::config::PermissionMode::Auto).await;
             assert!(actor.permissions.mode().is_auto());
             assert!(
                 !actor.permissions.has_llm_side_query(),
@@ -495,12 +940,11 @@ async fn set_auto_mode_path_wires_live_side_query_via_session_actor() {
             let dummy_update = acp::ToolCallUpdate::new(acp::ToolCallId::new(Arc::from("tc-session-wire")), Default::default());
             let d = session
                 .permissions
-                .request(
+                .request_with_context(
                     AccessKind::Bash("cargo test -p workspace".into()),
                     dummy_update,
                     None,
-                    None,
-                    None,
+                    primary_permission_context(),
                 )
                 .await;
             // cargo is heuristic-allow when sampling fails; must not be Prompt-only
@@ -513,12 +957,11 @@ async fn set_auto_mode_path_wires_live_side_query_via_session_actor() {
 
             let d2 = session
                 .permissions
-                .request(
+                .request_with_context(
                     AccessKind::Bash("rm -rf /".into()),
                     acp::ToolCallUpdate::new(acp::ToolCallId::new(Arc::from("tc-danger")), Default::default()),
                     None,
-                    None,
-                    None,
+                    primary_permission_context(),
                 )
                 .await;
             assert!(
@@ -544,7 +987,8 @@ async fn spawn_auto_mode_wires_classifier_when_enabled() {
             // canonical session metadata / CLI seed at spawn
             actor
                 .permissions
-                .set_mode(crate::util::config::PermissionMode::Auto);
+                .set_mode(crate::util::config::PermissionMode::Auto)
+                .await;
 
             let session = Arc::new(actor);
             if session.permissions.mode().is_auto() {
@@ -568,7 +1012,8 @@ async fn set_auto_mode_off_clears_side_query_flag() {
             install_real_permissions(&mut actor);
             actor
                 .permissions
-                .set_mode(crate::util::config::PermissionMode::Auto);
+                .set_mode(crate::util::config::PermissionMode::Auto)
+                .await;
             let session = Arc::new(actor);
             session.wire_permission_auto_llm_classifier().await;
             assert!(session.permissions.has_llm_side_query());
@@ -576,7 +1021,8 @@ async fn set_auto_mode_off_clears_side_query_flag() {
             // SetAutoMode { enabled: false } body
             session
                 .permissions
-                .set_mode(crate::util::config::PermissionMode::Ask);
+                .set_mode(crate::util::config::PermissionMode::Ask)
+                .await;
             session.permissions.set_llm_side_query_wired(false);
             assert!(!session.permissions.mode().is_auto());
             assert!(!session.permissions.has_llm_side_query());

@@ -805,6 +805,14 @@ pub(crate) async fn persist_setting(
                 .await
                 .map_err(|e| e.to_string())
         }
+        "show_model_provider" => {
+            let SettingValue::Bool(enabled) = value else {
+                return Err(kind_mismatch("show_model_provider", "Bool", &value));
+            };
+            shell::util::config::set_show_model_provider(enabled)
+                .await
+                .map_err(|error| error.to_string())
+        }
         "hunk_tracker_mode" => {
             let SettingValue::Enum(s) = value else {
                 return Err(kind_mismatch("hunk_tracker_mode", "Enum", &value));

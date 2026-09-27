@@ -361,12 +361,10 @@ impl TaskEntry {
         // Single consolidated label (subagent_type > tag > "general") plus
         // description with any `[tag]` prefix stripped.
         let (type_label, description) = format_subagent_label(info);
-        let model_suffix = info
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("");
+        let model_suffix = crate::app::subagent::format_subagent_model(
+            info.model.as_deref(),
+            info.reasoning_effort,
+        );
 
         // Label color is state-driven: pending_kill / running stay vivid;
         // completed / failed keep their hue (green / red) but blend toward
@@ -1760,12 +1758,10 @@ impl TasksPane {
 
         // Clear overlay area to prevent label text bleeding through.
         let badge = format_context_badge(info);
-        let model_text = info
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("");
+        let model_text = crate::app::subagent::format_subagent_model(
+            info.model.as_deref(),
+            info.reasoning_effort,
+        );
         let right_text_w = right_text.width() as u16;
         let kill_w: u16 = if info.is_running() { 3 } else { 0 };
         let badge_w: u16 = if badge.is_empty() {
@@ -1948,6 +1944,7 @@ mod tests {
             description: Arc::from("Find API endpoints"),
             subagent_type: Arc::from("explore"),
             model: None,
+            reasoning_effort: None,
             context_source: None,
             resumed_from: None,
             capability_mode: None,
@@ -2944,6 +2941,7 @@ mod tests {
         let mut info = make_info();
         info.subagent_type = "researcher".into();
         info.model = Some("grow-3".into());
+        info.reasoning_effort = Some(shell::sampling::types::ReasoningEffort::Max);
         let entry = TaskEntry::from_subagent(&info);
         let label = match &entry {
             TaskEntry::Agent { label, .. } => label.as_str(),
@@ -2954,9 +2952,41 @@ mod tests {
             "label should contain capitalized agent type: {label}",
         );
         assert!(
-            label.contains("grow-3"),
-            "label should contain model: {label}",
+            label.contains("grow-3 (max)"),
+            "label should contain model and effort: {label}",
         );
+    }
+
+    #[test]
+    fn tasks_row_renders_model_and_effort_together() {
+        let mut pane = TasksPane::new();
+        pane.overlay.show();
+        let mut info = make_info();
+        info.model = Some("bigmodel/glm-5.3".into());
+        info.reasoning_effort = Some(shell::sampling::types::ReasoningEffort::Max);
+        let subagents = HashMap::from([("cs-1".to_owned(), info)]);
+        pane.sync(&BTreeMap::new(), &subagents, &HashMap::new(), &[]);
+        let area = Rect::new(0, 0, 100, 8);
+        let mut buf = Buffer::empty(area);
+        pane.render(
+            area,
+            &mut buf,
+            false,
+            &crate::appearance::LayoutConfig::default(),
+            &BTreeMap::new(),
+            &subagents,
+            &HashMap::new(),
+            crate::motion::FrameStamp::default(),
+        );
+        let mut text = String::new();
+        for y in 0..area.height {
+            for x in 0..area.width {
+                if let Some(cell) = buf.cell((x, y)) {
+                    text.push_str(cell.symbol());
+                }
+            }
+        }
+        assert!(text.contains("bigmodel/glm-5.3 (max)"), "{text}");
     }
 
     #[test]

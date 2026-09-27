@@ -40,9 +40,11 @@ pub struct NotificationMeta {
     /// agent stamps the SAME `eventId` on the live emission and on the persisted
     /// line that is later replayed, so a client can dedup an event it receives
     /// twice (replay/live overlap, a re-emit after the reconnect gate, or
-    /// duplicate routing). Per-session events arrive in increasing order, so the
-    /// pager keeps a highwater and drops anything `<=` it. `None` when the agent
-    /// didn't stamp an `eventId` (older shell) — such updates always apply.
+    /// duplicate routing). The pager keeps a highwater for ordinary live Grow
+    /// updates. Independent producers can overtake a persisted subagent
+    /// lifecycle event, so missing spawn/finish facts also reconcile by child
+    /// identity without lowering that highwater. `None` when the agent didn't
+    /// stamp an `eventId` (older shell) — such updates always apply.
     pub event_seq: Option<u64>,
     /// Logical sampler request identity for preview chunks.
     pub sampling_request_id: Option<String>,

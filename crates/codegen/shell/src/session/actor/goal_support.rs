@@ -23,17 +23,22 @@ struct GoalUsageWindowState {
 }
 
 impl GoalUsageWindowState {
-    fn has_unsettled_owner_attempt(&self, session_id: &str, epoch: u64) -> bool {
+    fn has_unsettled_owner_attempt(
+        &self,
+        session_id: &str,
+        epoch: u64,
+        incoming_background: bool,
+    ) -> bool {
         self.pending_attempts.values().any(|attempt| {
-            let live_background = attempt.epoch == epoch
+            let live_concurrent = attempt.epoch == epoch
                 && attempt.epoch == self.owner_epochs.get(session_id).copied().unwrap_or(0)
                 && !attempt.returned
                 && attempt.settlement.is_none()
                 && matches!(&self.provider_window, GoalProviderWindow::Active(goal) if goal == &attempt.goal_id)
-                && attempt.background.as_ref().is_some_and(|background| {
+                && (incoming_background || attempt.background.as_ref().is_some_and(|background| {
                     background.load(std::sync::atomic::Ordering::Acquire)
-                });
-            attempt.session_id == session_id && attempt.epoch <= epoch && !live_background
+                }));
+            attempt.session_id == session_id && attempt.epoch <= epoch && !live_concurrent
         })
     }
 }
@@ -229,7 +234,13 @@ impl GoalUsageWindow {
                     }
                     (None, active) => active,
                 };
-                if !state.has_unsettled_owner_attempt(session_id, epoch) {
+                if !state.has_unsettled_owner_attempt(
+                    session_id,
+                    epoch,
+                    background
+                        .as_ref()
+                        .is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)),
+                ) {
                     let Some(goal_id) = goal_id else {
                         return Ok(None);
                     };
@@ -253,13 +264,23 @@ impl GoalUsageWindow {
     }
 
     pub(crate) async fn wait_for_owner_settlements_through(&self, session_id: &str, epoch: u64) {
+        self.wait_for_owner_settlements_through_with_background(session_id, epoch, None)
+            .await;
+    }
+
+    pub(crate) async fn wait_for_owner_settlements_through_with_background(
+        &self,
+        session_id: &str,
+        epoch: u64,
+        background: Option<&std::sync::atomic::AtomicBool>,
+    ) {
         loop {
             let changed = self.settlement_changed.notified();
-            if !self
-                .state
-                .lock()
-                .has_unsettled_owner_attempt(session_id, epoch)
-            {
+            if !self.state.lock().has_unsettled_owner_attempt(
+                session_id,
+                epoch,
+                background.is_some_and(|flag| flag.load(std::sync::atomic::Ordering::Acquire)),
+            ) {
                 return;
             }
             changed.await;
@@ -1823,6 +1844,137 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn concurrent_permission_like_attempts_settle_past_goal_budget_once() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = build_actor().await;
+                actor
+                    .goal_tracker
+                    .lock()
+                    .create_goal(
+                        "goal-1".into(),
+                        "finish".into(),
+                        Some(10),
+                        "2026-08-27T00:00:00Z".into(),
+                    )
+                    .unwrap();
+                actor
+                    .behavior
+                    .lock()
+                    .select_behavior(tool_types::BehaviorId::Goal);
+                actor.sync_goal_usage_window();
+                crate::session::actor::tests::support::begin_test_causal_turn(&actor).await;
+
+                let owner = actor.session_id_string();
+                let primary_attempt = actor
+                    .goal_usage_window
+                    .begin_model_attempt(&owner, 0, Some("goal-1"))
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let permission_sideband_live =
+                    std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+                let permission_attempt = actor
+                    .goal_usage_window
+                    .begin_model_attempt_with_background(
+                        &owner,
+                        0,
+                        Some("goal-1"),
+                        Some(permission_sideband_live),
+                    )
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_ne!(primary_attempt, permission_attempt);
+                assert_eq!(
+                    actor.goal_usage_window.state.lock().pending_attempts.len(),
+                    2
+                );
+
+                assert!(actor.goal_usage_window.claim_attempt_settlement(
+                    &primary_attempt,
+                    Some(crate::session::goal_tracker::GoalTokenUsage::new(6, 2, 1))
+                ));
+                assert!(
+                    actor
+                        .settle_claimed_goal_usage_attempt(&primary_attempt)
+                        .await
+                        .unwrap()
+                );
+                assert_eq!(actor.goal_tracker.lock().tokens_used(), 7);
+                assert_eq!(
+                    actor
+                        .goal_usage_window
+                        .attempt_goal_id(&permission_attempt)
+                        .as_deref(),
+                    Some("goal-1"),
+                    "the already-admitted permission Sideband remains settleable"
+                );
+                assert_eq!(
+                    actor.goal_usage_window.active_goal_id().as_deref(),
+                    Some("goal-1")
+                );
+
+                assert!(actor.goal_usage_window.claim_attempt_settlement(
+                    &permission_attempt,
+                    Some(crate::session::goal_tracker::GoalTokenUsage::new(8, 3, 1))
+                ));
+                assert!(
+                    actor
+                        .settle_claimed_goal_usage_attempt(&permission_attempt)
+                        .await
+                        .unwrap()
+                );
+                let goal = actor.goal_tracker.lock();
+                assert_eq!(
+                    goal.tokens_used(),
+                    16,
+                    "both confirmed charges remain counted"
+                );
+                assert_eq!(
+                    goal.snapshot().unwrap().usage_breakdown,
+                    Some(crate::session::goal_tracker::GoalTokenUsage::new(14, 5, 2))
+                );
+                assert_eq!(
+                    goal.status(),
+                    Some(crate::session::goal_tracker::GoalStatus::Active),
+                    "budget exhaustion closes admission without discarding this active step"
+                );
+                drop(goal);
+                assert_eq!(actor.goal_usage_window.active_goal_id(), None);
+
+                assert!(
+                    !actor
+                        .settle_claimed_goal_usage_attempt(&primary_attempt)
+                        .await
+                        .unwrap()
+                );
+                assert!(
+                    !actor
+                        .settle_claimed_goal_usage_attempt(&permission_attempt)
+                        .await
+                        .unwrap()
+                );
+                assert_eq!(actor.goal_tracker.lock().tokens_used(), 16);
+                assert!(
+                    actor
+                        .goal_usage_window
+                        .begin_model_attempt(&owner, 0, Some("goal-1"))
+                        .await
+                        .is_err()
+                );
+                assert!(
+                    actor
+                        .goal_usage_window
+                        .begin_model_attempt(&owner, 0, None)
+                        .await
+                        .is_err()
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn failed_goal_settlement_retains_attempt_and_retries_exactly_once() {
         tokio::task::LocalSet::new()
             .run_until(async {
@@ -2492,6 +2644,74 @@ mod tests {
             .await
             .expect("admission fence released")
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn incoming_background_only_coexists_with_live_current_goal_work() {
+        for boundary in ["live", "returned", "settlement", "epoch", "budget", "goal"] {
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let window = GoalUsageWindow::new(tx, Some("goal-1".into()));
+            let foreground = window
+                .begin_model_attempt("root", 0, Some("goal-1"))
+                .await
+                .unwrap()
+                .unwrap();
+            let background = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            // Preflight must not wait for an actively sampling foreground.
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                window.wait_for_owner_settlements_through_with_background(
+                    "root",
+                    0,
+                    Some(&background),
+                ),
+            )
+            .await
+            .unwrap();
+            match boundary {
+                "returned" => window.mark_attempt_returned(&foreground),
+                "settlement" => {
+                    assert!(
+                        window.claim_attempt_settlement(
+                            &foreground,
+                            Some(GoalTokenUsage::new(7, 0, 0))
+                        )
+                    );
+                }
+                "epoch" => {
+                    window.advance_owner_epoch("root");
+                }
+                "budget" => {
+                    assert!(window.close_goal_admission("goal-1"));
+                }
+                "goal" => window.sync(Some("goal-2".into())),
+                "live" => {}
+                _ => unreachable!(),
+            }
+            let mut admission = Box::pin(window.begin_model_attempt_with_background(
+                "root",
+                0,
+                Some("goal-1"),
+                Some(background),
+            ));
+            if matches!(boundary, "returned" | "settlement") {
+                tokio::select! {
+                    biased;
+                    result = &mut admission => panic!("unsettled foreground usage bypassed: {result:?}"),
+                    _ = tokio::task::yield_now() => {}
+                }
+                assert!(window.finish_attempt(&foreground));
+            }
+            let result = tokio::time::timeout(std::time::Duration::from_secs(1), admission)
+                .await
+                .expect("final admission must proceed or reject promptly");
+            if matches!(boundary, "epoch" | "budget" | "goal") {
+                assert!(result.is_err());
+            } else {
+                assert!(window.finish_attempt(&result.unwrap().unwrap()));
+            }
+            window.finish_attempt(&foreground);
+        }
     }
 
     #[tokio::test]

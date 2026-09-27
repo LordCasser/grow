@@ -2877,3 +2877,54 @@ The leader SHALL retain retractable candidate payloads for non-retracting observ
 
 - **WHEN** an observer loads the session after the failed candidate has reached a terminal boundary
 - **THEN** its normal durable load supplies accepted history without transient backfill.
+
+### Requirement: Subagent model labels show effective reasoning effort
+
+Pager SHALL display a known effective child effort immediately after its model as `model (effort)` in both the Tasks pane row and the opened subagent title. It SHALL omit the suffix when no effort is known and SHALL update both surfaces when the child's authoritative model or effort changes.
+
+#### Scenario: Open a running child
+
+- **WHEN** a child with model `bigmodel/glm-5.3` and effort `max` appears in Tasks and its detail view is opened
+- **THEN** both model labels include `bigmodel/glm-5.3 (max)` without adding a separate column.
+
+#### Scenario: Child changes effort
+
+- **WHEN** an authoritative child model change selects a new effort
+- **THEN** the parent Tasks row and opened title display the new model and effort.
+
+#### Scenario: Child has no known effort
+
+- **WHEN** a child spawn has no effective reasoning effort
+- **THEN** both labels show its model without empty parentheses.
+
+### Requirement: Prompt model label optionally includes provider
+
+Pager SHALL offer a persistent Settings choice between a compact `model (effort)` prompt footer label and the canonical `provider/model (effort)` label. Compact SHALL be the default. The choice SHALL apply to active session, child and Dashboard composers on the next render without changing the selected model or effort. The effort suffix SHALL appear only when an effective effort exists.
+
+#### Scenario: Compact default
+
+- **WHEN** the provider preference is unset or disabled and the active route is `bigmodel/glm-5.3` with display name `GLM-5.3` and effort `max`
+- **THEN** the prompt footer displays `GLM-5.3 (max)`.
+
+#### Scenario: Show provider
+
+- **WHEN** the user enables the preference in Settings for that route
+- **THEN** the prompt footer displays `bigmodel/glm-5.3 (max)` on the next render and future launches retain the choice.
+
+#### Scenario: Dashboard and child composer
+
+- **WHEN** a Dashboard selection or opened child has its own model and effort
+- **THEN** its prompt footer applies the same preference to that view's selected route and effective effort.
+
+#### Scenario: Persistence fails
+
+- **WHEN** writing the preference fails after a live Settings change
+- **THEN** Pager restores the prior display choice and reports the setting failure through its existing path.
+
+### Requirement: Permission reset failure is visible without becoming model context
+
+Shell 收到权限 Reset 通知后，若持久化失败 SHALL 发布 UI-only 错误提示，说明当前进程已撤销但重启后的权限文件状态未确认；该提示 SHALL 不进入 assistant/provider 对话内容。成功时不得发出失败提示。
+
+#### Scenario: Reset notification encounters a write error
+- **WHEN** 用户触发的权限 Reset 在根权限文件写入时失败
+- **THEN** 客户端看到错误提示，Shell 不记录成功的 Reset 完成消息，模型上下文不包含此提示。

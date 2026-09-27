@@ -725,6 +725,9 @@ pub(in crate::app::root::dispatch) fn action_for_reset(
         ("render_mermaid", SettingValue::Enum(s)) => {
             crate::appearance::RenderMermaid::from_canonical(s).map(Action::SetRenderMermaid)
         }
+        ("show_model_provider", SettingValue::Bool(enabled)) => {
+            Some(Action::SetShowModelProvider(*enabled))
+        }
         ("vim_mode", SettingValue::Bool(b)) => Some(Action::SetVimMode(*b)),
         ("remember_tool_approvals", SettingValue::Bool(b)) => {
             Some(Action::SetRememberToolApprovals(*b))
@@ -1025,6 +1028,9 @@ pub(in crate::app::root::dispatch) fn apply_setting_rollback(
             if let Some(kind) = crate::appearance::RenderMermaid::from_canonical(s) {
                 set_render_mermaid_inner(kind);
             }
+        }
+        ("show_model_provider", SettingValue::Bool(enabled)) => {
+            crate::appearance::cache::set_show_model_provider(*enabled);
         }
         // hunk_tracker_mode: restore the in-memory ui mirror.
         ("hunk_tracker_mode", SettingValue::Enum(s)) => {

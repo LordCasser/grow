@@ -2887,14 +2887,28 @@ fn paint_dispatch_config_badge(
     if area.height < 3 || area.width < 6 {
         return;
     }
+    let show_provider = crate::appearance::cache::load_show_model_provider();
     let model_label = state
         .pending_model
         .as_ref()
         .map(|m| match m.effort {
-            Some(effort) => format!("{} ({effort})", m.display),
-            None => m.display.clone(),
+            Some(effort) => format!(
+                "{} ({effort})",
+                if show_provider {
+                    m.id.0.as_ref()
+                } else {
+                    &m.display
+                }
+            ),
+            None => {
+                if show_provider {
+                    m.id.0.to_string()
+                } else {
+                    m.display.clone()
+                }
+            }
         })
-        .or_else(|| state.models.current_model_name())
+        .or_else(|| state.models.prompt_label(show_provider))
         .unwrap_or_default();
 
     // Dispatch stages a new session: show config default Agent (same as

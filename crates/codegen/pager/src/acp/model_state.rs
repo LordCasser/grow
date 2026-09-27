@@ -71,6 +71,20 @@ impl ModelState {
         }
     }
 
+    /// Prompt footer label for the active route. The compact mode preserves
+    /// the catalog display name; the full mode uses its canonical route ID.
+    pub fn prompt_label(&self, show_provider: bool) -> Option<String> {
+        let model = if show_provider {
+            self.current_model_id_str()?.to_owned()
+        } else {
+            self.current_model_name()?
+        };
+        Some(match self.reasoning_effort {
+            Some(effort) => format!("{model} ({effort})"),
+            None => model,
+        })
+    }
+
     /// Machine-readable model ID string for the current model (e.g. "grow-4.5").
     pub fn current_model_id_str(&self) -> Option<&str> {
         Some(self.current.as_ref()?.0.as_ref())
@@ -354,6 +368,25 @@ mod tests {
     fn test_current_model_name() {
         let state = sample_models();
         assert_eq!(state.current_model_name(), Some("Model A".to_string()));
+    }
+
+    #[test]
+    fn prompt_label_chooses_display_name_or_canonical_route_with_same_effort() {
+        let mut state = ModelState::default();
+        let id = shell::agent::models::ModelId::new("bigmodel/glm-5.3");
+        state.available.insert(
+            id.clone(),
+            shell::agent::models::ModelInfo::new(id.clone(), "GLM-5.3".to_owned()),
+        );
+        state.current = Some(id);
+        state.reasoning_effort = Some(ReasoningEffort::Max);
+        assert_eq!(state.prompt_label(false).as_deref(), Some("GLM-5.3 (max)"));
+        assert_eq!(
+            state.prompt_label(true).as_deref(),
+            Some("bigmodel/glm-5.3 (max)")
+        );
+        state.reasoning_effort = None;
+        assert_eq!(state.prompt_label(false).as_deref(), Some("GLM-5.3"));
     }
 
     #[test]

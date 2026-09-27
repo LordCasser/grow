@@ -153,12 +153,6 @@ pub enum PermissionRequestSource {
     },
 }
 
-impl Default for PermissionRequestSource {
-    fn default() -> Self {
-        Self::Primary { session_id: None }
-    }
-}
-
 impl PermissionRequestSource {
     pub fn session_id(&self) -> Option<&str> {
         match self {
@@ -206,7 +200,7 @@ pub struct PermissionCallEvidence {
     pub operation: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct PermissionRequestContext {
     pub source: PermissionRequestSource,
     pub request_mode: Option<RequestPermissionMode>,
@@ -283,6 +277,32 @@ pub struct EditPathContext {
     pub real_cwd: std::path::PathBuf,
     pub display_cwd: Option<std::path::PathBuf>,
 }
+
+/// Keeps one request counted until the manager has discarded its command or
+/// completed its decision, even when the caller has stopped waiting.
+pub struct PermissionRequestGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+impl PermissionRequestGuard {
+    pub(crate) fn try_new(
+        counter: &std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        limit: usize,
+    ) -> Option<Self> {
+        use std::sync::atomic::Ordering;
+        counter
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                (current < limit).then_some(current + 1)
+            })
+            .ok()?;
+        Some(Self(counter.clone()))
+    }
+}
+
+impl Drop for PermissionRequestGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 #[allow(clippy::large_enum_variant)]
 pub enum PermissionCommand {
     Request {
@@ -291,18 +311,27 @@ pub enum PermissionCommand {
         edit_path_context: Option<EditPathContext>,
         respond_to: oneshot::Sender<Decision>,
         context: PermissionRequestContext,
+        admission_guard: Option<PermissionRequestGuard>,
     },
-    /// Atomically select the canonical permission mode.
-    SetMode(diagnostics::enums::PermissionMode),
+    /// Select the canonical permission mode and acknowledge after revocation.
+    SetMode {
+        mode: diagnostics::enums::PermissionMode,
+        respond_to: oneshot::Sender<()>,
+    },
     /// Install or replace the permission classifier used in auto mode.
     SetClassifier(Option<std::sync::Arc<dyn super::auto_mode::PermissionClassifier>>),
     /// Project AGENTS.md instructions for classifier context (None clears).
     SetProjectInstructions(Option<String>),
     /// Drop every child-local permission and classifier state when the live
     /// child session ends.
-    ReleaseChild { session_id: String },
+    ReleaseChild {
+        session_id: String,
+        respond_to: oneshot::Sender<()>,
+    },
     /// Reset per-tool permission state back to defaults.
-    ResetState,
+    ResetState {
+        respond_to: oneshot::Sender<std::io::Result<()>>,
+    },
     /// Stop accepting requests. The shared shutdown token cancels an active
     /// judgment/prompt immediately; requests already queued before this
     /// command are returned as cancelled rather than approved during teardown.

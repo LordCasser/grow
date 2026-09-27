@@ -52,6 +52,7 @@ pub(crate) struct SidebandRun {
     pending: Option<chat_state::SidebandEvent>,
     persistence_poison: Option<String>,
     activity: Option<super::tasks_cancel::SessionActivityPermit>,
+    admission_permit: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
 impl SessionActor {
@@ -222,6 +223,7 @@ impl SessionActor {
             pending: Some(request),
             persistence_poison: None,
             activity: Some(activity),
+            admission_permit: None,
         };
         // Parent ownership must become durable before the independent child
         // ledger can contain a fact. A crash after this boundary may leave an
@@ -242,6 +244,11 @@ impl SessionActor {
 }
 
 impl SidebandRun {
+    pub(crate) fn retain_admission_permit(&mut self, permit: tokio::sync::OwnedSemaphorePermit) {
+        debug_assert!(self.admission_permit.is_none());
+        self.admission_permit = Some(permit);
+    }
+
     async fn settle_auxiliary_attempt_usage(
         &mut self,
         usage: Option<sampling_types::TokenUsage>,
@@ -484,7 +491,11 @@ impl SidebandRun {
             .await?;
         self.settle_goal_attempt(None).await?;
         self.goal_usage_window
-            .wait_for_owner_settlements_through(&self.usage_owner_id, self.usage_epoch)
+            .wait_for_owner_settlements_through_with_background(
+                &self.usage_owner_id,
+                self.usage_epoch,
+                self.background.as_deref(),
+            )
             .await;
         let evidence = self.evidence_sink.as_ref().map(|sink| {
             let sink = sink.clone();
@@ -824,6 +835,7 @@ impl Drop for SidebandRun {
             return;
         }
         let activity = self.activity.take();
+        let admission_permit = self.admission_permit.take();
         if self.cancellation.is_cancelled()
             && self.fail_stop.load(std::sync::atomic::Ordering::Acquire)
         {
@@ -848,6 +860,7 @@ impl Drop for SidebandRun {
         };
         runtime.spawn(async move {
             let _activity = activity;
+            let _admission_permit = admission_permit;
             if let (Some(owner), Some((attempt_no, model_id, prompt_index))) =
                 (usage_owner.as_ref(), pending_auxiliary_start)
             {
@@ -1138,6 +1151,7 @@ mod tests {
                 pending: None,
                 persistence_poison: None,
                 activity: None,
+                admission_permit: None,
             },
             persistence_rx,
         )

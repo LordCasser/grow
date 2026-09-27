@@ -382,9 +382,8 @@ async fn subagent_inherits_session_cli_overrides() {
         );
     assert_eq!(def.disallowed_tools, vec!["write"]);
 }
-/// Subagent lifecycle has one stamped parent command. The parent actor owns
-/// both persistence and live delivery; the child must not enqueue a second
-/// gateway copy.
+/// The parent actor assigns the lifecycle event ID at publication. The child
+/// only queues one metadata-only command and no second gateway copy.
 #[tokio::test]
 async fn emit_subagent_notification_sends_one_metadata_only_parent_command() {
     use crate::test_support::lsp_runtime::test_gateway_with_receiver;
@@ -406,7 +405,7 @@ async fn emit_subagent_notification_sends_one_metadata_only_parent_command() {
         },
         Some(&cmd_tx),
     );
-    let persisted_id = match cmd_rx.try_recv().expect("parent command must fire") {
+    match cmd_rx.try_recv().expect("parent command must fire") {
         SessionCommand::GrowSessionNotification {
             notification,
             forward_to_gateway: true,
@@ -415,18 +414,38 @@ async fn emit_subagent_notification_sends_one_metadata_only_parent_command() {
                 notification.update,
                 SessionUpdate::SubagentFinished { output: None, .. }
             ));
-            notification
-                .meta
-                .as_ref()
-                .and_then(|m| m.get("eventId"))
-                .and_then(|v| v.as_str())
-                .expect("persisted subagent lines must carry an eventId")
-                .to_string()
+            assert!(notification.meta.is_none(), "parent actor stamps after hooks");
         }
         _ => panic!("expected GrowSessionNotification"),
-    };
-    assert!(persisted_id.starts_with("parent-sess-"));
+    }
     assert!(gateway_rx.try_recv().is_err());
+
+    emit_subagent_notification(
+        &gateway,
+        "parent-sess",
+        SessionUpdate::SubagentFinished {
+            subagent_id: "sa-2".into(),
+            child_session_id: "child-2".into(),
+            status: "completed".into(),
+            error: None,
+            tool_calls: 0,
+            turns: 0,
+            duration_ms: 5,
+            tokens_used: 0,
+            output: Some("large child answer".into()),
+        },
+        None,
+    );
+    let acp_transport::AcpClientMessage::ExtNotification(message) =
+        gateway_rx.try_recv().expect("direct fallback must forward")
+    else {
+        panic!("expected Grow extension notification");
+    };
+    let fallback: serde_json::Value = serde_json::from_str(message.request.params.get()).unwrap();
+    assert!(fallback["_meta"]["eventId"]
+        .as_str()
+        .is_some_and(|id| id.starts_with("parent-sess-")));
+    assert!(fallback["update"]["output"].is_null());
 }
 #[test]
 fn subagent_max_turns_definition_wins_else_inherits_parent() {

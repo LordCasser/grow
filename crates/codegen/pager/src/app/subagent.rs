@@ -18,6 +18,7 @@ pub struct SubagentInfo {
     pub description: Arc<str>,
     pub subagent_type: Arc<str>,
     pub model: Option<Arc<str>>,
+    pub reasoning_effort: Option<shell::sampling::types::ReasoningEffort>,
     /// "new" or "resumed".
     pub context_source: Option<Arc<str>>,
     pub resumed_from: Option<Arc<str>>,
@@ -443,6 +444,13 @@ pub(crate) fn ensure_subagent_child_replayed(
     if let Some(info) = parent.session.subagent_sessions.get_mut(child_sid) {
         info.child_updates_replayed = true;
     }
+    if parent
+        .subagent_views
+        .get(child_sid)
+        .is_some_and(|child| child.session.models.current.is_some())
+    {
+        crate::app::acp_handler::sync_child_control_projection(parent, child_sid);
+    }
 }
 /// Finalize a finished child view: end the turn and append the `TurnCompleted`
 /// footer. Shared by the live `SubagentFinished` path and the deferred resume path.
@@ -549,6 +557,19 @@ pub(crate) fn format_subagent_meta(model: Option<&str>) -> String {
         format!(" ({bare})")
     }
 }
+/// Compact model label shared by the Tasks row and opened child title.
+pub(crate) fn format_subagent_model(
+    model: Option<&str>,
+    effort: Option<shell::sampling::types::ReasoningEffort>,
+) -> String {
+    let Some(model) = model.map(str::trim).filter(|model| !model.is_empty()) else {
+        return String::new();
+    };
+    match effort {
+        Some(effort) => format!("{model} ({effort})"),
+        None => model.to_owned(),
+    }
+}
 /// Format a [`TurnActivity`] into a concise display label.
 ///
 /// Used in the subagent scrollback block and the fullscreen title bar.
@@ -614,6 +635,7 @@ mod tests {
             description: "test task".into(),
             subagent_type: "explore".into(),
             model: None,
+            reasoning_effort: None,
             context_source: None,
             resumed_from: None,
             capability_mode: None,
@@ -727,6 +749,36 @@ mod tests {
             child.scrollback.entry(0).unwrap().block,
             RenderBlock::UserPrompt(_)
         ));
+    }
+    #[test]
+    fn ensure_subagent_child_replayed_syncs_current_effort_to_parent() {
+        let mut parent = make_min_child_view();
+        let child_sid = "child-effort-replay";
+        let mut child = make_min_child_view();
+        child.session.models.set_current(
+            shell::agent::models::ModelId::new("grow-3"),
+            Some(shell::sampling::types::ReasoningEffort::High),
+        );
+        parent
+            .subagent_views
+            .insert(child_sid.to_string(), Box::new(child));
+        let mut info = make_info();
+        info.child_session_id = child_sid.into();
+        info.model = Some(Arc::from("grow-3"));
+        info.reasoning_effort = Some(shell::sampling::types::ReasoningEffort::Max);
+        parent
+            .session
+            .subagent_sessions
+            .insert(child_sid.to_string(), info);
+
+        ensure_subagent_child_replayed(&mut parent, child_sid);
+
+        let info = &parent.session.subagent_sessions[child_sid];
+        assert!(info.child_updates_replayed);
+        assert_eq!(
+            info.reasoning_effort,
+            Some(shell::sampling::types::ReasoningEffort::High)
+        );
     }
     /// The child-transcript replay purges exactly once when it actually
     /// parsed an `updates.jsonl` transient — and never when the load no-ops
@@ -973,6 +1025,16 @@ mod tests {
     #[test]
     fn subagent_meta_model() {
         assert_eq!(format_subagent_meta(Some("grow-3")), " (grow-3)");
+    }
+    #[test]
+    fn subagent_model_label_uses_effective_effort_only_when_known() {
+        use shell::sampling::types::ReasoningEffort;
+        assert_eq!(
+            format_subagent_model(Some("bigmodel/glm-5.3"), Some(ReasoningEffort::Max)),
+            "bigmodel/glm-5.3 (max)"
+        );
+        assert_eq!(format_subagent_model(Some("grow-3"), None), "grow-3");
+        assert_eq!(format_subagent_model(None, Some(ReasoningEffort::Max)), "");
     }
     #[test]
     fn type_label_abbreviates_general_purpose() {

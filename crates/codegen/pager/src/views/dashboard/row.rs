@@ -1118,6 +1118,7 @@ mod tests {
             description: Arc::from("test task"),
             subagent_type: Arc::from("explore"),
             model: None,
+            reasoning_effort: None,
             context_source: None,
             resumed_from: None,
             capability_mode: None,

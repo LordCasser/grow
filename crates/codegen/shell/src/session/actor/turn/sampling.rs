@@ -19,7 +19,7 @@ async fn image_description_before_deadline<F: std::future::Future>(
 
 const PERMISSION_JUDGMENT_MAX_ATTEMPTS: usize = 2;
 const PERMISSION_JUDGMENT_MAX_OUTPUT_TOKENS: u32 = 1_024;
-const PERMISSION_JUDGMENT_RETRY_MESSAGE: &str = "The previous permission judgment attempt returned an empty or invalid structured response, timed out, or failed with a transient provider error. Retry once. Return exactly one JSON object with no Markdown or prose: {\"decision\":\"allow\"|\"deny\",\"reason\":\"brief explanation\"}.";
+const PERMISSION_JUDGMENT_RETRY_MESSAGE: &str = "The previous permission judgment attempt returned an empty or invalid structured response or failed with a transient provider error. Retry once. Return exactly one JSON object with no Markdown or prose: {\"decision\":\"allow\"|\"deny\",\"reason\":\"brief explanation\"}.";
 
 fn permission_judgment_needs_retry(text: &str) -> bool {
     workspace::permission::parse_classifier_model_text(text)
@@ -1154,6 +1154,7 @@ impl SessionActor {
         let classify_timeout = crate::util::config::auto_mode_classify_timeout(&auto_cfg);
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<(
             workspace::permission::PermissionJudgmentRequest,
+            tokio::time::Instant,
             tokio::sync::oneshot::Sender<Result<String, workspace::permission::ClassifierFailure>>,
         )>();
         // Do not let the classifier channel keep the primary session alive.
@@ -1162,360 +1163,400 @@ impl SessionActor {
         // bridge alive after session teardown.
         let weak_session = Arc::downgrade(self);
         tokio::task::spawn_local(async move {
-            while let Some((judgment, mut respond_to)) = rx.recv().await {
+            const MAX_PERMISSION_SIDEBANDS: usize = 16;
+            let sideband_admission =
+                Arc::new(tokio::sync::Semaphore::new(MAX_PERMISSION_SIDEBANDS));
+            let mut judgments = tokio::task::JoinSet::new();
+            loop {
+                let (judgment, enqueued_at, mut respond_to) = tokio::select! {
+                    result = judgments.join_next(), if !judgments.is_empty() => {
+                        if let Some(Err(error)) = result {
+                            tracing::error!(%error, "permission side-query task failed");
+                        }
+                        continue;
+                    }
+                    request = rx.recv() => match request {
+                        Some(request) => request,
+                        None => break,
+                    },
+                };
                 if respond_to.is_closed() {
-                    tracing::debug!("permission judgment requester disappeared before dispatch");
                     continue;
                 }
-                let Some(session) = weak_session.upgrade() else {
-                    let _ = respond_to.send(Err(
-                        workspace::permission::ClassifierFailure::TransportError(
-                            "primary session ended before permission judgment".to_owned(),
-                        ),
-                    ));
-                    break;
+                let permit = match sideband_admission.clone().try_acquire_owned() {
+                    Ok(permit) => permit,
+                    Err(_) => {
+                        workspace::permission::record_permission_sideband_overload();
+                        tracing::warn!(
+                            limit = MAX_PERMISSION_SIDEBANDS,
+                            "permission Sideband admission is full"
+                        );
+                        let _ = respond_to
+                            .send(Err(workspace::permission::ClassifierFailure::Overloaded));
+                        continue;
+                    }
                 };
-                let judgment_future = async {
-                    // The total deadline starts before config, credential, and
-                    // client preparation so setup latency cannot escape the
-                    // bounded time charged to the child tool call.
-                    let judgment_deadline = tokio::time::Instant::now() + classify_timeout;
-                    let is_child_judgment = judgment.uses_primary_context();
-                    let setup = async {
-                        let classifier_input = if is_child_judgment {
-                            session.subagent_classifier_input
-                        } else {
-                            crate::config::SubagentClassifierInput::RequestOnly
-                        };
-                        let (sampling_client, model, reasoning_effort) = if is_child_judgment {
-                            let client =
-                                session.prepare_chat_completion(false).await.map_err(|e| {
-                                    workspace::permission::ClassifierFailure::TransportError(
-                                        e.to_string(),
-                                    )
-                                })?;
-                            let model = session
-                                .chat_state_handle
-                                .get_sampling_config()
-                                .await
-                                .map(|config| config.model)
-                                .unwrap_or_default();
-                            // Child safety judgments use the primary session's
-                            // active model, but they are classifier calls rather
-                            // than continuations of the active turn. Inheriting
-                            // a `max` turn effort can consume the whole bounded
-                            // attempt window before the short JSON verdict is
-                            // produced. Keep effort under the classifier policy
-                            // for both primary and child judgment paths.
-                            (client, model, classifier_reasoning_effort)
-                        } else {
-                            let (client, model) = match &aux_classifier_sampler {
-                                Ok(Some((client, model))) => (client.clone(), model.clone()),
-                                Ok(None) => {
-                                    let client =
+                let weak_session = weak_session.clone();
+                let aux_classifier_sampler = aux_classifier_sampler.clone();
+                judgments.spawn_local(async move {
+                    if respond_to.is_closed() {
+                        tracing::debug!("permission judgment requester disappeared before dispatch");
+                        return;
+                    }
+                    let judgment_deadline = enqueued_at + classify_timeout;
+                    if tokio::time::Instant::now() >= judgment_deadline {
+                        tracing::warn!(
+                            queue_ms = enqueued_at.elapsed().as_millis(),
+                            "permission judgment expired in the classifier queue"
+                        );
+                        let _ = respond_to.send(Err(workspace::permission::ClassifierFailure::Timeout));
+                        return;
+                    }
+                    let queue_ms = enqueued_at.elapsed().as_millis();
+                    let phase = std::cell::Cell::new("request preparation");
+                    let failure_origin = std::cell::Cell::new(None::<&'static str>);
+                    let Some(session) = weak_session.upgrade() else {
+                        let _ = respond_to.send(Err(
+                            workspace::permission::ClassifierFailure::TransportError(
+                                "primary session ended before permission judgment".to_owned(),
+                            ),
+                        ));
+                        return;
+                    };
+                    let judgment_future = async {
+                        let is_child_judgment = judgment.uses_primary_context();
+                        let setup = async {
+                            let classifier_input = if is_child_judgment {
+                                session.subagent_classifier_input
+                            } else {
+                                crate::config::SubagentClassifierInput::RequestOnly
+                            };
+                            let (sampling_client, model, reasoning_effort) = if is_child_judgment {
+                                let client =
                                     session.prepare_chat_completion(false).await.map_err(|e| {
                                         workspace::permission::ClassifierFailure::TransportError(
                                             e.to_string(),
                                         )
                                     })?;
-                                    let model = session
-                                        .chat_state_handle
-                                        .get_sampling_config()
-                                        .await
-                                        .map(|config| config.model)
-                                        .unwrap_or_default();
-                                    (client, model)
-                                }
-                                Err(reason) => {
-                                    return Err(
-                                        workspace::permission::ClassifierFailure::TransportError(
-                                            reason.clone(),
-                                        ),
-                                    );
-                                }
-                            };
-                            (client, model, classifier_reasoning_effort)
-                        };
-                        let (items, input_refs) = if is_child_judgment {
-                            let materialized = if classifier_input
-                                == crate::config::SubagentClassifierInput::RequestOnly
-                            {
-                                None
+                                let model = session
+                                    .chat_state_handle
+                                    .get_sampling_config()
+                                    .await
+                                    .map(|config| config.model)
+                                    .unwrap_or_default();
+                                // Child safety judgments use the primary session's
+                                // active model, but they are classifier calls rather
+                                // than continuations of the active turn. Inheriting
+                                // a `max` turn effort can consume the whole bounded
+                                // attempt window before the short JSON verdict is
+                                // produced. Keep effort under the classifier policy
+                                // for both primary and child judgment paths.
+                                (client, model, classifier_reasoning_effort)
                             } else {
-                                Some(
-                                    session
-                                        .chat_state_handle
-                                        .materialize_timeline(session.session_info.id.to_string())
-                                        .await
-                                        .ok_or_else(|| {
+                                let (client, model) = match &aux_classifier_sampler {
+                                    Ok(Some((client, model))) => (client.clone(), model.clone()),
+                                    Ok(None) => {
+                                        let client =
+                                        session.prepare_chat_completion(false).await.map_err(|e| {
                                             workspace::permission::ClassifierFailure::TransportError(
-                                                "permission sideband could not materialize its parent Timeline"
-                                                    .into(),
+                                                e.to_string(),
                                             )
-                                        })?,
-                                )
-                            };
-                            let direct_user_inputs = materialized
-                                .as_ref()
-                                .map(|value| value.direct_user_inputs.clone())
-                                .unwrap_or_default();
-                            let items = session
-                                .child_permission_judgment_items_from_evidence(
-                                    &judgment,
-                                    classifier_input,
-                                    direct_user_inputs,
-                                )
-                                .await;
-                            let refs = materialized
-                                .map(|value| vec![value.input_ref])
-                                .unwrap_or_default();
-                            (items, refs)
-                        } else {
-                            let items = judgment
-                                .classifier_messages()
-                                .into_iter()
-                                .map(|message| match message.role {
-                                    workspace::permission::ClassifierMessageRole::System => {
-                                        ConversationItem::system(message.text)
+                                        })?;
+                                        let model = session
+                                            .chat_state_handle
+                                            .get_sampling_config()
+                                            .await
+                                            .map(|config| config.model)
+                                            .unwrap_or_default();
+                                        (client, model)
                                     }
-                                    workspace::permission::ClassifierMessageRole::User => {
-                                        ConversationItem::user(message.text)
+                                    Err(reason) => {
+                                        return Err(
+                                            workspace::permission::ClassifierFailure::TransportError(
+                                                reason.clone(),
+                                            ),
+                                        );
                                     }
-                                })
-                                .collect::<Vec<_>>();
-                            (items, Vec::new())
-                        };
-                        let json_output =
-                            sampling_types::JsonOutputFormat::portable_schema_for_backend(
-                                sampling_client.api_backend(),
-                                workspace::permission::classifier_output_json_schema(),
-                            );
-                        Ok::<_, workspace::permission::ClassifierFailure>((
-                            sampling_client,
-                            model,
-                            reasoning_effort,
-                            items,
-                            json_output,
-                            input_refs,
-                        ))
-                    };
-                    let (sampling_client, model, reasoning_effort, items, json_output, input_refs) =
-                        tokio::time::timeout_at(judgment_deadline, setup)
-                            .await
-                            .map_err(|_| workspace::permission::ClassifierFailure::Timeout)??;
-                    let mut maximum_attempt_items = items.clone();
-                    maximum_attempt_items
-                        .push(ConversationItem::user(PERMISSION_JUDGMENT_RETRY_MESSAGE));
-                    let maximum_attempt_request = ConversationRequest {
-                        items: maximum_attempt_items,
-                        tools: vec![],
-                        tool_choice: None,
-                        model: Some(model.clone()),
-                        temperature: None,
-                        max_output_tokens: Some(PERMISSION_JUDGMENT_MAX_OUTPUT_TOKENS),
-                        json_output: Some(json_output.clone()),
-                        reasoning_effort,
-                        ..ConversationRequest::default()
-                    };
-                    let budget_policy = chat_state::SidebandBudgetPolicy::for_request(
-                        &maximum_attempt_request,
-                        PERMISSION_JUDGMENT_MAX_ATTEMPTS as u32,
-                    );
-                    let mut sideband = session
-                        .begin_sideband(
-                            chat_state::SidebandPurpose::PermissionJudgment,
-                            permission_sideband_prompt(&items),
-                            if input_refs.is_empty() {
-                                SidebandSource::None
-                            } else {
-                                SidebandSource::Frozen(input_refs)
-                            },
-                            budget_policy,
-                            chat_state::SidebandRoute {
-                                model: model.clone(),
-                                backend: sampling_client.api_backend(),
-                            },
-                            Some(workspace::permission::classifier_output_json_schema()),
-                        )
-                        .await
-                        .map_err(|error| {
-                            workspace::permission::ClassifierFailure::TransportError(
-                                error.to_string(),
-                            )
-                        })?;
-                    // One total deadline covers every attempt. Each attempt is
-                    // durably visible before its provider request is emitted.
-                    let sampled = async {
-                        let mut feedback = None;
-                        for attempt in 1..=PERMISSION_JUDGMENT_MAX_ATTEMPTS {
-                            let mut attempt_items = items.clone();
-                            if attempt > 1 {
-                                // Failed provider output never becomes permission
-                                // evidence; only the programmatic correction does.
-                                attempt_items.push(ConversationItem::user(
-                                    PERMISSION_JUDGMENT_RETRY_MESSAGE,
-                                ));
-                            }
-                            let request = ConversationRequest {
-                                items: attempt_items,
-                                tools: vec![],
-                                tool_choice: None,
-                                model: Some(model.clone()),
-                                temperature: None,
-                                max_output_tokens: Some(PERMISSION_JUDGMENT_MAX_OUTPUT_TOKENS),
-                                json_output: Some(json_output.clone()),
-                                reasoning_effort,
-                                ..ConversationRequest::default()
+                                };
+                                (client, model, classifier_reasoning_effort)
                             };
-                            sideband
-                                .attempt_all_sources(
-                                    &request,
-                                    sampling_client.api_backend(),
-                                    feedback.take(),
-                                )
-                                .await
-                                .map_err(|error| {
-                                    workspace::permission::ClassifierFailure::TransportError(
-                                        error.to_string(),
-                                    )
-                                })?;
-                            let fut = sideband
-                                .run_provider(sampling_client.conversation_collect(request));
-                            let attempts_remaining =
-                                PERMISSION_JUDGMENT_MAX_ATTEMPTS - attempt + 1;
-                            let remaining = judgment_deadline
-                                .saturating_duration_since(tokio::time::Instant::now());
-                            let attempt_budget = remaining / attempts_remaining as u32;
-                            let response = match tokio::time::timeout(attempt_budget, fut).await {
-                                Ok(Ok(Ok(response))) => response,
-                                Ok(Ok(Err(error)))
-                                    if attempt < PERMISSION_JUDGMENT_MAX_ATTEMPTS
-                                        && permission_judgment_error_needs_retry(&error) =>
+                            let (items, input_refs) = if is_child_judgment {
+                                let materialized = if classifier_input
+                                    == crate::config::SubagentClassifierInput::RequestOnly
                                 {
-                                    tracing::warn!(
-                                        attempt,
-                                        max_attempts = PERMISSION_JUDGMENT_MAX_ATTEMPTS,
-                                        backend = ?sampling_client.api_backend(),
-                                        "permission judgment hit a transient provider error; retransmitting once"
-                                    );
-                                    feedback = Some(format!("transient provider error: {error}"));
-                                    continue;
-                                }
-                                Ok(Ok(Err(error))) => {
-                                    return Err(
-                                        workspace::permission::ClassifierFailure::TransportError(
-                                            error.to_string(),
-                                        ),
-                                    );
-                                }
-                                Ok(Err(error)) => {
-                                    return Err(
-                                        workspace::permission::ClassifierFailure::TransportError(
-                                            error.to_string(),
-                                        ),
-                                    );
-                                }
-                                Err(_) if attempt < PERMISSION_JUDGMENT_MAX_ATTEMPTS => {
-                                    tracing::warn!(
-                                        attempt,
-                                        max_attempts = PERMISSION_JUDGMENT_MAX_ATTEMPTS,
-                                        backend = ?sampling_client.api_backend(),
-                                        "permission judgment attempt timed out; retransmitting once within the total deadline"
-                                    );
-                                    feedback = Some("provider attempt timed out".into());
-                                    continue;
-                                }
-                                Err(_) => {
-                                    return Err(workspace::permission::ClassifierFailure::Timeout);
-                                }
+                                    None
+                                } else {
+                                    Some(
+                                        session
+                                            .chat_state_handle
+                                            .materialize_timeline(session.session_info.id.to_string())
+                                            .await
+                                            .ok_or_else(|| {
+                                                workspace::permission::ClassifierFailure::TransportError(
+                                                    "permission sideband could not materialize its parent Timeline"
+                                                        .into(),
+                                                )
+                                            })?,
+                                    )
+                                };
+                                let direct_user_inputs = materialized
+                                    .as_ref()
+                                    .map(|value| value.direct_user_inputs.clone())
+                                    .unwrap_or_default();
+                                let items = session
+                                    .child_permission_judgment_items_from_evidence(
+                                        &judgment,
+                                        classifier_input,
+                                        direct_user_inputs,
+                                    )
+                                    .await;
+                                let refs = materialized
+                                    .map(|value| vec![value.input_ref])
+                                    .unwrap_or_default();
+                                (items, refs)
+                            } else {
+                                let items = judgment
+                                    .classifier_messages()
+                                    .into_iter()
+                                    .map(|message| match message.role {
+                                        workspace::permission::ClassifierMessageRole::System => {
+                                            ConversationItem::system(message.text)
+                                        }
+                                        workspace::permission::ClassifierMessageRole::User => {
+                                            ConversationItem::user(message.text)
+                                        }
+                                    })
+                                    .collect::<Vec<_>>();
+                                (items, Vec::new())
                             };
-                            let usage = session
-                                .settle_sideband_response_usage(&mut sideband, &response)
-                                .await
-                                .map_err(|error| {
-                                    workspace::permission::ClassifierFailure::TransportError(
-                                        error.to_string(),
-                                    )
-                                })?;
-                            let model_text = response.assistant_text();
-                            if !permission_judgment_needs_retry(&model_text) {
-                                return Ok((response, usage));
-                            }
-                            if attempt == PERMISSION_JUDGMENT_MAX_ATTEMPTS {
-                                return Err(
-                                    workspace::permission::ClassifierFailure::TransportError(
-                                        "permission judgment exhausted structured-output validation"
-                                            .into(),
-                                    ),
+                            let json_output =
+                                sampling_types::JsonOutputFormat::portable_schema_for_backend(
+                                    sampling_client.api_backend(),
+                                    workspace::permission::classifier_output_json_schema(),
                                 );
-                            }
-                            tracing::warn!(
-                                attempt,
-                                max_attempts = PERMISSION_JUDGMENT_MAX_ATTEMPTS,
-                                backend = ?sampling_client.api_backend(),
-                                "permission judgment returned invalid structured output; retransmitting once"
-                            );
-                            feedback = Some("structured output failed local schema validation".into());
-                        }
-                        unreachable!("permission judgment attempt loop always returns")
-                    }
-                    .await;
-                    match sampled {
-                        Ok((response, usage)) => {
-                            let model_text = response.assistant_text();
-                            let structured_output =
-                                serde_json::from_str(&model_text).map_err(|_| {
-                                    workspace::permission::ClassifierFailure::TransportError(
-                                    "validated permission output could not be materialized as JSON"
-                                        .into(),
-                                )
-                                })?;
-                            sideband
-                                .complete(
-                                    model_text.clone(),
-                                    Some(structured_output),
-                                    usage,
-                                    sideband_finish(&response),
-                                    Vec::new(),
-                                )
+                            Ok::<_, workspace::permission::ClassifierFailure>((
+                                sampling_client,
+                                model,
+                                reasoning_effort,
+                                items,
+                                json_output,
+                                input_refs,
+                            ))
+                        };
+                        let (sampling_client, model, reasoning_effort, items, json_output, input_refs) =
+                            tokio::time::timeout_at(judgment_deadline, setup)
                                 .await
-                                .map_err(|error| {
-                                    workspace::permission::ClassifierFailure::TransportError(
-                                        error.to_string(),
+                                .map_err(|_| workspace::permission::ClassifierFailure::Timeout)??;
+                        phase.set("sideband admission");
+                        let mut maximum_attempt_items = items.clone();
+                        maximum_attempt_items
+                            .push(ConversationItem::user(PERMISSION_JUDGMENT_RETRY_MESSAGE));
+                        let maximum_attempt_request = ConversationRequest {
+                            items: maximum_attempt_items,
+                            tools: vec![],
+                            tool_choice: None,
+                            model: Some(model.clone()),
+                            temperature: None,
+                            max_output_tokens: Some(PERMISSION_JUDGMENT_MAX_OUTPUT_TOKENS),
+                            json_output: Some(json_output.clone()),
+                            reasoning_effort,
+                            ..ConversationRequest::default()
+                        };
+                        let budget_policy = chat_state::SidebandBudgetPolicy::for_request(
+                            &maximum_attempt_request,
+                            PERMISSION_JUDGMENT_MAX_ATTEMPTS as u32,
+                        );
+                        let mut sideband = session
+                            .begin_sideband(
+                                chat_state::SidebandPurpose::PermissionJudgment,
+                                permission_sideband_prompt(&items),
+                                if input_refs.is_empty() {
+                                    SidebandSource::None
+                                } else {
+                                    SidebandSource::Frozen(input_refs)
+                                },
+                                budget_policy,
+                                chat_state::SidebandRoute {
+                                    model: model.clone(),
+                                    backend: sampling_client.api_backend(),
+                                },
+                                Some(workspace::permission::classifier_output_json_schema()),
+                            )
+                            .await
+                            .map_err(|error| {
+                                workspace::permission::ClassifierFailure::TransportError(
+                                    error.to_string(),
+                                )
+                            })?;
+                        sideband.retain_admission_permit(permit);
+                        // This judgment is independent of foreground sampling.
+                        sideband.set_background(Some(Arc::new(std::sync::atomic::AtomicBool::new(true))));
+                        // One total deadline covers every attempt. Each attempt is
+                        // durably visible before its provider request is emitted.
+                        let sampled = async {
+                            let mut feedback = None;
+                            for attempt in 1..=PERMISSION_JUDGMENT_MAX_ATTEMPTS {
+                                let mut attempt_items = items.clone();
+                                if attempt > 1 {
+                                    // Failed provider output never becomes permission
+                                    // evidence; only the programmatic correction does.
+                                    attempt_items.push(ConversationItem::user(
+                                        PERMISSION_JUDGMENT_RETRY_MESSAGE,
+                                    ));
+                                }
+                                let request = ConversationRequest {
+                                    items: attempt_items,
+                                    tools: vec![],
+                                    tool_choice: None,
+                                    model: Some(model.clone()),
+                                    temperature: None,
+                                    max_output_tokens: Some(PERMISSION_JUDGMENT_MAX_OUTPUT_TOKENS),
+                                    json_output: Some(json_output.clone()),
+                                    reasoning_effort,
+                                    ..ConversationRequest::default()
+                                };
+                                phase.set("sideband attempt commit");
+                                sideband
+                                    .attempt_all_sources(
+                                        &request,
+                                        sampling_client.api_backend(),
+                                        feedback.take(),
                                     )
-                                })?;
-                            Ok(model_text)
-                        }
-                        Err(error) => {
-                            if let Err(record_error) = sideband
-                                .fail(chat_state::SidebandOutcome::Failed, error.to_string())
-                                .await
-                            {
-                                return Err(
-                                    workspace::permission::ClassifierFailure::TransportError(
-                                        format!(
-                                            "{error}; sideband terminal commit failed: {record_error}"
+                                    .await
+                                    .map_err(|error| {
+                                        workspace::permission::ClassifierFailure::TransportError(
+                                            error.to_string(),
+                                        )
+                                    })?;
+                                phase.set("provider admission");
+                                let response = match sideband.run_provider(async {
+                                    phase.set("provider response");
+                                    sampling_client.conversation_collect(request).await
+                                }).await {
+                                    Ok(Ok(response)) => response,
+                                    Ok(Err(error))
+                                        if attempt < PERMISSION_JUDGMENT_MAX_ATTEMPTS
+                                            && permission_judgment_error_needs_retry(&error) =>
+                                    {
+                                        tracing::warn!(attempt, backend = ?sampling_client.api_backend(),
+                                            "permission judgment hit a transient provider error; retransmitting once");
+                                        feedback = Some(format!("transient provider error: {error}"));
+                                        continue;
+                                    }
+                                    Ok(Err(error)) => return Err(
+                                        workspace::permission::ClassifierFailure::TransportError(error.to_string())
+                                    ),
+                                    Err(error) => return Err(
+                                        workspace::permission::ClassifierFailure::TransportError(error.to_string())
+                                    ),
+                                };
+                                phase.set("usage settlement");
+                                let usage = session
+                                    .settle_sideband_response_usage(&mut sideband, &response)
+                                    .await
+                                    .map_err(|error| {
+                                        workspace::permission::ClassifierFailure::TransportError(
+                                            error.to_string(),
+                                        )
+                                    })?;
+                                let model_text = response.assistant_text();
+                                if !permission_judgment_needs_retry(&model_text) {
+                                    return Ok((response, usage));
+                                }
+                                if attempt == PERMISSION_JUDGMENT_MAX_ATTEMPTS {
+                                    return Err(
+                                        workspace::permission::ClassifierFailure::TransportError(
+                                            "permission judgment exhausted structured-output validation"
+                                                .into(),
                                         ),
-                                    ),
+                                    );
+                                }
+                                tracing::warn!(
+                                    attempt,
+                                    max_attempts = PERMISSION_JUDGMENT_MAX_ATTEMPTS,
+                                    backend = ?sampling_client.api_backend(),
+                                    "permission judgment returned invalid structured output; retransmitting once"
                                 );
+                                feedback = Some("structured output failed local schema validation".into());
                             }
-                            Err(error)
+                            unreachable!("permission judgment attempt loop always returns")
                         }
+                        .await;
+                        match sampled {
+                            Ok((response, usage)) => {
+                                phase.set("sideband completion");
+                                let model_text = response.assistant_text();
+                                let structured_output =
+                                    serde_json::from_str(&model_text).map_err(|_| {
+                                        workspace::permission::ClassifierFailure::TransportError(
+                                        "validated permission output could not be materialized as JSON"
+                                            .into(),
+                                    )
+                                    })?;
+                                sideband
+                                    .complete(
+                                        model_text.clone(),
+                                        Some(structured_output),
+                                        usage,
+                                        sideband_finish(&response),
+                                        Vec::new(),
+                                    )
+                                    .await
+                                    .map_err(|error| {
+                                        workspace::permission::ClassifierFailure::TransportError(
+                                            error.to_string(),
+                                        )
+                                    })?;
+                                Ok(model_text)
+                            }
+                            Err(error) => {
+                                failure_origin.set(Some(phase.get()));
+                                phase.set("sideband failure settlement");
+                                if let Err(record_error) = sideband
+                                    .fail(chat_state::SidebandOutcome::Failed, error.to_string())
+                                    .await
+                                {
+                                    return Err(
+                                        workspace::permission::ClassifierFailure::TransportError(
+                                            format!(
+                                                "{error}; sideband terminal commit failed: {record_error}"
+                                            ),
+                                        ),
+                                    );
+                                }
+                                Err(error)
+                            }
+                        }
+                    };
+                    tokio::pin!(judgment_future);
+                    let result = tokio::select! {
+                        biased;
+                        _ = respond_to.closed() => {
+                            tracing::debug!("permission judgment requester disappeared; cancelling side-query");
+                            return;
+                        }
+                        _ = tokio::time::sleep_until(judgment_deadline) => {
+                            Err(workspace::permission::ClassifierFailure::Timeout)
+                        }
+                        result = &mut judgment_future => result,
+                    };
+                    if let Err(error) = &result {
+                        tracing::warn!(
+                            %error,
+                            phase = phase.get(),
+                            failure_origin = failure_origin.get().unwrap_or(phase.get()),
+                            queue_ms,
+                            elapsed_ms = enqueued_at.elapsed().as_millis(),
+                            "permission auto classifier side-query failed"
+                        );
                     }
-                };
-                tokio::pin!(judgment_future);
-                let result = tokio::select! {
-                    biased;
-                    _ = respond_to.closed() => {
-                        tracing::debug!("permission judgment requester disappeared; cancelling side-query");
-                        continue;
-                    }
-                    result = &mut judgment_future => result,
-                };
-                if let Err(error) = &result {
-                    tracing::warn!(%error, "permission auto classifier side-query failed");
+                    let _ = respond_to.send(result);
+                });
+            }
+            while let Some(result) = judgments.join_next().await {
+                if let Err(error) = result {
+                    tracing::error!(%error, "permission side-query failed during teardown");
                 }
-                let _ = respond_to.send(result);
             }
         });
         let clf = workspace::permission::LlmPermissionClassifier::with_channel(tx, prompt_type);

@@ -120,6 +120,10 @@ pub struct UiConfig {
     /// Written by the pager's settings modal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub render_mermaid: Option<String>,
+    /// Show the canonical provider/model route in prompt footers instead of
+    /// the compact model display name. Unset defaults to false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub show_model_provider: Option<bool>,
     /// Hunk-tracker mode the pager advertises to the agent (`agent_only` |
     /// `all_dirty` | `off`). Written by the pager's settings modal; read at
     /// connect time (CLI `--hunk-tracker-mode` / `GROW_HUNK_TRACKER` override
@@ -263,6 +267,7 @@ impl Default for UiConfig {
             scroll_lines: None,
             vim_mode: None,
             render_mermaid: None,
+            show_model_provider: None,
             hunk_tracker_mode: None,
             mouse_reporting_toggle: None,
             remember_tool_approvals: None,

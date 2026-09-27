@@ -90,6 +90,24 @@ pub(in crate::app::root::dispatch) fn set_render_mermaid(
     }]
 }
 
+pub(in crate::app::root::dispatch) fn set_show_model_provider(
+    app: &mut AppView,
+    enabled: bool,
+) -> Vec<Effect> {
+    let previous = crate::appearance::cache::load_show_model_provider();
+    if previous == enabled {
+        return vec![];
+    }
+    crate::appearance::cache::set_show_model_provider(enabled);
+    refresh_open_settings_modals(app);
+    app.show_toast(&save_success_toast("Show model provider", enabled));
+    vec![Effect::PersistSetting {
+        key: "show_model_provider",
+        value: crate::settings::SettingValue::Bool(enabled),
+        rollback_value: crate::settings::SettingValue::Bool(previous),
+    }]
+}
+
 /// Mirror the canonical mode into `app.current_ui` so `current_value_for` stays
 /// in sync. Called by the commit path AND by [`apply_setting_rollback`](super::ui::apply_setting_rollback).
 pub(super) fn set_hunk_tracker_mode_inner(app: &mut AppView, canonical: &str) {

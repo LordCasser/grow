@@ -847,6 +847,9 @@ pub enum SessionUpdate {
         /// Effective model ID used by the subagent (may differ from the parent).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         model: Option<String>,
+        /// Effective child reasoning effort at spawn, not the catalog default.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_effort: Option<String>,
         /// Exact session-scoped model/effort catalog owned by this child. A
         /// Workflow child receives the immutable Run projection, not the
         /// process catalog that happened to be live when the UI saw the spawn.
@@ -1411,6 +1414,7 @@ mod tests {
             permission_mode: None,
             effective_permission_mode: None,
             model: None,
+            reasoning_effort: None,
             model_state: None,
             workflow_agent_names: None,
             resumed_from: None,
@@ -1448,6 +1452,47 @@ mod tests {
         assert_eq!(spawned["sessionUpdate"], "subagent_spawned");
         assert_eq!(progress["sessionUpdate"], "subagent_progress");
         assert_eq!(finished["sessionUpdate"], "subagent_finished");
+    }
+
+    #[test]
+    fn subagent_spawned_effort_is_optional_and_round_trips() {
+        let mut value = serde_json::to_value(SessionUpdate::SubagentSpawned {
+            subagent_id: "s".into(),
+            parent_session_id: "p".into(),
+            parent_prompt_id: None,
+            child_session_id: "c".into(),
+            subagent_type: "explore".into(),
+            description: "inspect".into(),
+            effective_context_source: None,
+            context_normalized: false,
+            capability_mode: None,
+            permission_mode: None,
+            effective_permission_mode: None,
+            model: Some("bigmodel/glm-5.3".into()),
+            reasoning_effort: Some("max".into()),
+            model_state: None,
+            workflow_agent_names: None,
+            resumed_from: None,
+            workflow_run_id: None,
+            goal_id: None,
+        })
+        .unwrap();
+        assert_eq!(value["reasoning_effort"], "max");
+        let parsed: SessionUpdate = serde_json::from_value(value.clone()).unwrap();
+        assert!(
+            matches!(parsed, SessionUpdate::SubagentSpawned { reasoning_effort: Some(effort), .. } if effort == "max")
+        );
+        value.as_object_mut().unwrap().remove("reasoning_effort");
+        let parsed: SessionUpdate = serde_json::from_value(value).unwrap();
+        let without_effort = serde_json::to_value(&parsed).unwrap();
+        assert!(without_effort.get("reasoning_effort").is_none());
+        assert!(matches!(
+            parsed,
+            SessionUpdate::SubagentSpawned {
+                reasoning_effort: None,
+                ..
+            }
+        ));
     }
 
     #[test]

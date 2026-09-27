@@ -68,6 +68,30 @@ static SUBAGENT_PERMISSION_NONTERMINAL_TOTAL: std::sync::LazyLock<IntCounterVec>
         .unwrap()
     });
 
+static PERMISSION_ADMISSION_REJECTED_TOTAL: std::sync::LazyLock<IntCounterVec> =
+    std::sync::LazyLock::new(|| {
+        register_int_counter_vec!(
+            "grow_permission_admission_rejected_total",
+            "Permission requests rejected at finite admission boundaries",
+            &["stage"]
+        )
+        .unwrap()
+    });
+
+fn record_permission_admission_rejected(stage: &'static str) {
+    PERMISSION_ADMISSION_REJECTED_TOTAL
+        .with_label_values(&[stage])
+        .inc();
+}
+
+pub(crate) fn record_permission_request_overload() {
+    record_permission_admission_rejected("request");
+}
+
+pub fn record_permission_sideband_overload() {
+    record_permission_admission_rejected("sideband");
+}
+
 pub(crate) fn record_subagent_permission_judgment(
     verdict: ClassifierVerdict,
     duration_seconds: f64,
@@ -113,6 +137,11 @@ pub(crate) fn record_subagent_nonterminal_permission(outcome: &str) {
 
 /// Zero-init this module's metric families. See [`crate::init_metrics`].
 pub(crate) fn init_metrics() {
+    for stage in ["request", "sideband"] {
+        PERMISSION_ADMISSION_REJECTED_TOTAL
+            .with_label_values(&[stage])
+            .inc_by(0);
+    }
     for outcome in ["allow", "deny", "unavailable"] {
         SUBAGENT_PERMISSION_JUDGMENT_TOTAL
             .with_label_values(&[outcome])

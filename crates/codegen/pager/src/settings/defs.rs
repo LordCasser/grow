@@ -632,6 +632,19 @@ pub fn default_settings() -> Vec<SettingMeta> {
             restart_required: false,
             hidden_in_minimal: false,
         },
+        SettingMeta {
+            key: "show_model_provider",
+            category: SettingCategory::Models,
+            owner: SettingOwner::Shared,
+            label: "Show model provider",
+            description: "Show provider/model (effort) in the input footer instead of model (effort).",
+            keywords: &["model", "provider", "prompt", "footer", "label", "effort"],
+            kind: SettingKind::Bool {
+                default: ui_default.show_model_provider.unwrap_or(false),
+            },
+            restart_required: false,
+            hidden_in_minimal: false,
+        },
         // SHARED. `u16` in UiConfig, widened to `i64` for registry.
         // Width changes apply on the next render frame.
         SettingMeta {

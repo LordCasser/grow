@@ -282,14 +282,17 @@ enabled = true
 classifier_model = "example/model-a"  # omit to inherit the session model
 reasoning_effort = "low"              # optional explicit override
 prompt_type = "full"                  # full | no_user_tool_prefix | bare_instructions | just_command
-classify_timeout_ms = 30000
+classify_timeout_ms = 30000             # total judgment deadline (default: 30s)
 ```
 
 `classifier_model` must resolve through the provider catalog. If it cannot be resolved or its
 credentials are unavailable, the classifier falls back to the session model. An explicit
 `reasoning_effort` applies to either route, so omit it unless both possible models accept that
 value. When omitted, Grow uses the selected model's configured default or leaves the field to the
-upstream service.
+upstream service. The judgment deadline covers queueing, preparation, attempts, and settlement.
+The first attempt may use all remaining time; only a returned invalid response or recoverable
+provider error can trigger one retry within that same deadline. See the
+[permission judgment contract](../../../../../openspec/specs/tool-authorization/spec.md#requirement-auto-model-permission-judgments-obey-one-end-to-end-deadline).
 
 ### MCP servers
 

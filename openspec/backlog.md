@@ -1,3 +1,3 @@
 # 未解决边界
 
-暂无未解决事项。已处理事项的证据保留在 `openspec/changes/archive/`。
+当前无登记事项。已解决事项的设计、验证与归档记录见 [changes/archive/](changes/archive/)。

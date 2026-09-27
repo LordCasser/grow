@@ -721,20 +721,11 @@ impl SessionActor {
         forward_to_gateway: bool,
     ) -> Result<(), chat_state::TimelineWriteError> {
         if !matches!(
-            notification.update,
+            &notification.update,
             GrowSessionUpdate::SubagentProgress { .. }
         ) {
             tracing::debug!("storing Grow session notification");
         }
-        {
-            let mut meta_map = notification.meta.take().and_then(|v| match v {
-                serde_json::Value::Object(m) => Some(m),
-                _ => None,
-            });
-            crate::util::event_id::ensure_event_id_meta(&self.session_info.id.0, &mut meta_map);
-            notification.meta = meta_map.map(serde_json::Value::Object);
-        }
-        self.persist_grow_notification(&notification).await;
         if let GrowSessionUpdate::SubagentSpawned {
             subagent_id,
             subagent_type,
@@ -756,30 +747,42 @@ impl SessionActor {
             )
             .await?;
         }
-        match &notification.update {
-            GrowSessionUpdate::SubagentSpawned { goal_id, .. } => {
-                let goal_owned = goal_id.as_deref().is_some_and(|owner_goal_id| {
-                    self.goal_tracker
-                        .lock()
-                        .snapshot()
-                        .is_some_and(|goal| goal.goal_id == owner_goal_id)
-                });
-                if self.goal_runtime_available() && goal_owned {
-                    let tokens_used = self.goal_tokens_used();
-                    let notify = self.goal_notify_sender();
-                    notify.emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
-                }
-            }
-            GrowSessionUpdate::SubagentProgress { .. } => {
-                // Progress reports current child context pressure and remains
-                // a transient UI hint. Model-settlement usage is delivered by
-                // the shared Goal usage window instead.
-                return Ok(());
-            }
-            _ => {}
+        {
+            let mut meta_map = notification.meta.take().and_then(|v| match v {
+                serde_json::Value::Object(m) => Some(m),
+                _ => None,
+            });
+            crate::util::event_id::ensure_event_id_meta(&self.session_info.id.0, &mut meta_map);
+            notification.meta = meta_map.map(serde_json::Value::Object);
         }
+        self.persist_grow_notification(&notification).await;
+        if matches!(
+            &notification.update,
+            GrowSessionUpdate::SubagentProgress { .. }
+        ) {
+            // Progress reports current child context pressure and remains
+            // a transient UI hint. Model-settlement usage is delivered by
+            // the shared Goal usage window instead.
+            return Ok(());
+        }
+        let goal_owned_spawn = match &notification.update {
+            GrowSessionUpdate::SubagentSpawned {
+                goal_id: Some(owner_goal_id),
+                ..
+            } => self
+                .goal_tracker
+                .lock()
+                .snapshot()
+                .is_some_and(|goal| goal.goal_id == *owner_goal_id),
+            _ => false,
+        };
         if forward_to_gateway {
             self.forward_grow_notification_unhooked(notification);
+        }
+        if goal_owned_spawn && self.goal_runtime_available() {
+            let tokens_used = self.goal_tokens_used();
+            let notify = self.goal_notify_sender();
+            notify.emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
         }
         Ok(())
     }
@@ -1235,6 +1238,125 @@ fn acking_persistence_channel() -> (
 mod grow_event_id_stamping_tests {
     use super::super::tests::support::{begin_test_causal_turn, create_test_actor};
     use super::*;
+
+    #[tokio::test]
+    async fn goal_owned_subagent_spawn_reaches_live_client_before_goal_refresh() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, mut persistence_rx) = super::acking_persistence_channel();
+                let actor = std::sync::Arc::new(
+                    create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
+                );
+                actor
+                    .goal_tracker
+                    .lock()
+                    .create_goal(
+                        "goal-1".into(),
+                        "finish child work".into(),
+                        None,
+                        "now".into(),
+                    )
+                    .unwrap();
+                actor
+                    .goal_runtime_available
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                begin_test_causal_turn(&actor).await;
+                actor
+                    .chat_state_handle
+                    .record_timeline_event_durably(chat_state::TimelineEventKind::Subagent(
+                        chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
+                            subagent_id: "child-1".into(),
+                            child_session_id: "child-1".into(),
+                            security_parent_session_id: actor.session_info.id.to_string(),
+                            subagent_type: "explore".into(),
+                            description: "inspect code".into(),
+                            prompt: "inspect code".into(),
+                            context_source: chat_state::SubagentContextSource::New,
+                            source_ref: None,
+                            context_normalized: false,
+                            resumed_from: None,
+                            parent_prompt_id: None,
+                            capability_mode: None,
+                            permission_mode: None,
+                            effective_permission_mode: None,
+                            workflow_run_id: None,
+                            goal_id: None,
+                            goal_definition_revision: None,
+                            surface_completion: true,
+                            child_cwd: actor.session_info.cwd.clone(),
+                            worktree_path: None,
+                            effective_model_id: "test-model".into(),
+                            model_transport_key: sampling_types::ModelImageInputKey::new(
+                                "test-model",
+                                "chat_completions",
+                                "test-endpoint",
+                            ),
+                            reasoning_effort: None,
+                        }),
+                    ))
+                    .await
+                    .unwrap();
+
+                actor
+                    .handle_grow_session_notification(
+                        GrowSessionNotification {
+                            session_id: actor.session_info.id.clone(),
+                            update: GrowSessionUpdate::SubagentSpawned {
+                                subagent_id: "child-1".into(),
+                                parent_session_id: actor.session_info.id.to_string(),
+                                parent_prompt_id: None,
+                                child_session_id: "child-1".into(),
+                                subagent_type: "explore".into(),
+                                description: "inspect code".into(),
+                                effective_context_source: None,
+                                context_normalized: false,
+                                capability_mode: None,
+                                permission_mode: None,
+                                effective_permission_mode: None,
+                                model: None,
+                                reasoning_effort: None,
+                                model_state: None,
+                                workflow_agent_names: None,
+                                resumed_from: None,
+                                workflow_run_id: None,
+                                goal_id: Some("goal-1".into()),
+                            },
+                            meta: None,
+                        },
+                        true,
+                    )
+                    .await
+                    .unwrap();
+
+                let persisted_spawn_id = persisted_grow_event_id(&mut persistence_rx).await;
+                let next_grow = |message| {
+                    let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
+                        panic!("expected Grow extension notification");
+                    };
+                    assert_eq!(args.request.method.as_ref(), "grow/session_notification");
+                    serde_json::from_str::<serde_json::Value>(args.request.params.get()).unwrap()
+                };
+                let spawned = next_grow(gateway_rx.recv().await.unwrap());
+                let goal = next_grow(gateway_rx.recv().await.unwrap());
+                assert_eq!(spawned["update"]["sessionUpdate"], "subagent_spawned");
+                assert_eq!(goal["update"]["sessionUpdate"], "goal_updated");
+                assert_eq!(spawned["_meta"]["eventId"], persisted_spawn_id);
+                let seq = |value: &serde_json::Value| {
+                    value["_meta"]["eventId"]
+                        .as_str()
+                        .unwrap()
+                        .rsplit_once('-')
+                        .unwrap()
+                        .1
+                        .parse::<u64>()
+                        .unwrap()
+                };
+                assert!(seq(&spawned) < seq(&goal));
+            })
+            .await;
+    }
+
     #[tokio::test]
     async fn session_usage_projection_is_transient_and_matches_usage_query() {
         tokio::task::LocalSet::new()

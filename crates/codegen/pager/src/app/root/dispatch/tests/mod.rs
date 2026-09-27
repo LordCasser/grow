@@ -243,6 +243,7 @@ fn make_test_subagent(child_sid: &str, sa_id: &str) -> crate::app::subagent::Sub
         description: Arc::from("test subagent"),
         subagent_type: Arc::from("general-purpose"),
         model: None,
+        reasoning_effort: None,
         context_source: None,
         resumed_from: None,
         capability_mode: None,

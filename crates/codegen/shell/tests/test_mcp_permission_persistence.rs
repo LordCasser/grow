@@ -158,7 +158,17 @@ async fn request(handle: &PermissionHandle, access: AccessKind, id: &str) -> Dec
         tool_call_update: tool_call_update(id, "mcp"),
         edit_path_context: None,
         respond_to: tx,
-        context: workspace::permission::types::PermissionRequestContext::default(),
+        context: workspace::permission::types::PermissionRequestContext {
+            source: workspace::permission::types::PermissionRequestSource::Primary {
+                session_id: None,
+            },
+            request_mode: None,
+            within_capability_fence: false,
+            execution_cwd: None,
+            classifier_turns: None,
+            call_evidence: None,
+        },
+        admission_guard: None,
     };
     let PermissionHandle::Actor { cmd_tx, .. } = handle else {
         panic!("expected actor handle");

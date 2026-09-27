@@ -201,8 +201,9 @@ fn merge_replayed_subagent(
     existing.child_session_id = incoming.child_session_id;
     existing.description = incoming.description;
     existing.subagent_type = incoming.subagent_type;
-    if incoming.model.is_some() {
+    if existing.model.is_none() {
         existing.model = incoming.model;
+        existing.reasoning_effort = incoming.reasoning_effort;
     }
     if incoming.context_source.is_some() {
         existing.context_source = incoming.context_source;
@@ -657,6 +658,47 @@ fn handle_session_notification_inner(
     }
     let descendant_lifecycle_from_child =
         matches!(matched, SessionMatch::Child(_)) && descendant_lifecycle;
+    let lifecycle_highwater = if descendant_lifecycle_from_child {
+        agent
+            .subagent_views
+            .get(session_notif.session_id.0.as_ref())
+            .and_then(|parent_view| parent_view.session.last_applied_grow_event_seq)
+    } else {
+        agent.session.last_applied_grow_event_seq
+    };
+    // An independent Grow update can overtake a lifecycle event
+    // awaiting persistence ACK. Reconcile only missing child facts; never
+    // rewind the live highwater or resurrect a terminal child.
+    let late_lifecycle = !meta.is_replay
+        && descendant_lifecycle
+        && meta
+            .event_seq
+            .zip(lifecycle_highwater)
+            .is_some_and(|(seq, last)| seq <= last);
+    let missing_lifecycle = late_lifecycle
+        && match &session_notif.update {
+            GrowSessionUpdate::SubagentSpawned {
+                child_session_id, ..
+            } => !agent
+                .session
+                .subagent_sessions
+                .contains_key(child_session_id)
+                && !agent.scrollback.iter_entries().any(|(_, entry)| {
+                    matches!(
+                        &entry.block,
+                        RenderBlock::Subagent(block)
+                            if block.child_session_id == *child_session_id && !block.is_running()
+                    )
+                }),
+            GrowSessionUpdate::SubagentFinished {
+                child_session_id, ..
+            } => !agent
+                .session
+                .subagent_sessions
+                .get(child_session_id)
+                .is_some_and(|info| info.finished),
+            _ => false,
+        };
     if descendant_lifecycle_from_child
         && meta.event_seq.is_some_and(|seq| {
             agent
@@ -665,6 +707,7 @@ fn handle_session_notification_inner(
                 .and_then(|parent_view| parent_view.session.last_applied_grow_event_seq)
                 .is_some_and(|last| seq <= last)
         })
+        && !missing_lifecycle
     {
         tracing::debug!(
             session_id = session_notif.session_id.0.as_ref(),
@@ -696,6 +739,7 @@ fn handle_session_notification_inner(
                 .last_applied_grow_event_seq
                 .is_some_and(|last| seq <= last)
         })
+        && !missing_lifecycle
     {
         tracing::debug!(
             session_id = session_notif.session_id.0.as_ref(),
@@ -845,6 +889,7 @@ fn handle_session_notification_inner(
             subagent_type,
             description,
             model,
+            reasoning_effort,
             model_state,
             workflow_agent_names,
             effective_context_source,
@@ -881,11 +926,20 @@ fn handle_session_notification_inner(
                 .remove(&subagent_id)
                 .unwrap_or(false);
             let model_display = model.clone();
+            let effort = reasoning_effort.as_deref().and_then(|value| {
+                value
+                    .parse::<shell::sampling::types::ReasoningEffort>()
+                    .ok()
+            });
             let has_child_model_state = model_state.is_some();
-            let child_models = match model_state {
+            let mut child_models = match model_state {
                 Some(state) => crate::acp::model_state::ModelState::from(Some(state)),
                 None => agent.session.models.clone(),
             };
+            if !has_child_model_state && let Some(model_id) = model_display.as_deref() {
+                child_models.set_current(shell::agent::models::ModelId::new(model_id), effort);
+            }
+            child_models.reasoning_effort = effort;
             // A terminal event can arrive from the live stream before the
             // replayed spawn that causally precedes it. Keep that terminal
             // row as the entity's authoritative lifecycle fact so the later
@@ -922,6 +976,7 @@ fn handle_session_notification_inner(
                 description: Arc::from(description.clone()),
                 subagent_type: Arc::from(subagent_type.clone()),
                 model: model.map(Arc::from),
+                reasoning_effort: effort,
                 context_source: effective_context_source.map(Arc::from),
                 resumed_from: resumed_from.map(Arc::from),
                 capability_mode: capability_mode.map(Arc::from),
@@ -997,14 +1052,9 @@ fn handle_session_notification_inner(
                 // A reconnect replay repeats the durable spawn fact. Reuse the
                 // existing exact-session view so its rearmed control tokens
                 // and queued user intent cannot collapse back to generation 0.
-                child_view.session.models = child_models;
+                // A replayed spawn describes the initial route; this view may
+                // already have a newer authoritative child ModelChanged.
                 child_view.session.workflow_agent_names = workflow_agent_names.clone();
-                if !has_child_model_state && let Some(model_id) = model_display.as_deref() {
-                    child_view
-                        .session
-                        .models
-                        .set_current(shell::agent::models::ModelId::new(model_id), None);
-                }
                 child_view.session.cwd = effective_child_cwd;
                 child_view.session.permission_mode = effective_permission_mode
                     .as_deref()
@@ -1039,11 +1089,6 @@ fn handle_session_notification_inner(
                             .map(shell::util::config::parse_permission_mode_canonical)
                             .unwrap_or(shell::util::config::PermissionMode::Ask),
                     );
-                    if !has_child_model_state && let Some(model_id) = model_display.as_deref() {
-                        session
-                            .models
-                            .set_current(shell::agent::models::ModelId::new(model_id), None);
-                    }
                     session.workflow_agent_names = workflow_agent_names;
                     session.apply_agent_name(Some(subagent_type.clone()));
                     session.state = if terminal_finished {
@@ -1096,6 +1141,13 @@ fn handle_session_notification_inner(
                 if let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id) {
                     info.child_updates_replayed = true;
                 }
+            }
+            if agent
+                .subagent_views
+                .get(&child_session_id)
+                .is_some_and(|child| child.session.models.current.is_some())
+            {
+                sync_child_control_projection(agent, &child_session_id);
             }
             if workflow_run_id.is_none() {
                 if let Some((entry_id, status, elapsed, error)) = replayed_terminal {
@@ -1538,21 +1590,26 @@ fn handle_session_notification_inner(
                 .subagent_views
                 .get_mut(session_notif.session_id.0.as_ref())
             {
-                if let Some(seq) = meta.event_seq {
-                    parent_view.session.last_applied_grow_event_seq = Some(seq);
-                }
-                if let Some(id) = meta.event_id {
-                    parent_view.advance_reconnect_cursor(id, meta.is_replay);
+                if !late_lifecycle {
+                    if let Some(seq) = meta.event_seq {
+                        parent_view.session.last_applied_grow_event_seq = Some(seq);
+                    }
+                    if let Some(id) = meta.event_id {
+                        parent_view.advance_reconnect_cursor(id, meta.is_replay);
+                    }
                 }
             }
         } else {
             if let Some(seq) = meta.event_seq
                 && !meta.is_replay
                 && !is_workflow_update
+                && !late_lifecycle
             {
                 agent.session.last_applied_grow_event_seq = Some(seq);
             }
-            if let Some(id) = meta.event_id {
+            if let Some(id) = meta.event_id
+                && !late_lifecycle
+            {
                 agent.advance_reconnect_cursor(id, meta.is_replay);
             }
         }
@@ -1706,15 +1763,18 @@ pub(crate) fn sync_child_control_projection(agent: &mut AgentView, child_sid: &s
         .current
         .as_ref()
         .map(|id| Arc::<str>::from(id.0.to_string()));
+    let reasoning_effort = child.session.models.reasoning_effort;
     let agent_name = child.session.agent_name().map(Arc::<str>::from);
     let Some(info) = agent.session.subagent_sessions.get_mut(child_sid) else {
         return false;
     };
     let changed = info.model != model
+        || info.reasoning_effort != reasoning_effort
         || agent_name
             .as_ref()
             .is_some_and(|name| name != &info.subagent_type);
     info.model = model;
+    info.reasoning_effort = reasoning_effort;
     if let Some(agent_name) = agent_name {
         info.subagent_type = agent_name;
     }

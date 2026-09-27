@@ -511,11 +511,10 @@ impl AgentView {
             theme.accent_error
         };
         let meta = info
-            .and_then(|s| s.model.as_deref())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or("")
-            .to_string();
+            .map(|s| {
+                crate::app::subagent::format_subagent_model(s.model.as_deref(), s.reasoning_effort)
+            })
+            .unwrap_or_default();
         let badge = info.map(format_context_badge).unwrap_or("");
         let activity_label: Option<String> = if is_running {
             self.subagent_views.get(child_sid).and_then(|cv| {
@@ -782,10 +781,10 @@ impl AgentView {
         let appearance = self.scrollback.appearance().clone();
         let layout_cfg = &appearance.scrollback.layout;
         let scrollbar_cfg = &appearance.scrollback.scrollbar;
-        let model_id = self
+        let model_label = self
             .session
             .models
-            .current_model_name()
+            .prompt_label(crate::appearance::cache::load_show_model_provider())
             .unwrap_or_else(|| "unknown".to_string());
         let effective_plan = self.session.effective_plan_mode();
         let effective_behavior = self.session.effective_behavior();
@@ -2293,10 +2292,6 @@ impl AgentView {
         }
         let mode_flags: &[PromptFlag] = &mode_flags_vec;
         let multiline = self.multiline_mode;
-        let model_label = match self.session.models.reasoning_effort {
-            Some(eff) => format!("{model_id} ({eff})"),
-            None => model_id,
-        };
         let agent_label = self.session.agent_name().unwrap_or("grow");
         let info = match &self.prompt_mode {
             PromptMode::Normal => PromptInfo {

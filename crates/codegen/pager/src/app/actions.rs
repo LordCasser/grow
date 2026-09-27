@@ -404,6 +404,8 @@ pub enum Action {
     /// SHELL-owned: updates the process-wide cache mirror and persists to
     /// `[ui].render_mermaid` in config.toml via `Effect::PersistSetting`.
     SetRenderMermaid(crate::appearance::RenderMermaid),
+    /// Show the canonical provider/model route in prompt footers.
+    SetShowModelProvider(bool),
     /// Toggle vim-style scrollback keybindings (j/k, h/l, g/G, y/Y, etc.).
     /// Delegates to `set_vim_mode` so the new value is persisted to
     /// `[ui].vim_mode` in config.toml — same path as the settings modal.

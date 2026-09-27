@@ -1655,6 +1655,9 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "prompt_suggestions" => {
             let _ = dispatch(Action::SetPromptSuggestions(false), app);
         }
+        "show_model_provider" => {
+            let _ = dispatch(Action::SetShowModelProvider(true), app);
+        }
         "respect_manual_folds" => {
             let _ = dispatch(
                 Action::SetRespectManualFolds(
@@ -2687,6 +2690,29 @@ fn set_render_mermaid_rollback_restores_cache() {
         RenderMermaid::Auto,
         "rollback must restore the cache mirror",
     );
+}
+
+#[test]
+fn show_model_provider_updates_prompt_cache_and_rolls_back() {
+    crate::appearance::cache::set_show_model_provider(false);
+    let mut app = test_app_with_agent();
+    let effects = dispatch(Action::SetShowModelProvider(true), &mut app);
+    assert!(crate::appearance::cache::load_show_model_provider());
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::PersistSetting {
+            key: "show_model_provider",
+            value: crate::settings::SettingValue::Bool(true),
+            rollback_value: crate::settings::SettingValue::Bool(false),
+        }]
+    ));
+    assert!(dispatch(Action::SetShowModelProvider(true), &mut app).is_empty());
+    apply_setting_rollback(
+        &mut app,
+        "show_model_provider",
+        &crate::settings::SettingValue::Bool(false),
+    );
+    assert!(!crate::appearance::cache::load_show_model_provider());
 }
 /// `Action::SetScrollSpeed` updates the process-wide cache,
 /// recomputes `app.scroll_config`, and emits `Effect::PersistSetting`.

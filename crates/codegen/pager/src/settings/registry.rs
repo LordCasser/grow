@@ -549,6 +549,9 @@ pub fn current_value_for(
         "render_mermaid" => Some(SettingValue::Enum(
             crate::appearance::cache::load_render_mermaid().as_canonical(),
         )),
+        "show_model_provider" => Some(SettingValue::Bool(
+            crate::appearance::cache::load_show_model_provider(),
+        )),
         // This row is a persistent default for future sessions. Active-session
         // permission state is deliberately absent from Settings.
         "permission_mode" => Some(SettingValue::Enum(match ui.permission_mode.as_deref() {
@@ -954,6 +957,9 @@ mod tests {
                         *default, expected,
                         "render_mermaid default drifts from UiConfig::default()",
                     );
+                }
+                ("show_model_provider", SettingKind::Bool { default }) => {
+                    assert_eq!(*default, ui.show_model_provider.unwrap_or(false));
                 }
                 // scroll_speed: Option<u8>; None → 50.
                 ("scroll_speed", SettingKind::Int { default, .. }) => {
