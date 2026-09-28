@@ -581,6 +581,7 @@ impl ChatStateActor {
                 let _ = reply.send(result);
             }
             ChatStateCommand::ReplaceSamplingRoute { config } => {
+                self.state.image_budget = None;
                 self.state.continuation.replace_route(
                     config.api_backend.clone(),
                     self.state.timeline.surface_len(),
@@ -588,6 +589,11 @@ impl ChatStateActor {
                 self.state.sampling_config = config;
             }
             ChatStateCommand::UpdateSamplingConfig { config } => {
+                if sampling_types::model_image_input_key(&self.state.sampling_config)
+                    != sampling_types::model_image_input_key(&config)
+                {
+                    self.state.image_budget = None;
+                }
                 self.state.sampling_config = config;
             }
             ChatStateCommand::ResetContinuation { reply } => {

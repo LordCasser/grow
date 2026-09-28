@@ -98,8 +98,8 @@ fn response_started(id: &str, model: Option<&str>, input_tokens: u64) -> StreamE
         message_id: Some(id.into()),
         model: model.map(str::to_string),
         input_tokens,
-        cache_read_input_tokens: 0,
-        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: Some(0),
+        cache_creation_input_tokens: Some(0),
     }
 }
 

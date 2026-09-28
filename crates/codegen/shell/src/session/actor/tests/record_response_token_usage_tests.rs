@@ -13,7 +13,9 @@ fn response_with_usage(total_tokens: u32) -> ConversationResponse {
 
             reasoning_tokens: 0,
             cached_prompt_tokens: 0,
+            cache_read_known: true,
             cache_creation_prompt_tokens: 0,
+            cache_write_known: true,
         }),
         cost_usd_ticks: None,
         message_chunks_emitted: 1,
@@ -70,7 +72,9 @@ fn usage_with_completion_tokens(completion_tokens: u32) -> TokenUsage {
         total_tokens: completion_tokens,
         reasoning_tokens: 0,
         cached_prompt_tokens: 0,
+        cache_read_known: true,
         cache_creation_prompt_tokens: 0,
+        cache_write_known: true,
     }
 }
 
@@ -389,7 +393,9 @@ async fn goal_usage_accumulates_model_consumption_when_context_pressure_falls() 
                 total_tokens: 1_080,
                 reasoning_tokens: 40,
                 cached_prompt_tokens: 700,
+                cache_read_known: true,
                 cache_creation_prompt_tokens: 0,
+                cache_write_known: true,
             });
             let scope = actor
                 .goal_usage_window
@@ -441,7 +447,9 @@ async fn goal_usage_accumulates_model_consumption_when_context_pressure_falls() 
                 total_tokens: 400,
                 reasoning_tokens: 20,
                 cached_prompt_tokens: 300,
+                cache_read_known: true,
                 cache_creation_prompt_tokens: 0,
+                cache_write_known: true,
             });
             let scope = actor
                 .goal_usage_window
@@ -514,7 +522,9 @@ async fn descendant_model_usage_is_submitted_to_the_root_goal_window() {
                 total_tokens: 1_080,
                 reasoning_tokens: 40,
                 cached_prompt_tokens: 700,
+                cache_read_known: true,
                 cache_creation_prompt_tokens: 0,
+                cache_write_known: true,
             });
             let captured_prompt_index = actor.chat_state_handle.get_prompt_index().await;
             record_test_prompt(&actor, "descendant").await;

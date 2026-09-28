@@ -1,10 +1,11 @@
 ---
 source: crates/codegen/pager/src/app/status_blocks.rs
+assertion_line: 392
 expression: text
 ---
 Session usage (lifetime):
   Input tokens:   1,234,567 (1,000,000 cached)
-  Cache hit rate: 81.00%
+  Cache hit rate: 81.00% (100.00% of recorded input measured)
   Output tokens:  45,678 (12,000 reasoning)
   Total tokens:   1,280,245
   Model calls:    42 · API time: 3m12s

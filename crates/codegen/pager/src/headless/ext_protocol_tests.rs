@@ -206,8 +206,8 @@ fn headless_response_completed_parses_per_response_fields() {
     assert_eq!(signature.as_deref(), Some("sig-xyz"));
     assert_eq!(stop_sequence.as_deref(), Some("<END>"));
     let usage = usage.expect("usage present");
-    assert_eq!(usage.input_tokens, 10);
-    assert_eq!(usage.cache_read_input_tokens, 2);
+    assert_eq!(usage.input_tokens, Some(10));
+    assert_eq!(usage.cache_read_input_tokens, Some(2));
 }
 
 #[test]
@@ -239,8 +239,30 @@ fn headless_response_started_parses_per_response_fields() {
     assert_eq!(message_id.as_deref(), Some("msg_01"));
     assert_eq!(model.as_deref(), Some("grow-4"));
     assert_eq!(input_tokens, 42);
-    assert_eq!(cache_read_input_tokens, 7);
-    assert_eq!(cache_creation_input_tokens, 3);
+    assert_eq!(cache_read_input_tokens, Some(7));
+    assert_eq!(cache_creation_input_tokens, Some(3));
+
+    let missing = make_ext_notif(
+        "grow/session_notification",
+        serde_json::json!({
+            "sessionUpdate": "response_started",
+            "input_tokens": 42,
+            "cache_creation_input_tokens": 0,
+        }),
+    );
+    let ExtEvent::Stream(event) = handle_ext_notification(&missing) else {
+        panic!("expected Stream event");
+    };
+    let StreamEvent::ResponseStarted {
+        cache_read_input_tokens,
+        cache_creation_input_tokens,
+        ..
+    } = *event
+    else {
+        panic!("expected ResponseStarted")
+    };
+    assert_eq!(cache_read_input_tokens, None);
+    assert_eq!(cache_creation_input_tokens, Some(0));
 }
 
 #[test]

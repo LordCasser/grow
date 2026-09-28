@@ -49,8 +49,12 @@ const ANTHROPIC_DEFAULT_MAX_TOKENS: u32 = 128_000;
 /// passes through unchanged.
 #[cfg(test)]
 fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
-    let mut event =
-        serde_json::from_str::<rs::ResponseStreamEvent>(data).map_err(SamplingError::from)?;
+    let mut event = serde_json::from_str::<rs::ResponseStreamEvent>(data)
+        .or_else(|error| {
+            normalize_response_usage_details(data)
+                .map_or(Err(error), |normalized| serde_json::from_str(&normalized))
+        })
+        .map_err(SamplingError::from)?;
     apply_terminal_event_overrides(&mut event, data);
     Ok(event)
 }
@@ -59,11 +63,53 @@ fn deserialize_response_event(data: &str) -> Result<rs::ResponseStreamEvent> {
 /// known event with a malformed payload (including unknown nested variants)
 /// must not disappear into the extension path.
 fn decode_response_event(data: &str) -> Result<Option<rs::ResponseStreamEvent>> {
-    let mut event = decode_tagged_event::<rs::ResponseStreamEvent>(data)?;
+    let mut event = match decode_tagged_event::<rs::ResponseStreamEvent>(data) {
+        Ok(event) => event,
+        Err(error) => match normalize_response_usage_details(data) {
+            Some(normalized) => decode_tagged_event(&normalized)?,
+            None => return Err(error),
+        },
+    };
     if let Some(event) = &mut event {
         apply_terminal_event_overrides(event, data);
     }
     Ok(event)
+}
+
+/// The locked SDK requires cached/reasoning detail fields even when a route
+/// omits them. Supply typed zeros only for decoding; raw presence is recorded
+/// separately below and remains the accounting authority.
+fn normalize_response_usage_details(data: &str) -> Option<String> {
+    let mut value: serde_json::Value = serde_json::from_str(data).ok()?;
+    if !matches!(
+        value.get("type")?.as_str()?,
+        "response.completed" | "response.incomplete" | "response.failed"
+    ) {
+        return None;
+    }
+    let usage = value.pointer_mut("/response/usage")?.as_object_mut()?;
+    let mut changed = false;
+    for (details, field) in [
+        ("input_tokens_details", "cached_tokens"),
+        ("output_tokens_details", "reasoning_tokens"),
+    ] {
+        if !usage.contains_key(details) {
+            let mut object = serde_json::Map::new();
+            object.insert(field.to_owned(), serde_json::json!(0));
+            usage.insert(details.to_owned(), serde_json::Value::Object(object));
+            changed = true;
+        } else if let Some(object) = usage
+            .get_mut(details)
+            .and_then(serde_json::Value::as_object_mut)
+            && !object.contains_key(field)
+        {
+            object.insert(field.to_owned(), serde_json::json!(0));
+            changed = true;
+        } else if !usage.get(details).is_some_and(serde_json::Value::is_object) {
+            return None;
+        }
+    }
+    changed.then(|| value.to_string())
 }
 
 fn decode_tagged_event<T: serde::de::DeserializeOwned>(data: &str) -> Result<Option<T>> {
@@ -168,9 +214,15 @@ fn decode_chat_chunk(data: &str) -> Result<Option<ChatCompletionChunk>> {
 /// - or either of `context_details.{input_tokens, output_tokens}` is
 ///   missing — we don't guess the missing half.
 fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &str) {
+    let context_total_applies = matches!(
+        event,
+        rs::ResponseStreamEvent::ResponseCompleted(_)
+            | rs::ResponseStreamEvent::ResponseIncomplete(_)
+    );
     let response = match event {
         rs::ResponseStreamEvent::ResponseCompleted(e) => &mut e.response,
         rs::ResponseStreamEvent::ResponseIncomplete(e) => &mut e.response,
+        rs::ResponseStreamEvent::ResponseFailed(e) => &mut e.response,
         _ => return,
     };
     // Re-parse for fields async_openai's types omit (context total, cost ticks).
@@ -188,10 +240,33 @@ fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &st
             .get_or_insert_with(Default::default)
             .insert(COST_USD_TICKS_METADATA_KEY.to_owned(), ticks.to_string());
     }
+    let metadata = response.metadata.get_or_insert_with(Default::default);
+    metadata.remove(CACHE_READ_TOKENS_METADATA_KEY);
+    metadata.remove(CACHE_WRITE_TOKENS_METADATA_KEY);
+    if let Some(read) = value
+        .pointer("/response/usage/input_tokens_details/cached_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+    {
+        metadata.insert(CACHE_READ_TOKENS_METADATA_KEY.to_owned(), read.to_string());
+    }
+    if let Some(write) = value
+        .pointer("/response/usage/input_tokens_details/cache_write_tokens")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|value| u32::try_from(value).ok())
+    {
+        metadata.insert(
+            CACHE_WRITE_TOKENS_METADATA_KEY.to_owned(),
+            write.to_string(),
+        );
+    }
     let Some(usage) = response.usage.as_mut() else {
         return;
     };
-    let Some(total) = extract_context_total(&value) else {
+    let Some(total) = context_total_applies
+        .then(|| extract_context_total(&value))
+        .flatten()
+    else {
         return;
     };
     usage.total_tokens = total;
@@ -199,6 +274,8 @@ fn apply_terminal_event_overrides(event: &mut rs::ResponseStreamEvent, data: &st
 
 /// Grow-internal metadata key for cost ticks past typed Response events.
 pub(crate) const COST_USD_TICKS_METADATA_KEY: &str = "grow.cost_usd_ticks";
+pub(crate) const CACHE_READ_TOKENS_METADATA_KEY: &str = "grow.cache_read_tokens";
+pub(crate) const CACHE_WRITE_TOKENS_METADATA_KEY: &str = "grow.cache_write_tokens";
 
 /// Read `response.usage.context_details.{input_tokens, output_tokens}`
 /// from the parsed terminal-event JSON and return their sum. Returns `None`
@@ -2779,6 +2856,47 @@ mod tests {
     }
 
     #[test]
+    fn responses_cache_write_survives_locked_sdk_and_missing_read() {
+        let wire = serde_json::json!({
+            "type": "response.completed", "sequence_number": 0,
+            "response": {
+                "id": "resp_cache", "object": "response", "created_at": 0,
+                "model": "test", "status": "completed", "output": [],
+                "usage": {
+                    "input_tokens": 100,
+                    "input_tokens_details": {"cache_write_tokens": 70},
+                    "output_tokens": 5,
+                    "output_tokens_details": {"reasoning_tokens": 0},
+                    "total_tokens": 105
+                }
+            }
+        });
+        let event = deserialize_response_event(&wire.to_string()).unwrap();
+        let rs::ResponseStreamEvent::ResponseCompleted(event) = event else {
+            panic!()
+        };
+        let usage = crate::stream::responses::response_usage(&event.response).unwrap();
+        assert_eq!(usage.prompt_tokens, 100);
+        assert_eq!(usage.cache_read_tokens(), None);
+        assert_eq!(usage.cache_write_tokens(), Some(70));
+
+        let mut explicit_zero = wire.clone();
+        explicit_zero["response"]["usage"]["input_tokens_details"]["cached_tokens"] =
+            serde_json::json!(0);
+        let event = deserialize_response_event(&explicit_zero.to_string()).unwrap();
+        let rs::ResponseStreamEvent::ResponseCompleted(event) = event else {
+            panic!()
+        };
+        let usage = crate::stream::responses::response_usage(&event.response).unwrap();
+        assert_eq!(usage.cache_read_tokens(), Some(0));
+        assert_eq!(usage.cache_write_tokens(), Some(70));
+
+        let mut malformed = wire;
+        malformed["response"]["usage"]["input_tokens_details"] = serde_json::Value::Null;
+        assert!(deserialize_response_event(&malformed.to_string()).is_err());
+    }
+
+    #[test]
     fn deserialize_response_event_stashes_cost_in_metadata() {
         let make = |ticks: i64| {
             format!(
@@ -2819,7 +2937,13 @@ mod tests {
         let rs::ResponseStreamEvent::ResponseCompleted(e) = event else {
             panic!("expected ResponseCompleted");
         };
-        assert!(e.response.metadata.is_none());
+        assert!(
+            e.response
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get(COST_USD_TICKS_METADATA_KEY))
+                .is_none()
+        );
     }
 
     #[test]

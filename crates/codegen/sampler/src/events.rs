@@ -82,8 +82,8 @@ pub enum SamplingEvent {
         message_id: String,
         model: String,
         input_tokens: u64,
-        cache_read_input_tokens: u64,
-        cache_creation_input_tokens: u64,
+        cache_read_input_tokens: Option<u64>,
+        cache_creation_input_tokens: Option<u64>,
     },
 
     /// The reasoning (thinking) block finished and its encrypted signature is

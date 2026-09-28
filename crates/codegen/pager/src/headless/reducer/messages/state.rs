@@ -23,18 +23,30 @@ pub(super) struct PendingResponse {
 pub(super) struct ResponseIdentity {
     pub(super) message_id: Option<String>,
     pub(super) model: Option<String>,
-    pub(super) input_tokens: u64,
-    pub(super) cache_read_input_tokens: u64,
-    pub(super) cache_creation_input_tokens: u64,
+    pub(super) input_tokens: Option<u64>,
+    pub(super) cache_read_input_tokens: Option<u64>,
+    pub(super) cache_creation_input_tokens: Option<u64>,
 }
 
 impl ResponseIdentity {
     /// The input-side `message.usage` this identity seeds (`output_tokens` stays 0).
     pub(super) fn input_usage(&self) -> MessageUsage {
+        let full_input_tokens = self
+            .cache_read_input_tokens
+            .zip(self.cache_creation_input_tokens)
+            .and_then(|(read, write)| self.input_tokens?.checked_add(read)?.checked_add(write));
         MessageUsage {
             input_tokens: self.input_tokens,
+            full_input_tokens,
             cache_read_input_tokens: self.cache_read_input_tokens,
             cache_creation_input_tokens: self.cache_creation_input_tokens,
+            cache_read_known_input_tokens: full_input_tokens.unwrap_or(0),
+            cache_read_unknown_calls: u64::from(
+                self.cache_read_input_tokens.is_none() || full_input_tokens.is_none(),
+            ),
+            cache_write_unknown_calls: u64::from(
+                self.cache_creation_input_tokens.is_none() || full_input_tokens.is_none(),
+            ),
             ..MessageUsage::default()
         }
     }

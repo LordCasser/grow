@@ -56,8 +56,8 @@ pub(crate) enum StreamEvent {
         message_id: Option<String>,
         model: Option<String>,
         input_tokens: u64,
-        cache_read_input_tokens: u64,
-        cache_creation_input_tokens: u64,
+        cache_read_input_tokens: Option<u64>,
+        cache_creation_input_tokens: Option<u64>,
     },
     /// One reasoning block finished (Messages backend); carries its signature for in-order `signature_delta`.
     ReasoningCompleted {

@@ -1,0 +1,5 @@
+{
+  "deepseek_direct_candidate": {"max_requests": 2, "max_output_tokens_per_request": 512, "max_total_output_tokens": 512, "max_cost_usd": "0.02"},
+  "openai_direct_candidate": {"max_requests": 3, "max_output_tokens_per_request": 512, "max_total_output_tokens": 768, "max_cost_usd": "0.03"},
+  "claude_messages_direct_candidate": {"max_requests": 1, "max_output_tokens_per_request": 512, "max_total_output_tokens": 512, "max_cost_usd": "0.01"}
+}

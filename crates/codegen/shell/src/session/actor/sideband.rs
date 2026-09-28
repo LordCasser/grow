@@ -995,8 +995,18 @@ fn sideband_usage_as_tokens(
                 )
             })?,
         reasoning_tokens: 0,
-        cached_prompt_tokens: to_u32(usage.cache_read_tokens)?,
-        cache_creation_prompt_tokens: to_u32(usage.cache_write_tokens)?,
+        cached_prompt_tokens: usage
+            .cache_read_tokens
+            .map(to_u32)
+            .transpose()?
+            .unwrap_or(0),
+        cache_read_known: usage.cache_read_tokens.is_some(),
+        cache_creation_prompt_tokens: usage
+            .cache_write_tokens
+            .map(to_u32)
+            .transpose()?
+            .unwrap_or(0),
+        cache_write_known: usage.cache_write_tokens.is_some(),
     })
 }
 
@@ -1069,8 +1079,8 @@ pub(crate) fn sideband_usage_from_tokens(
     chat_state::SidebandUsage {
         input_tokens: usage.prompt_tokens.into(),
         output_tokens: usage.completion_tokens.into(),
-        cache_read_tokens: usage.cached_prompt_tokens.into(),
-        cache_write_tokens: usage.cache_creation_prompt_tokens.into(),
+        cache_read_tokens: usage.cache_read_tokens().map(u64::from),
+        cache_write_tokens: usage.cache_write_tokens().map(u64::from),
     }
 }
 
@@ -1182,6 +1192,8 @@ mod tests {
                 reasoning_tokens: 5,
                 cached_prompt_tokens: 40,
                 cache_creation_prompt_tokens: 0,
+                cache_read_known: true,
+                cache_write_known: true,
             }),
             cost_usd_ticks: None,
             message_chunks_emitted: 1,

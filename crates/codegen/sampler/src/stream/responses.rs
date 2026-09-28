@@ -22,14 +22,39 @@ use crate::events::{SamplingChannel, SamplingErrorInfo, SamplingEvent};
 use crate::metrics::InferenceLatencyStats;
 use crate::types::RequestId;
 
-fn response_usage(response: &rs::Response) -> Option<TokenUsage> {
-    response.usage.as_ref().map(|u| TokenUsage {
-        prompt_tokens: u.input_tokens,
-        completion_tokens: u.output_tokens,
-        total_tokens: u.total_tokens,
-        reasoning_tokens: u.output_tokens_details.reasoning_tokens,
-        cached_prompt_tokens: u.input_tokens_details.cached_tokens,
-        cache_creation_prompt_tokens: 0,
+pub(crate) fn response_usage(response: &rs::Response) -> Option<TokenUsage> {
+    response.usage.as_ref().map(|u| {
+        let read = response
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get(crate::client::CACHE_READ_TOKENS_METADATA_KEY))
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| *value <= u.input_tokens);
+        let write = response
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get(crate::client::CACHE_WRITE_TOKENS_METADATA_KEY))
+            .and_then(|value| value.parse::<u32>().ok())
+            .filter(|value| *value <= u.input_tokens);
+        let valid_pair = read.zip(write).is_none_or(|(read, write)| {
+            read.checked_add(write)
+                .is_some_and(|sum| sum <= u.input_tokens)
+        });
+        let (read, write) = if valid_pair {
+            (read, write)
+        } else {
+            (None, None)
+        };
+        TokenUsage {
+            prompt_tokens: u.input_tokens,
+            completion_tokens: u.output_tokens,
+            total_tokens: u.total_tokens,
+            reasoning_tokens: u.output_tokens_details.reasoning_tokens,
+            cached_prompt_tokens: read.unwrap_or(0),
+            cache_read_known: read.is_some(),
+            cache_creation_prompt_tokens: write.unwrap_or(0),
+            cache_write_known: write.is_some(),
+        }
     })
 }
 

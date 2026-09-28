@@ -52,13 +52,21 @@ pub(super) enum ContentBlock {
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub(super) struct MessageUsage {
     #[serde(default)]
-    pub(super) input_tokens: u64,
+    pub(super) input_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) full_input_tokens: Option<u64>,
     #[serde(default)]
     pub(super) output_tokens: u64,
     #[serde(default)]
-    pub(super) cache_read_input_tokens: u64,
+    pub(super) cache_read_input_tokens: Option<u64>,
     #[serde(default)]
-    pub(super) cache_creation_input_tokens: u64,
+    pub(super) cache_creation_input_tokens: Option<u64>,
+    #[serde(default)]
+    pub(super) cache_read_known_input_tokens: u64,
+    #[serde(default)]
+    pub(super) cache_read_unknown_calls: u64,
+    #[serde(default)]
+    pub(super) cache_write_unknown_calls: u64,
 }
 
 impl From<&ResponseUsage> for MessageUsage {
@@ -66,9 +74,17 @@ impl From<&ResponseUsage> for MessageUsage {
     fn from(u: &ResponseUsage) -> Self {
         Self {
             input_tokens: u.input_tokens,
+            full_input_tokens: Some(u.full_input_tokens),
             output_tokens: u.output_tokens,
             cache_read_input_tokens: u.cache_read_input_tokens,
             cache_creation_input_tokens: u.cache_creation_input_tokens,
+            cache_read_known_input_tokens: if u.cache_read_input_tokens.is_some() {
+                u.full_input_tokens
+            } else {
+                0
+            },
+            cache_read_unknown_calls: u64::from(u.cache_read_input_tokens.is_none()),
+            cache_write_unknown_calls: u64::from(u.cache_creation_input_tokens.is_none()),
         }
     }
 }
@@ -183,13 +199,21 @@ pub(super) enum SystemLine {
 #[derive(Serialize)]
 pub(super) struct ModelUsage {
     #[serde(rename = "inputTokens")]
-    pub(super) input_tokens: u64,
+    pub(super) input_tokens: Option<u64>,
+    #[serde(rename = "fullInputTokens")]
+    pub(super) full_input_tokens: u64,
     #[serde(rename = "outputTokens")]
     pub(super) output_tokens: u64,
     #[serde(rename = "cacheReadInputTokens")]
     pub(super) cache_read_input_tokens: u64,
     #[serde(rename = "cacheCreationInputTokens")]
     pub(super) cache_creation_input_tokens: u64,
+    #[serde(rename = "cacheReadKnownInputTokens")]
+    pub(super) cache_read_known_input_tokens: u64,
+    #[serde(rename = "cacheReadUnknownCalls")]
+    pub(super) cache_read_unknown_calls: u64,
+    #[serde(rename = "cacheWriteUnknownCalls")]
+    pub(super) cache_write_unknown_calls: u64,
     #[serde(rename = "costUSD", serialize_with = "serialize_finite_cost")]
     pub(super) cost_usd: f64,
     #[serde(rename = "contextWindow", skip_serializing_if = "Option::is_none")]

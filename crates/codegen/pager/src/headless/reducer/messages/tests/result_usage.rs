@@ -11,10 +11,11 @@ fn messages_usage_drops_reasoning_tokens() {
         message_id: None,
         stop_reason: Some("end_turn".into()),
         usage: Some(ResponseUsage {
-            input_tokens: 4,
+            input_tokens: Some(4),
+            full_input_tokens: 5,
             output_tokens: 2,
-            cache_read_input_tokens: 1,
-            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: Some(1),
+            cache_creation_input_tokens: Some(0),
             reasoning_tokens: 9,
         }),
         signature: None,
@@ -101,14 +102,14 @@ fn messages_result_usage_splits_disjoint_buckets() {
 }
 
 #[test]
-fn messages_result_usage_incomplete_aggregate_zeroes_buckets() {
+fn messages_result_usage_incomplete_aggregate_keeps_input_unknown() {
     let mut r = messages(false);
     r.reduce(StreamEvent::AgentMessage("hi".into()));
     r.reduce(StreamEvent::ResponseCompleted {
         message_id: None,
         stop_reason: Some("end_turn".into()),
         usage: Some(ResponseUsage {
-            cache_creation_input_tokens: 5,
+            cache_creation_input_tokens: Some(5),
             ..Default::default()
         }),
         signature: None,
@@ -116,8 +117,8 @@ fn messages_result_usage_incomplete_aggregate_zeroes_buckets() {
     });
     let out = r.finish(&end_turn());
     let usage = &out.last().unwrap()["usage"];
-    assert_eq!(usage["input_tokens"], 0);
-    assert_eq!(usage["cache_creation_input_tokens"], 0);
+    assert!(usage["input_tokens"].is_null());
+    assert!(usage["cache_creation_input_tokens"].is_null());
 }
 
 #[test]
@@ -207,8 +208,8 @@ fn messages_partial_error_max_tokens_recovers_real_id_and_usage() {
         message_id: Some("msg_real".into()),
         model: Some("grow-4".into()),
         input_tokens: 42,
-        cache_read_input_tokens: 100,
-        cache_creation_input_tokens: 20,
+        cache_read_input_tokens: Some(100),
+        cache_creation_input_tokens: Some(20),
     }));
     out.extend(r.reduce(StreamEvent::AgentMessage(
         "partial before truncation".into(),
@@ -250,8 +251,8 @@ fn messages_partial_error_max_tokens_delta_carries_input_usage() {
         message_id: Some("msg_real".into()),
         model: Some("grow-4".into()),
         input_tokens: 42,
-        cache_read_input_tokens: 100,
-        cache_creation_input_tokens: 20,
+        cache_read_input_tokens: Some(100),
+        cache_creation_input_tokens: Some(20),
     }));
     out.extend(r.reduce(StreamEvent::AgentMessage(
         "partial before truncation".into(),
@@ -367,10 +368,14 @@ fn non_finite_cost_serializes_to_finite_result_frame() {
     assert!(line["total_cost_usd"].as_f64().unwrap().is_finite());
 
     let mu = to_line(&ModelUsage {
-        input_tokens: 0,
+        input_tokens: Some(0),
+        full_input_tokens: 0,
         output_tokens: 0,
         cache_read_input_tokens: 0,
         cache_creation_input_tokens: 0,
+        cache_read_known_input_tokens: 0,
+        cache_read_unknown_calls: 0,
+        cache_write_unknown_calls: 0,
         cost_usd: f64::NAN,
         context_window: None,
     });

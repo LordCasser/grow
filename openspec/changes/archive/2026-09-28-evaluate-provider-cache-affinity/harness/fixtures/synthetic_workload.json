@@ -1,0 +1,33 @@
+{
+  "fixture_id": "provider-cache-affinity-synthetic-v1",
+  "data_classification": "synthetic",
+  "contains_real_session_data": false,
+  "prerequisites": {
+    "image_projection": {
+      "source": "stabilize-image-budget-projection",
+      "selected_images": ["synthetic-image-001"],
+      "projection_domain": "synthetic-domain-001",
+      "evicted_parts": [1]
+    },
+    "cache_usage_availability": {
+      "source": "preserve-cache-usage-availability",
+      "full_input": {"availability": "known", "tokens": 4096},
+      "cache_read": {"availability": "known", "tokens": 3072},
+      "cache_write": {"availability": "unknown"}
+    },
+    "offline_diagnostics": {
+      "source": "add-offline-prompt-cache-diagnostics",
+      "request_pair": ["synthetic-request-001:0", "synthetic-request-002:0"],
+      "comparison_status": "comparable_same_synthetic_route",
+      "changed_paths": ["input.items[3]"]
+    }
+  },
+  "attempts": [
+    {"route_id": "deepseek_direct_candidate", "scenario": "static-prefix-baseline", "full_input_tokens": 4096, "output_tokens": 256, "cost_usd": "0.01", "usage": {"cache_read": {"availability": "known", "tokens": 0}, "cache_write": {"availability": "known", "tokens": 4096}}},
+    {"route_id": "deepseek_direct_candidate", "scenario": "continuous-append", "full_input_tokens": 4352, "output_tokens": 256, "cost_usd": "0.01", "usage": {"cache_read": {"availability": "known", "tokens": 3072}, "cache_write": {"availability": "unknown"}}},
+    {"route_id": "deepseek_direct_candidate", "scenario": "image-append", "full_input_tokens": 4608, "output_tokens": 256, "cost_usd": "0.02", "usage": {"cache_read": {"availability": "unknown"}, "cache_write": {"availability": "unknown"}}},
+    {"route_id": "openai_direct_candidate", "scenario": "static-prefix-baseline", "full_input_tokens": 4096, "output_tokens": 256, "cost_usd": "0.01", "usage": {"cache_read": {"availability": "known", "tokens": 0}, "cache_write": {"availability": "unknown"}}},
+    {"route_id": "openai_direct_candidate", "scenario": "continuous-append", "full_input_tokens": 4352, "output_tokens": 256, "cost_usd": "0.01", "usage": {"cache_read": {"availability": "known", "tokens": 3072}, "cache_write": {"availability": "unknown"}}},
+    {"route_id": "claude_messages_direct_candidate", "scenario": "static-prefix-baseline", "full_input_tokens": 4096, "output_tokens": 256, "cost_usd": "0.01", "usage": {"cache_read": {"availability": "known", "tokens": 0}, "cache_write": {"availability": "known", "tokens": 4096}}}
+  ]
+}

@@ -1557,7 +1557,7 @@ A detected unbracketed multiline paste SHALL remain one pending insertion across
 - **THEN** Pager preserves two paste events in their original order rather than combining their content.
 
 ### Requirement: Usage exposes provider-model totals and cache-hit rates
-`/usage` SHALL display total token consumption and provider/model breakdowns using full input plus output including cache-hit input. It SHALL show cached input and cache-hit percentages overall and per provider/model, within the labeled ledger reporting window. The identity SHALL be captured from the selected catalog route before sampling, not from provider-returned model aliases.
+`/usage` SHALL display total token consumption and provider/model breakdowns using full input plus output including cache-hit input. It SHALL show known cached input, cache-field availability, cache-hit percentages for measured input and input-token coverage overall and per provider/model, within the labeled ledger reporting window. Rates SHALL include only attempts with valid known cache read and full input; missing cache fields SHALL NOT become zero-hit samples. The identity SHALL be captured from the selected catalog route before sampling, not from provider-returned model aliases.
 
 #### Scenario: Switch provider or model
 - **WHEN** calls use different provider/model identities, including providers serving the same wire model name
@@ -1565,7 +1565,7 @@ A detected unbracketed multiline paste SHALL remain one pending insertion across
 
 #### Scenario: Weighted total rate
 - **WHEN** models have different input volumes and cache hits
-- **THEN** overall rate is total cache-hit input divided by total input, rather than the arithmetic mean of model percentages; each model shows its own total, input, output, cached input and rate.
+- **THEN** overall measured rate is known cache-hit input divided by full input of the same read-known attempts, rather than the arithmetic mean of model percentages; coverage is that measured input divided by all recorded known full input. Each model shows its own totals, available cached input, measured rate and coverage.
 
 #### Scenario: Single model and empty input
 - **WHEN** only one model has usage or an entry has zero input
@@ -1573,11 +1573,19 @@ A detected unbracketed multiline paste SHALL remain one pending insertion across
 
 #### Scenario: Incomplete or invalid usage
 - **WHEN** the ledger is incomplete or cached input exceeds reported total input
-- **THEN** incomplete rates are identified as based on recorded usage and invalid ratios display N/A; no misleading exact overall percentage is asserted.
+- **THEN** incomplete rates and coverage are identified as based on recorded usage and invalid ratios display N/A; no misleading exact overall percentage is asserted. Missing cache details alone do not mark independently known total token consumption as incomplete.
 
 #### Scenario: Existing display paths
 - **WHEN** usage is opened in fullscreen, inline or minimal mode
 - **THEN** the same statistics projection is shown, and `/session-info` remains unchanged.
+
+#### Scenario: Mixed reported and unreported cache reads
+- **WHEN** A 报告 full input=100、read=80，B 报告 full input=900 且 read 缺失
+- **THEN** 总输入为 1,000，详情显示已知样本命中率 80% 与已记录输入覆盖率 10%，缓存累计标为已知部分；B 若明确 read=0，则命中率为 8%、覆盖率为 100%。
+
+#### Scenario: Cache writes and unknown reads
+- **WHEN** read 已知而 write 缺失，或所有 read 都未知
+- **THEN** 前者仍按已知 read 计算命中率并标记 write 未知，后者命中率显示 N/A；write 从不进入命中分子。
 
 ### Requirement: Goal tool success closes its running UI row
 CreateGoal、GetGoal 与 UpdateGoal 成功结果 SHALL 投影为带原工具调用 id 和结构化输出的 ACP Completed 更新，使客户端在当前 turn 内停止对应工具行的运行状态与计时。
@@ -1604,11 +1612,11 @@ Usage 与 Goal 详情中的完整 token 数字 SHALL 使用每三位逗号分隔
 
 #### Scenario: Calls and late child settlement
 - **WHEN** 普通会话产生主调用、已归属的子任务消费或不完整标记
-- **THEN** 状态栏按账本的 lifetime 累计 input + output（含 cache hit）更新，重复累计快照不会重复加账，缓存率按总 cached input / 总 input 计算。
+- **THEN** 状态栏按账本的 lifetime 累计 input + output（含 cache hit）更新，重复累计快照不会重复加账，缓存明细与总量均完整时，缓存率按总 cached input / 总 input 计算；read 覆盖不完整时紧凑状态栏显示 cache N/A，详情页展示已知样本比例与覆盖率。
 
 #### Scenario: Empty or incomplete usage
-- **WHEN** 没有输入、缓存数超过输入或账本不完整
-- **THEN** 无效比例显示 N/A；不完整累计显示 ≥，缓存率仅表示 recorded usage，不伪装精确完整用量。
+- **WHEN** 没有输入、缓存数超过输入、read 覆盖不完整或总消费账本不完整
+- **THEN** 状态栏比例显示 N/A；只有总消费不完整才将累计显示为 ≥。缓存明细单独缺失时保留精确总量，详情明确已记录用量及覆盖范围。
 
 #### Scenario: Open usage or Goal details
 - **WHEN** 用户点击普通会话用量或已有 Goal 的状态区域
@@ -1620,7 +1628,7 @@ Usage 与 Goal 详情中的完整 token 数字 SHALL 使用每三位逗号分隔
 
 #### Scenario: Usage details across resumes
 - **WHEN** session 至少经历一次有新增模型消费的冷 resume
-- **THEN** Usage 页顶部显示 lifetime 总计，并按 Initial run、Resume #1… 展示各 incarnation 的新增消费；各段之和与 lifetime 已知总量一致。
+- **THEN** Usage 页顶部显示 lifetime 总计，并按 Initial run、Resume #1… 展示各 incarnation 的新增消费；各段之和与 lifetime 已知总量及缓存覆盖计数一致。
 
 证据入口：`crates/codegen/chat-state/src/actor/state.rs`、`shell/src/extensions/usage.rs`、`pager/src/views/usage_modal.rs`、`pager/src/app/status_blocks.rs`。
 
@@ -1682,7 +1690,7 @@ Pager SHALL assign the terminal content of a generic successful tool call to its
 
 #### Scenario: Existing aggregate displays
 - **WHEN** 包含子 Agent 消费的会话账本投影到 `/usage`、headless usage 或 normal 状态栏
-- **THEN** 当前界面和公共 usage 形状显示包含子 Agent 的总体，但不增加 Agent 分项字段或逐 Agent UI。
+- **THEN** 当前界面和公共 usage 形状显示包含子 Agent 的总体及缓存字段可用性/覆盖信息，但不增加 Agent 分项字段或逐 Agent UI。
 
 #### Scenario: Incomplete child settlement
 - **WHEN** 子 Agent 回传已知下界并标记用量不完整，或其用量无法可靠应用
@@ -2168,7 +2176,7 @@ Minimal 全文 transcript 的渲染 SHALL 继续按每帧 8ms 预算分片；渲
 
 ### Requirement: Usage surfaces include auxiliary model consumption
 
-`/usage` SHALL display the owning session's known main, child and Sideband model consumption in lifetime and resume segments, grouped by the frozen provider/model route. Full input plus output includes cache-hit input. Incomplete Sideband attempts SHALL preserve the lower-bound marker and prevent unknown cost from appearing exact. Sideband calls SHALL NOT increment the public main-loop turn count. Existing aggregate UI and headless usage shapes remain unchanged.
+`/usage` SHALL display the owning session's known main, child and Sideband model consumption in lifetime and resume segments, grouped by the frozen provider/model route. Full input plus output includes cache-hit input. Incomplete Sideband attempts SHALL preserve the lower-bound marker and prevent unknown cost from appearing exact. Sideband calls SHALL NOT increment the public main-loop turn count. Aggregate UI and headless usage SHALL retain the existing ownership and total-consumption semantics while carrying cache-field availability and coverage. Missing cache details with independently known totals SHALL NOT mark total consumption incomplete.
 
 #### Scenario: Auxiliary calls across a resume
 
@@ -2179,6 +2187,10 @@ Minimal 全文 transcript 的渲染 SHALL 继续按每帧 8ms 预算分片；渲
 
 - **WHEN** a Sideband provider request completes or fails without trustworthy usage
 - **THEN** `/usage` and headless reporting show recorded totals as an incomplete lower bound and do not present unknown cost as exact
+
+#### Scenario: Structured usage retains cache availability
+- **WHEN** 主调用、子 Agent 或 Sideband 的 usage 经 ACP/headless 投影，且缓存明细部分缺失
+- **THEN** 结构化输出保留字段未知与显式零、已知缓存累计和覆盖分母；重连或恢复后不把缺失改为零，不公开额外的逐 Agent 明细。
 
 ### Requirement: Agent-local tasks end with their owner
 Local background tasks that access an `MvpAgent` SHALL stop before the agent is destroyed, even when the agent's owning task is aborted while its `LocalSet` remains active.

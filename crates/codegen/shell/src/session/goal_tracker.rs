@@ -65,6 +65,7 @@ impl GoalPauseReason {
 pub struct GoalTokenUsage {
     pub cached_input_tokens: u64,
     pub uncached_input_tokens: u64,
+    pub unclassified_input_tokens: u64,
     pub output_tokens: u64,
 }
 
@@ -74,7 +75,20 @@ impl GoalTokenUsage {
         Self {
             cached_input_tokens: cached,
             uncached_input_tokens: input - cached,
+            unclassified_input_tokens: 0,
             output_tokens: output,
+        }
+    }
+
+    pub fn with_cache_read(input: u64, cached: Option<u64>, output: u64) -> Self {
+        match cached {
+            Some(cached) if cached <= input => Self::new(input, cached, output),
+            _ => Self {
+                cached_input_tokens: 0,
+                uncached_input_tokens: 0,
+                unclassified_input_tokens: input,
+                output_tokens: output,
+            },
         }
     }
 
@@ -82,6 +96,7 @@ impl GoalTokenUsage {
         i64::try_from(
             self.cached_input_tokens
                 .saturating_add(self.uncached_input_tokens)
+                .saturating_add(self.unclassified_input_tokens)
                 .saturating_add(self.output_tokens),
         )
         .unwrap_or(i64::MAX)
@@ -94,13 +109,16 @@ impl GoalTokenUsage {
         self.uncached_input_tokens = self
             .uncached_input_tokens
             .saturating_add(usage.uncached_input_tokens);
+        self.unclassified_input_tokens = self
+            .unclassified_input_tokens
+            .saturating_add(usage.unclassified_input_tokens);
         self.output_tokens = self.output_tokens.saturating_add(usage.output_tokens);
     }
 }
 
 impl From<&chat_state::SidebandUsage> for GoalTokenUsage {
     fn from(usage: &chat_state::SidebandUsage) -> Self {
-        Self::new(
+        Self::with_cache_read(
             usage.input_tokens,
             usage.cache_read_tokens,
             usage.output_tokens,
@@ -610,9 +628,9 @@ impl GoalTracker {
 
 /// Full input plus output; reasoning is already included in output.
 pub fn model_usage_goal_tokens(usage: &sampling_types::TokenUsage) -> GoalTokenUsage {
-    GoalTokenUsage::new(
+    GoalTokenUsage::with_cache_read(
         u64::from(usage.prompt_tokens),
-        u64::from(usage.cached_prompt_tokens),
+        usage.cache_read_tokens().map(u64::from),
         u64::from(usage.completion_tokens),
     )
 }
@@ -693,6 +711,7 @@ mod tests {
             GoalTokenUsage {
                 cached_input_tokens: 10,
                 uncached_input_tokens: 0,
+                unclassified_input_tokens: 0,
                 output_tokens: 2
             }
         );
@@ -704,6 +723,25 @@ mod tests {
         }
         assert_eq!(tracker.tokens_used(), i64::MAX);
         assert!(GoalTracker::validate_snapshot(tracker.snapshot().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn missing_cache_read_keeps_exact_goal_total_but_unclassified_input() {
+        let usage = sampling_types::TokenUsage {
+            prompt_tokens: 500,
+            completion_tokens: 80,
+            total_tokens: 580,
+            cached_prompt_tokens: 0,
+            cache_read_known: false,
+            cache_creation_prompt_tokens: 0,
+            cache_write_known: false,
+            ..Default::default()
+        };
+        let goal = model_usage_goal_tokens(&usage);
+        assert_eq!(goal.total(), 580);
+        assert_eq!(goal.cached_input_tokens, 0);
+        assert_eq!(goal.uncached_input_tokens, 0);
+        assert_eq!(goal.unclassified_input_tokens, 500);
     }
 
     #[test]
@@ -825,7 +863,9 @@ mod tests {
             total_tokens: 1_080,
             reasoning_tokens: 40,
             cached_prompt_tokens: 700,
+            cache_read_known: true,
             cache_creation_prompt_tokens: 0,
+            cache_write_known: true,
         };
         let charge = model_usage_goal_tokens(&usage);
         assert_eq!(charge, GoalTokenUsage::new(1_000, 700, 80));

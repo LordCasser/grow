@@ -1053,14 +1053,15 @@ impl SessionActor {
                 .usage
                 .as_ref()
                 .map(|u| crate::extensions::notification::ResponseUsage {
-                    input_tokens: u64::from(
-                        u.prompt_tokens
-                            .saturating_sub(u.cached_prompt_tokens)
-                            .saturating_sub(u.cache_creation_prompt_tokens),
+                    input_tokens: u.cache_read_tokens().zip(u.cache_write_tokens()).map(
+                        |(read, write)| {
+                            u64::from(u.prompt_tokens.saturating_sub(read).saturating_sub(write))
+                        },
                     ),
+                    full_input_tokens: u64::from(u.prompt_tokens),
                     output_tokens: u64::from(u.completion_tokens),
-                    cache_read_input_tokens: u64::from(u.cached_prompt_tokens),
-                    cache_creation_input_tokens: u64::from(u.cache_creation_prompt_tokens),
+                    cache_read_input_tokens: u.cache_read_tokens().map(u64::from),
+                    cache_creation_input_tokens: u.cache_write_tokens().map(u64::from),
                     reasoning_tokens: u64::from(u.reasoning_tokens),
                 });
         let signature = response

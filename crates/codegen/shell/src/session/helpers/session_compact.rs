@@ -42,6 +42,39 @@ impl CompactFailure {
 pub(crate) type CompactUsageObserver =
     std::sync::Arc<dyn Fn(Option<chat_state::SidebandUsage>) + Send + Sync>;
 
+fn responses_sideband_usage(
+    response: &async_openai::types::responses::Response,
+) -> Option<chat_state::SidebandUsage> {
+    let usage = response.usage.as_ref()?;
+    let read = response
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("grow.cache_read_tokens"))
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value <= u64::from(usage.input_tokens));
+    let write = response
+        .metadata
+        .as_ref()
+        .and_then(|metadata| metadata.get("grow.cache_write_tokens"))
+        .and_then(|value| value.parse::<u64>().ok())
+        .filter(|value| *value <= u64::from(usage.input_tokens));
+    let valid_pair = read.zip(write).is_none_or(|(read, write)| {
+        read.checked_add(write)
+            .is_some_and(|sum| sum <= u64::from(usage.input_tokens))
+    });
+    let (read, write) = if valid_pair {
+        (read, write)
+    } else {
+        (None, None)
+    };
+    Some(chat_state::SidebandUsage {
+        input_tokens: usage.input_tokens.into(),
+        output_tokens: usage.output_tokens.into(),
+        cache_read_tokens: read,
+        cache_write_tokens: write,
+    })
+}
+
 /// Exactly-once attempt settlement guard. Once a provider request has been
 /// emitted, every exit reports the latest usage if the stream supplied it, or
 /// `None` when billing is unknowable. This includes timeout, cancellation,
@@ -570,30 +603,18 @@ pub(crate) async fn generate_session_compact(
                                 content.push_str(&text_delta_event.delta);
                             }
                             ResponseStreamEvent::ResponseCompleted(completed_event) => {
-                                if let Some(reported) = completed_event.response.usage.as_ref() {
-                                    usage = chat_state::SidebandUsage {
-                                        input_tokens: reported.input_tokens.into(),
-                                        output_tokens: reported.output_tokens.into(),
-                                        cache_read_tokens: reported
-                                            .input_tokens_details
-                                            .cached_tokens
-                                            .into(),
-                                        cache_write_tokens: 0,
-                                    };
+                                if let Some(reported) =
+                                    responses_sideband_usage(&completed_event.response)
+                                {
+                                    usage = reported;
                                     usage_meter.observe(&usage);
                                 }
                             }
                             ResponseStreamEvent::ResponseFailed(failed_event) => {
-                                if let Some(reported) = failed_event.response.usage.as_ref() {
-                                    usage = chat_state::SidebandUsage {
-                                        input_tokens: reported.input_tokens.into(),
-                                        output_tokens: reported.output_tokens.into(),
-                                        cache_read_tokens: reported
-                                            .input_tokens_details
-                                            .cached_tokens
-                                            .into(),
-                                        cache_write_tokens: 0,
-                                    };
+                                if let Some(reported) =
+                                    responses_sideband_usage(&failed_event.response)
+                                {
+                                    usage = reported;
                                     usage_meter.observe(&usage);
                                 }
                                 let event_error = failed_event.response.error.as_ref();
@@ -627,16 +648,10 @@ pub(crate) async fn generate_session_compact(
                                 ));
                             }
                             ResponseStreamEvent::ResponseIncomplete(incomplete_event) => {
-                                if let Some(reported) = incomplete_event.response.usage.as_ref() {
-                                    usage = chat_state::SidebandUsage {
-                                        input_tokens: reported.input_tokens.into(),
-                                        output_tokens: reported.output_tokens.into(),
-                                        cache_read_tokens: reported
-                                            .input_tokens_details
-                                            .cached_tokens
-                                            .into(),
-                                        cache_write_tokens: 0,
-                                    };
+                                if let Some(reported) =
+                                    responses_sideband_usage(&incomplete_event.response)
+                                {
+                                    usage = reported;
                                     usage_meter.observe(&usage);
                                 }
                                 let reason = incomplete_event
@@ -688,6 +703,7 @@ pub(crate) async fn generate_session_compact(
             let mut stop_reason: Option<String> = None;
             let mut content = String::new();
             let mut usage = chat_state::SidebandUsage::default();
+            let mut uncached_input_tokens = 0u64;
             let mut last_progress_at = std::time::Instant::now();
             loop {
                 let idle_remaining = idle_timeout.saturating_sub(last_progress_at.elapsed());
@@ -731,16 +747,29 @@ pub(crate) async fn generate_session_compact(
                             sampling_types::messages::MessageStreamEvent::MessageStart {
                                 message,
                             } => {
+                                uncached_input_tokens = u64::from(message.usage.input_tokens);
                                 usage = chat_state::SidebandUsage {
-                                    input_tokens: message.usage.input_tokens.into(),
+                                    input_tokens: 0,
                                     output_tokens: message.usage.output_tokens.into(),
-                                    cache_read_tokens: message.usage.cache_read_input_tokens.into(),
+                                    cache_read_tokens: message
+                                        .usage
+                                        .cache_read_input_tokens
+                                        .map(u64::from),
                                     cache_write_tokens: message
                                         .usage
                                         .cache_creation_input_tokens
-                                        .into(),
+                                        .map(u64::from),
                                 };
-                                usage_meter.observe(&usage);
+                                if let Some(full) = usage
+                                    .cache_read_tokens
+                                    .zip(usage.cache_write_tokens)
+                                    .and_then(|(read, write)| {
+                                        uncached_input_tokens.checked_add(read)?.checked_add(write)
+                                    })
+                                {
+                                    usage.input_tokens = full;
+                                    usage_meter.observe(&usage);
+                                }
                             }
                             sampling_types::messages::MessageStreamEvent::ContentBlockDelta {
                                 delta: sampling_types::messages::StreamDelta::TextDelta { text },
@@ -755,17 +784,31 @@ pub(crate) async fn generate_session_compact(
                             } => {
                                 usage.output_tokens = reported.output_tokens.into();
                                 if let Some(input_tokens) = reported.input_tokens {
-                                    usage.input_tokens = input_tokens.into();
+                                    uncached_input_tokens = input_tokens.into();
                                 }
                                 if let Some(cache_read_tokens) = reported.cache_read_input_tokens {
-                                    usage.cache_read_tokens = cache_read_tokens.into();
+                                    usage.cache_read_tokens = Some(cache_read_tokens.into());
                                 }
                                 if let Some(cache_write_tokens) =
                                     reported.cache_creation_input_tokens
                                 {
-                                    usage.cache_write_tokens = cache_write_tokens.into();
+                                    usage.cache_write_tokens = Some(cache_write_tokens.into());
                                 }
-                                usage_meter.observe(&usage);
+                                if let Some(full) = usage
+                                    .cache_read_tokens
+                                    .zip(usage.cache_write_tokens)
+                                    .and_then(|(read, write)| {
+                                        uncached_input_tokens.checked_add(read)?.checked_add(write)
+                                    })
+                                {
+                                    usage.input_tokens = full;
+                                    usage_meter.observe(&usage);
+                                } else {
+                                    // A Messages uncached bucket is not a full prompt.
+                                    // The attempt remains incomplete until all buckets exist.
+                                    usage.input_tokens = 0;
+                                    usage_meter.usage = None;
+                                }
                                 if let Some(sr) = delta.stop_reason {
                                     truncated = matches!(
                                     sr,

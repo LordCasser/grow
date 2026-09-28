@@ -57,7 +57,7 @@ fn acp_response_completed_emits_usage_line() {
         message_id: Some("msg_1".into()),
         stop_reason: Some("tool_use".into()),
         usage: Some(ResponseUsage {
-            input_tokens: 5,
+            input_tokens: Some(5),
             output_tokens: 2,
             ..Default::default()
         }),

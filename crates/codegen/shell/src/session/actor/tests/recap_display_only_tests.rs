@@ -785,10 +785,10 @@ fn over_budget_recap_serializes_to_well_formed_messages_request() {
     );
 }
 
-/// Recap wire shape: main-turn tools + `prompt_cache_key` = session id, so the
-/// request rides the parent turn's prefix cache instead of cold-prefilling.
+/// Recap wire shape: a session-ID cache key and no main-turn tools. This local
+/// assertion does not establish reuse of the parent's provider cache.
 #[tokio::test(flavor = "current_thread")]
-async fn recap_request_rides_parent_prompt_cache() {
+async fn recap_request_keeps_its_own_cache_key_and_omits_parent_tools() {
     use test_support::MockInferenceServer;
 
     let local = tokio::task::LocalSet::new();
@@ -847,7 +847,7 @@ async fn recap_request_rides_parent_prompt_cache() {
             assert_eq!(
                 body["prompt_cache_key"].as_str(),
                 Some(actor.session_info.id.to_string().as_str()),
-                "prompt_cache_key must be the parent session id for sticky routing"
+                "recap prompt_cache_key must be its session id"
             );
             assert!(
                 body.get("tools")

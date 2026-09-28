@@ -36,6 +36,10 @@ pub struct UsageTotals {
     pub output_tokens: u64,
     pub cached_read_tokens: u64,
     pub cache_creation_tokens: u64,
+    /// Full input for attempts whose cache-read bucket was available.
+    pub cache_read_known_input_tokens: u64,
+    pub cache_read_unknown_calls: u64,
+    pub cache_write_unknown_calls: u64,
     pub reasoning_tokens: u64,
     pub model_calls: u64,
     pub api_duration_ms: u64,
@@ -120,11 +124,27 @@ impl UsageTotals {
         cost_usd_ticks: Option<i64>,
     ) -> Self {
         let cost_usd_ticks = sampling_types::reported_cost_ticks(cost_usd_ticks);
+        let mut read = usage.cache_read_tokens();
+        let mut write = usage.cache_write_tokens();
+        if read.zip(write).is_some_and(|(read, write)| {
+            read.checked_add(write)
+                .is_none_or(|sum| sum > usage.prompt_tokens)
+        }) {
+            read = None;
+            write = None;
+        }
         Self {
             input_tokens: u64::from(usage.prompt_tokens),
             output_tokens: u64::from(usage.completion_tokens),
-            cached_read_tokens: u64::from(usage.cached_prompt_tokens),
-            cache_creation_tokens: u64::from(usage.cache_creation_prompt_tokens),
+            cached_read_tokens: u64::from(read.unwrap_or(0)),
+            cache_creation_tokens: u64::from(write.unwrap_or(0)),
+            cache_read_known_input_tokens: if read.is_some() {
+                u64::from(usage.prompt_tokens)
+            } else {
+                0
+            },
+            cache_read_unknown_calls: u64::from(read.is_none()),
+            cache_write_unknown_calls: u64::from(write.is_none()),
             reasoning_tokens: u64::from(usage.reasoning_tokens),
             model_calls: 1,
             api_duration_ms: api_duration_ms.unwrap_or(0),
@@ -139,10 +159,20 @@ impl UsageTotals {
 
     /// Model consumption excluding cache reads; cache creation remains ordinary
     /// input. Goal budgets use full input plus output instead.
-    pub fn uncached_tokens(&self) -> u64 {
-        self.input_tokens
-            .saturating_sub(self.cached_read_tokens)
-            .saturating_add(self.output_tokens)
+    pub fn uncached_tokens(&self) -> Option<u64> {
+        self.cache_read_complete().then(|| {
+            self.input_tokens
+                .saturating_sub(self.cached_read_tokens)
+                .saturating_add(self.output_tokens)
+        })
+    }
+
+    pub fn cache_read_complete(&self) -> bool {
+        self.cache_read_unknown_calls == 0
+    }
+
+    pub fn cache_write_complete(&self) -> bool {
+        self.cache_write_unknown_calls == 0
     }
 
     pub fn cost_is_partial(&self) -> bool {
@@ -155,6 +185,9 @@ impl UsageTotals {
             output_tokens,
             cached_read_tokens,
             cache_creation_tokens,
+            cache_read_known_input_tokens,
+            cache_read_unknown_calls,
+            cache_write_unknown_calls,
             reasoning_tokens,
             model_calls,
             api_duration_ms,
@@ -167,6 +200,15 @@ impl UsageTotals {
         self.cache_creation_tokens = self
             .cache_creation_tokens
             .saturating_add(*cache_creation_tokens);
+        self.cache_read_known_input_tokens = self
+            .cache_read_known_input_tokens
+            .saturating_add(*cache_read_known_input_tokens);
+        self.cache_read_unknown_calls = self
+            .cache_read_unknown_calls
+            .saturating_add(*cache_read_unknown_calls);
+        self.cache_write_unknown_calls = self
+            .cache_write_unknown_calls
+            .saturating_add(*cache_write_unknown_calls);
         self.reasoning_tokens = self.reasoning_tokens.saturating_add(*reasoning_tokens);
         self.model_calls = self.model_calls.saturating_add(*model_calls);
         self.api_duration_ms = self.api_duration_ms.saturating_add(*api_duration_ms);
@@ -343,8 +385,38 @@ mod tests {
             total_tokens: 999_999,
             reasoning_tokens: 0,
             cached_prompt_tokens: 0,
+            cache_read_known: true,
             cache_creation_prompt_tokens: 0,
+            cache_write_known: true,
         }
+    }
+
+    #[test]
+    fn cache_coverage_folds_known_input_without_diluting_hit_rate() {
+        let mut ledger = UsageLedger::default();
+        let mut known = tu(100, 5);
+        known.cached_prompt_tokens = 80;
+        ledger.record_main_loop_call("a", &known, None, None);
+        let mut unknown = tu(900, 5);
+        unknown.cache_read_known = false;
+        unknown.cache_write_known = false;
+        ledger.record_auxiliary_call("b", &unknown, None, None);
+        assert_eq!(ledger.totals.input_tokens, 1_000);
+        assert_eq!(ledger.totals.cached_read_tokens, 80);
+        assert_eq!(ledger.totals.cache_read_known_input_tokens, 100);
+        assert_eq!(ledger.totals.cache_read_unknown_calls, 1);
+        assert_eq!(ledger.totals.cache_write_unknown_calls, 1);
+        assert!(
+            !ledger.incomplete,
+            "cache detail does not make full totals unknown"
+        );
+        assert_eq!(ledger.by_model["a"].cache_read_known_input_tokens, 100);
+        assert_eq!(ledger.by_model["b"].cache_read_known_input_tokens, 0);
+
+        unknown.cache_read_known = true;
+        ledger.record_auxiliary_call("b", &unknown, None, None);
+        assert_eq!(ledger.totals.cache_read_known_input_tokens, 1_000);
+        assert_eq!(ledger.totals.cached_read_tokens, 80);
     }
 
     #[test]

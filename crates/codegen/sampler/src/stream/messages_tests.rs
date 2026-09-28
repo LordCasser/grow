@@ -26,8 +26,8 @@ fn message_start() -> MessageStreamEvent {
             usage: MessagesUsage {
                 input_tokens: 10,
                 output_tokens: 0,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
+                cache_creation_input_tokens: Some(0),
+                cache_read_input_tokens: Some(0),
             },
         },
     }
@@ -1154,8 +1154,8 @@ fn message_start_with_cache(
             usage: MessagesUsage {
                 input_tokens: input,
                 output_tokens: 0,
-                cache_creation_input_tokens: cache_creation,
-                cache_read_input_tokens: cache_read,
+                cache_creation_input_tokens: Some(cache_creation),
+                cache_read_input_tokens: Some(cache_read),
             },
         },
     }
@@ -1254,6 +1254,42 @@ async fn pure_cache_hit_with_zero_uncached_still_emits_usage() {
     assert_eq!(usage.prompt_tokens, 2500);
     assert_eq!(usage.cached_prompt_tokens, 2500);
     assert_eq!(usage.total_tokens, 2501);
+}
+
+#[tokio::test]
+async fn messages_missing_bucket_keeps_full_input_unknown() {
+    let mut start = message_start_with_cache(10, 0, 0);
+    let MessageStreamEvent::MessageStart { message } = &mut start else {
+        unreachable!()
+    };
+    message.usage.cache_read_input_tokens = None;
+    let raw = stream::iter(vec![
+        Ok::<_, SamplingError>(start),
+        Ok(text_block_start(0)),
+        Ok(text_delta(0, "ok")),
+        Ok(block_stop(0)),
+        Ok(message_delta_with_cache(4, None, None, None)),
+        Ok(MessageStreamEvent::MessageStop),
+    ])
+    .boxed();
+    let events = collect(stream_messages(raw, None, rid(), Duration::from_secs(60))).await;
+    let SamplingEvent::Completed { response, .. } = events.last().unwrap() else {
+        panic!()
+    };
+    assert!(response.usage.is_none(), "uncached input is not full input");
+
+    let usage = usage_from_stream(vec![
+        message_start_with_cache(10, 100, 0),
+        text_block_start(0),
+        text_delta(0, "ok"),
+        block_stop(0),
+        message_delta_with_cache(4, None, Some(0), None),
+        MessageStreamEvent::MessageStop,
+    ])
+    .await;
+    assert_eq!(usage.prompt_tokens, 10);
+    assert_eq!(usage.cache_read_tokens(), Some(0));
+    assert_eq!(usage.cache_write_tokens(), Some(0));
 }
 
 #[tokio::test]

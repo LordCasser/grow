@@ -89,7 +89,9 @@ mod tests {
             total_tokens: 0,
             reasoning_tokens: 0,
             cached_prompt_tokens: 0,
+            cache_read_known: true,
             cache_creation_prompt_tokens: 0,
+            cache_write_known: true,
         }
     }
 

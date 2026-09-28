@@ -5,9 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 
 use sampling_types::{
-    ConversationItem, ConversationRequest, DanglingToolCallReason, JsonOutputFormat,
-    NativeContinuationFragment, NativeContinuationProjection, NativeContinuationSpan,
-    SamplingConfig, TokenUsage, dedup_duplicate_tool_results,
+    ConversationItem, ConversationRequest, DanglingToolCallReason, GoalDirectiveTag,
+    JsonOutputFormat, ModelImageInputKey, NativeContinuationFragment, NativeContinuationProjection,
+    NativeContinuationSpan, SamplingConfig, TokenUsage, dedup_duplicate_tool_results,
     project_portable_history_with_reasoning, repair_dangling_tool_calls,
 };
 
@@ -244,6 +244,9 @@ pub(crate) struct ChatState {
     pub timeline: Timeline,
     /// Non-durable provider continuation for the current sampling epoch.
     pub continuation: ContinuationLane,
+    /// Request-only image replacements for the current append-only Surface and
+    /// image presentation domain. Native continuation resets do not own this.
+    pub image_budget: Option<ImageBudgetSelection>,
     /// Current sampling configuration (model, context window, etc.).
     pub sampling_config: SamplingConfig,
     /// Provider-anchored projection of the current model-visible context.
@@ -290,6 +293,18 @@ pub(crate) struct ChatState {
     /// Cleared on `TakeTurnMessages` (consumed), `BeginTurnCapture` (new turn),
     /// and the durable rewind transaction (which abandons the turn capture).
     pub(super) turn_capture: Option<TurnCaptureState>,
+}
+
+#[derive(Clone)]
+pub(crate) struct ImageBudgetSelection {
+    pub route: ModelImageInputKey,
+    pub active_goal: Option<GoalDirectiveTag>,
+    pub use_image_descriptions: bool,
+    pub surface_ids: Vec<SurfaceId>,
+    /// Source identity and part position, checked against the original Arc
+    /// allocation without retaining or rescanning its base64 payload.
+    pub replaced:
+        BTreeMap<(SurfaceId, usize), (std::sync::Weak<str>, Option<std::sync::Weak<str>>)>,
 }
 
 /// The immutable payload recorded for one model-attempt settlement.
@@ -433,7 +448,9 @@ fn token_usage_matches(left: Option<&TokenUsage>, right: Option<&TokenUsage>) ->
                 && left.total_tokens == right.total_tokens
                 && left.reasoning_tokens == right.reasoning_tokens
                 && left.cached_prompt_tokens == right.cached_prompt_tokens
+                && left.cache_read_known == right.cache_read_known
                 && left.cache_creation_prompt_tokens == right.cache_creation_prompt_tokens
+                && left.cache_write_known == right.cache_write_known
         }
         _ => false,
     }
@@ -823,6 +840,7 @@ impl ChatState {
                 sampling_config.api_backend.clone(),
                 timeline.surface_len(),
             ),
+            image_budget: None,
             timeline,
             sampling_config,
             projected_tokens: initial_tokens,

@@ -32,10 +32,10 @@ fn messages_response_completed_stamps_assistant_frame() {
             message_id: Some("msg_real".into()),
             stop_reason: Some("end_turn".into()),
             usage: Some(ResponseUsage {
-                input_tokens: 12,
+                input_tokens: Some(12),
                 output_tokens: 7,
-                cache_read_input_tokens: 3,
-                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: Some(3),
+                cache_creation_input_tokens: Some(0),
                 ..Default::default()
             }),
             signature: Some("sig-abc".into()),
@@ -374,7 +374,7 @@ fn messages_late_response_completed_for_flushed_response_is_dropped() {
         message_id: Some("msg_a".into()),
         stop_reason: Some("end_turn".into()),
         usage: Some(ResponseUsage {
-            input_tokens: 99,
+            input_tokens: Some(99),
             output_tokens: 99,
             ..Default::default()
         }),

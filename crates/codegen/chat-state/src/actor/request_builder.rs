@@ -6,6 +6,7 @@ use sampling_types::{
 };
 
 use super::ChatStateActor;
+use super::state::ImageBudgetSelection;
 use crate::MessageCause;
 use crate::events::ChatStateEvent;
 
@@ -73,36 +74,97 @@ impl ChatStateActor {
             )?;
         }
 
-        // Measure the internal conversation body and evict as it approaches
+        let surface_ids = self.state.timeline.surface_ids().to_vec();
+        let route = sampling_types::model_image_input_key(&self.state.sampling_config);
+        let same_domain = self.state.image_budget.as_ref().is_some_and(|previous| {
+            previous.route == route
+                && previous.active_goal == active_goal
+                && previous.use_image_descriptions == use_image_descriptions
+                && surface_ids.starts_with(&previous.surface_ids)
+        });
+        let mut selection = if same_domain {
+            self.state.image_budget.as_ref().unwrap().clone()
+        } else {
+            ImageBudgetSelection {
+                route,
+                active_goal: active_goal.clone(),
+                use_image_descriptions,
+                surface_ids: Vec::new(),
+                replaced: Default::default(),
+            }
+        };
+        let inline_images = inline_image_count(&items);
+        // A SurfaceId is stable across append. Check the exact source part as
+        // well, so a replacement under an old coordinate cannot inherit it.
+        let valid_choices = selection
+            .replaced
+            .iter()
+            .all(|((source, part_index), identity)| {
+                surface_ids
+                    .iter()
+                    .position(|id| id == source)
+                    .and_then(|index| image_content(&items[index]).get(*part_index))
+                    .is_some_and(|part| image_part_matches(part, identity))
+            });
+        if !valid_choices {
+            selection.replaced.clear();
+        }
+        let placeholder = ContentPart::Text {
+            text: IMAGE_COMPACT_PLACEHOLDER.into(),
+        };
+        for ((source, part_index), _) in &selection.replaced {
+            if let Some(index) = surface_ids.iter().position(|id| id == source) {
+                image_content_mut(&mut items[index])[*part_index] = placeholder.clone();
+            }
+        }
+
+        // Measure the effective request after replaying previous choices and
+        // evict as it approaches
         // the 50 MB ceiling. The transport checks the final wire body after
         // encoding. This estimate skips the multi-MB base64 escape scan, so
         // it runs inline on every turn with no blocking-thread offload.
-        // Eviction rewrites earlier turns and busts the KV-cache prefix, so we
-        // only pay it when the body is actually near the limit (the original
-        // behavior — evicting every turn — caused chronic cache misses).
+        // Eviction rewrites earlier turns. The low-water mark buys headroom
+        // only when these choices are reused on later requests.
         let body_bytes = conversation_body_bytes(&items);
-        let inline_images = inline_image_count(&items);
         let needs_image_compaction = body_bytes >= IMAGE_COMPACT_TRIGGER_BYTES;
 
         let mut eviction: Option<ImageEvictionOutcome> = None;
         if needs_image_compaction {
             // Step 1: When the body nears the 50 MB ceiling, evict oldest
             // images down to the low-water mark (not just under the trigger).
-            // Reclaiming a batch frees headroom for many subsequent image
-            // turns, so the prefix is rewritten once and then stays cache-warm
-            // — instead of re-triggering and re-busting the cache every turn.
+            // Reclaiming a batch frees headroom for later image turns.
             eviction = Some(compact_images_to_byte_budget(
                 &mut items,
                 body_bytes,
                 IMAGE_COMPACT_RECLAIM_TARGET_BYTES,
             ));
+            if let Some(outcome) = &eviction {
+                for ((index, part_index), identity) in outcome
+                    .evicted_parts
+                    .iter()
+                    .zip(&outcome.evicted_identities)
+                {
+                    selection
+                        .replaced
+                        .insert((surface_ids[*index], *part_index), identity.clone());
+                }
+            }
+        }
+        selection.surface_ids = surface_ids.clone();
+        let mut effective_evicted_parts = Vec::new();
+        for (index, source) in surface_ids.iter().enumerate() {
+            for part in 0..image_content(&items[index]).len() {
+                if selection.replaced.contains_key(&(*source, part)) {
+                    effective_evicted_parts.push((index, part));
+                }
+            }
         }
 
         // Per-turn image-budget record for local verification. Emitted on the
         // ChatState event channel (chat-state can't reach the shell's unified
         // log directly); the session consumer writes it to the local log file.
         // Only on image-bearing turns to avoid noise.
-        if inline_images > 0 {
+        if inline_images > 0 || !effective_evicted_parts.is_empty() {
             self.send_event(ChatStateEvent::ImageBudget {
                 body_bytes,
                 trigger_bytes: IMAGE_COMPACT_TRIGGER_BYTES,
@@ -110,11 +172,11 @@ impl ChatStateActor {
                 inline_images,
                 needs_image_compaction,
                 evicted: eviction.as_ref().map_or(0, |o| o.evicted),
+                effective_evicted: effective_evicted_parts.len(),
                 body_bytes_after: eviction.as_ref().map_or(body_bytes, |o| o.body_bytes_after),
             });
         }
 
-        let surface_ids = self.state.timeline.surface_ids().to_vec();
         let projection_is_aligned = self
             .state
             .continuation
@@ -141,7 +203,8 @@ impl ChatStateActor {
                     "before_bytes": body_bytes,
                     "trigger_bytes": IMAGE_COMPACT_TRIGGER_BYTES,
                     "target_bytes": IMAGE_COMPACT_RECLAIM_TARGET_BYTES,
-                    "evicted_parts": eviction.as_ref().map(|value| &value.evicted_parts),
+                    "evicted_parts": effective_evicted_parts,
+                    "newly_evicted_parts": eviction.as_ref().map(|value| &value.evicted_parts),
                     "after_bytes": eviction.as_ref().map_or(body_bytes, |value| value.body_bytes_after),
                 },
                 "continuation_epoch": epoch_nonce,
@@ -170,6 +233,7 @@ impl ChatStateActor {
         };
         let request_input_tokens = super::state::estimate_request_input_tokens(&request);
         self.apply_request_projection(request_input_tokens);
+        self.state.image_budget = Some(selection);
         Ok(request)
     }
 }
@@ -351,9 +415,37 @@ pub(crate) struct ImageEvictionOutcome {
     pub evicted: usize,
     /// Exact (Surface item index, content part index), before any wire lowering.
     pub evicted_parts: Vec<(usize, usize)>,
+    evicted_identities: Vec<(std::sync::Weak<str>, Option<std::sync::Weak<str>>)>,
     /// Estimated serialized body size after eviction (`current_bytes` minus the
     /// net bytes freed) — at or below `target_bytes` once enough images go.
     pub body_bytes_after: usize,
+}
+
+fn image_part_identity(
+    part: &ContentPart,
+) -> Option<(std::sync::Weak<str>, Option<std::sync::Weak<str>>)> {
+    let ContentPart::Image { url, description } = part else {
+        return None;
+    };
+    Some((
+        std::sync::Arc::downgrade(url),
+        description.as_ref().map(std::sync::Arc::downgrade),
+    ))
+}
+
+fn image_part_matches(
+    part: &ContentPart,
+    identity: &(std::sync::Weak<str>, Option<std::sync::Weak<str>>),
+) -> bool {
+    let Some((url, description)) = image_part_identity(part) else {
+        return false;
+    };
+    std::sync::Weak::ptr_eq(&url, &identity.0)
+        && match (&description, &identity.1) {
+            (None, None) => true,
+            (Some(a), Some(b)) => std::sync::Weak::ptr_eq(a, b),
+            _ => false,
+        }
 }
 
 /// Serialized size of the internal conversation body, leaving headroom for
@@ -425,6 +517,7 @@ pub(crate) fn compact_images_to_byte_budget(
         return ImageEvictionOutcome {
             evicted: 0,
             evicted_parts: Vec::new(),
+            evicted_identities: Vec::new(),
             body_bytes_after: current_bytes,
         };
     }
@@ -452,11 +545,13 @@ pub(crate) fn compact_images_to_byte_budget(
     let mut running = current_bytes;
     let mut evicted = 0usize;
     let mut evicted_parts = Vec::new();
+    let mut evicted_identities = Vec::new();
     for &(i, j, image_bytes) in &images {
         if running <= target_bytes {
             break;
         }
         if let Some(part) = image_content_mut(&mut conversation[i]).get_mut(j) {
+            evicted_identities.push(image_part_identity(part).expect("enumerated image part"));
             *part = placeholder.clone();
             // Net body saving: the image part leaves, the placeholder takes its
             // slot. Everything else (siblings, commas, brackets) is untouched,
@@ -472,6 +567,7 @@ pub(crate) fn compact_images_to_byte_budget(
     ImageEvictionOutcome {
         evicted,
         evicted_parts,
+        evicted_identities,
         body_bytes_after: running,
     }
 }

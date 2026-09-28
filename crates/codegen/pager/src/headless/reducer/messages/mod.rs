@@ -211,11 +211,10 @@ impl MessagesReducer {
 
     /// Reported usage, else the identity's input-side usage (`output_tokens` 0).
     fn resolved_usage(&self) -> MessageUsage {
-        self.response
-            .pending()
-            .and_then(|p| p.usage.as_ref())
-            .cloned()
-            .unwrap_or_else(|| self.response.identity().input_usage())
+        match self.response.pending() {
+            Some(pending) => pending.usage.clone().unwrap_or_default(),
+            None => self.response.identity().input_usage(),
+        }
     }
 
     fn resolved_stop_sequence(&self) -> Option<String> {
@@ -583,7 +582,7 @@ impl Reducer for MessagesReducer {
                 self.response.open(ResponseIdentity {
                     message_id,
                     model,
-                    input_tokens,
+                    input_tokens: Some(input_tokens),
                     cache_read_input_tokens,
                     cache_creation_input_tokens,
                 });

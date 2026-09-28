@@ -194,10 +194,14 @@ pub fn session_usage_status_line(
             format!(
                 "{lower_bound}{} tokens · {} cache{recorded}",
                 format_tokens_compact_u64(total_tokens),
-                crate::app::status_blocks::cache_hit_rate(
-                    totals.input_tokens,
-                    totals.cached_read_tokens,
-                )
+                if usage.usage_is_incomplete || totals.cache_read_unknown_calls > 0 {
+                    "N/A".to_string()
+                } else {
+                    crate::app::status_blocks::cache_hit_rate(
+                        totals.cache_read_known_input_tokens,
+                        totals.cached_read_tokens,
+                    )
+                }
             )
         }
         None => "— tokens · — cache".to_string(),
@@ -361,6 +365,7 @@ mod tests {
                 input_tokens: input,
                 output_tokens: output,
                 cached_read_tokens: cached,
+                cache_read_known_input_tokens: input,
                 model_calls: 1,
                 ..Default::default()
             },
@@ -404,7 +409,7 @@ mod tests {
                 &theme,
                 false,
             )),
-            "≥120 tokens · 90.00% cache recorded"
+            "≥120 tokens · N/A cache recorded"
         );
         assert_eq!(
             line_text(session_usage_status_line(
@@ -421,6 +426,13 @@ mod tests {
                 false,
             )),
             "15 tokens · N/A cache"
+        );
+        let mut partial = usage(1_000, 0, 80, false);
+        partial.totals.cache_read_known_input_tokens = 100;
+        partial.totals.cache_read_unknown_calls = 1;
+        assert_eq!(
+            line_text(session_usage_status_line(Some(&partial), &theme, false)),
+            "1k tokens · N/A cache"
         );
     }
 

@@ -27,8 +27,8 @@ async fn sampling_candidate_is_scoped_and_dropped_until_durable_admission() {
                     message_id: "remote".into(),
                     model: "test".into(),
                     input_tokens: 1,
-                    cache_read_input_tokens: 0,
-                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: Some(0),
+                    cache_creation_input_tokens: Some(0),
                 })
                 .await;
             actor

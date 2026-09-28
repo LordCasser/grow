@@ -39,21 +39,32 @@ impl MessagesReducer {
         if end_usage.is_none() {
             tracing::warn!(
                 "streaming-messages-json: no aggregate usage ledger at turn end; \
-                 `result.usage` token counts fall back to zero (the Messages API \
-                 schema has no absent-usage marker)"
+                 `result.usage` input/cache counts remain unknown and output \
+                 falls back to zero"
             );
         } else if usage_is_incomplete {
             tracing::warn!(
                 "streaming-messages-json: usage is incomplete; `result.usage` token \
-                 counts may under-count or fall back to zero (the Messages API schema \
-                 has no incompleteness marker)"
+                 counts may be unknown or under-count"
             );
         }
         let usage = MessageUsage {
-            input_tokens: field(u, "input_tokens"),
+            input_tokens: u
+                .and_then(|usage| usage.get("input_tokens"))
+                .and_then(Value::as_u64),
+            full_input_tokens: u
+                .and_then(|usage| usage.get("full_input_tokens"))
+                .and_then(Value::as_u64),
             output_tokens: field(u, "output_tokens"),
-            cache_read_input_tokens: field(u, "cache_read_input_tokens"),
-            cache_creation_input_tokens: field(u, "cache_creation_input_tokens"),
+            cache_read_input_tokens: u
+                .and_then(|usage| usage.get("cache_read_input_tokens"))
+                .and_then(Value::as_u64),
+            cache_creation_input_tokens: u
+                .and_then(|usage| usage.get("cache_creation_input_tokens"))
+                .and_then(Value::as_u64),
+            cache_read_known_input_tokens: field(u, "cache_read_known_input_tokens"),
+            cache_read_unknown_calls: field(u, "cache_read_unknown_calls"),
+            cache_write_unknown_calls: field(u, "cache_write_unknown_calls"),
         };
         let num_turns = scratch
             .get("num_turns")
@@ -98,10 +109,14 @@ pub(super) fn messages_model_usage(
             (
                 model.clone(),
                 to_line(&ModelUsage {
-                    input_tokens: n("inputTokens"),
+                    input_tokens: row.get("inputTokens").and_then(Value::as_u64),
+                    full_input_tokens: n("fullInputTokens"),
                     output_tokens: n("outputTokens"),
                     cache_read_input_tokens: n("cacheReadInputTokens"),
                     cache_creation_input_tokens: n("cacheCreationInputTokens"),
+                    cache_read_known_input_tokens: n("cacheReadKnownInputTokens"),
+                    cache_read_unknown_calls: n("cacheReadUnknownCalls"),
+                    cache_write_unknown_calls: n("cacheWriteUnknownCalls"),
                     cost_usd: row.get("costUSD").and_then(Value::as_f64).unwrap_or(0.0),
                     context_window: if is_current { context_window } else { None },
                 }),

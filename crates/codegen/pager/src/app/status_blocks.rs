@@ -194,14 +194,27 @@ pub(crate) fn session_usage_block_text(
 
     let mut rows = Vec::new();
     rows.push(format!(
-        "  Input tokens:   {} ({} cached)",
+        "  Input tokens:   {} ({} cached{})",
         group_thousands(t.input_tokens),
         group_thousands(t.cached_read_tokens),
+        if t.cache_read_unknown_calls > 0 {
+            " known portion"
+        } else {
+            ""
+        },
     ));
     rows.push(format!(
-        "  Cache hit rate: {}",
-        cache_hit_rate(t.input_tokens, t.cached_read_tokens)
+        "  Cache hit rate: {} ({} of recorded input measured)",
+        cache_hit_rate(t.cache_read_known_input_tokens, t.cached_read_tokens),
+        cache_hit_rate(t.input_tokens, t.cache_read_known_input_tokens),
     ));
+    if t.cache_write_unknown_calls > 0 {
+        rows.push(format!(
+            "  Cache writes:   {} known; {} calls unreported",
+            group_thousands(t.cache_creation_tokens),
+            group_thousands(t.cache_write_unknown_calls)
+        ));
+    }
     rows.push(format!(
         "  Output tokens:  {} ({} reasoning)",
         group_thousands(t.output_tokens),
@@ -224,19 +237,25 @@ pub(crate) fn session_usage_block_text(
             rows.push(format!(
                 "    {model}
       {} total · {} in / {} out
-      {} cached · {} cache hit · {}",
+      {} cached{} · {} cache hit · {} input coverage · {}",
                 group_thousands(m.input_tokens.saturating_add(m.output_tokens)),
                 group_thousands(m.input_tokens),
                 group_thousands(m.output_tokens),
                 group_thousands(m.cached_read_tokens),
-                cache_hit_rate(m.input_tokens, m.cached_read_tokens),
+                if m.cache_read_unknown_calls > 0 {
+                    " known"
+                } else {
+                    ""
+                },
+                cache_hit_rate(m.cache_read_known_input_tokens, m.cached_read_tokens),
+                cache_hit_rate(m.input_tokens, m.cache_read_known_input_tokens),
                 format_cost(m),
             ));
         }
     }
 
     if usage.usage_is_incomplete {
-        rows.push("  Note: usage is incomplete and may under-count; cache-hit rates cover recorded usage only.".to_string());
+        rows.push("  Note: total usage is incomplete and may under-count; cache coverage refers to recorded input only.".to_string());
     }
 
     join_header_rows("Session usage (lifetime):".to_string(), rows)
@@ -340,6 +359,9 @@ mod tests {
             total_tokens: input + output,
             cached_read_tokens: 0,
             cache_creation_tokens: 0,
+            cache_read_known_input_tokens: input,
+            cache_read_unknown_calls: 0,
+            cache_write_unknown_calls: 0,
             reasoning_tokens: 0,
             model_calls: 1,
             api_duration_ms: 1_000,
@@ -463,7 +485,36 @@ mod tests {
         assert!(text.contains("Total tokens:   2,000"), "{text}");
         assert!(text.contains("0 cached · 0.00% cache hit"), "{text}");
         usage.usage_is_incomplete = true;
-        assert!(session_usage_block_text(&usage).contains("recorded usage only"));
+        assert!(session_usage_block_text(&usage).contains("recorded input only"));
+    }
+
+    #[test]
+    fn partial_cache_coverage_uses_only_known_input() {
+        let mut totals = model_row(1_000, 0, None);
+        totals.cached_read_tokens = 80;
+        totals.cache_read_known_input_tokens = 100;
+        totals.cache_read_unknown_calls = 1;
+        totals.cache_write_unknown_calls = 1;
+        let usage = PromptUsage {
+            totals,
+            ..Default::default()
+        };
+        let text = session_usage_block_text(&usage);
+        assert!(
+            text.contains("80.00% (10.00% of recorded input measured)"),
+            "{text}"
+        );
+        assert!(text.contains("80 cached known portion"), "{text}");
+        assert!(text.contains("1 calls unreported"), "{text}");
+
+        let mut complete = usage;
+        complete.totals.cache_read_known_input_tokens = 1_000;
+        complete.totals.cache_read_unknown_calls = 0;
+        let text = session_usage_block_text(&complete);
+        assert!(
+            text.contains("8.00% (100.00% of recorded input measured)"),
+            "{text}"
+        );
     }
 
     #[test]

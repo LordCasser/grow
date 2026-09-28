@@ -101,7 +101,7 @@ impl TurnSpanTotals {
         if let Some(u) = response.usage.as_ref() {
             self.input_tokens += i64::from(u.prompt_tokens);
             self.output_tokens += i64::from(u.completion_tokens);
-            self.cache_read_tokens += i64::from(u.cached_prompt_tokens);
+            self.cache_read_tokens += i64::from(u.cache_read_tokens().unwrap_or(0));
             span.record("input_tokens", self.input_tokens);
             span.record("output_tokens", self.output_tokens);
             span.record("cache_read_tokens", self.cache_read_tokens);
@@ -1515,7 +1515,7 @@ impl SessionActor {
             let model_elapsed_ms = model_timer.elapsed().as_millis() as u64;
             let usage = response.usage.as_ref();
             let prompt_tokens = usage.map(|u| u.prompt_tokens);
-            let cached_prompt_tokens = usage.map(|u| u.cached_prompt_tokens);
+            let cached_prompt_tokens = usage.and_then(|u| u.cache_read_tokens());
             let completion_tokens = usage.map(|u| u.completion_tokens);
             let reasoning_tokens = usage.map(|u| u.reasoning_tokens);
             let ttft_ms = latency.time_to_first_token_ms;
@@ -1574,7 +1574,7 @@ impl SessionActor {
                         cached_prompt_tokens: response
                             .usage
                             .as_ref()
-                            .map(|u| u.cached_prompt_tokens),
+                            .and_then(|u| u.cache_read_tokens()),
                     },
                 );
             }

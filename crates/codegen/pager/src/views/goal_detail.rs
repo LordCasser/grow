@@ -32,6 +32,10 @@ fn usage_lines(goal: &GoalDisplayState) -> Vec<String> {
             group_thousands(usage.uncached_input_tokens)
         ),
         format!(
+            "Input (unclassified) {marker}{}",
+            group_thousands(usage.unclassified_input_tokens)
+        ),
+        format!(
             "Output              {marker}{}",
             group_thousands(usage.output_tokens)
         ),

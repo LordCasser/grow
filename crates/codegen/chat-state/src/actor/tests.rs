@@ -1279,7 +1279,9 @@ async fn record_last_turn_usage_round_trip() {
         total_tokens: 1290,
         reasoning_tokens: 0,
         cached_prompt_tokens: 800,
+        cache_read_known: true,
         cache_creation_prompt_tokens: 0,
+        cache_write_known: true,
     };
     h.handle.record_last_turn_usage(usage.clone());
 
@@ -1295,7 +1297,9 @@ async fn record_last_turn_usage_round_trip() {
         total_tokens: 10000,
         reasoning_tokens: 0,
         cached_prompt_tokens: 0,
+        cache_read_known: true,
         cache_creation_prompt_tokens: 0,
+        cache_write_known: true,
     };
     h.handle.record_last_turn_usage(next);
     let got2 = h
@@ -1314,6 +1318,7 @@ async fn session_usage_events_replace_totals_and_include_late_children() {
         prompt_tokens: 100,
         completion_tokens: 20,
         cached_prompt_tokens: 75,
+        cache_read_known: true,
         ..Default::default()
     };
     h.handle
@@ -1414,7 +1419,9 @@ async fn prompt_usage_ledger_via_handle_resets_and_clears() {
         total_tokens: 12,
         reasoning_tokens: 0,
         cached_prompt_tokens: 0,
+        cache_read_known: true,
         cache_creation_prompt_tokens: 0,
+        cache_write_known: true,
     };
 
     let h = TestHarness::new();
@@ -1488,6 +1495,7 @@ async fn auxiliary_attempt_usage_is_durable_idempotent_and_separate_from_rounds(
         total_tokens: 89,
         reasoning_tokens: 3,
         cached_prompt_tokens: 20,
+        cache_read_known: true,
         ..Default::default()
     };
     assert_eq!(
@@ -2019,12 +2027,27 @@ async fn model_attempt_usage_retries_exact_event_and_restores_dedup_index() {
                 "attempt-retry".into(),
                 0,
                 "model-a".into(),
-                Some(usage),
+                Some(usage.clone()),
                 Some(9),
                 Some(17),
             )
             .await,
         Ok(false)
+    ));
+    let mut availability_conflict = usage;
+    availability_conflict.cache_read_known = true;
+    assert!(matches!(
+        restored
+            .settle_model_attempt_usage(
+                "attempt-retry".into(),
+                0,
+                "model-a".into(),
+                Some(availability_conflict),
+                Some(9),
+                Some(17),
+            )
+            .await,
+        Err(crate::TimelineWriteError::AttemptUsageConflict)
     ));
     assert_eq!(
         restored
@@ -2128,6 +2151,8 @@ async fn lifetime_usage_restores_children_incomplete_and_resume_segments() {
         prompt_tokens: 10,
         completion_tokens: 2,
         total_tokens: 12,
+        cached_prompt_tokens: 8,
+        cache_read_known: true,
         ..Default::default()
     };
     h.handle
@@ -2146,6 +2171,9 @@ async fn lifetime_usage_restores_children_incomplete_and_resume_segments() {
         crate::UsageTotals {
             input_tokens: 20,
             output_tokens: 3,
+            cached_read_tokens: 4,
+            cache_read_known_input_tokens: 20,
+            cache_write_unknown_calls: 1,
             model_calls: 1,
             cost_usd_ticks: Some(6),
             ..Default::default()
@@ -2191,6 +2219,12 @@ async fn lifetime_usage_restores_children_incomplete_and_resume_segments() {
     let usage = restored.try_get_session_usage().await.unwrap();
     assert_eq!(usage.totals.input_tokens, 35);
     assert_eq!(usage.totals.output_tokens, 6);
+    assert_eq!(usage.totals.cached_read_tokens, 12);
+    assert_eq!(usage.totals.cache_read_known_input_tokens, 30);
+    assert_eq!(usage.totals.cache_read_unknown_calls, 1);
+    assert_eq!(usage.totals.cache_write_unknown_calls, 3);
+    assert_eq!(usage.segments[0].totals.cache_read_known_input_tokens, 30);
+    assert_eq!(usage.segments[1].totals.cache_read_unknown_calls, 1);
     assert_eq!(usage.main_loop_model_calls, 2);
     assert_eq!(usage.by_model.len(), 2);
     assert_eq!(
@@ -7540,6 +7574,136 @@ async fn build_request_preserves_small_old_images() {
     );
 }
 
+#[tokio::test]
+async fn image_budget_selection_survives_append_until_next_high_water_mark() {
+    use sampling_types::ContentPart;
+
+    fn image(index: usize) -> ConversationItem {
+        let mut item = ConversationItem::user(format!("image {index}"));
+        for part in 0..2 {
+            item.add_image(format!(
+                "data:image/png;base64,{}{}",
+                "A".repeat(6 * 1024 * 1024),
+                part
+            ));
+        }
+        item
+    }
+    fn selected(request: &sampling_types::ConversationRequest, index: usize) -> bool {
+        matches!(
+            &request.items[index],
+            ConversationItem::User(user)
+                if user.content.iter().any(|part| matches!(part, ContentPart::Image { .. }))
+        )
+    }
+
+    let h = TestHarness::with_conversation((0..4).map(image).collect());
+    let first = h
+        .handle
+        .build_request("image-selection", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert!(!selected(&first, 0));
+    assert!(!selected(&first, 1));
+    assert!(selected(&first, 2));
+    assert!(selected(&first, 3));
+    assert_eq!(
+        first.source_projection.as_ref().unwrap()["image_budget"]["evicted_parts"],
+        serde_json::json!([[0, 1], [0, 2], [1, 1], [1, 2]])
+    );
+
+    let repeated = h
+        .handle
+        .build_request("image-selection", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        repeated.source_projection.as_ref().unwrap()["image_budget"]["evicted_parts"],
+        first.source_projection.as_ref().unwrap()["image_budget"]["evicted_parts"]
+    );
+    assert_eq!(
+        repeated.source_projection.as_ref().unwrap()["image_budget"]["newly_evicted_parts"],
+        serde_json::Value::Null
+    );
+
+    h.handle.push_user_message(image(4));
+    let appended = h
+        .handle
+        .build_request("image-selection", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert!(
+        selected(&appended, 2),
+        "old selection must retain the third image"
+    );
+    assert_eq!(
+        appended.source_projection.as_ref().unwrap()["image_budget"]["evicted_parts"],
+        serde_json::json!([[0, 1], [0, 2], [1, 1], [1, 2]])
+    );
+    assert_eq!(first.prompt_cache_key, appended.prompt_cache_key);
+    assert_eq!(
+        first.source_projection.as_ref().unwrap()["continuation_epoch"],
+        appended.source_projection.as_ref().unwrap()["continuation_epoch"]
+    );
+
+    // A new actor starts from immutable source evidence, not this actor's
+    // request-only selection. At five images its first budget pass differs.
+    let (persistence, _records) = MockTimelinePersistence::new();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let cold = ChatStateActor::spawn_from_timeline(
+        h.handle.timeline_events().await.unwrap(),
+        test_config(),
+        Box::new(persistence),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let cold_request = cold
+        .build_request("image-selection", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert!(!selected(&cold_request, 2));
+    assert!(selected(&cold_request, 4));
+
+    h.handle
+        .push_user_message(ConversationItem::user("text-only append"));
+    let text_append = h
+        .handle
+        .build_request("image-selection", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert!(selected(&text_append, 2));
+
+    h.handle.push_user_message(image(5));
+    let next_boundary = h
+        .handle
+        .build_request("image-selection", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert!(!selected(&next_boundary, 2));
+    assert!(!selected(&next_boundary, 3));
+    assert!(selected(&next_boundary, 4));
+    assert!(selected(&next_boundary, 6));
+    h.handle
+        .push_response_durably(vec![ConversationItem::assistant("ok")], None)
+        .await
+        .unwrap();
+    let after_native_reset = h
+        .handle
+        .build_request("image-selection", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        after_native_reset.source_projection.as_ref().unwrap()["image_budget"]["evicted_parts"],
+        next_boundary.source_projection.as_ref().unwrap()["image_budget"]["evicted_parts"]
+    );
+    assert!(selected(&after_native_reset, 4));
+    assert!(h.handle.get_conversation().await.iter().any(|item| matches!(item,
+        ConversationItem::User(user) if user.content.iter().any(|part| matches!(part, ContentPart::Image { .. }))
+    )));
+}
+
 // ============================================================================
 // Out-of-band history repair (grow/session/repair)
 // ============================================================================
@@ -8738,9 +8902,9 @@ async fn assert_live_tool_image_budget(backend: sampling_types::ApiBackend) {
         .await
         .unwrap();
     let url: std::sync::Arc<str> =
-        format!("data:image/png;base64,{}", "A".repeat(15 * 1024 * 1024)).into();
+        format!("data:image/png;base64,{}", "A".repeat(15 * 1024 * 1024 / 2)).into();
     let mut saw_eviction = false;
-    for index in 0..4 {
+    for index in 0..5 {
         let id = format!("call_{index}");
         let assistant = ConversationItem::assistant_tool_calls(vec![ToolCall {
             id: id.clone().into(),
@@ -8766,10 +8930,13 @@ async fn assert_live_tool_image_budget(backend: sampling_types::ApiBackend) {
         handle.push_tool_result(ConversationItem::tool_result_with_images(
             id,
             "Read image.",
-            vec![ContentPart::Image {
-                description: None,
-                url: format!("{url}{marker}").into(),
-            }],
+            ["a", "b"]
+                .into_iter()
+                .map(|part| ContentPart::Image {
+                    description: None,
+                    url: format!("{url}{marker}{part}").into(),
+                })
+                .collect(),
         ));
         let request = handle
             .build_request("image-budget", vec![], None, None, None)
@@ -8787,7 +8954,7 @@ async fn assert_live_tool_image_budget(backend: sampling_types::ApiBackend) {
         fn contains_image(value: &serde_json::Value, marker: &str) -> bool {
             match value {
                 serde_json::Value::String(text) => {
-                    text.len() > 15 * 1024 * 1024 && text.ends_with(marker)
+                    text.len() > 7 * 1024 * 1024 && text.ends_with(marker)
                 }
                 serde_json::Value::Array(values) => {
                     values.iter().any(|value| contains_image(value, marker))
@@ -8799,9 +8966,16 @@ async fn assert_live_tool_image_budget(backend: sampling_types::ApiBackend) {
             }
         }
         assert!(
-            contains_image(&wire, &marker),
+            contains_image(&wire, &format!("{marker}a"))
+                && contains_image(&wire, &format!("{marker}b")),
             "newest image must survive a native epoch reset on {backend:?}"
         );
+        if index == 4 {
+            assert!(
+                contains_image(&wire, "image003a") && contains_image(&wire, "image003b"),
+                "a ToolResult image selected at the first boundary must survive append on {backend:?}"
+            );
+        }
         assert!(
             crate::estimate_request_input_tokens(&request)
                 >= token_estimation::IMAGE_TOKEN_ESTIMATE
@@ -8823,7 +8997,7 @@ async fn assert_live_tool_image_budget(backend: sampling_types::ApiBackend) {
         ConversationItem::ToolResult(result) if result.images.iter().any(|part| matches!(part, ContentPart::Image { .. }))
     )).count();
     assert_eq!(
-        images, 4,
+        images, 5,
         "request projection must preserve original Timeline images"
     );
 }

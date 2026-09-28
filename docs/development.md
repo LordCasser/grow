@@ -309,3 +309,11 @@ Messages 在单次请求内为中性工具 ID 建立映射，预留已有合法�
 ```sh
 CARGO_BUILD_JOBS=2 RUST_MIN_STACK=16777216 cargo test --locked -p pager --lib bounded_replay_text_blocks_and_prompt_measurement -- --ignored --nocapture --test-threads=1
 ```
+
+### Prompt cache 离线诊断
+
+完整会话快照可用 `python3 scripts/analyze_prompt_cache.py --session-dir <snapshot> --baseline <request-id:attempt> --request <request-id:attempt> --format text|json` 对比已保存的 provider 请求证据。主请求使用实际 `request_id:attempt_number`；Sideband 请求可用 `sideband_id:sideband_attempt`。工具读取 `timeline.jsonl` 与其引用的 `artifacts/sampling` chunks，只物化所选请求及其可得响应，验证长度和 BLAKE3，并拒绝符号链接及越出快照的证据路径。默认输出大小、digest、结构路径、缓存字段 presence 与原始响应的白名单 usage 数值，不输出请求正文或工具参数。快照只记录去敏 endpoint，不能据此确认租户和部署身份；因此报告分别展示可见 endpoint 是否相同与 provider 级比较不可确认。可见 JSON 前缀只说明本地结构相同，不证明 provider 缓存命中；报告将 Timeline 的已结算 Request usage 与原始响应证据分开显示。该工具仅用于完整、已静止的快照，不读取写入中的一致性快照，也不推断服务端缓存状态。
+
+请求图片预算在 actor 内按 Surface 身份保留已选 placeholder；纯追加先重放原选择再测量，高水位才扩大回收。`source_projection.image_budget.evicted_parts` 是本轮完整生效选择，`newly_evicted_parts` 仅是本轮新增。原始 Timeline 图片不受请求预算修改；native epoch 与 provider cache 命中需分别核对。契约见 [图片预算选择](../openspec/specs/model-sampling/spec.md#requirement-image-budget-choices-remain-stable-between-reclamation-boundaries)。
+
+采样用量的 cache read/write 分别保留「缺失」与「明确为零」；会话总输入包含缓存命中，缓存率只以 read 已知的输入为分母，`/usage` 另显示这部分占全部已记录输入的覆盖率。总输入可信但 cache 分类未知时，账本总量仍精确，Goal 将该输入列为未分类并按全量计入预算。ACP/headless 的结构化用量携带已知桶、覆盖分母与未知调用数；headless 旧的 uncached `input_tokens` 无法准确派生时为 `null`，`full_input_tokens` 仍给出可信总输入。契约见 [缓存用量可用性](../openspec/specs/model-sampling/spec.md#requirement-cache-usage-preserves-field-availability-across-protocols)、[会话用量展示](../openspec/specs/client-surfaces/spec.md#requirement-usage-exposes-provider-model-totals-and-cache-hit-rates) 与 [Goal 分类](../openspec/specs/behavior-goal/spec.md#requirement-goal-usage-exposes-provider-style-components)。

@@ -211,8 +211,7 @@ impl SessionActor {
     /// Generate a session recap and broadcast it via
     /// [`SessionUpdate::SessionRecap`](crate::extensions::notification::SessionUpdate::SessionRecap).
     ///
-    /// Snapshots the conversation, appends a single recap instruction turn
-    /// (reusing the prompt prefix verbatim so the provider cache stays warm),
+    /// Snapshots the conversation, appends a single recap instruction turn,
     /// makes one tool-free model call, and emits the cleaned one-line summary
     /// for display only. It never mutates the conversation.
     ///
@@ -306,9 +305,9 @@ impl SessionActor {
 
         let tag = self.reminder_wrapper_tag();
         // Strip reasoning only on the Messages backend (it rejects thinking
-        // blocks without a `thinking` config). Other backends keep reasoning
-        // verbatim so the prefix matches the last turn and the prefix KV
-        // cache stays warm. Mirrors compaction's `summary_strips_reasoning`.
+        // blocks without a `thinking` config). Other backends retain the
+        // visible history; this does not establish provider cache reuse.
+        // Mirrors compaction's `summary_strips_reasoning`.
         let strip_reasoning =
             sampling_client.api_backend() == crate::sampling::ApiBackend::Messages;
 

@@ -2175,35 +2175,66 @@ pub struct TokenUsage {
     pub completion_tokens: u32,
     pub total_tokens: u32,
     pub reasoning_tokens: u32,
-    /// Prompt tokens served from cache.
+    /// Prompt tokens served from cache. The separate availability bit makes
+    /// an absent provider field distinct from an explicit zero.
     /// - OpenAI: `prompt_tokens_details.cached_tokens` / `input_tokens_details.cached_tokens`.
     /// - Anthropic Messages: `usage.cache_read_input_tokens`. Cache writes
     ///   (`cache_creation_input_tokens`, billed at ~1.25x) are NOT counted here; they are folded
     ///   into `prompt_tokens` instead.
     #[serde(default)]
     pub cached_prompt_tokens: u32,
+    #[serde(default)]
+    pub cache_read_known: bool,
     /// Prompt tokens written to cache this call (Messages `cache_creation_input_tokens`,
     /// billed at ~1.25x). Part of `prompt_tokens` but distinct from cache reads; 0 on
     /// backends without a cache-write signal.
     #[serde(default)]
     pub cache_creation_prompt_tokens: u32,
+    #[serde(default)]
+    pub cache_write_known: bool,
 }
 
 impl TokenUsage {
+    pub fn cache_read_tokens(&self) -> Option<u32> {
+        self.cache_read_known
+            .then_some(self.cached_prompt_tokens)
+            .filter(|read| *read <= self.prompt_tokens)
+    }
+
+    pub fn cache_write_tokens(&self) -> Option<u32> {
+        self.cache_write_known
+            .then_some(self.cache_creation_prompt_tokens)
+            .filter(|write| *write <= self.prompt_tokens)
+    }
+
     pub fn record_on_span(&self, span: &tracing::Span) {
         span.record("prompt_tokens", self.prompt_tokens);
         span.record("completion_tokens", self.completion_tokens);
         span.record("reasoning_tokens", self.reasoning_tokens);
-        span.record("cached_prompt_tokens", self.cached_prompt_tokens);
+        if self.cache_read_known {
+            span.record("cached_prompt_tokens", self.cached_prompt_tokens);
+        }
     }
 }
 
 impl From<Usage> for TokenUsage {
     fn from(u: Usage) -> Self {
-        let cached_prompt_tokens = u
+        let standard_read = u
             .prompt_tokens_details
             .as_ref()
-            .map_or(0, |d| d.cached_tokens);
+            .and_then(|d| d.cached_tokens);
+        let alias_read = u.prompt_cache_hit_tokens;
+        let alias_valid = match (alias_read, u.prompt_cache_miss_tokens) {
+            (Some(read), Some(miss)) => read.checked_add(miss) == Some(u.prompt_tokens),
+            _ => true,
+        };
+        let read = if alias_valid && standard_read.zip(alias_read).is_none_or(|(a, b)| a == b) {
+            standard_read
+                .or(alias_read)
+                .filter(|read| *read <= u.prompt_tokens)
+        } else {
+            None
+        };
         Self {
             prompt_tokens: u.prompt_tokens,
             completion_tokens: u.completion_tokens,
@@ -2212,9 +2243,52 @@ impl From<Usage> for TokenUsage {
                 .completion_tokens_details
                 .as_ref()
                 .map_or(0, |d| d.reasoning_tokens),
-            cached_prompt_tokens,
+            cached_prompt_tokens: read.unwrap_or(0),
+            cache_read_known: read.is_some(),
             cache_creation_prompt_tokens: 0,
+            cache_write_known: false,
         }
+    }
+}
+
+#[cfg(test)]
+mod cache_usage_tests {
+    use super::*;
+
+    fn chat_usage(fields: serde_json::Value) -> TokenUsage {
+        let mut value = serde_json::json!({
+            "prompt_tokens": 100,
+            "completion_tokens": 10,
+            "total_tokens": 110
+        });
+        value
+            .as_object_mut()
+            .unwrap()
+            .extend(fields.as_object().unwrap().clone());
+        serde_json::from_value::<Usage>(value).unwrap().into()
+    }
+
+    #[test]
+    fn cache_read_presence_and_alias_conflicts() {
+        let missing = chat_usage(serde_json::json!({}));
+        assert_eq!(missing.cache_read_tokens(), None);
+        assert_eq!(missing.cache_write_tokens(), None);
+        let zero = chat_usage(serde_json::json!({"prompt_tokens_details":{"cached_tokens":0}}));
+        assert_eq!(zero.cache_read_tokens(), Some(0));
+        let alias = chat_usage(serde_json::json!({
+            "prompt_cache_hit_tokens": 80, "prompt_cache_miss_tokens": 20
+        }));
+        assert_eq!(alias.cache_read_tokens(), Some(80));
+        let conflict = chat_usage(serde_json::json!({
+            "prompt_tokens_details":{"cached_tokens":0},
+            "prompt_cache_hit_tokens":80,
+            "prompt_cache_miss_tokens":20
+        }));
+        assert_eq!(conflict.cache_read_tokens(), None);
+        let invalid =
+            chat_usage(serde_json::json!({"prompt_tokens_details":{"cached_tokens":101}}));
+        assert_eq!(invalid.cache_read_tokens(), None);
+        assert_eq!(invalid.prompt_tokens, 100);
     }
 }
 

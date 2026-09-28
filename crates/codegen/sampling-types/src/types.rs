@@ -479,6 +479,12 @@ pub struct Usage {
     pub total_tokens: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prompt_tokens_details: Option<PromptTokensDetails>,
+    /// DeepSeek-compatible Chat Completions cache counters. These are aliases
+    /// for read/miss, not additional prompt tokens.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_hit_tokens: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_cache_miss_tokens: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completion_tokens_details: Option<CompletionTokensDetails>,
     /// Optional provider extension: request price in USD ticks (1 USD = 1e10 ticks).
@@ -491,7 +497,7 @@ pub struct Usage {
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct PromptTokensDetails {
     #[serde(default)]
-    pub cached_tokens: u32,
+    pub cached_tokens: Option<u32>,
     #[serde(default)]
     pub audio_tokens: u32,
 }

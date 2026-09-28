@@ -127,8 +127,8 @@ pub fn stream_messages<'a>(
         // Anthropic Messages API `input_tokens` is the uncached portion; cache hits and writes are reported
         // in separate buckets and must be summed for the true total prompt size.
         let mut final_input_tokens: u32 = 0;
-        let mut final_cache_read_input_tokens: u32 = 0;
-        let mut final_cache_creation_input_tokens: u32 = 0;
+        let mut final_cache_read_input_tokens: Option<u32> = None;
+        let mut final_cache_creation_input_tokens: Option<u32> = None;
         let mut final_output_tokens: u32 = 0;
         let mut final_stop_reason: Option<StopReason> = None;
         let mut final_stop_message: Option<String> = None;
@@ -257,12 +257,8 @@ pub fn stream_messages<'a>(
                         message_id: message.id,
                         model: message.model,
                         input_tokens: u64::from(message.usage.input_tokens),
-                        cache_read_input_tokens: u64::from(
-                            message.usage.cache_read_input_tokens,
-                        ),
-                        cache_creation_input_tokens: u64::from(
-                            message.usage.cache_creation_input_tokens,
-                        ),
+                        cache_read_input_tokens: message.usage.cache_read_input_tokens.map(u64::from),
+                        cache_creation_input_tokens: message.usage.cache_creation_input_tokens.map(u64::from),
                     };
                 }
 
@@ -524,8 +520,8 @@ pub fn stream_messages<'a>(
                         || (final_raw_stop_reason.is_none() && delta.stop_reason.is_some())
                         || final_output_tokens != usage.output_tokens
                         || usage.input_tokens.is_some_and(|n| n != final_input_tokens)
-                        || usage.cache_read_input_tokens.is_some_and(|n| n != final_cache_read_input_tokens)
-                        || usage.cache_creation_input_tokens.is_some_and(|n| n != final_cache_creation_input_tokens);
+                        || usage.cache_read_input_tokens.is_some_and(|n| Some(n) != final_cache_read_input_tokens)
+                        || usage.cache_creation_input_tokens.is_some_and(|n| Some(n) != final_cache_creation_input_tokens);
                     message_delta_seen = true;
                     if !blocks.is_empty() {
                         invalid_response.get_or_insert_with(|| "message_delta with unclosed content blocks".into());
@@ -589,10 +585,10 @@ pub fn stream_messages<'a>(
                         final_input_tokens = input;
                     }
                     if let Some(cache_read) = usage.cache_read_input_tokens {
-                        final_cache_read_input_tokens = cache_read;
+                        final_cache_read_input_tokens = Some(cache_read);
                     }
                     if let Some(cache_creation) = usage.cache_creation_input_tokens {
-                        final_cache_creation_input_tokens = cache_creation;
+                        final_cache_creation_input_tokens = Some(cache_creation);
                     }
                 }
 
@@ -639,17 +635,19 @@ pub fn stream_messages<'a>(
         // ── Build the final response ─────────────────────────────────
         let model_id = final_model.unwrap_or_default();
         // Match the OAI Responses convention: prompt_tokens = full prompt, cached_prompt_tokens = cache hits only.
-        let total_prompt_tokens = final_input_tokens
-            .saturating_add(final_cache_read_input_tokens)
-            .saturating_add(final_cache_creation_input_tokens);
-        let usage = if message_stop_seen && final_stop_reason.is_some() {
+        let total_prompt_tokens = final_cache_read_input_tokens
+            .zip(final_cache_creation_input_tokens)
+            .and_then(|(read, write)| final_input_tokens.checked_add(read)?.checked_add(write));
+        let usage = if let (true, Some(total_prompt_tokens)) = (message_stop_seen && final_stop_reason.is_some(), total_prompt_tokens) {
             Some(TokenUsage {
                 prompt_tokens: total_prompt_tokens,
                 completion_tokens: final_output_tokens,
                 total_tokens: total_prompt_tokens.saturating_add(final_output_tokens),
                 reasoning_tokens: 0,
-                cached_prompt_tokens: final_cache_read_input_tokens,
-                cache_creation_prompt_tokens: final_cache_creation_input_tokens,
+                cached_prompt_tokens: final_cache_read_input_tokens.unwrap(),
+                cache_read_known: true,
+                cache_creation_prompt_tokens: final_cache_creation_input_tokens.unwrap(),
+                cache_write_known: true,
             })
         } else {
             None

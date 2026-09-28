@@ -972,6 +972,7 @@ pub(super) async fn run_session(
                         inline_images,
                         needs_image_compaction,
                         evicted,
+                        effective_evicted,
                         body_bytes_after,
                     }) => {
                         // Unified-log record for local image-eviction verification.
@@ -984,9 +985,10 @@ pub(super) async fn run_session(
                                 "trigger_bytes": trigger_bytes,
                                 "reclaim_target_bytes": reclaim_target_bytes,
                                 "inline_images": inline_images,
-                                "images_remaining": inline_images.saturating_sub(evicted),
+                                "images_remaining": inline_images.saturating_sub(effective_evicted),
                                 "needs_image_compaction": needs_image_compaction,
                                 "evicted": evicted,
+                                "effective_evicted": effective_evicted,
                             })),
                         );
                     }

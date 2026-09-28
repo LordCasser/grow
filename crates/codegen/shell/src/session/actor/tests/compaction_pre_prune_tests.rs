@@ -178,7 +178,7 @@ fn async_compaction_scenario(action: &'static str) {
             let mut tool = server.expect_response_blocked("foreground executes tool",
                 InferenceRequestMatcher::foreground(InferenceEndpoint::Messages),
                 ScriptedResponse::sse([
-                    json!({"type":"message_start","message":{"id":"tool-msg","type":"message","role":"assistant","content":[],"model":"test","usage":{"input_tokens":74_000,"output_tokens":0}}}),
+                    json!({"type":"message_start","message":{"id":"tool-msg","type":"message","role":"assistant","content":[],"model":"test","usage":{"input_tokens":74_000,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}),
                     json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"async-todo","name":"todo_write","input":{}}}),
                     json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"todos\":[{\"id\":\"latest\",\"content\":\"latest todo while summary runs\",\"status\":\"in_progress\"}]}"}}),
                     json!({"type":"content_block_stop","index":0}),

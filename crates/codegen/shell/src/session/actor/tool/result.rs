@@ -738,10 +738,10 @@ impl SessionActor {
                             .map(|usage| u64::from(usage.completion_tokens)),
                         cache_read_tokens: usage
                             .as_ref()
-                            .map(|usage| u64::from(usage.cached_prompt_tokens)),
+                            .and_then(|usage| usage.cache_read_tokens().map(u64::from)),
                         cache_write_tokens: usage
                             .as_ref()
-                            .map(|usage| u64::from(usage.cache_creation_prompt_tokens)),
+                            .and_then(|usage| usage.cache_write_tokens().map(u64::from)),
                     },
                     item_count,
                     metrics.attempts,

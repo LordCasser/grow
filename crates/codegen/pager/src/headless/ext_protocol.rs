@@ -188,9 +188,9 @@ fn decode_session_notification(method: &str, params: &str) -> ExtEvent {
             #[serde(default)]
             input_tokens: u64,
             #[serde(default)]
-            cache_read_input_tokens: u64,
+            cache_read_input_tokens: Option<u64>,
             #[serde(default)]
-            cache_creation_input_tokens: u64,
+            cache_creation_input_tokens: Option<u64>,
         },
         ReasoningCompleted {
             #[serde(default)]

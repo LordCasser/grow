@@ -33,7 +33,7 @@ fn messages_partial_framing_closes_with_stop_reason_and_usage() {
         message_id: Some("msg_a".into()),
         stop_reason: Some("end_turn".into()),
         usage: Some(ResponseUsage {
-            input_tokens: 3,
+            input_tokens: Some(3),
             output_tokens: 7,
             ..Default::default()
         }),
@@ -138,8 +138,8 @@ fn messages_partial_response_started_emits_real_id_and_input_usage() {
         message_id: Some("msg_real".into()),
         model: Some("grow-4".into()),
         input_tokens: 42,
-        cache_read_input_tokens: 100,
-        cache_creation_input_tokens: 20,
+        cache_read_input_tokens: Some(100),
+        cache_creation_input_tokens: Some(20),
     }));
     out.extend(r.reduce(StreamEvent::AgentThought("mull".into())));
     out.extend(r.reduce(StreamEvent::ReasoningCompleted {
@@ -189,6 +189,28 @@ fn messages_partial_response_started_emits_real_id_and_input_usage() {
 }
 
 #[test]
+fn messages_partial_response_started_preserves_missing_cache_read() {
+    let mut r = messages(true);
+    r.reduce(StreamEvent::ResponseStarted {
+        message_id: Some("msg_missing".into()),
+        model: Some("grow-4".into()),
+        input_tokens: 42,
+        cache_read_input_tokens: None,
+        cache_creation_input_tokens: Some(0),
+    });
+    let out = r.reduce(StreamEvent::AgentMessage("hi".into()));
+    let start = out
+        .iter()
+        .find(|line| line["event"]["type"] == "message_start")
+        .unwrap();
+    let usage = &start["event"]["message"]["usage"];
+    assert_eq!(usage["input_tokens"], 42);
+    assert!(usage["cache_read_input_tokens"].is_null());
+    assert_eq!(usage["cache_creation_input_tokens"], 0);
+    assert!(usage.get("full_input_tokens").is_none());
+}
+
+#[test]
 fn messages_partial_response_started_ids_do_not_leak_across_responses() {
     let mut r = messages(true);
     let mut out = Vec::new();
@@ -196,8 +218,8 @@ fn messages_partial_response_started_ids_do_not_leak_across_responses() {
         message_id: Some("msg_real".into()),
         model: None,
         input_tokens: 9,
-        cache_read_input_tokens: 5,
-        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: Some(5),
+        cache_creation_input_tokens: Some(0),
     }));
     out.extend(r.reduce(StreamEvent::AgentMessage("one".into())));
     out.extend(r.reduce(response_completed("msg_real", "end_turn")));
@@ -213,15 +235,9 @@ fn messages_partial_response_started_ids_do_not_leak_across_responses() {
         5
     );
     assert_eq!(starts[1]["event"]["message"]["id"], "msg_0");
-    assert_eq!(starts[1]["event"]["message"]["usage"]["input_tokens"], 0);
-    assert_eq!(
-        starts[1]["event"]["message"]["usage"]["cache_read_input_tokens"],
-        0
-    );
-    assert_eq!(
-        starts[1]["event"]["message"]["usage"]["cache_creation_input_tokens"],
-        0
-    );
+    assert!(starts[1]["event"]["message"]["usage"]["input_tokens"].is_null());
+    assert!(starts[1]["event"]["message"]["usage"]["cache_read_input_tokens"].is_null());
+    assert!(starts[1]["event"]["message"]["usage"]["cache_creation_input_tokens"].is_null());
 }
 
 #[test]
@@ -332,7 +348,7 @@ fn messages_partial_empty_response_still_frames_message() {
         message_id: Some("msg_empty".into()),
         stop_reason: Some("end_turn".into()),
         usage: Some(ResponseUsage {
-            input_tokens: 5,
+            input_tokens: Some(5),
             output_tokens: 0,
             ..Default::default()
         }),
@@ -366,7 +382,7 @@ fn messages_partial_empty_then_real_response_do_not_cross_attribute() {
         message_id: Some("msg_a".into()),
         stop_reason: Some("end_turn".into()),
         usage: Some(ResponseUsage {
-            input_tokens: 11,
+            input_tokens: Some(11),
             output_tokens: 0,
             ..Default::default()
         }),

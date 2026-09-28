@@ -23,8 +23,8 @@ pub enum ChatStateEvent {
 
     /// Image byte-budget record for a built request (observability only,
     /// emitted on image-bearing turns). The session consumer writes this to
-    /// the local unified log for verification. `evicted == 0` means the body
-    /// was under the trigger and every image was kept.
+    /// the local unified log for verification. `evicted` counts new choices;
+    /// `effective_evicted` includes choices carried from previous requests.
     ImageBudget {
         /// Exact serialized conversation body size measured for the gate.
         body_bytes: usize,
@@ -38,6 +38,8 @@ pub enum ChatStateEvent {
         needs_image_compaction: bool,
         /// Images replaced with a placeholder this turn.
         evicted: usize,
+        /// Images already selected or newly replaced in this request.
+        effective_evicted: usize,
         /// Estimated body size after eviction (== `body_bytes` when none).
         body_bytes_after: usize,
     },
