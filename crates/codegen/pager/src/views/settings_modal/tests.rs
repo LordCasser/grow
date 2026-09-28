@@ -648,6 +648,33 @@ fn enter_on_compact_mode_also_toggles() {
 }
 
 #[test]
+fn show_model_provider_row_toggles_from_settings() {
+    crate::appearance::cache::set_show_model_provider(false);
+    let mut state = make_state();
+    state.selected = state
+        .rows
+        .iter()
+        .position(
+            |row| matches!(row, RowEntry::Setting { key, .. } if *key == "show_model_provider"),
+        )
+        .expect("Show model provider row is visible");
+
+    let enter = KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE);
+    assert!(matches!(
+        handle_settings_key(&mut state, &enter),
+        SettingsKeyOutcome::Action(Action::SetShowModelProvider(true))
+    ));
+
+    crate::appearance::cache::set_show_model_provider(true);
+    let space = KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE);
+    assert!(matches!(
+        handle_settings_key(&mut state, &space),
+        SettingsKeyOutcome::Action(Action::SetShowModelProvider(false))
+    ));
+    crate::appearance::cache::set_show_model_provider(false);
+}
+
+#[test]
 fn f2_closes_modal() {
     let mut s = make_state();
     let f2 = KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE);

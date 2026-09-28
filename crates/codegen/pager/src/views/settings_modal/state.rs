@@ -843,6 +843,7 @@ pub(super) fn action_for_bool(key: SettingKey, new: bool) -> Option<Action> {
         "show_timestamps" => Some(Action::SetTimestamps(new)),
         "show_timeline" => Some(Action::SetTimeline(new)),
         "simple_mode" => Some(Action::SetSimpleMode(new)),
+        "show_model_provider" => Some(Action::SetShowModelProvider(new)),
         "contextual_hints.undo" => Some(Action::SetContextualHintUndo(new)),
         "contextual_hints.plan_mode" => Some(Action::SetContextualHintPlanMode(new)),
         "contextual_hints.image_input" => Some(Action::SetContextualHintImageInput(new)),

@@ -2899,7 +2899,7 @@ Pager SHALL display a known effective child effort immediately after its model a
 
 ### Requirement: Prompt model label optionally includes provider
 
-Pager SHALL offer a persistent Settings choice between a compact `model (effort)` prompt footer label and the canonical `provider/model (effort)` label. Compact SHALL be the default. The choice SHALL apply to active session, child and Dashboard composers on the next render without changing the selected model or effort. The effort suffix SHALL appear only when an effective effort exists.
+Pager SHALL offer a persistent Settings choice between a compact `model (effort)` prompt footer label and the canonical `provider/model (effort)` label. Compact SHALL be the default. The choice SHALL apply to active session, child and Dashboard composers on the next render without changing the selected model or effort. The effort suffix SHALL appear only when an effective effort exists. The focused Settings Bool row SHALL accept Enter, Space and a value click to change this choice.
 
 #### Scenario: Compact default
 
@@ -2910,6 +2910,11 @@ Pager SHALL offer a persistent Settings choice between a compact `model (effort)
 
 - **WHEN** the user enables the preference in Settings for that route
 - **THEN** the prompt footer displays `bigmodel/glm-5.3 (max)` on the next render and future launches retain the choice.
+
+#### Scenario: Settings row toggles the preference
+
+- **WHEN** the user focuses “Show model provider” and presses Enter or Space, or clicks its value
+- **THEN** Pager switches the displayed value between On and Off and applies the resulting prompt footer choice on the next render.
 
 #### Scenario: Dashboard and child composer
 
