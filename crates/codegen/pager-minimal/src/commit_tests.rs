@@ -394,7 +394,7 @@ fn coordination_minimal_default_is_one_line_for_start_and_finish() {
 fn plan_body_anchored_above_a_parked_tool_commits_while_it_is_still_running() {
     let mut s = ScrollbackState::new();
     s.push(finalized("user prompt"));
-    let tool = s.push(running("exit_plan_mode")); // parked on the decision
+    let tool = s.push(running("plan_control")); // parked on the decision
     s.insert_block_before(tool, RenderBlock::agent_message("PLAN BODY"));
 
     // Prompt + plan commit; the running tool row still holds the frontier.
@@ -420,7 +420,7 @@ fn anchored_plan_body_is_not_left_in_the_live_tail() {
     // painted under the prompt AND printed above it.
     let mut s = ScrollbackState::new();
     s.push(finalized("user prompt"));
-    let tool = s.push(running("exit_plan_mode"));
+    let tool = s.push(running("plan_control"));
     s.insert_block_before(tool, RenderBlock::agent_message("PLAN BODY"));
 
     // Sizing pass: the tail is just the tool row (index 2), and a commit is
@@ -440,12 +440,12 @@ fn anchored_plan_body_is_not_left_in_the_live_tail() {
 #[test]
 fn revised_plan_anchors_to_its_own_tool_row_and_neither_plan_re_emits() {
     let mut s = ScrollbackState::new();
-    let tool1 = s.push(running("exit_plan_mode #1"));
+    let tool1 = s.push(running("plan_control #1"));
     s.insert_block_before(tool1, RenderBlock::agent_message("PLAN ONE"));
     assert_eq!(commit_collect(&mut s), vec![0]); // plan one
 
     s.get_mut(1).unwrap().mark_completed();
-    let tool2 = s.push(running("exit_plan_mode #2"));
+    let tool2 = s.push(running("plan_control #2"));
     s.insert_block_before(tool2, RenderBlock::agent_message("PLAN TWO"));
 
     // Tool #1 and plan two commit; tool #2 holds the frontier.

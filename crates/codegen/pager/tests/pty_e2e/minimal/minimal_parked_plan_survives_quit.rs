@@ -24,13 +24,13 @@ async fn minimal_parked_plan_survives_quit() {
         .wait_for_full_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(40))
         .expect("first turn streams");
 
-    let dir = session_dir(&content, &mut harness);
-    std::fs::write(dir.join("plan.md"), plan_body(TAG, PLAN_LINES)).expect("seed plan.md");
-
-    let _expectation = expect_tool_turn(&content, "call_plan_quit", "exit_plan_mode", "{}".into());
+    let args =
+        serde_json::json!({ "action": "submit", "plan": plan_body(TAG, PLAN_LINES) }).to_string();
+    let mut expectation = expect_tool_turn(&content, "call_plan_quit", "plan_control", args);
     harness
-        .inject_keys(b"present the plan\r")
+        .inject_keys(b"/plan present the plan\r")
         .expect("submit plan prompt");
+    expectation.wait_received().await;
     harness
         .wait_for_text(PLAN_PARKED_SENTINEL, Duration::from_secs(60))
         .expect("plan approval parks");

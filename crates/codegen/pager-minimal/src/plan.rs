@@ -49,7 +49,7 @@ const PLAN_HEADER: &str = "Plan ready for review";
 /// and is committed as its own block. The PlanControl protocol rejects empty plans
 /// before an approval view can be created.
 ///
-/// The block is anchored **above** the still-running `exit_plan_mode` tool row,
+/// The block is anchored **above** the still-running `plan_control` tool row,
 /// not appended after it, so the commit frontier reaches the plan while the
 /// approval is still parked. Users reported losing the head of a plan to the
 /// clipped live tail; design doc §6.16 has the full argument and the rejected

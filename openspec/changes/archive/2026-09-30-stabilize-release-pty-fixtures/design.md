@@ -1,0 +1,3 @@
+# Design
+
+The existing new-session PTY test first proves that the response head has reached native scrollback, which is necessary for the preservation assertion. It must also wait for the final line and turn completion before submitting `/new`; otherwise the test crosses a turn boundary while output is still active. Keep both facts as separate assertions. Initialize the isolated project and mock model configuration explicitly so unrelated startup pickers do not own the prompt. The test continues to verify two welcome cards, preserved prior output, and a fresh second turn. The separately documented placeholder-owner runtime defect is fixed by `minimal-welcome-after-session-binding`.

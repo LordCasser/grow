@@ -5,6 +5,8 @@ use super::common::*;
 #[ignore]
 async fn plan_revise_empty_enter_does_not_approve() {
     let content = ContentController::start().await.expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
+    content.seed_llm_config().expect("seed mock LLM config");
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} first turn done."));
 
     let binary = pager_binary().expect("resolve pager binary");
@@ -27,18 +29,21 @@ async fn plan_revise_empty_enter_does_not_approve() {
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
         .expect("welcome");
-    harness.inject_keys(b"go\r").expect("first turn");
+    // The first key promotes Welcome to the agent view; wait for that
+    // transition before sending the rest of the prompt.
+    harness.inject_keys(b"g").expect("promote welcome prompt");
+    harness
+        .wait_for_text("Enter:send", Duration::from_secs(10))
+        .expect("agent composer ready");
+    inject_keys_paced(&mut harness, b"o\r");
     harness
         .wait_for_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(40))
         .expect("first turn streams");
 
-    let dir = session_dir(&content, &mut harness);
-    std::fs::write(dir.join("plan.md"), plan_body("REV", 8)).expect("seed plan.md");
-
-    let _expectation = expect_tool_turn(&content, "call_plan_rev", "exit_plan_mode", "{}".into());
-    harness
-        .inject_keys(b"present the plan\r")
-        .expect("submit plan prompt");
+    let args = serde_json::json!({ "action": "submit", "plan": plan_body("REV", 8) }).to_string();
+    let mut expectation = expect_tool_turn(&content, "call_plan_rev", "plan_control", args);
+    inject_keys_paced(&mut harness, b"/plan present the plan\r");
+    expectation.wait_received().await;
     harness
         .wait_for_text("request changes", Duration::from_secs(60))
         .unwrap_or_else(|e| {

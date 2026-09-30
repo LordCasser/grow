@@ -1,0 +1,5 @@
+# Design
+
+The legacy fixtures modeled a plan file created before an `exit_plan_mode` call. The current Plan Behavior submits the complete plan through `plan_control(action="submit", plan=...)`. `/plan <description>` selects Plan before sending the initial prompt, so the test must use that entry point before expecting the first tool turn. If the user requests changes while the initial approval is pending, the behavior returns to Drafting and the revised candidate is submitted with `action="submit"` again. `action="amend"` is valid only after an approved plan is executing or already amending.
+
+Use the existing deterministic `plan_body` fixture as the inline tool argument. Wait for each scripted tool request and, for the revised plan, its unique first body sentinel before checking scrollback; the prior approval header can remain visible and is not sufficient evidence of a second approval. Preserve the tests' terminal-level assertions and approval interactions. Remove disk seeding because it bypasses the current input contract and can let the fixture pass without proving the tool submitted its plan.

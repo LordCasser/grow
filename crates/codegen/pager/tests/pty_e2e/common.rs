@@ -867,7 +867,7 @@ pub(crate) const MINIMAL_SWITCH_BACK_IDLE_SENTINEL: &str =
 /// Header of minimal's parked plan-approval controls strip.
 pub(crate) const PLAN_PARKED_SENTINEL: &str = "Plan ready for review";
 
-/// A plan body the `exit_plan_mode` tool will read off disk. Every step carries
+/// A complete plan body submitted inline to `plan_control`. Every step carries
 /// a unique `{tag}{NNN}` sentinel, because a truncated plan still contains its
 /// head and would pass a plain substring check.
 pub(crate) fn plan_body(tag: &str, lines: usize) -> String {

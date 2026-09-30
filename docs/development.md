@@ -122,6 +122,8 @@ Pager 子 Agent 权限审计组按 primary-turn epoch 聚合。成员追加与 r
 
 Minimal 每帧从当前 root、选中子 Agent 和 root 权限队列解析唯一可见 Agent；commit、viewport、live 和输入均使用该归属。切换视图会清空当前屏幕并重建新视图的原生提交边界，旧内容仍保留在终端历史中。实现入口为 `pager::minimal_api` 与 `pager-minimal::draw`；行为以 [Minimal 视图归属](../openspec/specs/client-surfaces/spec.md#requirement-minimal-frames-render-the-selected-agent-view) 为准。
 
+Minimal 新会话欢迎卡在 root Agent 绑定 session ID 后才提交，因为绑定会改变可见视图归属并清空 placeholder epoch 的当前屏幕。卡片会在该会话首批对话条目之前写入原生终端历史；行为以 [Minimal 欢迎卡](../openspec/specs/client-surfaces/spec.md#requirement-minimal-welcome-card-belongs-to-a-bound-session-epoch) 为准。
+
 ## Rust 验证入口
 
 按受影响 crate 缩小检查范围；下列命令是项目现有 CI/README 的入口，不意味着每次纯文档修改都运行全部测试。

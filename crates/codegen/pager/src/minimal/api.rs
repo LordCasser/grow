@@ -534,6 +534,18 @@ pub fn minimal_welcome_pending(app: &AppView) -> bool {
     app.minimal_state.welcome_pending
 }
 
+/// A new-session card may be printed only after the root Agent has acquired
+/// its session identity. Binding changes Minimal's visible owner and clears
+/// the placeholder epoch's screen.
+pub fn minimal_welcome_session_ready(app: &AppView) -> bool {
+    let ActiveView::Agent(id) = app.active_view else {
+        return false;
+    };
+    app.agents
+        .get(&id)
+        .is_some_and(|agent| agent.session.session_id.is_some())
+}
+
 /// `AppView::minimal_state.welcome_pending` (write).
 pub fn set_minimal_welcome_pending(app: &mut AppView, on: bool) {
     app.minimal_state.welcome_pending = on;

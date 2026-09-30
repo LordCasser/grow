@@ -13,19 +13,29 @@ fn duplicated(harness: &mut PtyHarness, tag: &str) -> Vec<usize> {
     plan_lines_duplicated(harness, tag, PLAN_LINES)
 }
 
-fn park_plan(
+async fn park_plan(
     content: &ContentController,
     harness: &mut PtyHarness,
-    dir: &std::path::Path,
     tag: &str,
     call_id: &str,
+    action: &str,
     prompt: &str,
 ) -> AgentTurnExpectation {
-    std::fs::write(dir.join("plan.md"), plan_body(tag, PLAN_LINES)).expect("seed plan.md");
-    let expectation = expect_tool_turn(content, call_id, "exit_plan_mode", "{}".into());
+    let args =
+        serde_json::json!({ "action": action, "plan": plan_body(tag, PLAN_LINES) }).to_string();
+    let mut expectation = expect_tool_turn(content, call_id, "plan_control", args);
     harness
         .inject_keys(format!("{prompt}\r").as_bytes())
         .expect("submit plan prompt");
+    expectation.wait_received().await;
+    harness
+        .wait_for_full_text(&format!("{tag}000"), Duration::from_secs(60))
+        .unwrap_or_else(|e| {
+            panic!(
+                "plan body was not committed to scrollback: {e}\nscreen:\n{}",
+                harness.screen_contents()
+            )
+        });
     harness
         .wait_for_text(PLAN_PARKED_SENTINEL, Duration::from_secs(60))
         .unwrap_or_else(|e| {
@@ -45,8 +55,8 @@ fn park_plan(
 /// reported reading a truncated plan with nothing behind it in the scrollback;
 /// design doc §6.16.
 ///
-/// Also pins the revision path: a revised plan is a fresh `exit_plan_mode` with
-/// a new `tool_call_id`, and must commit as its own block exactly once.
+/// Also pins the revision path: a revised plan is a fresh `plan_control` submit
+/// with a new `tool_call_id`, and must commit as its own block exactly once.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
 async fn minimal_parked_plan_commits_to_scrollback() {
@@ -59,22 +69,21 @@ async fn minimal_parked_plan_commits_to_scrollback() {
     let mut harness = spawn_minimal_sized(&content, 20, 100);
     wait_minimal_ready(&mut harness);
 
-    // A first turn, so the session (and its plan.md directory) exists.
+    // A first turn, so the session exists before entering Plan Behavior.
     harness.inject_keys(b"go\r").expect("submit first turn");
     harness
         .wait_for_full_text(MOCK_RESPONSE_SENTINEL, Duration::from_secs(40))
         .expect("first turn streams");
-    let dir = session_dir(&content, &mut harness);
-
     // ── plan 1, parked ──
     let _first = park_plan(
         &content,
         &mut harness,
-        &dir,
         "ONE",
         "call_plan_one",
-        "present the plan",
-    );
+        "submit",
+        "/plan present the plan",
+    )
+    .await;
     assert!(
         missing(&mut harness, "ONE").is_empty(),
         "the whole plan must be readable while the approval is parked \
@@ -95,11 +104,12 @@ async fn minimal_parked_plan_commits_to_scrollback() {
     let _second = park_plan(
         &content,
         &mut harness,
-        &dir,
         "TWO",
         "call_plan_two",
+        "submit",
         "make it shorter",
-    );
+    )
+    .await;
     assert!(
         missing(&mut harness, "TWO").is_empty(),
         "the revised plan must also be readable while parked (missing {:?})",

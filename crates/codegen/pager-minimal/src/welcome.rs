@@ -10,8 +10,9 @@
 //!
 //! It is printed via [`ratatui_inline::Terminal::insert_before`] — the same
 //! one-shot mechanism the commit pipeline uses — gated on an `AppView` flag set
-//! at session creation, so it prints exactly once per session and re-prints when
-//! a new session starts.
+//! at session creation and the bound root session ID. This avoids printing in
+//! the placeholder owner epoch, which is cleared when the ID arrives. The card
+//! prints exactly once per session and re-prints when a new session starts.
 
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -22,12 +23,14 @@ use pager::app::root::{ActiveView, AppView};
 use pager::minimal_api;
 use pager::theme::Theme;
 
-/// Commit the welcome card when one is pending (set at session start / `/new`).
+/// Commit the welcome card when one is pending and its session is bound.
 ///
 /// Called at the top of the minimal draw, before `commit_active`, so the card
 /// lands above the first conversation block in native scrollback.
 pub fn maybe_commit_welcome(app: &mut AppView, terminal: &mut PagerTerminal) {
-    if !minimal_api::minimal_welcome_pending(app) {
+    if !minimal_api::minimal_welcome_pending(app)
+        || !minimal_api::minimal_welcome_session_ready(app)
+    {
         return;
     }
     let width = terminal.viewport_area().width;

@@ -29,6 +29,9 @@ async fn minimal_new_session_keeps_history_and_resets() {
     let mut harness = spawn_minimal(&content);
     wait_minimal_ready(&mut harness);
     harness
+        .wait_for_full_text("Grow", Duration::from_secs(10))
+        .expect("initial minimal welcome card is visible");
+    harness
         .inject_keys(format!("{PROMPT}\r").as_bytes())
         .expect("submit turn 1");
 
@@ -44,6 +47,17 @@ async fn minimal_new_session_keeps_history_and_resets() {
         "turn 1 must reach native scrollback before /new\nscrollback:\n{}",
         harness.scrollback_text()
     );
+    harness
+        .wait_for_full_text("line 79 payload", Duration::from_secs(40))
+        .expect("all first-turn output reaches the terminal before /new");
+    harness
+        .wait_for_full_text("Worked for", Duration::from_secs(40))
+        .expect("first turn completes before /new");
+    assert!(
+        harness.full_text().contains("Grow"),
+        "first welcome card must be readable before /new\nfull:\n{}",
+        harness.full_text()
+    );
 
     // `/new` → fresh session: commits a second welcome card and resets the frontier.
     inject_keys_paced(&mut harness, b"/new");
@@ -57,8 +71,9 @@ async fn minimal_new_session_keeps_history_and_resets() {
     }
     assert!(
         harness.full_text().matches(WELCOME_BANNER).count() >= 2,
-        "/new must commit a second welcome card (first preserved in scrollback)\nfull:\n{}",
-        harness.full_text()
+        "/new must commit a second welcome card (first preserved in scrollback)\nfull:\n{}\nscreen:\n{}",
+        harness.full_text(),
+        harness.screen_contents()
     );
 
     // Prior turn's committed lines remain in native scrollback (not wiped).
