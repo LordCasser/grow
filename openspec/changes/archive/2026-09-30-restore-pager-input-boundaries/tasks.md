@@ -1,0 +1,3 @@
+- [x] Keep post-bracketed-Paste keys on their ordinary event path and update the stale test to assert the contract.
+- [x] Dismiss an active `@` context on Escape even when a pending query has no visible results.
+- [x] Update the developer note, run the Pager library suite, and record verification.

@@ -25,6 +25,7 @@ pub mod mcp_cmd;
 pub mod memory_cmd;
 pub mod memory_release;
 pub mod memory_trace;
+pub(crate) mod transcript_projection;
 // ── Minimal (scrollback-native) mode seam ────────────────────────────────────
 // The *only* minimal-specific surface in this (the "full pager") crate. Both
 // modules are grouped under `src/minimal/` so a full-pager contributor sees one
@@ -46,6 +47,7 @@ pub mod notifications;
 pub mod plugin_cmd;
 pub mod project_picker;
 pub mod pty_wrap;
+pub mod replay_cmd;
 pub mod scrollback;
 pub mod search;
 pub mod sessions_cmd;

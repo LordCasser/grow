@@ -186,22 +186,30 @@ pub fn session_usage_status_line(
             let totals = &usage.totals;
             let total_tokens = totals.input_tokens.saturating_add(totals.output_tokens);
             let lower_bound = if usage.usage_is_incomplete { "≥" } else { "" };
-            let recorded = if usage.usage_is_incomplete {
-                " recorded"
+            let measured_input = totals.cache_read_known_input_tokens;
+            let cached_input = totals.cached_read_tokens;
+            let cache_rate = if measured_input > 0
+                && measured_input <= totals.input_tokens
+                && cached_input <= measured_input
+            {
+                Some(crate::app::status_blocks::cache_hit_rate(
+                    measured_input,
+                    cached_input,
+                ))
             } else {
-                ""
+                None
+            };
+            let measured = usage.usage_is_incomplete
+                || totals.cache_read_unknown_calls > 0
+                || measured_input < totals.input_tokens;
+            let cache = match cache_rate {
+                Some(rate) if measured => format!("measured cache {rate}"),
+                Some(rate) => format!("{rate} cache"),
+                None => "N/A cache".to_string(),
             };
             format!(
-                "{lower_bound}{} tokens · {} cache{recorded}",
+                "{lower_bound}{} tokens · {cache}",
                 format_tokens_compact_u64(total_tokens),
-                if usage.usage_is_incomplete || totals.cache_read_unknown_calls > 0 {
-                    "N/A".to_string()
-                } else {
-                    crate::app::status_blocks::cache_hit_rate(
-                        totals.cache_read_known_input_tokens,
-                        totals.cached_read_tokens,
-                    )
-                }
             )
         }
         None => "— tokens · — cache".to_string(),
@@ -252,7 +260,7 @@ fn goal_phase_label(goal: &GoalDisplayState) -> String {
 
 /// Build a compact goal status `Line` for the agent status bar.
 ///
-/// Format: `[Goal: {label}]  {tokens}  {elapsed}`
+/// Format: `[Goal: {label}]  {tokens} · {cache rate}  {elapsed}`
 ///
 /// When `hovered` is true the label is bolded/underlined to signal
 /// clickability. When the goal is `Active`, the shared frame drives its spinner.
@@ -277,6 +285,22 @@ pub fn goal_status_line(
             )
         }
         _ => format!("{lower_bound}{} tokens", tokens_str),
+    };
+
+    let historical = goal
+        .tokens_used
+        .saturating_sub(goal.usage_breakdown.total())
+        > 0;
+    let (cache_rate, measured) = crate::app::status_blocks::goal_cache_hit_rate(
+        goal.usage_breakdown,
+        goal.usage_incomplete || historical,
+    );
+    let cache_display = if cache_rate == "N/A" {
+        "N/A cache".to_owned()
+    } else if measured {
+        format!("measured cache {cache_rate}")
+    } else {
+        format!("{cache_rate} cache")
     };
 
     let elapsed_str = format_elapsed_compact(goal.live_elapsed_ms_at(frame_stamp.now()));
@@ -311,7 +335,10 @@ pub fn goal_status_line(
         Span::styled("[", dim_style),
         Span::styled(goal_text, label_style),
         Span::styled("]", dim_style),
-        Span::styled(format!("  {tokens_display}  {elapsed_str}"), dim_style),
+        Span::styled(
+            format!("  {tokens_display} · {cache_display}  {elapsed_str}"),
+            dim_style,
+        ),
     ])
 }
 
@@ -389,7 +416,7 @@ mod tests {
     }
 
     #[test]
-    fn session_usage_formats_unknown_large_incomplete_and_invalid_cache() {
+    fn session_usage_formats_measured_cache_independently_from_total_completeness() {
         let theme = Theme::current();
         assert_eq!(
             line_text(session_usage_status_line(None, &theme, false)),
@@ -409,7 +436,7 @@ mod tests {
                 &theme,
                 false,
             )),
-            "≥120 tokens · N/A cache recorded"
+            "≥120 tokens · measured cache 90.00%"
         );
         assert_eq!(
             line_text(session_usage_status_line(
@@ -432,29 +459,137 @@ mod tests {
         partial.totals.cache_read_unknown_calls = 1;
         assert_eq!(
             line_text(session_usage_status_line(Some(&partial), &theme, false)),
+            "1k tokens · measured cache 80.00%"
+        );
+
+        let mut late_sample = usage(1_000, 0, 0, true);
+        late_sample.totals.cache_read_known_input_tokens = 0;
+        assert_eq!(
+            line_text(session_usage_status_line(Some(&late_sample), &theme, false)),
+            "≥1k tokens · N/A cache"
+        );
+
+        let mut zero_reads = usage(1_000, 0, 0, false);
+        zero_reads.totals.cache_write_unknown_calls = 1;
+        assert_eq!(
+            line_text(session_usage_status_line(Some(&zero_reads), &theme, false)),
+            "1k tokens · 0.00% cache"
+        );
+
+        let mut no_read_coverage = usage(1_000, 0, 0, false);
+        no_read_coverage.totals.cache_read_known_input_tokens = 0;
+        assert_eq!(
+            line_text(session_usage_status_line(
+                Some(&no_read_coverage),
+                &theme,
+                false
+            )),
             "1k tokens · N/A cache"
         );
+
+        let mut cached_exceeds_measured = usage(100, 0, 0, false);
+        cached_exceeds_measured.totals.cached_read_tokens = 11;
+        cached_exceeds_measured.totals.cache_read_known_input_tokens = 10;
+        assert_eq!(
+            line_text(session_usage_status_line(
+                Some(&cached_exceeds_measured),
+                &theme,
+                false,
+            )),
+            "100 tokens · N/A cache"
+        );
+
+        let mut measured_exceeds_recorded = usage(100, 0, 0, false);
+        measured_exceeds_recorded
+            .totals
+            .cache_read_known_input_tokens = 101;
+        assert_eq!(
+            line_text(session_usage_status_line(
+                Some(&measured_exceeds_recorded),
+                &theme,
+                false,
+            )),
+            "100 tokens · N/A cache"
+        );
+    }
+
+    #[test]
+    fn goal_status_shows_its_own_cache_rate_and_unknown_samples() {
+        let theme = Theme::current();
+        let now = std::time::Instant::now();
+        let frame = crate::motion::FrameStamp::at(now, now);
+        let mut goal = GoalDisplayState::test_stub();
+        goal.tokens_used = 580;
+        goal.usage_breakdown = shell::session::goal_tracker::GoalTokenUsage::new(500, 200, 80);
+        let exact = line_text(goal_status_line(&goal, &theme, false, frame, None, 0));
+        assert!(exact.contains("580 tokens · 40.00% cache"), "{exact}");
+
+        goal.tokens_used = 1_080;
+        goal.usage_breakdown.unclassified_input_tokens = 500;
+        let partial = line_text(goal_status_line(&goal, &theme, false, frame, None, 0));
+        assert!(
+            partial.contains("1.1k tokens · measured cache 40.00%"),
+            "{partial}"
+        );
+
+        goal.tokens_used = 580;
+        goal.usage_breakdown =
+            shell::session::goal_tracker::GoalTokenUsage::with_cache_read(500, None, 80);
+        let unknown = line_text(goal_status_line(&goal, &theme, false, frame, None, 0));
+        assert!(unknown.contains("580 tokens · N/A cache"), "{unknown}");
+    }
+
+    #[test]
+    fn known_samples_remain_visible_across_unknown_and_late_settlement() {
+        let theme = Theme::current();
+        let snapshots = [
+            (usage(0, 0, 0, true), "≥0 tokens · N/A cache"),
+            (usage(100, 0, 80, false), "100 tokens · 80.00% cache"),
+            (
+                usage(100, 0, 80, true),
+                "≥100 tokens · measured cache 80.00%",
+            ),
+            (
+                usage(1_000, 0, 890, true),
+                "≥1k tokens · measured cache 89.00%",
+            ),
+        ];
+        for (snapshot, expected) in &snapshots {
+            assert_eq!(
+                line_text(session_usage_status_line(Some(snapshot), &theme, false)),
+                *expected
+            );
+        }
+        let details = crate::app::status_blocks::session_usage_block_text(&snapshots[3].0);
+        assert!(
+            details.contains("89.00% (100.00% of recorded input measured)"),
+            "{details}"
+        );
+        assert!(details.contains("total usage is incomplete"), "{details}");
     }
 
     #[test]
     fn narrow_status_bar_keeps_rightmost_entries_and_bounds_hit_areas() {
         let theme = Theme::current();
-        let area = Rect::new(7, 3, 12, 1);
-        let mut buf = Buffer::empty(Rect::new(0, 0, 24, 6));
-        let mut status = AgentStatusBar::new(&theme);
-        status.push("usage", Line::from("1.5M tokens · 90.00% cache"));
-        status.push("context", Line::from("ctx 50%"));
+        let usage_line = Line::from("≥1.5M tokens · measured cache 90.00%");
+        for width in 1..=usage_line.width() as u16 {
+            let area = Rect::new(7, 3, width, 1);
+            let mut buf = Buffer::empty(Rect::new(0, 0, 48, 6));
+            let mut status = AgentStatusBar::new(&theme);
+            status.push("usage", usage_line.clone());
 
-        let areas = status.render(&mut buf, area);
-
-        let usage = areas.get("usage").expect("left usage is minimally clipped");
-        assert!(usage.width > 0);
-        assert!(usage.x >= area.x);
-        assert!(usage.right() <= area.right());
-        let context = areas
-            .get("context")
-            .expect("rightmost context remains visible");
-        assert!(context.x >= area.x);
-        assert!(context.right() <= area.right());
+            let areas = status.render(&mut buf, area);
+            let usage = areas.get("usage").expect("usage remains clickable");
+            assert!(usage.width > 0);
+            assert!(usage.x >= area.x);
+            assert!(usage.right() <= area.right());
+            let visible = (usage.x..usage.right())
+                .map(|x| buf[(x, area.y)].symbol())
+                .collect::<String>();
+            assert!(
+                !visible.contains('%') || visible.contains("measured cache"),
+                "visible percentage must keep its qualifier at width {width}: {visible:?}"
+            );
+        }
     }
 }

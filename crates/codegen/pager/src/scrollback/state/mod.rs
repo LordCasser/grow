@@ -1556,6 +1556,12 @@ impl ScrollbackState {
     }
 
     pub fn set_entry_running(&mut self, id: EntryId, running: bool) {
+        self.set_entry_running_with_clock(id, running, true);
+    }
+
+    /// Historical activity is an unresolved recorded state, not a timer
+    /// starting when the transcript happens to be viewed.
+    pub(crate) fn set_entry_running_with_clock(&mut self, id: EntryId, running: bool, clock: bool) {
         let Some(entry) = self.entries.get_mut(&id) else {
             return;
         };
@@ -1563,7 +1569,7 @@ impl ScrollbackState {
         entry.is_running = running;
         entry.invalidate_cache();
         if running && !was_running {
-            if let RenderBlock::ToolCall(ref mut tc) = entry.block {
+            if clock && let RenderBlock::ToolCall(ref mut tc) = entry.block {
                 tc.start_timing();
             }
             self.running.insert(entry.id);

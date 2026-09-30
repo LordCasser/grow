@@ -894,48 +894,12 @@ impl AgentView {
             return InputOutcome::Unchanged;
         }
 
-        // Handle raw toggle: capture old source map, toggle, rebuild with stability
-        if viewer.raw_toggle_pending {
-            viewer.raw_toggle_pending = false;
-            // Record scroll anchor BEFORE toggle so the selected line stays
-            // at the same screen position after the rebuild.
-            viewer.list_state.set_scroll_anchor();
-            // Capture source map BEFORE toggle for cursor mapping
-            let old_source_line = self
-                .scrollback
-                .get_by_id(viewer.entry_id)
-                .and_then(|entry| {
-                    viewer.list_state.selected_id().and_then(|id| {
-                        crate::views::block_viewer::BlockViewerPane::source_line_for_id(
-                            &entry.block,
-                            id,
-                        )
-                    })
-                });
-            // Toggle raw mode on the entry
-            if let Some(entry) = self.scrollback.get_by_id_mut(viewer.entry_id) {
-                entry.toggle_raw();
-            }
-            // Re-borrow immutably to rebuild items (avoids clone)
-            if let Some(entry) = self.scrollback.get_by_id(viewer.entry_id) {
-                viewer.rebuild_items(entry);
-                viewer.jump_to_source_line(entry, old_source_line);
-            }
-        }
-
-        if viewer.data_toggle_pending {
-            viewer.data_toggle_pending = false;
-            viewer.data_mode = !viewer.data_mode;
-            if let Some(entry) = self.scrollback.get_by_id(viewer.entry_id) {
-                viewer.rebuild_items(entry);
-            }
-        }
-
-        // Process pending copy actions (logic lives in BlockViewerPane)
         let entry_id = viewer.entry_id;
-        if let Some(entry) = self.scrollback.get_by_id(entry_id)
-            && let Some(text) = viewer.process_pending_copy(entry)
-        {
+        let copy_text = self
+            .scrollback
+            .get_by_id_mut(entry_id)
+            .and_then(|entry| viewer.apply_pending_entry_actions(entry));
+        if let Some(text) = copy_text {
             self.copy_to_clipboard(&text);
         }
 

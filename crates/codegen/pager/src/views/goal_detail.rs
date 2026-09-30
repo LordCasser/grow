@@ -22,6 +22,7 @@ fn usage_lines(goal: &GoalDisplayState) -> Vec<String> {
         group_thousands(goal.tokens_used as u64)
     )];
     let usage = goal.usage_breakdown;
+    let (cache_rate, measured) = crate::app::status_blocks::goal_cache_hit_rate(usage, partial);
     lines.extend([
         format!(
             "Input (cache hit)   {marker}{}",
@@ -34,6 +35,14 @@ fn usage_lines(goal: &GoalDisplayState) -> Vec<String> {
         format!(
             "Input (unclassified) {marker}{}",
             group_thousands(usage.unclassified_input_tokens)
+        ),
+        format!(
+            "Cache hit rate       {}{cache_rate}",
+            if measured && cache_rate != "N/A" {
+                "measured "
+            } else {
+                ""
+            }
         ),
         format!(
             "Output              {marker}{}",
@@ -331,6 +340,7 @@ mod tests {
         assert!(lines.contains(&"Total tokens  580".into()));
         assert!(lines.contains(&"Input (cache hit)   200".into()));
         assert!(lines.contains(&"Input (cache miss)  300".into()));
+        assert!(lines.contains(&"Cache hit rate       40.00%".into()));
         assert!(lines.contains(&"Output              80".into()));
         assert!(lines.contains(&"Budget  580/1,000 tokens".into()));
         assert!(!lines.iter().any(|line| line.contains('≥')));
@@ -348,6 +358,7 @@ mod tests {
         assert!(lines.contains(&"Total tokens  ≥300,000,000".into()));
         assert!(lines.contains(&"Input (cache hit)   ≥12,345,678".into()));
         assert!(lines.contains(&"Input (cache miss)  ≥111,111,111".into()));
+        assert!(lines.contains(&"Cache hit rate       measured 10.00%".into()));
         assert!(lines.contains(&"Output              ≥34,567,890".into()));
         assert!(
             lines.contains(&"Unclassified history  ≥141,975,321 (categories unavailable)".into())
@@ -367,9 +378,23 @@ mod tests {
                 .any(|line| line.contains("categories unavailable"))
         );
         assert!(lines.contains(&"Input (cache hit)   ≥0".into()));
+        assert!(lines.contains(&"Cache hit rate       N/A".into()));
         goal.tokens_used = 0;
         goal.usage_incomplete = true;
         assert!(usage_lines(&goal).contains(&"Total tokens  ≥0".into()));
+    }
+
+    #[test]
+    fn unclassified_goal_input_does_not_lower_measured_cache_rate() {
+        let mut goal = GoalDisplayState::test_stub();
+        goal.tokens_used = 1_080;
+        goal.usage_breakdown = shell::session::goal_tracker::GoalTokenUsage {
+            unclassified_input_tokens: 500,
+            ..shell::session::goal_tracker::GoalTokenUsage::new(500, 200, 80)
+        };
+        let lines = usage_lines(&goal);
+        assert!(lines.contains(&"Total tokens  1,080".into()));
+        assert!(lines.contains(&"Cache hit rate       measured 40.00%".into()));
     }
 
     #[test]

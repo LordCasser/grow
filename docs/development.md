@@ -2,6 +2,10 @@
 
 项目使用 OpenSpec SDD。先把本次要改变的行为写清楚，再实现和验证，最后归档成为当前规范。纯文档修正也保留最小变更记录，但不增加无意义需求。
 
+模型目录在配置解析时把 provider 的 `api_backend` 作为默认值投影到各 model；
+model 显式值优先，最终采样配置只持有解析后的协议。配置到请求的边界见
+[model-sampling](../openspec/specs/model-sampling/spec.md#requirement-model-api-backend-overrides-its-provider-default)。
+
 采样断流排查从 attempt evidence 的 `attempt_number`、`stream_end`、
 `output_delivery`、`output_observed` 和 `recovery_stop` 决定开始，再核对
 Timeline 的 `sampling_usage/attempt_settled`。`[DONE]` 或 body EOF 不能代替
@@ -96,6 +100,18 @@ openspec validate --archived --no-interactive
 
 归档是维护规范的本地操作，不代表 Git 已提交、合并或发布。CLI 的 artifact 状态只检查文件是否存在；格式通过也不能证明行为正确。
 
+## 离线 transcript 调试
+
+离线 transcript 的实现入口是 `shell::session::storage::transcript`、`pager::transcript_projection` 和 `pager::replay_cmd`。排查 export/replay 时分别核对捕获来源、事实到展示的转换、虚拟时钟；不要通过构造 SessionActor、恢复 executor 或运行 Hook 来补历史。`TranscriptSnapshot` 固定所选 ledger 的文件身份和读取上界，跨 session 仍不是全局原子快照。取消/下一输入不代表 pending 工具成功，晚到 terminal 必须按 prompt identity 处理。相关行为见 [离线中断归属](../openspec/specs/client-surfaces/spec.md#requirement-offline-transcripts-preserve-interrupted-turn-ownership)、[来源截点](../openspec/specs/client-surfaces/spec.md#requirement-offline-snapshot-frontiers-survive-normal-append) 与 [播放语义边界](../openspec/specs/client-surfaces/spec.md#requirement-replay-semantic-boundaries-take-precedence-over-simulated-text)。
+
+Behavior 选择、Plan phase、Goal 与 foreground turn/Workflow Run 分别投影。取消 turn 不隐式暂停 Goal，离开 Workflow Behavior 不隐式终止 Run；模式和控制回执可以穿插模拟正文，不触发执行或提前结束正文。reader 校验 Timeline 的 `SessionControlSnapshot`，如果显示缓存遗漏最后状态，在末尾追加明确标记的截点状态；不能据此还原缺失的中间确认界面或事件位置。Goal clear 清除当前目标展示，停止状态仍允许已记录的重启，Workflow 正 revision 防止旧更新覆盖新投影。契约见 [离线 Behavior/Goal](../openspec/specs/client-surfaces/spec.md#requirement-offline-behavior-and-goal-projections-remain-observational) 与 [Control 截点](../openspec/specs/client-surfaces/spec.md#requirement-offline-control-snapshots-use-captured-authority)。
+
+定向回归可运行 `cargo test --locked -p shell --lib session::storage::transcript`、`cargo test --locked -p pager --lib transcript_projection`、`cargo test --locked -p pager --lib replay_cmd` 和 `cargo test --locked -p pager --lib export_cmd::tests`。`replay_cmd` 不带 `::tests`，以覆盖生产 tree/browser/time/idle/panel 子模块。真实 CLI/PTY 的离线中断 smoke 与未覆盖范围保存在 [中断审计记录](../openspec/changes/archive/2026-09-29-harden-transcript-interruption-snapshots/verification.md)，Behavior/Goal 组合覆盖见 [专项审计](../openspec/changes/archive/2026-09-29-harden-offline-behavior-goal-projections/audit.md)。
+
+### 只读 Replay
+
+Replay 的独立 TUI 复用 ScrollbackPane 与详情 viewer，提供只读搜索、展开、复制和子 Agent 导航。底部专用面板显示全树播放状态、进度、历史业务状态、本机时区时间及可用操作；F8 可在任意焦点暂停，`]` 在正文或通过面板显式跳到下一记录。已确认且严格超过 30 秒的 IDLE 压缩为 1 秒播放时间；中断恢复空档标估算，普通工具中无法确认的权限等待和缺时后台任务保守保护。旧记录缺少的时间与等待事实不能从静默或当前时间推断。入口和场景见 [只读 Replay 契约](../openspec/specs/client-surfaces/spec.md#requirement-replay-supports-ordinary-read-only-transcript-inspection)，实施验收见 [记录](../openspec/changes/archive/2026-09-30-interactive-readonly-replay/verification.md)。
+
 ## 不改行为的最小变更
 
 先创建 change，在生成的 `.openspec.yaml` 中保留 schema/created 并加入 `skip_specs: true`。proposal 写明不改行为的原因，design 简述影响，tasks 只列必要动作和验证。不创建空 delta，也不为工具维护虚构产品能力。完成后使用 `openspec archive <change> --skip-specs --yes`，再运行上述全量与归档校验。
@@ -139,6 +155,10 @@ Windows 协调清单用句柄级原子替换保留已有读者；独立会话加
 
 用量状态栏由 `ChatStateEvent::SessionUsageUpdated` 投影到账本变化时的 transient `SessionInfoUpdate.meta["grow/sessionUsage"]`，复用 `PromptUsage`，不增加周期查询或模型输入。主模型 attempt、子 Agent 终态结算、session incomplete 与冷恢复边界写入 Timeline；新 actor 按结算身份恢复 lifetime aggregate，resident reconnect 不新增分段。Pager 按累计值替换、丢弃倒退及历史 replay；normal 状态栏只显示 lifetime 总体，`/usage` 另外按 Initial run、Resume #N 展示分段。计费窗口和点击行为见 [会话用量契约](../openspec/specs/client-surfaces/spec.md#requirement-ordinary-agent-status-shows-session-usage)。
 
+Goal 状态栏、详情与只读回放的缓存率只用已分类的 cache hit + miss 输入作分母；未分类、历史聚合与未知消费使可计算比例带 `measured` 限定，无已分类输入则显示 N/A。其他无 Goal Behavior 沿用普通 session 用量投影。契约见 [Goal 缓存率](../openspec/specs/client-surfaces/spec.md#requirement-goal-usage-surfaces-show-measured-cache-hit-rates)。
+
+Chat 流在 finish reason 与完整 usage 都已解析后，若用户 steer 或逻辑期限在可选尾帧等待期间取消 attempt，Sampler 仍以原 attempt 身份结算这份已确认的 token、cache 字段可用性与已报告费用；取消不等待尚未到达的 usage。未收到可信完整 usage 的已开始 attempt 继续按未知消费结算。状态栏在总消费不完整时保留 `≥`，只按 read 已知的输入样本计算缓存率，并以 `measured cache` 限定部分样本；`/usage` 的 coverage 是这些样本占全部已记录输入的比例，不包括未知消费。契约见 [中断用量结算](../openspec/specs/model-sampling/spec.md#requirement-cancellation-preserves-confirmed-attempt-usage) 与 [状态栏用量](../openspec/specs/client-surfaces/spec.md#requirement-ordinary-agent-status-shows-session-usage)。
+
 `UsageLedger` 同时保留账本所属 Agent 与每个已完成子 Agent 的身份分项；子 Agent 以稳定 `subagent_id` 沿既有终态 ACK fold 进入父账本并持久结算。`PromptUsage` 当前只投影包含全部 Agent 的总体和 provider/model 分项，不把 Agent 分项暴露到 `/usage`、headless 或 normal 状态栏。
 
 Pager 的 cancel notification 没有响应体；`TurnCancelling` 因此在短窗口后复用 exact-prompt status 查询，以 terminal/unknown/error 收敛，Running 只重新起算窗口。首次 session load 使用带来源 surface 的临时 Agent：失败会删除临时页并返回 Welcome、原 Agent 或 Dashboard，原地 reload 仍走既有事务回滚。
@@ -164,6 +184,8 @@ Pager 的 cancel notification 没有响应体；`TurnCancelling` 因此在短窗
 图片附件URI使用 `client-support::placeholder_images::file_uri_from_path`，不能直接拼接路径字符串。生成与解析边界见 [图片URI契约](../openspec/specs/client-surfaces/spec.md#requirement-image-file-uris-preserve-literal-path-bytes)；占位符在客户端展示时仍可使用原始文件路径。
 
 Dashboard 的路径粘贴共用 `insert_dropped_paths`，保留图片和普通文件的顺序；不要在插入前使用图片专用过滤器。见 [混合路径契约](../openspec/specs/client-surfaces/spec.md#requirement-dashboard-preserves-mixed-drop-paths)。问题模式和异步目标有效性由调用入口检查。
+
+终端输入批次中，已完成的括号粘贴保留独立边界，其后的普通按键逐个路由；无括号粘贴检测只处理此前的按键段。文件补全查询更新会立即清空旧结果，`@` 上下文即使暂时无可见结果，Esc 仍可关闭它和目录钻取锚点。见 [粘贴边界](../openspec/specs/client-surfaces/spec.md#requirement-paste-collection-preserves-input-batch-boundaries) 与 [文件搜索当前查询](../openspec/specs/client-surfaces/spec.md#requirement-file-search-results-belong-to-the-current-query)。
 
 异步文件 URL 和原始剪贴板文本是两个独立来源。分类未命中时，通过 `ClipboardPasteSource::file_url_text_on_miss` 判断是否需要保留 URL 文本；仅在成功探测且没有原始非空文本时使用。见 [异步 URL 回退契约](../openspec/specs/client-surfaces/spec.md#requirement-deferred-file-urls-survive-classification-miss)。
 
@@ -289,6 +311,8 @@ GROW_PERF_ASSERT_HISTORY=1 cargo test --locked -p shell --features test-support 
 可见会话处于历史 replay 时，Pager 对 ACP、动画和周期性 UI maintenance 的自动绘制采用至少 100 ms 间隔；输入与显式动作维持即时绘制，`SessionLoaded` 后恢复正常间隔。状态维护和通知处理不受绘制节流影响；契约见 [冷恢复绘制节奏](../openspec/specs/client-surfaces/spec.md#requirement-cold-replay-paint-work-is-bounded-by-a-visible-progress-cadence)。
 
 Pager 在恢复 batch 中保留已有布局，新增条目和 dirty 文本先使用估计高度，再由可见区域完成精确测量；隐藏 thinking 的跨条目间距回退到完整重建。turn 索引在最外层 batch 结束时重建，完整加载后的布局仍预热上方页面。加载中的导出与 transcript 保护继续以 [客户端契约](../openspec/specs/client-surfaces/spec.md) 为准。
+
+Pager 的选中框和悬停框按相邻条目、面板的实际间距放置角符号。无空行时角符号留在当前条目或面板内；有空行时可使用空行，视口裁剪时保留延续边线。粘性标题位于滚动区首行时也收进该区域。契约见 [TUI 框角边界](../openspec/specs/client-surfaces/spec.md#requirement-tui-frame-corners-remain-within-their-owned-rows)。
 
 JSONL full/light observation 仅从已验证 Timeline 派生内存 title/model；显式 writer restore 获得 lease 后才修复持久投影。观察不会因 Summary 滞后而争抢 writer lease，冲突和损坏仍拒绝，见 [只读观察契约](../openspec/specs/session-timeline/spec.md#requirement-session-observation-does-not-repair-durable-projections)。Workflow 从最新候选向前验证，最多保留 128 个有效 run，返回时保持 Timeline 顺序；无效候选不占名额。单文件读取预算保持，但最坏情况下会检查所有 Timeline 候选，见 [Workflow 恢复契约](../openspec/specs/workflow-execution/spec.md#requirement-workflow-restore-retains-the-latest-valid-runs)。
 

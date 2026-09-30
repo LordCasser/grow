@@ -25,7 +25,8 @@ the API unless its `model` field overrides that value.
 
 ## Architecture constraints
 
-- `[provider.<id>]` owns the wire protocol.
+- `[provider.<id>].api_backend` sets the default wire protocol; a model's own `api_backend`
+  overrides it.
 - `[provider.<id>.options]` owns endpoint and credential settings shared by its models.
 - `[provider.<id>.models.<model>]` owns model metadata and per-model overrides.
 - `[models].default` seeds only newly created sessions.
@@ -54,6 +55,30 @@ These constraints keep provider configuration global while model selection remai
 
 Choose the protocol exposed by the endpoint. A Claude model served by an OpenAI-compatible gateway
 still uses `chat_completions`; an Anthropic-compatible gateway uses `messages`.
+
+Set `api_backend` on the provider for its usual protocol, then override it on individual models
+that use another protocol. If neither level sets it, Grow uses `chat_completions`:
+
+```toml
+[provider.gateway]
+api_backend = "responses"
+
+[provider.gateway.options]
+base_url = "https://gateway.example/v1"
+env_key = "GATEWAY_API_KEY"
+
+[provider.gateway.models.primary]
+# Inherits responses.
+
+[provider.gateway.models.legacy]
+api_backend = "chat_completions"
+
+[provider.gateway.models.claude]
+api_backend = "messages"
+base_url = "https://gateway.example/anthropic/v1"
+```
+
+The model-level `base_url` is optional; use it when that protocol has a different endpoint URL.
 
 ## Provider options
 
@@ -128,7 +153,7 @@ output_limit = 8192
 ```
 
 A model may override shared provider options when required. Common model fields include `model`,
-`name`, `description`, `context_window`, `temperature`, `top_p`, `output_limit`,
+`name`, `description`, `api_backend`, `base_url`, `context_window`, `temperature`, `top_p`, `output_limit`,
 `reasoning_efforts`, `extra_headers`, `query_params`, and
 `env_http_headers`.
 

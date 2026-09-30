@@ -6,6 +6,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use axum::Extension;
 use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::middleware;
@@ -484,6 +485,7 @@ pub async fn serve(
     session_id: &str,
     bind: SocketAddr,
     on_ready: impl FnOnce(&str, &str),
+    export_transcript: impl Fn(&str) -> anyhow::Result<tempfile::NamedTempFile> + Send + Sync + 'static,
 ) -> anyhow::Result<()> {
     if !bind.ip().is_loopback() {
         anyhow::bail!("Trajectory server only accepts loopback bind addresses, got {bind}");
@@ -531,14 +533,23 @@ pub async fn serve(
         sessions_root: crate::util::grow_home::grow_home().join("sessions"),
         cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
     };
-    let app = trajectory_router(&token, state);
+    let app = trajectory_router(&token, state, Arc::new(export_transcript));
     let url = format!("http://{local}/{token}/");
     on_ready(&canonical_session_id, &url);
     axum::serve(listener, app).await?;
     Ok(())
 }
 
-fn trajectory_router(token: &str, state: AppState) -> Router {
+type TranscriptArchiveFactory =
+    Arc<dyn Fn(&str) -> anyhow::Result<tempfile::NamedTempFile> + Send + Sync>;
+
+#[derive(Clone)]
+struct TranscriptDownload {
+    export: TranscriptArchiveFactory,
+    in_flight: Arc<tokio::sync::Semaphore>,
+}
+
+fn trajectory_router(token: &str, state: AppState, export: TranscriptArchiveFactory) -> Router {
     let root = format!("/{token}");
     Router::new()
         .route(&root, get(index))
@@ -548,8 +559,59 @@ fn trajectory_router(token: &str, state: AppState) -> Router {
             &format!("{root}/api/trajectory/event"),
             get(query_trajectory_event),
         )
+        .route(&format!("{root}/api/transcript"), get(download_transcript))
+        .layer(Extension(TranscriptDownload {
+            export,
+            in_flight: Arc::new(tokio::sync::Semaphore::new(1)),
+        }))
         .with_state(state)
         .layer(middleware::map_response(add_security_headers))
+}
+
+async fn download_transcript(
+    State(state): State<AppState>,
+    Extension(download): Extension<TranscriptDownload>,
+    headers: HeaderMap,
+) -> Result<Response, HttpError> {
+    require_local_host(&headers)?;
+    let export = download.export;
+    let permit = download
+        .in_flight
+        .try_acquire_owned()
+        .map_err(|_| http_error(StatusCode::CONFLICT, "transcript export already running"))?;
+    let session_id = state.session_id.clone();
+    let (archive, permit) =
+        tokio::task::spawn_blocking(move || export(&session_id).map(|archive| (archive, permit)))
+            .await
+            .map_err(internal_error)?
+            .map_err(internal_error)?;
+    let file = tokio::fs::File::from_std(archive.reopen().map_err(internal_error)?);
+    let path = archive.into_temp_path();
+    use tokio::io::AsyncReadExt;
+    let stream = futures_util::stream::try_unfold(
+        (file, path, permit),
+        |(mut file, path, permit)| async move {
+            let mut chunk = vec![0_u8; 64 * 1024];
+            let read = file.read(&mut chunk).await?;
+            if read == 0 {
+                Ok::<_, std::io::Error>(None)
+            } else {
+                chunk.truncate(read);
+                Ok(Some((bytes::Bytes::from(chunk), (file, path, permit))))
+            }
+        },
+    );
+    let filename = format!("attachment; filename=\"{}.tar.gz\"", state.session_id);
+    let mut response = Response::new(axum::body::Body::from_stream(stream));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/gzip"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_str(&filename).map_err(internal_error)?,
+    );
+    Ok(response)
 }
 
 async fn add_security_headers(mut response: Response) -> Response {
@@ -3481,10 +3543,55 @@ mod tests {
             sessions_root: temp.path().join("sessions"),
             cache: Arc::new(Mutex::new(SessionTrajectoryCache::default())),
         };
+        let archive_dir = temp.path().to_path_buf();
+        let archive_path = Arc::new(Mutex::new(None::<PathBuf>));
+        let captured_path = archive_path.clone();
+        let export: TranscriptArchiveFactory = Arc::new(move |session_id| {
+            assert_eq!(session_id, "canonical-session");
+            let mut archive = tempfile::NamedTempFile::new_in(&archive_dir)?;
+            archive.write_all(b"transcript archive")?;
+            *captured_path.lock().unwrap() = Some(archive.path().to_path_buf());
+            Ok(archive)
+        });
+        let mut local_headers = HeaderMap::new();
+        local_headers.insert(header::HOST, HeaderValue::from_static("127.0.0.1"));
+        let busy = download_transcript(
+            State(state.clone()),
+            Extension(TranscriptDownload {
+                export: export.clone(),
+                in_flight: Arc::new(tokio::sync::Semaphore::new(0)),
+            }),
+            local_headers.clone(),
+        )
+        .await;
+        assert_eq!(busy.unwrap_err().0, StatusCode::CONFLICT);
+        let shared_download = TranscriptDownload {
+            export: export.clone(),
+            in_flight: Arc::new(tokio::sync::Semaphore::new(1)),
+        };
+        let unconsumed = download_transcript(
+            State(state.clone()),
+            Extension(shared_download.clone()),
+            local_headers.clone(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(shared_download.in_flight.available_permits(), 0);
+        let concurrent = download_transcript(
+            State(state.clone()),
+            Extension(shared_download.clone()),
+            local_headers,
+        )
+        .await;
+        assert_eq!(concurrent.unwrap_err().0, StatusCode::CONFLICT);
+        let abandoned_path = archive_path.lock().unwrap().clone().unwrap();
+        drop(unconsumed);
+        assert_eq!(shared_download.in_flight.available_permits(), 1);
+        assert!(!abandoned_path.exists());
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            axum::serve(listener, trajectory_router("secret", state))
+            axum::serve(listener, trajectory_router("secret", state, export))
                 .await
                 .unwrap();
         });
@@ -3499,6 +3606,31 @@ mod tests {
             assert_eq!(response.status(), StatusCode::OK, "path {path}");
             assert!(response.text().await.unwrap().contains("Grow Trajectory"));
         }
+        let transcript = client
+            .get(format!("http://{address}/secret/api/transcript"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(transcript.status(), StatusCode::OK);
+        assert_eq!(
+            transcript.headers()[header::CONTENT_TYPE],
+            "application/gzip"
+        );
+        assert_eq!(
+            transcript.headers()[header::CONTENT_DISPOSITION],
+            "attachment; filename=\"canonical-session.tar.gz\""
+        );
+        assert_eq!(
+            transcript.bytes().await.unwrap().as_ref(),
+            b"transcript archive"
+        );
+        assert!(!archive_path.lock().unwrap().as_ref().unwrap().exists());
+        let wrong_token = client
+            .get(format!("http://{address}/wrong/api/transcript"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(wrong_token.status(), StatusCode::NOT_FOUND);
         let response = client
             .get(format!("http://{address}/secret/api/trajectory"))
             .send()
@@ -5811,9 +5943,14 @@ mod tests {
 
     #[tokio::test]
     async fn server_rejects_non_loopback_bind_addresses() {
-        let error = serve("missing", "0.0.0.0:0".parse().unwrap(), |_, _| {})
-            .await
-            .unwrap_err();
+        let error = serve(
+            "missing",
+            "0.0.0.0:0".parse().unwrap(),
+            |_, _| {},
+            |_| unreachable!(),
+        )
+        .await
+        .unwrap_err();
         assert!(error.to_string().contains("loopback"));
     }
 }

@@ -51,8 +51,10 @@ Examples:
 See ~/.grow/README.md for more information.
 ")]
     Wrap(WrapArgs),
-    /// Export a session transcript as Markdown
+    /// Export a session and its subagents as a Markdown directory tree
     Export(crate::export_cmd::ExportArgs),
+    /// Replay one saved session in a read-only terminal viewer
+    Replay(crate::replay_cmd::ReplayArgs),
     /// Save session trace data locally
     Trace(crate::trace_cmd::TraceArgs),
     /// Open the independent Timeline Trajectory debugger

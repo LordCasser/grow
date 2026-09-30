@@ -305,6 +305,23 @@ pub(crate) fn cache_hit_rate(input: u64, cached: u64) -> String {
     }
 }
 
+/// Goal cache classification is independent of its cache-inclusive token budget.
+/// Unknown input does not enter the measured denominator.
+pub(crate) fn goal_cache_hit_rate(
+    usage: shell::session::goal_tracker::GoalTokenUsage,
+    incomplete_or_historical: bool,
+) -> (String, bool) {
+    let rate = usage
+        .cached_input_tokens
+        .checked_add(usage.uncached_input_tokens)
+        .map(|measured_input| cache_hit_rate(measured_input, usage.cached_input_tokens))
+        .unwrap_or_else(|| "N/A".into());
+    (
+        rate,
+        incomplete_or_historical || usage.unclassified_input_tokens > 0,
+    )
+}
+
 /// Cost cell. Ticks are 1e10 per USD; partial sums are scrubbed to absent.
 fn format_cost(m: &shell::extensions::notification::PromptUsageModel) -> String {
     use shell::extensions::notification::ticks_to_usd;
@@ -535,6 +552,37 @@ mod tests {
         let text = session_usage_block_text(&usage);
         assert!(text.contains("Cache hit rate: N/A"));
         assert!(text.contains("0 cached · N/A cache hit"));
+    }
+
+    #[test]
+    fn goal_cache_rate_uses_only_classified_input() {
+        use shell::session::goal_tracker::GoalTokenUsage;
+
+        let classified = GoalTokenUsage::new(500, 200, 80);
+        assert_eq!(
+            goal_cache_hit_rate(classified, false),
+            ("40.00%".into(), false)
+        );
+        assert_eq!(
+            goal_cache_hit_rate(classified, true),
+            ("40.00%".into(), true)
+        );
+
+        let partial = GoalTokenUsage {
+            unclassified_input_tokens: 500,
+            ..classified
+        };
+        assert_eq!(goal_cache_hit_rate(partial, false), ("40.00%".into(), true));
+        assert_eq!(
+            goal_cache_hit_rate(GoalTokenUsage::with_cache_read(500, None, 0), false),
+            ("N/A".into(), true)
+        );
+        let overflow = GoalTokenUsage {
+            cached_input_tokens: u64::MAX,
+            uncached_input_tokens: 1,
+            ..Default::default()
+        };
+        assert_eq!(goal_cache_hit_rate(overflow, false), ("N/A".into(), false));
     }
 
     #[test]

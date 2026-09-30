@@ -4,6 +4,7 @@
 //! [`SamplingEvent`]s. Pure: no I/O, no shell coupling.
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use futures_util::StreamExt;
@@ -23,6 +24,21 @@ use crate::types::RequestId;
 // Usage is optional and often arrives after finish_reason. Bound the entire
 // tail (not each frame) so keepalives cannot hold a completed request open.
 const USAGE_TAIL_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// A completed Chat usage snapshot survives dropping the stream on cancellation.
+pub(crate) type ConfirmedUsage = Arc<Mutex<Option<(TokenUsage, Option<i64>)>>>;
+
+fn record_usage(
+    usage: &mut Option<TokenUsage>,
+    cost_usd_ticks: &mut Option<i64>,
+    reported: &sampling_types::Usage,
+) {
+    // Wire cost is cumulative for the response, so last-write-wins. Never
+    // clobber a known cost with missing/unreported.
+    *cost_usd_ticks =
+        sampling_types::reported_cost_ticks(reported.cost_in_usd_ticks).or(*cost_usd_ticks);
+    *usage = Some(reported.clone().into());
+}
 
 fn merge_tool_identity(
     current: &mut String,
@@ -66,6 +82,16 @@ pub fn stream_chat_completions<'a>(
     model_metadata: Option<ResponseModelMetadata>,
     request_id: RequestId,
     idle_timeout: Duration,
+) -> impl Stream<Item = SamplingEvent> + Send + 'a {
+    stream_chat_completions_tracked(raw_stream, model_metadata, request_id, idle_timeout, None)
+}
+
+pub(crate) fn stream_chat_completions_tracked<'a>(
+    raw_stream: BoxStream<'a, Result<ChatCompletionChunk, SamplingError>>,
+    model_metadata: Option<ResponseModelMetadata>,
+    request_id: RequestId,
+    idle_timeout: Duration,
+    confirmed_usage: Option<ConfirmedUsage>,
 ) -> impl Stream<Item = SamplingEvent> + Send + 'a {
     async_stream::stream! {
         let stream_start = Instant::now();
@@ -222,6 +248,21 @@ pub fn stream_chat_completions<'a>(
                     chunk_has_content |= !already_finished;
                 }
 
+                // A final chunk may carry both text and complete usage. Save
+                // billing before yielding its preview, since cancellation can
+                // drop the parser at that yield point.
+                if finish_reason.is_some()
+                    && let Some(reported) = chunk_usage.as_ref()
+                {
+                    record_usage(&mut usage, &mut cost_usd_ticks, reported);
+                }
+                if finish_reason.is_some()
+                    && let (Some(slot), Some(usage)) = (&confirmed_usage, &usage)
+                {
+                    *slot.lock().expect("confirmed usage slot poisoned") =
+                        Some((usage.clone(), cost_usd_ticks));
+                }
+
                 let delta = choice.delta;
                 if already_finished
                     && (delta.content.as_ref().is_some_and(|text| !text.is_empty())
@@ -328,17 +369,19 @@ pub fn stream_chat_completions<'a>(
                 }
             }
 
-            if (finish_reason.is_some() || choices_empty)
-                && let Some(u) = chunk_usage
+            if choices_empty
+                && let Some(reported) = chunk_usage.as_ref()
             {
-                // Wire cost is cumulative for the response, so last-write-wins.
-                // Never clobber a known cost with missing/unreported.
-                let chunk_cost = sampling_types::reported_cost_ticks(u.cost_in_usd_ticks);
-                cost_usd_ticks = match (cost_usd_ticks, chunk_cost) {
-                    (_, Some(n)) => Some(n),
-                    (prev, None) => prev,
-                };
-                usage = Some(u.into());
+                record_usage(&mut usage, &mut cost_usd_ticks, reported);
+            }
+
+            // Independent choices=[] usage frames have no preview yield.
+            if choices_empty
+                && finish_reason.is_some()
+                && let (Some(slot), Some(usage)) = (&confirmed_usage, &usage)
+            {
+                *slot.lock().expect("confirmed usage slot poisoned") =
+                    Some((usage.clone(), cost_usd_ticks));
             }
 
             if chunk_has_content {
@@ -526,6 +569,50 @@ mod tests {
         };
         assert_eq!(response.assistant_text(), "answer");
         assert!(response.usage.is_none());
+    }
+
+    #[tokio::test]
+    async fn final_chunk_usage_is_confirmed_before_its_preview_yields() {
+        let mut final_chunk = final_chunk(FinishReason::Stop);
+        final_chunk.choices[0].delta.content = Some("last words".into());
+        final_chunk.usage = Some(Usage {
+            prompt_tokens: 100,
+            completion_tokens: 20,
+            total_tokens: 120,
+            prompt_cache_hit_tokens: Some(90),
+            prompt_cache_miss_tokens: Some(10),
+            prompt_tokens_details: None,
+            completion_tokens_details: None,
+            cost_in_usd_ticks: Some(42),
+        });
+        let raw = stream::iter([Ok(final_chunk)])
+            .chain(stream::pending::<Result<ChatCompletionChunk, SamplingError>>())
+            .boxed();
+        let slot: ConfirmedUsage = Arc::new(Mutex::new(None));
+        let l2 = stream_chat_completions_tracked(
+            raw,
+            None,
+            rid(),
+            Duration::from_secs(30),
+            Some(Arc::clone(&slot)),
+        );
+        let mut l2 = pin!(l2);
+        assert!(matches!(
+            l2.next().await,
+            Some(SamplingEvent::StreamStarted { .. })
+        ));
+        assert!(matches!(
+            l2.next().await,
+            Some(SamplingEvent::FirstToken { .. })
+        ));
+        let snapshot = slot
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("usage precedes preview");
+        assert_eq!(snapshot.0.total_tokens, 120);
+        assert_eq!(snapshot.0.cache_read_tokens(), Some(90));
+        assert_eq!(snapshot.1, Some(42));
     }
 
     #[tokio::test]

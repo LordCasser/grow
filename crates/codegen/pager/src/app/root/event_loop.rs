@@ -3082,7 +3082,8 @@ fn is_pasteable_key_event(ev: &Event) -> bool {
 ///    Windows Terminal versions deliver dropped paths as keystrokes
 ///    instead of a bracketed paste; this branch recovers them.
 ///
-/// A completed bracketed `Event::Paste` separates adjacent key runs.
+/// After a completed bracketed `Event::Paste`, later events in the same
+/// batch keep their ordinary key boundaries.
 fn coalesce_rapid_keys(events: Vec<TimedInputEvent>) -> Vec<TimedInputEvent> {
     // Fast path: not enough events for coalescing to trigger.
     if events.len() < PASTE_COALESCE_THRESHOLD {
@@ -3097,9 +3098,10 @@ fn coalesce_rapid_keys(events: Vec<TimedInputEvent>) -> Vec<TimedInputEvent> {
 
     let mut result = Vec::with_capacity(events.len());
     let mut i = 0;
+    let mut after_bracketed_paste = false;
 
     while i < events.len() {
-        if is_pasteable_key_event(&events[i].event) {
+        if !after_bracketed_paste && is_pasteable_key_event(&events[i].event) {
             let run_start = i;
             let arrived_at = events[i].arrived_at;
             let mut text = String::new();
@@ -3159,6 +3161,9 @@ fn coalesce_rapid_keys(events: Vec<TimedInputEvent>) -> Vec<TimedInputEvent> {
                 }
             }
         } else {
+            if matches!(&events[i].event, Event::Paste(_)) {
+                after_bracketed_paste = true;
+            }
             result.push(events[i].clone());
             i += 1;
         }
@@ -4446,8 +4451,7 @@ mod tests {
     }
 
     #[test]
-    fn fragmented_paste_merged_with_keys() {
-        // Event::Paste mixed with key events — merge into one paste.
+    fn bracketed_paste_keeps_following_multiline_keys_separate() {
         let events = vec![
             TimedInputEvent::now(Event::Paste("real paste".into())),
             press(KeyCode::Char('a')),
@@ -4455,8 +4459,11 @@ mod tests {
             press(KeyCode::Char('b')),
         ];
         let result = coalesce_rapid_keys(events);
-        assert_eq!(result.len(), 1);
-        assert_eq!(result[0].event, Event::Paste("real pastea\nb".to_string()));
+        assert_eq!(result.len(), 4);
+        assert_eq!(result[0].event, Event::Paste("real paste".to_string()));
+        assert_eq!(result[1].event, press(KeyCode::Char('a')).event);
+        assert_eq!(result[2].event, press(KeyCode::Enter).event);
+        assert_eq!(result[3].event, press(KeyCode::Char('b')).event);
     }
 
     #[test]

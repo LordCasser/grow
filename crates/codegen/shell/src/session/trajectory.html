@@ -86,6 +86,9 @@ header{
 .search-wrap::before{content:"/";position:absolute;left:11px;top:8px;color:var(--muted);font:12px ui-monospace,monospace}
 .control-kicker{color:var(--muted);font-size:9px;font-weight:700;letter-spacing:.1em}
 .controls-actions{display:flex;align-items:center;gap:8px;margin-left:auto}
+.transcript-download{display:inline-flex;align-items:center;height:var(--control-height);padding:0 10px;border:1px solid var(--input-border);border-radius:var(--radius-md);background:var(--background);color:var(--text);text-decoration:none;white-space:nowrap;box-shadow:0 1px 2px oklch(.145 0 0/.06)}
+.transcript-download:hover{background:var(--raised);border-color:color-mix(in oklch,var(--foreground) 24%,var(--border))}
+.transcript-download:focus-visible{outline:2px solid var(--focus);outline-offset:2px}
 .live-status{height:var(--control-height);display:inline-flex;align-items:center;gap:7px;padding:0 8px;color:var(--green);font-size:11px;font-weight:650}
 .follow{min-width:108px;display:inline-flex;align-items:center;justify-content:center;gap:7px;color:var(--primary-foreground);border-color:var(--primary);background:var(--primary)}
 button.follow:hover:not(:disabled){background:color-mix(in oklch,var(--primary) 88%,var(--background));border-color:var(--primary)}
@@ -363,6 +366,7 @@ main.inspecting .inspector{display:block}
   <button class="relation-scope" id="relationScope" aria-label="Clear related event scope" hidden><span id="relationScopeLabel"></span><span aria-hidden="true">×</span></button>
   <div class="controls-actions" role="group" aria-label="Timeline navigation">
     <span class="live-status" id="liveStatus" role="status" aria-live="polite"><span class="live-dot" aria-hidden="true"></span>Live tail</span><button class="follow" id="follow" aria-label="Jump to the newest event and keep following" hidden><span class="live-dot" aria-hidden="true"></span><span id="followLabel">Jump to live</span></button>
+    <a class="transcript-download" id="transcriptDownload">Download conversation</a>
   </div>
 </div>
 <div class="classification">
@@ -857,6 +861,7 @@ function endpoint(path){
   const base=window.location.pathname.replace(/\/?$/,'/');
   return new URL(base+path,window.location.origin)
 }
+$('transcriptDownload').href=endpoint('api/transcript').href;
 async function fetchPage(params,signal){
   const url=endpoint('api/trajectory');url.search=params;
   const response=await fetch(url,{signal});

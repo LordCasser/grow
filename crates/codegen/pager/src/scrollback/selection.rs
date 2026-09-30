@@ -18,6 +18,8 @@ mod border_chars {
     pub const BOTTOM_LEFT: char = '└';
     pub const BOTTOM_RIGHT: char = '┘';
     pub const VERTICAL: char = '│';
+    pub const SINGLE_LEFT: char = '├';
+    pub const SINGLE_RIGHT: char = '┤';
     /// Dashed vertical - used on edge rows when clipped to indicate continuation.
     pub const VERTICAL_DASHED: char = '┆';
 }
@@ -26,8 +28,9 @@ mod border_chars {
 ///
 /// The box consists of:
 /// - Side borders (│) on the left and right edges of `inner_area`
-/// - Top corners (┌┐) one row above `inner_area` (if `!top_clipped`)
-/// - Bottom corners (└┘) one row below `inner_area` (if `!bottom_clipped`)
+/// - Top and bottom corners (┌┐ / └┘) in adjacent spacer rows when available
+/// - Corners on `inner_area` edge rows when a dense neighbor occupies the spacer
+/// - Dashed continuation at clipped edges
 ///
 /// This struct is returned by components (like ScrollbackPane) and rendered
 /// by the frame, allowing selection boxes to span component boundaries.
@@ -39,6 +42,10 @@ pub struct SelectionBox {
     pub top_clipped: bool,
     /// True if the block has rows clipped at bottom.
     pub bottom_clipped: bool,
+    /// Draw a corner on the selected edge row when the adjacent row is occupied.
+    pub top_inset: bool,
+    /// Draw the bottom corner on the selected edge row when its spacer is occupied.
+    pub bottom_inset: bool,
     /// Style for the border (typically just fg color).
     pub style: Style,
     /// Whether to render a close control replacing the top-right corner.
@@ -129,6 +136,8 @@ impl SelectionBox {
             inner_area,
             top_clipped: false,
             bottom_clipped: false,
+            top_inset: false,
+            bottom_inset: false,
             style,
             closable: false,
             close_hovered: false,
@@ -145,6 +154,12 @@ impl SelectionBox {
     /// Set whether the bottom is clipped (no bottom corners).
     pub fn with_bottom_clipped(mut self, clipped: bool) -> Self {
         self.bottom_clipped = clipped;
+        self
+    }
+
+    pub fn with_corner_insets(mut self, top: bool, bottom: bool) -> Self {
+        self.top_inset = top;
+        self.bottom_inset = bottom;
         self
     }
 
@@ -171,7 +186,7 @@ impl SelectionBox {
     /// Pure computation — does not touch the buffer. Use for mouse hit-testing.
     /// Returns `None` if not closable, top is clipped, or no room.
     pub fn close_button_rect(&self) -> Option<Rect> {
-        if !self.closable || self.top_clipped || self.inner_area.y == 0 {
+        if !self.closable || self.top_clipped || (self.inner_area.y == 0 && !self.top_inset) {
             return None;
         }
         let label_w = self
@@ -183,7 +198,7 @@ impl SelectionBox {
         let x = right_x.saturating_sub(label_w.saturating_sub(1));
         Some(Rect {
             x,
-            y: self.inner_area.y - 1,
+            y: self.inner_area.y - u16::from(!self.top_inset),
             width: label_w,
             height: 1,
         })
@@ -194,8 +209,8 @@ impl SelectionBox {
     /// Draws:
     /// - Side borders (│) on left and right edges of inner_area
     /// - Dashed borders (┆) on edge rows when clipped, to indicate continuation
-    /// - Top corners (┌┐) at inner_area.y - 1 if !top_clipped and y > 0
-    /// - Bottom corners (└┘) at inner_area.y + height if !bottom_clipped
+    /// - Corners (┌┐ / └┘) in a spacer row or inset on the framed edge
+    /// - A one-row junction when both corners are inset
     /// - Close button (✗) left of ┐ if enabled
     pub fn render(&self, buf: &mut Buffer) {
         let area = self.inner_area;
@@ -229,33 +244,21 @@ impl SelectionBox {
             }
         }
 
-        // Draw top corners (if not clipped and there's room)
-        if !self.top_clipped && y_top > 0 {
-            let corner_y = y_top - 1;
+        // Draw corners in the adjacent spacer, or on the selected edge row
+        // when that spacer belongs to a densely packed neighbor.
+        if !self.top_clipped && (self.top_inset || y_top > 0) {
+            let corner_y = y_top - u16::from(!self.top_inset);
             if let Some(cell) = buf.cell_mut((left_x, corner_y)) {
                 cell.set_char(border_chars::TOP_LEFT).set_style(self.style);
             }
-            // Close control replaces ┐, or draw normal corner
-            if let Some(close_rect) = self.close_button_rect() {
-                let style = if self.close_hovered {
-                    Style::default().fg(Theme::current().text_primary)
-                } else {
-                    self.style
-                };
-                if let Some(label) = self.close_label {
-                    use crate::render::SafeBuf;
-                    buf.set_string_safe(close_rect.x, close_rect.y, label, style);
-                } else if let Some(cell) = buf.cell_mut((close_rect.x, close_rect.y)) {
-                    cell.set_symbol(crate::glyphs::ballot_x()).set_style(style);
-                }
-            } else if let Some(cell) = buf.cell_mut((right_x, corner_y)) {
+            if let Some(cell) = buf.cell_mut((right_x, corner_y)) {
                 cell.set_char(border_chars::TOP_RIGHT).set_style(self.style);
             }
         }
 
         // Draw bottom corners (if not clipped)
         if !self.bottom_clipped {
-            let corner_y = y_bottom + 1;
+            let corner_y = y_bottom + u16::from(!self.bottom_inset);
             if let Some(cell) = buf.cell_mut((left_x, corner_y)) {
                 cell.set_char(border_chars::BOTTOM_LEFT)
                     .set_style(self.style);
@@ -263,6 +266,41 @@ impl SelectionBox {
             if let Some(cell) = buf.cell_mut((right_x, corner_y)) {
                 cell.set_char(border_chars::BOTTOM_RIGHT)
                     .set_style(self.style);
+            }
+        }
+
+        // A one-row dense selection cannot show separate top and bottom
+        // corners. A junction marks both ends without painting either neighbor.
+        if area.height == 1
+            && (self.top_inset || self.top_clipped)
+            && (self.bottom_inset || self.bottom_clipped)
+        {
+            let (left, right) = if self.top_clipped || self.bottom_clipped {
+                (border_chars::VERTICAL_DASHED, border_chars::VERTICAL_DASHED)
+            } else {
+                (border_chars::SINGLE_LEFT, border_chars::SINGLE_RIGHT)
+            };
+            if let Some(cell) = buf.cell_mut((left_x, y_top)) {
+                cell.set_char(left).set_style(self.style);
+            }
+            if let Some(cell) = buf.cell_mut((right_x, y_top)) {
+                cell.set_char(right).set_style(self.style);
+            }
+        }
+
+        // Paint the close control last: on a one-row inset frame it shares
+        // the row with both corners and must remain visible above the junction.
+        if let Some(close_rect) = self.close_button_rect() {
+            let style = if self.close_hovered {
+                Style::default().fg(Theme::current().text_primary)
+            } else {
+                self.style
+            };
+            if let Some(label) = self.close_label {
+                use crate::render::SafeBuf;
+                buf.set_string_safe(close_rect.x, close_rect.y, label, style);
+            } else if let Some(cell) = buf.cell_mut((close_rect.x, close_rect.y)) {
+                cell.set_symbol(crate::glyphs::ballot_x()).set_style(style);
             }
         }
     }
@@ -434,5 +472,51 @@ mod tests {
 
         // Bottom corners at y=4
         assert_eq!(buf.cell((0, 4)).unwrap().symbol(), "└");
+    }
+
+    #[test]
+    fn dense_selection_corners_use_own_edge_rows() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 8));
+        let selection = SelectionBox::new(Rect::new(0, 2, 10, 3), Style::default())
+            .with_corner_insets(true, true);
+        selection.render(&mut buf);
+
+        assert_eq!(buf.cell((0, 1)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((0, 2)).unwrap().symbol(), "┌");
+        assert_eq!(buf.cell((0, 3)).unwrap().symbol(), "│");
+        assert_eq!(buf.cell((0, 4)).unwrap().symbol(), "└");
+        assert_eq!(buf.cell((0, 5)).unwrap().symbol(), " ");
+    }
+
+    #[test]
+    fn single_row_dense_selection_uses_junctions_and_respects_clipping() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 8));
+        let dense = SelectionBox::new(Rect::new(0, 3, 10, 1), Style::default())
+            .with_corner_insets(true, true);
+        dense.render(&mut buf);
+        assert_eq!(buf.cell((0, 3)).unwrap().symbol(), "├");
+        assert_eq!(buf.cell((9, 3)).unwrap().symbol(), "┤");
+        assert_eq!(buf.cell((0, 2)).unwrap().symbol(), " ");
+        assert_eq!(buf.cell((0, 4)).unwrap().symbol(), " ");
+
+        let clipped = dense.with_top_clipped(true);
+        clipped.render(&mut buf);
+        assert_eq!(buf.cell((0, 3)).unwrap().symbol(), "┆");
+        assert_eq!(buf.cell((9, 3)).unwrap().symbol(), "┆");
+    }
+
+    #[test]
+    fn single_row_dense_frame_keeps_its_close_control() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 10, 8));
+        let frame = SelectionBox::new(Rect::new(0, 3, 10, 1), Style::default())
+            .with_corner_insets(true, true)
+            .with_closable(true, false);
+        assert_eq!(frame.close_button_rect().unwrap().y, 3);
+        frame.render(&mut buf);
+        assert_eq!(buf.cell((0, 3)).unwrap().symbol(), "├");
+        assert_eq!(
+            buf.cell((9, 3)).unwrap().symbol(),
+            crate::glyphs::ballot_x()
+        );
     }
 }

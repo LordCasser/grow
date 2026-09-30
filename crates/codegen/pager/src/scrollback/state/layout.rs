@@ -201,6 +201,31 @@ impl ScrollbackState {
         self.layout_cache.as_ref().map(|c| c.entries.as_slice())
     }
 
+    /// Whether the rows immediately outside an entry range belong to dense neighbors.
+    /// Selection and hover borders use the same cached spacing decision.
+    pub fn selection_corner_insets(&self, range: Range<usize>) -> (bool, bool) {
+        let visible = self.visible_entry_range();
+        let Some(layouts) = self.get_cached_entry_layouts() else {
+            return (false, false);
+        };
+        if range.is_empty() || range.start < visible.start || range.end > visible.end {
+            return (false, false);
+        }
+        // Hidden thinking rows have zero height and are transparent to the
+        // spacing rule. Read the last visible row on each boundary.
+        let top = range.start > visible.start
+            && layouts
+                .get(visible.start..range.start)
+                .and_then(|entries| entries.iter().rfind(|entry| entry.height > 0))
+                .is_some_and(|entry| entry.gap_after == 0);
+        let bottom = range.end < visible.end
+            && layouts
+                .get(range)
+                .and_then(|entries| entries.iter().rfind(|entry| entry.height > 0))
+                .is_some_and(|entry| entry.gap_after == 0);
+        (top, bottom)
+    }
+
     /// Get cached virtual Y positions for all entries.
     ///
     /// Each entry's virtual Y is its cumulative position in the scrollable content.

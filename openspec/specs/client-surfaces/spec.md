@@ -173,21 +173,6 @@ Pager 收到 Skills discovery 事件 SHALL 先维护目录监听，再请求技�
 - **WHEN** 默认权限保存成功或失败
 - **THEN** 当前会话权限不变，未来会话仍按最终保存的默认配置初始化。
 
-### Requirement: CLI clipboard export reports actual delivery
-CLI export --clipboard SHALL 消费剪贴板实际结果，失败时返回错误，不得无条件报告已复制。反馈 SHALL 保留目标后端及是否确认的语义。
-
-#### Scenario: Clipboard backends fail
-- **WHEN** 剪贴板结果为 Failed
-- **THEN** 导出返回错误，不能打印成功信息并正常退出。
-
-#### Scenario: Delivery is unverified
-- **WHEN** 后端只能确认发送而不能确认到达
-- **THEN** 保留未确认发送的反馈，不升级为已复制。
-
-#### Scenario: Confirmed delivery
-- **WHEN** 后端确认接收
-- **THEN** 使用该后端反馈，并按共享统计规则显示文本量。
-
 ### Requirement: Interactive session export resolves paths against session cwd
 交互式 /export 的相对文件路径 SHALL 在展开 ~ 后按活动会话 cwd 解析，与会话路径补全的目录基准一致。
 
@@ -211,18 +196,19 @@ CLI export --clipboard SHALL 消费剪贴板实际结果，失败时返回错误
 - **THEN** 字符计数覆盖全部 Unicode 标量，行数仍按 str::lines，空文本为零字符零行。
 
 ### Requirement: Transcript file export commits completed content atomically
-CLI/TUI 文件导出 SHALL 先完整写入同目录临时文件并同步，再原子替换普通目标；提交前失败 SHALL 保留旧内容并清理临时文件。
+
+TUI 显式 transcript 文件导出 SHALL 先完整写入同目录临时文件并同步，再原子替换普通目标；提交前失败 SHALL 保留旧内容并清理临时文件。CLI 会话树导出的目录提交 SHALL 遵循 `Transcript directory publication never overwrites an existing target`，不得把单文件原子性当作整棵树发布保证。
 
 #### Scenario: Partial temporary write fails
 - **WHEN** 临时文件已写入部分内容后发生错误
 - **THEN** 导出失败，原目标内容保持不变且临时文件清理。
 
 #### Scenario: Existing symbolic link
-- **WHEN** 目标为指向现存普通文件的符号链接
+- **WHEN** TUI 显式文件目标为指向现存普通文件的符号链接
 - **THEN** 提交替换链接目标，保留符号链接；悬空链接报错。
 
 #### Scenario: Permissions and special targets
-- **WHEN** 目标为已有普通文件、新文件或非普通文件
+- **WHEN** TUI 显式文件目标为已有普通文件、新文件或非普通文件
 - **THEN** 已有权限保留且只读目标拒绝；Unix 新文件默认私有权限；非普通目标拒绝。
 
 ### Requirement: Interactive export waits for history replay completion
@@ -1552,6 +1538,10 @@ A detected unbracketed multiline paste SHALL remain one pending insertion across
 - **WHEN** one input batch contains a completed bracketed paste followed by Enter, text, navigation or a control key
 - **THEN** Pager routes the paste and each subsequent key separately in arrival order without adding the keys to paste text or dropping them.
 
+#### Scenario: Bracketed paste followed by a multiline-shaped key run
+- **WHEN** one input batch contains a completed bracketed paste followed by character, Enter and another character keys
+- **THEN** Pager retains three ordinary key events after the Paste rather than synthesizing another Paste.
+
 #### Scenario: Two completed bracketed pastes
 - **WHEN** one input batch contains two completed `Event::Paste` values
 - **THEN** Pager preserves two paste events in their original order rather than combining their content.
@@ -1608,29 +1598,67 @@ Usage 与 Goal 详情中的完整 token 数字 SHALL 使用每三位逗号分隔
 - **THEN** 例如 100000000 显示为 100,000,000，≥ 和分类含义不变。
 
 ### Requirement: Ordinary agent status shows session usage
-没有 Goal 的普通主会话 Agent 视图 SHALL 在原 Goal 插槽显示本 session 跨 resume 的 lifetime 累计 token 与输入缓存命中率，并在点击时打开 Usage 页。数据 SHALL 来自可恢复 session ledger 的变化投影，不使用定时轮询、context 窗口压力或 prompt 总额累加替代账本。子 Agent 内嵌视图不增加一个指向父会话用量的入口。
+
+没有 Goal 的普通主会话 Agent 视图 SHALL 在原 Goal 插槽显示本 session 跨 resume 的 lifetime 已记录累计 token 与可测量的输入缓存命中率，并在点击时打开 Usage 页。数据 SHALL 来自可恢复 session ledger 的变化投影，不使用定时轮询、context 窗口压力或 prompt 总额累加替代账本。子 Agent 内嵌视图不增加一个指向父会话用量的入口。
+
+总消费完整性与缓存率可计算性 SHALL 独立表达：总消费不完整时累计保留 `≥`；缓存率按 cache read 与 full input 均已知的同一批样本计算，未知 attempt 不进入分子或分母。只要样本输入大于零且 `0 ≤ cached input ≤ measured input ≤ recorded input`，状态栏 SHALL 显示该比例。总消费不完整或 cache read 覆盖不完整时，比例前 SHALL 标注 `measured cache`，不将样本比例表述为全部实际消费的精确比例。只有无有效分母或计数无效时才显示缓存率 N/A；尚无用量快照时保持未知占位。
 
 #### Scenario: Calls and late child settlement
+
 - **WHEN** 普通会话产生主调用、已归属的子任务消费或不完整标记
-- **THEN** 状态栏按账本的 lifetime 累计 input + output（含 cache hit）更新，重复累计快照不会重复加账，缓存明细与总量均完整时，缓存率按总 cached input / 总 input 计算；read 覆盖不完整时紧凑状态栏显示 cache N/A，详情页展示已知样本比例与覆盖率。
+- **THEN** 状态栏按账本 lifetime 已记录 input + output（含 cache hit）更新；重复累计快照不重复加账。完整总量与完整缓存明细显示普通缓存率；部分测量样本显示 `measured cache` 比例，详情页展示同一口径的比例与已记录输入覆盖率。
 
 #### Scenario: Empty or incomplete usage
-- **WHEN** 没有输入、缓存数超过输入、read 覆盖不完整或总消费账本不完整
-- **THEN** 状态栏比例显示 N/A；只有总消费不完整才将累计显示为 ≥。缓存明细单独缺失时保留精确总量，详情明确已记录用量及覆盖范围。
+
+- **WHEN** 账本没有可测量输入、cached input 超过 measured input，或 measured input 超过 recorded input
+- **THEN** 缓存率显示 N/A；总消费不完整仍独立显示 `≥`。仅缓存明细缺失不会使精确总量显示下界。
+
+#### Scenario: Steering interrupts an attempt without final usage
+
+- **WHEN** 会话已有可信输入与缓存数据，用户补充输入使一个已开始的请求以未知用量结算
+- **THEN** 状态栏保留此前样本的缓存率并显示 `measured cache`，总量标为下界；此未知请求不作为零命中样本，不清空已有计数，也不使有效比例变成 N/A。
+
+#### Scenario: Known samples continue after repeated interruptions
+
+- **WHEN** 会话先记录 input=100、cache read=80，随后有一次或多次未知用量打断，再记录 input=900、cache read=810
+- **THEN** 缓存率按 890/1,000 显示 `measured cache 89.00%`；总量仍标下界，不能沿用首次比例、平均请求百分比或因后续成功清除未知消费事实。
+
+#### Scenario: Partially reported cache reads
+
+- **WHEN** 所有总消费已知，其中 A 的 input=100、read=80，B 的 input=900、read 未报告
+- **THEN** 总输入为精确的 1,000，状态栏显示 `measured cache 80.00%`；Usage 详情显示已记录输入覆盖率 10.00%。若 B 明确报告 read=0，则显示完整缓存率 8.00% 与覆盖率 100.00%。
+
+#### Scenario: Explicit zero reads and missing writes
+
+- **WHEN** 有正数输入，所有 cache read 明确为零，但 cache write 未报告
+- **THEN** 缓存率为 0.00%，cache write 缺失不使缓存率 N/A；只有总消费或 cache read 覆盖不完整才要求 measured 限定。
+
+#### Scenario: No measured sample yet
+
+- **WHEN** 会话只有未知消费，或所有已记录输入都没有可信 cache read
+- **THEN** 缓存率为 N/A；首个有效样本随后到达时自动显示带适用限定的比例，不要求新建会话或手动重置。
+
+#### Scenario: Narrow status preserves the scope qualifier
+
+- **WHEN** 窄屏裁剪包含 measured 缓存率的用量区域
+- **THEN** 不能留下完整可读的百分比却裁掉其 measured 限定；允许隐藏或截短该项，点击区域保持在可见范围内。
 
 #### Scenario: Open usage or Goal details
+
 - **WHEN** 用户点击普通会话用量或已有 Goal 的状态区域
 - **THEN** 普通用量打开既有 Usage 面板的 Usage 页，Goal 继续打开 Goal 详情；窄屏下点击区域不能超出可见区域。
 
 #### Scenario: Resume or reconnect
-- **WHEN** 客户端重新连接存活进程或在新 actor incarnation 从持久 Timeline 恢复会话
-- **THEN** normal 状态栏显示此前与当前 incarnation 的 lifetime 总计，不重置为零或只显示 resume 后新增用量；resident reconnect 不重复累计。
+
+- **WHEN** 客户端重新连接存活进程或在新 actor incarnation 从持久 Timeline 恢复被打断过的会话
+- **THEN** normal 状态栏按此前与当前 incarnation 的 lifetime 计数显示同一测量比例及 incomplete 限定，不重置为零或只显示 resume 后新增用量；resident reconnect 不重复累计。
 
 #### Scenario: Usage details across resumes
+
 - **WHEN** session 至少经历一次有新增模型消费的冷 resume
 - **THEN** Usage 页顶部显示 lifetime 总计，并按 Initial run、Resume #1… 展示各 incarnation 的新增消费；各段之和与 lifetime 已知总量及缓存覆盖计数一致。
 
-证据入口：`crates/codegen/chat-state/src/actor/state.rs`、`shell/src/extensions/usage.rs`、`pager/src/views/usage_modal.rs`、`pager/src/app/status_blocks.rs`。
+证据入口：`crates/codegen/pager/src/views/agent_status.rs::session_usage_status_line`、`crates/codegen/pager/src/app/status_blocks.rs::session_usage_block_text`、`crates/codegen/pager/src/app/acp_handler/tests/mod.rs::transient_session_usage_replaces_totals_without_context_or_scrollback`、`crates/codegen/chat-state/src/actor/state.rs`。新展示场景待本 change 实施验证。
 
 ### Requirement: Sampling previews are isolated by attempt and delivery capability
 
@@ -2282,7 +2310,11 @@ Pager file search SHALL expose results only when they belong to the currently ac
 - **WHEN** the active `@` query changes while an earlier daemon snapshot is still available
 - **THEN** the old snapshot is cleared immediately and cannot be restored by a late poll
 
-证据：`crates/codegen/pager/src/views/file_search/state.rs` — `start_query`, `poll`, `apply_results`；`crates/codegen/workspace/src/file_system/fuzzy.rs` — `FuzzyFileMatcherDaemon::set_query` 与结果快照的 `query_id`。
+#### Scenario: Escape while a new query has no visible results
+- **WHEN** a user presses Escape while an active `@` completion context has empty or pending results after a directory drill
+- **THEN** Pager dismisses that context and its drill anchor, and a late result cannot reopen the dismissed query
+
+证据：`crates/codegen/pager/src/views/prompt_widget/mod.rs` — `handle_key_inner`；`crates/codegen/pager/src/views/file_search/state.rs` — `start_query`, `poll`, `apply_results`；`crates/codegen/workspace/src/file_system/fuzzy.rs` — `FuzzyFileMatcherDaemon::set_query` 与结果快照的 `query_id`。
 
 ### Requirement: Fuzzy file-search submissions and teardown do not wait for worker capacity
 Fuzzy file search SHALL submit the latest restart and query without waiting for the worker's notification channel or an ongoing filesystem walk. Closing its daemon SHALL not join the worker on the caller's thread and SHALL prevent pending requests from running after stop is observed.
@@ -2945,3 +2977,605 @@ Shell 收到权限 Reset 通知后，若持久化失败 SHALL 发布 UI-only 错
 #### Scenario: Reset notification encounters a write error
 - **WHEN** 用户触发的权限 Reset 在根权限文件写入时失败
 - **THEN** 客户端看到错误提示，Shell 不记录成功的 Reset 完成消息，模型上下文不包含此提示。
+
+### Requirement: Accepted Ask answers show submitted freeform text
+
+Pager SHALL render non-empty freeform notes from an accepted `ask_user_question` result in its expanded Ask answer row. When the answer is only the `Other` placeholder, the row SHALL show the submitted text in its place. When a selected option also has freeform notes, the row SHALL show both the option and submitted text. Answers without freeform notes SHALL continue to show their selected labels. This display projection SHALL NOT change the model-facing tool result or the persisted result text.
+
+#### Scenario: Freeform-only answer
+
+- **WHEN** the user submits an accepted answer using only the freeform field
+- **THEN** the expanded Ask row shows the entered text as the answer, without `Other` or a stray quote.
+
+#### Scenario: Selected option with additional text
+
+- **WHEN** the user submits an accepted option and non-empty freeform notes
+- **THEN** the expanded Ask row shows both the selected label and the entered text.
+
+#### Scenario: Selected option without freeform text
+
+- **WHEN** the user submits an accepted option without notes
+- **THEN** the expanded Ask row shows the selected label as before.
+
+### Requirement: CLI export writes a session transcript directory tree
+
+`grow export <session-id> [output-dir]` SHALL 导出指定 session 与其已持久直接委派后代的 Markdown 目录树。默认输出根 SHALL 是调用 cwd 下以完整 canonical session ID 命名的目录；显式 output-dir SHALL 直接作为输出根，展开 `~` 后按调用 cwd 解析相对路径。每个节点 SHALL 写 `transcript.md`，直接 child SHALL 位于该节点的 `subagents/<child-session-id>/`，递归保持实际委派关系。CLI SHALL 不再提供 transcript stdout 或 `--clipboard` / `-c` 模式。
+
+#### Scenario: Default export includes nested delegates
+- **WHEN** 指定 session 有 child 和 grandchild，各自有独立对话
+- **THEN** 当前目录产生 `<session-id>/transcript.md`、`subagents/<child-id>/transcript.md` 和其下的 `subagents/<grandchild-id>/transcript.md`，每份正文来自各自 session。
+
+#### Scenario: Explicit destination differs from session cwd
+- **WHEN** 指定相对或绝对 output-dir，session cwd 与命令 cwd 不同
+- **THEN** 只按 output-dir 规则选择根目录，不使用 session cwd，也不在显式根下额外追加 session ID。
+
+#### Scenario: Clipboard flag is supplied
+- **WHEN** 调用 CLI export 带 `--clipboard` 或 `-c`
+- **THEN** 参数解析拒绝该选项，不进行导出或剪贴板操作。
+
+#### Scenario: Empty valid session
+- **WHEN** 一个有效节点没有可见正文
+- **THEN** 它仍具有带 session 身份和无已记录正文说明的 transcript，不从树中静默消失。
+
+证据与实施入口：`crates/codegen/pager/src/export_cmd.rs::ExportArgs/run`、`crates/codegen/pager/src/app/cli.rs::Command::Export`。
+
+### Requirement: Transcript hierarchy follows verified direct delegation
+
+导出 SHALL 从 durable spawn/seed 事实验证 child identity、lifecycle owner 和直接委派者，并以直接委派者组织目录。Summary parent、展示缓存或目录扫描 SHALL NOT 单独作为委派 authority。每个包含节点 SHALL 唯一且具有可验证的父链；现有 terminal result reference SHALL 经过对应链接校验。请求某个 child 为根时 SHALL 只导出该 child 的委派子树；fork 祖先、resume 来源、兄弟 session 和 Sideband SHALL NOT 被当作后代。
+
+#### Scenario: Nested lifecycle is stored in the root ledger
+- **WHEN** child 和 grandchild 的 spawn 都由 root Timeline 持有，但 grandchild 的直接安全父身份指向 child
+- **THEN** grandchild 文档位于 child 目录下，不被扁平放在 root 下，spawn/seed 的 lifecycle owner 链仍按真实来源校验。
+
+#### Scenario: A subagent is the requested export root
+- **WHEN** 请求导出一个 subagent，其后代的 lifecycle 记录位于更高层 owner
+- **THEN** 读取必要 owner 索引后只导出请求根及其直接委派后代，不输出 owner、兄弟或源会话的 transcript。
+
+#### Scenario: Fork or resume provenance exists
+- **WHEN** session 带有 fork parent 或 resumed_from
+- **THEN** 它们保持来源语义，不被转化为新的目录父子边或导致祖先历史重复遍历。
+
+#### Scenario: Required child data is missing or conflicting
+- **WHEN** 一个选中 child 缺少必要 ledger、seed/result link 不匹配、出现循环或多父身份
+- **THEN** 整次导出明确失败并定位相关 session，不返回遗漏 child 的成功结果，也不执行修复或恢复。
+
+#### Scenario: A parent transcript was rewound
+- **WHEN** 父 session 当前对话分支回退，但仍有已持久的委派 spawn/seed
+- **THEN** 委派目录清单保留该事实，每个节点的正文分别遵循自身当前分支，不复活被 rewind 排除的正文。
+
+证据与实施入口：`chat-state/src/timeline.rs::SubagentSpawnEvent/Timeline::validate_subagent_seed_link/validate_subagent_result_link`、`shell/src/agent/subagent/mod.rs::SubagentCtx`、`shell/src/session/trajectory.rs::refresh_tree_from_directory`；路径均相对 `crates/codegen/`。
+
+### Requirement: Full transcript export preserves recoverable conversation presentation
+
+完整会话树导出 SHALL 使用与会话界面一致的用户可见内容选择、正文与状态语义，覆盖可恢复的 ACP 和 Grow 会话展示，包括 thinking、工具结果和子 agent 生命周期。它 SHALL 保留现有隐藏用户回显、显示文本、response admission、rewind、去重和 Hook observational 规则，不把模型 Surface、原始 provider 请求或 trajectory 调试行作为用户消息。每份文档 SHALL 包含身份及直接子文档的相对链接；child 正文 SHALL 保存在 child 文档中。
+
+#### Scenario: Display text differs from model input
+- **WHEN** 用户消息携带 display text、skill 包装或 hideFromScrollback 标志
+- **THEN** transcript 采用相同展示选择，不泄漏包装后的内部输入或伪造用户消息。
+
+#### Scenario: Conversation contains reasoning and tool details
+- **WHEN** 会话包含可见 thinking、工具参数展示、结果、错误或已有截断标记
+- **THEN** Markdown 保留相应正文和状态，不再仅输出工具一行摘要或无条件省略 thinking。
+
+#### Scenario: Conversation contains Grow presentation
+- **WHEN** 已保存或可从事实重建子 agent、通信、Hook、压缩、后台任务、Goal 或 Workflow 会话展示
+- **THEN** 导出保留相应用户展示，父级生命周期不代替完整 child transcript，历史 Hook 不重新执行。
+
+#### Scenario: Response cache is incomplete or stale
+- **WHEN** canonical response 需要从 Timeline 补投影，或存在 discarded/quarantined/rewound candidate
+- **THEN** 与现有 reconciliation 一致地重建去重历史，不复活排除内容、不猜测无法证明的响应位置。
+
+#### Scenario: Optional display material is unavailable
+- **WHEN** 已记录的附件引用或截断结果缺少可选展示材料
+- **THEN** 保留可得引用及明确 unavailable/truncated 说明，不把当前工作区文件或重新执行结果充当历史正文；必要 authority 损坏仍失败。
+
+#### Scenario: Existing interactive export is used
+- **WHEN** 用户调用 TUI `/export` 或既有 `/transcript`
+- **THEN** 继续输出当前活动 root/child 视图的单份完整 transcript，保留紧凑展示、路径和剪贴板语义，不自动升级成目录树或仅导出视窗可见的一页。
+
+证据与实施入口：`pager/src/acp/tracker.rs`、`pager/src/scrollback/export.rs`、`pager/src/scrollback/block.rs`、`pager/src/app/acp_handler/`、`pager/src/app/root/dispatch/transcript.rs`；路径均相对 `crates/codegen/`。
+
+### Requirement: Transcript tree export is bounded and observational
+
+会话树导出 SHALL 固定每个必要来源的已提交读取边界，复用身份绑定的只读存储能力，不取得 writer lease、不修复 Summary/Timeline、不开启执行 session。读取 SHALL 有全树节点、深度、事件及实际源字节预算，输出 SHALL 有总字节预算；超限、不可验证来源和必要材料缺失 SHALL 明确失败。跨活跃 ledger 的读取 SHALL NOT 被宣称为同一时刻的全局原子快照。
+
+#### Scenario: Export while a writer exists
+- **WHEN** 源 session 有活跃 writer 且选定来源可以完整校验
+- **THEN** 导出只消费已固定边界内的记录，不争抢 writer、不追随后续追加，源文件内容不因导出改变。
+
+#### Scenario: Captured references are not yet complete
+- **WHEN** 固定读取边界下某个必要跨 ledger 前件不可用
+- **THEN** 导出报告不完整来源并允许之后重试，不把它解释为无子 agent 或空对话。
+
+#### Scenario: Source or output exceeds its budget
+- **WHEN** 节点、深度、记录、实际读取字节或生成 Markdown 达到限制
+- **THEN** 操作停止并报告超限，不静默截掉剩余 agent 后返回成功。
+
+证据与实施入口：`shell/src/session/storage/jsonl/mod.rs::open_session_by_id_shared_read`、`shell/src/session/storage/mod.rs::reconcile_raw_replay_lines` 与本 change design 的预算；路径均相对 `crates/codegen/`。
+
+### Requirement: Transcript directory publication never overwrites an existing target
+
+CLI 导出 SHALL 在私有同级临时目录中完成所有 transcript 的生成与写入，再以不覆盖的目录发布提交到最终路径。任何已有目标 SHALL 被拒绝，包括普通文件、空目录、非空目录及符号链接。提交前失败 SHALL 保持已有目标不变并清理本次临时输出；成功反馈 SHALL 晚于完整目录提交。
+
+#### Scenario: Export succeeds
+- **WHEN** 所有必要节点和文件均准备成功且最终路径不存在
+- **THEN** 一次发布完整目录树，再报告路径与 agent 数量。
+
+#### Scenario: Destination already exists or appears during publication
+- **WHEN** 最终路径预先存在，或在准备和发布之间被其他操作创建
+- **THEN** 导出失败，已有路径不被覆盖或合并，哪怕它是空目录。
+
+#### Scenario: Child rendering or writing fails
+- **WHEN** 某个后代已经写入临时目录后发生读取、投影或写入失败
+- **THEN** 清理本次临时目录，不留下表示完整导出的最终路径，不报告成功。
+
+证据与实施入口：`pager/src/export_cmd.rs`；参考 `shell/src/session/storage/mod.rs::ContainedDirectory::publish_child_no_replace` 和 `pager/src/local_drafts.rs::rename_no_replace` 的原语，不复用草稿业务；路径均相对 `crates/codegen/`。
+
+### Requirement: Trajectory downloads the same transcript tree
+
+trajectory SHALL 为页面绑定的 session 提供完整对话导出下载，内容是与 CLI 相同布局和正文规则的 `<session-id>.tar.gz`，归档内有 `<session-id>/` 顶层目录。导出 SHALL 忽略调试器的行过滤和当前分页范围，沿用 loopback、随机 token 与 Host 校验，不接受任意服务器文件输出路径。下载 SHALL 有界并持有临时产物的明确释放责任。
+
+#### Scenario: Download from a filtered trajectory page
+- **WHEN** 页面带 search/layer/visibility 等筛选，用户选择导出对话
+- **THEN** 下载绑定 session 的完整会话树，而不是当前已加载或筛选出的调试行。
+
+#### Scenario: Compare CLI and browser output
+- **WHEN** 两个入口消费相同的固定来源快照
+- **THEN** 解包后的相对路径和 Markdown 内容与 CLI 输出一致，压缩包元数据不影响比较。
+
+#### Scenario: Concurrent request or disconnected download
+- **WHEN** 一个导出仍在执行，或下载客户端断开
+- **THEN** server 不无限堆积任务；并发请求得到明确 busy 反馈，当前产物在 owner 结束后清理，不写入源 session。
+
+证据与实施入口：`shell/src/session/trajectory.rs::serve/trajectory_router`、`shell/src/session/trajectory.html`、`pager/src/trajectory_cmd.rs`；路径均相对 `crates/codegen/`。回调由 Pager 组合，Shell 不反向依赖 Pager。
+
+### Requirement: CLI replay runs an isolated observational TUI
+
+`grow replay <session-id> [--speed <value>]` SHALL 以指定 session 的固定历史快照启动只读 TUI，默认 speed 为 1。它 SHALL 复用会话展示组件、没有会话输入框（主动搜索可使用本地搜索编辑器），并且不创建执行 session、连接执行 ACP、调用 provider、运行工具/Hook、恢复 scheduler/workflow 或修改源 session/工作区。必要历史不存在或校验失败 SHALL 明确报错，不进入真实 resume 作为回退。
+
+#### Scenario: Start replay without model configuration
+- **WHEN** 历史来源有效，但模型配置无效或没有认证
+- **THEN** replay 仍可展示历史，不初始化 provider 或要求修复模型配置。
+
+#### Scenario: Historical execution and interaction appear
+- **WHEN** 历史包含工具、Hook、Ask、权限请求或子任务生命周期
+- **THEN** 只呈现已记录内容和状态，不重新执行、不发应答、不产生当前权限/任务操作。
+
+#### Scenario: Source cannot be validated
+- **WHEN** 指定 session 缺失，或必要 authority/引用损坏
+- **THEN** replay 报告来源错误，不新建会话、不恢复执行、不展示无提示的部分成功历史。
+
+#### Scenario: Quit or cancel key is pressed
+- **WHEN** 用户在根页面且无局部搜索/选区/详情/帮助时按 q 或 Esc，或在任意播放视图按 Ctrl-C
+- **THEN** 只退出播放器并恢复终端，不发送 session cancel 或修改被查看 session；查询编辑中的 q 是字符，Esc 先退出编辑；非编辑搜索结果/纯选区、详情/帮助和子页的 Esc/q 按层级返回。
+
+证据与实施入口：`cli/src/main.rs`、`pager/src/app/cli.rs`、`pager/src/replay_cmd.rs`；复用前序 `export-session-transcript-tree` reader。路径均相对 `crates/codegen/`。
+
+### Requirement: Replay speed and pause use a single virtual clock
+
+播放 SHALL 以单调虚拟时钟调度历史，speed SHALL 是有限且大于零的数值。调速 SHALL 保持当前播放位置连续，暂停 SHALL 冻结自动事件交付、文本揭示和历史业务耗时；只有用户明确选择下一记录时才允许推进，且推进后仍保持暂停。事件顺序 SHALL 按已验证逻辑顺序保持，不以墙钟或 eventId 全量重排；高倍速可以合并绘制，但 SHALL NOT 丢弃语义事件。
+
+#### Scenario: Replay at four times speed
+- **WHEN** 两个有可靠间隔的事件相差 8 秒，所在区间没有 IDLE 压缩，播放 speed 为 4 且没有暂停
+- **THEN** 播放调度间隔为 2 秒，不因渲染耗时累计漂移；事件内容与顺序不变。
+
+#### Scenario: Pause and resume mid-message
+- **WHEN** 用户在文本揭示中暂停，然后恢复
+- **THEN** 暂停期间文字、事件游标和历史 elapsed 保持，恢复从原位置继续，不跳过或重复正文。
+
+#### Scenario: Change speed while playing or paused
+- **WHEN** 用户修改当前 speed
+- **THEN** 当前虚拟位置不跳变，后续间隔按新速度计算；暂停时仍保持暂停。
+
+#### Scenario: Invalid speed
+- **WHEN** speed 为零、负值、NaN、无穷或不能安全换算的数值
+- **THEN** 在终端接管前报告参数错误，不启动播放。
+
+#### Scenario: Timestamps regress or event counters restart
+- **WHEN** 历史墙钟倒退、时间精度导致同值，或 resume 后事件 counter 重新起算
+- **THEN** 播放保持已验证的事件顺序，等待时间非负，不把旧记录重排为新的因果顺序。
+
+证据与实施入口：`pager/src/motion.rs::FrameStamp`、`pager/src/acp/meta.rs::NotificationMeta`、`pager/src/replay_cmd.rs::PlaybackClock/Player`。路径均相对 `crates/codegen/`。
+
+### Requirement: Simulated streaming never becomes historical evidence
+
+Replay SHALL 对 assistant 和可见 thinking 提供渐进文本展示，优先使用确切关联的历史时间区间；没有可靠区间时 SHALL 使用确定性的估算并明确标注模拟流式。文本揭示 SHALL 保持 Unicode grapheme 完整及同一消息身份，结束后正文逐字等于 canonical 内容。模拟分片 SHALL 只存在于播放器内存，不写回历史、不参与 sampling admission、不生成原本不存在的工具执行输出。
+
+#### Scenario: Only a complete assistant response was persisted
+- **WHEN** 没有可恢复的原始 delta 序列，但存在已接纳的完整回复
+- **THEN** 播放器可以分段揭示该回复并标明模拟，最后得到恰好一份完整消息，不声称这是原始 token 到达节奏。
+
+#### Scenario: Unicode and Markdown cross chunk boundaries
+- **WHEN** 正文含中文、组合字符、emoji 或 Markdown fence
+- **THEN** 揭示不切坏 grapheme，最终文本与原始 Markdown 一致，不产生重复前缀或替换字符。
+
+#### Scenario: Independent event arrives during text reveal
+- **WHEN** 文本仍在揭示而独立 Grow/工具展示事件到期
+- **THEN** 独立事件可按原逻辑位置应用，后续揭示仍归属于原消息；依赖边界到来时必要正文收束，不为动画重排事实。
+
+#### Scenario: History contains a discarded candidate
+- **WHEN** 早期 attempt 被 discarded/quarantined 或回复被 rewind 排除
+- **THEN** 该正文不因模拟流式而出现，只有同一只读 reconciliation 允许的内容进入播放。
+
+#### Scenario: Tool history contains only the final result
+- **WHEN** 工具结果没有逐段输出事实
+- **THEN** 展示保存的结果，不模拟不存在的命令输出、重试或工具执行。
+
+证据与实施入口：`shell/src/session/response_projection.rs::project_admitted_response/plan_response_projections`、`shell/src/session/storage/mod.rs::projection_envelope`、Pager 只读展示投影。路径均相对 `crates/codegen/`。
+
+### Requirement: Replay preserves historical time provenance
+
+播放时间 SHALL 来自与事件明确关联的原通知时间、原写盘时间或 Timeline 事实时间；读取期间合成 projection 的当前时刻 SHALL NOT 被当作历史时间。无法证明时间时 SHALL 标为估算。历史来源轴与播放轴 SHALL 分离；已确认长 IDLE 按下述固定区间规则压缩并提示，倍速作用于播放轴，不改写原始时间或业务 duration。
+
+#### Scenario: Missing response projection is synthesized now
+- **WHEN** reader 在本次读取时从 Timeline 重建 response projection
+- **THEN** 播放使用其原始 anchor/admission 时间依据或估算，不在历史中插入从原会话到当前时间的巨大空白。
+
+#### Scenario: All source timing is absent
+- **WHEN** 合法的展示序列没有可靠时间信息
+- **THEN** 按确定性估算轴播放并明确显示估算，不用文件修改时间或当前时间伪装原始节奏。
+
+#### Scenario: History contains a long real pause
+- **WHEN** 可靠来源记录严格超过 30 秒且全树没有执行/未知活动保护的 IDLE 区间
+- **THEN** 默认压缩为 1 秒播放时间并在面板显示原长度和 IDLE 提示；再按指定 speed 缩放，暂停/退出保持响应。
+
+证据与实施入口：`shell/src/session/storage/mod.rs::SessionUpdateEnvelope/projection_envelope`、`chat-state/src/timeline.rs::TimelineEvent`、`pager/src/acp/meta.rs`。路径均相对 `crates/codegen/`。
+
+### Requirement: Replay remains browsable and ends without resuming work
+
+Replay SHALL 支持暂停/继续、调速、滚动、选择/折叠和退出，展示播放状态/倍速/进度；没有发送、执行、恢复或授权控件。用户离开底部阅读时 SHALL 保留视窗。播放结束 SHALL 停留在最终页面供阅读；业务事实未结束的节点 SHALL 保留截至快照的未完成/未知状态，不合成成功或继续等待真实执行。
+
+#### Scenario: User scrolls upward during playback
+- **WHEN** 用户离开底部浏览已有正文
+- **THEN** 后续事件不抢回视窗，回到底部后恢复跟随。
+
+#### Scenario: Snapshot ends during a running tool
+- **WHEN** 源截点没有该工具或 turn 的终态
+- **THEN** 播放器正常进入 Finished，业务行标明截至快照未完成，不伪造 Completed，也不调用任务查询或等待其真实结束。
+
+#### Scenario: Replay finishes
+- **WHEN** 全部快照事件与剩余文本揭示完成
+- **THEN** 停在可滚动阅读的最终页面，直到用户退出，不跳转普通交互会话或出现输入框。
+
+#### Scenario: User tries a historical action
+- **WHEN** 按 Enter、粘贴文本、slash、权限批准或工具重试快捷键
+- **THEN** 不提交任何执行请求；只有明确允许的本地浏览操作可以改变展示。
+
+证据与实施入口：`pager/src/scrollback/scrollback_pane.rs`、`pager/src/replay_cmd.rs` 的只读 keymap/终端页面；禁止使用 `pager/src/app/acp_handler/permissions.rs` 的 live 响应路径。路径均相对 `crates/codegen/`。
+
+### Requirement: Completed replay matches the exported session transcript
+
+在同一来源快照上，播放结束的指定 session 用户展示 SHALL 与完整树导出中该节点 transcript 的语义内容一致，忽略目录导航索引、主题、折叠、视窗、播放控制栏和仅属于播放器的跳过提示。speed、暂停、IDLE 压缩、显式下一记录、绘制合并 SHALL NOT 改变最终消息、工具状态或 Grow 展示。来源读取与播放处理 SHALL 有界，不预建每字符事件队列或随分片无限复制累计正文。
+
+#### Scenario: Compare different playback schedules
+- **WHEN** 同一来源以 1 倍、4 倍及多次暂停/调速播放完成
+- **THEN** 三者的归一化展示与该节点完整 Markdown 的内容/状态一致。
+
+#### Scenario: Replay a child session
+- **WHEN** 指定一个 child session ID
+- **THEN** 播放该 child 的 transcript，与导出树中对应节点一致，不混入其兄弟正文或重新启动 child。
+
+#### Scenario: Large transcript and slow terminal
+- **WHEN** 大正文、高倍速和慢绘制同时出现
+- **THEN** 可以合并到期绘制，所有语义事件仍恰好应用，退出/暂停保持有界响应，源预算超限时明确失败。
+
+证据与实施入口：前序 `export-session-transcript-tree` 的完整投影/reader、`pager/src/acp/tracker.rs`、`pager/src/scrollback/state/` 及新增 replay 测试。路径均相对 `crates/codegen/`。
+
+#### Scenario: Complete the navigable captured tree
+- **WHEN** 父节点和最终有效 transcript 中可导航的全部后代播放完成
+- **THEN** 每个节点分别与同一快照导出一致；切页不混合正文，被 rewind 排除的不可达分支不延长完成条件。
+
+### Requirement: Offline transcripts preserve interrupted turn ownership
+
+Export 和 replay SHALL 使用同一离线展示投影，按已记录 prompt identity 处理 turn 边界。取消、失败及其他非正常 stop reason SHALL 可见；未记录原因时不得猜测。Turn terminal 或后续用户输入 SHALL NOT 充当任何 pending 工具的成功结果；无工具 terminal 的行 SHALL 保持截至快照未完成，晚到真实工具 terminal SHALL 更新原行。
+
+#### Scenario: User cancels and continues
+- **WHEN** 一个 turn 在正文或工具途中取消，随后用户发起下一 turn
+- **THEN** 显示已允许的历史正文、取消事实与新输入；两 turn 的消息分开，未闭合工具不被标为成功。
+
+#### Scenario: Earlier terminal arrives during another turn
+- **WHEN** 前一 prompt 的 terminal 到达时已有不同 prompt 的正文
+- **THEN** terminal 只描述所属 prompt，不收束或拆分当前 prompt 的消息。
+
+#### Scenario: Background work finishes after a turn
+- **WHEN** TaskBackgrounded 后跨 turn 出现 TaskCompleted
+- **THEN** 保留一条 started 和一条对应 terminal 展示，不将 started 改写成第二条 terminal。
+
+#### Scenario: Persisted user echo is repeated during its response
+- **WHEN** 同一 message identity 的用户 echo 在正文中重复到达
+- **THEN** 不重复用户行，也不切开所属回复。
+
+#### Scenario: Passive history requires an existing fact projection
+- **WHEN** 已校验 Timeline 包含缺失展示的 completed Hook、direct child lifecycle 或 parent/agent reply receipt，或者已保存的 UiNotice 包含通信 receipt 正文
+- **THEN** 复用相应纯展示转换保留事实和稳定身份，不运行 handler；补回事实缺乏原始展示时间时明确使用估计顺序。
+
+#### Scenario: A retained message receipt has no readable body
+- **WHEN** receipt 的 immutable 正文 artifact 已缺失或校验不通过
+- **THEN** 与 live reconnect 相同，保留 receipt identity 和 Message unavailable 提示，不重投递消息、不虚构正文。
+
+### Requirement: Offline snapshot frontiers survive normal append
+
+Transcript reader SHALL 在解析前固定必要 ledger 的文件身份和长度，目录树发现与正文消费 SHALL 复用该捕获。预算 SHALL 在物化前约束 ledger 字节并累计必要引用与记录。正常追加 SHALL 不延长读取；捕获范围中的完整损坏行、截断或身份冲突 SHALL 明确失败。
+
+#### Scenario: Writer appends after capture
+- **WHEN** writer 在捕获后补齐半行或追加新的消息、turn terminal 或 child spawn
+- **THEN** 该次输出仅消费已捕获的完整行，之后的记录不进入正文或目录树，也不因单纯追加失败。
+
+#### Scenario: Committed prefix is invalid
+- **WHEN** 捕获前缀含完整坏行、外部 session 身份或读取中发生截断
+- **THEN** reader 返回定位明确的错误，不导出空成功或混入其他 session。
+
+#### Scenario: Canonical response replaces a preview anchor
+- **WHEN** 已准入响应取代同 sampling attempt 的展示锚点
+- **THEN** 保留锚点记录的 prompt identity 和原始时间，不以本次读取时间代替；未准入 attempt 的正文不进入历史。
+
+### Requirement: Replay semantic boundaries take precedence over simulated text
+
+到期的依赖事件 SHALL 收束此前模拟正文并立即按既有逻辑顺序交付；模拟动画 SHALL NOT 推迟用户打断、下一输入或工具边界。暂停 SHALL 同时冻结自动事件交付与模拟正文，用户明确下一记录除外。终端粘贴 SHALL 被视为整体输入；只有主动搜索编辑器可以消费为查询，其他场景忽略，不触发播放器快捷键或会话提交。
+
+#### Scenario: Cancellation arrives during reveal
+- **WHEN** 文本仍在模拟揭示，而取消 terminal 或新用户输入已到期
+- **THEN** 先收束已记录正文，再在本 tick 交付到期边界；下一消息不继承前一 reveal。
+
+#### Scenario: Paste contains playback keys
+- **WHEN** 粘贴的正文含 q、空格、加减号或 slash command
+- **THEN** 不退出、不调速、不暂停、不执行命令；主动搜索只将其作为查询，其他场景忽略；独立键盘快捷键仍可浏览或退出。
+
+### Requirement: Offline Behavior and Goal projections remain observational
+
+Export 与 replay SHALL 展示已记录的 Behavior identity、Plan phase 与控制 terminal。模式选择、Goal state、foreground turn、Workflow Run SHALL 保持独立归属；展示 SHALL NOT 发起选择、确认、审批、自动续跑或终止工作。
+
+#### Scenario: Goal changes during a foreground turn
+- **WHEN** 一个 prompt 正文期间记录 Goal 设置、暂停或退出模式，随后旧 turn terminal 和新用户/自动续轮到达
+- **THEN** 模式/Goal 更新保留原 prompt 正文归属，新 turn 按自己的 identity 展示，不从旧 turn cancelled 推导 Goal 停止，也不生成 continuation。
+
+#### Scenario: Goal is cleared or replaced
+- **WHEN** 空 ID 的 cleared 更新撤销当前 Goal，或者新 Goal 替换旧 Goal
+- **THEN** 旧 Goal 不再作为当前展示，后续旧 ID 更新不将其复活；未 clear 的 paused Goal 可按已记录 active 更新重启。
+
+#### Scenario: Goal stops and late usage arrives
+- **WHEN** 已记录 paused、blocked、budget_limited 或 complete Goal，随后出现该状态的用量更新
+- **THEN** 展示记录的停止状态与预算/用量，不把 TurnCompleted 或用量变化解释为 active；没有预算保持无预算。
+
+#### Scenario: Plan selection needs confirmation or is rejected
+- **WHEN** 历史 CurrentModeUpdate 保持原模式并携带 confirmation/rejection，或存在相应控制 terminal
+- **THEN** 展示原模式及已有说明，不提前切到请求目标、不弹出可提交的审批。
+
+#### Scenario: Workflow update is stale or Behavior has changed
+- **WHEN** 更旧或重复 revision 在较新 Run 投影后到达，或用户已离开 Workflow Behavior
+- **THEN** 旧投影不回退 Run，模式变化不自行结束 Run；cleared 不产生第二条活动 Run。
+
+### Requirement: Offline Control snapshots use captured authority
+
+来源 reader SHALL 校验捕获 Timeline 中的 Control snapshot，并在必要的只读末尾投影保留最新 Behavior/Goal 状态。该 snapshot SHALL 明确表示截点状态，未知中间事件顺序 SHALL 保持估计，不用当前机器时间伪造历史。
+
+#### Scenario: Display cache omits the last Goal transition
+- **WHEN** 捕获 Timeline 已提交退出/clear Goal，而 updates 中最后状态仍为 active
+- **THEN** 结尾 snapshot 恢复已提交模式/Goal 截点，既有历史正文顺序不被猜测重排，来源文件不变。
+
+#### Scenario: Control is invalid
+- **WHEN** Control revision、architecture 或 Behavior/Goal ownership 不合法
+- **THEN** 离线读取明确失败，不静默展示冲突控制状态。
+
+### Requirement: TUI frame corners remain within their owned rows
+
+Pager SHALL render a selected or hovered scrollback frame without placing its corner glyphs on the content row of an adjacent scrollback entry. A corner MAY use the spacer row outside the framed entry when one exists; if adjacent entries are densely packed, the corner SHALL use the framed entry's edge row. Viewport-clipped edges SHALL retain a continuation border instead of a corner.
+
+For a one-row selection with dense neighbors on both sides, Pager SHALL use a single-row junction mark rather than overwrite a neighbor or arbitrarily drop one edge of the selection.
+
+#### Scenario: Selected collapsed tool between dense groups
+
+- **WHEN** a selected tool entry or selected group has no spacer before or after an adjacent collapsed tool group
+- **THEN** its top and bottom selection corners stay on its own edge rows, and neither neighboring group header receives a selection corner.
+
+#### Scenario: Hovered collapsed tool between dense groups
+
+- **WHEN** a hovered tool entry or group has no spacer before or after an adjacent collapsed tool group
+- **THEN** its hover frame stays within its own edge rows, and neither neighboring group header receives a hover corner.
+
+#### Scenario: Selected entry has spacer rows
+
+- **WHEN** the selected entry has a free row before and after it
+- **THEN** its corners use those spacer rows as before.
+
+#### Scenario: One-row selection between dense neighbors
+
+- **WHEN** the selected entry occupies one row and neither adjacent entry leaves a spacer
+- **THEN** its selection marks remain on that row, with neither neighbor row repainted.
+
+#### Scenario: Selected entry crosses the viewport edge
+
+- **WHEN** the selected entry is clipped at the top or bottom of the scrollback viewport
+- **THEN** the clipped side shows its continuation border and no corner outside or inside the clipped edge.
+
+#### Scenario: Focused side pane touches another pane
+
+- **WHEN** a focused side pane has no separator row before or after an adjacent pane
+- **THEN** its corresponding frame corners stay on the focused pane's edge row and do not repaint the adjacent pane.
+
+#### Scenario: One-row focused pane retains its close control
+
+- **WHEN** a focused side pane occupies one row and both frame corners must be inset
+- **THEN** its close control remains visible and aligned with its hit area.
+
+#### Scenario: Sticky header starts at the scrollback top edge
+
+- **WHEN** a selected sticky prompt header begins on the scrollback area's first row
+- **THEN** its top frame corners stay within that area rather than repainting the preceding pane.
+
+#### Scenario: Scrollback frame touches its viewport boundary
+
+- **WHEN** a selected or hovered scrollback entry ends exactly at the scrollback area's top or bottom boundary without clipping its own content
+- **THEN** its corresponding frame corner remains inside the scrollback area.
+
+### Requirement: Replay supports ordinary read-only transcript inspection
+
+Replay SHALL 复用普通会话被动浏览组件，支持鼠标与键盘选择、分组折叠、详情、搜索、正文/详情文本选择与复制。浏览 SHALL 仅使用已交付的投影，不访问未来正文、当前执行数据或未捕获外部文件。它 SHALL 不提供会话提交、修改历史、执行工具或批准交互的能力；历史外链、文件或图表 SHALL NOT 触发浏览器、editor、native opener、Mermaid 子进程或其他执行补全。仅用户明确复制时允许调用既有 clipboard backend，不允许历史内容提供待执行命令。
+
+#### Scenario: Inspect a recorded tool or message
+- **WHEN** 用户操作已显示内容的详情入口或选择后按 Enter/Ctrl-F
+- **THEN** 打开相应查看器，可以搜索/选择/复制当前已交付内容；关闭回原阅读位置，不执行记录中的命令，也不提前展示 reveal 尚未交付的文本。
+
+#### Scenario: Expand grouped rows
+- **WHEN** 用户点击分组头或对选中组按 Enter，再查看已展开成员
+- **THEN** 正确展开/折叠和打开成员详情；共享 entry 的组头不会误打开第一个成员。
+
+#### Scenario: Select text while records arrive
+- **WHEN** 用户拖选正文或详情文本，同时新记录到达、窗口调整或鼠标释放
+- **THEN** 已有选区按稳定 entry 身份保持；拖动和失效热区不触发点击，复制失败有可见反馈。
+
+#### Scenario: Local input owns its keys
+- **WHEN** 用户在搜索或详情内输入字符、空格、q 或加减号
+- **THEN** 优先遵循当前局部控件行为，不触发播放快捷键；F8 可控制播放，Ctrl-C 只退出播放器。
+
+#### Scenario: Close nested inspection
+- **WHEN** 用户在搜索编辑/选区、详情/帮助或子 agent 页面按 Esc
+- **THEN** 逐层退出查询编辑、结果/选区、详情/帮助、子页，根页面才退出；q 在查询编辑内是字符，在其他局部层按同样层级返回；返回保持阅读位置和播放状态。
+
+#### Scenario: Late search result belongs to an old view
+- **WHEN** 关闭搜索、修改查询或切换子页后旧后台结果到达
+- **THEN** 旧 owner/generation 的结果不抢焦点或滚动位置，查询不包含未来队列。
+
+#### Scenario: Historical auxiliary output is absent
+- **WHEN** 记录中的后台任务输出、媒体或外部文件内容无法从已捕获历史获得
+- **THEN** 显示可用表示或明确缺失说明，不连接当前任务、不启动命令或读取当前 workspace 文件冒充历史；点击历史链接/媒体不启动 browser/opener/renderer 进程。
+
+### Requirement: Replay navigates a captured agent tree on one clock
+
+Replay SHALL 一次验证和读取固定会话树，最终有效 transcript 中的可导航后代与选中根共用播放时钟，各自保存阅读状态。跨节点 SHALL 不运行 session、不重新捕获当前来源、不提前展示未来子任务。生命周期 owner 锚点与委派父子导航 SHALL 保持各自归属。
+
+#### Scenario: Open a subagent during playback
+- **WHEN** 对应子 agent 卡片已经交付，用户打开该节点或其已出现的后代
+- **THEN** 展示截至当前已交付播放位置的过程；暂停/调速应用于整棵播放树，切页不重置时间，返回恢复阅读位置。
+
+#### Scenario: Child time is missing or precedes spawn
+- **WHEN** 子事件没有可靠时间，或其时间早于父入口
+- **THEN** 依据已验证 owner spawn 作因果锚定，缺失则明确估算；不能使用点击时间，父卡片交付前不可导航到未来正文。
+
+#### Scenario: Browse after completion
+- **WHEN** 播放集合内各节点事件及 reveal 均已完成
+- **THEN** 页面停留可浏览；历史未结束工具或 Goal 保持截点状态，不继续等待真实执行。
+
+#### Scenario: Child source is invalid or unavailable
+- **WHEN** 必须的子节点来源缺失、损坏、无法验证或超出来源预算
+- **THEN** 接管终端前明确失败，不连接 live agent，不展示无提示的不完整树。
+
+#### Scenario: Large tree is due at high speed
+- **WHEN** 多节点同时有大量到期事件
+- **THEN** 全树共享有界推进预算并避免单节点长期独占，输入保持响应；显示进度以已交付 frontier 为依据，不提前宣告完成。
+
+### Requirement: Replay panel replaces live composer and status controls
+
+Replay SHALL 在正文下方使用专用状态/操作面板，替代 composer 及执行会话状态控件。面板 SHALL 显示播放状态、倍速、全局进度、当前节点上下文、历史时间和当前焦点可用操作；不提供配置、发送、停止历史任务、审批或续跑动作。
+
+#### Scenario: Standard terminal
+- **WHEN** 终端至少 100 列、24 行
+- **THEN** 面板最多占 5 行，按上下文、播放控制、时间、历史状态/跳过提示、快捷键组织；正文占剩余空间，不保留空 composer。
+
+#### Scenario: Narrow or short terminal
+- **WHEN** 窗口缩小或含中文长标题
+- **THEN** 按 cell 宽度和可用行数降级，优先保留播放状态及可发现的帮助/退出；完整被省略信息在只读帮助可查，无越界或过期鼠标热区。
+
+#### Scenario: Playback focus changes
+- **WHEN** 用户打开详情、搜索、子页或播放进入 Paused/Finished
+- **THEN** 提示与当前实际动作一致；无效动作禁用，状态不只靠颜色表达，详情不遮住播放控制。
+
+#### Scenario: Reading away from the bottom
+- **WHEN** 用户滚离底部或打开详情
+- **THEN** 不隐式暂停也不抢回阅读位置；面板明确跟随状态，End/跟随控件只改 viewport。
+
+#### Scenario: Playback and historical state differ
+- **WHEN** 播放器 Playing 而历史 Goal paused、已退出 Goal 模式或存在未完成工具
+- **THEN** 播放状态与历史业务状态分开显示，不从任一状态推导另一状态，不发起恢复/继续。
+
+### Requirement: Replay displays recorded time in the local timezone
+
+Replay SHALL 使用本机在记录瞬间的时区显示历史时间并标明 offset；无法获取时 SHALL 回退 UTC。时区只影响展示，不改变事件顺序/间隔。缺少可靠来源时间或非法时间 SHALL 显示估算/未知，不使用当前时间伪装。
+
+#### Scenario: Local timezone is available
+- **WHEN** 记录瞬间本机 offset 为 UTC+08:00
+- **THEN** 显示对应本地日期及 offset，来源轴、播放轴、倍速不变。
+
+#### Scenario: Local offset changes with historical daylight saving
+- **WHEN** 历史跨越本机时区 DST 变化或重复小时
+- **THEN** 每个瞬间使用相应 offset，绝对顺序和播放间隔保持不变。
+
+#### Scenario: Local timezone is unavailable
+- **WHEN** 无法解析记录瞬间的本机 offset
+- **THEN** 对合法绝对时间显示 UTC 并明确标为 UTC；非法绝对时间显示未知，不猜测偏移或用 now 回填。
+
+### Requirement: Replay compresses only supported idle and recovery gaps
+
+Replay SHALL 基于捕获树的执行与等待事实分类区间，已确认 IDLE 严格超过 30 秒时压缩为固定 1 秒播放时间。该时间随后受 speed 控制。所有节点、已验证 sideband 与后台执行的已知或无法排除的活动 SHALL 阻止普通 IDLE 压缩；单纯没有输出、Goal paused 或 turn 结束 SHALL NOT 证明全树空闲。中断恢复空档可估算压缩，但 SHALL 与确认 IDLE 明确区分。
+
+#### Scenario: Skip a confirmed long idle
+- **WHEN** 可靠区间内全树无执行/未知活动保护且时长超过 30 秒
+- **THEN** 按 1 秒播放时间跨过，并显示一行“跳过 xx IDLE 时间”及固定播放间隔；随后保留上次跳过说明，高倍速不让提示只闪一帧。
+
+#### Scenario: Threshold and speed apply predictably
+- **WHEN** IDLE 为 30 秒、30 秒加 1 毫秒，或对被压缩区间使用 0.5×/16×
+- **THEN** 30 秒不压缩，超过阈值压缩；1 秒播放间隔分别对应 2 秒/62.5 毫秒实际调度间隔，不额外添加不可暂停的墙钟等待。
+
+#### Scenario: Another agent remains active
+- **WHEN** 当前页面无输出但子节点、sideband、后台任务或其他已知执行覆盖该区间
+- **THEN** 对重叠部分不标为 IDLE，切换当前页面不改变分类。
+
+#### Scenario: Permission wait cannot be proven
+- **WHEN** 只有跨越长时间的普通 Tool Started/Completed，没有可关联的人工等待边界
+- **THEN** 保守保留，不能凭工具名或无输出将全程标成 IDLE；允许用户显式前进下一记录。
+
+#### Scenario: Session recovers after an interruption
+- **WHEN** 存在明确恢复 terminal，最后可信活动至恢复边界之间有长空档
+- **THEN** 扣除其他已知活动后可压缩估算空档，提示“中断空档（估算）”；不把恢复 duration 当成确切运行时间或确切 IDLE，不改变 terminal/outcome。
+
+#### Scenario: Metadata changes inside idle
+- **WHEN** 可压缩空档内有多次模式、Goal、用量或其他展示元数据变化
+- **THEN** 所有事件沿单调映射按原逻辑顺序交付，不丢事件，也不因元数据心跳把一段空闲拆成永不压缩的小间隔。
+
+#### Scenario: Snapshot has no recorded trailing endpoint
+- **WHEN** 最后记录后没有可靠末端，或 session 打开未输入期间没有记录时间
+- **THEN** 不用 now/mtime 添加等待或计算虚构 IDLE，现有快照消费完即结束。
+
+### Requirement: Explicit replay advance remains observational
+
+Replay SHALL 提供显式下一记录操作，以跨过不能自动判断的等待。它 SHALL 只推进全树播放位置到最近未交付的记录边界，保持原事件顺序与当前 Playing/Paused 意图，不改历史业务时长，不执行任何任务。正文 `]` 与显式 panel 点击可触发该操作；搜索编辑中的 `]` 只是查询字符，详情/帮助不将此键冒泡为全局推进。
+
+#### Scenario: Advance while paused
+- **WHEN** 用户暂停中选择下一记录
+- **THEN** 依赖 reveal 正确收束、至少交付下一条边界后仍暂停；提示手动跨过的等待，未知时长不猜测，最终内容不变。
+
+#### Scenario: Advance while playing
+- **WHEN** 用户在 Playing 时从正文快捷键或任意局部焦点下显式点击下一记录
+- **THEN** 推进至最近待交付边界后继续 Playing，保留原局部焦点；不发起任何历史动作。
+
+#### Scenario: Advance key belongs to local search
+- **WHEN** 搜索编辑器收到 `]` 字符，或详情/帮助接到该键
+- **THEN** 查询正常编辑，详情/帮助遵循自身键位且不向全局冒泡；播放游标不因此前进。
+
+#### Scenario: No remaining record
+- **WHEN** 全部事件及 reveal 已完成
+- **THEN** 下一记录禁用，页面继续可浏览，不重启或恢复 session。
+
+### Requirement: Goal usage surfaces show measured cache-hit rates
+
+Pager SHALL show a Goal-specific input cache-hit rate alongside Goal token usage in the compact status, detail overlay, and read-only Goal transcript details. It SHALL divide cached input by cached plus uncached classified input; unclassified input and historical consumption without categories SHALL NOT become zero-hit samples. The ratio SHALL be marked as measured when cache classification or total usage is incomplete. With no valid classified-input denominator, it SHALL display N/A. Goal budget consumption and token-total completeness remain independent of this ratio.
+
+#### Scenario: Fully classified Goal input
+
+- **WHEN** a Goal has 200 cached and 300 uncached input tokens with no unknown usage
+- **THEN** its usage surfaces show a 40.00% cache-hit rate without a partial-measurement qualifier.
+
+#### Scenario: Partially classified or incomplete Goal input
+
+- **WHEN** a Goal has classified input plus unclassified input, historical consumption without categories, or an incomplete usage marker
+- **THEN** its usage surfaces show the rate from classified input with a measured qualifier; the unknown portion does not lower the percentage.
+
+#### Scenario: No classified input
+
+- **WHEN** a Goal has only unclassified input, only unknown consumption, or zero input
+- **THEN** its usage surfaces show N/A rather than 0.00% or an inferred cache miss.
+
+#### Scenario: Other behavior modes without Goal
+
+- **WHEN** Plan or Workflow is active without a Goal
+- **THEN** the existing ordinary session usage status continues to show its session cache-hit rate.

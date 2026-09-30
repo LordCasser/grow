@@ -15,6 +15,14 @@ pub struct FrameStamp {
 }
 
 impl FrameStamp {
+    /// Sample a replay frame from its virtual elapsed time and recorded wall time.
+    pub fn at_virtual(origin: Instant, elapsed: Duration, wall_now: SystemTime) -> Self {
+        Self {
+            now: origin.checked_add(elapsed).unwrap_or(origin),
+            wall_now,
+            elapsed,
+        }
+    }
     /// Capture a frame relative to the application's stable motion origin.
     pub fn capture(origin: Instant) -> Self {
         let now = Instant::now();

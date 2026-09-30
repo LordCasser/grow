@@ -555,6 +555,7 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "toolset.ask_user_question.timeout_enabled",
             // SHELL-owned default_model (Models category).
             "default_model",
+            "show_model_provider",
             // Models category. `default_reasoning_effort` and `session_title_model` are
             // not exposed in the modal.
             "fork_secondary_model",

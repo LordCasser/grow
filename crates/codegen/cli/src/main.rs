@@ -1505,6 +1505,9 @@ async fn async_main(args: PagerArgs) -> Result<()> {
                 init_tracing_simple("cli");
                 return pager::export_cmd::run(export_args);
             }
+            Command::Replay(replay_args) => {
+                return pager::replay_cmd::run(replay_args);
+            }
             Command::Trace(trace_args) => {
                 init_tracing_simple("cli");
                 return pager::trace_cmd::run(trace_args).await;

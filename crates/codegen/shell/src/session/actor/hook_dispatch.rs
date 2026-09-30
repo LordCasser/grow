@@ -474,8 +474,7 @@ impl SessionActor {
     /// the same data so a snapshot cannot silently lose the join key.
     /// `prompt_id` is `None` for session-level dispatches (session_start /
     /// session-end stop).
-    pub(super) fn project_hook_execution(
-        &self,
+    pub(crate) fn project_hook_execution(
         event_name: &str,
         tool_name: Option<&str>,
         prompt_id: Option<&str>,
@@ -622,7 +621,7 @@ impl SessionActor {
         projection: &chat_state::HookLifecycleProjection,
     ) {
         if let Some(update) =
-            self.project_hook_execution(event_name, tool_name, prompt_id, projection, false)
+            Self::project_hook_execution(event_name, tool_name, prompt_id, projection, false)
         {
             self.send_transient_hook_notification(update).await;
         }

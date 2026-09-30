@@ -87,30 +87,45 @@ impl WorkflowRegistry {
         let mut diagnostics = Vec::new();
 
         let mut dirs = Vec::new();
+        let user_relative = PathBuf::from("workflows");
+        let user_dir = user_root.join(&user_relative);
         if let Some(cwd) = session_cwd {
             let project_root = project_root(cwd);
             let project_relative = PathBuf::from(".grow").join("workflows");
             let project_dir = project_root.join(&project_relative);
-            if crate::agent::folder_trust::project_scope_allowed(cwd) {
-                dirs.push((
-                    project_root,
-                    project_relative,
-                    "project",
-                    WorkflowScope::Project,
-                ));
-            } else if project_dir.exists() {
-                diagnostics.push(WorkflowDiagnostic {
-                    scope: WorkflowScope::Project,
-                    path: Some(project_dir.display().to_string()),
-                    code: "untrusted_path".into(),
-                    message: "project Workflow Definitions are hidden until the folder is trusted"
-                        .into(),
-                });
+            let project_allowed = crate::agent::folder_trust::project_scope_allowed(cwd);
+            // The user directory owns this source even when the session root is home.
+            let overlaps_user = project_dir == user_dir
+                || (project_allowed
+                    && same_workflow_directory(
+                        &project_root,
+                        &project_relative,
+                        user_root,
+                        &user_relative,
+                    ));
+            if !overlaps_user {
+                if project_allowed {
+                    dirs.push((
+                        project_root,
+                        project_relative,
+                        "project",
+                        WorkflowScope::Project,
+                    ));
+                } else if project_dir.exists() {
+                    diagnostics.push(WorkflowDiagnostic {
+                        scope: WorkflowScope::Project,
+                        path: Some(project_dir.display().to_string()),
+                        code: "untrusted_path".into(),
+                        message:
+                            "project Workflow Definitions are hidden until the folder is trusted"
+                                .into(),
+                    });
+                }
             }
         }
         dirs.push((
             user_root.to_path_buf(),
-            PathBuf::from("workflows"),
+            user_relative,
             "user",
             WorkflowScope::User,
         ));
@@ -230,6 +245,38 @@ fn reject_same_scope_duplicates(
             });
             entries.retain(|entry| entry.meta.name != name);
         }
+    }
+}
+
+fn same_workflow_directory(
+    project_root: &Path,
+    project_relative: &Path,
+    user_root: &Path,
+    user_relative: &Path,
+) -> bool {
+    #[cfg(any(unix, windows))]
+    {
+        let project = crate::session::storage::ContainedDirectory::open(
+            project_root,
+            project_relative,
+            "project Workflow Definition directory",
+            false,
+        );
+        let user = crate::session::storage::ContainedDirectory::open(
+            user_root,
+            user_relative,
+            "user Workflow Definition directory",
+            false,
+        );
+        project
+            .ok()
+            .zip(user.ok())
+            .is_some_and(|(project, user)| project.is_same_entity(&user).unwrap_or(false))
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (project_root, project_relative, user_root, user_relative);
+        false
     }
 }
 
@@ -950,6 +997,32 @@ mod tests {
             trusted.resolve_by_name("project-only").unwrap().meta.name,
             "project-only"
         );
+    }
+
+    #[test]
+    fn overlapping_project_and_user_workflow_dir_is_user_only() {
+        let dir = tempfile::tempdir().unwrap();
+        git2::Repository::init(dir.path()).unwrap();
+        let user_root = dir.path().join(".grow");
+        let workflows = user_root.join("workflows");
+        std::fs::create_dir_all(&workflows).unwrap();
+        std::fs::write(workflows.join("shared.rhai"), script("shared")).unwrap();
+        crate::agent::folder_trust::record_for_test(dir.path(), true);
+
+        let registry = WorkflowRegistry::scan_with_user_root(Some(dir.path()), &user_root);
+        let listings = registry.list();
+        assert_eq!(listings.len(), 1);
+        assert_eq!(listings[0].source, "user");
+        assert_eq!(listings[0].scope, WorkflowScope::User);
+        assert_eq!(listings[0].definition_id.0, "user:shared");
+        assert_eq!(
+            listings[0].path.as_deref(),
+            Some(workflows.join("shared.rhai").to_str().unwrap())
+        );
+
+        let resolved = registry.resolve_by_name("shared").unwrap();
+        assert_eq!(resolved.scope, WorkflowScope::User);
+        assert_eq!(resolved.definition_id.0, "user:shared");
     }
 
     #[test]

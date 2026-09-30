@@ -1,0 +1,3 @@
+- [x] Align the Settings list test with the existing `show_model_provider` registry entry.
+- [x] Make the inline-media per-view limit test independent of process-wide worker scheduling.
+- [x] Run the Pager library suite, document results, and validate OpenSpec.

@@ -74,6 +74,8 @@ Plan 的 artifact revision/hash 与 phase 存在 control snapshot；Plan 文档�
 
 Plan 模式的 `ask_user_question` 在 Pager 中拥有完整的 `Navigation | InputMode | PlanAction` 焦点状态。`Chat about this` 与 `Skip interview` 是固定、可键盘到达的 typed response；当前部分答案随响应返回，不通过 prompt queue、Interject 或伪造 UserMessage 旁路提交。
 
+普通接受的 Ask 回答仍以选项 label 和自由输入 notes 形成模型工具结果；Pager 展开记录时，自由输入独占的 `Other` 显示为实际输入，有选项与补充输入时两者都显示。模型结果和持久化正文不因展示转换而改写。行为见 [Ask 回答展示契约](../../openspec/specs/client-surfaces/spec.md#requirement-accepted-ask-answers-show-submitted-freeform-text)。
+
 Goal turn 的 lifecycle mutation authority 以当前 prompt、Goal id、definition revision 与 active status 为边界。全局 Control revision 仍保护尚无 Goal owner 的创建操作，但 Goal 已激活后，usage、reminder、context reprojection 或 compaction checkpoint 不属于定义变更，不能撤销同一 turn 的 `update_goal` 权限。
 
 ## 切换矩阵

@@ -133,6 +133,36 @@ pub struct AgentViewLayout {
     pub timeline_width: u16,
 }
 impl AgentViewLayout {
+    /// Insets a side pane's frame corners when its edge touches another pane
+    /// or the screen edge, leaving no spacer row for an outboard corner.
+    pub fn side_pane_corner_insets(&self, pane: Rect, screen: Rect) -> (bool, bool) {
+        let neighbors = [
+            self.status_bar,
+            self.startup_warnings,
+            self.tasks,
+            self.catalog,
+            self.scrollback,
+            self.todo,
+            self.queue,
+            self.btw,
+            self.turn_status,
+            self.banner,
+            self.plugin_cta,
+            self.follow_ups,
+            self.prompt,
+            self.shortcuts,
+        ];
+        let top = pane.y <= screen.y
+            || neighbors
+                .iter()
+                .any(|other| *other != pane && other.area() > 0 && other.bottom() == pane.y);
+        let bottom = pane.bottom() >= screen.bottom()
+            || neighbors
+                .iter()
+                .any(|other| *other != pane && other.area() > 0 && other.y == pane.bottom());
+        (top, bottom)
+    }
+
     /// Compute layout from screen area, appearance config, prompt height,
     /// todo pane height, turn status height, and prompt gap.
     ///
@@ -512,6 +542,7 @@ pub fn render_entry_hover(
         .display
         .group_selection_split;
     let group = scrollback.group_range_of(hover_idx, split_mode);
+    let (top_inset, bottom_inset) = scrollback.selection_corner_insets(group.clone());
     if group.len() <= 1 {
         if let Some((area, top_clipped, bottom_clipped)) =
             scrollback.entry_screen_area(hover_idx, scrollback_area)
@@ -519,6 +550,10 @@ pub fn render_entry_hover(
             SelectionBox::new(area, Style::default().fg(theme.hover_border))
                 .with_top_clipped(top_clipped)
                 .with_bottom_clipped(bottom_clipped)
+                .with_corner_insets(
+                    top_inset || area.y == scrollback_area.y,
+                    bottom_inset || area.bottom() >= scrollback_area.bottom(),
+                )
                 .render(buf);
         }
     } else {
@@ -535,6 +570,10 @@ pub fn render_entry_hover(
             SelectionBox::new(combined, Style::default().fg(theme.hover_border))
                 .with_top_clipped(first_top_clipped)
                 .with_bottom_clipped(last_bottom_clipped)
+                .with_corner_insets(
+                    top_inset || combined.y == scrollback_area.y,
+                    bottom_inset || combined.bottom() >= scrollback_area.bottom(),
+                )
                 .render(buf);
         }
     }
@@ -661,6 +700,7 @@ pub fn render_todo_chrome(
     focused: bool,
     hovered: bool,
     close_hovered: bool,
+    corner_insets: (bool, bool),
     theme: &Theme,
 ) -> Option<SelectionBox> {
     render_todo_chrome_with_close_label(
@@ -670,6 +710,7 @@ pub fn render_todo_chrome(
         focused,
         hovered,
         close_hovered,
+        corner_insets,
         theme,
         None,
     )
@@ -683,6 +724,7 @@ pub fn render_todo_chrome_with_close_label(
     focused: bool,
     hovered: bool,
     close_hovered: bool,
+    corner_insets: (bool, bool),
     theme: &Theme,
     close_label: Option<&'static str>,
 ) -> Option<SelectionBox> {
@@ -698,6 +740,7 @@ pub fn render_todo_chrome_with_close_label(
     };
     let layout = HorizontalLayout::new(todo_area, layout_cfg);
     let mut sel = SelectionBox::new(layout.selection_area(), Style::default().fg(color))
+        .with_corner_insets(corner_insets.0, corner_insets.1)
         .with_closable(focused, close_hovered);
     if focused && let Some(label) = close_label {
         sel = sel.with_close_label(Some(label));
@@ -1950,6 +1993,74 @@ mod tests {
     }
     fn layout_with_cta(area: Rect, cta_height: u16) -> AgentViewLayout {
         layout_with_rows(area, 0, cta_height, 0)
+    }
+
+    #[test]
+    fn compact_side_pane_frame_stays_off_adjacent_panes() {
+        let area = Rect::new(0, 0, 80, 30);
+        let layout_cfg = LayoutConfig::default();
+        let compute = |compact| {
+            AgentViewLayout::compute(
+                area,
+                &layout_cfg,
+                &ScrollbarConfig::default(),
+                0,
+                2,
+                2,
+                2,
+                2,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                0,
+                1,
+                compact,
+            )
+        };
+        let layout = compute(true);
+        assert_eq!(layout.status_bar.bottom(), layout.tasks.y);
+        assert_eq!(layout.tasks.bottom(), layout.catalog.y);
+        let corner_insets = layout.side_pane_corner_insets(layout.tasks, area);
+        assert_eq!(corner_insets, (true, true));
+        let spaced = compute(false);
+        assert_eq!(
+            spaced.side_pane_corner_insets(spaced.tasks, area),
+            (false, false)
+        );
+
+        let left = HorizontalLayout::new(layout.tasks, &layout_cfg)
+            .selection_area()
+            .x;
+        let mut buf = Buffer::empty(area);
+        buf.cell_mut((left, layout.status_bar.y))
+            .unwrap()
+            .set_char('S');
+        buf.cell_mut((left, layout.catalog.y))
+            .unwrap()
+            .set_char('C');
+        render_todo_chrome(
+            &mut buf,
+            layout.tasks,
+            &layout_cfg,
+            true,
+            false,
+            false,
+            corner_insets,
+            &Theme::current(),
+        );
+        assert_eq!(buf.cell((left, layout.status_bar.y)).unwrap().symbol(), "S");
+        assert_eq!(buf.cell((left, layout.tasks.y)).unwrap().symbol(), "┌");
+        assert_eq!(
+            buf.cell((left, layout.tasks.bottom() - 1))
+                .unwrap()
+                .symbol(),
+            "└"
+        );
+        assert_eq!(buf.cell((left, layout.catalog.y)).unwrap().symbol(), "C");
     }
     /// Minimal layout with a timeline rail request — hides the cfg-dependent
     /// arity of `compute` like `layout_with_rows` does.

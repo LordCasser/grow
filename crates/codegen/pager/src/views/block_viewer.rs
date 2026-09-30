@@ -799,6 +799,83 @@ impl BlockViewerPane {
         }
     }
 
+    /// Create a viewer for block content that is owned by the scrollback entry.
+    ///
+    /// Background task output is held in the session's task store, so callers
+    /// must continue to construct those viewers with `for_bg_task`.
+    pub fn for_entry(entry: &ScrollbackEntry) -> Option<Self> {
+        match &entry.block {
+            RenderBlock::ToolCall(ToolCallBlock::Other(block))
+                if block.communication_body().is_some() =>
+            {
+                Self::for_communication(entry.id, entry)
+            }
+            RenderBlock::Notice(notice) if notice.communication_body().is_some() => {
+                Self::for_communication(entry.id, entry)
+            }
+            RenderBlock::Thinking(_) | RenderBlock::AgentMessage(_) => {
+                Self::for_markdown(entry.id, entry)
+            }
+            RenderBlock::ToolCall(ToolCallBlock::Execute(_)) => Self::for_execute(entry.id, entry),
+            RenderBlock::ToolCall(ToolCallBlock::Edit(_)) => Self::for_edit(entry.id, entry),
+            RenderBlock::ToolCall(ToolCallBlock::Read(_)) => Self::for_read(entry.id, entry),
+            RenderBlock::ToolCall(ToolCallBlock::Search(_)) => Self::for_grep(entry.id, entry),
+            RenderBlock::ToolCall(ToolCallBlock::ListDir(_)) => Self::for_list_dir(entry.id, entry),
+            RenderBlock::ToolCall(ToolCallBlock::WebFetch(_)) => {
+                Self::for_web_fetch(entry.id, entry)
+            }
+            RenderBlock::ToolCall(ToolCallBlock::IntegrationSearch(_)) => {
+                Self::for_integration_search(entry.id, entry)
+            }
+            RenderBlock::ToolCall(ToolCallBlock::UseTool(_)) => Self::for_use_tool(entry.id, entry),
+            RenderBlock::SubagentPermission(block) => block
+                .member(0)
+                .map(|member| Self::for_plain_text(&member.detail_title(), &member.detail_text())),
+            RenderBlock::Notice(notice) if notice.has_details() => Some(Self::for_plain_text(
+                if notice.category == crate::scrollback::blocks::NoticeCategory::Command {
+                    "Command result"
+                } else {
+                    "Coordination inquiry"
+                },
+                &notice.detail_text(),
+            )),
+            RenderBlock::ToolCall(ToolCallBlock::Other(block)) => Some(Self::for_plain_text(
+                &block.name,
+                &format!(
+                    "{}\n{}\n{}",
+                    block.summary,
+                    block.error.as_deref().unwrap_or_default(),
+                    block.output.as_deref().unwrap_or_default()
+                ),
+            )),
+            _ => None,
+        }
+    }
+
+    /// Apply entry-backed actions requested by `handle_key` and return text
+    /// that the caller may copy. This method does not access the clipboard.
+    pub fn apply_pending_entry_actions(&mut self, entry: &mut ScrollbackEntry) -> Option<String> {
+        if self.raw_toggle_pending {
+            self.raw_toggle_pending = false;
+            self.list_state.set_scroll_anchor();
+            let old_source_line = self
+                .list_state
+                .selected_id()
+                .and_then(|id| Self::source_line_for_id(&entry.block, id));
+            entry.toggle_raw();
+            self.rebuild_items(entry);
+            self.jump_to_source_line(entry, old_source_line);
+        }
+
+        if self.data_toggle_pending {
+            self.data_toggle_pending = false;
+            self.data_mode = !self.data_mode;
+            self.rebuild_items(entry);
+        }
+
+        self.process_pending_copy(entry)
+    }
+
     /// Update a BgTask viewer with new stdout content.
     ///
     /// Called from the tick path when stdout in the central store has changed.
@@ -1812,6 +1889,46 @@ mod tests {
 
     fn communication_entry() -> ScrollbackEntry {
         communication_entry_with("typed\tmessage", "{\"receipt_id\":\"r-1\"}", false)
+    }
+
+    #[test]
+    fn entry_factory_builds_read_only_content_viewers() {
+        let markdown = ScrollbackEntry::new(RenderBlock::agent_message("message"));
+        assert_eq!(
+            BlockViewerPane::for_entry(&markdown).unwrap().kind,
+            ViewerKind::Markdown
+        );
+
+        let execute = ScrollbackEntry::new(RenderBlock::execute_with_output(
+            "printf ok",
+            "ok",
+            None::<String>,
+        ));
+        assert_eq!(
+            BlockViewerPane::for_entry(&execute).unwrap().kind,
+            ViewerKind::Execute
+        );
+
+        let read_block = crate::scrollback::blocks::ReadToolCallBlock::new("src/main.rs")
+            .with_content("fn main() {}".into(), 1);
+        let read = ScrollbackEntry::new(RenderBlock::ToolCall(ToolCallBlock::Read(read_block)));
+        assert_eq!(
+            BlockViewerPane::for_entry(&read).unwrap().kind,
+            ViewerKind::Read
+        );
+
+        let notice = ScrollbackEntry::new(RenderBlock::typed_notice(
+            crate::scrollback::blocks::NoticeTone::Info,
+            crate::scrollback::blocks::NoticeCategory::Command,
+            "Command finished",
+            Some("output".into()),
+        ));
+        let notice_viewer = BlockViewerPane::for_entry(&notice).unwrap();
+        assert_eq!(notice_viewer.kind, ViewerKind::PlainText);
+        assert_eq!(notice_viewer.items[0].search_text(), "Command result");
+
+        let plain_notice = ScrollbackEntry::new(RenderBlock::notice("No detail"));
+        assert!(BlockViewerPane::for_entry(&plain_notice).is_none());
     }
 
     #[test]

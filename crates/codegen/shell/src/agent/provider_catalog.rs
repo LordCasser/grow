@@ -273,8 +273,11 @@ impl ConfigModelOverride {
 
 #[cfg(test)]
 mod tests {
-    use crate::agent::config::{Config, resolve_credentials, resolve_model_list};
+    use crate::agent::config::{
+        Config, resolve_credentials, resolve_model_list, sampling_config_for_model,
+    };
     use crate::agent::config_model_override_parse::{ConfigWarningKind, WarningTarget};
+    use crate::sampling::ApiBackend;
 
     #[test]
     fn provider_hierarchy_builds_the_byok_catalog() {
@@ -314,6 +317,69 @@ mod tests {
             resolve_credentials(model).api_key.as_deref(),
             Some("secret")
         );
+    }
+
+    #[test]
+    fn model_api_backend_overrides_provider_default_in_sampling_config() {
+        let raw: toml::Value = toml::from_str(
+            r#"
+            [models]
+            default = "gateway/inherited"
+
+            [provider.gateway]
+            api_backend = "responses"
+
+            [provider.gateway.options]
+            base_url = "https://gateway.example/v1"
+
+            [provider.gateway.models.inherited]
+
+            [provider.gateway.models.messages]
+            api_backend = "messages"
+            base_url = "https://gateway.example/anthropic/v1"
+
+            [provider.gateway.models.chat]
+            api_backend = "chat_completions"
+
+            [provider.plain.options]
+            base_url = "https://plain.example/v1"
+
+            [provider.plain.models.fallback]
+            "#,
+        )
+        .unwrap();
+
+        let cfg = Config::new_from_toml_cfg(&raw).expect("provider config should parse");
+        cfg.validate_llm_configuration()
+            .expect("provider config should be complete");
+        let models = resolve_model_list(&cfg);
+        for (id, expected_backend, expected_base_url) in [
+            (
+                "gateway/inherited",
+                ApiBackend::Responses,
+                "https://gateway.example/v1",
+            ),
+            (
+                "gateway/messages",
+                ApiBackend::Messages,
+                "https://gateway.example/anthropic/v1",
+            ),
+            (
+                "gateway/chat",
+                ApiBackend::ChatCompletions,
+                "https://gateway.example/v1",
+            ),
+            (
+                "plain/fallback",
+                ApiBackend::ChatCompletions,
+                "https://plain.example/v1",
+            ),
+        ] {
+            let model = models.get(id).expect("configured model should exist");
+            let sampling = sampling_config_for_model(model, resolve_credentials(model), None);
+            assert_eq!(sampling.api_backend, expected_backend, "model {id}");
+            assert_eq!(sampling.base_url, expected_base_url, "model {id}");
+        }
     }
 
     #[test]

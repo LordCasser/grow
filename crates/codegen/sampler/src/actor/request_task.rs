@@ -30,9 +30,15 @@ use crate::metrics::InferenceLatencyStats;
 use crate::retry::{
     self as retry_mod, RetryDecision, classify_error, clone_error, resolve_max_retries,
 };
+use crate::stream::chat_completions::{ConfirmedUsage, stream_chat_completions_tracked};
 use crate::stream::responses::stream_responses_tracked;
-use crate::stream::{stream_chat_completions, stream_messages};
+use crate::stream::stream_messages;
 use crate::types::RequestId;
+
+#[cfg(test)]
+tokio::task_local! {
+    static CONFIRMED_USAGE_TEST_TAP: Arc<dyn Fn(ConfirmedUsage) + Send + Sync>;
+}
 
 /// Default per-chunk idle timeout when neither config nor caller
 /// supplies one. Matches the shell's session-level default
@@ -107,6 +113,40 @@ struct AttemptRun {
     outcome: AttemptOutcome,
     scope: Option<String>,
     provider_started: bool,
+}
+
+fn attempt_billing(
+    outcome: &AttemptOutcome,
+    confirmed_usage: Option<&(TokenUsage, Option<i64>)>,
+) -> (Option<TokenUsage>, Option<i64>) {
+    match outcome {
+        AttemptOutcome::Completed { response, .. }
+        | AttemptOutcome::Truncated {
+            partial_response: response,
+            ..
+        }
+        | AttemptOutcome::ContextWindowExceeded {
+            partial_response: response,
+            ..
+        }
+        | AttemptOutcome::PauseTurn { response, .. } => {
+            (response.usage.clone(), response.cost_usd_ticks)
+        }
+        AttemptOutcome::Empty {
+            usage,
+            cost_usd_ticks,
+            ..
+        }
+        | AttemptOutcome::Failed {
+            usage,
+            cost_usd_ticks,
+            ..
+        } => (usage.clone(), *cost_usd_ticks),
+        AttemptOutcome::Cancelled => confirmed_usage
+            .map(|(usage, cost)| (Some(usage.clone()), *cost))
+            .unwrap_or((None, None)),
+        AttemptOutcome::InitFailed { .. } => (None, None),
+    }
 }
 
 /// Drop closes every unsuccessful attempt, including early returns and unwind.
@@ -239,6 +279,9 @@ pub(crate) async fn run_request_task(
         let evidence = evidence_sink
             .as_ref()
             .map(|sink| crate::audit::AttemptEvidence::new(sink.clone()));
+        let confirmed_usage: ConfirmedUsage = Arc::new(Mutex::new(None));
+        #[cfg(test)]
+        let _ = CONFIRMED_USAGE_TEST_TAP.try_with(|tap| tap(Arc::clone(&confirmed_usage)));
         let attempt = {
             let attempt_cancel = cancel_token.child_token();
             let attempt = run_one_attempt(
@@ -250,6 +293,7 @@ pub(crate) async fn run_request_task(
                 &attempt_cancel,
                 doom_check,
                 Arc::clone(&output_observed),
+                Arc::clone(&confirmed_usage),
                 scope_capture.as_ref(),
                 Some(&recovery),
                 preview_budget.as_ref(),
@@ -270,10 +314,14 @@ pub(crate) async fn run_request_task(
                     let mut result = attempt.await;
                     if let Ok(run) = &mut result
                         && matches!(run.outcome, AttemptOutcome::Cancelled) {
+                        let snapshot = confirmed_usage
+                            .lock()
+                            .expect("confirmed usage slot poisoned")
+                            .clone();
                         run.outcome = AttemptOutcome::Failed {
                             error: SamplingError::Lifecycle("logical sampling deadline exceeded".into()),
-                            usage: None,
-                            cost_usd_ticks: None,
+                            usage: snapshot.as_ref().map(|(usage, _)| usage.clone()),
+                            cost_usd_ticks: snapshot.and_then(|(_, cost)| cost),
                         };
                     }
                     result
@@ -295,66 +343,41 @@ pub(crate) async fn run_request_task(
                 return request_id;
             }
         };
+        let confirmed_usage = confirmed_usage
+            .lock()
+            .expect("confirmed usage slot poisoned")
+            .clone();
 
-        let outcome_usage = match &outcome {
-            AttemptOutcome::Completed { response, .. }
-            | AttemptOutcome::Truncated {
-                partial_response: response,
-                ..
-            }
-            | AttemptOutcome::ContextWindowExceeded {
-                partial_response: response,
-                ..
-            }
-            | AttemptOutcome::PauseTurn { response, .. } => response.usage.clone(),
-            AttemptOutcome::Empty { usage, .. } | AttemptOutcome::Failed { usage, .. } => {
-                usage.clone()
-            }
-            AttemptOutcome::Cancelled | AttemptOutcome::InitFailed { .. } => None,
-        }
-        .or_else(|| {
-            evidence
-                .as_ref()
-                .filter(|evidence| !evidence.was_dispatched())
-                .map(|_| TokenUsage::default())
-        })
-        .or_else(|| {
-            // An unconditional image-capability rejection is a provider-side
-            // request validation failure: inference never started, so the
-            // attempt has exact zero usage. Keeping it out of the generic
-            // unknown-usage path is what lets the session durably install an
-            // ImageShadow and resubmit to the text-only model. The matcher is
-            // intentionally strict; malformed-image, policy, transport, and
-            // every other usage-less failure remain incomplete.
-            let error = match &outcome {
-                AttemptOutcome::Failed { error, .. } | AttemptOutcome::InitFailed { error } => {
-                    Some(error)
-                }
-                _ => None,
-            }?;
-            let info = crate::events::SamplingErrorInfo::from(error);
-            sampling_types::is_unconditional_image_input_unsupported(
-                info.status_code,
-                &info.message,
-                request.image_count(),
-            )
-            .then(sampling_types::TokenUsage::default)
-        });
-        let cost_usd_ticks = match &outcome {
-            AttemptOutcome::Completed { response, .. }
-            | AttemptOutcome::Truncated {
-                partial_response: response,
-                ..
-            }
-            | AttemptOutcome::ContextWindowExceeded {
-                partial_response: response,
-                ..
-            }
-            | AttemptOutcome::PauseTurn { response, .. } => response.cost_usd_ticks,
-            AttemptOutcome::Empty { cost_usd_ticks, .. }
-            | AttemptOutcome::Failed { cost_usd_ticks, .. } => *cost_usd_ticks,
-            _ => None,
-        };
+        let (outcome_usage, cost_usd_ticks) = attempt_billing(&outcome, confirmed_usage.as_ref());
+        let outcome_usage = outcome_usage
+            .or_else(|| {
+                evidence
+                    .as_ref()
+                    .filter(|evidence| !evidence.was_dispatched())
+                    .map(|_| TokenUsage::default())
+            })
+            .or_else(|| {
+                // An unconditional image-capability rejection is a provider-side
+                // request validation failure: inference never started, so the
+                // attempt has exact zero usage. Keeping it out of the generic
+                // unknown-usage path is what lets the session durably install an
+                // ImageShadow and resubmit to the text-only model. The matcher is
+                // intentionally strict; malformed-image, policy, transport, and
+                // every other usage-less failure remain incomplete.
+                let error = match &outcome {
+                    AttemptOutcome::Failed { error, .. } | AttemptOutcome::InitFailed { error } => {
+                        Some(error)
+                    }
+                    _ => None,
+                }?;
+                let info = crate::events::SamplingErrorInfo::from(error);
+                sampling_types::is_unconditional_image_input_unsupported(
+                    info.status_code,
+                    &info.message,
+                    request.image_count(),
+                )
+                .then(sampling_types::TokenUsage::default)
+            });
         let attempt_key = format!("{}:{attempt_number}", request_id.as_str());
         let evidence_result = if let Some(evidence) = &evidence {
             let output_observed_for_evidence = output_observed.load(Ordering::Relaxed);
@@ -945,6 +968,7 @@ async fn run_one_attempt(
     cancel_token: &CancellationToken,
     doom_check: Option<sampling_types::DoomLoopRecoveryPolicy>,
     output_observed: Arc<AtomicBool>,
+    confirmed_usage: ConfirmedUsage,
     scope_capture: Option<&AttemptScopeCapture>,
     recovery: Option<&crate::RecoveryBudget>,
     preview_budget: Option<&PreviewEventBudget>,
@@ -985,7 +1009,13 @@ async fn run_one_attempt(
                 }
             };
             let (teed, captured) = tee_errors(raw);
-            let l2 = stream_chat_completions(teed, metadata, request_id.clone(), idle_timeout);
+            let l2 = stream_chat_completions_tracked(
+                teed,
+                metadata,
+                request_id.clone(),
+                idle_timeout,
+                Some(confirmed_usage),
+            );
             Ok(AttemptRun {
                 outcome: drive_l2(
                     l2,
@@ -1764,6 +1794,7 @@ mod tests {
             &cancel,
             None,
             Arc::new(AtomicBool::new(false)),
+            Arc::new(Mutex::new(None)),
             Some(&capture),
             None,
             None,
@@ -2149,6 +2180,7 @@ mod tests {
                 &cancel,
                 None,
                 Arc::new(AtomicBool::new(false)),
+                Arc::new(Mutex::new(None)),
                 Some(&capture),
                 None,
                 None,
@@ -3227,6 +3259,299 @@ mod tests {
             }
             _ => panic!("buffered terminal must win over simultaneous cancellation"),
         }
+    }
+
+    #[tokio::test]
+    async fn chat_usage_confirmed_before_cancel_survives_pending_tail() {
+        use sampling_types::{
+            ChatChunkChoice, ChatChunkDelta, ChatCompletionChunk, FinishReason, Usage,
+        };
+
+        for mode in ["missing", "intermediate", "complete"] {
+            let request_id = RequestId::from("chat-cancel-pending-tail");
+            let finish = ChatCompletionChunk {
+                id: "response-1".into(),
+                object: "chat.completion.chunk".into(),
+                created: 0,
+                model: "test-model".into(),
+                choices: vec![ChatChunkChoice {
+                    index: 0,
+                    delta: ChatChunkDelta::default(),
+                    finish_reason: Some(FinishReason::Stop),
+                }],
+                usage: None,
+                system_fingerprint: None,
+            };
+            let mut intermediate = finish.clone();
+            intermediate.choices[0].finish_reason = None;
+            intermediate.choices[0].delta.content = Some("partial".into());
+            intermediate.usage = Some(Usage {
+                prompt_tokens: 1,
+                completion_tokens: 1,
+                total_tokens: 2,
+                prompt_cache_hit_tokens: Some(0),
+                prompt_cache_miss_tokens: Some(1),
+                prompt_tokens_details: None,
+                completion_tokens_details: None,
+                cost_in_usd_ticks: None,
+            });
+            let usage = ChatCompletionChunk {
+                choices: vec![],
+                usage: Some(Usage {
+                    prompt_tokens: 100,
+                    completion_tokens: 20,
+                    total_tokens: 120,
+                    prompt_cache_hit_tokens: Some(90),
+                    prompt_cache_miss_tokens: Some(10),
+                    prompt_tokens_details: None,
+                    completion_tokens_details: None,
+                    cost_in_usd_ticks: Some(42),
+                }),
+                ..finish.clone()
+            };
+            let (tail_polled_tx, tail_polled_rx) = oneshot::channel();
+            let tail = stream::once(async move {
+                tail_polled_tx.send(()).unwrap();
+                std::future::pending::<Result<ChatCompletionChunk, SamplingError>>().await
+            });
+            let chunks = match mode {
+                "complete" => vec![Ok(finish), Ok(usage)],
+                "intermediate" => vec![Ok(intermediate), Ok(finish)],
+                _ => vec![Ok(finish)],
+            };
+            let raw = stream::iter(chunks).chain(tail).boxed();
+            let confirmed_usage: ConfirmedUsage = Arc::new(Mutex::new(None));
+            let l2 = stream_chat_completions_tracked(
+                raw,
+                None,
+                request_id.clone(),
+                Duration::from_secs(30),
+                Some(Arc::clone(&confirmed_usage)),
+            );
+            let (event_tx, mut event_rx) = mpsc::unbounded_channel();
+            let cancel = CancellationToken::new();
+            let task_cancel = cancel.clone();
+            let task = tokio::spawn(async move {
+                drive_l2(
+                    l2,
+                    request_id,
+                    &event_tx,
+                    &task_cancel,
+                    Arc::new(Mutex::new(None)),
+                    None,
+                    Arc::new(AtomicBool::new(false)),
+                    None,
+                    None,
+                )
+                .await
+            });
+
+            tokio::time::timeout(Duration::from_secs(2), tail_polled_rx)
+                .await
+                .expect("parser must reach the pending tail")
+                .unwrap();
+            let snapshot = confirmed_usage.lock().unwrap().clone();
+            if mode == "complete" {
+                let (usage, cost) = snapshot
+                    .as_ref()
+                    .expect("complete usage must survive parser drop");
+                assert_eq!((usage.prompt_tokens, usage.completion_tokens), (100, 20));
+                assert_eq!(usage.total_tokens, 120);
+                assert_eq!(usage.cache_read_tokens(), Some(90));
+                assert_eq!(*cost, Some(42));
+            } else {
+                assert!(snapshot.is_none(), "finish alone is not exact usage");
+            }
+
+            cancel.cancel();
+            let outcome = tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .expect("cancellation must not wait for the optional usage tail")
+                .unwrap();
+            assert!(matches!(outcome, AttemptOutcome::Cancelled));
+            let (settled_usage, settled_cost) = attempt_billing(&outcome, snapshot.as_ref());
+            if mode == "complete" {
+                let usage = settled_usage.expect("cancelled attempt must settle confirmed usage");
+                assert_eq!(usage.total_tokens, 120);
+                assert_eq!(usage.cache_read_tokens(), Some(90));
+                assert_eq!(settled_cost, Some(42));
+            } else {
+                assert!(settled_usage.is_none(), "unconfirmed usage stays unknown");
+                assert_eq!(settled_cost, None);
+            }
+            while let Ok(event) = event_rx.try_recv() {
+                assert!(!matches!(event, SamplingEvent::Completed { .. }));
+            }
+        }
+    }
+
+    async fn confirmed_chat_usage_settles_once(logical_deadline: bool) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let received = Arc::clone(&requests);
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            received.fetch_add(1, Ordering::SeqCst);
+            let mut request = Vec::new();
+            loop {
+                let mut buffer = [0; 4096];
+                let count = socket.read(&mut buffer).await.unwrap();
+                assert!(count > 0);
+                request.extend_from_slice(&buffer[..count]);
+                if request.windows(4).any(|part| part == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            let finish = serde_json::json!({
+                "id":"response-1", "object":"chat.completion.chunk", "created":0, "model":"test",
+                "choices":[{"index":0,"delta":{"content":"discard me"},"finish_reason":"stop"}]
+            });
+            let usage = serde_json::json!({
+                "id":"response-1", "object":"chat.completion.chunk", "created":0, "model":"test",
+                "choices":[],
+                "usage":{"prompt_tokens":100,"completion_tokens":20,"total_tokens":120,
+                    "prompt_cache_hit_tokens":90,"prompt_cache_miss_tokens":10,
+                    "cost_in_usd_ticks":42}
+            });
+            let body = format!("data: {finish}\n\ndata: {usage}\n\n");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n{:X}\r\n{body}\r\n",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            std::future::pending::<()>().await;
+        });
+
+        let (slot_tx, mut slot_rx) = mpsc::unbounded_channel();
+        let tap: Arc<dyn Fn(ConfirmedUsage) + Send + Sync> = Arc::new(move |slot| {
+            slot_tx.send(slot).unwrap();
+        });
+        let charges = Arc::new(Mutex::new(Vec::new()));
+        let charge_log = Arc::clone(&charges);
+        let (settlement_tx, mut settlement_rx) = mpsc::unbounded_channel();
+        let (ack_tx, ack_rx) = oneshot::channel();
+        let ack_rx = Mutex::new(Some(ack_rx));
+        let usage_sink: AttemptUsageSink = Arc::new(move |charge| {
+            charge_log.lock().unwrap().push(charge);
+            let ack = ack_rx
+                .lock()
+                .unwrap()
+                .take()
+                .expect("attempt must reach the usage sink only once");
+            let settlement_tx = settlement_tx.clone();
+            Box::pin(async move {
+                settlement_tx.send(()).unwrap();
+                ack.await.expect("test releases the settlement ACK");
+                Ok(())
+            })
+        });
+        let (event_tx, mut events) = mpsc::unbounded_channel();
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let cancel = CancellationToken::new();
+        let task_cancel = cancel.clone();
+        let recovery = logical_deadline.then(|| {
+            let recovery = crate::RecoveryBudget::default();
+            recovery.configure(1, Duration::from_millis(1_900));
+            recovery
+        });
+        let deadline = recovery.as_ref().map(crate::RecoveryBudget::deadline);
+        let task = tokio::spawn(async move {
+            CONFIRMED_USAGE_TEST_TAP
+                .scope(
+                    tap,
+                    run_request_task(
+                        RequestId::from("confirmed-cancel"),
+                        ConversationRequest::default(),
+                        SamplerConfig {
+                            api_backend: ApiBackend::ChatCompletions,
+                            base_url: format!("http://{address}"),
+                            model: "test".into(),
+                            max_retries: Some(3),
+                            ..Default::default()
+                        },
+                        RetryPolicy {
+                            output_delivery: crate::OutputDelivery::Retractable,
+                            ..Default::default()
+                        },
+                        event_tx,
+                        task_cancel,
+                        Some(completion_tx),
+                        None,
+                        Some(usage_sink),
+                        None,
+                        recovery,
+                        None,
+                    ),
+                )
+                .await
+        });
+        let slot = tokio::time::timeout(Duration::from_secs(2), slot_rx.recv())
+            .await
+            .expect("attempt slot must be created")
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if slot.lock().unwrap().is_some() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("parser must confirm complete usage before cancellation");
+        if let Some(deadline) = deadline {
+            tokio::time::pause();
+            tokio::time::advance(deadline.saturating_duration_since(tokio::time::Instant::now()))
+                .await;
+            tokio::time::resume();
+        } else {
+            cancel.cancel();
+        }
+        tokio::time::timeout(Duration::from_secs(2), settlement_rx.recv())
+            .await
+            .expect("confirmed attempt must enter the usage sink")
+            .unwrap();
+        assert!(
+            !task.is_finished(),
+            "request must wait for usage settlement ACK"
+        );
+        assert_eq!(charges.lock().unwrap().len(), 1);
+        ack_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("cancelled request must finish without tail EOF")
+            .unwrap();
+        assert!(completion_rx.await.unwrap().is_err());
+        server.abort();
+        assert_eq!(requests.load(Ordering::SeqCst), 1);
+        let charges = charges.lock().unwrap();
+        assert_eq!(charges.len(), 1);
+        assert!(matches!(&charges[0],
+            AttemptUsage::Known { attempt_key, usage, cost_usd_ticks: Some(42), .. }
+                if attempt_key == "confirmed-cancel:1"
+                    && usage.total_tokens == 120
+                    && usage.cache_read_tokens() == Some(90)));
+        while let Ok(event) = events.try_recv() {
+            assert!(!matches!(
+                event,
+                SamplingEvent::Completed { .. }
+                    | SamplingEvent::RequestCompleted { .. }
+                    | SamplingEvent::Retrying { .. }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn confirmed_chat_usage_settles_once_when_request_is_cancelled() {
+        confirmed_chat_usage_settles_once(false).await;
+    }
+
+    #[tokio::test]
+    async fn confirmed_chat_usage_settles_once_when_logical_deadline_expires() {
+        confirmed_chat_usage_settles_once(true).await;
     }
 
     #[tokio::test]

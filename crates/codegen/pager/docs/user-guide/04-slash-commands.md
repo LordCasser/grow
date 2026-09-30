@@ -88,7 +88,7 @@ Every copy is also written to a backup file — `~/.grow/last-copy.txt` by defau
 
 ### `/export`
 
-Export the conversation to a file or the clipboard.
+Export the full conversation of the currently selected root or subagent view to one Markdown file or the clipboard. This interactive command keeps its existing path and clipboard behavior; use `grow export <session-id>` from the CLI for a directory containing the entire subagent tree.
 
 ### `/quit`
 
@@ -290,6 +290,8 @@ An active Goal requests another turn whenever the session becomes idle. Every co
 
 Arguments are `set <objective> [--budget <tokens>]`, `edit <objective> [--budget <tokens>]`, `budget <tokens|unlimited>`, or one of `status`, `pause`, `restart`, `clear`. `set` is valid only when no unfinished Goal exists. `edit` preserves accumulated usage and updates the objective; Paused/Blocked remain stopped so edit and restart are independent controls. The budget is for the whole Goal, separate from Workflow child-call budgets. Changing an exhausted budget moves the Goal to Paused; run `/goal restart` afterwards. `/goal pause` stops continuation and returns the active Behavior to Normal. `/goal clear` deletes only Goal state and preserves another Behavior already selected while the Goal was stopped. Goal is offered only when `create_goal`, `get_goal`, `update_goal`, and `todo_write` are available; `task` remains optional bounded delegation.
 
+The Goal status and detail view show a Goal-specific cache-hit rate. When some input lacks cache classification or usage is incomplete, the rate is labeled `measured` and uses only classified input; with no classified input it shows N/A. Plan and Workflow without a Goal continue to show the ordinary session cache rate.
+
 ### `/workflow [prompt]`
 
 Enter Workflow Behavior, optionally sending the prompt after the Behavior switch succeeds. This is the only Behavior in which Grow can discover, create, modify, validate, publish, run, or manage public Workflow Definitions. Outside it, only `/workflow [prompt]` and `/behavior workflow` are offered as public Workflow entry points.
@@ -394,6 +396,8 @@ Not the live multi-session [Agent Dashboard](23-dashboard.md) (`/agents` / `Ctrl
 View local token and context usage for the current session.
 
 In fullscreen and inline modes this opens the tabbed usage modal on the Usage tab; `Esc` closes it and nothing is written into the transcript. Minimal mode keeps the inline scrollback output.
+
+The status bar shows the session's recorded lifetime tokens. `≥` means at least one attempt has unknown total usage. A `measured cache` percentage uses only input samples with a reported cache read count; the Usage tab also shows how much of the recorded input those samples cover. An interrupted attempt with confirmed complete usage is included in the recorded totals, while missing usage remains unknown. See the [usage display contract](../../../../../openspec/specs/client-surfaces/spec.md#requirement-ordinary-agent-status-shows-session-usage).
 
 ```
 /usage

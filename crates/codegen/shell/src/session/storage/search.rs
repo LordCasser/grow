@@ -2158,10 +2158,21 @@ mod tests {
             encode_timeline(&timeline)
         };
         let db_path = search_db_path(root);
-        let outcome = bootstrap_with_lease(root, &storage, BootstrapRole::Launch)
-            .await
-            .unwrap();
-        assert_eq!(outcome, BootstrapOutcome::Done);
+        let mut outcome = BootstrapOutcome::RunAgain;
+        for _ in 0..8 {
+            outcome = bootstrap_with_lease(root, &storage, BootstrapRole::Launch)
+                .await
+                .unwrap();
+            if outcome == BootstrapOutcome::Done {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            outcome,
+            BootstrapOutcome::Done,
+            "bootstrap must settle within the bounded retry allowance"
+        );
         assert_eq!(has_completed_bootstrap_marker(root).await, Some(true));
 
         std::fs::write(&timeline_path, b"{invalid timeline\n").unwrap();

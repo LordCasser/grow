@@ -7,7 +7,6 @@ use crate::app::root::{ActiveView, AppView};
 use crate::app::session::AgentId;
 use crate::app::transcript_file_writes::{FileWriteKind, TranscriptFileWrite};
 use crate::scrollback::block::{BlockContent, RenderBlock};
-use crate::scrollback::blocks::ToolCallBlock;
 use acp_transport::protocol as acp;
 use diagnostics::session_ctx::log_event;
 
@@ -325,43 +324,9 @@ pub(super) fn dispatch_open_block_viewer(app: &mut AppView) {
             return;
         }
 
-        // Try to create a normal viewer for the selected block type.
+        // Background task output lives outside the entry. All other viewer
+        // construction is shared with read-only transcript surfaces.
         let viewer = match &entry.block {
-            RenderBlock::ToolCall(ToolCallBlock::Other(block))
-                if block.communication_body().is_some() =>
-            {
-                BlockViewerPane::for_communication(entry.id, entry)
-            }
-            RenderBlock::Notice(notice) if notice.communication_body().is_some() => {
-                BlockViewerPane::for_communication(entry.id, entry)
-            }
-            RenderBlock::Thinking(_) | RenderBlock::AgentMessage(_) => {
-                BlockViewerPane::for_markdown(entry.id, entry)
-            }
-            RenderBlock::ToolCall(ToolCallBlock::Execute(_)) => {
-                BlockViewerPane::for_execute(entry.id, entry)
-            }
-            RenderBlock::ToolCall(ToolCallBlock::Edit(_)) => {
-                BlockViewerPane::for_edit(entry.id, entry)
-            }
-            RenderBlock::ToolCall(ToolCallBlock::Read(_)) => {
-                BlockViewerPane::for_read(entry.id, entry)
-            }
-            RenderBlock::ToolCall(ToolCallBlock::Search(_)) => {
-                BlockViewerPane::for_grep(entry.id, entry)
-            }
-            RenderBlock::ToolCall(ToolCallBlock::ListDir(_)) => {
-                BlockViewerPane::for_list_dir(entry.id, entry)
-            }
-            RenderBlock::ToolCall(ToolCallBlock::WebFetch(_)) => {
-                BlockViewerPane::for_web_fetch(entry.id, entry)
-            }
-            RenderBlock::ToolCall(ToolCallBlock::IntegrationSearch(_)) => {
-                BlockViewerPane::for_integration_search(entry.id, entry)
-            }
-            RenderBlock::ToolCall(ToolCallBlock::UseTool(_)) => {
-                BlockViewerPane::for_use_tool(entry.id, entry)
-            }
             RenderBlock::BgTask(block) => {
                 let stdout = agent
                     .session
@@ -381,31 +346,7 @@ pub(super) fn dispatch_open_block_viewer(app: &mut AppView) {
                     is_running,
                 ))
             }
-            RenderBlock::SubagentPermission(block) => block.member(0).map(|member| {
-                BlockViewerPane::for_plain_text(&member.detail_title(), &member.detail_text())
-            }),
-            RenderBlock::Notice(notice) if notice.has_details() => {
-                Some(BlockViewerPane::for_plain_text(
-                    if notice.category == crate::scrollback::blocks::NoticeCategory::Command {
-                        "Command result"
-                    } else {
-                        "Coordination inquiry"
-                    },
-                    &notice.detail_text(),
-                ))
-            }
-            RenderBlock::ToolCall(ToolCallBlock::Other(block)) => {
-                Some(BlockViewerPane::for_plain_text(
-                    &block.name,
-                    &format!(
-                        "{}\n{}\n{}",
-                        block.summary,
-                        block.error.as_deref().unwrap_or_default(),
-                        block.output.as_deref().unwrap_or_default()
-                    ),
-                ))
-            }
-            _ => None,
+            _ => BlockViewerPane::for_entry(entry),
         };
 
         if viewer.is_some() {

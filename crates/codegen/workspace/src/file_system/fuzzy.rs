@@ -910,11 +910,8 @@ mod tests {
     #[test]
     fn dropping_daemon_eventually_exits_worker() {
         let dir = temp_repo();
-        let daemon = FuzzyFileMatcherDaemon::new(
-            FuzzyFileMatcher::new_inner(dir.path(), false),
-            10,
-            None,
-        );
+        let daemon =
+            FuzzyFileMatcherDaemon::new(FuzzyFileMatcher::new_inner(dir.path(), false), 10, None);
         if daemon.mode == MatcherMode::Disabled {
             return;
         }

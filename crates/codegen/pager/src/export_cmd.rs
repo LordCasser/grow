@@ -1,12 +1,13 @@
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
-use crate::acp::meta::NotificationMeta;
-use crate::acp::tracker::AcpUpdateTracker;
-use crate::scrollback::export::render_blocks_to_markdown;
-use crate::scrollback::state::ScrollbackState;
+use crate::scrollback::export::render_entries_to_full_markdown;
+use crate::transcript_projection::TranscriptProjection;
+use shell::session::storage::transcript::{TranscriptSnapshot, capture_tree_at};
+
+const MAX_OUTPUT_BYTES: u64 = 512 * 1024 * 1024;
 
 /// A private, disposable snapshot owned by the external pager request.
 pub(crate) fn write_pager_transcript(
@@ -57,68 +58,164 @@ fn write_pager_transcript_with(
 pub struct ExportArgs {
     /// Session ID to export
     pub session_id: String,
-    /// Output file path (default: stdout)
+    /// Output directory (default: ./<session-id>; existing targets are rejected)
     pub output: Option<PathBuf>,
-    /// Copy to clipboard instead of writing to stdout
-    #[arg(long, short)]
-    pub clipboard: bool,
 }
 
 pub fn run(args: ExportArgs) -> Result<()> {
     tracing::info!(session_id = %args.session_id, "export_cmd: starting session export");
-
-    let updates = shell::session::storage::load_updates_for_replay(&args.session_id)?
-        .with_context(|| format!("Session '{}' not found.", args.session_id))?;
-
-    let mut tracker = AcpUpdateTracker::new();
-    let mut scrollback = ScrollbackState::new();
-    let replay_meta = NotificationMeta {
-        is_replay: true,
-        ..Default::default()
+    let mut snapshot = capture_tree_at(&args.session_id, &shell::util::grow_home::grow_home())?;
+    let nodes = snapshot.nodes.clone();
+    let canonical = &nodes.first().context("empty transcript tree")?.session_id;
+    let target = match args.output {
+        Some(output) => {
+            let expanded = PathBuf::from(shellexpand::tilde(&output.to_string_lossy()).as_ref());
+            if expanded.is_absolute() {
+                expanded
+            } else {
+                std::env::current_dir()?.join(expanded)
+            }
+        }
+        None => std::env::current_dir()?.join(canonical),
     };
+    let parent = target.parent().context("output directory has no parent")?;
+    std::fs::create_dir_all(parent)?;
+    let temp = tempfile::Builder::new()
+        .prefix(".grow-export-")
+        .tempdir_in(parent)?;
+    write_tree(temp.path(), &mut snapshot)?;
+    crate::local_drafts::rename_no_replace(temp.path(), &target).with_context(|| {
+        format!(
+            "Cannot publish {} (choose a different output directory or move the previous export)",
+            target.display()
+        )
+    })?;
+    eprintln!(
+        "Exported {} agent transcript(s) to {}",
+        nodes.len(),
+        target.display()
+    );
+    Ok(())
+}
 
-    for update in updates {
-        tracker.handle_update(update, &replay_meta, &mut scrollback);
+pub(crate) struct TemporaryTranscriptTree {
+    pub(crate) directory: tempfile::TempDir,
+    pub(crate) canonical_id: String,
+    pub(crate) agents: usize,
+}
+
+/// Build the same tree in a private temporary directory for trajectory download.
+pub(crate) fn temporary_tree(session_id: &str) -> Result<TemporaryTranscriptTree> {
+    temporary_tree_at(session_id, &shell::util::grow_home::grow_home())
+}
+
+fn temporary_tree_at(session_id: &str, grow_home: &Path) -> Result<TemporaryTranscriptTree> {
+    let mut snapshot = capture_tree_at(session_id, grow_home)?;
+    let nodes = snapshot.nodes.clone();
+    let directory = tempfile::Builder::new()
+        .prefix("grow-transcript-")
+        .tempdir()?;
+    write_tree(directory.path(), &mut snapshot)?;
+    Ok(TemporaryTranscriptTree {
+        canonical_id: nodes
+            .first()
+            .context("empty transcript tree")?
+            .session_id
+            .clone(),
+        agents: nodes.len(),
+        directory,
+    })
+}
+
+fn valid_component(id: &str) -> Result<()> {
+    if Path::new(id).components().count() != 1
+        || !matches!(
+            Path::new(id).components().next(),
+            Some(Component::Normal(_))
+        )
+    {
+        bail!("invalid session ID path component: {id:?}");
     }
+    Ok(())
+}
 
-    let blocks: Vec<_> = (0..scrollback.len())
-        .filter_map(|i| scrollback.entry(i).map(|e| &e.block))
-        .collect();
-    let md = render_blocks_to_markdown(blocks);
-
-    if md.is_empty() {
-        anyhow::bail!(
-            "Session '{}' has no conversation content to export",
-            args.session_id
-        );
+fn write_tree(root: &Path, snapshot: &mut TranscriptSnapshot) -> Result<()> {
+    let nodes = snapshot.nodes.clone();
+    let mut paths: std::collections::BTreeMap<String, PathBuf> = std::collections::BTreeMap::new();
+    let mut output_bytes = 0_u64;
+    for node in nodes {
+        valid_component(&node.session_id)?;
+        let relative = match &node.parent_id {
+            None => PathBuf::new(),
+            Some(parent) => paths
+                .get(parent)
+                .context("transcript tree is not in parent-first order")?
+                .join("subagents")
+                .join(&node.session_id),
+        };
+        let directory = root.join(&relative);
+        std::fs::create_dir_all(&directory)?;
+        let session = snapshot.read_session(&node.session_id)?;
+        let mut projection = TranscriptProjection::default();
+        for event in session.events {
+            projection.apply(event);
+        }
+        let entries =
+            (0..projection.scrollback.len()).filter_map(|index| projection.scrollback.entry(index));
+        let body = render_entries_to_full_markdown(entries, &node.children);
+        let mut markdown = format!("# Grow transcript\n\nSession: `{}`\n\n", node.session_id);
+        if let Some(title) = node.title.as_ref().filter(|title| !title.is_empty()) {
+            markdown.push_str(&format!("Title: {}\n\n", title.replace('\n', " ")));
+        }
+        if !node.children.is_empty() {
+            markdown.push_str("## Subagents\n\n");
+            for child in &node.children {
+                valid_component(child)?;
+                markdown.push_str(&format!("- [{}](subagents/{child}/transcript.md)\n", child));
+            }
+            markdown.push('\n');
+        }
+        if body.is_empty() {
+            markdown.push_str("No recorded conversation content.\n");
+        } else {
+            markdown.push_str(&body);
+            markdown.push('\n');
+        }
+        output_bytes = output_bytes
+            .checked_add(markdown.len() as u64)
+            .context("output byte count overflow")?;
+        if output_bytes > MAX_OUTPUT_BYTES {
+            bail!("transcript output exceeds 512 MiB limit");
+        }
+        write_private_file(&directory.join("transcript.md"), markdown.as_bytes())?;
+        paths.insert(node.session_id.clone(), relative);
     }
+    sync_tree(root)?;
+    Ok(())
+}
 
-    if let Some(path) = args.output {
-        let expanded = PathBuf::from(shellexpand::tilde(&path.to_string_lossy()).as_ref());
-        write_export_file(&expanded, &md)
-            .with_context(|| format!("Failed to write {}", expanded.display()))?;
-        tracing::info!(
-            session_id = %args.session_id,
-            path = %expanded.display(),
-            bytes = md.len(),
-            "export_cmd: wrote transcript to file"
-        );
-        eprintln!("Conversation exported to {}", expanded.display());
-    } else if args.clipboard {
-        let result = crate::clipboard::copy_text(&md);
-        let message = clipboard_export_feedback(&result, &md)?;
-        tracing::info!(
-            session_id = %args.session_id,
-            bytes = md.len(),
-            delivery = ?result.delivery,
-            "export_cmd: clipboard export completed"
-        );
-        eprintln!("{message}");
-    } else {
-        std::io::stdout().write_all(md.as_bytes())?;
-        std::io::stdout().write_all(b"\n")?;
+fn write_private_file(path: &Path, contents: &[u8]) -> Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
     }
+    let mut file = options.open(path)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    Ok(())
+}
 
+fn sync_tree(path: &Path) -> Result<()> {
+    for entry in std::fs::read_dir(path)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            sync_tree(&entry.path())?;
+        }
+    }
+    std::fs::File::open(path)?.sync_all()?;
     Ok(())
 }
 
@@ -173,21 +270,74 @@ fn write_export_file_with(
     Ok(())
 }
 
-fn clipboard_export_feedback(result: &crate::clipboard::CopyResult, text: &str) -> Result<String> {
-    if result.delivery.is_failed() {
-        anyhow::bail!("Conversation export failed: {}", result.message);
-    }
-    Ok(format!(
-        "{}{}",
-        result.message,
-        crate::clipboard::clipboard_stats_suffix(text)
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
     use std::time::Duration;
+
+    use acp_transport::protocol as acp;
+    use chat_state::{SubagentEvent, SubagentSeedEvent, Timeline, TimelineEventKind};
+    use sampling_types::ModelImageInputKey;
+
+    fn write_fixture_session(
+        home: &Path,
+        id: &str,
+        timeline: &Timeline,
+        parent: Option<&str>,
+        message: &str,
+    ) {
+        let cwd = "/a/different/worktree";
+        let directory = home
+            .join("sessions")
+            .join(shell::util::grow_home::encode_cwd_dirname(cwd))
+            .join(id);
+        std::fs::create_dir_all(&directory).unwrap();
+        let info = shell::session::info::Info {
+            id: acp::SessionId::new(id.to_owned()),
+            cwd: cwd.into(),
+        };
+        let mut summary = shell::session::persistence::Summary::new(
+            &info,
+            shell::agent::models::ModelId::new("model"),
+        )
+        .unwrap();
+        if let Some(parent) = parent {
+            summary.parent_session_id = Some(parent.into());
+            summary.session_kind = Some("subagent".into());
+        }
+        std::fs::write(
+            directory.join("summary.json"),
+            serde_json::to_vec(&summary).unwrap(),
+        )
+        .unwrap();
+        let timeline_json = timeline
+            .events()
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(
+            directory.join("timeline.jsonl"),
+            format!("{timeline_json}\n"),
+        )
+        .unwrap();
+        let notification = acp::SessionNotification::new(
+            acp::SessionId::new(id.to_owned()),
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+                acp::TextContent::new(message),
+            ))),
+        );
+        let mut update = serde_json::to_value(shell::session::storage::SessionUpdate::Acp(
+            Box::new(notification),
+        ))
+        .unwrap();
+        update["timestamp"] = serde_json::json!(1_700_000_000);
+        std::fs::write(
+            directory.join("updates.jsonl"),
+            format!("{}\n", serde_json::to_string(&update).unwrap()),
+        )
+        .unwrap();
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn blocked_minimal_snapshot_write_keeps_runtime_responsive() {
@@ -250,7 +400,153 @@ mod tests {
     }
 
     use super::*;
-    use crate::clipboard::{ClipboardDelivery, CopyResult};
+
+    #[test]
+    fn tree_export_keeps_parent_and_child_conversations_separate() {
+        let home = tempfile::tempdir().unwrap();
+        let mut parent = Timeline::default();
+        let spawn = chat_state::SubagentSpawnEvent {
+            subagent_id: "agent-child".into(),
+            child_session_id: "child".into(),
+            security_parent_session_id: "root".into(),
+            subagent_type: "explore".into(),
+            description: "inspect".into(),
+            prompt: "inspect".into(),
+            context_source: chat_state::SubagentContextSource::New,
+            source_ref: None,
+            context_normalized: false,
+            resumed_from: None,
+            parent_prompt_id: None,
+            capability_mode: None,
+            permission_mode: None,
+            effective_permission_mode: None,
+            workflow_run_id: None,
+            goal_id: None,
+            goal_definition_revision: None,
+            surface_completion: true,
+            child_cwd: "/a/different/worktree".into(),
+            worktree_path: None,
+            effective_model_id: "model".into(),
+            model_transport_key: ModelImageInputKey::new("model", "responses", "test"),
+            reasoning_effort: None,
+        };
+        parent
+            .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+                spawn.clone(),
+            )))
+            .unwrap();
+        let spawn_seq = parent.events().last().unwrap().seq.get();
+        let mut child = Timeline::default();
+        child
+            .record(TimelineEventKind::SubagentSeed(SubagentSeedEvent {
+                parent_timeline_id: "root".into(),
+                parent_spawn_seq: spawn_seq,
+                subagent_id: spawn.subagent_id,
+                security_parent_session_id: "root".into(),
+                context_source: spawn.context_source,
+                source_ref: None,
+                normalized: false,
+            }))
+            .unwrap();
+        write_fixture_session(home.path(), "root", &parent, None, "parent-only-answer");
+        write_fixture_session(
+            home.path(),
+            "child",
+            &child,
+            Some("root"),
+            "child-only-answer",
+        );
+
+        let mut snapshot = capture_tree_at("root", home.path()).unwrap();
+        let output = tempfile::tempdir().unwrap();
+        write_tree(output.path(), &mut snapshot).unwrap();
+        let parent_doc = std::fs::read_to_string(output.path().join("transcript.md")).unwrap();
+        let child_doc =
+            std::fs::read_to_string(output.path().join("subagents/child/transcript.md")).unwrap();
+        assert!(parent_doc.contains("parent-only-answer"));
+        assert!(parent_doc.contains("subagents/child/transcript.md"));
+        assert!(!parent_doc.contains("child-only-answer"));
+        assert!(child_doc.contains("child-only-answer"));
+        assert!(!child_doc.contains("parent-only-answer"));
+
+        let download_tree = temporary_tree_at("root", home.path()).unwrap();
+        assert_eq!(download_tree.agents, 2);
+        assert_eq!(
+            std::fs::read_to_string(download_tree.directory.path().join("transcript.md")).unwrap(),
+            parent_doc
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                download_tree
+                    .directory
+                    .path()
+                    .join("subagents/child/transcript.md")
+            )
+            .unwrap(),
+            child_doc
+        );
+        let archive = crate::trajectory_cmd::archive_tree(download_tree).unwrap();
+        let unpacked = tempfile::tempdir().unwrap();
+        tar::Archive::new(flate2::read::GzDecoder::new(archive.reopen().unwrap()))
+            .unpack(unpacked.path())
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(unpacked.path().join("root/transcript.md")).unwrap(),
+            parent_doc
+        );
+        assert_eq!(
+            std::fs::read_to_string(unpacked.path().join("root/subagents/child/transcript.md"))
+                .unwrap(),
+            child_doc
+        );
+    }
+
+    #[test]
+    fn directory_publication_rejects_every_existing_target_kind() {
+        let home = tempfile::tempdir().unwrap();
+        let target = home.path().join("transcript-tree");
+        for kind in ["file", "empty-dir", "nonempty-dir", "symlink"] {
+            match kind {
+                "file" => std::fs::write(&target, b"previous").unwrap(),
+                "empty-dir" | "nonempty-dir" => {
+                    std::fs::create_dir(&target).unwrap();
+                    if kind == "nonempty-dir" {
+                        std::fs::write(target.join("keep"), b"previous").unwrap();
+                    }
+                }
+                "symlink" => {
+                    #[cfg(unix)]
+                    std::os::unix::fs::symlink("missing", &target).unwrap();
+                    #[cfg(not(unix))]
+                    continue;
+                }
+                _ => unreachable!(),
+            }
+            let prepared = tempfile::tempdir_in(home.path()).unwrap();
+            std::fs::write(prepared.path().join("transcript.md"), b"new").unwrap();
+            assert!(crate::local_drafts::rename_no_replace(prepared.path(), &target).is_err());
+            assert!(!target.join("transcript.md").exists());
+            if kind == "file" {
+                assert_eq!(std::fs::read(&target).unwrap(), b"previous");
+            }
+            if kind == "nonempty-dir" {
+                assert_eq!(std::fs::read(target.join("keep")).unwrap(), b"previous");
+            }
+            if kind == "symlink" {
+                assert!(
+                    std::fs::symlink_metadata(&target)
+                        .unwrap()
+                        .file_type()
+                        .is_symlink()
+                );
+            }
+            if target.is_dir() {
+                std::fs::remove_dir_all(&target).unwrap();
+            } else {
+                std::fs::remove_file(&target).unwrap();
+            }
+        }
+    }
 
     #[test]
     fn export_write_failure_keeps_old_content_and_cleans_temp() {
@@ -315,36 +611,5 @@ mod tests {
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o440)).unwrap();
         assert!(write_export_file(&path, "no").is_err());
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "new");
-    }
-
-    #[test]
-    fn clipboard_export_preserves_delivery_outcome() {
-        for (delivery, message) in [
-            (ClipboardDelivery::Failed, "Copy failed"),
-            (
-                ClipboardDelivery::Unverified,
-                "Copy sent; delivery unverified",
-            ),
-            (ClipboardDelivery::Confirmed, "Copied to tmux buffer"),
-        ] {
-            let result = CopyResult {
-                message,
-                message_lead: message,
-                ticks: 30,
-                delivery,
-            };
-            let feedback = clipboard_export_feedback(&result, "你好\nworld");
-            if delivery == ClipboardDelivery::Failed {
-                assert!(feedback.unwrap_err().to_string().contains("Copy failed"));
-            } else {
-                assert_eq!(
-                    feedback.unwrap(),
-                    format!(
-                        "{message}{}",
-                        crate::clipboard::clipboard_stats_suffix("你好\nworld")
-                    )
-                );
-            }
-        }
     }
 }

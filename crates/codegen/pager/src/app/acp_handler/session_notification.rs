@@ -3,7 +3,7 @@ use crate::scrollback::blocks::communication::{CommunicationBody, CommunicationS
 use crate::scrollback::blocks::{NoticeCategory, NoticeTone};
 use shell::sampling::error::format_rate_limited_user_message;
 
-fn ui_notice_block(
+pub(crate) fn ui_notice_block(
     notice: shell::extensions::notification::UiNotice,
     event_id: Option<String>,
 ) -> RenderBlock {
@@ -68,8 +68,6 @@ pub(crate) fn apply_ui_notice(
     event_id: Option<String>,
     is_replay: bool,
 ) -> bool {
-    use crate::scrollback::blocks::tool::{CoordinationPhase, CoordinationRow, OtherToolCallBlock};
-    use shell::extensions::notification::AgentMessageNotice;
     if notice.tone == shell::extensions::notification::UiNoticeTone::Progress {
         if is_replay
             || agent.session.loading_replay
@@ -90,7 +88,19 @@ pub(crate) fn apply_ui_notice(
             agent.session.pending_memory_browse = None;
         }
     }
-    let scrollback = &mut agent.scrollback;
+    project_ui_notice(&mut agent.scrollback, notice, event_id, is_replay)
+}
+
+/// Passive presentation shared with offline transcripts; no AgentView or
+/// interaction/command state is available here.
+pub(crate) fn project_ui_notice(
+    scrollback: &mut crate::scrollback::state::ScrollbackState,
+    notice: shell::extensions::notification::UiNotice,
+    event_id: Option<String>,
+    is_replay: bool,
+) -> bool {
+    use crate::scrollback::blocks::tool::{CoordinationPhase, CoordinationRow, OtherToolCallBlock};
+    use shell::extensions::notification::AgentMessageNotice;
     if notice.category == shell::extensions::notification::UiNoticeCategory::Coordination {
         if let Some(data) = AgentMessageNotice::from_notice(&notice) {
             let receipt_id = notice.correlation_id.clone();

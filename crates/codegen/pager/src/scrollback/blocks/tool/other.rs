@@ -830,20 +830,19 @@ fn parse_ask_user_qa_pairs(output: &str) -> Vec<(String, String)> {
             // The answer value continues until we hit `, "` (next pair) or end.
             let answer_end = remaining.find(", \"").unwrap_or(remaining.len());
 
-            let mut answer_text = remaining[..answer_end].to_string();
-            // Strip trailing quote if present (answer is quoted)
-            if answer_text.ends_with('"') {
-                answer_text.pop();
-            }
-
-            // Remove annotation suffixes (selected preview:..., user notes:...)
-            // for display — keep just the label.
-            if let Some(ann_start) = answer_text.find(" selected preview:") {
-                answer_text.truncate(ann_start);
-            }
-            if let Some(ann_start) = answer_text.find(" user notes:") {
-                answer_text.truncate(ann_start);
-            }
+            let answer_part = &remaining[..answer_end];
+            let (label_and_preview, notes) = answer_part
+                .split_once(" user notes: ")
+                .map_or((answer_part, None), |(label, notes)| (label, Some(notes)));
+            let quoted_label = label_and_preview
+                .split_once(" selected preview:")
+                .map_or(label_and_preview, |(label, _)| label);
+            let label = quoted_label.strip_suffix('"').unwrap_or(quoted_label);
+            let answer_text = match notes.filter(|notes| !notes.trim().is_empty()) {
+                Some(notes) if label == "Other" => notes.to_string(),
+                Some(notes) => format!("{label} · {notes}"),
+                None => label.to_string(),
+            };
 
             pairs.push((question, answer_text));
 
@@ -897,4 +896,68 @@ fn parse_ask_user_qa_pairs(output: &str) -> Vec<(String, String)> {
     }
 
     vec![]
+}
+
+#[cfg(test)]
+mod ask_answer_tests {
+    use super::*;
+    use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::blocks::ToolCallBlock;
+    use crate::scrollback::state::ScrollbackState;
+    use indexmap::IndexMap;
+    use std::collections::HashMap;
+    use tools::implementations::grow_build::ask_user_question::{
+        QuestionAnnotation, format::format_accepted_tool_result,
+    };
+
+    #[test]
+    fn accepted_ask_row_shows_freeform_text_and_keeps_selected_labels() {
+        let mut answers = IndexMap::new();
+        answers.insert("你的决定？".to_string(), vec!["Other".to_string()]);
+        answers.insert("部署方式？".to_string(), vec!["手动".to_string()]);
+        answers.insert("输出格式？".to_string(), vec!["Markdown".to_string()]);
+
+        let annotations = HashMap::from([
+            (
+                "你的决定？".to_string(),
+                QuestionAnnotation {
+                    preview: None,
+                    notes: Some("先检查 Wi-Fi 与 modem 的关系".to_string()),
+                },
+            ),
+            (
+                "部署方式？".to_string(),
+                QuestionAnnotation {
+                    preview: Some("手动执行步骤".to_string()),
+                    notes: Some("保留回滚命令".to_string()),
+                },
+            ),
+        ]);
+        let result = format_accepted_tool_result(&answers, &Some(annotations));
+        let expected = vec![
+            (
+                "你的决定？".to_string(),
+                "先检查 Wi-Fi 与 modem 的关系".to_string(),
+            ),
+            ("部署方式？".to_string(), "手动 · 保留回滚命令".to_string()),
+            ("输出格式？".to_string(), "Markdown".to_string()),
+        ];
+        assert_eq!(parse_ask_user_qa_pairs(&result), expected);
+
+        let block = OtherToolCallBlock::new("Ask", "你的决定？").with_output(result);
+        let mut scrollback = ScrollbackState::new();
+        scrollback.push_block(RenderBlock::ToolCall(ToolCallBlock::Other(block)));
+        scrollback.set_selected(Some(0));
+        scrollback.expand_selected();
+        let entry = scrollback.entry(0).expect("Ask row");
+        let ctx = entry.context(120, &AppearanceConfig::default(), None);
+        let rendered = format!("{:?}", entry.block.output(&ctx));
+        assert!(
+            rendered.contains("先检查 Wi-Fi 与 modem 的关系"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("手动 · 保留回滚命令"), "{rendered}");
+        assert!(rendered.contains("Markdown"), "{rendered}");
+        assert!(!rendered.contains("Other"), "{rendered}");
+    }
 }

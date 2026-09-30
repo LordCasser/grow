@@ -1880,6 +1880,7 @@ impl AgentView {
                 bg_focused,
                 false,
                 self.hit_bg_close.hovered,
+                layout.side_pane_corner_insets(layout.tasks, area),
                 &theme,
             )
             .and_then(|sel| sel.close_button_rect());
@@ -1896,6 +1897,7 @@ impl AgentView {
                 cat_focused,
                 false,
                 self.hit_catalog_close.hovered,
+                layout.side_pane_corner_insets(layout.catalog, area),
                 &theme,
             )
             .and_then(|sel| sel.close_button_rect());
@@ -1913,6 +1915,7 @@ impl AgentView {
                 todo_focused,
                 false,
                 self.hit_todo_close.hovered,
+                layout.side_pane_corner_insets(layout.todo, area),
                 &theme,
             )
             .and_then(|sel| sel.close_button_rect());
@@ -1937,6 +1940,7 @@ impl AgentView {
                 queue_focused,
                 false,
                 self.hit_queue_close.hovered,
+                layout.side_pane_corner_insets(layout.queue, area),
                 &theme,
                 Some(crate::glyphs::ballot_x_button()),
             )

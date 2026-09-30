@@ -2255,7 +2255,7 @@ fn persist_subagent_output(
 }
 const ORPHAN_RECONCILE_REASON: &str = "interrupted by process restart";
 
-fn finish_from_terminal(
+pub(crate) fn finish_from_terminal(
     terminal: &chat_state::SubagentTerminalEvent,
     output: Option<String>,
 ) -> SessionUpdate {
@@ -2462,7 +2462,7 @@ fn finish_from_durable_facts_in_directory(
     Ok(finish_from_terminal(terminal, output))
 }
 
-fn spawn_from_fact(
+pub(crate) fn spawn_from_fact(
     parent_session_id: &str,
     spawn: &chat_state::SubagentSpawnEvent,
     workflow_tracker: Option<

@@ -219,6 +219,9 @@ struct SamplingAttemptKey {
 /// Does nothing else — no UI, no networking, just data transformation.
 #[derive(Debug, Default)]
 pub struct AcpUpdateTracker {
+    /// Offline transcript projection includes historical thinking even when
+    /// the current live UI preference hides it.
+    historical_thinking: bool,
     /// Entry currently receiving AgentMessageChunk deltas.
     /// None between turns or before first message chunk.
     current_agent_msg: Option<EntryId>,
@@ -402,6 +405,9 @@ impl Utf8Decoder {
 impl AcpUpdateTracker {
     pub fn new() -> Self {
         Self::default()
+    }
+    pub(crate) fn include_historical_thinking(&mut self) {
+        self.historical_thinking = true;
     }
     /// Record session cwd used when stripping redundant `cd` prefixes in chrome.
     /// No-op when the path is already stored (avoids cloning on every update).
@@ -1169,6 +1175,39 @@ impl AcpUpdateTracker {
             _ => false,
         }
     }
+    /// Offline input boundaries have no authority to finish a tool. Keep its
+    /// identity available for a later persisted ToolCallUpdate.
+    pub(crate) fn handle_transcript_update(
+        &mut self,
+        update: acp::SessionUpdate,
+        meta: &NotificationMeta,
+        scrollback: &mut ScrollbackState,
+    ) {
+        let pending = matches!(&update, acp::SessionUpdate::UserMessageChunk(_))
+            .then(|| std::mem::take(&mut self.pending_tools));
+        self.handle_update(update, meta, scrollback);
+        if let Some(pending) = pending {
+            self.pending_tools.extend(pending);
+        }
+    }
+
+    pub(crate) fn finish_transcript_turn(&mut self, scrollback: &mut ScrollbackState) {
+        let pending = std::mem::take(&mut self.pending_tools);
+        let suppressed = std::mem::take(&mut self.suppressed_tools);
+        let orphan_updates = std::mem::take(&mut self.orphan_updates);
+        self.finish_turn(scrollback);
+        self.pending_tools = pending;
+        self.suppressed_tools = suppressed;
+        self.orphan_updates = orphan_updates;
+    }
+
+    pub(crate) fn unresolved_transcript_tools(&self) -> usize {
+        self.pending_tools
+            .values()
+            .filter(|tool| tool.entry_id.is_some())
+            .count()
+    }
+
     /// Called when PromptResponse is received (turn complete).
     pub fn finish_turn(&mut self, scrollback: &mut ScrollbackState) {
         self.finish_thinking(scrollback);
@@ -1288,7 +1327,7 @@ impl AcpUpdateTracker {
         meta: &NotificationMeta,
         scrollback: &mut ScrollbackState,
     ) -> bool {
-        if !crate::appearance::cache::load_show_thinking_blocks() {
+        if !self.historical_thinking && !crate::appearance::cache::load_show_thinking_blocks() {
             return false;
         }
         let text = match &thought.content {
@@ -1385,8 +1424,11 @@ impl AcpUpdateTracker {
             let block = tool_call_to_block(&tc, self.session_cwd.as_deref());
             let id = scrollback.push_block(block);
             self.register_tool_entry(tc_id.clone(), Some(id), scrollback);
-            scrollback.set_last_running(true);
-            let started_at = Some(std::time::Instant::now());
+            scrollback.set_entry_running_with_clock(id, true, !is_replay);
+            // Offline replay uses persisted facts for elapsed time. A local
+            // start instant would freeze the player's scaled wall duration as
+            // though it were the original tool runtime.
+            let started_at = (!is_replay).then(std::time::Instant::now);
             self.pending_tools.insert(
                 tc_id,
                 PendingTool {

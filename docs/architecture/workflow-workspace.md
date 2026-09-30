@@ -11,6 +11,7 @@ Workflow 由四个所有权边界组成，而不是一段“可变的后台脚�
    Workflow。`deep-research` 由 builtin extractor version-managed 到
    `~/.grow/workflows/deep-research.rhai`，每次启动幂等核验后按普通 User workflow 由 Registry 扫描；不会
    引入额外的 scope、Behavior 或私有运行机制。
+   当项目 `.grow/workflows` 与用户目录指向同一目录时，Registry 只按 User scope 扫描一次；不同目录中的同名 Definition 仍各自保留。见 [Workflow 发现契约](../../openspec/specs/workflow-execution/spec.md#requirement-overlapping-workflow-discovery-roots-have-one-scope)。
 2. **Workflow Workspace** 归 session 所有，持久化多个草稿、唯一 Definition 焦点、派生
    来源、基线、当前内容哈希、验证哈希、保存提示和发布冲突。它不持有运行中执行器。
 3. **Workflow Definition** 是可搜索、可编辑和可复用的 Rhai 定义，scope 为 Session、

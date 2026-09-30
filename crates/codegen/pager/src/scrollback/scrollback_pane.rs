@@ -433,7 +433,8 @@ impl ScrollbackPane {
                     let sel_box =
                         SelectionBox::new(selection_area, Style::default().fg(border_color))
                             .with_top_clipped(top_clipped)
-                            .with_bottom_clipped(false);
+                            .with_bottom_clipped(false)
+                            .with_corner_insets(true, selection_area.bottom() >= area.bottom());
 
                     pushed_header_selection_box = Some(sel_box);
                 }
@@ -494,7 +495,8 @@ impl ScrollbackPane {
             let sel_box =
                 SelectionBox::new(selection_area, Style::default().fg(theme.selection_border))
                     .with_top_clipped(top_clipped)
-                    .with_bottom_clipped(false);
+                    .with_bottom_clipped(false)
+                    .with_corner_insets(screen_row == 0, selection_area.bottom() >= area.bottom());
 
             pinned_header_selection_box = Some(sel_box);
         }
@@ -1082,11 +1084,17 @@ impl ScrollbackPane {
                 let bottom = selected.area.y + selected.area.height;
                 let bottom_clipped =
                     selected.bottom_clipped || bottom > content_area.y + content_area.height;
+                let (top_inset, bottom_inset) =
+                    state.selection_corner_insets(selected_abs..selected_abs + 1);
 
                 let sel_box =
                     SelectionBox::new(selected.area, Style::default().fg(theme.selection_border))
                         .with_top_clipped(top_clipped)
-                        .with_bottom_clipped(bottom_clipped);
+                        .with_bottom_clipped(bottom_clipped)
+                        .with_corner_insets(
+                            top_inset || selected.area.y == area.y,
+                            bottom_inset || selected.area.bottom() >= area.bottom(),
+                        );
 
                 content_output.output.selection_box = Some(sel_box);
                 content_output.output.selected_entry_area = selected_entry_rect;
@@ -1129,11 +1137,16 @@ impl ScrollbackPane {
 
                     let top_clipped = group_start_vy < viewport_start;
                     let bottom_clipped = group_end_vy > viewport_end;
+                    let (top_inset, bottom_inset) = state.selection_corner_insets(sel_range);
 
                     let sel_box =
                         SelectionBox::new(sel_area, Style::default().fg(theme.selection_border))
                             .with_top_clipped(top_clipped)
-                            .with_bottom_clipped(bottom_clipped);
+                            .with_bottom_clipped(bottom_clipped)
+                            .with_corner_insets(
+                                top_inset || sel_area.y == area.y,
+                                bottom_inset || sel_area.bottom() >= area.bottom(),
+                            );
 
                     content_output.output.selection_box = Some(sel_box);
                     content_output.output.selected_entry_area = selected_entry_rect;
@@ -1152,7 +1165,8 @@ impl ScrollbackPane {
 
             let sel_box = SelectionBox::new(sel_area, Style::default().fg(theme.selection_border))
                 .with_top_clipped(top_clipped)
-                .with_bottom_clipped(bottom_clipped);
+                .with_bottom_clipped(bottom_clipped)
+                .with_corner_insets(sel_area.y == area.y, sel_area.bottom() >= area.bottom());
 
             content_output.output.selection_box = Some(sel_box);
             return content_output;
@@ -1243,7 +1257,12 @@ fn paint_expandable_indicator(
 
 #[cfg(test)]
 mod tests {
-    use super::verb_member_indicator_row;
+    use super::{ScrollbackPane, verb_member_indicator_row};
+    use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::render::ScratchBuffer;
+    use crate::scrollback::state::ScrollbackState;
+    use ratatui::buffer::Buffer;
+    use ratatui::layout::Rect;
 
     // Pins the "caret offset ignores clipping" fix: the member caret
     // sits one row below the slot top only while the header row is visible.
@@ -1256,5 +1275,138 @@ mod tests {
         assert_eq!(verb_member_indicator_row(4, true, false), 5);
         // Header top-clipped off-screen: the first visible row IS member 0.
         assert_eq!(verb_member_indicator_row(4, true, true), 4);
+    }
+
+    #[test]
+    fn dense_tool_groups_keep_selection_corners_off_neighbor_headers() {
+        crate::appearance::cache::set_group_tool_verbs(true);
+        let mut state = ScrollbackState::new();
+        state.push_block(RenderBlock::read("before.rs", None));
+        state.push_block(RenderBlock::tool_call_with_details(
+            "send_subagent_message",
+            "agent received message",
+            true,
+            "Received",
+        ));
+        state.push_block(RenderBlock::search("needle", 0, vec![]));
+        state.set_selected(Some(1));
+        state.prepare_layout(80, 8);
+
+        let area = Rect::new(2, 0, 80, 8);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 84, 8));
+        let mut scratch = ScratchBuffer::new();
+        let output = ScrollbackPane::new().active(true).render_with_scratch(
+            area,
+            &mut buf,
+            &state,
+            &mut scratch,
+        );
+        let selection = output.selection_box.expect("selected communication row");
+        let selected_y = selection.inner_area.y;
+        let neighbor_y = state.get_cached_virtual_y().expect("layout")[2] as u16;
+        let left = selection.inner_area.x;
+        selection.render(&mut buf);
+
+        assert_eq!(buf.cell((left, selected_y)).unwrap().symbol(), "├");
+        assert_ne!(buf.cell((left, neighbor_y)).unwrap().symbol(), "└");
+
+        state.set_selected(None);
+        let mut hover_buf = Buffer::empty(Rect::new(0, 0, 84, 8));
+        let previous_y = state.get_cached_virtual_y().unwrap()[0] as u16;
+        hover_buf
+            .cell_mut((left, previous_y))
+            .unwrap()
+            .set_char('N');
+        hover_buf
+            .cell_mut((left, neighbor_y))
+            .unwrap()
+            .set_char('N');
+        crate::views::agent::render_entry_hover(
+            &mut hover_buf,
+            area,
+            &state,
+            Some(1),
+            &crate::theme::Theme::current(),
+        );
+        assert_eq!(hover_buf.cell((left, selected_y)).unwrap().symbol(), "├");
+        assert_eq!(hover_buf.cell((left, previous_y)).unwrap().symbol(), "N");
+        assert_eq!(hover_buf.cell((left, neighbor_y)).unwrap().symbol(), "N");
+    }
+
+    #[test]
+    fn sticky_header_corner_stays_inside_scrollback_top() {
+        let mut state = ScrollbackState::new();
+        state.push_block(RenderBlock::user_prompt("prompt"));
+        for i in 0..16 {
+            state.push_block(RenderBlock::agent_message(format!("response {i}")));
+        }
+        state.set_selected(Some(0));
+        state.prepare_layout(80, 8);
+        state.set_scroll_offset(4);
+
+        let area = Rect::new(2, 2, 80, 8);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 84, 12));
+        let mut scratch = ScratchBuffer::new();
+        let output = ScrollbackPane::new().active(true).render_with_scratch(
+            area,
+            &mut buf,
+            &state,
+            &mut scratch,
+        );
+        let selection = output.selection_box.expect("selected sticky prompt");
+        assert_eq!(selection.inner_area.y, area.y);
+        let left = selection.inner_area.x;
+        buf.cell_mut((left, area.y - 1)).unwrap().set_char('P');
+        selection.render(&mut buf);
+        assert_eq!(buf.cell((left, area.y - 1)).unwrap().symbol(), "P");
+        assert_eq!(buf.cell((left, area.y)).unwrap().symbol(), "┌");
+    }
+
+    #[test]
+    fn frame_at_scrollback_viewport_edges_stays_inside() {
+        let mut state = ScrollbackState::new();
+        state.push_block(RenderBlock::read("one.rs", None));
+        state.set_selected(Some(0));
+        state.prepare_layout(80, 1);
+        state.set_scroll_offset(0);
+
+        let area = Rect::new(2, 2, 80, 1);
+        let mut buf = Buffer::empty(Rect::new(0, 0, 84, 5));
+        let mut scratch = ScratchBuffer::new();
+        let output = ScrollbackPane::new().active(true).render_with_scratch(
+            area,
+            &mut buf,
+            &state,
+            &mut scratch,
+        );
+        let selection = output.selection_box.expect("selected viewport row");
+        let left = selection.inner_area.x;
+        buf.cell_mut((left, area.y - 1)).unwrap().set_char('A');
+        buf.cell_mut((left, area.bottom())).unwrap().set_char('B');
+        selection.render(&mut buf);
+        assert_eq!(buf.cell((left, area.y - 1)).unwrap().symbol(), "A");
+        assert_eq!(buf.cell((left, area.y)).unwrap().symbol(), "├");
+        assert_eq!(buf.cell((left, area.bottom())).unwrap().symbol(), "B");
+
+        state.set_selected(None);
+        let mut hover_buf = Buffer::empty(Rect::new(0, 0, 84, 5));
+        hover_buf
+            .cell_mut((left, area.y - 1))
+            .unwrap()
+            .set_char('A');
+        hover_buf
+            .cell_mut((left, area.bottom()))
+            .unwrap()
+            .set_char('B');
+        crate::views::agent::render_entry_hover(
+            &mut hover_buf,
+            area,
+            &state,
+            Some(0),
+            &crate::theme::Theme::current(),
+        );
+        assert_eq!(hover_buf.cell((left, area.y - 1)).unwrap().symbol(), "A");
+        assert_eq!(hover_buf.cell((left, area.y)).unwrap().symbol(), "├");
+        assert_eq!(hover_buf.cell((left, area.bottom())).unwrap().symbol(), "B");
     }
 }

@@ -797,24 +797,17 @@ mod tests {
 
     #[test]
     fn inline_media_requests_have_a_per_view_pending_limit() {
-        let _protocol = crate::terminal::image::set_protocol_for_test(
-            crate::terminal::image::GraphicsProtocol::ITerm2,
-        );
-        let dir = tempfile::tempdir().unwrap();
-        let mut encoded = std::io::Cursor::new(Vec::new());
-        image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
-            1,
-            1,
-            image::Rgba([1, 2, 3, 255]),
-        ))
-        .write_to(&mut encoded, image::ImageFormat::Png)
-        .unwrap();
         let mut agent = make_agent();
-        for name in ["one.png", "two.png", "three.png"] {
-            let path = dir.path().join(name);
-            std::fs::write(&path, encoded.get_ref()).unwrap();
-            agent.request_inline_media_load(&path);
-        }
+        let first = std::path::PathBuf::from("one.png");
+        let second = std::path::PathBuf::from("two.png");
+        let third = std::path::PathBuf::from("three.png");
+        agent.inline_media_pending.insert(first);
+        agent.inline_media_pending.insert(second);
+
+        agent.request_inline_media_load(&third);
+
+        assert!(!agent.inline_media_pending.contains(&third));
+        assert!(!agent.inline_media_failed.contains(&third));
         assert_eq!(
             agent.inline_media_pending.len(),
             super::INLINE_MEDIA_MAX_PENDING_PER_VIEW

@@ -438,7 +438,7 @@ fn same_file_identity(left: &fs::Metadata, right: &fs::Metadata) -> bool {
     }
 }
 
-fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
+pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
         use std::os::unix::ffi::OsStrExt;

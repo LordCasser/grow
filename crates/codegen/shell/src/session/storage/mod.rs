@@ -26,6 +26,7 @@ pub mod search;
 pub mod search_fts;
 mod search_recovery;
 pub(crate) mod summary_write;
+pub mod transcript;
 
 /// On-disk file names, relative to a session directory. Single source of truth for
 /// the storage adapter and the session/state and session/import extensions.
@@ -1960,6 +1961,9 @@ pub(crate) struct CommittedJsonlLines {
     max_entry_bytes: u64,
     line_number: u64,
     committed_position: u64,
+    /// A captured byte frontier. Appended bytes, including a later newline
+    /// completing a torn row, must never become part of this read.
+    end: Option<u64>,
 }
 
 impl CommittedJsonlLines {
@@ -1998,6 +2002,17 @@ impl CommittedJsonlLines {
         Ok(lines)
     }
 
+    pub(crate) fn from_open_file_bounded(
+        file: std::fs::File,
+        label: PathBuf,
+        description: &str,
+        end: u64,
+    ) -> io::Result<Self> {
+        let mut lines = Self::from_open_file_at(file, label, description, 0)?;
+        lines.end = Some(end);
+        Ok(lines)
+    }
+
     fn from_file(
         file: std::fs::File,
         path: PathBuf,
@@ -2012,6 +2027,7 @@ impl CommittedJsonlLines {
             max_entry_bytes,
             line_number: 0,
             committed_position: 0,
+            end: None,
         }
     }
 
@@ -2022,6 +2038,22 @@ impl CommittedJsonlLines {
     pub(crate) fn line_number(&self) -> u64 {
         self.line_number
     }
+
+    fn check_captured_frontier(&self) -> io::Result<()> {
+        if let Some(end) = self.end
+            && self.reader.get_ref().metadata()?.len() < end
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "{} was truncated at {}",
+                    self.description,
+                    self.path.display()
+                ),
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Iterator for CommittedJsonlLines {
@@ -2030,13 +2062,28 @@ impl Iterator for CommittedJsonlLines {
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             self.line_buffer.clear();
+            if let Err(error) = self.check_captured_frontier() {
+                return Some(Err(error));
+            }
+            let remaining = if let Some(end) = self.end {
+                let position = match self.reader.stream_position() {
+                    Ok(position) => position,
+                    Err(error) => return Some(Err(error)),
+                };
+                end.saturating_sub(position)
+            } else {
+                u64::MAX
+            };
             let read = match (&mut self.reader)
-                .take(self.max_entry_bytes.saturating_add(1))
+                .take(self.max_entry_bytes.saturating_add(1).min(remaining))
                 .read_until(b'\n', &mut self.line_buffer)
             {
                 Ok(read) => read,
                 Err(error) => return Some(Err(error)),
             };
+            if let Err(error) = self.check_captured_frontier() {
+                return Some(Err(error));
+            }
             if read == 0 {
                 return None;
             }
@@ -2044,8 +2091,25 @@ impl Iterator for CommittedJsonlLines {
             if self.line_buffer.len() as u64 > self.max_entry_bytes {
                 let mut committed = self.line_buffer.ends_with(b"\n");
                 while !committed {
+                    if let Err(error) = self.check_captured_frontier() {
+                        return Some(Err(error));
+                    }
+                    let remaining = match self.end {
+                        Some(end) => match self.reader.stream_position() {
+                            Ok(position) => end.saturating_sub(position),
+                            Err(error) => return Some(Err(error)),
+                        },
+                        None => u64::MAX,
+                    };
+                    if remaining == 0 {
+                        return None;
+                    }
                     let buffered = match self.reader.fill_buf() {
-                        Ok(buffered) => buffered,
+                        Ok(buffered) => {
+                            &buffered[..buffered
+                                .len()
+                                .min(usize::try_from(remaining).unwrap_or(usize::MAX))]
+                        }
                         Err(error) => return Some(Err(error)),
                     };
                     if buffered.is_empty() {

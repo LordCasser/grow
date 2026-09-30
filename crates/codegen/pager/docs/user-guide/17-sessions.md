@@ -286,6 +286,44 @@ grow trajectory
 
 Pass a session ID to inspect another session, or use `--no-open` to print the local URL without launching a browser. The page incrementally tails the main and Sideband timelines, defaults to aligned Input / Model / Tools lanes, and can regroup the same filtered events by layer, actor, class, or producer. Subagents currently share their family lane, while each ledger row retains the child ID; tool producers use names such as `tool:read_file`. Scrolling away from the live tail pauses following and exposes a single **Jump to live** action; scrolling to the top pages backward automatically. Layer, actor, class, producer, visibility, diagnostic outcome, and text filters remain separate from the timeline view. Selecting a row opens its canonical event inspector with exact Parent, Pair, Turn, and Step navigation, and the current view, filters, relation scope, and selected event stay in the URL for refresh or sharing. Agent/Behavior prompt-context changes and reprojections receive their own visible timeline marks, while terminal outcomes and model request metrics use type-specific summaries. Each launch uses a random URL token, rejects non-loopback bind addresses and non-local Host headers, and never mutates the session.
 
+### Export a transcript tree
+
+Export a session and its required subagent sessions as Markdown:
+
+```sh
+grow export <session-id>
+grow export <session-id> ./reviewed-session
+```
+
+Without an output path, Grow creates `./<session-id>/` in the current directory. An explicit path names the output directory. Each agent has its own `transcript.md`; child transcripts live under `subagents/<child-session-id>/`, recursively, and the parent transcript links to its direct children. Grow rejects an existing destination instead of merging or overwriting it. CLI export writes files and does not use the clipboard.
+
+The trajectory debugger also has a **Download conversation** action. It downloads a `.tar.gz` containing the same session-named directory and transcript tree, independent of the page's current filters.
+
+Each export captures fixed ledger frontiers. A session may keep appending while the captured transcript is read; later records and unfinished final lines are excluded. Missing required sources, corrupt committed records, or inconsistent cross-session links fail the export. The capture is not an atomic transaction across all agents; retry after the writer settles if a required causal link is not yet available.
+
+The [client-surfaces contract](../../../../../openspec/specs/client-surfaces/spec.md#requirement-cli-export-writes-a-session-transcript-directory-tree) defines the verified delegation tree and publication rules.
+
+### Replay a session
+
+Replay a saved session in a read-only terminal page:
+
+```sh
+grow replay <session-id>
+grow replay <session-id> --speed 4
+```
+
+Playback defaults to `1×`; `--speed` accepts a finite positive number within the playback clock's range. The bottom panel replaces the session input area with playback state, speed, progress, historical time, and controls. Press **F8** from any view, or **Space** in the transcript, to pause or continue. **+** / **-** changes speed, and **]** advances to the next saved record while preserving a paused state. Use **Tab** / **Shift-Tab** to select rows, **Enter** to inspect a row, **←** / **→** to fold, **/** to search already displayed text, and **End** to follow the latest output. Click a subagent card to enter its captured process; a Workflow card opens a read-only picker for child agents that have already appeared. **Esc** / **q** closes the current search, selection, detail, or child page one layer at a time; **Ctrl-C** exits immediately. The finished replay stays open for reading.
+
+Replay captures the selected session and its valid descendant tree before entering the TUI, then only renders recorded information. It does not reconnect an agent, send prompts, execute recorded tools or hooks, answer old permission requests, or modify session files. Assistant and thinking text streams at an approximate pace because the original per-token timing is not stored. You can also start directly from a child session ID. Background-task stdout that was not captured in the transcript is labeled unavailable rather than read from a current task store.
+
+Recorded cancellation and failure reasons remain visible. A new prompt does not imply that an earlier pending tool succeeded: without its own terminal record, the tool stays unfinished at the captured snapshot. Due cancellation, user input, and tool boundaries complete the preceding text reveal immediately; pausing freezes both events and text. Pasted text is ignored. Replay uses a captured snapshot and does not follow subsequent session writes.
+
+Recorded Behavior changes and Plan phases appear during playback. Goal setup, pause, restart, completion, and clear update the displayed goal; cancellation of a turn alone does not stop it. Only recorded continuations are played. Leaving Workflow mode does not finish its Run, and old confirmation requests never become interactive approvals. If the display cache omits the latest Behavior or Goal state, a labeled captured-state notice restores the verified endpoint. Missing intermediate timing and unsaved interaction screens cannot be reconstructed.
+
+The [client-surfaces replay contract](../../../../../openspec/specs/client-surfaces/spec.md#requirement-cli-replay-runs-an-isolated-observational-tui) covers the read-only and timing boundaries.
+
+Historical timestamps use the local timezone offset at each recorded instant; if that offset cannot be resolved, they use UTC. A reliably bounded IDLE gap strictly longer than 30 seconds is shown as “跳过 xx IDLE 时间” and takes one second of playback time before speed scaling. A cold-recovery gap is labeled as an estimate. Active agents, tools, hooks, sidebands, background tasks, and Workflow runs protect their recorded execution spans from ordinary IDLE compression. When a permission wait or timestamp boundary cannot be proven, replay remains conservative; use **]** to move ahead explicitly. Older sessions can lack the facts needed to recover exact timing or historical auxiliary output.
+
 ### Persistence Format
 
 Grow stores runtime causality as newline-delimited JSON (JSONL). Each line in `timeline.jsonl` is a sequenced, self-contained lifecycle fact. This format supports:

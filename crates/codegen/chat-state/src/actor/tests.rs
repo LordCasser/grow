@@ -1921,6 +1921,130 @@ async fn unknown_model_attempt_usage_marks_current_ledgers_incomplete() {
 }
 
 #[tokio::test]
+async fn known_cache_samples_survive_unknown_attempt_and_cold_restore() {
+    let h = TestHarness::new();
+    let first = sampling_types::TokenUsage {
+        prompt_tokens: 100,
+        total_tokens: 100,
+        cached_prompt_tokens: 80,
+        cache_read_known: true,
+        ..Default::default()
+    };
+    assert!(
+        h.handle
+            .settle_model_attempt_usage(
+                "attempt-a".into(),
+                0,
+                "model-a".into(),
+                Some(first.clone()),
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        h.handle
+            .settle_model_attempt_usage(
+                "attempt-interrupted".into(),
+                0,
+                "model-a".into(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        h.handle
+            .settle_model_attempt_usage(
+                "attempt-interrupted-2".into(),
+                0,
+                "model-a".into(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+    );
+    let second = sampling_types::TokenUsage {
+        prompt_tokens: 900,
+        total_tokens: 900,
+        cached_prompt_tokens: 810,
+        cache_read_known: true,
+        ..Default::default()
+    };
+    assert!(
+        h.handle
+            .settle_model_attempt_usage(
+                "attempt-b".into(),
+                0,
+                "model-a".into(),
+                Some(second),
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+    );
+    assert!(
+        !h.handle
+            .settle_model_attempt_usage(
+                "attempt-a".into(),
+                0,
+                "model-a".into(),
+                Some(first),
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+    );
+
+    let current = h.handle.try_get_session_usage().await.unwrap();
+    assert!(current.incomplete);
+    assert_eq!(current.totals.input_tokens, 1_000);
+    assert_eq!(current.totals.cached_read_tokens, 890);
+    assert_eq!(current.totals.cache_read_known_input_tokens, 1_000);
+    assert_eq!(current.totals.model_calls, 2);
+
+    let events = h.handle.timeline_events().await.unwrap();
+    let (persistence, _records) = MockTimelinePersistence::new();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let restored = ChatStateActor::spawn_from_timeline(
+        events,
+        test_config(),
+        Box::new(persistence),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let lifetime = restored.try_get_session_usage().await.unwrap();
+    assert_eq!(lifetime.totals, current.totals);
+    assert!(lifetime.incomplete);
+    assert!(
+        !restored
+            .settle_model_attempt_usage(
+                "attempt-interrupted".into(),
+                0,
+                "model-a".into(),
+                None,
+                None,
+                None,
+            )
+            .await
+            .unwrap()
+    );
+    assert_eq!(
+        restored.try_get_session_usage().await.unwrap().totals,
+        current.totals
+    );
+}
+
+#[tokio::test]
 async fn model_attempt_usage_waits_for_persistence_ack_before_folding() {
     let mut h = TestHarness::with_manual_timeline_ack(vec![]);
     let handle = h.handle.clone();

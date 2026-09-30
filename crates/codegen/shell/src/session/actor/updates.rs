@@ -940,7 +940,7 @@ impl SessionActor {
     /// occurrences are queried again instead of copied to `updates.jsonl`.
     pub(super) async fn publish_completed_hook_projections(&self) {
         for projection in self.chat_state_handle.completed_hook_projections().await {
-            if let Some(update) = self.project_hook_execution(
+            if let Some(update) = Self::project_hook_execution(
                 timeline_hook_event_name(projection.event),
                 None,
                 None,

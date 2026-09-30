@@ -18,6 +18,7 @@ pub mod session;
 pub use crate::link_opener;
 pub use prompt_queue;
 mod acp_handler;
+pub(crate) use acp_handler::project_ui_notice;
 mod csi_filter;
 /// Display-refresh probe + motion cadence + terminal diagnostics at startup.
 mod display_refresh_startup;

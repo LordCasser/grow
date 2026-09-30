@@ -244,8 +244,9 @@ env_key = "EXAMPLE_API_KEY"
 
 ### Custom models
 
-Every selectable model belongs to an explicit provider. The provider chooses the wire backend and
-owns shared endpoint/credential options; each model owns its API identifier and local limits.
+Every selectable model belongs to an explicit provider. The provider sets the default wire backend
+and owns shared endpoint/credential options; each model may override `api_backend` and `base_url`
+alongside its API identifier and local limits.
 
 ```toml
 [models]
@@ -264,6 +265,9 @@ env_http_headers = { "X-Tenant" = "TENANT_TOKEN" }
 name = "Model A"
 context_window = 128000                # local context management / auto-compact
 reasoning_efforts = ["none", "high"]
+
+[provider.example.models.model-b]
+api_backend = "messages"              # overrides the provider's responses default
 ```
 
 There is no built-in model to override. `output_limit` maps to `max_tokens` for Chat Completions and
