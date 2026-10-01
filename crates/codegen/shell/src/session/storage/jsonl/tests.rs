@@ -43,7 +43,7 @@ async fn communication_receipt_replay_uses_timeline_without_updates_cache() {
     // UI cache contents must never create a second receipt or override its body.
     std::fs::write(writer.session_dir(&info).join("updates.jsonl"), "").unwrap();
     let mut notices = Vec::new();
-    assert_eq!(crate::session::storage::stream_coordination_notices_at(info.id.0.as_ref(), root.path(), |notice| notices.push(notice)).unwrap(), crate::session::storage::ReplayEmission::Emitted);
+    assert_eq!(crate::session::storage::stream_session_history_at(info.id.0.as_ref(), root.path(), |update| { if let SessionUpdate::Grow(n) = update && let crate::extensions::notification::SessionUpdate::UiNotice(notice) = n.update { notices.push(notice); } }).unwrap(), crate::session::storage::ReplayEmission::Emitted);
     assert_eq!(notices.len(), 1);
     assert_eq!(notices[0].correlation_id, id);
     let restored = AgentMessageNotice::from_notice(&notices[0]).unwrap();
@@ -52,7 +52,7 @@ async fn communication_receipt_replay_uses_timeline_without_updates_cache() {
     crate::session::notification_inbox::remove_payload(opened.directory(), &payload_ref).unwrap();
     let before = std::fs::read(writer.session_dir(&info).join("timeline.jsonl")).unwrap();
     let mut missing = Vec::new();
-    assert_eq!(crate::session::storage::stream_coordination_notices_at(info.id.0.as_ref(), root.path(), |notice| missing.push(notice)).unwrap(), crate::session::storage::ReplayEmission::Emitted);
+    assert_eq!(crate::session::storage::stream_session_history_at(info.id.0.as_ref(), root.path(), |update| { if let SessionUpdate::Grow(n) = update && let crate::extensions::notification::SessionUpdate::UiNotice(notice) = n.update { missing.push(notice); } }).unwrap(), crate::session::storage::ReplayEmission::Emitted);
     assert_eq!(missing.len(), 1);
     assert_eq!(missing[0].correlation_id, id);
     assert!(AgentMessageNotice::from_notice(&missing[0]).unwrap().message.is_none());

@@ -601,6 +601,7 @@ fn render_minimal_status(
             activity_started_at: minimal_api::agent_activity_started_at(agent),
             frame,
             drain_blocked,
+            input_available: true,
             buttons: None,
             has_running_execute: false,
             total_tokens: minimal_api::agent_context_used(agent),

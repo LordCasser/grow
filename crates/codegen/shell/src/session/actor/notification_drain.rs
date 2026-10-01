@@ -4,38 +4,6 @@ use super::*;
 use crate::session::notification_inbox::AgentMessageDeliveryError;
 
 impl SessionActor {
-    /// Replay receipt projections without another delivery, hook or cursor.
-    pub(super) async fn publish_parent_message_receipts(&self) -> Result<(), String> {
-        let receipts = self
-            .chat_state_handle
-            .parent_message_receipts()
-            .await
-            .ok_or_else(|| "Parent message history is unavailable".to_string())?;
-        for batch in receipts.chunks(32) {
-            let events = batch.to_vec();
-            let directory = self
-                .session_directory
-                .try_clone()
-                .map_err(|error| error.to_string())?;
-            let notices = tokio::task::spawn_blocking(move || {
-                events
-                    .iter()
-                    .filter_map(|event| {
-                        crate::session::notification_inbox::read_parent_message_notice(
-                            &directory, event,
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .await
-            .map_err(|error| error.to_string())?;
-            for notice in notices {
-                self.send_transient_passive_notification(GrowSessionUpdate::UiNotice(notice));
-            }
-        }
-        Ok(())
-    }
-
     pub(super) async fn receive_agent_message(
         &self,
         source_session_id: String,
@@ -1735,7 +1703,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn parent_receipt_publication_is_transient_and_recovers_after_ui_disconnect() {
+    async fn parent_receipt_is_transient_and_history_restores_without_delivery() {
         tokio::task::LocalSet::new()
             .run_until(async {
                 let (actor, mut gateway) =
@@ -1779,12 +1747,28 @@ mod tests {
                 assert!(actor.drain_active_notifications().await);
                 let before = actor.chat_state_handle.timeline_events().await.unwrap();
                 let _ = notices(&mut gateway);
-                actor.publish_parent_message_receipts().await.unwrap();
-                let replay = notices(&mut gateway);
-                assert_eq!(replay.len(), 1);
-                assert_eq!(
-                    serde_json::to_value(&replay[0].update).unwrap(),
-                    serde_json::to_value(&live[0].update).unwrap()
+                let timeline = chat_state::Timeline::from_events(before.clone()).unwrap();
+                let prepared = crate::session::storage::prepare_reconciled_replay_lines(
+                    &actor.session_info.id,
+                    &timeline,
+                    "",
+                    None,
+                    |event| {
+                        Ok(
+                            crate::session::notification_inbox::read_parent_message_notice(
+                                &actor.session_directory,
+                                event,
+                            ),
+                        )
+                    },
+                )
+                .unwrap();
+                assert_eq!(prepared.lines.len(), 1);
+                assert!(prepared.mark_replay);
+                assert!(prepared.lines[0].as_str().contains("original body"));
+                assert!(
+                    notices(&mut gateway).is_empty(),
+                    "restoring history must not deliver again"
                 );
                 assert_eq!(
                     actor

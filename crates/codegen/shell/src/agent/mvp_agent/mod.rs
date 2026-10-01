@@ -1120,6 +1120,7 @@ impl MvpAgent {
                 timeline,
                 &raw_contents,
                 cursor,
+                |event| crate::session::storage::communication_history::read_notice(session_directory, event),
             )
             .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?
         };

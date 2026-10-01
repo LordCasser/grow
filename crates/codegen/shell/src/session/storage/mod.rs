@@ -21,6 +21,7 @@ use acp_transport::protocol as acp;
 use sampling_types::ReasoningEffort;
 use workspace::session::file_state::RewindPoint;
 
+pub(crate) mod communication_history;
 pub mod jsonl;
 pub mod search;
 pub mod search_fts;
@@ -3643,7 +3644,8 @@ pub fn strip_context_wrappers(update: acp::SessionUpdate) -> acp::SessionUpdate 
 // Replay-loader family, all resolving an identity-checked session and reading
 // its pinned updates handle through `for_each_replay_update`. Pick by need:
 //   - production, current grow home:   `load_updates_for_replay`
-//   - production, streaming (bounded): `stream_replay_updates_at`
+//   - production child history:       `stream_session_history_at` (ACP + notices)
+//   - ACP-only streaming:             `stream_replay_updates_at`
 //   - tests, explicit grow home:       `load_updates_for_replay_at` (typed reference)
 
 /// Load replay-ready typed ACP updates for a session, or `None` when the
@@ -3693,6 +3695,12 @@ fn with_reconciled_replay_lines<R>(
     };
     let filtered = filter_rewind_lines(lines.iter().map(String::as_str).collect());
     let reconciled = reconcile_raw_replay_lines(&opened.summary().info.id, &timeline, filtered)?;
+    let reconciled = communication_history::restore(
+        &opened.summary().info.id,
+        &timeline,
+        reconciled,
+        |event| communication_history::read_notice(opened.directory(), event),
+    )?;
     Ok(Some(f(&reconciled.lines)?))
 }
 
@@ -3842,6 +3850,56 @@ pub fn stream_replay_updates_at<F: FnMut(acp::SessionUpdate)>(
     })
 }
 
+/// Restore a child's visible conversation and communication in one ordered
+/// stream. Lifecycle/control snapshots are restored separately by their owner.
+pub fn stream_session_history_at(
+    session_id: &str,
+    grow_home: &Path,
+    mut emit: impl FnMut(SessionUpdate),
+) -> io::Result<ReplayEmission> {
+    let Some(emitted) = with_reconciled_replay_lines(session_id, grow_home, |lines| {
+        let mut emitted = false;
+        for line in lines {
+            let Ok(update) = SessionUpdateEnvelope::from_str(line.as_str()) else {
+                continue;
+            };
+            match update {
+                SessionUpdate::Acp(mut n) => {
+                    n.update = strip_context_wrappers(n.update);
+                    emit(SessionUpdate::Acp(n));
+                    emitted = true;
+                }
+                SessionUpdate::ResponseReplayProjection(p) => {
+                    for mut n in p.into_notifications() {
+                        n.update = strip_context_wrappers(n.update);
+                        emit(SessionUpdate::Acp(Box::new(n)));
+                        emitted = true;
+                    }
+                }
+                SessionUpdate::Grow(n)
+                    if matches!(
+                        n.update,
+                        crate::extensions::notification::SessionUpdate::UiNotice(_)
+                    ) =>
+                {
+                    emit(SessionUpdate::Grow(n));
+                    emitted = true;
+                }
+                _ => {}
+            }
+        }
+        Ok(emitted)
+    })?
+    else {
+        return Ok(ReplayEmission::Empty);
+    };
+    Ok(if emitted {
+        ReplayEmission::Emitted
+    } else {
+        ReplayEmission::Empty
+    })
+}
+
 /// Stream durable Grow extension notifications from one already-resolved
 /// session directory. This is separate from conversation replay because the
 /// pager normally applies only ACP chunks to a child view; reconnect
@@ -3862,42 +3920,6 @@ pub fn stream_replay_grow_notifications_at<
         return Ok(ReplayEmission::Empty);
     };
     for_each_replay_grow_notification(reader, f)
-}
-
-/// Restore communication independently of the disposable updates cache.
-/// Pin and validate one session; stream bodies individually rather than
-/// collecting all historical messages into a second transcript.
-pub fn stream_coordination_notices_at<F: FnMut(crate::extensions::notification::UiNotice)>(
-    session_id: &str,
-    grow_home: &std::path::Path,
-    mut emit: F,
-) -> io::Result<ReplayEmission> {
-    let storage = JsonlStorageAdapter::with_root(grow_home.to_path_buf());
-    let Some(opened) = storage.open_session_by_id_shared_read(session_id)? else {
-        return Ok(ReplayEmission::Empty);
-    };
-    let validated = opened.validated_timeline(session_id)?;
-    let mut emitted = false;
-    for event in validated.timeline.events() {
-        if let Some(notice) = crate::session::notification_inbox::read_parent_message_notice(
-            opened.directory(),
-            event,
-        ) {
-            emit(notice);
-            emitted = true;
-        } else if let Some(inquiry @ crate::coordination::InquiryEvent::Incoming { .. }) =
-            crate::coordination::InquiryEvent::from_timeline(event)
-                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?
-        {
-            emit(inquiry.notice());
-            emitted = true;
-        }
-    }
-    Ok(if emitted {
-        ReplayEmission::Emitted
-    } else {
-        ReplayEmission::Empty
-    })
 }
 
 /// Fold Grow-only durable facts while constructing a SessionActor from its
@@ -4316,6 +4338,9 @@ pub(crate) fn prepare_reconciled_replay_lines<'a>(
     timeline: &chat_state::Timeline,
     contents: &'a str,
     cursor: Option<&str>,
+    read_notice: impl FnMut(
+        &chat_state::TimelineEvent,
+    ) -> io::Result<Option<crate::extensions::notification::UiNotice>>,
 ) -> io::Result<PreparedReconciledReplay<'a>> {
     let filtered = filter_rewind_lines(contents.lines().filter(|l| !l.trim().is_empty()).collect());
     let max_event_seq = max_event_seq(&filtered);
@@ -4325,6 +4350,7 @@ pub(crate) fn prepare_reconciled_replay_lines<'a>(
         .count();
     let subagent_projections = collect_subagent_projection_state(&filtered);
     let reconciled = reconcile_raw_replay_lines(session_id, timeline, filtered.clone())?;
+    let reconciled = communication_history::restore(session_id, timeline, reconciled, read_notice)?;
     let cursor_pos = cursor
         .and_then(|id| {
             filtered
@@ -4661,7 +4687,10 @@ mod tests {
         let raw = format!("{candidate}\n{later}\n{acu}\n");
 
         let prepared =
-            prepare_reconciled_replay_lines(&session_id, &timeline, &raw, Some("later")).unwrap();
+            prepare_reconciled_replay_lines(&session_id, &timeline, &raw, Some("later"), |_| {
+                Ok(None)
+            })
+            .unwrap();
         assert!(prepared.mark_replay);
         assert_eq!(prepared.lines.len(), 2);
         assert!(
@@ -4686,7 +4715,10 @@ mod tests {
         let raw = format!("{projection}\n{seen}\n{later}\n");
 
         let prepared =
-            prepare_reconciled_replay_lines(&session_id, &timeline, &raw, Some("seen")).unwrap();
+            prepare_reconciled_replay_lines(&session_id, &timeline, &raw, Some("seen"), |_| {
+                Ok(None)
+            })
+            .unwrap();
         assert!(!prepared.mark_replay);
         assert_eq!(prepared.lines.len(), 1);
         assert!(prepared.lines[0].as_str().contains("later"));
@@ -4701,7 +4733,10 @@ mod tests {
         let raw = format!("{seen}\n{projection}\n");
 
         let prepared =
-            prepare_reconciled_replay_lines(&session_id, &timeline, &raw, Some("seen")).unwrap();
+            prepare_reconciled_replay_lines(&session_id, &timeline, &raw, Some("seen"), |_| {
+                Ok(None)
+            })
+            .unwrap();
         assert!(prepared.mark_replay);
         assert!(prepared.lines.iter().any(|line| {
             line.as_str()

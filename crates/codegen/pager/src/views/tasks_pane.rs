@@ -245,6 +245,7 @@ pub enum TaskEntry {
     },
     Workflow {
         id: u64,
+        run_id: String,
         name: String,
         label: String,
         styled: Line<'static>,
@@ -520,6 +521,7 @@ impl TaskEntry {
 
         TaskEntry::Workflow {
             id,
+            run_id: run.run_id.clone(),
             name: run.name.clone(),
             label,
             styled: Line::from(spans),
@@ -781,6 +783,7 @@ pub struct TasksPane {
     pub view_button_rects: Vec<(TaskEntryId, Rect)>,
     pub hovered_kill: Option<TaskEntryId>,
     pub hovered_view: Option<TaskEntryId>,
+    read_only: bool,
     prev_running_count: usize,
     opened_by_auto: bool,
     highlight_cache: HashMap<String, Vec<Span<'static>>>,
@@ -852,6 +855,17 @@ fn draw_centered_arrow(buf: &mut Buffer, area: Rect, y: u16, arrow: &str, color:
 }
 impl TasksPane {
     pub fn new() -> Self {
+        Self::with_read_only(false)
+    }
+
+    /// Create a task pane for historical browsing. It keeps the shared list
+    /// renderer and view affordances, but omits actions that can change live
+    /// work. The ordinary `h` toggle also exposes completed history.
+    pub fn new_readonly() -> Self {
+        Self::with_read_only(true)
+    }
+
+    fn with_read_only(read_only: bool) -> Self {
         let config = ListPaneConfig {
             follow_enabled: false,
             wrap_toggle_enabled: false,
@@ -882,6 +896,7 @@ impl TasksPane {
             view_button_rects: Vec::new(),
             hovered_kill: None,
             hovered_view: None,
+            read_only,
             prev_running_count: 0,
             opened_by_auto: false,
             highlight_cache: HashMap::new(),
@@ -1525,12 +1540,12 @@ impl TasksPane {
         buf.set_span(area.x, y, &Span::styled(icon, icon_style), 2);
 
         let right_text_w = right_text.width() as u16;
-        let kill_w: u16 = if running { 3 } else { 0 };
+        let kill_w: u16 = if running && !self.read_only { 3 } else { 0 };
         let overlay_w = kill_w + right_text_w + 1;
         clear_overlay_area(buf, area, y, overlay_w);
 
         let mut rx = area.x + area.width;
-        if running {
+        if running && !self.read_only {
             rx = rx.saturating_sub(3);
             let is_hovered = matches!(
                 &self.hovered_kill,
@@ -1572,7 +1587,7 @@ impl TasksPane {
         theme: &Theme,
         frame: crate::motion::FrameStamp,
     ) {
-        let (icon, icon_style, right_text, right_style) = if task.pending_kill {
+        let (icon, icon_style, right_text, right_style) = if task.pending_kill && !self.read_only {
             let frames = crate::glyphs::dot_spinner_frames();
             (
                 crate::motion::spinner_glyph(frame, frames),
@@ -1632,7 +1647,7 @@ impl TasksPane {
 
         // Clear overlay area to prevent label text bleeding through.
         let right_text_w = right_text.width() as u16;
-        let bg_kill_w: u16 = if task.status == BgTaskStatus::Running {
+        let bg_kill_w: u16 = if task.status == BgTaskStatus::Running && !self.read_only {
             3
         } else {
             0
@@ -1643,7 +1658,7 @@ impl TasksPane {
         let mut rx = area.x + area.width;
 
         // Kill button (visible even during pending_kill so the user can retry)
-        if task.status == BgTaskStatus::Running {
+        if task.status == BgTaskStatus::Running && !self.read_only {
             rx = rx.saturating_sub(3);
             let is_hovered = matches!(
                 &self.hovered_kill,
@@ -1719,7 +1734,7 @@ impl TasksPane {
         theme: &Theme,
         frame: crate::motion::FrameStamp,
     ) {
-        let (icon, icon_style, right_text, right_style) = if info.pending_kill {
+        let (icon, icon_style, right_text, right_style) = if info.pending_kill && !self.read_only {
             let frames = crate::glyphs::dot_spinner_frames();
             (
                 crate::motion::spinner_glyph(frame, frames),
@@ -1763,7 +1778,11 @@ impl TasksPane {
             info.reasoning_effort,
         );
         let right_text_w = right_text.width() as u16;
-        let kill_w: u16 = if info.is_running() { 3 } else { 0 };
+        let kill_w: u16 = if info.is_running() && !self.read_only {
+            3
+        } else {
+            0
+        };
         let badge_w: u16 = if badge.is_empty() {
             0
         } else {
@@ -1780,7 +1799,7 @@ impl TasksPane {
         let mut rx = area.x + area.width;
 
         // Kill button (visible even during pending_kill so the user can retry)
-        if info.is_running() {
+        if info.is_running() && !self.read_only {
             rx = rx.saturating_sub(3);
             let is_hovered = matches!(
                 &self.hovered_kill,
@@ -1874,32 +1893,36 @@ impl TasksPane {
             2,
         );
 
-        let overlay_cols = if linked_subagent.is_some() { 7 } else { 4 };
+        let kill_cols = if self.read_only { 0 } else { 4 };
+        let view_cols = if linked_subagent.is_some() { 3 } else { 0 };
+        let overlay_cols = kill_cols + view_cols;
         clear_overlay_area(buf, area, y, overlay_cols);
 
         let mut rx = area.x + area.width;
 
-        // Kill button [✗]
-        rx = rx.saturating_sub(3);
-        let is_hovered = matches!(
-            &self.hovered_kill,
-            Some(TaskEntryId::Scheduled(tid)) if tid == task_id
-        );
-        let kill_style = if is_hovered {
-            Style::default().fg(theme.accent_error)
-        } else {
-            Style::default().fg(theme.gray)
-        };
-        buf.set_span(
-            rx,
-            y,
-            &Span::styled(crate::glyphs::ballot_x_button(), kill_style),
-            3,
-        );
-        self.kill_button_rects.push((
-            TaskEntryId::Scheduled(task_id.to_string()),
-            Rect::new(rx, y, 3, 1),
-        ));
+        if !self.read_only {
+            // Kill button [✗]
+            rx = rx.saturating_sub(3);
+            let is_hovered = matches!(
+                &self.hovered_kill,
+                Some(TaskEntryId::Scheduled(tid)) if tid == task_id
+            );
+            let kill_style = if is_hovered {
+                Style::default().fg(theme.accent_error)
+            } else {
+                Style::default().fg(theme.gray)
+            };
+            buf.set_span(
+                rx,
+                y,
+                &Span::styled(crate::glyphs::ballot_x_button(), kill_style),
+                3,
+            );
+            self.kill_button_rects.push((
+                TaskEntryId::Scheduled(task_id.to_string()),
+                Rect::new(rx, y, 3, 1),
+            ));
+        }
 
         if linked_subagent.is_some() {
             rx = rx.saturating_sub(3);
@@ -2248,6 +2271,95 @@ mod tests {
                     .collect::<String>()
             })
             .collect()
+    }
+
+    #[test]
+    fn readonly_render_keeps_view_buttons_and_hides_management_controls() {
+        let mut bg_tasks = BTreeMap::new();
+        let mut running_task = make_bg_task("bg-running", "cargo test", BgTaskStatus::Running);
+        running_task.pending_kill = true;
+        bg_tasks.insert("bg-running".into(), running_task);
+        bg_tasks.insert(
+            "bg-complete".into(),
+            make_bg_task("bg-complete", "cargo build", BgTaskStatus::Done),
+        );
+
+        let mut agent = make_info();
+        agent.pending_kill = true;
+        let mut subagents = HashMap::new();
+        subagents.insert("cs-1".into(), agent);
+
+        let mut scheduled = HashMap::new();
+        let mut loop_task = make_scheduled_info("loop-1", "every 1m", "check status", None);
+        loop_task.last_subagent_id = Some("sa-1".into());
+        scheduled.insert("loop-1".into(), loop_task);
+        let workflows = vec![make_workflow_run("replay-flow", "active")];
+
+        let render = |pane: &mut TasksPane| {
+            let area = Rect::new(0, 0, 100, 20);
+            let mut buf = Buffer::empty(area);
+            pane.render(
+                area,
+                &mut buf,
+                false,
+                &crate::appearance::LayoutConfig::default(),
+                &bg_tasks,
+                &subagents,
+                &scheduled,
+                crate::motion::FrameStamp::default(),
+            );
+            let text = (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .filter_map(|x| buf.cell((x, y)).map(|cell| cell.symbol().to_string()))
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            (
+                text,
+                pane.kill_button_rects.len(),
+                pane.view_button_rects.len(),
+            )
+        };
+
+        let mut readonly = TasksPane::new_readonly();
+        readonly.show_done = true;
+        readonly.overlay.show();
+        readonly.sync(&bg_tasks, &subagents, &scheduled, &workflows);
+        assert!(readonly.show_done());
+        let (readonly_text, kill_count, view_count) = render(&mut readonly);
+        assert_eq!(
+            kill_count, 0,
+            "read-only pane must expose no kill hit areas"
+        );
+        assert_eq!(
+            view_count, 4,
+            "both bg tasks, the subagent and linked loop remain viewable"
+        );
+        assert!(
+            readonly_text.contains("cargo build"),
+            "completed rows stay visible"
+        );
+        assert!(readonly_text.contains(crate::glyphs::enlarge_button()));
+        assert!(!readonly_text.contains(crate::glyphs::ballot_x_button()));
+        assert!(
+            !readonly_text.contains("killing"),
+            "live pending-kill UI is not historical state"
+        );
+
+        let mut live = TasksPane::new();
+        live.overlay.show();
+        live.sync(&bg_tasks, &subagents, &scheduled, &workflows);
+        assert!(!live.show_done());
+        let (live_text, live_kill_count, live_view_count) = render(&mut live);
+        assert_eq!(
+            live_kill_count, 4,
+            "live pane retains task/agent/loop/workflow actions"
+        );
+        assert_eq!(live_view_count, 3);
+        assert!(live_text.contains(crate::glyphs::ballot_x_button()));
+        assert!(live_text.contains("killing"));
     }
 
     #[test]

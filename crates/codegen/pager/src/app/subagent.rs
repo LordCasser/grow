@@ -3,7 +3,9 @@
 //! Tracking state for spawned child sessions. [`SubagentInfo`] is the single
 //! source of truth — used by both the subagent pane (display) and the
 //! permission view (provenance labels).
-use shell::session::storage::{ReplayEmission, stream_replay_updates_at};
+#[cfg(test)]
+use shell::session::storage::stream_replay_updates_at;
+use shell::session::storage::{ReplayEmission, stream_session_history_at};
 use std::sync::Arc;
 use std::time::Instant;
 /// Enriched subagent tracking info.
@@ -247,10 +249,22 @@ pub(crate) fn replay_inherited_updates(
         is_replay: true,
         ..Default::default()
     };
-    let outcome = match stream_replay_updates_at(child_session_id, &home, |update| {
-        child_view
-            .session
-            .handle_update(update, &replay_meta, &mut child_view.scrollback);
+    let outcome = match stream_session_history_at(child_session_id, &home, |update| match update {
+        shell::session::storage::SessionUpdate::Acp(notification) => {
+            child_view.session.handle_update(
+                notification.update,
+                &replay_meta,
+                &mut child_view.scrollback,
+            );
+        }
+        shell::session::storage::SessionUpdate::Grow(notification) => {
+            if let shell::extensions::notification::SessionUpdate::UiNotice(notice) =
+                notification.update
+            {
+                crate::app::acp_handler::apply_ui_notice(child_view, notice, None, true);
+            }
+        }
+        _ => {}
     }) {
         Ok(outcome) => outcome,
         Err(e) => {
@@ -258,19 +272,7 @@ pub(crate) fn replay_inherited_updates(
             ReplayEmission::Empty
         }
     };
-    let communication_outcome = shell::session::storage::stream_coordination_notices_at(
-        child_session_id,
-        &home,
-        |notice| {
-            crate::app::acp_handler::apply_ui_notice(child_view, notice, None, true);
-        },
-    );
-    if let Err(error) = &communication_outcome {
-        tracing::warn!(session_id = child_session_id, %error, "failed to restore child communication history");
-    }
-    if outcome == ReplayEmission::Emitted
-        || matches!(communication_outcome, Ok(ReplayEmission::Emitted))
-    {
+    if outcome == ReplayEmission::Emitted {
         crate::memory_release::release_retained_memory_with("subagent-replay");
     }
 }

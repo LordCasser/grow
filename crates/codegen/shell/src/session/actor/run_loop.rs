@@ -1712,10 +1712,9 @@ pub(super) async fn run_session(
                         let _ = respond_to.send(());
                     }
                     SessionCommand::PublishCoordinationState { respond_to } => {
-                        let result = async {
-                            session.publish_coordination_state().await?;
-                            session.publish_parent_message_receipts().await
-                        }.await;
+                        // History is already merged at its Timeline anchors by load.
+                        // This snapshot publishes only current coordination state.
+                        let result = session.publish_coordination_state().await;
                         let _ = respond_to.send(result);
                     }
                     SessionCommand::GetCurrentModel { responds_to } => {

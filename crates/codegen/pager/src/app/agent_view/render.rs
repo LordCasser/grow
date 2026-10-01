@@ -2086,6 +2086,7 @@ impl AgentView {
                         activity_started_at: self.session.activity_started_at,
                         frame: frame_stamp,
                         drain_blocked,
+                        input_available: true,
                         buttons: Some(turn_status::MouseButtons {
                             cancel_hovered: self.hit_cancel_button.hovered,
                             bg_hovered: self.hit_bg_button.hovered,

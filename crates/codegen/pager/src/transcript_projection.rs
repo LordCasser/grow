@@ -18,8 +18,10 @@ use shell::extensions::notification::{
 };
 use shell::session::storage::SessionUpdate;
 use shell::session::storage::transcript::TranscriptEvent;
+mod surfaces;
 
 pub struct TranscriptProjection {
+    pub(crate) surfaces: surfaces::RecordedSurfaces,
     pub scrollback: ScrollbackState,
     tracker: AcpUpdateTracker,
     subagents: HashMap<String, (String, String, Option<String>, bool)>,
@@ -48,6 +50,7 @@ impl Default for TranscriptProjection {
         let mut tracker = AcpUpdateTracker::new();
         tracker.include_historical_thinking();
         Self {
+            surfaces: Default::default(),
             scrollback,
             tracker,
             subagents: HashMap::new(),
@@ -140,7 +143,24 @@ impl TranscriptProjection {
         self.tracker.unresolved_transcript_tools()
     }
 
+    pub(crate) fn activity(&self) -> Option<crate::acp::tracker::TurnActivity> {
+        self.tracker.activity()
+    }
+
     pub fn apply(&mut self, event: TranscriptEvent) {
+        let at = match &event.update {
+            SessionUpdate::Acp(n) => {
+                NotificationMeta::from_json(n.meta.as_ref()).agent_timestamp_ms
+            }
+            SessionUpdate::Grow(n) => {
+                NotificationMeta::from_json(n.meta.as_ref().and_then(|m| m.as_object()))
+                    .agent_timestamp_ms
+            }
+            _ => None,
+        }
+        .and_then(|at| u64::try_from(at).ok())
+        .or(event.timestamp_ms);
+        self.surfaces.observe_time(at);
         match event.update {
             SessionUpdate::Acp(notification) => {
                 if let acp_transport::protocol::SessionUpdate::CurrentModeUpdate(update) =
@@ -164,6 +184,9 @@ impl TranscriptProjection {
                 }
                 let mut meta = NotificationMeta::from_json(notification.meta.as_ref());
                 meta.is_replay = true;
+                if let Some(tokens) = meta.total_tokens {
+                    self.surfaces.total_tokens = Some(tokens);
+                }
                 let prompt = meta
                     .prompt_id
                     .clone()
@@ -176,6 +199,34 @@ impl TranscriptProjection {
                             .map(str::to_owned),
                         _ => None,
                     });
+                let starts_activity = matches!(
+                    &notification.update,
+                    acp_transport::protocol::SessionUpdate::UserMessageChunk(_)
+                        | acp_transport::protocol::SessionUpdate::AgentMessageChunk(_)
+                        | acp_transport::protocol::SessionUpdate::AgentThoughtChunk(_)
+                        | acp_transport::protocol::SessionUpdate::ToolCall(_)
+                );
+                if starts_activity
+                    && !prompt
+                        .as_ref()
+                        .is_some_and(|id| self.terminal_prompts.contains(id))
+                {
+                    if !self.surfaces.turn_active
+                        || prompt
+                            .as_ref()
+                            .is_some_and(|id| self.current_prompt.as_ref() != Some(id))
+                        || matches!(
+                            &notification.update,
+                            acp_transport::protocol::SessionUpdate::UserMessageChunk(_)
+                        )
+                    {
+                        self.surfaces.turn_started_ms = meta
+                            .turn_start_ms
+                            .and_then(|at| u64::try_from(at).ok())
+                            .or(at);
+                    }
+                    self.surfaces.turn_active = true;
+                }
                 if matches!(
                     &notification.update,
                     acp_transport::protocol::SessionUpdate::UserMessageChunk(_)
@@ -220,6 +271,51 @@ impl TranscriptProjection {
     }
 
     fn apply_grow(&mut self, update: GrowUpdate, meta: NotificationMeta, captured_snapshot: bool) {
+        // Feed the shared widgets through exactly the same acceptance guards as
+        // the transcript. Late progress/old Goal or Workflow snapshots must not
+        // resurrect a finished or cleared historical entity.
+        let accepted = match &update {
+            GrowUpdate::SubagentSpawned {
+                child_session_id, ..
+            } => {
+                !self.subagents.contains_key(child_session_id)
+                    && !self.finished_subagents.contains(child_session_id)
+            }
+            GrowUpdate::SubagentFinished {
+                child_session_id, ..
+            } => !self.finished_subagents.contains(child_session_id),
+            GrowUpdate::WorkflowUpdated {
+                run_id,
+                revision,
+                status,
+                ..
+            } => {
+                !self.workflow_revisions.get(run_id).is_some_and(|last| {
+                    (*revision > 0 && revision <= last)
+                        || (status != "cleared" && *revision == 0 && *last > 0)
+                }) && !(status != "cleared"
+                    && *revision == 0
+                    && self.cleared_workflows.contains(run_id))
+            }
+            GrowUpdate::GoalUpdated {
+                goal_id, status, ..
+            } => {
+                status == "cleared"
+                    || (!goal_id.is_empty()
+                        && crate::app::session::GoalDisplayStatus::parse(status).is_some()
+                        && (captured_snapshot || !self.retired_goals.contains(goal_id)))
+            }
+            GrowUpdate::TaskBackgrounded { task_id, .. } => {
+                !self.finished_background_tasks.contains(task_id)
+            }
+            GrowUpdate::TaskCompleted { task_snapshot } => !self
+                .finished_background_tasks
+                .contains(&task_snapshot.task_id),
+            _ => true,
+        };
+        if accepted {
+            self.surfaces.apply(&update);
+        }
         match update {
             GrowUpdate::ControlStateUpdate(update) => {
                 use shell::extensions::notification::ControlPhase;
@@ -683,6 +779,13 @@ impl TranscriptProjection {
             } => {
                 if !self.terminal_prompts.insert(prompt_id.clone()) {
                     return;
+                }
+                if self
+                    .current_prompt
+                    .as_ref()
+                    .is_none_or(|current| current == &prompt_id)
+                {
+                    self.surfaces.turn_active = false;
                 }
                 // A delayed terminal belongs to its original prompt. It must
                 // not end a newer response or its permission-audit epoch.

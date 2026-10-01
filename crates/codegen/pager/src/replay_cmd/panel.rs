@@ -23,15 +23,11 @@ pub(super) struct PanelInfo<'a> {
     pub state: &'a str,
     pub speed: f64,
     pub progress: u8,
-    pub path: &'a str,
     pub time: &'a str,
     pub play_current: f64,
     pub play_total: f64,
-    pub original_duration: Option<u64>,
-    pub historical: &'a str,
     pub notice: Option<&'a str>,
-    pub hint: &'a str,
-    pub has_parent: bool,
+    pub has_back_layer: bool,
     pub follow: bool,
     pub next: bool,
 }
@@ -45,7 +41,6 @@ struct Segment {
     text: String,
     color: ratatui::style::Color,
     action: Option<PanelAction>,
-    atomic: bool,
 }
 
 impl Segment {
@@ -54,46 +49,26 @@ impl Segment {
             text: text.into(),
             color,
             action: None,
-            atomic: false,
         }
-    }
-
-    fn atomic(mut self) -> Self {
-        self.atomic = true;
-        self
     }
 
     fn action(mut self, action: PanelAction) -> Self {
         self.action = Some(action);
         self
     }
+
+    fn with_action(mut self, action: Option<PanelAction>) -> Self {
+        self.action = action;
+        self
+    }
 }
 
 impl Panel {
     pub(super) fn height(area: Rect) -> u16 {
-        if area.width == 0 || area.height == 0 {
-            return 0;
-        }
-        let by_width = if area.width >= 100 {
-            5
-        } else if area.width >= 72 {
-            4
+        if area.width == 0 {
+            0
         } else {
-            3
-        };
-        let by_height = match area.height {
-            0 => 0,
-            1..=5 => 1,
-            6..=9 => 2,
-            10..=15 => 3,
-            16..=23 => 4,
-            _ => 5,
-        };
-        let height = by_width.min(by_height);
-        if height == 1 {
-            1
-        } else {
-            height.min(area.height.saturating_sub(1))
+            area.height.min(3)
         }
     }
 
@@ -108,132 +83,87 @@ impl Panel {
         let panel_area = Rect { height, ..area };
         buf.set_style(panel_area, Style::default().bg(theme.bg_base));
 
-        if height == 1 {
-            self.draw_escape_help(area, buf, 0, &theme);
+        if height < 3 || area.width < 3 {
+            self.draw_compact(area, buf, info, &theme);
             return;
         }
 
-        if height >= 4 {
-            let playback = format!(" · {}× · {}% · ", speed(info.speed), info.progress);
-            let readonly = if area.width >= 100 {
-                "只读 · 模拟流式 · "
-            } else {
-                ""
-            };
-            let path_budget = (area.width as usize).saturating_sub(
-                UnicodeWidthStr::width("Replay · ")
-                    + UnicodeWidthStr::width(info.state)
-                    + UnicodeWidthStr::width(playback.as_str())
-                    + UnicodeWidthStr::width(readonly),
-            );
-            self.draw_line(
-                area,
-                buf,
-                0,
-                vec![
-                    Segment::new("Replay · ", theme.accent_assistant),
-                    Segment::new(info.state, theme.text_primary),
-                    Segment::new(playback, theme.gray),
-                    Segment::new(readonly, theme.gray),
-                    Segment::new(clip_path(info.path, path_budget), theme.text_secondary),
-                ],
-            );
-            self.draw_line(
-                area,
-                buf,
-                if height >= 5 { 2 } else { 1 },
-                vec![
-                    Segment::new(format!("历史 {}", info.time), theme.text_secondary).atomic(),
-                    Segment::new(
-                        format!(
-                            " · 回放 {}/{}",
-                            clock(info.play_current),
-                            clock(info.play_total)
-                        ),
-                        theme.gray,
-                    ),
-                    duration_segment(info.original_duration, theme.gray),
-                ],
-            );
-            self.draw_line(
-                area,
-                buf,
-                if height >= 5 { 3 } else { 2 },
-                vec![Segment::new(
-                    info.notice.unwrap_or(info.historical),
-                    if info.notice.is_some() {
-                        theme.warning
-                    } else {
-                        theme.gray
-                    },
-                )],
-            );
-            if height >= 5 {
-                self.draw_controls(area, buf, 1, info, &theme);
-                self.draw_line(
-                    area,
-                    buf,
-                    4,
-                    vec![
-                        Segment::new("? 帮助  ", theme.gray).action(PanelAction::Help),
-                        Segment::new(info.hint, theme.text_secondary),
-                    ],
-                );
-            } else {
-                self.draw_controls(area, buf, 3, info, &theme);
-            }
-        } else if height == 3 {
-            self.draw_line(
-                area,
-                buf,
-                0,
-                vec![
-                    Segment::new("Replay · ", theme.accent_assistant),
-                    Segment::new(info.state, theme.text_primary),
-                    Segment::new(
-                        format!(" · {}× · {}%", speed(info.speed), info.progress),
-                        theme.gray,
-                    ),
-                ],
-            );
-            let second = info.notice.unwrap_or_else(|| {
-                if area.width >= 40 {
-                    info.time
-                } else {
-                    info.historical
-                }
-            });
-            self.draw_line(
-                area,
-                buf,
-                1,
-                vec![Segment::new(
-                    second,
-                    if info.notice.is_some() {
-                        theme.warning
-                    } else {
-                        theme.text_secondary
-                    },
-                )],
-            );
-            if area.width < 40 {
-                self.draw_escape_help(area, buf, 2, &theme);
-            } else {
-                self.draw_controls(area, buf, 2, info, &theme);
-            }
+        let inside = Rect::new(
+            area.x.saturating_add(1),
+            area.y,
+            area.width.saturating_sub(2),
+            1,
+        );
+        self.draw_box_line(
+            area,
+            buf,
+            0,
+            '╭',
+            '╮',
+            inside,
+            vec![
+                Segment::new(" Replay · ", theme.accent_assistant),
+                Segment::new(info.state, theme.text_primary),
+                Segment::new(
+                    format!(" · {}× · {}% ", speed(info.speed), info.progress),
+                    theme.gray,
+                ),
+                Segment::new("· 模拟流式 ", theme.gray),
+            ],
+            &theme,
+        );
+
+        let middle = Rect::new(
+            area.x.saturating_add(1),
+            area.y.saturating_add(1),
+            area.width.saturating_sub(2),
+            1,
+        );
+        buf.set_string(
+            area.x,
+            area.y.saturating_add(1),
+            "│",
+            Style::default().fg(theme.gray).bg(theme.bg_base),
+        );
+        buf.set_string(
+            area.right().saturating_sub(1),
+            area.y.saturating_add(1),
+            "│",
+            Style::default().fg(theme.gray).bg(theme.bg_base),
+        );
+        self.draw_controls(middle, buf, info, &theme);
+
+        let timestamp = info.notice.unwrap_or_else(|| info.time);
+        let timestamp_label = if info.notice.is_some() {
+            timestamp.to_owned()
         } else {
-            self.draw_line(
-                area,
-                buf,
-                0,
-                vec![
-                    Segment::new("Replay · ", theme.accent_assistant),
-                    Segment::new(info.state, theme.text_primary),
-                    Segment::new(format!(" · {}%", info.progress), theme.gray),
-                ],
-            );
-            self.draw_escape_help(area, buf, 1, &theme);
-        }
+            format!(" 历史 {timestamp}")
+        };
+        let timestamp_color = if info.notice.is_some() {
+            theme.warning
+        } else {
+            theme.text_secondary
+        };
+        self.draw_box_line(
+            area,
+            buf,
+            2,
+            '╰',
+            '╯',
+            Rect::new(inside.x, area.y.saturating_add(2), inside.width, 1),
+            vec![
+                Segment::new(timestamp_label, timestamp_color),
+                Segment::new(
+                    format!(
+                        " · 回放 {}/{} ",
+                        clock(info.play_current),
+                        clock(info.play_total)
+                    ),
+                    theme.gray,
+                ),
+            ],
+            &theme,
+        );
     }
 
     pub(super) fn hit(&self, col: u16, row: u16) -> Option<PanelAction> {
@@ -248,123 +178,188 @@ impl Panel {
             .map(|(_, action)| *action)
     }
 
-    fn draw_escape_help(&mut self, area: Rect, buf: &mut Buffer, row: u16, theme: &Theme) {
-        let (back, help) = if area.width < 20 {
-            ("Esc", " ?")
-        } else {
-            ("Esc 退出", "   ? 帮助")
-        };
-        self.draw_line(
-            area,
-            buf,
-            row,
-            vec![
-                Segment::new(back, theme.text_primary).action(PanelAction::Back),
-                Segment::new(help, theme.gray).action(PanelAction::Help),
-            ],
-        );
-    }
-
-    fn draw_controls(
-        &mut self,
-        area: Rect,
-        buf: &mut Buffer,
-        row: u16,
-        info: &PanelInfo<'_>,
-        theme: &Theme,
-    ) {
-        let toggle = if info.state.eq_ignore_ascii_case("playing") {
+    fn draw_controls(&mut self, area: Rect, buf: &mut Buffer, info: &PanelInfo<'_>, theme: &Theme) {
+        let width = area.width as usize;
+        let finished = info.state.eq_ignore_ascii_case("finished");
+        let toggle = if finished {
+            "已结束"
+        } else if info.state.eq_ignore_ascii_case("playing") {
             "F8 暂停"
         } else {
             "F8 继续"
         };
-        if area.width < 72 {
-            let toggle_segment = if info.state.eq_ignore_ascii_case("finished") {
-                Segment::new(toggle, theme.gray)
-            } else {
-                Segment::new(toggle, theme.text_primary).action(PanelAction::Toggle)
-            };
-            let mut compact = vec![
-                toggle_segment,
+        let mut segments = Vec::new();
+        if width >= 64 {
+            segments.push(
                 Segment::new(
-                    if info.has_parent {
-                        " Esc 返回"
+                    format!(" {toggle} "),
+                    if finished {
+                        theme.gray
                     } else {
-                        " Esc 退出"
+                        theme.text_primary
+                    },
+                )
+                .with_action((!finished).then_some(PanelAction::Toggle)),
+            );
+            if !finished {
+                segments.push(
+                    Segment::new(" [-] ", theme.text_secondary).action(PanelAction::SpeedDown),
+                );
+                segments
+                    .push(Segment::new(" [+] ", theme.text_secondary).action(PanelAction::SpeedUp));
+            }
+            if info.next {
+                segments.push(
+                    Segment::new(" [ ] 下一条 ", theme.text_secondary).action(PanelAction::Next),
+                );
+            }
+            segments.push(
+                Segment::new(
+                    if info.follow {
+                        " End 跟随✓ "
+                    } else {
+                        " End 跟随 "
                     },
                     theme.text_secondary,
                 )
+                .action(PanelAction::Follow),
+            );
+            segments.push(Segment::new(" [?] 帮助 ", theme.gray).action(PanelAction::Help));
+            segments.push(
+                Segment::new(
+                    if info.has_back_layer {
+                        " [Esc] 返回"
+                    } else {
+                        " [Esc] 退出"
+                    },
+                    theme.text_primary,
+                )
                 .action(PanelAction::Back),
-                Segment::new(" ? 帮助", theme.gray).action(PanelAction::Help),
-            ];
-            if !info.state.eq_ignore_ascii_case("finished") {
-                compact
-                    .push(Segment::new(" -", theme.text_secondary).action(PanelAction::SpeedDown));
-                compact.push(Segment::new(
-                    format!("{}×", speed(info.speed)),
-                    theme.accent_assistant,
-                ));
-                compact.push(Segment::new("+", theme.text_secondary).action(PanelAction::SpeedUp));
+            );
+        } else if width >= 20 {
+            segments.push(
+                Segment::new(
+                    if finished { " 完成 " } else { " F8 " },
+                    if finished {
+                        theme.gray
+                    } else {
+                        theme.text_primary
+                    },
+                )
+                .with_action((!finished).then_some(PanelAction::Toggle)),
+            );
+            if !finished {
+                segments
+                    .push(Segment::new(" − ", theme.text_secondary).action(PanelAction::SpeedDown));
+                segments
+                    .push(Segment::new(" + ", theme.text_secondary).action(PanelAction::SpeedUp));
             }
             if info.next {
-                compact.push(Segment::new(" ]", theme.text_secondary).action(PanelAction::Next));
+                segments.push(Segment::new(" ] ", theme.text_secondary).action(PanelAction::Next));
             }
-            if info.follow {
-                compact
-                    .push(Segment::new(" 跟随✓", theme.text_secondary).action(PanelAction::Follow));
-            } else {
-                compact
-                    .push(Segment::new(" End", theme.text_secondary).action(PanelAction::Follow));
-            }
-            self.draw_line(area, buf, row, compact);
-            return;
-        }
-        let toggle_segment = if info.state.eq_ignore_ascii_case("finished") {
-            Segment::new(toggle, theme.gray)
+            segments.push(Segment::new(" End ", theme.text_secondary).action(PanelAction::Follow));
+            segments.push(Segment::new(" ? ", theme.gray).action(PanelAction::Help));
+            segments.push(Segment::new(" Esc ", theme.text_primary).action(PanelAction::Back));
+        } else if width >= 16 {
+            segments.push(
+                Segment::new(
+                    if finished { " 完成 " } else { " F8 " },
+                    if finished {
+                        theme.gray
+                    } else {
+                        theme.text_primary
+                    },
+                )
+                .with_action((!finished).then_some(PanelAction::Toggle)),
+            );
+            segments.push(Segment::new(" [?] ", theme.gray).action(PanelAction::Help));
+            segments.push(Segment::new(" [Esc] ", theme.text_primary).action(PanelAction::Back));
+        } else if width >= 7 {
+            segments.push(Segment::new("[?] ", theme.gray).action(PanelAction::Help));
+            segments.push(Segment::new("Esc", theme.text_primary).action(PanelAction::Back));
         } else {
-            Segment::new(toggle, theme.text_primary).action(PanelAction::Toggle)
-        };
-        let mut segments = vec![
-            toggle_segment,
-            Segment::new(
-                if info.has_parent {
-                    "  Esc 返回"
-                } else {
-                    "  Esc 退出"
-                },
-                theme.text_secondary,
-            )
-            .action(PanelAction::Back),
-            Segment::new("  ? 帮助", theme.gray).action(PanelAction::Help),
-            Segment::new(
-                if info.follow {
-                    "  跟随✓"
-                } else {
-                    "  End 跟随"
-                },
-                theme.text_secondary,
-            )
-            .action(PanelAction::Follow),
-        ];
-        if !info.state.eq_ignore_ascii_case("finished") {
-            segments
-                .push(Segment::new("  - ", theme.text_secondary).action(PanelAction::SpeedDown));
-            segments.push(Segment::new(
-                format!("{}×", speed(info.speed)),
-                theme.accent_assistant,
-            ));
-            segments.push(Segment::new(" +", theme.text_secondary).action(PanelAction::SpeedUp));
+            // Too little room for a complete visible key label; do not create partial hot areas.
+            segments.push(Segment::new("?", theme.gray));
         }
-        if info.next {
-            segments
-                .push(Segment::new("  ] 下一记录", theme.text_secondary).action(PanelAction::Next));
-        }
-        self.draw_line(area, buf, row, segments);
+        self.draw_line(area, buf, 0, segments);
     }
 
-    fn draw_line(&mut self, area: Rect, buf: &mut Buffer, row: u16, segments: Vec<Segment>) {
+    fn draw_compact(&mut self, area: Rect, buf: &mut Buffer, info: &PanelInfo<'_>, theme: &Theme) {
+        let state = vec![
+            Segment::new("Replay ", theme.accent_assistant),
+            Segment::new(info.state, theme.text_primary),
+            Segment::new(format!(" · {}% ", info.progress), theme.gray),
+        ];
+        if area.height == 1 {
+            let controls = self.compact_end_controls(area.width as usize, info, theme);
+            let reserved = controls
+                .iter()
+                .map(|s| UnicodeWidthStr::width(s.text.as_str()) as u16)
+                .sum::<u16>();
+            let state_area = Rect {
+                width: area.width.saturating_sub(reserved),
+                ..area
+            };
+            self.draw_line(state_area, buf, 0, state);
+            self.draw_line(
+                Rect::new(state_area.right(), area.y, reserved, 1),
+                buf,
+                0,
+                controls,
+            );
+        } else {
+            self.draw_line(area, buf, 0, state);
+            let controls_area = Rect::new(area.x, area.y.saturating_add(1), area.width, 1);
+            self.draw_controls(controls_area, buf, info, theme);
+        }
+    }
+
+    fn compact_end_controls(
+        &self,
+        width: usize,
+        _info: &PanelInfo<'_>,
+        theme: &Theme,
+    ) -> Vec<Segment> {
+        if width >= 12 {
+            vec![
+                Segment::new(" [?]", theme.gray).action(PanelAction::Help),
+                Segment::new(" [Esc]", theme.text_primary).action(PanelAction::Back),
+            ]
+        } else if width >= 7 {
+            vec![
+                Segment::new(" [?]", theme.gray).action(PanelAction::Help),
+                Segment::new(" Esc", theme.text_primary).action(PanelAction::Back),
+            ]
+        } else {
+            Vec::new()
+        }
+    }
+
+    fn draw_box_line(
+        &mut self,
+        area: Rect,
+        buf: &mut Buffer,
+        row: u16,
+        left: char,
+        right: char,
+        content_area: Rect,
+        segments: Vec<Segment>,
+        theme: &Theme,
+    ) {
+        let y = area.y.saturating_add(row);
+        let border_style = Style::default().fg(theme.gray).bg(theme.bg_base);
+        buf.set_string(area.x, y, left.to_string(), border_style);
+        let consumed = self.draw_line(content_area, buf, 0, segments);
+        let right_x = area.right().saturating_sub(1);
+        for x in consumed..right_x {
+            buf.set_string(x, y, "─", border_style);
+        }
+        buf.set_string(right_x, y, right.to_string(), border_style);
+    }
+
+    fn draw_line(&mut self, area: Rect, buf: &mut Buffer, row: u16, segments: Vec<Segment>) -> u16 {
         if row >= area.height || area.width == 0 {
-            return;
+            return area.x;
         }
         let y = area.y.saturating_add(row);
         let mut x = area.x;
@@ -375,7 +370,7 @@ impl Panel {
             }
             let remaining = (right - x) as usize;
             let text_width = UnicodeWidthStr::width(segment.text.as_str());
-            if (segment.atomic || segment.action.is_some()) && text_width > remaining {
+            if segment.action.is_some() && text_width > remaining {
                 break;
             }
             let visible = clip_width(&segment.text, remaining);
@@ -395,13 +390,7 @@ impl Panel {
             }
             x = x.saturating_add(width);
         }
-    }
-}
-
-fn duration_segment(duration: Option<u64>, color: ratatui::style::Color) -> Segment {
-    match duration {
-        Some(seconds) => Segment::new(format!(" · 原时长 {}", clock(seconds as f64)), color),
-        None => Segment::new(" · 原时长 未知/估算", color),
+        x
     }
 }
 
@@ -455,127 +444,209 @@ fn clip_width(text: &str, max_width: usize) -> String {
     result
 }
 
-fn clip_path(path: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(path) <= max_width {
-        return path.to_owned();
-    }
-    let parts: Vec<_> = path.split(" › ").collect();
-    if parts.len() < 2 || max_width < 10 {
-        return clip_width(path, max_width);
-    }
-    let separator = " › … › ";
-    let available = max_width.saturating_sub(UnicodeWidthStr::width(separator));
-    let head = clip_tail(parts[0], available / 2);
-    let tail = clip_tail(
-        parts[parts.len() - 1],
-        available - UnicodeWidthStr::width(head.as_str()),
-    );
-    format!("{head}{separator}{tail}")
-}
-
-fn clip_tail(text: &str, max_width: usize) -> String {
-    if UnicodeWidthStr::width(text) <= max_width {
-        return text.to_owned();
-    }
-    if max_width == 0 {
-        return String::new();
-    }
-    let mut tail = String::new();
-    let mut width = 0;
-    for grapheme in text.graphemes(true).rev() {
-        let segment_width = UnicodeWidthStr::width(grapheme);
-        if width + segment_width > max_width.saturating_sub(1) {
-            break;
-        }
-        tail.insert_str(0, grapheme);
-        width += segment_width;
-    }
-    format!("…{tail}")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn info<'a>(path: &'a str, hint: &'a str) -> PanelInfo<'a> {
+    fn info<'a>() -> PanelInfo<'a> {
         PanelInfo {
             state: "Paused",
             speed: 4.0,
             progress: 38,
-            path,
             time: "2026-09-29 11:49:55 UTC+08:00",
             play_current: 9.0,
             play_total: 26.0,
-            original_duration: Some(7920),
-            historical: "Goal paused",
             notice: None,
-            hint,
-            has_parent: true,
+            has_back_layer: true,
             follow: true,
             next: true,
         }
     }
 
+    fn row(buffer: &Buffer, y: u16, width: u16) -> String {
+        let mut text = String::new();
+        let mut x = 0;
+        while x < width {
+            let symbol = buffer.cell((x, y)).map(|cell| cell.symbol()).unwrap_or(" ");
+            text.push_str(symbol);
+            x += (UnicodeWidthStr::width(symbol) as u16).max(1);
+        }
+        text
+    }
+
     #[test]
-    fn panel_height_matches_responsive_size_classes() {
-        assert_eq!(Panel::height(Rect::new(0, 0, 120, 40)), 5);
-        assert_eq!(Panel::height(Rect::new(0, 0, 80, 24)), 4);
-        assert_eq!(Panel::height(Rect::new(0, 0, 60, 15)), 3);
-        assert_eq!(Panel::height(Rect::new(0, 0, 60, 8)), 2);
-        assert_eq!(Panel::height(Rect::new(0, 0, 60, 4)), 1);
+    fn panel_height_is_three_rows_with_safe_small_terminal_fallback() {
+        assert_eq!(Panel::height(Rect::new(0, 0, 120, 40)), 3);
+        assert_eq!(Panel::height(Rect::new(0, 0, 80, 2)), 2);
+        assert_eq!(Panel::height(Rect::new(0, 0, 60, 1)), 1);
         assert_eq!(Panel::height(Rect::new(0, 0, 60, 0)), 0);
         assert_eq!(Panel::height(Rect::new(0, 0, 0, 20)), 0);
     }
 
     #[test]
-    fn drawing_exposes_only_visible_click_targets_and_clears_them_on_resize() {
+    fn framed_panel_shows_status_history_and_complete_control_targets() {
         let mut panel = Panel::default();
-        let mut buffer = Buffer::empty(Rect::new(0, 0, 80, 24));
-        let info = info(
-            "根 agent › discovery-2",
-            "Enter 详情  ] 下一记录  Esc 返回  ? 帮助",
+        let area = Rect::new(0, 0, 120, 3);
+        let mut buffer = Buffer::empty(area);
+        panel.render(area, &mut buffer, &info());
+
+        let top = row(&buffer, 0, area.width);
+        let controls = row(&buffer, 1, area.width);
+        let bottom = row(&buffer, 2, area.width);
+        assert!(top.starts_with('╭') && top.ends_with('╮'));
+        assert!(top.contains("Replay · Paused · 4× · 38%"));
+        assert!(controls.starts_with('│') && controls.ends_with('│'));
+        assert!(controls.contains("F8 继续"));
+        assert!(controls.contains("[ ] 下一条"));
+        assert!(controls.contains("End 跟随"));
+        assert!(controls.contains("[?] 帮助") && controls.contains("[Esc] 返回"));
+        assert!(bottom.starts_with('╰') && bottom.ends_with('╯'));
+        assert!(bottom.contains("历史 2026-09-29 11:49:55 UTC+08:00"));
+        assert!(bottom.contains("回放 00:09/00:26"));
+        for omitted in ["根 agent", "Goal paused", "full shortcut", "原时长"] {
+            assert!(
+                !buffer
+                    .content()
+                    .iter()
+                    .any(|cell| cell.symbol().contains(omitted))
+            );
+        }
+
+        for action in [
+            PanelAction::Toggle,
+            PanelAction::SpeedDown,
+            PanelAction::SpeedUp,
+            PanelAction::Next,
+            PanelAction::Follow,
+            PanelAction::Help,
+            PanelAction::Back,
+        ] {
+            assert!(
+                panel.hits.iter().any(|(_, target)| *target == action),
+                "missing {action:?}"
+            );
+        }
+        assert!(panel.hit(0, 1).is_none());
+    }
+
+    #[test]
+    fn notice_replaces_historical_time_but_keeps_playback_elapsed() {
+        let mut panel = Panel::default();
+        let mut panel_info = info();
+        panel_info.notice = Some("暂停中 · 正在等待输入");
+        let area = Rect::new(0, 0, 100, 3);
+        let mut buffer = Buffer::empty(area);
+        panel.render(area, &mut buffer, &panel_info);
+        let bottom = row(&buffer, 2, area.width);
+        assert!(bottom.contains("暂停中 · 正在等待输入"));
+        assert!(!bottom.contains(panel_info.time));
+        assert!(bottom.contains("回放 00:09/00:26"));
+    }
+
+    #[test]
+    fn compact_and_tiny_layouts_only_hit_complete_visible_labels() {
+        let _theme_guard = crate::theme::cache::pin_theme();
+        let mut panel = Panel::default();
+        let mut buffer = Buffer::empty(Rect::new(0, 0, 40, 3));
+        panel.render(Rect::new(0, 0, 40, 3), &mut buffer, &info());
+        assert_eq!(panel.hit(1, 1), Some(PanelAction::Toggle));
+        assert!(panel.hit(39, 1).is_none());
+        assert!(
+            panel
+                .hits
+                .iter()
+                .any(|(_, action)| *action == PanelAction::Back)
         );
-        panel.render(Rect::new(0, 20, 80, 4), &mut buffer, &info);
-        assert_eq!(panel.hit(1, 23), Some(PanelAction::Toggle));
-        assert!(panel.hit(1, 22).is_none());
-        assert!(buffer.content().iter().any(|cell| cell.symbol() == "根"));
+        assert!(
+            panel
+                .hits
+                .iter()
+                .any(|(_, action)| *action == PanelAction::Help)
+        );
 
-        let short = Rect::new(0, 22, 20, 2);
-        panel.render(short, &mut buffer, &info);
-        assert_eq!(panel.hit(1, 23), Some(PanelAction::Back));
-        assert_eq!(panel.hit(5, 23), Some(PanelAction::Back));
-        assert!(panel.hit(25, 23).is_none());
+        let narrow = Rect::new(0, 0, 12, 3);
+        let mut narrow_buffer = Buffer::empty(narrow);
+        panel.render(narrow, &mut narrow_buffer, &info());
+        assert_eq!(panel.hit(1, 1), Some(PanelAction::Help));
+        assert!(panel.hits.iter().any(|(rect, action)| {
+            *action == PanelAction::Back && rect.width == UnicodeWidthStr::width("Esc") as u16
+        }));
+        assert!(panel.hit(12, 1).is_none());
+
+        let one_row = Rect::new(0, 0, 80, 1);
+        let mut one_row_buffer = Buffer::empty(one_row);
+        panel.render(one_row, &mut one_row_buffer, &info());
+        assert!(row(&one_row_buffer, 0, one_row.width).contains("Replay Paused"));
+        assert!(
+            panel
+                .hits
+                .iter()
+                .any(|(_, action)| *action == PanelAction::Help)
+        );
+        assert!(
+            panel
+                .hits
+                .iter()
+                .any(|(_, action)| *action == PanelAction::Back)
+        );
     }
 
     #[test]
-    fn clipped_fields_use_display_width_and_keep_dates_atomic_by_priority() {
-        assert_eq!(clip_width("中文路径abc", 5), "中文…");
-        assert_eq!(clip_width("abc", 2), "a…");
-        assert_eq!(clip_width("abc", 1), "a");
-        let path = clip_path("很长的根节点 › 中间节点 › 很长的当前子代理", 18);
-        assert!(path.contains('点') && path.contains('理'));
-        assert!(UnicodeWidthStr::width(path.as_str()) <= 18);
+    fn finished_state_has_no_execution_targets_and_resize_clears_old_hits() {
+        let mut panel = Panel::default();
+        let mut finished = info();
+        finished.state = "Finished";
+        finished.next = false;
+        let area = Rect::new(0, 0, 100, 3);
+        let mut buffer = Buffer::empty(area);
+        panel.render(area, &mut buffer, &finished);
+        assert!(row(&buffer, 1, area.width).contains("已结束"));
+        assert!(!row(&buffer, 1, area.width).contains("继续"));
+        assert!(!panel.hits.iter().any(|(_, action)| matches!(
+            action,
+            PanelAction::Toggle | PanelAction::SpeedDown | PanelAction::SpeedUp | PanelAction::Next
+        )));
+        assert!(
+            panel
+                .hits
+                .iter()
+                .any(|(_, action)| *action == PanelAction::Follow)
+        );
+        assert!(
+            panel
+                .hits
+                .iter()
+                .any(|(_, action)| *action == PanelAction::Help)
+        );
+        assert!(
+            panel
+                .hits
+                .iter()
+                .any(|(_, action)| *action == PanelAction::Back)
+        );
+
+        panel.render(Rect::new(0, 0, 6, 3), &mut buffer, &finished);
+        assert!(panel.hits.is_empty(), "resize must clear old hot areas");
     }
 
     #[test]
-    fn dark_and_light_themes_render_controls_at_standard_and_compact_sizes() {
+    fn dark_and_light_themes_render_framed_controls() {
         let _theme_guard = crate::theme::cache::pin_theme();
         for kind in [
             crate::theme::ThemeKind::GrowNight,
             crate::theme::ThemeKind::GrowDay,
         ] {
             crate::theme::cache::set(kind);
-            for outer in [Rect::new(0, 0, 120, 40), Rect::new(0, 0, 40, 8)] {
-                let height = Panel::height(outer);
-                let area = Rect::new(0, outer.height - height, outer.width, height);
-                let mut buffer = Buffer::empty(outer);
+            for area in [Rect::new(0, 0, 120, 3), Rect::new(0, 0, 40, 3)] {
+                let mut buffer = Buffer::empty(area);
                 let mut panel = Panel::default();
-                panel.render(area, &mut buffer, &info("根 › 子代理", "Enter 详情"));
+                panel.render(area, &mut buffer, &info());
                 assert_eq!(
                     buffer.cell((0, area.y)).expect("panel cell").bg,
                     Theme::current().bg_base
                 );
-                assert!((0..outer.width).any(|x| {
+                assert_eq!(buffer.cell((0, area.y)).unwrap().symbol(), "╭");
+                assert!((0..area.width).any(|x| {
                     (area.y..area.bottom()).any(|y| panel.hit(x, y) == Some(PanelAction::Help))
                 }));
             }

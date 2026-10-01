@@ -17,18 +17,32 @@ use super::{
     GrowUpdate, MAX_EVENTS_PER_TICK, MAX_SPEED, PlayState, PlaybackClock, Player, ReplayArgs,
     SessionUpdate, TerminalGuard,
 };
+use crate::app::session::AgentState;
 use crate::motion::FrameStamp;
+use crate::theme::Theme;
+use crate::views::agent::{self, AgentViewLayout};
+use crate::views::agent_status::{AgentStatusBar, goal_status_line};
+use crate::views::shortcuts_bar::{HintItem, ShortcutsBar};
+use crate::views::tasks_pane::{TaskEntry, TaskEntryId, TasksPane};
+use crate::views::turn_status::{self, TurnStatusArgs, Watchers};
+use ratatui::{style::Style, text::Line, widgets::Widget};
 
 struct Node {
     id: String,
     title: String,
     parent: Option<usize>,
     spawn_at_ms: Option<u64>,
+    source_shift_ms: u64,
     visible_children: HashSet<String>,
     workflow_children: HashMap<String, Vec<String>>,
     playable: bool,
     player: Player,
     browser: Browser,
+    tasks: TasksPane,
+    tasks_focus: bool,
+    tasks_area: Rect,
+    task_press: Option<TaskEntryId>,
+    task_badge: Rect,
 }
 
 struct Replay {
@@ -118,12 +132,18 @@ impl Replay {
                     title: node.title.unwrap_or_else(|| node.session_id.clone()),
                     parent: node.parent_id.and_then(|id| by_id.get(&id).copied()),
                     spawn_at_ms: node.spawn_at_ms,
+                    source_shift_ms: 0,
                     visible_children,
                     workflow_children,
                     playable: false,
                     id: node.session_id,
                     player: Player::new(session.events),
                     browser: Browser::default(),
+                    tasks: TasksPane::new_readonly(),
+                    tasks_focus: false,
+                    tasks_area: Rect::default(),
+                    task_press: None,
+                    task_badge: Rect::default(),
                 }
             })
             .collect();
@@ -187,6 +207,7 @@ impl Replay {
             let shift = anchor
                 .zip(first)
                 .map_or(0, |(anchor, first)| anchor.saturating_sub(first));
+            nodes[index].source_shift_ms = shift;
             let move_range =
                 |span: Range<u64>| span.start.saturating_add(shift)..span.end.saturating_add(shift);
             // Even an unseen branch can have occupied execution time, but its
@@ -401,13 +422,16 @@ impl Replay {
             PanelAction::Toggle => self.clock.pause_or_resume(now),
             PanelAction::SpeedUp => {
                 let speed = self.clock.speed * 2.0;
-                if speed.is_finite() && speed <= MAX_SPEED {
+                if self.clock.state != PlayState::Finished
+                    && speed.is_finite()
+                    && speed <= MAX_SPEED
+                {
                     self.clock.set_speed(speed, now);
                 }
             }
             PanelAction::SpeedDown => {
                 let speed = self.clock.speed / 2.0;
-                if speed > 0.0 {
+                if self.clock.state != PlayState::Finished && speed > 0.0 {
                     self.clock.set_speed(speed, now);
                 }
             }
@@ -423,7 +447,7 @@ impl Replay {
             PanelAction::Help => {
                 let index = self.active();
                 let state = format!(
-                    "Session: {}\nPath: {}\nPlayback: {:?} at {:.2}×\nHistorical time: {}\nLast notice: {}",
+                    "Session: {}\nPath: {}\nPlayback: {:?} at {:.2}×\nHistorical time: {}\nLast notice: {}\nDelivered records: {}/{}\nHistorical Behavior: {}\nHistorical Goal: {}\nUnresolved historical tools: {}\nTiming estimated: {}\n\n{}",
                     self.nodes[index].id,
                     self.path
                         .iter()
@@ -436,7 +460,27 @@ impl Replay {
                         .to_source(self.displayed_position(now))
                         .and_then(super::time::format_recorded_time)
                         .unwrap_or_else(|| "unknown".to_owned()),
-                    self.last_notice.as_deref().unwrap_or("none")
+                    self.last_notice.as_deref().unwrap_or("none"),
+                    self.nodes
+                        .iter()
+                        .filter(|n| n.playable)
+                        .map(|n| n.player.total - n.player.queue.len())
+                        .sum::<usize>(),
+                    self.total_events,
+                    self.nodes[index]
+                        .player
+                        .projection
+                        .behavior_label()
+                        .as_deref()
+                        .unwrap_or("unknown"),
+                    self.nodes[index]
+                        .player
+                        .projection
+                        .goal_status()
+                        .unwrap_or("none"),
+                    self.nodes[index].player.projection.unresolved_tools(),
+                    self.nodes[index].player.estimated || self.time_map.origin.is_none(),
+                    self.nodes[index].browser.hint(),
                 );
                 self.nodes[index].browser.open_help(&state);
             }
@@ -444,93 +488,70 @@ impl Replay {
         false
     }
 
-    fn handle(&mut self, event: Event, now: Instant) -> bool {
-        if matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Release) {
-            return false;
-        }
-        if matches!(&event, Event::Key(key) if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
-        {
-            return true;
-        }
-        if matches!(&event, Event::Key(key) if key.code == KeyCode::F(8)) {
-            self.clock.pause_or_resume(now);
-            return false;
-        }
-        if let Event::Resize(_, _) = &event {
-            self.panel_press = None;
-            self.panel = Panel::default();
-            self.panel_area = Rect::default();
-            let active = self.active();
-            self.nodes[active].browser.invalidate_geometry();
-        }
-        if let Event::Mouse(mouse) = &event {
-            match mouse.kind {
-                MouseEventKind::Down(MouseButton::Left)
-                    if self.panel_area.contains((mouse.column, mouse.row).into()) =>
-                {
-                    self.panel_press = self.panel.hit(mouse.column, mouse.row);
-                    return false;
-                }
-                MouseEventKind::Up(MouseButton::Left) if self.panel_press.is_some() => {
-                    let pressed = self.panel_press.take();
-                    if pressed == self.panel.hit(mouse.column, mouse.row)
-                        && let Some(action) = pressed
-                    {
-                        return self.panel_action(action, now);
-                    }
-                    return false;
-                }
-                MouseEventKind::Drag(MouseButton::Left) => self.panel_press = None,
-                _ => {}
-            }
-        }
-        let index = self.active();
-        if !self.nodes[index].browser.owns_input() {
-            if let Event::Key(key) = &event {
-                match key.code {
-                    KeyCode::Char(' ') => {
-                        self.clock.pause_or_resume(now);
-                        return false;
-                    }
-                    KeyCode::Char('+' | '=') => {
-                        let speed = self.clock.speed * 2.0;
-                        if speed.is_finite() && speed <= MAX_SPEED {
-                            self.clock.set_speed(speed, now);
-                        }
-                        return false;
-                    }
-                    KeyCode::Char('-') => {
-                        let speed = self.clock.speed / 2.0;
-                        if speed > 0.0 {
-                            self.clock.set_speed(speed, now);
-                        }
-                        return false;
-                    }
-                    KeyCode::Char(']') if !self.nodes[index].browser.has_search_or_help() => {
-                        self.next_record(now);
-                        return false;
-                    }
-                    _ => {}
-                }
-            }
-        }
+    fn task_action(&mut self, index: usize, task: TaskEntryId) -> BrowseAction {
         let node = &mut self.nodes[index];
-        match node
-            .browser
-            .handle(event, &mut node.player.projection.scrollback)
-        {
+        let surfaces = &node.player.projection.surfaces;
+        match task {
+            TaskEntryId::Agent(id) => surfaces
+                .subagents
+                .values()
+                .find(|s| s.subagent_id.as_ref() == id)
+                .map_or(BrowseAction::None, |s| {
+                    BrowseAction::Child(s.child_session_id.to_string())
+                }),
+            TaskEntryId::Scheduled(id) => surfaces
+                .scheduled
+                .get(&id)
+                .and_then(|s| s.last_subagent_id.as_ref())
+                .and_then(|id| {
+                    surfaces
+                        .subagents
+                        .values()
+                        .find(|s| s.subagent_id.as_ref() == id)
+                })
+                .map_or(BrowseAction::None, |s| {
+                    BrowseAction::Child(s.child_session_id.to_string())
+                }),
+            TaskEntryId::Workflow(id) => BrowseAction::Workflow(id),
+            TaskEntryId::BgTask(id) => {
+                if let Some(task) = surfaces.bg_tasks.get(&id) {
+                    node.browser.viewer =
+                        Some(crate::views::block_viewer::BlockViewerPane::for_plain_text(
+                            "Recorded background task",
+                            &format!(
+                                "{}\n{}\nRecorded status: {:?}\n\n{}",
+                                task.description.as_deref().unwrap_or(""),
+                                task.command,
+                                task.status,
+                                if task.stdout.is_empty() {
+                                    "Historical stdout was not captured in the session transcript."
+                                } else {
+                                    &task.stdout
+                                }
+                            ),
+                        ));
+                }
+                BrowseAction::None
+            }
+        }
+    }
+
+    fn browse_action(&mut self, index: usize, action: BrowseAction) -> bool {
+        match action {
             BrowseAction::Back if self.path.len() == 1 => return true,
             BrowseAction::Back => {
                 self.nodes[index].browser.cancel_pending_pointer();
+                self.nodes[index].task_press = None;
                 self.path.pop();
             }
             BrowseAction::Child(id) => {
-                // Only a displayed card in the current parent can request this.
-                if let Some(child) = self.by_id.get(&id).copied()
+                if self.nodes[index].player.projection.has_subagent(&id)
+                    && let Some(child) = self.by_id.get(&id).copied()
                     && self.nodes[child].parent == Some(index)
                     && self.nodes[child].playable
                 {
                     self.nodes[index].browser.cancel_pending_pointer();
+                    self.nodes[index].task_press = None;
                     self.nodes[child].browser.cancel_pending_pointer();
                     self.path.push(child);
                 }
@@ -557,12 +578,232 @@ impl Replay {
                     })
                     .collect();
                 let node = &mut self.nodes[index];
+                let position = node.player.projection.scrollback.iter_entries().find_map(|(id, entry)| matches!(&entry.block, crate::scrollback::block::RenderBlock::Workflow(w) if w.run_id == run_id).then_some(id)).and_then(|id| node.player.projection.scrollback.index_of_id(id));
+                if let Some(position) = position {
+                    node.player
+                        .projection
+                        .scrollback
+                        .set_selected(Some(position));
+                }
                 node.browser
                     .open_workflow_picker(&node.player.projection.scrollback, children);
             }
             BrowseAction::None => {}
         }
         false
+    }
+
+    fn handle(&mut self, event: Event, now: Instant) -> bool {
+        if matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Release) {
+            return false;
+        }
+        if matches!(&event, Event::Key(key) if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
+        {
+            return true;
+        }
+        if matches!(&event, Event::Key(key) if key.code == KeyCode::F(8)) {
+            self.clock.pause_or_resume(now);
+            return false;
+        }
+        if let Event::Resize(_, _) = &event {
+            self.panel_press = None;
+            self.panel = Panel::default();
+            self.panel_area = Rect::default();
+            let active = self.active();
+            self.nodes[active].browser.invalidate_geometry();
+            self.nodes[active].task_press = None;
+            self.nodes[active].tasks_area = Rect::default();
+            self.nodes[active].task_badge = Rect::default();
+            self.nodes[active].tasks.view_button_rects.clear();
+        }
+        if let Event::Mouse(mouse) = &event {
+            match mouse.kind {
+                MouseEventKind::Down(MouseButton::Left)
+                    if self.panel_area.contains((mouse.column, mouse.row).into()) =>
+                {
+                    self.panel_press = self.panel.hit(mouse.column, mouse.row);
+                    return false;
+                }
+                MouseEventKind::Up(MouseButton::Left) if self.panel_press.is_some() => {
+                    let pressed = self.panel_press.take();
+                    if pressed == self.panel.hit(mouse.column, mouse.row)
+                        && let Some(action) = pressed
+                    {
+                        return self.panel_action(action, now);
+                    }
+                    return false;
+                }
+                MouseEventKind::Drag(MouseButton::Left) => self.panel_press = None,
+                _ => {}
+            }
+        }
+        let index = self.active();
+        if !self.nodes[index].browser.owns_input() {
+            if self.nodes[index].tasks.list_state.input_mode().is_none()
+                && let Event::Key(key) = &event
+            {
+                match key.code {
+                    KeyCode::Char('+' | '=') => {
+                        return self.panel_action(PanelAction::SpeedUp, now);
+                    }
+                    KeyCode::Char('-') => {
+                        return self.panel_action(PanelAction::SpeedDown, now);
+                    }
+                    KeyCode::Char('?') => {
+                        return self.panel_action(PanelAction::Help, now);
+                    }
+                    _ => {}
+                }
+            }
+            if matches!(&event, Event::Key(key) if key.code == KeyCode::Char('t') && self.nodes[index].tasks.list_state.input_mode().is_none())
+            {
+                let node = &mut self.nodes[index];
+                node.tasks.overlay.visible = !node.tasks.overlay.visible;
+                node.tasks.on_state_change();
+                node.tasks_focus = node.tasks.overlay.visible;
+                node.task_press = None;
+                return false;
+            }
+            if let Event::Mouse(mouse) = &event {
+                let node = &mut self.nodes[index];
+                let point = (mouse.column, mouse.row).into();
+                if node.task_badge.contains(point)
+                    && matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left))
+                {
+                    node.tasks.overlay.visible = !node.tasks.overlay.visible;
+                    node.tasks.on_state_change();
+                    node.tasks_focus = node.tasks.overlay.visible;
+                    return false;
+                }
+                if node.tasks_area.contains(point) || node.task_press.is_some() {
+                    node.tasks_focus = true;
+                    let hit = node
+                        .tasks
+                        .view_button_rects
+                        .iter()
+                        .find(|(_, area)| area.contains(point))
+                        .map(|(id, _)| id.clone());
+                    match mouse.kind {
+                        MouseEventKind::Down(MouseButton::Left) => {
+                            node.task_press = hit.clone();
+                            node.tasks.handle_mouse(
+                                mouse.kind,
+                                mouse.column,
+                                mouse.row,
+                                node.tasks_area,
+                            );
+                            if hit.is_none()
+                                && let Some(group) = node.tasks.selected_header_group()
+                            {
+                                node.tasks.toggle_group(group);
+                            }
+                        }
+                        MouseEventKind::Up(MouseButton::Left) => {
+                            let pressed = node.task_press.take();
+                            if pressed.is_some() && pressed == hit {
+                                let action = self.task_action(index, pressed.unwrap());
+                                return self.browse_action(index, action);
+                            }
+                        }
+                        MouseEventKind::ScrollDown => {
+                            node.tasks.handle_scroll(3, mouse.column, mouse.row)
+                        }
+                        MouseEventKind::ScrollUp => {
+                            node.tasks.handle_scroll(-3, mouse.column, mouse.row)
+                        }
+                        MouseEventKind::Drag(_) => {
+                            node.task_press = None;
+                        }
+                        _ => {}
+                    }
+                    return false;
+                }
+                if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                    node.tasks_focus = false;
+                    node.task_press = None;
+                }
+            }
+            if self.nodes[index].tasks_focus {
+                match &event {
+                    Event::Key(key) if key.code == KeyCode::Esc => {
+                        let node = &mut self.nodes[index];
+                        if node.tasks.list_state.input_mode().is_some() {
+                            node.tasks.handle_key(key);
+                        } else {
+                            node.tasks_focus = false;
+                        }
+                        return false;
+                    }
+                    Event::Key(key)
+                        if key.code == KeyCode::Enter
+                            && self.nodes[index].tasks.list_state.input_mode().is_none() =>
+                    {
+                        let node = &mut self.nodes[index];
+                        if let Some(group) = node.tasks.selected_header_group() {
+                            node.tasks.toggle_group(group);
+                            return false;
+                        }
+                        let task = match node.tasks.selected_entry() {
+                            Some(TaskEntry::Agent { subagent_id, .. }) => {
+                                Some(TaskEntryId::Agent(subagent_id.clone()))
+                            }
+                            Some(TaskEntry::BgTask { task_id, .. }) => {
+                                Some(TaskEntryId::BgTask(task_id.clone()))
+                            }
+                            Some(TaskEntry::Scheduled { task_id, .. }) => {
+                                Some(TaskEntryId::Scheduled(task_id.clone()))
+                            }
+                            Some(TaskEntry::Workflow { run_id, .. }) => {
+                                Some(TaskEntryId::Workflow(run_id.clone()))
+                            }
+                            _ => None,
+                        };
+                        if let Some(task) = task {
+                            let action = self.task_action(index, task);
+                            return self.browse_action(index, action);
+                        }
+                        return false;
+                    }
+                    Event::Key(key) => {
+                        if let Some(group) = self.nodes[index].tasks.selected_header_group() {
+                            if matches!(key.code, KeyCode::Left | KeyCode::Right) {
+                                self.nodes[index]
+                                    .tasks
+                                    .set_group_collapsed(group, key.code == KeyCode::Left);
+                                return false;
+                            }
+                        }
+                        self.nodes[index].tasks.handle_key(key);
+                        return false;
+                    }
+                    Event::Paste(text) => {
+                        self.nodes[index].tasks.handle_paste(text);
+                        return false;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !self.nodes[index].browser.owns_input() {
+            if let Event::Key(key) = &event {
+                match key.code {
+                    KeyCode::Char(' ') => {
+                        self.clock.pause_or_resume(now);
+                        return false;
+                    }
+                    KeyCode::Char(']') if !self.nodes[index].browser.has_search_or_help() => {
+                        self.next_record(now);
+                        return false;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let node = &mut self.nodes[index];
+        let action = node
+            .browser
+            .handle(event, &mut node.player.projection.scrollback);
+        self.browse_action(index, action)
     }
 
     fn draw(&mut self, area: Rect, buf: &mut Buffer, now: Instant, origin: Instant) {
@@ -574,29 +815,243 @@ impl Replay {
             .unwrap_or(UNIX_EPOCH);
         let stamp =
             FrameStamp::at_virtual(origin, Duration::from_millis(virtual_ms), historical_wall);
-        let panel_height = Panel::height(area);
-        let content = Rect::new(
-            area.x,
-            area.y,
-            area.width,
-            area.height.saturating_sub(panel_height),
-        );
-        self.panel_area = Rect::new(area.x, content.bottom(), area.width, panel_height);
+        let theme = Theme::current();
+        let path = self
+            .path
+            .iter()
+            .map(|index| self.nodes[*index].title.as_str())
+            .collect::<Vec<_>>()
+            .join(" › ");
         let node = &mut self.nodes[index];
-        node.browser
-            .draw(content, buf, &mut node.player.projection.scrollback, stamp);
-        let node_estimated = node.player.estimated;
-        let hint = node.browser.hint();
-        let behavior = node
+        let appearance = node.player.projection.scrollback.appearance().clone();
+        let cfg = &appearance.scrollback.layout;
+        let scrollbar_cfg = &appearance.scrollback.scrollbar;
+        let compact = agent::effective_compact(crate::appearance::cache::load(), area.height);
+        agent::fill_background(buf, area, cfg, compact, &theme);
+        let node_source_ms = source_ms.map(|at| at.saturating_sub(node.source_shift_ms));
+        let historical_frame = node
             .player
             .projection
-            .behavior_label()
-            .map_or("Behavior: 未知".to_owned(), |mode| {
-                format!("Behavior: {mode}")
-            });
-        let goal = node.player.projection.goal_status().unwrap_or("none");
-        let unresolved = node.player.projection.unresolved_tools();
-        let business = format!("历史 {behavior} · Goal: {goal} · 未完成工具: {unresolved}");
+            .surfaces
+            .frame(node_source_ms, node.player.is_finished());
+        let surfaces = &node.player.projection.surfaces;
+        node.tasks.overlay.focused = node.tasks_focus && !node.browser.owns_input();
+        node.tasks.sync_at(
+            &surfaces.bg_tasks,
+            &surfaces.subagents,
+            &surfaces.scheduled,
+            &surfaces.workflows,
+            historical_frame,
+        );
+        let tasks_height = node.tasks.desired_height(area.height);
+        let turn_height = u16::from(area.height > 12 && surfaces.turn_active);
+        let mut layout = AgentViewLayout::compute(
+            area,
+            cfg,
+            scrollbar_cfg,
+            0,
+            Panel::height(area),
+            tasks_height,
+            0,
+            0,
+            0,
+            0,
+            turn_height,
+            0,
+            0,
+            0,
+            0,
+            u16::from(!compact),
+            u16::from(area.height > 6),
+            compact,
+        );
+        if area.height <= 8 {
+            // The ordinary layout's minimum body height cannot reserve every
+            // optional row here. Keep the offline escape controls reachable.
+            let height = Panel::height(area);
+            layout.prompt = Rect::new(
+                area.x,
+                area.bottom().saturating_sub(height),
+                area.width,
+                height,
+            );
+            layout.scrollback = Rect {
+                height: area.height.saturating_sub(height),
+                ..area
+            };
+            layout.status_bar = Rect::default();
+            layout.tasks = Rect::default();
+            layout.turn_status = Rect::default();
+            layout.shortcuts = Rect::default();
+        }
+        self.panel_area = layout.prompt;
+        if node.tasks_area != layout.tasks {
+            node.task_press = None;
+        }
+        node.tasks_area = layout.tasks;
+        node.tasks.view_button_rects.clear();
+        if tasks_height == 0 {
+            node.tasks_focus = false;
+        }
+        let mut header = AgentStatusBar::new(&theme);
+        if let Some(behavior) = node.player.projection.behavior_label() {
+            header.push(
+                "behavior",
+                Line::styled(behavior, Style::default().fg(theme.accent_assistant)),
+            );
+        }
+        if let Some(goal) = &surfaces.goal {
+            header.push(
+                "goal",
+                goal_status_line(
+                    goal,
+                    &theme,
+                    false,
+                    historical_frame,
+                    surfaces.total_tokens,
+                    0,
+                ),
+            );
+        }
+        if let Some(tokens) = surfaces.total_tokens {
+            header.push(
+                "context",
+                Line::styled(
+                    format!("⇣{}", tokens.to_string()),
+                    Style::default().fg(theme.gray),
+                ),
+            );
+        }
+        let total = surfaces.bg_tasks.len()
+            + surfaces.subagents.len()
+            + surfaces.scheduled.len()
+            + surfaces.workflows.len();
+        if total > 0 {
+            header.push(
+                "tasks",
+                Line::styled(
+                    format!("⋮ {total} tasks"),
+                    Style::default().fg(theme.accent_running),
+                ),
+            );
+        }
+        let header_area = Rect {
+            x: layout.status_bar.x + layout.status_bar.width / 3,
+            width: layout
+                .status_bar
+                .width
+                .saturating_sub(layout.status_bar.width / 3),
+            ..layout.status_bar
+        };
+        let hits = header.render(buf, header_area);
+        node.task_badge = hits.get("tasks").copied().unwrap_or_default();
+        let left_end = hits
+            .values()
+            .map(|r| r.x)
+            .min()
+            .unwrap_or(layout.status_bar.right());
+        if layout.status_bar.height > 0 {
+            buf.set_stringn(
+                layout.status_bar.x,
+                layout.status_bar.y,
+                &path,
+                left_end.saturating_sub(layout.status_bar.x + 2) as usize,
+                Style::default().fg(theme.gray),
+            );
+        }
+        node.tasks.render(
+            layout.tasks,
+            buf,
+            node.tasks_focus,
+            cfg,
+            &surfaces.bg_tasks,
+            &surfaces.subagents,
+            &surfaces.scheduled,
+            historical_frame,
+        );
+        if layout.turn_status.height > 0 {
+            let activity = node.player.projection.activity();
+            turn_status::render_turn_status(
+                buf,
+                layout.turn_status,
+                TurnStatusArgs {
+                    state: &AgentState::TurnRunning,
+                    activity: &activity,
+                    turn_elapsed: node_source_ms
+                        .zip(surfaces.turn_started_ms)
+                        .map(|(now, started)| Duration::from_millis(now.saturating_sub(started))),
+                    activity_started_at: None,
+                    frame: historical_frame,
+                    drain_blocked: false,
+                    input_available: false,
+                    buttons: None,
+                    has_running_execute: false,
+                    total_tokens: surfaces.total_tokens,
+                    mcp_init_progress: None,
+                    is_bash_turn: false,
+                    is_pending_user_input: false,
+                    watchers: Watchers {
+                        commands: surfaces
+                            .bg_tasks
+                            .values()
+                            .filter(|task| {
+                                task.status == crate::app::session::BgTaskStatus::Running
+                                    && !task.is_monitor
+                            })
+                            .count(),
+                        monitors: surfaces
+                            .bg_tasks
+                            .values()
+                            .filter(|task| {
+                                task.status == crate::app::session::BgTaskStatus::Running
+                                    && task.is_monitor
+                            })
+                            .count(),
+                        loops: surfaces.scheduled.len(),
+                        subagents: surfaces
+                            .subagents
+                            .values()
+                            .filter(|info| info.is_running())
+                            .count(),
+                        workflows: surfaces
+                            .workflows
+                            .iter()
+                            .filter(|run| run.is_active())
+                            .count(),
+                    },
+                    parked: turn_status::is_parkable_wait(&activity),
+                    flat_background: false,
+                    held_queue: 0,
+                    held_queue_top_sendable: false,
+                    control_status: None,
+                },
+            );
+        }
+        node.browser.draw(
+            layout.scrollback,
+            buf,
+            &mut node.player.projection.scrollback,
+            stamp,
+        );
+        let hints = if node.tasks_focus {
+            if node.tasks.list_state.input_mode().is_some() {
+                vec![
+                    HintItem::new(crate::key!(Enter), "搜索"),
+                    HintItem::new(crate::key!(Esc), "结束编辑"),
+                ]
+            } else {
+                vec![
+                    HintItem::new(crate::key!(Enter), "查看"),
+                    HintItem::paired(crate::key!(Left), crate::key!(Right), "折叠"),
+                    HintItem::new(crate::key!('/'), "搜索"),
+                    HintItem::new(crate::key!('h'), "完成项"),
+                    HintItem::new(crate::key!(Esc), "正文"),
+                ]
+            }
+        } else {
+            node.browser.shortcuts_hints()
+        };
+        ShortcutsBar::new(&hints).render(layout.shortcuts, buf);
         let feedback = node.browser.feedback().map(str::to_owned);
         let follow = node.player.projection.scrollback.is_follow_mode();
         let state = match self.clock.state {
@@ -604,18 +1059,6 @@ impl Replay {
             PlayState::Paused => "Paused",
             PlayState::Finished => "Finished",
         };
-        let shown: usize = self
-            .nodes
-            .iter()
-            .filter(|node| node.playable)
-            .map(|node| node.player.total - node.player.queue.len())
-            .sum();
-        let catching_up = self
-            .nodes
-            .iter()
-            .filter(|node| node.playable)
-            .filter_map(|node| node.player.queue.front())
-            .any(|item| item.due_ms <= self.clock.now_ms(now));
         let progress = if self.clock.state == PlayState::Finished {
             100
         } else if self.time_map.playback_end > 0.0 {
@@ -626,49 +1069,23 @@ impl Replay {
         let time = source_ms
             .and_then(super::time::format_recorded_time)
             .unwrap_or_else(|| "时间未知".to_owned());
-        let path = self
-            .path
-            .iter()
-            .map(|index| self.nodes[*index].title.as_str())
-            .collect::<Vec<_>>()
-            .join(" › ");
-        let original_duration = (!node_estimated
-            && self
-                .nodes
-                .iter()
-                .filter(|node| node.playable)
-                .all(|node| !node.player.estimated))
-        .then(|| {
-            self.time_map
-                .origin
-                .map(|first| self.time_map.end.saturating_sub(first) / 1_000)
-        })
-        .flatten();
-        let historical = if !follow {
-            format!("正在浏览历史 · End 跟随 · {business}")
-        } else if node_estimated || self.time_map.origin.is_none() {
-            format!("时间估算 · {business}")
-        } else if self.clock.state == PlayState::Finished {
-            format!("播放结束，可继续浏览 · {business}")
-        } else if catching_up {
-            format!("追赶记录 · {business}")
-        } else {
-            format!("{business} · 已交付 {shown}/{} 记录", self.total_events)
-        };
-        let notice = feedback.as_deref().or(self.last_notice.as_deref());
+        let notice = feedback.as_deref().or_else(|| {
+            (self.clock.state != PlayState::Finished)
+                .then_some(self.last_notice.as_deref())
+                .flatten()
+        });
         let info = PanelInfo {
             state,
             speed: self.clock.speed,
             progress,
-            path: &path,
             time: &time,
             play_current: (virtual_ms as f64 / 1_000.0).min(self.time_map.playback_end / 1_000.0),
             play_total: self.time_map.playback_end / 1_000.0,
-            original_duration,
-            historical: &historical,
             notice,
-            hint: &hint,
-            has_parent: self.path.len() > 1,
+            has_back_layer: self.path.len() > 1
+                || node.tasks_focus
+                || node.browser.owns_input()
+                || node.browser.has_search_or_help(),
             follow,
             next: self.clock.state != PlayState::Finished
                 && self
@@ -721,6 +1138,99 @@ pub(super) fn run(args: ReplayArgs) -> Result<()> {
 mod tests {
     use super::*;
     use acp_transport::protocol as acp;
+
+    #[test]
+    fn ordinary_task_surfaces_follow_delivery_and_open_children_without_execution_controls() {
+        let _theme_guard = crate::theme::cache::pin_theme();
+        let start = Instant::now();
+        let mut replay = Replay::new(
+            vec![
+                (
+                    node("root", None, None),
+                    session(
+                        "root",
+                        vec![text("first", 1_000), spawn(2_000), text("last", 100_000)],
+                        vec![],
+                    ),
+                ),
+                (
+                    node("child", Some("root"), Some(2_000)),
+                    session("child", vec![text("child body", 2_000)], vec![]),
+                ),
+            ],
+            1.0,
+            start,
+        );
+        let area = Rect::new(0, 0, 120, 40);
+        replay.tick(start);
+        replay.draw(area, &mut Buffer::empty(area), start, start);
+        assert!(
+            replay.nodes[0]
+                .player
+                .projection
+                .surfaces
+                .subagents
+                .is_empty()
+        );
+        assert!(replay.nodes[0].tasks.view_button_rects.is_empty());
+        replay.tick(start + Duration::from_secs(2));
+        for kind in [
+            crate::theme::ThemeKind::GrowNight,
+            crate::theme::ThemeKind::GrowDay,
+        ] {
+            crate::theme::cache::set(kind);
+            replay.draw(
+                area,
+                &mut Buffer::empty(area),
+                start + Duration::from_secs(2),
+                start,
+            );
+            assert_eq!(replay.panel_area.height, 3);
+            assert!(replay.nodes[0].tasks_area.height > 0);
+            assert!(replay.nodes[0].tasks_area.bottom() < replay.panel_area.y);
+            assert!(replay.nodes[0].tasks.kill_button_rects.is_empty());
+        }
+        let rect = replay.nodes[0]
+            .tasks
+            .view_button_rects
+            .iter()
+            .find_map(|(id, area)| matches!(id, TaskEntryId::Agent(_)).then_some(*area))
+            .expect("shared task row has a view control");
+        for kind in [
+            MouseEventKind::Down(MouseButton::Left),
+            MouseEventKind::Up(MouseButton::Left),
+        ] {
+            replay.handle(
+                Event::Mouse(crossterm::event::MouseEvent {
+                    kind,
+                    column: rect.x,
+                    row: rect.y,
+                    modifiers: KeyModifiers::NONE,
+                }),
+                start + Duration::from_secs(2),
+            );
+        }
+        assert_eq!(replay.path, vec![0, 1]);
+        replay.handle(
+            Event::Key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE)),
+            start + Duration::from_secs(2),
+        );
+        assert_eq!(replay.path, vec![0]);
+        for area in [
+            Rect::new(0, 0, 40, 8),
+            Rect::new(0, 0, 20, 4),
+            Rect::new(0, 0, 1, 1),
+        ] {
+            replay.draw(
+                area,
+                &mut Buffer::empty(area),
+                start + Duration::from_secs(2),
+                start,
+            );
+            assert!(replay.panel_area.bottom() <= area.bottom());
+        }
+        crate::theme::cache::set(crate::theme::ThemeKind::GrowNight);
+    }
 
     fn text(id: &str, at: u64) -> shell::session::storage::transcript::TranscriptEvent {
         shell::session::storage::transcript::TranscriptEvent {
@@ -1005,6 +1515,12 @@ mod tests {
         }
         replay.tick(start + Duration::from_secs(1));
         assert_eq!(replay.clock.state, PlayState::Finished);
+        let speed = replay.clock.speed;
+        replay.handle(
+            Event::Key(KeyEvent::new(KeyCode::Char('+'), KeyModifiers::NONE)),
+            start + Duration::from_secs(1),
+        );
+        assert_eq!(replay.clock.speed, speed);
     }
 
     #[test]

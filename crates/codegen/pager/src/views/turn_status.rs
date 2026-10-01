@@ -175,6 +175,9 @@ pub struct TurnStatusArgs<'a> {
     pub activity_started_at: Option<Instant>,
     pub frame: crate::motion::FrameStamp,
     pub drain_blocked: bool,
+    /// Whether this surface can submit or steer input. Historical viewers
+    /// retain the activity cue without advertising live input actions.
+    pub input_available: bool,
     /// Mouse affordances + hover state; `None` for keyboard-only hosts.
     pub buttons: Option<MouseButtons>,
     pub has_running_execute: bool,
@@ -211,6 +214,7 @@ pub fn render_turn_status(
         activity_started_at,
         frame,
         drain_blocked,
+        input_available,
         buttons,
         has_running_execute,
         total_tokens,
@@ -298,7 +302,9 @@ pub fn render_turn_status(
         // Parked with held queued rows: the queued hint IS the input-semantics
         // story (Enter acts on the queue immediately), so it replaces the
         // generic interrupt copy.
-        let parked_suffix = if held_queue > 0 && held_queue_top_sendable {
+        let parked_suffix = if !input_available {
+            String::new()
+        } else if held_queue > 0 && held_queue_top_sendable {
             format!(" \u{00b7} {held_queue} queued — Enter to send now")
         } else if held_queue > 0 {
             format!(" \u{00b7} {held_queue} queued")
@@ -1136,6 +1142,7 @@ mod tests {
             activity_started_at: None,
             frame: crate::motion::FrameStamp::default(),
             drain_blocked: false,
+            input_available: true,
             buttons: Some(MouseButtons::default()),
             has_running_execute: false,
             total_tokens: None,
@@ -1472,6 +1479,28 @@ mod tests {
                 assert_eq!(output.watching_cue.is_some(), subagents > 0);
             }
         }
+    }
+
+    #[test]
+    fn recorded_parked_wait_omits_input_and_execution_actions() {
+        let activity = Some(TurnActivity::Waiting(WaitingReason::Subagent));
+        let mut args = idle_args(Watchers {
+            subagents: 3,
+            ..Watchers::default()
+        });
+        args.state = &AgentState::TurnRunning;
+        args.activity = &activity;
+        args.parked = true;
+        args.input_available = false;
+        args.buttons = None;
+        let (output, buf) = render_row(args, 100);
+        let text = buffer_text(&buf, buf.area);
+        assert!(text.contains("3 subagents still running"));
+        assert!(!text.contains("Enter"));
+        assert!(!text.contains("[stop]"));
+        assert!(output.cancel_button.is_none());
+        assert!(output.bg_button.is_none());
+        assert!(output.watching_cue.is_none());
     }
 
     #[test]

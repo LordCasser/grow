@@ -163,6 +163,98 @@ fn cancelled_tool_stays_pending_across_next_prompt_and_assistant_response() {
 }
 
 #[test]
+fn task_elapsed_uses_source_time_and_terminal_progress_cannot_resurrect_it() {
+    let mut projection = TranscriptProjection::default();
+    let timed = |value: serde_json::Value, at| {
+        let mut event = grow_event(serde_json::from_value(value).unwrap());
+        event.timestamp_ms = Some(at);
+        event
+    };
+    projection.apply(timed(serde_json::json!({"sessionUpdate":"subagent_spawned", "subagent_id":"s", "parent_session_id":"projection-test", "child_session_id":"s", "description":"inspect", "subagent_type":"explore"}), 1_000));
+    let frame = projection.surfaces.frame(Some(61_000), false);
+    assert_eq!(
+        projection.surfaces.subagents["s"].display_elapsed_at(frame.now()),
+        Duration::from_secs(60)
+    );
+    assert_eq!(
+        projection.surfaces.frame(Some(61_000), false),
+        frame,
+        "paused source clock freezes every task surface"
+    );
+    projection.apply(timed(serde_json::json!({"sessionUpdate":"subagent_finished", "subagent_id":"s", "child_session_id":"s", "status":"completed", "tool_calls":2, "turns":1, "duration_ms":70_000, "tokens_used":20}), 71_000));
+    projection.apply(timed(serde_json::json!({"sessionUpdate":"subagent_progress", "subagent_id":"s", "parent_session_id":"projection-test", "child_session_id":"s", "duration_ms":80_000, "turn_count":2, "tool_call_count":3, "tokens_used":30, "context_window_tokens":100, "context_usage_pct":30, "tools_used":[], "error_count":0}), 81_000));
+    assert!(projection.surfaces.subagents["s"].finished);
+    assert_eq!(
+        projection.surfaces.subagents["s"]
+            .display_elapsed_at(projection.surfaces.frame(Some(1_000_000), true).now()),
+        Duration::from_secs(70)
+    );
+}
+
+#[test]
+fn interrupted_turn_followup_owns_the_status_row_and_delayed_terminal_does_not_hide_it() {
+    let mut projection = TranscriptProjection::default();
+    let mut first = acp_event(user_message("first", false), Some("p1"));
+    first.timestamp_ms = Some(1_000);
+    projection.apply(first);
+    projection.apply(turn_completed("p1", "cancelled"));
+    assert!(!projection.surfaces.turn_active);
+    let mut second = acp_event(user_message("followup", false), Some("p2"));
+    second.timestamp_ms = Some(10_000);
+    projection.apply(second);
+    projection.apply(turn_completed("p1", "cancelled"));
+    assert!(projection.surfaces.turn_active);
+    assert_eq!(projection.surfaces.turn_started_ms, Some(10_000));
+    projection.apply(turn_completed("p2", "end_turn"));
+    assert!(!projection.surfaces.turn_active);
+}
+
+#[test]
+fn shared_goal_workflow_and_schedule_surfaces_cannot_resurrect_cleared_history() {
+    let mut p = TranscriptProjection::default();
+    let goal = |status: &str| {
+        grow_event(serde_json::from_value(serde_json::json!({"sessionUpdate":"goal_updated", "goal_id":"g", "objective":"inspect", "status":status, "token_budget":null, "elapsed_ms":1_000, "created_at":"saved", "updated_at":"saved"})).unwrap())
+    };
+    p.apply(goal("active"));
+    assert!(
+        p.surfaces
+            .goal
+            .as_ref()
+            .is_some_and(|g| g.status == crate::app::session::GoalDisplayStatus::Active)
+    );
+    p.apply(goal("paused"));
+    assert!(
+        p.surfaces
+            .goal
+            .as_ref()
+            .is_some_and(|g| g.status == crate::app::session::GoalDisplayStatus::Paused)
+    );
+    p.apply(goal("cleared"));
+    p.apply(goal("active"));
+    assert!(p.surfaces.goal.is_none());
+    let workflow = |revision, status: &str| {
+        grow_event(serde_json::from_value(serde_json::json!({"sessionUpdate":"workflow_updated", "run_id":"r", "name":"saved run", "objective":"inspect", "revision":revision, "status":status, "elapsed_ms":1_000})).unwrap())
+    };
+    p.apply(workflow(2, "active"));
+    assert_eq!(p.surfaces.workflows.len(), 1);
+    assert!(!p.surfaces.workflows[0].management_available);
+    p.apply(workflow(3, "cleared"));
+    p.apply(workflow(1, "active"));
+    assert!(p.surfaces.workflows.is_empty());
+    p.apply(grow_event(GrowUpdate::ScheduledTaskCreated {
+        task_id: "loop".into(),
+        prompt: "saved".into(),
+        human_schedule: "hourly".into(),
+        next_fire_at: None,
+    }));
+    assert_eq!(p.surfaces.scheduled.len(), 1);
+    p.apply(grow_event(GrowUpdate::ScheduledTaskDeleted {
+        task_id: "loop".into(),
+    }));
+    assert!(p.surfaces.scheduled.is_empty());
+}
+
+#[test]
 fn cross_turn_tool_terminal_updates_the_original_execute_row_once() {
     for status in [acp::ToolCallStatus::Failed, acp::ToolCallStatus::Completed] {
         let mut projection = TranscriptProjection::default();

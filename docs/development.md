@@ -110,7 +110,13 @@ Behavior 选择、Plan phase、Goal 与 foreground turn/Workflow Run 分别投�
 
 ### 只读 Replay
 
-Replay 的独立 TUI 复用 ScrollbackPane 与详情 viewer，提供只读搜索、展开、复制和子 Agent 导航。底部专用面板显示全树播放状态、进度、历史业务状态、本机时区时间及可用操作；F8 可在任意焦点暂停，`]` 在正文或通过面板显式跳到下一记录。已确认且严格超过 30 秒的 IDLE 压缩为 1 秒播放时间；中断恢复空档标估算，普通工具中无法确认的权限等待和缺时后台任务保守保护。旧记录缺少的时间与等待事实不能从静默或当前时间推断。入口和场景见 [只读 Replay 契约](../openspec/specs/client-surfaces/spec.md#requirement-replay-supports-ordinary-read-only-transcript-inspection)，实施验收见 [记录](../openspec/changes/archive/2026-09-30-interactive-readonly-replay/verification.md)。
+Replay 的独立 TUI 复用普通 AgentViewLayout、顶部状态栏、TasksPane、ScrollbackPane、详情 viewer、历史 turn 状态和 ShortcutsBar。仅将 composer 槽位换成三行播放控制框：状态/倍速/进度、播放操作、历史时间/回放耗时；诊断信息放在帮助中。任务栏沿用普通自动展开/收起和 `h` 查看完成项，`t` 切换任务列表；子 Agent、Workflow 关联 child 和已捕获后台输出可只读查看。共享展示只使用当前已交付事实，未知字段不从当前运行时补取；任务/Goal 计时走历史来源时钟，暂停冻结，IDLE 压缩不改变业务耗时。入口和场景见 [Replay 布局契约](../openspec/specs/client-surfaces/spec.md#requirement-replay-panel-replaces-live-composer-and-status-controls) 与 [任务状态契约](../openspec/specs/client-surfaces/spec.md#requirement-replay-task-and-status-surfaces-follow-delivered-history)，布局验收见 [记录](../openspec/changes/archive/2026-10-01-align-replay-with-session-surfaces/verification.md)。
+
+F8 可在任意焦点暂停，`]` 在正文或通过控制框显式跳到下一记录；Finished 保持可浏览但没有继续动作。已确认且严格超过 30 秒的 IDLE 压缩为 1 秒播放时间；中断恢复空档标估算，普通工具中无法确认的权限等待和缺时后台任务保守保护。旧记录缺少的时间与等待事实不能从静默或当前时间推断。只读交互、时区和 IDLE 验收见 [前序记录](../openspec/changes/archive/2026-09-30-interactive-readonly-replay/verification.md)。
+
+### 普通 resume 历史
+
+普通 resume 的历史加载与 `grow replay` 播放器是独立入口。`session::storage::communication_history` 将 Timeline-only 通信按 canonical response、input、tool 和已有通信身份定位到历史区间，根 load、延迟 child 历史和离线 transcript 共用该规划；加载后的 coordination snapshot 只发布当前待处理 inquiry。已有 receipt/阶段保持原位置，缺失接收方 inquiry 阶段按 source peer + inquiry ID + phase 去重。合成行保留来源时间且没有缓存 eventId，不能充当 reconnect cursor；涉及合成时沿完整替换回退。没有可靠锚点会标估算，缺失正文使用既有 unavailable 说明。它不重新投递消息、消费通知或运行 Hook；不新增 viewport 持久化，也不改变普通 Goal 恢复策略。契约见 [恢复通信顺序](../openspec/specs/client-surfaces/spec.md#requirement-resume-restores-ordered-communication-history)，验证见 [记录](../openspec/changes/archive/2026-10-01-restore-ordered-resume-communications/verification.md)。
 
 ## 不改行为的最小变更
 

@@ -747,6 +747,43 @@ fn project_session(
     }
     let reconciled =
         reconcile_raw_replay_lines(&opened.summary().info.id, &facts.timeline, filtered)?;
+    let reconciled = super::communication_history::restore(
+        &opened.summary().info.id,
+        &facts.timeline,
+        reconciled,
+        |receipt| {
+            if let TimelineEventKind::Notification(chat_state::NotificationEvent::Received {
+                payload_ref,
+                ..
+            }) = &receipt.kind
+            {
+                let payload_bytes = facts
+                    .opened
+                    .directory()
+                    .open_relative(
+                        Path::new("artifacts/notifications"),
+                        "notification payload directory",
+                        false,
+                    )
+                    .and_then(|directory| {
+                        directory.open_regular(
+                            OsStr::new(&format!("{}.txt", payload_ref.blake3)),
+                            "notification payload",
+                        )
+                    })
+                    .and_then(|file| file.metadata())
+                    .map(|metadata| metadata.len())
+                    .unwrap_or(payload_ref.bytes);
+                budget.add_bytes(payload_bytes)?;
+            }
+            let notice =
+                super::communication_history::read_notice(facts.opened.directory(), receipt)?;
+            if notice.is_some() {
+                budget.add_events(1)?;
+            }
+            Ok(notice)
+        },
+    )?;
     let timeline_times = facts
         .timeline
         .events()
@@ -803,7 +840,7 @@ fn project_session(
             update @ SessionUpdate::Grow(_) => events.push(TranscriptEvent {
                 update,
                 timestamp_ms,
-                simulated_source: false,
+                simulated_source: synthetic,
             }),
         }
     }
@@ -956,7 +993,6 @@ fn restore_observational_facts(
     let mut spawned = BTreeSet::new();
     let mut finished = BTreeSet::new();
     let mut hooks = BTreeSet::new();
-    let mut receipts = BTreeSet::new();
     for event in events.iter() {
         if let SessionUpdate::Grow(notification) = &event.update {
             match &notification.update {
@@ -972,12 +1008,6 @@ fn restore_observational_facts(
                 }
                 GrowUpdate::HookExecution { occurrence_id, .. } => {
                     hooks.insert(occurrence_id.clone());
-                }
-                GrowUpdate::UiNotice(notice)
-                    if notice.subject.as_deref()
-                        == Some(crate::extensions::notification::AgentMessageNotice::SUBJECT) =>
-                {
-                    receipts.insert(notice.correlation_id.clone());
                 }
                 _ => {}
             }
@@ -1042,54 +1072,6 @@ fn restore_observational_facts(
                 )));
                 finished.insert(spawn.child_session_id.clone());
             }
-        }
-    }
-    for receipt in facts.timeline.parent_message_receipts() {
-        let TimelineEventKind::Notification(chat_state::NotificationEvent::Received {
-            id,
-            owner_session_id,
-            payload_ref,
-            ..
-        }) = &receipt.kind
-        else {
-            continue;
-        };
-        if owner_session_id != session_id {
-            return Err(invalid(format!(
-                "session '{session_id}' has a foreign message receipt"
-            )));
-        }
-        if !receipts.insert(id.clone()) {
-            continue;
-        }
-        // The existing reader bounds and verifies this immutable artifact.
-        // Reserve its actual bytes before materializing; a missing or invalid
-        // body retains the same explicit 'Message unavailable' receipt as live
-        // reconnect, never another delivery or a guessed body.
-        let payload_bytes = facts
-            .opened
-            .directory()
-            .open_relative(
-                Path::new("artifacts/notifications"),
-                "notification payload directory",
-                false,
-            )
-            .and_then(|directory| {
-                directory.open_regular(
-                    OsStr::new(&format!("{}.txt", payload_ref.blake3)),
-                    "notification payload",
-                )
-            })
-            .and_then(|file| file.metadata())
-            .map(|metadata| metadata.len())
-            .unwrap_or(payload_ref.bytes);
-        budget.add_bytes(payload_bytes)?;
-        if let Some(notice) = crate::session::notification_inbox::read_parent_message_notice(
-            facts.opened.directory(),
-            &receipt,
-        ) {
-            budget.add_events(1)?;
-            events.push(restored(GrowUpdate::UiNotice(notice)));
         }
     }
     for projection in facts.timeline.completed_hook_projections() {

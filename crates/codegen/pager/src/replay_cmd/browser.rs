@@ -68,6 +68,32 @@ pub(super) struct Browser {
 }
 
 impl Browser {
+    pub(super) fn shortcuts_hints(&self) -> Vec<crate::views::shortcuts_bar::HintItem> {
+        use crate::views::shortcuts_bar::HintItem;
+        if let Some(viewer) = &self.viewer {
+            return viewer.shortcuts_hints();
+        }
+        if self.workflow_picker.is_some() {
+            return vec![
+                HintItem::paired(crate::key!(Up), crate::key!(Down), "选择"),
+                HintItem::new(crate::key!(Enter), "打开过程"),
+                HintItem::new(crate::key!(Esc), "返回"),
+            ];
+        }
+        if self.search.is_some() {
+            return vec![
+                HintItem::new(crate::key!(Enter), "查看结果"),
+                HintItem::new(crate::key!(Esc), "关闭搜索"),
+            ];
+        }
+        vec![
+            HintItem::new(crate::key!(Enter), "详情"),
+            HintItem::paired(crate::key!(Left), crate::key!(Right), "折叠"),
+            HintItem::new(crate::key!('/'), "搜索"),
+            HintItem::new(crate::key!('y'), "复制"),
+            HintItem::new(crate::key!('t'), "任务"),
+        ]
+    }
     pub(super) fn owns_input(&self) -> bool {
         self.viewer.is_some() || self.search.is_some() || self.workflow_picker.is_some()
     }
