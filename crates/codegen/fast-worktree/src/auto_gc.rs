@@ -360,7 +360,9 @@ fn build_auto_gc_options_with_dry_run(
         force: false,
         dry_run,
         protect_paths,
-        skip_kinds: vec![],
+        // Standalone auto-GC cannot validate the session recovery obligation
+        // behind subagent snapshots, so TTL never grants deletion authority.
+        skip_kinds: vec![WorktreeKind::Subagent],
         max_age_by_kind,
     }
 }
@@ -819,7 +821,7 @@ mod tests {
         };
         let gc = build_auto_gc_options(&opts, Vec::new());
         assert!(!gc.force, "auto path must never set force=true");
-        assert!(gc.skip_kinds.is_empty());
+        assert_eq!(gc.skip_kinds, vec![WorktreeKind::Subagent]);
         assert_eq!(gc.max_age_by_kind.get(&WorktreeKind::Manual), Some(&None));
     }
 
@@ -961,6 +963,16 @@ mod tests {
         live.creator_pid = Some(std::process::id());
         db.register(&live).unwrap();
 
+        let subagent = tmp.path().join("expired-subagent");
+        std::fs::create_dir(&subagent).unwrap();
+        db.register(&make_rec(
+            "expired-subagent",
+            subagent.clone(),
+            WorktreeKind::Subagent,
+            1,
+        ))
+        .unwrap();
+
         let report = maybe_auto_gc(
             &db,
             &AutoGcOptions {
@@ -982,9 +994,13 @@ mod tests {
             kept.exists(),
             "live creator_pid must protect the other tree"
         );
+        assert!(
+            subagent.exists(),
+            "auto-GC TTL must preserve subagent worktrees"
+        );
         let gc = report.gc.as_ref().unwrap();
         assert!(gc.expired_removed >= 1);
-        assert!(gc.skipped_alive >= 1);
+        assert!(gc.skipped_alive >= 2);
     }
 
     #[cfg(any(target_os = "linux", target_os = "macos"))]

@@ -896,7 +896,16 @@ impl SchedulerActor {
                         biased;
                         _ = self.cancel_token.cancelled() => return LoopFireOutcome::Skipped,
                         snapshot = rx => match snapshot {
-                            Ok(s) => s,
+                            Ok(Ok(s)) => s,
+                            Ok(Err(error)) => {
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    previous_subagent = %prev_id,
+                                    %error,
+                                    "Loop in-flight query could not confirm prior state; skipping this fire"
+                                );
+                                return LoopFireOutcome::Skipped;
+                            }
                             Err(_) => return LoopFireOutcome::Skipped,
                         },
                         _ = tokio::time::sleep(Duration::from_secs(10)) => {
@@ -1346,7 +1355,7 @@ mod tests {
             while let Some(event) = receiver.recv().await {
                 match event {
                     SubagentEvent::Query(request) => {
-                        let _ = request.respond_to.send(None);
+                        let _ = request.respond_to.send(Ok(None));
                     }
                     SubagentEvent::LoopUnitActive(request) => {
                         let _ = request.respond_to.send(false);
@@ -2284,7 +2293,7 @@ mod tests {
         assert!(!query.block);
         query
             .respond_to
-            .send(Some(subagent_snapshot(subagent_id, status)))
+            .send(Ok(Some(subagent_snapshot(subagent_id, status))))
             .unwrap();
     }
 
@@ -2418,7 +2427,7 @@ mod tests {
         };
         query2
             .respond_to
-            .send(Some(subagent_snapshot(&first_id, completed)))
+            .send(Ok(Some(subagent_snapshot(&first_id, completed))))
             .unwrap();
         answer_loop_unit_active(&mut subagent_rx, false).await;
         resources
@@ -2503,7 +2512,7 @@ mod tests {
             panic!("expected Query after prompt update");
         };
         assert_eq!(q1.subagent_id, first_id, "guard queries the kept anchor");
-        let _ = q1.respond_to.send(Some(
+        let _ = q1.respond_to.send(Ok(Some(
             crate::implementations::grow_build::task::types::SubagentSnapshot {
                 subagent_id: first_id.clone(),
                 description: "loop: watch ci".into(),
@@ -2520,14 +2529,14 @@ mod tests {
                 started_at_epoch_ms: 0,
                 duration_ms: 100,
             },
-        ));
+        )));
 
         // Old iteration done: the following tick spawns the NEW job fresh —
         // no resume_from, and the framing carries no old-task output.
         let SubagentEvent::Query(q2) = next_event(&mut subagent_rx).await else {
             panic!("expected second Query, not a Spawn");
         };
-        let _ = q2.respond_to.send(Some(
+        let _ = q2.respond_to.send(Ok(Some(
             crate::implementations::grow_build::task::types::SubagentSnapshot {
                 subagent_id: first_id.clone(),
                 description: "loop: watch ci".into(),
@@ -2542,7 +2551,7 @@ mod tests {
                 started_at_epoch_ms: 0,
                 duration_ms: 100,
             },
-        ));
+        )));
         answer_loop_unit_active(&mut subagent_rx, false).await;
         let SubagentEvent::Spawn(second) = next_event(&mut subagent_rx).await else {
             panic!("expected fresh Spawn after old iteration completed");

@@ -135,6 +135,8 @@ pub struct SessionHandle {
     pub(crate) goal_usage_window: crate::session::actor::goal_support::GoalUsageWindow,
     /// Persistence channel shared with the actor (used by extension handlers).
     pub(crate) persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
+    /// Lock-backed runtime facts for non-blocking observation queries.
+    pub(crate) runtime_observation: super::actor::runtime_observation::SharedRuntimeObservation,
     /// Current running prompt/turn id, if any.
     ///
     /// Shared with the session actor so external cancellation paths can target

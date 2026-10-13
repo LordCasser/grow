@@ -1771,16 +1771,38 @@ pub mod gc {
             })?;
             report.dead_removed = all
                 .iter()
-                .filter(|r| r.status == WorktreeStatus::Dead || !Path::new(&r.path).exists())
+                .filter(|r| {
+                    (opts.force || r.kind != WorktreeKind::Subagent)
+                        && (r.status == WorktreeStatus::Dead || !Path::new(&r.path).exists())
+                })
                 .count() as u64;
         } else {
-            db.sweep_dead()?;
+            // Standalone GC has no session authority to determine whether a
+            // subagent's missing checkout is recoverable from its snapshot.
+            // Mark only ordinary worktrees here; explicit force preserves the
+            // existing destructive management semantics.
+            if opts.force {
+                db.sweep_dead()?;
+            } else {
+                let alive = db.list(&ListFilter::default())?;
+                for rec in alive
+                    .into_iter()
+                    .filter(|r| r.kind != WorktreeKind::Subagent)
+                {
+                    if !Path::new(&rec.path).exists() {
+                        db.mark_dead(&rec.id)?;
+                    }
+                }
+            }
             let dead = db.list(&ListFilter {
                 status: Some(WorktreeStatus::Dead),
                 include_dead: true,
                 ..Default::default()
             })?;
             for rec in dead {
+                if !opts.force && rec.kind == WorktreeKind::Subagent {
+                    continue;
+                }
                 // Count only when the row was actually removed.
                 if db.unregister(&rec.id).unwrap_or(false) {
                     report.dead_removed += 1;
@@ -1811,6 +1833,10 @@ pub mod gc {
             };
             let alive = db.list(&ListFilter::default())?;
             for rec in alive {
+                if !opts.force && rec.kind == WorktreeKind::Subagent {
+                    report.skipped_alive += 1;
+                    continue;
+                }
                 let Some(max_age) = effective_max_age(opts, rec.kind) else {
                     // Metrics-only: never-expire kinds are retained on purpose.
                     // Prefer global `max_age_secs` as the "would have expired"
@@ -4247,6 +4273,65 @@ mod tests {
         }
 
         #[test]
+        fn standalone_gc_preserves_subagent_worktrees_until_explicit_force() {
+            let tmp = tempfile::TempDir::new().unwrap();
+            let db = db_at(&tmp);
+            let live_path = tmp.path().join("subagent-live");
+            std::fs::create_dir(&live_path).unwrap();
+            let mut record = crate::db::WorktreeRecord {
+                id: "subagent-live".into(),
+                path: live_path.clone(),
+                source_repo: "/repo".into(),
+                repo_name: "repo".into(),
+                kind: WorktreeKind::Subagent,
+                creation_mode: "linked".into(),
+                git_ref: Some("refs/grow/subagents/subagent-live".into()),
+                head_commit: None,
+                session_id: Some("parent".into()),
+                creator_pid: None,
+                created_at: 1,
+                last_accessed_at: None,
+                status: crate::WorktreeStatus::Alive,
+                metadata: None,
+            };
+            db.register(&record).unwrap();
+            record.id = "subagent-missing".into();
+            record.path = tmp.path().join("subagent-missing");
+            record.git_ref = Some("refs/grow/subagents/subagent-missing".into());
+            db.register(&record).unwrap();
+
+            let report = gc::gc_worktrees(
+                &db,
+                &gc::GcOptions {
+                    max_age_secs: Some(0),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(live_path.exists(), "TTL must not remove subagent worktrees");
+            assert_eq!(report.expired_removed, 0);
+            assert_eq!(report.dead_removed, 0);
+            assert!(db.get_by_id("subagent-missing").unwrap().is_some());
+
+            let forced = gc::gc_worktrees(
+                &db,
+                &gc::GcOptions {
+                    max_age_secs: Some(0),
+                    force: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            assert!(
+                !live_path.exists(),
+                "explicit force retains destructive semantics"
+            );
+            assert!(db.get_by_id("subagent-missing").unwrap().is_none());
+            assert_eq!(forced.expired_removed, 1);
+            assert_eq!(forced.dead_removed, 1);
+        }
+
+        #[test]
         fn per_kind_max_age_expires_session_not_manual() {
             let tmp = tempfile::TempDir::new().unwrap();
             let db = db_at(&tmp);
@@ -4309,12 +4394,13 @@ mod tests {
         }
 
         #[test]
-        fn per_kind_shorter_ttl_expires_subagent_keeps_session() {
+        fn standalone_gc_ignores_subagent_ttl_and_keeps_session() {
             let tmp = tempfile::TempDir::new().unwrap();
             let db = db_at(&tmp);
             let now = crate::db::now_epoch_secs();
             // Subagent last active 2h ago; session last active 2h ago.
-            // subagent TTL=1h → expire; session default=7d → keep.
+            // The configured subagent TTL is not sufficient recovery authority;
+            // session default=7d also keeps its younger worktree.
             let sub_dir = tmp.path().join("sub");
             let sess_dir = tmp.path().join("sess");
             std::fs::create_dir(&sub_dir).unwrap();
@@ -4362,9 +4448,9 @@ mod tests {
                 },
             )
             .unwrap();
-            assert!(!sub_dir.exists(), "subagent past 1h TTL must expire");
+            assert!(sub_dir.exists(), "subagent past 1h TTL must be preserved");
             assert!(sess_dir.exists(), "session within 7d must stay");
-            assert_eq!(report.expired_removed, 1);
+            assert_eq!(report.expired_removed, 0);
         }
 
         #[test]
@@ -4475,12 +4561,13 @@ mod tests {
             )
             .unwrap();
             assert_eq!(
-                dry.expired_removed, 1,
-                "only subagent past its kind TTL is would-expire"
+                dry.expired_removed, 0,
+                "subagent TTL alone cannot authorize standalone deletion"
             );
             assert!(sub_dir.exists() && sess_dir.exists() && man_dir.exists());
 
-            // max_age_secs=0: session+subagent would-expire; manual never → skipped.
+            // max_age_secs=0: only session would-expire; subagent is protected
+            // and manual remains never-expire.
             let dry0 = gc::gc_worktrees(
                 &db,
                 &gc::GcOptions {
@@ -4497,7 +4584,7 @@ mod tests {
                 },
             )
             .unwrap();
-            assert_eq!(dry0.expired_removed, 2);
+            assert_eq!(dry0.expired_removed, 1);
             assert!(dry0.skipped_alive >= 1);
         }
 

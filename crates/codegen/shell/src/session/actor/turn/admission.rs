@@ -166,6 +166,11 @@ impl SessionActor {
         persist_ack: Option<oneshot::Sender<()>>,
     ) -> PromptTurnResult {
         let turn_input_ids = input_ids;
+        if let Some(gate) = self.tool_context.storage_admission.as_ref()
+            && let Err(reason) = gate.check(self.session_info.id.0.as_ref())
+        {
+            return Err(acp::Error::internal_error().data(reason));
+        }
         let handle_prompt_start = std::time::Instant::now();
         let prompt_length: usize = prompt_blocks
             .iter()

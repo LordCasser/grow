@@ -282,6 +282,8 @@ impl AgentView {
             return InputOutcome::Action(Action::SteerPrompt {
                 text: prompt.text,
                 images: prompt.images,
+                expected_turn_id: prompt.expected_turn_id,
+                prompt_id: prompt.prompt_id,
             });
         }
         InputOutcome::Changed

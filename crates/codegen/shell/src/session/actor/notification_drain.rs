@@ -74,6 +74,7 @@ impl SessionActor {
                     value: chat_state::PARENT_MESSAGE_SOURCE_VERSION,
                 },
                 message,
+                None,
             )
             .await?;
         if interrupt
@@ -449,7 +450,19 @@ impl SessionActor {
         source_version: chat_state::NotificationSourceVersion,
         body: String,
     ) -> Result<String, String> {
-        self.receive_notification_detailed(source, source_version, body)
+        self.receive_notification_before(source, source_version, body, None)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
+    pub(super) async fn receive_notification_before(
+        &self,
+        source: chat_state::NotificationSource,
+        source_version: chat_state::NotificationSourceVersion,
+        body: String,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<String, String> {
+        self.receive_notification_detailed(source, source_version, body, deadline)
             .await
             .map_err(|error| error.to_string())
     }
@@ -459,6 +472,7 @@ impl SessionActor {
         source: chat_state::NotificationSource,
         source_version: chat_state::NotificationSourceVersion,
         body: String,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<String, AgentMessageDeliveryError> {
         let artifact_guard = self.notification_artifact_gate.lock().await;
         let pending_before = self
@@ -536,11 +550,12 @@ impl SessionActor {
         let received_payload = payload_ref.clone();
         let event = match self
             .chat_state_handle
-            .receive_notification_durably(
+            .receive_notification_durably_before(
                 self.session_info.id.0.to_string(),
                 source,
                 source_version,
                 payload_ref,
+                deadline,
             )
             .await
         {
@@ -614,6 +629,14 @@ impl SessionActor {
         self: Arc<Self>,
         completion_tx: mpsc::UnboundedSender<(String, PromptTurnResult)>,
     ) {
+        if self
+            .tool_context
+            .storage_admission
+            .as_ref()
+            .is_some_and(|gate| gate.check(self.session_info.id.0.as_ref()).is_err())
+        {
+            return;
+        }
         // Fast path under the lock: nothing to promote.
         let may_combine;
         {

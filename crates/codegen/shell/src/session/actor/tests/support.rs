@@ -729,12 +729,19 @@ async fn create_test_actor_ex_inner(
     // fixture through the resolved root while preserving `/tmp` as the model
     // workspace path.
     let session_root = std::fs::canonicalize(cwd.as_path()).expect("resolve test session root");
+    let control_epoch = uuid::Uuid::now_v7().to_string();
+    let runtime_observation = Arc::new(parking_lot::RwLock::new(
+        crate::session::actor::RuntimeObservationSnapshot::new(
+            acp::SessionId::new("test-actor"),
+            control_epoch.clone(),
+        ),
+    ));
     let actor = SessionActor {
         session_info: SessionInfo {
             id: acp::SessionId::new("test-actor"),
             cwd: cwd.as_str().to_string(),
         },
-        control_epoch: uuid::Uuid::now_v7().to_string(),
+        control_epoch,
         test_session_dir_guard: Some(test_session_dir_guard),
         session_dir,
         session_directory: std::sync::Arc::new(
@@ -747,7 +754,9 @@ async fn create_test_actor_ex_inner(
             .expect("pin test session directory"),
         ),
         notification_artifact_gate: TokioMutex::new(()),
+        input_admission_gate: TokioMutex::new(()),
         input_artifact_gate: TokioMutex::new(()),
+        runtime_observation,
         auth_method_id: test_auth_method_id("test-auth"),
         model_auth_memo: std::cell::RefCell::new(None),
         state,

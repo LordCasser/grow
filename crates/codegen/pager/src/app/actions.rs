@@ -136,6 +136,9 @@ pub enum Action {
         text: String,
         /// Pasted images riding along with the prompt.
         images: Vec<crate::prompt_images::PastedImage>,
+        /// Original target and identity, present for explicit uncertain retry.
+        expected_turn_id: Option<String>,
+        prompt_id: Option<String>,
     },
     /// Send a direct bash command (bypasses agent loop).
     SendBashCommand(String),
@@ -1820,8 +1823,18 @@ pub enum Effect {
     QueryPromptStatus {
         agent_id: AgentId,
         session_id: acp::SessionId,
+        binding_epoch: u32,
+        query_generation: u64,
+        prompt_id: Option<String>,
+    },
+    QueryInputAdmissionStatus {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
         prompt_id: String,
     },
+    /// An input request released by the local draft checkpoint gate.
+    ReadyInputIntent { send: Box<Effect> },
     /// Register the current session in the active-sessions crash-recovery
     /// registry (`~/.grow/active_sessions.json`).
     RegisterActiveSession {
@@ -1973,18 +1986,46 @@ impl Effect {
     /// Every effect which starts the ACP prompt RPC lifecycle. Keeping this
     /// classification beside the enum prevents local-draft ownership transfer
     /// from drifting when text and structured-block sends evolve separately.
-    pub(crate) fn prompt_rpc_identity(&self) -> Option<(AgentId, &acp::SessionId)> {
+    pub(crate) fn prompt_rpc_identity(
+        &self,
+    ) -> Option<(AgentId, &acp::SessionId, &str, Option<&str>)> {
         match self {
             Self::SendPrompt {
                 agent_id,
                 session_id,
+                prompt_id,
                 ..
             }
             | Self::SendPromptBlocks {
                 agent_id,
                 session_id,
+                prompt_id,
                 ..
-            } => Some((*agent_id, session_id)),
+            } => Some((*agent_id, session_id, prompt_id, None)),
+            Self::SendInterject {
+                agent_id,
+                session_id,
+                expected_turn_id,
+                interjection_id,
+                ..
+            } => Some((
+                *agent_id,
+                session_id,
+                interjection_id,
+                Some(expected_turn_id.as_str()),
+            )),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn checkpoint_fallback(&self) -> Option<(String, bool)> {
+        match self {
+            Self::SendInterject {
+                text,
+                images,
+                blocks,
+                ..
+            } => Some((text.clone(), !images.is_empty() || blocks.is_some())),
             _ => None,
         }
     }
@@ -2015,6 +2056,15 @@ pub enum DoctorPlanningOutcome {
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum PromptStatusWire {
     Unknown,
+    Absent,
+    TimedOut,
+    Settling,
+    Unavailable {
+        reason: String,
+    },
+    InvalidEvidence {
+        reason: String,
+    },
     Queued {
         position: usize,
         queue_version: u64,
@@ -2026,6 +2076,34 @@ pub enum PromptStatusWire {
         stop_reason: String,
         agent_result: Option<String>,
     },
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum InputAdmissionStatusWire {
+    UnknownUnconfirmed,
+    Submitted,
+    Allowed {
+        route: chat_state::InputRoute,
+    },
+    Blocked {
+        reason: chat_state::InputBlockReason,
+    },
+    Consumed {
+        route: chat_state::InputRoute,
+    },
+    Handled,
+    Dismissed {
+        reason: chat_state::InputDismissReason,
+    },
+    Unavailable {
+        reason: String,
+    },
+    TimedOut,
+    InvalidEvidence {
+        reason: String,
+    },
+    Absent,
 }
 
 /// Correlation outcome returned by a Shell control RPC. Committed state and
@@ -2090,8 +2168,32 @@ pub enum TaskResult {
     },
     PromptStatusResolved {
         agent_id: AgentId,
-        prompt_id: String,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
+        query_generation: u64,
+        prompt_id: Option<String>,
+        response_session_id: Option<String>,
+        response_control_epoch: Option<String>,
+        observation_source: Option<String>,
         status: Result<PromptStatusWire, String>,
+    },
+    InputAdmissionStatusResolved {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
+        prompt_id: String,
+        response_session_id: Option<String>,
+        response_prompt_id: Option<String>,
+        response_source: Option<String>,
+        status: Result<InputAdmissionStatusWire, String>,
+    },
+    InputIntentCheckpointed {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
+        prompt_id: String,
+        send: Box<Effect>,
+        result: Result<(), String>,
     },
     QueueControlResolved {
         agent_id: AgentId,
@@ -2567,6 +2669,8 @@ pub enum TaskResult {
     InterjectFailed {
         agent_id: AgentId,
         error: String,
+        expected_turn_id: String,
+        interjection_id: String,
         text: String,
         blocks: Option<Vec<agent_client_protocol::schema::v1::ContentBlock>>,
         images: Vec<crate::prompt_images::PastedImage>,

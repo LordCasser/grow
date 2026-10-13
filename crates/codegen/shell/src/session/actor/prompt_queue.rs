@@ -11,6 +11,34 @@ pub(super) struct RunningPromptDisplay {
 }
 
 impl SessionActor {
+    fn refresh_runtime_prompt_observation(
+        &self,
+        state: &AdmissionState,
+        running: Option<&RunningPromptDisplay>,
+    ) {
+        let active = state
+            .foreground
+            .regular()
+            .map(|task| (task.prompt_id.clone(), task.turn_start_ms))
+            .or_else(|| {
+                running.map(|display| {
+                    (
+                        display.id.clone(),
+                        chrono::Utc::now().timestamp_millis().max(0) as u64,
+                    )
+                })
+            });
+        let queue = state
+            .pending_inputs
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| active.as_ref().is_none_or(|(id, _)| id != &item.prompt_id))
+            .map(|(position, item)| (item.prompt_id.clone(), position))
+            .collect();
+        self.runtime_observation
+            .write()
+            .replace_queue_running(queue, active);
+    }
     pub(super) async fn handle_queue_control(
         &self,
         request: crate::session::prompt_queue::QueueControlRequest,
@@ -143,6 +171,13 @@ impl SessionActor {
         persist_ack: Option<oneshot::Sender<()>>,
     ) {
         tracing::info!("queueing prompt: {prompt_id}");
+        if let Some(gate) = self.tool_context.storage_admission.as_ref()
+            && let Err(reason) = gate.check(self.session_info.id.0.as_ref())
+        {
+            let _ = respond_to.send(Err(acp::Error::internal_error().data(reason)));
+            drop(persist_ack);
+            return;
+        }
         let human = !origin.is_synthetic();
         if let Err(error) = crate::session::input_inbox::validate_image_sizes(
             prompt_blocks.iter().filter_map(|block| match block {
@@ -203,6 +238,7 @@ impl SessionActor {
         let input_ids = if let Some(queue) = queue_meta.as_ref() {
             let payload = crate::session::input_inbox::InputPayload::Prompt {
                 prompt_id: prompt_id.clone(),
+                requested_route: crate::session::input_inbox::InputRequestRoute::Fifo,
                 prompt_blocks: prompt_blocks.clone(),
                 client_identifier: client_identifier.clone(),
                 screen_mode: screen_mode.clone(),
@@ -233,6 +269,13 @@ impl SessionActor {
                     return;
                 }
             };
+            if admitted.replayed {
+                if let Some(ack) = persist_ack {
+                    let _ = ack.send(());
+                }
+                Self::respond_removed_prompt(respond_to);
+                return;
+            }
             vec![admitted.input_id]
         } else {
             Vec::new()
@@ -492,6 +535,7 @@ impl SessionActor {
         state: &AdmissionState,
         running: Option<RunningPromptDisplay>,
     ) {
+        self.refresh_runtime_prompt_observation(state, running.as_ref());
         let running_id = running.as_ref().map(|r| r.id.clone());
         // Exclude the running/promoting row from `entries` (same as when
         // `running_task` is set).
@@ -851,8 +895,10 @@ impl SessionActor {
             .queue_meta
             .as_ref()
             .expect("edited input remains queued");
+        let input_prompt_id = format!("{}:edit:{}", replacement.prompt_id, queue.version + 1);
         let payload = crate::session::input_inbox::InputPayload::Prompt {
-            prompt_id: replacement.prompt_id.clone(),
+            prompt_id: input_prompt_id.clone(),
+            requested_route: crate::session::input_inbox::InputRequestRoute::Fifo,
             prompt_blocks: replacement.prompt_blocks.clone(),
             client_identifier: replacement.client_identifier.clone(),
             screen_mode: replacement.screen_mode.clone(),
@@ -870,7 +916,7 @@ impl SessionActor {
                     chat_state::InputIntent::Prompt
                 },
                 payload,
-                Some(replacement.prompt_id.clone()),
+                Some(input_prompt_id),
                 chat_state::InputRoute::Fifo,
                 snapshot.10.clone(),
             )

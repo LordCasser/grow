@@ -10,7 +10,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::commands::{
     ChatStateCommand, ConditionalToolResultOutcome, ImageProjectionReport, PruneError, PruneReport,
-    RepairHistoryError, TimelineWriteError,
+    RepairHistoryError, SubmitInputResult, TimelineWriteError,
 };
 use crate::types::{
     AutoCompactTrigger, ChatStateSnapshot, ConversationCounts, Credentials, NotificationMeta,
@@ -24,6 +24,16 @@ use crate::{TimelineEventKind, TrajectorySnapshot};
 pub struct ChatStateHandle {
     cmd_tx: mpsc::UnboundedSender<ChatStateCommand>,
     _lifetime: std::sync::Arc<HandleLifetime>,
+    pub(crate) pending_commit: std::sync::Arc<std::sync::Mutex<Option<PendingTimelineCommit>>>,
+}
+
+/// Immutable write identity retained even after an actor loses its ACK.
+/// A readable event alone is not proof of a successful durability barrier.
+#[derive(Debug, Clone)]
+pub struct PendingTimelineCommit {
+    pub event: crate::TimelineEvent,
+    pub error_kind: Option<std::io::ErrorKind>,
+    pub acknowledgement_lost: bool,
 }
 
 struct HandleLifetime {
@@ -45,6 +55,7 @@ impl ChatStateHandle {
         Self {
             cmd_tx,
             _lifetime: std::sync::Arc::new(HandleLifetime { cancellation_token }),
+            pending_commit: Default::default(),
         }
     }
 
@@ -60,6 +71,13 @@ impl ChatStateHandle {
     /// sequence number.
     pub fn is_closed(&self) -> bool {
         self.cmd_tx.is_closed()
+    }
+
+    pub fn pending_timeline_commit(&self) -> Option<PendingTimelineCommit> {
+        self.pending_commit
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     // ═══ Fire-and-forget mutations ═══
@@ -79,8 +97,30 @@ impl ChatStateHandle {
         &self,
         kind: TimelineEventKind,
     ) -> Result<crate::TimelineEvent, TimelineWriteError> {
+        self.record_timeline_event_durably_with_deadline(kind, None)
+            .await
+    }
+
+    pub async fn record_timeline_event_durably_before(
+        &self,
+        kind: TimelineEventKind,
+        deadline: tokio::time::Instant,
+    ) -> Result<crate::TimelineEvent, TimelineWriteError> {
+        self.record_timeline_event_durably_with_deadline(kind, Some(deadline))
+            .await
+    }
+
+    async fn record_timeline_event_durably_with_deadline(
+        &self,
+        kind: TimelineEventKind,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<crate::TimelineEvent, TimelineWriteError> {
         self.query("RecordTimelineEventDurably", |reply| {
-            ChatStateCommand::RecordTimelineEventDurably { kind, reply }
+            ChatStateCommand::RecordTimelineEventDurably {
+                kind,
+                deadline,
+                reply,
+            }
         })
         .await
         .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
@@ -93,12 +133,49 @@ impl ChatStateHandle {
         source_version: crate::NotificationSourceVersion,
         payload_ref: crate::NotificationPayloadRef,
     ) -> Result<crate::TimelineEvent, TimelineWriteError> {
+        self.receive_notification_durably_with_deadline(
+            owner_session_id,
+            source,
+            source_version,
+            payload_ref,
+            None,
+        )
+        .await
+    }
+
+    pub async fn receive_notification_durably_before(
+        &self,
+        owner_session_id: String,
+        source: crate::NotificationSource,
+        source_version: crate::NotificationSourceVersion,
+        payload_ref: crate::NotificationPayloadRef,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<crate::TimelineEvent, TimelineWriteError> {
+        self.receive_notification_durably_with_deadline(
+            owner_session_id,
+            source,
+            source_version,
+            payload_ref,
+            deadline,
+        )
+        .await
+    }
+
+    async fn receive_notification_durably_with_deadline(
+        &self,
+        owner_session_id: String,
+        source: crate::NotificationSource,
+        source_version: crate::NotificationSourceVersion,
+        payload_ref: crate::NotificationPayloadRef,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<crate::TimelineEvent, TimelineWriteError> {
         self.query("ReceiveNotificationDurably", |reply| {
             ChatStateCommand::ReceiveNotificationDurably {
                 owner_session_id,
                 source,
                 source_version,
                 payload_ref,
+                deadline,
                 reply,
             }
         })
@@ -111,7 +188,7 @@ impl ChatStateHandle {
         input_id: String,
         intent: crate::InputIntent,
         payload_ref: crate::InputPayloadRef,
-    ) -> Result<crate::TimelineEvent, TimelineWriteError> {
+    ) -> Result<SubmitInputResult, TimelineWriteError> {
         self.query("SubmitInputDurably", |reply| {
             ChatStateCommand::SubmitInputDurably {
                 input_id,
@@ -367,12 +444,49 @@ impl ChatStateHandle {
         attribute_to_prompt: bool,
         incomplete: bool,
     ) -> Result<bool, TimelineWriteError> {
+        self.record_subagent_usage_with_deadline(
+            subagent_id,
+            by_model,
+            attribute_to_prompt,
+            incomplete,
+            None,
+        )
+        .await
+    }
+
+    pub async fn record_subagent_usage_before(
+        &self,
+        subagent_id: String,
+        by_model: Vec<(String, crate::usage::UsageTotals)>,
+        attribute_to_prompt: bool,
+        incomplete: bool,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<bool, TimelineWriteError> {
+        self.record_subagent_usage_with_deadline(
+            subagent_id,
+            by_model,
+            attribute_to_prompt,
+            incomplete,
+            deadline,
+        )
+        .await
+    }
+
+    async fn record_subagent_usage_with_deadline(
+        &self,
+        subagent_id: String,
+        by_model: Vec<(String, crate::usage::UsageTotals)>,
+        attribute_to_prompt: bool,
+        incomplete: bool,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<bool, TimelineWriteError> {
         self.query("RecordSubagentUsage", |reply| {
             ChatStateCommand::RecordSubagentUsage {
                 subagent_id,
                 by_model,
                 attribute_to_prompt,
                 incomplete,
+                deadline,
                 reply,
             }
         })

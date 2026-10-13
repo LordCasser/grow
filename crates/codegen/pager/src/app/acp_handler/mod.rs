@@ -343,6 +343,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                                 agent.session.current_prompt_id.as_ref() == Some(prompt_id)
                             })
                         {
+                            agent.session.clear_prompt_status_observation();
                             agent.session.last_prompt_event_at = Some(observed_at);
                         }
                         let items: Vec<_> = plan
@@ -401,6 +402,12 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             .flatten();
                         if !meta.is_replay {
                             agent.session.last_prompt_event_at = Some(observed_at);
+                            if meta.prompt_id.is_some() {
+                                // A newly accepted prompt event supersedes an
+                                // in-flight read-only observation. Clearing the
+                                // query identity makes its eventual reply stale.
+                                agent.session.clear_prompt_status_observation();
+                            }
                         }
                         // Adopt a mismatching `promptId` so subsequent chunks for
                         // the same turn match and render — but ONLY for a viewer

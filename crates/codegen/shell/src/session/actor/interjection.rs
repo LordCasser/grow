@@ -56,6 +56,7 @@ impl SessionActor {
         let prompt_id = interjection_id
             .clone()
             .unwrap_or_else(|| format!("steer-{}", uuid::Uuid::now_v7()));
+        let _admission_guard = self.input_admission_gate.lock().await;
         // Capture the server-minted durable identity before the potentially
         // slow Hook. The client prompt id is presentation identity and may be
         // reused; it cannot by itself prevent an ABA target replacement.
@@ -74,6 +75,9 @@ impl SessionActor {
         blocks.extend(images.iter().cloned().map(acp::ContentBlock::Image));
         let payload = crate::session::input_inbox::InputPayload::Prompt {
             prompt_id: prompt_id.clone(),
+            requested_route: crate::session::input_inbox::InputRequestRoute::Steer {
+                expected_turn_id: expected_turn_id.to_owned(),
+            },
             prompt_blocks: blocks,
             client_identifier: None,
             screen_mode: None,
@@ -83,13 +87,34 @@ impl SessionActor {
             turn_kind: crate::session::TurnKind::User,
             queue: None,
         };
-        let (input_id, hook_decision) = self
+        let attempt = self
             .run_human_input_admission_hook(
                 chat_state::InputIntent::Steer,
                 payload,
                 Some(prompt_id.clone()),
             )
             .await?;
+        let (input_id, hook_decision) = match attempt {
+            super::input_admission::InputAdmissionAttempt::New { input_id, decision } => {
+                (input_id, decision)
+            }
+            super::input_admission::InputAdmissionAttempt::Existing { input_id, state } => {
+                return match state {
+                    super::input_admission::ExistingInputState::Allowed => Ok(()),
+                    super::input_admission::ExistingInputState::Blocked(reason) => {
+                        Err(super::input_admission::input_block_reason_message(reason))
+                    }
+                    super::input_admission::ExistingInputState::Submitted => Err(format!(
+                        "input admission remains unresolved for prompt {prompt_id} (input {input_id})"
+                    )),
+                    super::input_admission::ExistingInputState::Consumed
+                    | super::input_admission::ExistingInputState::Handled
+                    | super::input_admission::ExistingInputState::Dismissed => Err(format!(
+                        "input is already terminal for prompt {prompt_id} (input {input_id})"
+                    )),
+                };
+            }
+        };
         if !matches!(&hook_decision, chat_state::InputAdmissionDecision::Allow) {
             return self
                 .resolve_human_input_admission(input_id, hook_decision, None, Vec::new())

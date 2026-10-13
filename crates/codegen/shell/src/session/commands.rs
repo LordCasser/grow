@@ -393,6 +393,7 @@ pub enum SessionCommand {
         source: chat_state::NotificationSource,
         source_version: chat_state::NotificationSourceVersion,
         body: String,
+        deadline: Option<tokio::time::Instant>,
         /// Optional producer barrier. Terminal producers use it so their
         /// lifecycle cannot advance past notification delivery until the
         /// durable inbox owns the corresponding exactly-once receipt.
@@ -556,6 +557,7 @@ pub enum SessionCommand {
         parent_prompt_id: Option<String>,
         /// Nested subagent bill may under-count.
         incomplete: bool,
+        deadline: Option<tokio::time::Instant>,
         respond_to: oneshot::Sender<()>,
     },
     /// Sticky incomplete for a parent prompt (or the live pin when `None`). Acks when marked.

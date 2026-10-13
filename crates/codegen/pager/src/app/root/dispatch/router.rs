@@ -315,9 +315,18 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
             dispatch_send_prompt_inner(app, text, false, false, false)
         }
         Action::Interject { text, images } => dispatch_interject(app, text, images),
-        Action::SteerPrompt { text, images } => {
-            super::interject::dispatch_steer_prompt(app, text, images)
-        }
+        Action::SteerPrompt {
+            text,
+            images,
+            expected_turn_id,
+            prompt_id,
+        } => super::interject::dispatch_steer_prompt_with_identity(
+            app,
+            text,
+            images,
+            expected_turn_id,
+            prompt_id,
+        ),
         Action::SendBashCommand(cmd) => dispatch_send_bash_command(app, cmd),
         Action::ShowUndoTip => dispatch_show_undo_tip(app),
         Action::ShowPlanNudge => dispatch_show_plan_nudge(app),

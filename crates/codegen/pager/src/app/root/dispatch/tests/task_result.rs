@@ -1305,7 +1305,13 @@ fn running_status_shims_only_while_submitting() {
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptStatusResolved {
             agent_id: id,
-            prompt_id: "pid-run".into(),
+            session_id: acp::SessionId::new("test-session"),
+            binding_epoch: 0,
+            query_generation: 1,
+            prompt_id: Some("pid-run".into()),
+            response_session_id: Some("test-session".into()),
+            response_control_epoch: Some("test-epoch".into()),
+            observation_source: Some("runtime".into()),
             status: Ok(crate::app::actions::PromptStatusWire::Running {
                 turn_start_ms: chrono::Utc::now().timestamp_millis() as u64,
             }),
@@ -1348,7 +1354,13 @@ fn running_status_skips_shim_when_turn_already_running() {
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptStatusResolved {
             agent_id: id,
-            prompt_id: "pid-run".into(),
+            session_id: acp::SessionId::new("test-session"),
+            binding_epoch: 0,
+            query_generation: 1,
+            prompt_id: Some("pid-run".into()),
+            response_session_id: Some("test-session".into()),
+            response_control_epoch: Some("test-epoch".into()),
+            observation_source: Some("runtime".into()),
             status: Ok(crate::app::actions::PromptStatusWire::Running {
                 turn_start_ms: chrono::Utc::now().timestamp_millis() as u64,
             }),
@@ -1366,6 +1378,144 @@ fn running_status_skips_shim_when_turn_already_running() {
     assert!(agent.session.turn_start_ms.is_some());
     assert!(agent.session.turn_started_at.is_some());
     assert!(!agent.session.prompt_status_query_matches("pid-run"));
+}
+
+#[test]
+fn prompt_status_observations_project_waiting_copy_without_finalizing() {
+    use crate::acp::tracker::{TurnActivity, WaitingReason};
+    use crate::app::actions::PromptStatusWire;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("pid-observe".into());
+        agent
+            .session
+            .set_compaction_activity(Some(TurnActivity::Responding));
+    }
+
+    for (status, expected) in [
+        (PromptStatusWire::Unknown, WaitingReason::ObservationUnknown),
+        (PromptStatusWire::Settling, WaitingReason::Settling),
+    ] {
+        let generation = app.agents[&id]
+            .session
+            .begin_prompt_status_query("pid-observe");
+        let _ = dispatch(
+            Action::TaskComplete(TaskResult::PromptStatusResolved {
+                agent_id: id,
+                session_id: acp::SessionId::new("test-session"),
+                binding_epoch: 0,
+                query_generation: generation,
+                prompt_id: Some("pid-observe".into()),
+                response_session_id: Some("test-session".into()),
+                response_control_epoch: Some("test-epoch".into()),
+                observation_source: Some("runtime".into()),
+                status: Ok(status),
+            }),
+            &mut app,
+        );
+
+        let agent = &app.agents[&id];
+        assert!(matches!(agent.session.state, AgentState::TurnRunning));
+        assert_eq!(
+            agent.session.prompt_status_waiting_reason,
+            Some(expected.clone())
+        );
+        assert_eq!(
+            agent.resolve_turn_activity(),
+            Some(TurnActivity::Waiting(expected))
+        );
+        assert_eq!(
+            agent.session.turn_activity(),
+            Some(TurnActivity::Responding),
+            "status observation must not overwrite tracker facts"
+        );
+    }
+
+    // Session lifecycle terminal evidence has no prompt identity, so it may
+    // describe delivery as pending but must not finalize the foreground turn.
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.current_prompt_id = None;
+    }
+    let generation = app.agents[&id].session.begin_lifecycle_status_query();
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptStatusResolved {
+            agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            binding_epoch: 0,
+            query_generation: generation,
+            prompt_id: None,
+            response_session_id: Some("test-session".into()),
+            response_control_epoch: Some("test-epoch".into()),
+            observation_source: Some("runtime".into()),
+            status: Ok(PromptStatusWire::Terminal {
+                stop_reason: "completed".into(),
+                agent_result: None,
+            }),
+        }),
+        &mut app,
+    );
+    let agent = &app.agents[&id];
+    assert!(matches!(agent.session.state, AgentState::TurnRunning));
+    assert_eq!(
+        agent.session.prompt_status_waiting_reason,
+        Some(WaitingReason::DeliveryPending)
+    );
+    assert_eq!(
+        agent.resolve_turn_activity(),
+        Some(TurnActivity::Waiting(WaitingReason::DeliveryPending))
+    );
+}
+
+#[test]
+fn confirmed_running_or_queued_prompt_clears_observation_copy() {
+    use crate::acp::tracker::WaitingReason;
+    use crate::app::actions::PromptStatusWire;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    for status in [
+        PromptStatusWire::Running {
+            turn_start_ms: chrono::Utc::now().timestamp_millis() as u64,
+        },
+        PromptStatusWire::Queued {
+            position: 1,
+            queue_version: 1,
+        },
+    ] {
+        {
+            let agent = app.agents.get_mut(&id).unwrap();
+            agent.session.state = AgentState::TurnRunning;
+            agent.session.current_prompt_id = Some("pid-confirmed".into());
+            agent.session.prompt_status_waiting_reason = Some(WaitingReason::ObservationUnknown);
+        }
+        let generation = app.agents[&id]
+            .session
+            .begin_prompt_status_query("pid-confirmed");
+        let _ = dispatch(
+            Action::TaskComplete(TaskResult::PromptStatusResolved {
+                agent_id: id,
+                session_id: acp::SessionId::new("test-session"),
+                binding_epoch: 0,
+                query_generation: generation,
+                prompt_id: Some("pid-confirmed".into()),
+                response_session_id: Some("test-session".into()),
+                response_control_epoch: Some("test-epoch".into()),
+                observation_source: Some("runtime".into()),
+                status: Ok(status),
+            }),
+            &mut app,
+        );
+        assert_eq!(app.agents[&id].session.prompt_status_waiting_reason, None);
+        assert!(matches!(
+            app.agents[&id].session.state,
+            AgentState::TurnRunning
+        ));
+    }
 }
 
 #[test]

@@ -1031,7 +1031,7 @@ pub fn extract_last_response_type(agent: &AgentView) -> String {
     // "Response" once the agent has moved past its last message into tool
     // execution or waiting for results.
     if running {
-        match agent.session.turn_activity() {
+        match agent.resolve_turn_activity() {
             Some(TurnActivity::Thinking) => return "Thinking".to_string(),
             Some(TurnActivity::Responding) => return "Response".to_string(),
             Some(TurnActivity::AutoCompacting) => return "Compacting".to_string(),

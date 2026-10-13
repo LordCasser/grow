@@ -75,7 +75,7 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
                         child_session_id: request.id,
                         ..Default::default()
                     },
-                    completion_data: Default::default(),
+                    completion_data: crate::agent::subagent::ShellCompletionData::not_admitted(),
                 };
             };
             let delegation_handle = match security_parent {
@@ -107,6 +107,42 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
             )
             .await
         })
+    }
+    fn reconcile(
+        &self,
+        request: tools::implementations::grow_build::task::types::SubagentRequest,
+        mut output: tools::implementations::grow_build::task::coordinator::ChildRunOutput<
+            Self::CompletionData,
+        >,
+        deadline: tokio::time::Instant,
+    ) -> Result<
+        Self::RunFuture,
+        tools::implementations::grow_build::task::coordinator::ChildRunOutput<Self::CompletionData>,
+    > {
+        let agent_ref = self.agent_ref.clone();
+        Ok(Box::pin(async move {
+            let this = agent_ref.get();
+            if let Some(parent) =
+                this.get_session_handle(&acp::SessionId::new(request.parent_session_id.clone()))
+            {
+                crate::agent::subagent::refresh_finalization_parent(
+                    &mut output.completion_data,
+                    &parent,
+                    this.storage_admission.clone(),
+                );
+            }
+            crate::agent::subagent::reconcile_shell_child(request, output, deadline).await
+        }))
+    }
+    fn completion_after_panic(
+        &self,
+        request: &tools::implementations::grow_build::task::types::SubagentRequest,
+        control: Option<&Self::Control>,
+        execution_outcome: Option<&str>,
+    ) -> Self::CompletionData {
+        control
+            .map(|control| control.completion_after_panic(request, execution_outcome))
+            .unwrap_or_default()
     }
     fn validate_type(
         &self,
@@ -142,32 +178,62 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
     fn terminal_committed(&self, completion_data: &Self::CompletionData) -> bool {
         completion_data.terminal_committed()
     }
-    fn load_persisted_output(
+    fn finalization_error(&self, completion_data: &Self::CompletionData) -> Option<String> {
+        completion_data.finalization_error()
+    }
+    fn load_persisted_output_async(
         &self,
-        request: &tools::implementations::grow_build::task::types::SubagentRequest,
-        child_session_id: &str,
-        reference: &str,
-    ) -> Option<std::sync::Arc<str>> {
-        if request.id != child_session_id {
-            return None;
-        }
-        let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
-        let opened = storage.open_session_by_id(child_session_id).ok()??;
-        let summary = opened.summary();
-        if summary.parent_session_id.as_deref() != Some(request.parent_session_id.as_str())
-            || !summary
-                .session_kind
-                .as_deref()
-                .is_some_and(|kind| kind.starts_with("subagent"))
-        {
-            return None;
-        }
-        crate::agent::subagent::load_subagent_output_ref_from_directory(
-            opened.directory(),
-            reference,
-        )
-        .ok()
-        .map(std::sync::Arc::from)
+        request: tools::implementations::grow_build::task::types::SubagentRequest,
+        child_session_id: String,
+        reference: String,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> tools::implementations::grow_build::task::coordinator::SendBoxFuture<
+        Result<
+            Option<std::sync::Arc<str>>,
+            tools::implementations::grow_build::task::types::SubagentObservationError,
+        >,
+    > {
+        Box::pin(async move {
+            tokio::task::spawn_blocking(move || {
+                let _permit = permit;
+                if request.id != child_session_id {
+                    return Err(
+                        tools::implementations::grow_build::task::types::SubagentObservationError::InvalidEvidence,
+                    );
+                }
+                let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
+                let opened = storage
+                    .open_session_by_id(&child_session_id)
+                    .map_err(|_| {
+                        tools::implementations::grow_build::task::types::SubagentObservationError::InvalidEvidence
+                    })?
+                    .ok_or(
+                        tools::implementations::grow_build::task::types::SubagentObservationError::InvalidEvidence,
+                    )?;
+                let summary = opened.summary();
+                if summary.parent_session_id.as_deref() != Some(request.parent_session_id.as_str())
+                    || !summary
+                        .session_kind
+                        .as_deref()
+                        .is_some_and(|kind| kind.starts_with("subagent"))
+                {
+                    return Err(
+                        tools::implementations::grow_build::task::types::SubagentObservationError::InvalidEvidence,
+                    );
+                }
+                let output = crate::agent::subagent::load_subagent_output_ref_from_directory(
+                    opened.directory(),
+                    &reference,
+                )
+                .ok()
+                .map(std::sync::Arc::from);
+                Ok(output)
+            })
+            .await
+            .map_err(|_| {
+                tools::implementations::grow_build::task::types::SubagentObservationError::Unavailable
+            })?
+        })
     }
 }
 
@@ -190,11 +256,23 @@ fn missing_delegation_parent_output(
             child_session_id: request.id,
             ..Default::default()
         },
-        completion_data: Default::default(),
+        completion_data: crate::agent::subagent::ShellCompletionData::not_admitted(),
     }
 }
 
 impl MvpAgent {
+    pub(crate) fn is_live_subagent_session(&self, session_id: &acp::SessionId) -> bool {
+        self.active_child_sessions.borrow().contains_key(session_id)
+    }
+
+    pub(crate) fn authorized_subagent_observer(
+        &self,
+    ) -> tools::implementations::grow_build::task::backend::ChannelBackend {
+        tools::implementations::grow_build::task::backend::ChannelBackend::for_authorized_observer(
+            self.subagent_event_tx.clone(),
+        )
+    }
+
     /// Start the shared subagent coordinator actor.
     ///
     /// Takes `subagent_event_rx` once and `spawn_local`s one
@@ -285,6 +363,14 @@ impl MvpAgent {
         parent_session_id: &str,
     ) -> Option<crate::agent::subagent::SubagentSpawnContext> {
         let parent_sid = acp::SessionId::new(parent_session_id);
+        if self.storage_admission.check(parent_session_id).is_err() {
+            return None;
+        }
+        let parent_control_epoch = self
+            .sessions
+            .borrow()
+            .get(&parent_sid)
+            .map(|handle| handle.runtime_observation.read().control_epoch.clone())?;
         let parent_route = self
             .sessions
             .borrow()
@@ -415,6 +501,8 @@ impl MvpAgent {
             )
         };
         Some(crate::agent::subagent::SubagentSpawnContext {
+            storage_admission: self.storage_admission.clone(),
+            parent_control_epoch,
             sampling_output_delivery: self
                 .sessions
                 .borrow()

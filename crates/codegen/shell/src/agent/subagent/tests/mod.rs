@@ -868,13 +868,13 @@ fn persist_gate_only_persists_successful_nonempty_outputs() {
         success: true,
         ..Default::default()
     };
-    assert_eq!(persist_subagent_output(&session, &empty), Ok(None));
+    assert!(persist_subagent_output(&session, &empty).unwrap().is_none());
     let failed = SubagentResult {
         success: false,
         output: std::sync::Arc::from("partial"),
         ..Default::default()
     };
-    assert_eq!(persist_subagent_output(&session, &failed), Ok(None));
+    assert!(persist_subagent_output(&session, &failed).unwrap().is_none());
 }
 #[test]
 fn subagent_output_roundtrips_through_immutable_artifact() {
@@ -1004,7 +1004,7 @@ async fn completed_recovery_publishes_artifact_before_exact_child_result() {
         fork_parent_prompt_id: None,
         resumed_from: None,
     };
-    let fallback = result_from_inspection(&spawn, Some(&inspection), 999);
+    let fallback = result_from_inspection(&spawn, Some(&inspection), 999).unwrap();
     let (result_ref, result, output) = ensure_recovered_child_result_in_dir(
         "parent-recovery",
         spawn_seq,
@@ -1326,7 +1326,7 @@ async fn backend_running_inspection_keeps_parent_spawn_open() {
         };
         request
             .respond_to
-            .send(Some(SubagentInspection {
+            .send(Ok(Some(SubagentInspection {
                 snapshot: SubagentSnapshot {
                     subagent_id: inspection_spawn.subagent_id.clone(),
                     description: inspection_spawn.description.clone(),
@@ -1347,7 +1347,7 @@ async fn backend_running_inspection_keeps_parent_spawn_open() {
                 child_session_id: inspection_spawn.child_session_id.clone(),
                 fork_parent_prompt_id: None,
                 resumed_from: None,
-            }))
+            })))
             .unwrap();
     });
     let (gateway, _gateway_rx) = test_gateway_with_receiver();
@@ -1406,7 +1406,7 @@ async fn foreign_backend_inspection_cannot_close_or_fill_a_parent_spawn() {
         );
         request
             .respond_to
-            .send(Some(SubagentInspection {
+            .send(Ok(Some(SubagentInspection {
                 snapshot: SubagentSnapshot {
                     subagent_id: inspection_spawn.subagent_id.clone(),
                     description: inspection_spawn.description.clone(),
@@ -1425,7 +1425,7 @@ async fn foreign_backend_inspection_cannot_close_or_fill_a_parent_spawn() {
                 child_session_id: "different-child".into(),
                 fork_parent_prompt_id: None,
                 resumed_from: None,
-            }))
+            })))
             .unwrap();
     });
     let (gateway, _gateway_rx) = test_gateway_with_receiver();
@@ -1480,7 +1480,7 @@ async fn unavailable_completed_output_keeps_parent_spawn_open() {
         };
         request
             .respond_to
-            .send(Some(SubagentInspection {
+            .send(Ok(Some(SubagentInspection {
                 snapshot: SubagentSnapshot {
                     subagent_id: inspection_spawn.subagent_id.clone(),
                     description: inspection_spawn.description.clone(),
@@ -1499,7 +1499,7 @@ async fn unavailable_completed_output_keeps_parent_spawn_open() {
                 child_session_id: inspection_spawn.child_session_id.clone(),
                 fork_parent_prompt_id: None,
                 resumed_from: None,
-            }))
+            })))
             .unwrap();
     });
     let (gateway, _gateway_rx) = test_gateway_with_receiver();
@@ -1531,7 +1531,7 @@ async fn unavailable_completed_output_keeps_parent_spawn_open() {
 }
 
 #[tokio::test]
-async fn missing_unpublished_child_closes_without_forging_result_ref() {
+async fn missing_unpublished_child_preserves_spawn_without_forging_terminal() {
     let parent_dir = tempfile::tempdir().unwrap();
     let parent_id = format!("parent-missing-{}", uuid::Uuid::now_v7());
     let spawn = recovery_spawn(
@@ -1550,7 +1550,7 @@ async fn missing_unpublished_child_closes_without_forging_result_ref() {
         else {
             panic!("expected backend inspection");
         };
-        request.respond_to.send(None).unwrap();
+        request.respond_to.send(Ok(None)).unwrap();
     });
     let (gateway, _gateway_rx) = test_gateway_with_receiver();
     reconcile_orphaned_subagents_with_backend(
@@ -1577,10 +1577,11 @@ async fn missing_unpublished_child_closes_without_forging_result_ref() {
                 ..
             }) => Some(terminal),
             _ => None,
-        })
-        .expect("missing child should close the parent spawn");
-    assert_eq!(terminal.outcome, chat_state::SubagentOutcome::Cancelled);
-    assert!(terminal.result_ref.is_none());
+        });
+    assert!(terminal.is_none(), "a missing child entity cannot prove a cancelled execution or supply its result identity");
+    let events = parent.timeline_events().await.unwrap();
+    assert!(events.iter().any(|event| matches!(&event.kind,
+        chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(found)) if found.subagent_id == spawn.subagent_id)));
 }
 #[cfg(unix)]
 #[test]
@@ -2351,21 +2352,19 @@ async fn committed_cancelled_completion_presents_one_finish() {
 async fn run_promote_cancel_with_worktree(
     worktree: &Path,
     worktree_freshly_created: bool,
-) {
-    let result = cancel_pending_shell_child(
+) -> SubagentResult {
+    cancel_pending_shell_child(
         "worktree-cancel",
         &acp::SessionId::new("worktree-cancel"),
         Some(worktree),
         worktree_freshly_created,
         42,
     )
-    .await;
-    assert!(result.cancelled);
+    .await
 }
-/// A pending cancel removes a freshly-created worktree but preserves a
-/// resumed child worktree owned by its source.
+/// A pending cancel removes only a fresh pristine worktree and reports retained paths.
 #[tokio::test]
-async fn cancel_pending_at_promote_removes_fresh_worktree_preserves_resumed() {
+async fn cancel_pending_at_promote_removes_pristine_and_preserves_changed_or_resumed_worktrees() {
     test_utils::require_git!();
     use test_utils::git::{git_commit_all, init_git_repo};
     let temp = tempfile::TempDir::new().unwrap();
@@ -2380,11 +2379,25 @@ async fn cancel_pending_at_promote_removes_fresh_worktree_preserves_resumed() {
         .create()
         .unwrap();
     assert!(fresh.exists());
-    run_promote_cancel_with_worktree(&fresh, true).await;
+    let fresh_result = run_promote_cancel_with_worktree(&fresh, true).await;
+    assert!(fresh_result.cancelled);
+    assert!(fresh_result.worktree_path.is_none());
     assert!(
             !fresh.exists(),
             "freshly-created worktree must be removed on pending-kill"
         );
+
+    let dirty = temp.path().join("subagent-dirty");
+    fast_worktree::WorktreeBuilder::new(&repo, &dirty)
+        .standalone(true)
+        .create()
+        .unwrap();
+    std::fs::write(dirty.join("untracked.txt"), "user change").unwrap();
+    let dirty_result = run_promote_cancel_with_worktree(&dirty, true).await;
+    assert!(dirty.exists(), "a fresh worktree with an untracked change is retained");
+    assert_eq!(dirty_result.worktree_path.as_deref(), Some(dirty.to_str().unwrap()));
+    assert_eq!(std::fs::read_to_string(dirty.join("untracked.txt")).unwrap(), "user change");
+
     let resumed = temp.path().join("subagent-resumed");
     fast_worktree::WorktreeBuilder::new(&repo, &resumed)
         .standalone(true)
@@ -2392,7 +2405,8 @@ async fn cancel_pending_at_promote_removes_fresh_worktree_preserves_resumed() {
         .unwrap();
     std::fs::write(resumed.join("tracked.txt"), "source edit").unwrap();
     assert!(resumed.exists());
-    run_promote_cancel_with_worktree(&resumed, false).await;
+    let resumed_result = run_promote_cancel_with_worktree(&resumed, false).await;
+    assert_eq!(resumed_result.worktree_path.as_deref(), Some(resumed.to_str().unwrap()));
     assert!(
             resumed.exists(),
             "resumed subagent's reused worktree must be preserved (source owns it)"
@@ -2692,3 +2706,383 @@ fn spawn_test_parent_chat_state(model_slug: &str) -> chat_state::ChatStateHandle
     )
 }
 mod rest;
+
+#[tokio::test(start_paused = true)]
+async fn live_receipt_ack_deadline_does_not_dispatch_a_second_mutation() {
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let delivery = tokio::spawn(async move {
+        admit_subagent_completion_receipt(&tx, "stalled-receipt", &SubagentOwner::Task, "body".into()).await
+    });
+    let SessionCommand::ReceiveNotification { respond_to: Some(ack), deadline: Some(deadline), .. } = rx.recv().await.unwrap() else {
+        panic!("expected deadline-bound receipt");
+    };
+    assert!(deadline <= tokio::time::Instant::now() + std::time::Duration::from_secs(30));
+    tokio::time::advance(std::time::Duration::from_secs(5)).await;
+    assert!(!delivery.await.unwrap());
+    assert!(rx.try_recv().is_err(), "a live ambiguous operation cannot be retried");
+    assert!(ack.is_closed());
+}
+
+#[tokio::test]
+async fn recovery_refuses_live_child_writer_then_preserves_interrupted_provenance() {
+    let dir = tempfile::tempdir().unwrap();
+    let spawn = recovery_spawn("sa-live-lease", "child-live-lease");
+    let seq = chat_state::EventSeq::new(7);
+    write_recovery_child(dir.path(), "parent-recovery", seq, &spawn);
+    let owner = crate::session::storage::jsonl::JsonlStorageAdapter::with_explicit_session_dir(dir.path().to_path_buf());
+    let info = SessionInfo { id: acp::SessionId::new(spawn.child_session_id.clone()), cwd: spawn.child_cwd.clone() };
+    owner.claim_recovery_writer(&info).unwrap();
+    let before = std::fs::read(dir.path().join("timeline.jsonl")).unwrap();
+    let fallback = result_from_inspection(&spawn, None, 99_000).unwrap();
+    assert!(ensure_recovered_child_result_in_dir("parent-recovery", seq, &spawn, fallback.clone(), dir.path()).await.is_err());
+    assert_eq!(std::fs::read(dir.path().join("timeline.jsonl")).unwrap(), before);
+    drop(owner);
+    let (_, result, output) = ensure_recovered_child_result_in_dir("parent-recovery", seq, &spawn, fallback, dir.path()).await.unwrap();
+    assert_eq!(result.outcome, chat_state::SubagentOutcome::Failed);
+    assert_eq!(result.duration_ms, 0, "offline duration is not execution time");
+    assert!(result.error.as_deref().unwrap().contains("interrupted"));
+    assert!(output.is_none());
+}
+
+#[tokio::test]
+async fn recovery_result_survives_independent_worktree_gc_and_delivers_once() {
+    test_utils::require_git!();
+    use test_utils::git::{git_commit_all, init_git_repo};
+
+    async fn admit_and_persist_receipt(
+        parent_id: &str,
+        parent: &chat_state::ChatStateHandle,
+        cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
+        request: &SubagentRequest,
+        result: &SubagentResult,
+        completion: &mut ShellCompletionData,
+    ) -> (String, String) {
+        let (receipt_id, body) = {
+        let admission = admit_completion_receipt_before_result(request, result, completion);
+        tokio::pin!(admission);
+        let SessionCommand::ReceiveNotification {
+            source,
+            source_version,
+            body,
+            respond_to: Some(respond_to),
+            ..
+        } = (tokio::select! {
+            command = cmd_rx.recv() => command.expect("completion receipt command"),
+            () = &mut admission => panic!("completion returned before receipt admission"),
+        })
+        else {
+            panic!("expected a durable completion receipt command");
+        };
+        let receipt = parent
+            .receive_notification_durably(
+                parent_id.to_owned(),
+                source,
+                source_version,
+                chat_state::NotificationPayloadRef {
+                    blake3: blake3::hash(body.as_bytes()).to_hex().to_string(),
+                    bytes: body.len() as u64,
+                },
+            )
+            .await
+            .expect("persist completion receipt");
+        let receipt_id = match receipt.kind {
+            chat_state::TimelineEventKind::Notification(
+                chat_state::NotificationEvent::Received { id, .. },
+            ) => id,
+            other => panic!("expected durable receipt, got {other:?}"),
+        };
+        respond_to
+            .send(Ok(receipt_id.clone()))
+            .expect("acknowledge durable receipt");
+        admission.await;
+        (receipt_id, body)
+        };
+        assert!(completion.completion_receipt_admitted);
+        (receipt_id, body)
+    }
+
+    let temp = tempfile::tempdir().unwrap();
+    let parent_id = format!("parent-gc-recovery-{}", uuid::Uuid::now_v7());
+    let child_id = format!("child-gc-recovery-{}", uuid::Uuid::now_v7());
+    let subagent_id = format!("sa-gc-recovery-{}", uuid::Uuid::now_v7());
+    let mut spawn = recovery_spawn(&subagent_id, &child_id);
+    spawn.security_parent_session_id = parent_id.clone();
+    let repo = temp.path().join("repo");
+    std::fs::create_dir(&repo).unwrap();
+    init_git_repo(&repo);
+    std::fs::write(repo.join("tracked.txt"), "base").unwrap();
+    git_commit_all(&repo, "initial");
+    let worktree = temp.path().join("subagent-worktree");
+    fast_worktree::WorktreeBuilder::new(&repo, &worktree)
+        .standalone(true)
+        .create()
+        .unwrap();
+    std::fs::write(worktree.join("user-change.txt"), "preserve this edit").unwrap();
+    spawn.worktree_path = Some(worktree.to_string_lossy().into_owned());
+    spawn.child_cwd = worktree.to_string_lossy().into_owned();
+
+    let worktree_db = fast_worktree::WorktreeDb::open_at(&temp.path().join("worktrees.db"))
+        .unwrap();
+    worktree_db
+        .register(&fast_worktree::WorktreeRecord {
+            id: subagent_id.clone(),
+            path: worktree.clone(),
+            source_repo: repo.clone(),
+            repo_name: "recovery-fixture".into(),
+            kind: fast_worktree::WorktreeKind::Subagent,
+            creation_mode: "standalone".into(),
+            git_ref: Some(format!("refs/grow/subagents/{subagent_id}")),
+            head_commit: None,
+            session_id: Some(parent_id.clone()),
+            creator_pid: None,
+            created_at: 1,
+            last_accessed_at: Some(1),
+            status: fast_worktree::WorktreeStatus::Alive,
+            metadata: None,
+        })
+        .unwrap();
+    let report = fast_worktree::gc_worktrees(
+        &worktree_db,
+        &fast_worktree::GcOptions {
+            max_age_secs: Some(0),
+            max_age_by_kind: [(
+                fast_worktree::WorktreeKind::Subagent,
+                Some(0),
+            )]
+            .into_iter()
+            .collect(),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert_eq!(report.expired_removed, 0);
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("user-change.txt")).unwrap(),
+        "preserve this edit",
+        "independent fast-worktree GC must preserve subagent user changes"
+    );
+
+    let spawn_seq = chat_state::EventSeq::new(1);
+    let child_dir = temp.path().join("child-session");
+    std::fs::create_dir(&child_dir).unwrap();
+    write_recovery_child(&child_dir, &parent_id, spawn_seq, &spawn);
+    let child_info = SessionInfo {
+        id: acp::SessionId::new(child_id.clone()),
+        cwd: spawn.child_cwd.clone(),
+    };
+    let old_writer = crate::session::storage::jsonl::JsonlStorageAdapter::
+        with_explicit_session_dir(child_dir.clone());
+    old_writer.claim_recovery_writer(&child_info).unwrap();
+    let before_recovery = std::fs::read(child_dir.join(crate::session::storage::TIMELINE_FILE))
+        .unwrap();
+    let fallback = RecoveredInspectionResult {
+        event: chat_state::SubagentResultEvent {
+            subagent_id: subagent_id.clone(),
+            outcome: chat_state::SubagentOutcome::Completed,
+            duration_ms: 38,
+            tool_calls: 2,
+            turns: 1,
+            tokens_used: 42,
+            error: None,
+            output_ref: None,
+        },
+        output: Some("completed child output retained across recovery".into()),
+    };
+    assert!(ensure_recovered_child_result_in_dir(
+        &parent_id,
+        spawn_seq,
+        &spawn,
+        fallback.clone(),
+        &child_dir,
+    )
+    .await
+    .is_err());
+    assert_eq!(
+        std::fs::read(child_dir.join(crate::session::storage::TIMELINE_FILE)).unwrap(),
+        before_recovery,
+        "a live legal child writer prevents result publication"
+    );
+    drop(old_writer);
+
+    let (result_ref, original_result, output) = ensure_recovered_child_result_in_dir(
+        &parent_id,
+        spawn_seq,
+        &spawn,
+        fallback.clone(),
+        &child_dir,
+    )
+    .await
+    .expect("replacement writer publishes the recovered canonical result");
+    let original_output = output.expect("recovered output artifact");
+    assert_eq!(original_output, fallback.output.clone().unwrap());
+    let child_directory = crate::session::storage::ContainedDirectory::open(
+        &child_dir,
+        std::path::Path::new(""),
+        "recovered child test session",
+        false,
+    )
+    .unwrap();
+    let terminal = chat_state::SubagentTerminalEvent {
+        subagent_id: subagent_id.clone(),
+        child_session_id: child_id.clone(),
+        outcome: original_result.outcome,
+        duration_ms: original_result.duration_ms,
+        tool_calls: original_result.tool_calls,
+        turns: original_result.turns,
+        tokens_used: original_result.tokens_used,
+        error: original_result.error.clone(),
+        result_ref: Some(result_ref.clone()),
+        snapshot_ref: None,
+    };
+    let finished = finish_from_durable_facts_in_directory(
+        &parent_id,
+        spawn_seq,
+        &spawn,
+        &terminal,
+        &child_directory,
+    )
+    .expect("parent delivery projection validates the exact recovered child result");
+    assert!(matches!(
+        finished,
+        SessionUpdate::SubagentFinished { output: Some(ref text), .. }
+            if text == &original_output
+    ));
+
+    let parent_dir = temp.path().join("parent-session");
+    std::fs::create_dir(&parent_dir).unwrap();
+    let (parent, _persistence) = recovery_parent(&parent_dir, &parent_id, &spawn).await;
+    parent
+        .record_timeline_event_durably(chat_state::TimelineEventKind::Subagent(
+            chat_state::SubagentEvent::Ended(terminal),
+        ))
+        .await
+        .unwrap();
+
+    let mut request = auto_wake_test_request(&subagent_id);
+    request.parent_session_id = parent_id.clone();
+    let result = SubagentResult {
+        success: true,
+        output: std::sync::Arc::from(original_output.clone()),
+        subagent_id: subagent_id.clone(),
+        child_session_id: child_id,
+        tool_calls: original_result.tool_calls,
+        turns: original_result.turns,
+        duration_ms: original_result.duration_ms,
+        tokens_used: original_result.tokens_used,
+        total_tokens_used: original_result.tokens_used,
+        ..Default::default()
+    };
+    let (cmd_tx, mut cmd_rx) = mpsc::unbounded_channel();
+    let mut completion = ShellCompletionData::not_admitted();
+    completion.parent_cmd_tx = Some(cmd_tx);
+    let (receipt_id, body) = admit_and_persist_receipt(
+        &parent_id,
+        &parent,
+        &mut cmd_rx,
+        &request,
+        &result,
+        &mut completion,
+    )
+    .await;
+    assert!(body.contains(&original_output));
+    let after_first_delivery = parent.timeline_events().await.unwrap();
+
+    let (retried_receipt_id, retried_body) = admit_and_persist_receipt(
+        &parent_id,
+        &parent,
+        &mut cmd_rx,
+        &request,
+        &result,
+        &mut completion,
+    )
+    .await;
+    assert_eq!(retried_receipt_id, receipt_id);
+    assert_eq!(retried_body, body);
+    assert_eq!(
+        parent.timeline_events().await.unwrap().len(),
+        after_first_delivery.len(),
+        "exact delivery retry does not rewrite the parent receipt or terminal"
+    );
+
+    let changed_fallback = RecoveredInspectionResult {
+        event: chat_state::SubagentResultEvent {
+            outcome: chat_state::SubagentOutcome::Failed,
+            duration_ms: 999,
+            tool_calls: 99,
+            turns: 99,
+            tokens_used: 999,
+            error: Some("must not replace canonical result".into()),
+            ..fallback.event
+        },
+        output: Some("must not replace canonical output".into()),
+    };
+    let timeline_before_exact_retry = std::fs::read(
+        child_dir.join(crate::session::storage::TIMELINE_FILE),
+    )
+    .unwrap();
+    let (retried_ref, retried_result, retried_output) = ensure_recovered_child_result_in_dir(
+        &parent_id,
+        spawn_seq,
+        &spawn,
+        changed_fallback,
+        &child_dir,
+    )
+    .await
+    .unwrap();
+    assert_eq!(retried_ref, result_ref);
+    assert_eq!(retried_result, original_result);
+    assert_eq!(retried_output.as_deref(), Some(original_output.as_str()));
+    assert_eq!(
+        std::fs::read(child_dir.join(crate::session::storage::TIMELINE_FILE)).unwrap(),
+        timeline_before_exact_retry,
+        "exact child replay cannot rewrite outcome, usage, or output"
+    );
+    assert_eq!(
+        after_first_delivery
+            .iter()
+            .filter(|event| matches!(
+                &event.kind,
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(_))
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        after_first_delivery
+            .iter()
+            .filter(|event| matches!(
+                &event.kind,
+                chat_state::TimelineEventKind::Notification(
+                    chat_state::NotificationEvent::Received { .. }
+                )
+            ))
+            .count(),
+        1,
+        "one immutable completion receipt represents both exact deliveries"
+    );
+}
+
+#[tokio::test]
+async fn canonical_completed_result_survives_missing_and_corrupt_output() {
+    for corrupt in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let spawn = recovery_spawn("sa-output-loss", "child-output-loss");
+        let seq = chat_state::EventSeq::new(7);
+        write_recovery_child(dir.path(), "parent-recovery", seq, &spawn);
+        let fallback = RecoveredInspectionResult {
+            event: chat_state::SubagentResultEvent { subagent_id: spawn.subagent_id.clone(), outcome: chat_state::SubagentOutcome::Completed, duration_ms: 12, tool_calls: 2, turns: 1, tokens_used: 31, error: None, output_ref: None },
+            output: Some("{\"structured\":true}".into()),
+        };
+        let (reference, original, _) = ensure_recovered_child_result_in_dir("parent-recovery", seq, &spawn, fallback, dir.path()).await.unwrap();
+        let hash = original.output_ref.as_ref().unwrap().rsplit(':').next().unwrap();
+        let artifact = dir.path().join("artifacts/subagent-output").join(format!("{hash}.json"));
+        if corrupt { std::fs::write(artifact, b"corrupt").unwrap(); } else { std::fs::remove_file(artifact).unwrap(); }
+        let before = std::fs::read(dir.path().join("timeline.jsonl")).unwrap();
+        let replacement = result_from_inspection(&spawn, None, 999).unwrap();
+        let (again, result, output) = ensure_recovered_child_result_in_dir("parent-recovery", seq, &spawn, replacement, dir.path()).await.unwrap();
+        assert_eq!(again, reference);
+        assert_eq!(result, original);
+        assert!(output.is_none(), "missing structured output must never be guessed");
+        assert_eq!(std::fs::read(dir.path().join("timeline.jsonl")).unwrap(), before);
+    }
+}

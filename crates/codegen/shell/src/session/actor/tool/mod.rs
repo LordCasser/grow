@@ -147,6 +147,12 @@ impl SessionActor {
     ) -> Result<(), acp::Error> {
         let mut approved: Vec<PreparedToolCall> = Vec::new();
         for call in tool_calls.into_iter() {
+            if let Some(gate) = self.tool_context.storage_admission.as_ref()
+                && let Err(reason) = gate.check(self.session_info.id.0.as_ref())
+            {
+                self.events.cancel_active_tool();
+                return Err(acp::Error::internal_error().data(reason));
+            }
             let frozen_input = serde_json::from_str::<serde_json::Value>(
                 crate::session::helpers::tool_input_parsing::normalize_empty_arguments(
                     &call.function.arguments,

@@ -95,6 +95,18 @@ impl SessionActor {
         parent_prompt_id: Option<&str>,
         incomplete: bool,
     ) -> Result<SubagentUsageApply, ()> {
+        self.record_subagent_usage_before(subagent_id, by_model, parent_prompt_id, incomplete, None)
+            .await
+    }
+
+    pub(super) async fn record_subagent_usage_before(
+        &self,
+        subagent_id: &str,
+        by_model: &[(String, chat_state::UsageTotals)],
+        parent_prompt_id: Option<&str>,
+        incomplete: bool,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<SubagentUsageApply, ()> {
         let current = self
             .current_prompt_id
             .lock()
@@ -104,11 +116,12 @@ impl SessionActor {
         if (!by_model.is_empty() || incomplete)
             && self
                 .chat_state_handle
-                .record_subagent_usage(
+                .record_subagent_usage_before(
                     subagent_id.to_owned(),
                     by_model.to_vec(),
                     attributable,
                     incomplete,
+                    deadline,
                 )
                 .await
                 .is_err()

@@ -23,6 +23,16 @@ pub(super) fn dispatch_interject(
     text: String,
     images: Vec<crate::prompt_images::PastedImage>,
 ) -> Vec<Effect> {
+    dispatch_interject_with_identity(app, text, images, None, None)
+}
+
+pub(super) fn dispatch_interject_with_identity(
+    app: &mut AppView,
+    text: String,
+    images: Vec<crate::prompt_images::PastedImage>,
+    requested_turn_id: Option<String>,
+    requested_prompt_id: Option<String>,
+) -> Vec<Effect> {
     // Hard-reset only — `text` may not be from the composer.
     let ActiveView::Agent(id) = app.active_view else {
         return vec![];
@@ -40,7 +50,9 @@ pub(super) fn dispatch_interject(
         agent.show_toast("No active session");
         return vec![];
     };
-    let Some(expected_turn_id) = agent.session.current_prompt_id.clone() else {
+    let Some(expected_turn_id) =
+        requested_turn_id.or_else(|| agent.session.current_prompt_id.clone())
+    else {
         agent.show_toast("No active turn to steer");
         return vec![];
     };
@@ -50,13 +62,15 @@ pub(super) fn dispatch_interject(
     // Push a standard user prompt block locally for instant feedback, and
     // record its id so the broadcast echo (`grow/session/interjection`) is
     // deduped instead of rendering a second copy on this pane.
-    let interjection_id = uuid::Uuid::new_v4().to_string();
-    agent
-        .session
-        .remember_self_interjection(interjection_id.clone());
-    agent
-        .scrollback
-        .push_block(RenderBlock::interjection_prompt(&text));
+    let interjection_id = requested_prompt_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    if !agent.session.has_self_interjection(&interjection_id) {
+        agent
+            .session
+            .remember_self_interjection(interjection_id.clone());
+        agent
+            .scrollback
+            .push_block(RenderBlock::interjection_prompt(&text));
+    }
 
     // The composer is NOT touched here: the producer that consumed composer
     // text (the InterjectPrompt registry arm) clears it at the call site;
@@ -76,12 +90,14 @@ pub(super) fn dispatch_interject(
 }
 
 /// User-facing "Send now" is steering, never cancel-and-send.
-pub(super) fn dispatch_steer_prompt(
+pub(super) fn dispatch_steer_prompt_with_identity(
     app: &mut AppView,
     text: String,
     images: Vec<crate::prompt_images::PastedImage>,
+    expected_turn_id: Option<String>,
+    prompt_id: Option<String>,
 ) -> Vec<Effect> {
-    dispatch_interject(app, text, images)
+    dispatch_interject_with_identity(app, text, images, expected_turn_id, prompt_id)
 }
 
 /// Record an interjection in prompt history (Ctrl+R finds interjections).

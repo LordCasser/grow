@@ -2,7 +2,7 @@
 //!
 //! Two responsibilities:
 //!
-//! 1. **Owns `rmcp` 2.2 integration.** Consumers reach `rmcp` model types
+//! 1. **Owns official `rmcp` integration.** Consumers reach `rmcp` model types
 //!    through this namespace (`mcp::rmcp::*`).
 //!
 //! 2. **Owns MCP-specific integration code**:

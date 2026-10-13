@@ -13,7 +13,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use fast_worktree::{BtrfsDelegate, IgnoredFilesMode, WorkingTreeMode, WorktreeBuilder};
 use git2::{DiffOptions, Oid, Repository};
 use serde::{Deserialize, Serialize};
@@ -1318,6 +1318,37 @@ pub async fn remove_subagent_worktree(worktree_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Return whether a Git worktree has no tracked, untracked, or ignored changes.
+/// Ignored paths count as content too: they may contain user data that ordinary
+/// `git status` hides. Any repository/status/ownership uncertainty is an error
+/// so callers can preserve the worktree.
+pub fn is_worktree_pristine(worktree_path: &Path) -> Result<bool> {
+    let path = worktree_path
+        .canonicalize()
+        .with_context(|| format!("resolve worktree path {}", worktree_path.display()))?;
+    let repo = Repository::discover(&path)
+        .with_context(|| format!("discover Git worktree at {}", path.display()))?;
+    let repo_workdir = repo
+        .workdir()
+        .context("Git repository has no worktree directory")?
+        .canonicalize()
+        .context("resolve Git worktree root")?;
+    anyhow::ensure!(
+        repo_workdir == path,
+        "discovered Git worktree root does not match requested path"
+    );
+
+    let mut options = git2::StatusOptions::new();
+    options
+        .include_untracked(true)
+        .recurse_untracked_dirs(true)
+        .include_ignored(true)
+        .recurse_ignored_dirs(true)
+        .include_unmodified(false);
+    let statuses = repo.statuses(Some(&mut options))?;
+    Ok(statuses.is_empty())
+}
+
 /// Test-only thin wrapper: snapshot then remove (capture-first). NOT for
 /// production use — the completion path drives [`snapshot_subagent_worktree`] and
 /// [`remove_subagent_worktree`] separately so it can persist the ref between the
@@ -2408,6 +2439,11 @@ pub fn gc_worktrees_mgmt(
         max_age_secs,
         force,
         dry_run,
+        skip_kinds: if force {
+            vec![]
+        } else {
+            vec![WorktreeKind::Subagent]
+        },
         ..Default::default()
     };
     fw_gc_worktrees(&db, &opts)
@@ -2641,6 +2677,32 @@ mod tests {
         let wt = temp.path().join("wt");
         WorktreeBuilder::new(&repo, &wt).create().unwrap();
         (repo, wt)
+    }
+
+    #[test]
+    fn pristine_check_covers_tracked_untracked_and_ignored_paths() {
+        test_utils::require_git!();
+        let temp = tempfile::TempDir::new().unwrap();
+        let (_repo, wt) = repo_with_worktree(&temp);
+        assert!(is_worktree_pristine(&wt).unwrap());
+
+        std::fs::write(wt.join("tracked.txt"), "modified").unwrap();
+        assert!(!is_worktree_pristine(&wt).unwrap());
+        git_out(&wt, &["checkout", "--", "tracked.txt"]);
+
+        std::fs::write(wt.join("untracked.txt"), "user data").unwrap();
+        assert!(!is_worktree_pristine(&wt).unwrap());
+        std::fs::remove_file(wt.join("untracked.txt")).unwrap();
+
+        std::fs::write(wt.join(".gitignore"), "ignored.txt\n").unwrap();
+        git_out(&wt, &["add", ".gitignore"]);
+        git_out(&wt, &["commit", "-m", "ignore user data"]);
+        std::fs::write(wt.join("ignored.txt"), "user data").unwrap();
+        assert!(!is_worktree_pristine(&wt).unwrap());
+
+        let outside_repo = temp.path().join("not-a-repo");
+        std::fs::create_dir(&outside_repo).unwrap();
+        assert!(is_worktree_pristine(&outside_repo).is_err());
     }
 
     /// Happy path: the snapshot ref resolves and the worktree dir is removed.

@@ -955,6 +955,12 @@ mod tests {
                 "compile release…",
             ),
             (WaitingReason::Sleep, "Sleeping…"),
+            (WaitingReason::Settling, "Finalizing result…"),
+            (WaitingReason::ObservationUnknown, "Status unconfirmed…"),
+            (
+                WaitingReason::DeliveryPending,
+                "Result committed; delivery pending…",
+            ),
         ];
         for (reason, expected) in cases {
             let (_, label, is_tool) = compute_activity(

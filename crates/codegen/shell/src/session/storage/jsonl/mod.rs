@@ -14,6 +14,23 @@ use fs2::FileExt;
 use std::io::{self, BufRead, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 use workspace::session::file_state::RewindPoint;
+
+/// Hard limits for diagnostic and maintenance validation. Normal session
+/// loading keeps its existing semantics; bounded callers use this aggregate
+/// budget before doing any destructive maintenance work.
+const BOUNDED_VALIDATION_MAX_BYTES: u64 = 16 * 1024 * 1024;
+const BOUNDED_VALIDATION_MAX_EVENTS: usize = 50_000;
+const BOUNDED_VALIDATION_MAX_REFERENCES: usize = 4_096;
+const TTL_DISCOVERY_MAX_CANDIDATES: usize = 4_096;
+const TTL_DISCOVERY_MAX_DIRECTORY_ENTRIES: usize = 8_192;
+const BOUNDED_SESSION_ID_SCAN_ENTRIES: usize = 4_096;
+
+fn bounded_read_exhausted(description: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::WouldBlock,
+        format!("{description} exceeded its bounded read budget"),
+    )
+}
 #[derive(Clone)]
 enum SessionDirMode {
     FromRoot(PathBuf),
@@ -49,6 +66,8 @@ pub struct JsonlStorageAdapter {
     update_append_probe: Option<std::sync::Arc<AppendProbe>>,
     #[cfg(test)]
     update_sync_probe: Option<std::sync::Arc<UpdateSyncProbe>>,
+    #[cfg(test)]
+    timeline_sync_probe: Option<std::sync::Arc<TimelineSyncProbe>>,
 }
 
 #[derive(Clone)]
@@ -230,6 +249,241 @@ impl OpenedSession {
         })
     }
 
+    /// Validate a read-only/maintenance view under a strict aggregate IO
+    /// budget. The ordinary loader intentionally continues to use
+    /// `validated_timeline` without these observational limits.
+    pub(crate) fn bounded_validated_timeline(
+        &self,
+        timeline_id: &str,
+    ) -> io::Result<ValidatedTimeline> {
+        let mut remaining_bytes = BOUNDED_VALIDATION_MAX_BYTES;
+        let mut remaining_events = BOUNDED_VALIDATION_MAX_EVENTS;
+        let timeline_events = JsonlStorageAdapter::read_timeline_bounded_from_directory(
+            &self.directory,
+            &mut remaining_bytes,
+            &mut remaining_events,
+        )
+        .map_err(|error| {
+            if error.kind() == io::ErrorKind::NotFound {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "mandatory Timeline ledger is missing",
+                )
+            } else {
+                error
+            }
+        })?;
+        let timeline = Timeline::from_events(timeline_events)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+
+        let sideband_ids = Self::bounded_sideband_ids(&timeline)?;
+        let mut sidebands = super::SidebandLedgers::new();
+        for sideband_id in &sideband_ids {
+            chat_state::validate_sideband_id(sideband_id)
+                .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+            let sideband = match self.directory.open_relative(
+                &Path::new(super::SIDEBANDS_DIR).join(sideband_id),
+                "sideband entity directory",
+                false,
+            ) {
+                Ok(sideband) => sideband,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            let component = format!("Sideband schema for {sideband_id}");
+            let events = match JsonlStorageAdapter::read_versioned_jsonl_bounded_from_directory::<
+                chat_state::SidebandEvent,
+            >(
+                &sideband,
+                std::ffi::OsStr::new(super::TIMELINE_FILE),
+                "sideband Timeline ledger",
+                super::MAX_JSONL_ENTRY_BYTES,
+                &component,
+                u64::from(chat_state::SIDEBAND_SCHEMA_VERSION),
+                &mut remaining_bytes,
+                &mut remaining_events,
+            ) {
+                Ok(events) => events,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+            };
+            if !events.is_empty() {
+                sidebands.insert(sideband_id.clone(), events);
+            }
+        }
+        super::validate_sideband_ledgers(timeline_id, &timeline, &sidebands)?;
+
+        let prompt_hashes = Self::bounded_prompt_blob_hashes(&timeline)?;
+        let sampling_chunks = Self::bounded_sampling_chunk_refs(&timeline)?;
+        if prompt_hashes
+            .len()
+            .saturating_add(sampling_chunks.len())
+            .saturating_add(sideband_ids.len())
+            > BOUNDED_VALIDATION_MAX_REFERENCES
+        {
+            return Err(bounded_read_exhausted("session artifact references"));
+        }
+        for hash in &prompt_hashes {
+            Self::verify_prompt_blob_with_budget(&self.directory, hash, &mut remaining_bytes)?;
+        }
+        let sampling_worst_case = sampling_chunks
+            .len()
+            .saturating_mul(crate::session::sampling_evidence::CHUNK_BYTES);
+        if sampling_worst_case as u64 > remaining_bytes {
+            return Err(bounded_read_exhausted("sampling evidence"));
+        }
+        // The evidence reader bounds each chunk to CHUNK_BYTES. Reserve that
+        // worst case first so file growth cannot exceed the aggregate budget.
+        crate::session::sampling_evidence::verify(&self.directory, &timeline)?;
+
+        Ok(ValidatedTimeline {
+            timeline,
+            sidebands,
+        })
+    }
+
+    fn bounded_sideband_ids(
+        timeline: &chat_state::Timeline,
+    ) -> io::Result<std::collections::BTreeSet<String>> {
+        let mut sideband_ids = std::collections::BTreeSet::new();
+        for event in timeline.events() {
+            if let chat_state::TimelineEventKind::Sideband(spawn) = &event.kind {
+                sideband_ids.insert(spawn.sideband_id.clone());
+                if sideband_ids.len() > BOUNDED_VALIDATION_MAX_REFERENCES {
+                    return Err(bounded_read_exhausted("sideband references"));
+                }
+            }
+        }
+        Ok(sideband_ids)
+    }
+
+    fn bounded_prompt_blob_hashes(
+        timeline: &chat_state::Timeline,
+    ) -> io::Result<std::collections::BTreeSet<String>> {
+        let mut hashes = std::collections::BTreeSet::new();
+        for event in timeline.events() {
+            let chat_state::TimelineEventKind::Messages(messages) = &event.kind else {
+                continue;
+            };
+            for item in &messages.items {
+                for line in item.text_content().lines() {
+                    let Some(hash) = line
+                        .strip_suffix('\r')
+                        .unwrap_or(line)
+                        .strip_prefix(crate::session::persistence::PROMPT_BLOB_REF_PREFIX)
+                    else {
+                        continue;
+                    };
+                    if hash.len() != 64
+                        || !hash
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "Timeline contains an invalid prompt blob reference",
+                        ));
+                    }
+                    hashes.insert(hash.to_owned());
+                    if hashes.len() > BOUNDED_VALIDATION_MAX_REFERENCES {
+                        return Err(bounded_read_exhausted("prompt blob references"));
+                    }
+                }
+            }
+        }
+        Ok(hashes)
+    }
+
+    fn bounded_sampling_chunk_refs(
+        timeline: &chat_state::Timeline,
+    ) -> io::Result<std::collections::BTreeSet<(String, u64)>> {
+        let mut chunks = std::collections::BTreeSet::new();
+        for event in timeline.events() {
+            let chat_state::TimelineEventKind::Observation(observation) = &event.kind else {
+                continue;
+            };
+            if observation.scope != "sampling_evidence" {
+                continue;
+            }
+            let data = observation.data.as_ref().ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "sampling evidence is missing data",
+                )
+            })?;
+            let chunk_values = data
+                .get("chunks")
+                .and_then(serde_json::Value::as_array)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "sampling evidence chunks are invalid",
+                    )
+                })?;
+            for chunk in chunk_values {
+                let hash = chunk
+                    .get("blake3")
+                    .and_then(serde_json::Value::as_str)
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "invalid sampling evidence hash")
+                    })?;
+                let bytes = chunk
+                    .get("bytes")
+                    .and_then(serde_json::Value::as_u64)
+                    .ok_or_else(|| {
+                        io::Error::new(io::ErrorKind::InvalidData, "invalid sampling evidence size")
+                    })?;
+                chunks.insert((hash.to_owned(), bytes));
+                if chunks.len() > BOUNDED_VALIDATION_MAX_REFERENCES {
+                    return Err(bounded_read_exhausted("sampling evidence references"));
+                }
+            }
+        }
+        // Run the canonical evidence decoder before using the collected
+        // references for a budget calculation.
+        crate::session::sampling_evidence::referenced_hashes(timeline)?;
+        Ok(chunks)
+    }
+
+    fn verify_prompt_blob_with_budget(
+        session: &super::ContainedDirectory,
+        hash: &str,
+        remaining_bytes: &mut u64,
+    ) -> io::Result<()> {
+        let prompts = session.open_relative(
+            Path::new("prompts"),
+            "immutable prompt blob directory",
+            false,
+        )?;
+        let file_name = format!("{hash}.txt");
+        let mut file =
+            prompts.open_regular(std::ffi::OsStr::new(&file_name), "immutable prompt blob")?;
+        let length = file.metadata()?.len();
+        if length > crate::session::persistence::MAX_IMMUTABLE_BLOB_BYTES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "immutable prompt blob exceeds its per-file limit",
+            ));
+        }
+        if length > *remaining_bytes {
+            return Err(bounded_read_exhausted("immutable prompt blobs"));
+        }
+        let mut bytes = Vec::new();
+        file.take((*remaining_bytes).saturating_add(1))
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > *remaining_bytes || bytes.len() as u64 != length {
+            return Err(bounded_read_exhausted("immutable prompt blobs"));
+        }
+        if blake3::hash(&bytes).to_hex().as_str() != hash {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "prompt blob hash mismatch",
+            ));
+        }
+        *remaining_bytes -= bytes.len() as u64;
+        Ok(())
+    }
+
     pub(crate) fn materialize_timeline(
         &self,
         timeline_id: &str,
@@ -269,6 +523,14 @@ enum UpdateSyncPoint {
 }
 #[cfg(test)]
 type UpdateSyncProbe = dyn Fn(UpdateSyncPoint) -> io::Result<()> + Send + Sync;
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TimelineSyncPoint {
+    File,
+    Directory,
+}
+#[cfg(test)]
+type TimelineSyncProbe = dyn Fn(TimelineSyncPoint) -> io::Result<()> + Send + Sync;
 impl Default for JsonlStorageAdapter {
     fn default() -> Self {
         Self::new()
@@ -381,6 +643,8 @@ impl JsonlStorageAdapter {
             update_append_probe: None,
             #[cfg(test)]
             update_sync_probe: None,
+            #[cfg(test)]
+            timeline_sync_probe: None,
         }
     }
     pub fn with_root(root_dir: PathBuf) -> Self {
@@ -394,6 +658,8 @@ impl JsonlStorageAdapter {
             update_append_probe: None,
             #[cfg(test)]
             update_sync_probe: None,
+            #[cfg(test)]
+            timeline_sync_probe: None,
         }
     }
     /// Create an adapter that writes directly to `session_dir`, bypassing
@@ -412,6 +678,8 @@ impl JsonlStorageAdapter {
             update_append_probe: None,
             #[cfg(test)]
             update_sync_probe: None,
+            #[cfg(test)]
+            timeline_sync_probe: None,
         }
     }
     #[cfg(test)]
@@ -427,6 +695,7 @@ impl JsonlStorageAdapter {
             timeline_prefixes: Default::default(),
             update_append_probe: Some(std::sync::Arc::new(append_probe)),
             update_sync_probe: None,
+            timeline_sync_probe: None,
         }
     }
     #[cfg(test)]
@@ -442,6 +711,23 @@ impl JsonlStorageAdapter {
             timeline_prefixes: Default::default(),
             update_append_probe: None,
             update_sync_probe: Some(std::sync::Arc::new(sync_probe)),
+            timeline_sync_probe: None,
+        }
+    }
+    #[cfg(test)]
+    fn with_timeline_sync_probe(
+        root: PathBuf,
+        sync_probe: impl Fn(TimelineSyncPoint) -> io::Result<()> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            dir_mode: SessionDirMode::FromRoot(root),
+            authority: Default::default(),
+            opened_sessions: Default::default(),
+            writer_leases: Default::default(),
+            timeline_prefixes: Default::default(),
+            update_append_probe: None,
+            update_sync_probe: None,
+            timeline_sync_probe: Some(std::sync::Arc::new(sync_probe)),
         }
     }
     /// Read one committed ledger snapshot and derive its exact reference plus
@@ -989,13 +1275,14 @@ impl JsonlStorageAdapter {
         cwd: Option<&str>,
         project: impl FnMut(OpenedSession) -> T,
     ) -> io::Result<Vec<T>> {
-        self.scan_opened_sessions_with_policy(cwd, false, project)
+        self.scan_opened_sessions_with_policy(cwd, false, None, project)
     }
 
     fn scan_opened_sessions_with_policy<T>(
         &self,
         cwd: Option<&str>,
         fail_on_invalid_candidate: bool,
+        max_directory_entries: Option<usize>,
         mut project: impl FnMut(OpenedSession) -> T,
     ) -> io::Result<Vec<T>> {
         if !matches!(&self.dir_mode, SessionDirMode::FromRoot(_)) {
@@ -1011,7 +1298,10 @@ impl JsonlStorageAdapter {
         };
         let mut opened = Vec::new();
         let mut ids = std::collections::BTreeSet::new();
-        for cwd_name in sessions.list_names()? {
+        let mut discovered_entries = 0usize;
+        for cwd_name in
+            Self::list_names_with_budget(&sessions, max_directory_entries, &mut discovered_entries)?
+        {
             if cwd_name.to_string_lossy().starts_with('.') {
                 continue;
             }
@@ -1031,7 +1321,11 @@ impl JsonlStorageAdapter {
                 }
                 Err(error) => return Err(error),
             };
-            for session_name in cwd_directory.list_names()? {
+            for session_name in Self::list_names_with_budget(
+                &cwd_directory,
+                max_directory_entries,
+                &mut discovered_entries,
+            )? {
                 if session_name.to_string_lossy().starts_with('.') {
                     continue;
                 }
@@ -1101,10 +1395,33 @@ impl JsonlStorageAdapter {
                 let canonical_summary = Self::read_summary_from_directory(&directory)?;
                 Self::validate_session_identity(&summary.info, &canonical_summary)?;
                 let summary = canonical_summary;
+                if max_directory_entries.is_some() && opened.len() >= TTL_DISCOVERY_MAX_CANDIDATES {
+                    return Err(bounded_read_exhausted("TTL session candidates"));
+                }
                 opened.push(project(OpenedSession { directory, summary }));
             }
         }
         Ok(opened)
+    }
+
+    fn list_names_with_budget(
+        directory: &super::ContainedDirectory,
+        maximum: Option<usize>,
+        discovered: &mut usize,
+    ) -> io::Result<Vec<std::ffi::OsString>> {
+        let Some(maximum) = maximum else {
+            return directory.list_names();
+        };
+        let mut names = Vec::new();
+        directory.visit_names(|name| {
+            *discovered = (*discovered).saturating_add(1);
+            if *discovered > maximum {
+                return Err(bounded_read_exhausted("TTL session discovery"));
+            }
+            names.push(name.to_os_string());
+            Ok(())
+        })?;
+        Ok(names)
     }
 
     pub(crate) fn list_sessions_sync(&self, cwd: Option<&str>) -> io::Result<Vec<Summary>> {
@@ -1115,7 +1432,7 @@ impl JsonlStorageAdapter {
 
     fn list_sessions_for_search_sync(&self) -> io::Result<Vec<Summary>> {
         let mut summaries =
-            self.scan_opened_sessions_with_policy(None, true, |opened| opened.summary)?;
+            self.scan_opened_sessions_with_policy(None, true, None, |opened| opened.summary)?;
         Self::sort_session_summaries(&mut summaries);
         Ok(summaries)
     }
@@ -1170,6 +1487,7 @@ impl JsonlStorageAdapter {
     }
 
     async fn append_timeline_event_with_durability(
+        writer_owner: Self,
         directory: std::sync::Arc<super::ContainedDirectory>,
         prefix_state: std::sync::Arc<std::sync::Mutex<Option<LedgerPrefix>>>,
         event: &chat_state::TimelineEvent,
@@ -1181,13 +1499,18 @@ impl JsonlStorageAdapter {
             .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
         line.push(b'\n');
         tokio::task::spawn_blocking(move || {
-            Self::append_timeline_line_in_directory_sync(
+            let _writer_owner = writer_owner;
+            #[cfg(test)]
+            let sync_probe = _writer_owner.timeline_sync_probe.as_deref();
+            Self::append_timeline_line_in_directory_sync_with_probe(
                 &directory,
                 &prefix_state,
                 &path,
                 line,
                 event_seq,
                 durability,
+                #[cfg(test)]
+                sync_probe,
             )
         })
         .await
@@ -1235,8 +1558,14 @@ impl JsonlStorageAdapter {
         self.ensure_writer_lease(info)?;
         let directory = self.bound_session_directory(info)?;
         let prefix_state = self.timeline_prefix_state(info)?;
-        Self::append_timeline_event_with_durability(directory, prefix_state, event, durability)
-            .await?;
+        Self::append_timeline_event_with_durability(
+            self.clone(),
+            directory,
+            prefix_state,
+            event,
+            durability,
+        )
+        .await?;
         let mut patch = super::summary_write::SummaryPatch::default();
         match &event.kind {
             chat_state::TimelineEventKind::Messages(messages) => {
@@ -1294,6 +1623,27 @@ impl JsonlStorageAdapter {
         line: Vec<u8>,
         event_seq: u64,
         durability: AppendDurability,
+    ) -> io::Result<()> {
+        Self::append_timeline_line_in_directory_sync_with_probe(
+            directory,
+            prefix_state,
+            path,
+            line,
+            event_seq,
+            durability,
+            #[cfg(test)]
+            None,
+        )
+    }
+
+    fn append_timeline_line_in_directory_sync_with_probe(
+        directory: &super::ContainedDirectory,
+        prefix_state: &std::sync::Mutex<Option<LedgerPrefix>>,
+        path: &Path,
+        line: Vec<u8>,
+        event_seq: u64,
+        durability: AppendDurability,
+        #[cfg(test)] sync_probe: Option<&TimelineSyncProbe>,
     ) -> io::Result<()> {
         debug_assert!(line.ends_with(b"\n"));
         Self::validate_jsonl_line_size(&line, "Timeline event")?;
@@ -1380,8 +1730,16 @@ impl JsonlStorageAdapter {
                         }
                         if matches!(durability, AppendDurability::Durable) {
                             Self::sync_file_durable(&file)?;
+                            #[cfg(test)]
+                            if let Some(probe) = sync_probe {
+                                probe(TimelineSyncPoint::File)?;
+                            }
                             drop(file);
                             directory.sync()?;
+                            #[cfg(test)]
+                            if let Some(probe) = sync_probe {
+                                probe(TimelineSyncPoint::Directory)?;
+                            }
                         }
                         return Ok(());
                     }
@@ -1419,8 +1777,16 @@ impl JsonlStorageAdapter {
             });
             if matches!(durability, AppendDurability::Durable) {
                 Self::sync_file_durable(&file)?;
+                #[cfg(test)]
+                if let Some(probe) = sync_probe {
+                    probe(TimelineSyncPoint::File)?;
+                }
                 drop(file);
                 directory.sync()?;
+                #[cfg(test)]
+                if let Some(probe) = sync_probe {
+                    probe(TimelineSyncPoint::Directory)?;
+                }
             }
             Ok(())
         })();
@@ -2125,6 +2491,116 @@ impl JsonlStorageAdapter {
         .collect()
     }
 
+    fn read_timeline_bounded_from_directory(
+        directory: &super::ContainedDirectory,
+        remaining_bytes: &mut u64,
+        remaining_events: &mut usize,
+    ) -> io::Result<Vec<chat_state::TimelineEvent>> {
+        Self::read_versioned_jsonl_bounded_from_directory(
+            directory,
+            std::ffi::OsStr::new(super::TIMELINE_FILE),
+            "mandatory Timeline ledger",
+            super::MAX_JSONL_ENTRY_BYTES,
+            "Timeline schema",
+            u64::from(chat_state::TIMELINE_SCHEMA_VERSION),
+            remaining_bytes,
+            remaining_events,
+        )
+    }
+
+    fn read_versioned_jsonl_bounded_from_directory<T: serde::de::DeserializeOwned>(
+        directory: &super::ContainedDirectory,
+        name: &std::ffi::OsStr,
+        description: &str,
+        max_entry_bytes: u64,
+        component: &str,
+        current_version: u64,
+        remaining_bytes: &mut u64,
+        remaining_events: &mut usize,
+    ) -> io::Result<Vec<T>> {
+        let path = directory.display_path().join(name);
+        let file = directory.open_regular(name, description)?;
+        let frontier = file.metadata()?.len();
+        if frontier > *remaining_bytes {
+            return Err(bounded_read_exhausted(description));
+        }
+        // Limit the underlying reader to the observed frontier. Appends after
+        // metadata capture cannot extend this observational snapshot.
+        let mut reader = std::io::BufReader::new(file.take(frontier));
+        let mut items = Vec::new();
+        let mut line = Vec::new();
+        let mut bytes_read = 0u64;
+        let mut complete_records = 0usize;
+        loop {
+            line.clear();
+            let count = reader.read_until(b'\n', &mut line)?;
+            if count == 0 {
+                break;
+            }
+            bytes_read = bytes_read.saturating_add(count as u64);
+            if bytes_read > *remaining_bytes {
+                return Err(bounded_read_exhausted(description));
+            }
+            if line.last() != Some(&b'\n') {
+                // The final fragment was never a committed JSONL fact.
+                break;
+            }
+            let entry_bytes = line.len().saturating_sub(1) as u64;
+            if entry_bytes > max_entry_bytes {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "{}:{} exceeds the per-entry byte limit",
+                        path.display(),
+                        complete_records + 1
+                    ),
+                ));
+            }
+            if complete_records >= *remaining_events {
+                return Err(bounded_read_exhausted(description));
+            }
+            let value: serde_json::Value = serde_json::from_slice(&line).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}:{}: {error}", path.display(), complete_records + 1),
+                )
+            })?;
+            let persisted_version = value
+                .get("version")
+                .and_then(serde_json::Value::as_u64)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "{}:{} has no valid schema version",
+                            path.display(),
+                            complete_records + 1
+                        ),
+                    )
+                })?;
+            if persisted_version != current_version {
+                return Err(crate::session::persistence::session_version_mismatch(
+                    component,
+                    persisted_version,
+                    current_version,
+                ));
+            }
+            items.push(serde_json::from_value(value).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("{}:{}: {error}", path.display(), complete_records + 1),
+                )
+            })?);
+            complete_records += 1;
+        }
+        if bytes_read != frontier {
+            return Err(bounded_read_exhausted(description));
+        }
+        *remaining_bytes -= frontier;
+        *remaining_events -= complete_records;
+        Ok(items)
+    }
+
     /// Read every complete Timeline record. A final non-newline-terminated
     /// fragment was never committed and is ignored; every complete line is
     /// parsed strictly so interior corruption still fails closed.
@@ -2498,7 +2974,7 @@ impl JsonlStorageAdapter {
     }
 
     pub(crate) fn open_session_by_id(&self, session_id: &str) -> io::Result<Option<OpenedSession>> {
-        self.open_session_by_id_inner(session_id, false)
+        self.open_session_by_id_inner(session_id, false, None)
     }
 
     /// Resolve a session for a separate read-only process such as Trajectory.
@@ -2509,13 +2985,24 @@ impl JsonlStorageAdapter {
         &self,
         session_id: &str,
     ) -> io::Result<Option<OpenedSession>> {
-        self.open_session_by_id_inner(session_id, true)
+        self.open_session_by_id_inner(session_id, true, None)
+    }
+
+    /// Resolve a session for diagnostics or maintenance with a strict cwd
+    /// directory scan budget. An incomplete scan is an error, never evidence
+    /// that the requested session is absent.
+    pub(crate) fn open_session_by_id_shared_read_bounded(
+        &self,
+        session_id: &str,
+    ) -> io::Result<Option<OpenedSession>> {
+        self.open_session_by_id_inner(session_id, true, Some(BOUNDED_SESSION_ID_SCAN_ENTRIES - 1))
     }
 
     fn open_session_by_id_inner(
         &self,
         session_id: &str,
         shared_read: bool,
+        max_cwd_names: Option<usize>,
     ) -> io::Result<Option<OpenedSession>> {
         if !matches!(&self.dir_mode, SessionDirMode::FromRoot(_)) {
             return Err(io::Error::new(
@@ -2550,7 +3037,10 @@ impl JsonlStorageAdapter {
             Err(error) => return Err(error),
         };
         let mut found: Option<OpenedSession> = None;
-        for cwd_name in sessions.list_names()? {
+        let mut discovered_cwd_names = 0;
+        let cwd_names =
+            Self::list_names_with_budget(&sessions, max_cwd_names, &mut discovered_cwd_names)?;
+        for cwd_name in cwd_names {
             if cwd_name.to_string_lossy().starts_with('.') {
                 continue;
             }
@@ -2743,6 +3233,28 @@ impl JsonlStorageAdapter {
         Ok(())
     }
 
+    /// Recovery must claim the writer before inspecting and extending a
+    /// prefix. A previous actor or detached persistence worker keeps this
+    /// lease unavailable until it has completely exited.
+    pub(crate) fn claim_recovery_writer(&self, info: &Info) -> io::Result<()> {
+        self.ensure_writer_lease(info)
+    }
+
+    pub(crate) async fn sync_recovery_prefix(&self, info: &Info) -> io::Result<()> {
+        self.ensure_writer_lease(info)?;
+        let directory = self.bound_session_directory(info)?;
+        let owner = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _owner = owner;
+            let file =
+                directory.open_read_write_create(std::ffi::OsStr::new(super::TIMELINE_FILE))?;
+            Self::sync_file_durable(&file)?;
+            directory.sync()
+        })
+        .await
+        .map_err(io::Error::other)?
+    }
+
     fn writer_lease_name(id: &acp::SessionId) -> String {
         let name = format!(".{id}.writer.lock");
         let component_len = if cfg!(windows) {
@@ -2807,7 +3319,12 @@ impl JsonlStorageAdapter {
         let mut errors = 0u32;
         // Finish discovery before mutation, retaining summaries rather than
         // one directory capability per candidate.
-        for summary in self.scan_opened_sessions(None, |opened| opened.summary)? {
+        for summary in self.scan_opened_sessions_with_policy(
+            None,
+            false,
+            Some(TTL_DISCOVERY_MAX_DIRECTORY_ENTRIES),
+            |opened| opened.summary,
+        )? {
             if skip_session_dir.is_some_and(|skip| self.session_dir(&summary.info) == skip) {
                 continue;
             }
@@ -2850,6 +3367,7 @@ impl JsonlStorageAdapter {
         cutoff: chrono::DateTime<chrono::Utc>,
     ) -> io::Result<bool> {
         if !self.try_acquire_writer_lease(&opened.summary().info)? {
+            tracing::debug!(session_id = %opened.summary().info.id, reason = "live_writer", "retaining stale session");
             return Ok(false);
         }
         let current = Self::read_summary_from_directory(opened.directory())?;
@@ -2858,9 +3376,234 @@ impl JsonlStorageAdapter {
         if current.is_hidden() || current.last_active_at.unwrap_or(current.updated_at) >= cutoff {
             return Ok(false);
         }
+        // TTL is only an activity filter. Recovery-bearing Timeline facts
+        // remain authoritative while their lifecycle or receipt is open.
+        let timeline_id = current.info.id.to_string();
+        let timeline = opened.bounded_validated_timeline(&timeline_id)?.timeline;
+        if self.timeline_has_recovery_dependencies(&timeline, &timeline_id)? {
+            tracing::debug!(%timeline_id, reason = "unresolved_recovery_dependency", "retaining stale session");
+            return Ok(false);
+        }
         opened.summary = current;
         self.delete_opened_session(opened)?;
         Ok(true)
+    }
+
+    /// Fail closed when Timeline state or a cross-session subagent result
+    /// cannot be proven complete. The caller holds this candidate's writer
+    /// lease for the entire check and deletion boundary.
+    fn timeline_has_recovery_dependencies(
+        &self,
+        timeline: &Timeline,
+        timeline_id: &str,
+    ) -> io::Result<bool> {
+        if Self::timeline_has_unresolved_local_dependencies(timeline) {
+            return Ok(true);
+        }
+
+        let child_spawns: Vec<_> = timeline
+            .events()
+            .iter()
+            .filter_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
+                    spawn,
+                )) => Some((event.seq, spawn)),
+                _ => None,
+            })
+            .collect();
+        if child_spawns.len() > 4096 {
+            return Err(io::Error::other(
+                "recovery dependency scan budget exhausted",
+            ));
+        }
+        for (spawn_seq, spawn) in child_spawns {
+            let Some(terminal) = timeline
+                .events()
+                .iter()
+                .find_map(|event| match &event.kind {
+                    chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(
+                        ended,
+                    )) if ended.subagent_id == spawn.subagent_id => Some(ended),
+                    _ => None,
+                })
+            else {
+                return Ok(true);
+            };
+            if Self::subagent_receipt_unresolved(timeline, spawn, terminal) {
+                return Ok(true);
+            }
+            if terminal.result_ref.is_none() {
+                // A never-published child has no nested entity to protect.
+                continue;
+            }
+            let child_storage = Self {
+                opened_sessions: Default::default(),
+                writer_leases: Default::default(),
+                timeline_prefixes: Default::default(),
+                ..self.clone()
+            };
+            let Some(child) =
+                child_storage.open_session_by_id_shared_read_bounded(&spawn.child_session_id)?
+            else {
+                return Ok(true);
+            };
+            if !child_storage.try_acquire_writer_lease(&child.summary().info)? {
+                return Ok(true);
+            }
+            let child_timeline = child
+                .bounded_validated_timeline(&spawn.child_session_id)?
+                .timeline;
+            child_timeline
+                .validate_subagent_result_link(timeline_id, spawn_seq, spawn, terminal)
+                .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+            if Self::timeline_has_unresolved_local_dependencies(&child_timeline) {
+                return Ok(true);
+            }
+        }
+        let seeds = timeline
+            .events()
+            .iter()
+            .filter_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::SubagentSeed(seed) => Some(seed),
+                _ => None,
+            });
+        for seed in seeds {
+            let parent_storage = Self {
+                opened_sessions: Default::default(),
+                writer_leases: Default::default(),
+                timeline_prefixes: Default::default(),
+                ..self.clone()
+            };
+            // A live parent writer owns the mutable result boundary. We must
+            // not infer quiescence from a concurrent read of its Timeline.
+            let Some(parent) =
+                parent_storage.open_session_by_id_shared_read_bounded(&seed.parent_timeline_id)?
+            else {
+                return Ok(true);
+            };
+            if !parent_storage.try_acquire_writer_lease(&parent.summary().info)? {
+                return Ok(true);
+            }
+            let parent_timeline = parent
+                .bounded_validated_timeline(&seed.parent_timeline_id)?
+                .timeline;
+            let spawn_event = parent_timeline.events().iter().find(|event| {
+                event.seq.get() == seed.parent_spawn_seq
+                    && matches!(
+                        &event.kind,
+                        chat_state::TimelineEventKind::Subagent(
+                            chat_state::SubagentEvent::Spawned(spawn)
+                        ) if spawn.subagent_id == seed.subagent_id
+                    )
+            });
+            let Some(spawn_event) = spawn_event else {
+                return Ok(true);
+            };
+            let chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn)) =
+                &spawn_event.kind
+            else {
+                unreachable!("spawn event was matched above")
+            };
+            let Some(terminal) =
+                parent_timeline
+                    .events()
+                    .iter()
+                    .find_map(|event| match &event.kind {
+                        chat_state::TimelineEventKind::Subagent(
+                            chat_state::SubagentEvent::Ended(ended),
+                        ) if ended.subagent_id == seed.subagent_id => Some(ended),
+                        _ => None,
+                    })
+            else {
+                return Ok(true);
+            };
+            if timeline
+                .validate_subagent_result_link(
+                    &seed.parent_timeline_id,
+                    spawn_event.seq,
+                    spawn,
+                    terminal,
+                )
+                .is_err()
+                || Self::timeline_has_unresolved_local_dependencies(&parent_timeline)
+                || Self::subagent_receipt_unresolved(&parent_timeline, spawn, terminal)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn subagent_receipt_unresolved(
+        parent: &Timeline,
+        spawn: &chat_state::SubagentSpawnEvent,
+        terminal: &chat_state::SubagentTerminalEvent,
+    ) -> bool {
+        if !spawn.surface_completion || terminal.outcome == chat_state::SubagentOutcome::Cancelled {
+            return false;
+        }
+        let owner = match (&spawn.goal_id, spawn.goal_definition_revision) {
+            (Some(goal_id), Some(definition_revision)) if definition_revision > 0 => {
+                chat_state::NotificationOwner::Goal {
+                    goal_id: goal_id.clone(),
+                    definition_revision,
+                }
+            }
+            (None, None) => chat_state::NotificationOwner::Session,
+            _ => return true,
+        };
+        let source = chat_state::NotificationSource::SubagentCompleted {
+            subagent_id: spawn.subagent_id.clone(),
+            owner,
+        };
+        let version = chat_state::NotificationSourceVersion::Ordinal { value: 1 };
+        let Some(id) = parent.received_notification_id(&source, &version) else {
+            return true;
+        };
+        parent
+            .pending_notifications()
+            .iter()
+            .any(|receipt| receipt.id == id)
+    }
+
+    fn timeline_has_unresolved_local_dependencies(timeline: &Timeline) -> bool {
+        let has_unresolved_input = timeline.events().iter().any(|event| {
+            let chat_state::TimelineEventKind::Input(chat_state::InputEvent::Submitted {
+                input_id,
+                ..
+            }) = &event.kind
+            else {
+                return false;
+            };
+            timeline.input_state(input_id).is_some_and(|input| {
+                matches!(
+                    input.state,
+                    chat_state::InputState::Submitted | chat_state::InputState::Allowed { .. }
+                )
+            })
+        });
+        let mut open_subagents = std::collections::BTreeSet::new();
+        for event in timeline.events() {
+            match &event.kind {
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
+                    spawn,
+                )) => {
+                    open_subagents.insert(spawn.subagent_id.clone());
+                }
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(
+                    ended,
+                )) => {
+                    open_subagents.remove(&ended.subagent_id);
+                }
+                _ => {}
+            }
+        }
+        timeline.active_turn().is_some()
+            || timeline.open_request_ids().next().is_some()
+            || timeline.open_tool_call_ids().next().is_some()
+            || has_unresolved_input
+            || !timeline.pending_notifications().is_empty()
+            || !open_subagents.is_empty()
     }
 
     fn read_summary_from_directory(directory: &super::ContainedDirectory) -> io::Result<Summary> {

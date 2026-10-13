@@ -5,6 +5,13 @@
 > **Scope**: 2026-07-28 ~ 2026-08-13 的 upstream/xai-org/grok-build 16 个同步提交
 > **Author**: software-architect
 
+> **Latest reviewed upstream target**: `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8`（2026-10-11）
+> **Review coverage**: 仅 MCP 多轮用户交互与可保留计划体验；不是 `bc7f02ed..2bdd1d6` 的全提交/全功能审计。
+> **Adoption status**: 两项已评审并立项，产品实现未开始；此标记不表示 merge、cherry-pick 或远端最新 HEAD。
+> **Current record**: [OpenSpec 评审与状态](../../openspec/changes/record-upstream-review-2bdd1d6/review.md)、[MCP 提案](../../openspec/changes/add-mcp-multi-round-elicitation/proposal.md)、[计划提案](../../openspec/changes/retain-plan-for-later-review/proposal.md)。
+
+本文以下为历史评审；第二轮宽范围终点仍为 `bc7f02eddd3d84085849dc19ed216f11c23b0571`。其中 MCP 等待 draft/SDK 的判断已由 [2026-09-23 核查](../../openspec/changes/archive/2026-09-23-reconcile-backlog-active-debt/verification.md) 取代，不能作为当前立项前提。当前细节与进行中任务只在上述 OpenSpec change 维护。
+
 本文记录 grok-build 分叉后更新中"可借鉴项"的逐项架构评审结论。它是后续实现任务（coder handoff）与 review 的依据；已采纳项的最终实现事实以各模块契约文档为准，本文只保留决策与排除理由。
 
 ## 0. 过滤原则

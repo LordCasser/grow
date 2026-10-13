@@ -3497,6 +3497,16 @@ async fn storage_full_failure_poison_closes_the_actor_without_retrying_forever()
         crate::TimelineWriteError::Persistence(error)
             if error.kind() == std::io::ErrorKind::StorageFull
     ));
+    let pending = handle
+        .pending_timeline_commit()
+        .expect("permanent persistence failure keeps the rejected event identity");
+    assert_eq!(pending.event.seq.get(), 0);
+    assert_eq!(pending.error_kind, Some(std::io::ErrorKind::StorageFull));
+    assert!(!pending.acknowledgement_lost);
+    assert!(matches!(
+        &pending.event.kind,
+        crate::TimelineEventKind::Observation(event) if event.name == "disk_full"
+    ));
     let closed = tokio::time::timeout(Duration::from_secs(1), event_rx.recv())
         .await
         .expect("poisoned actor must close its event channel");
@@ -3507,6 +3517,695 @@ async fn storage_full_failure_poison_closes_the_actor_without_retrying_forever()
     )
     .await;
     assert!(!matches!(retry, Ok(Some(_))), "storage full must not retry");
+}
+
+#[tokio::test(start_paused = true)]
+async fn unacknowledged_write_times_out_with_shared_exact_pending_identity() {
+    let (mock, mut persistence_rx) = MockTimelinePersistence::new_with_manual_timeline_ack();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = ChatStateActor::spawn(
+        Vec::new(),
+        test_config(),
+        Box::new(mock),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    );
+    let observer = handle.clone();
+    let write = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .record_timeline_event_durably(crate::TimelineEventKind::Observation(
+                    crate::ObservationEvent {
+                        scope: "test".into(),
+                        name: "ack_deadline".into(),
+                        turn: None,
+                        step: None,
+                        data: None,
+                    },
+                ))
+                .await
+        })
+    };
+    let acknowledgement = persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("writer sends the pending append");
+    let pending_before = observer
+        .pending_timeline_commit()
+        .expect("shared handle exposes the pending commit identity");
+    assert_eq!(pending_before.event.seq.get(), 0);
+    assert!(!pending_before.acknowledgement_lost);
+    assert!(matches!(
+        &pending_before.event.kind,
+        crate::TimelineEventKind::Observation(event) if event.name == "ack_deadline"
+    ));
+    let at_ms = pending_before.event.at_ms;
+
+    tokio::time::advance(Duration::from_secs(30)).await;
+    let error = write
+        .await
+        .expect("write task")
+        .expect_err("ACK deadline must expire");
+    assert!(matches!(error, crate::TimelineWriteError::DeadlineExceeded));
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while !handle.is_closed() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the ambiguous writer epoch closes its mailbox");
+
+    let pending_after = observer
+        .pending_timeline_commit()
+        .expect("ambiguous event identity remains available to observers");
+    assert_eq!(pending_after.event.seq.get(), 0);
+    assert_eq!(pending_after.event.at_ms, at_ms);
+    assert!(pending_after.acknowledgement_lost);
+    assert!(matches!(
+        &pending_after.event.kind,
+        crate::TimelineEventKind::Observation(event) if event.name == "ack_deadline"
+    ));
+    assert!(
+        acknowledgement.send(Ok(())).is_err(),
+        "late ACK has no live writer"
+    );
+
+    let later = handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Observation(
+            crate::ObservationEvent {
+                scope: "test".into(),
+                name: "must_not_reuse_sequence".into(),
+                turn: None,
+                step: None,
+                data: None,
+            },
+        ))
+        .await;
+    assert!(matches!(
+        later,
+        Err(crate::TimelineWriteError::AcknowledgementLost)
+    ));
+    assert_eq!(handle.pending_timeline_commit().unwrap().event.seq.get(), 0);
+}
+
+#[tokio::test(start_paused = true)]
+async fn subagent_usage_ack_loss_retries_the_same_fact_and_deadline_stops_dispatch() {
+    let mut h = TestHarness::with_manual_timeline_ack(vec![]);
+    let usage = vec![(
+        "child-model".to_owned(),
+        crate::usage::UsageTotals {
+            input_tokens: 120,
+            output_tokens: 30,
+            model_calls: 1,
+            ..Default::default()
+        },
+    )];
+    let record_usage = {
+        let handle = h.handle.clone();
+        let usage = usage.clone();
+        tokio::spawn(async move {
+            handle
+                .record_subagent_usage("child-ack-lost".into(), usage, false, false)
+                .await
+        })
+    };
+    let first_ack = h
+        .persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("first child-usage append");
+    let first_event = h
+        .drain_persistence()
+        .into_iter()
+        .find_map(|record| match record {
+            PersistenceRecord::Timeline(event) => Some(event),
+            PersistenceRecord::Flush => None,
+        })
+        .expect("the first child-usage event is sent before its ACK");
+    drop(first_ack);
+
+    let retry_ack = h
+        .persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("a lost ACK retries the pending usage fact");
+    let retry_event = h
+        .drain_persistence()
+        .into_iter()
+        .find_map(|record| match record {
+            PersistenceRecord::Timeline(event) => Some(event),
+            PersistenceRecord::Flush => None,
+        })
+        .expect("the retry is dispatched");
+    assert_eq!(retry_event.seq, first_event.seq);
+    assert_eq!(
+        serde_json::to_value(&retry_event).unwrap(),
+        serde_json::to_value(&first_event).unwrap(),
+        "the retry retains the immutable event identity and payload"
+    );
+    retry_ack.send(Ok(())).expect("the retry ACK is pending");
+    assert!(record_usage.await.unwrap().unwrap());
+    assert_eq!(
+        h.handle
+            .try_get_session_usage()
+            .await
+            .unwrap()
+            .totals
+            .total_tokens(),
+        150,
+        "the committed usage fact is projected once"
+    );
+    assert_eq!(
+        h.handle
+            .timeline_events()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(
+                &event.kind,
+                crate::TimelineEventKind::Observation(observation)
+                    if observation.name == "subagent_settled"
+            ))
+            .count(),
+        1,
+        "the canonical ledger contains one settlement"
+    );
+
+    let unresolved_usage = vec![(
+        "child-model".to_owned(),
+        crate::usage::UsageTotals {
+            input_tokens: 4,
+            output_tokens: 2,
+            model_calls: 1,
+            ..Default::default()
+        },
+    )];
+    let unresolved = {
+        let handle = h.handle.clone();
+        tokio::spawn(async move {
+            handle
+                .record_subagent_usage("child-no-ack".into(), unresolved_usage, false, false)
+                .await
+        })
+    };
+    let unresolved_first = h
+        .persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("second usage append");
+    let unresolved_event = h
+        .drain_persistence()
+        .into_iter()
+        .find_map(|record| match record {
+            PersistenceRecord::Timeline(event) => Some(event),
+            PersistenceRecord::Flush => None,
+        })
+        .expect("second usage event is dispatched");
+    drop(unresolved_first);
+    let unresolved_retry = h
+        .persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("second usage append is retried exactly");
+    let unresolved_retry_event = h
+        .drain_persistence()
+        .into_iter()
+        .find_map(|record| match record {
+            PersistenceRecord::Timeline(event) => Some(event),
+            PersistenceRecord::Flush => None,
+        })
+        .expect("second retry is dispatched");
+    assert_eq!(
+        serde_json::to_value(&unresolved_retry_event).unwrap(),
+        serde_json::to_value(&unresolved_event).unwrap()
+    );
+
+    tokio::time::advance(Duration::from_secs(30)).await;
+    assert!(matches!(
+        unresolved.await.unwrap(),
+        Err(crate::TimelineWriteError::DeadlineExceeded)
+    ));
+    assert!(
+        unresolved_retry.send(Ok(())).is_err(),
+        "late ACK is rejected"
+    );
+    let pending = h
+        .handle
+        .pending_timeline_commit()
+        .expect("unconfirmed usage remains owned after deadline");
+    assert_eq!(pending.event.seq, unresolved_event.seq);
+    assert!(pending.acknowledgement_lost);
+    assert_eq!(
+        serde_json::to_value(&pending.event).unwrap(),
+        serde_json::to_value(&unresolved_event).unwrap()
+    );
+    assert!(
+        h.drain_persistence().is_empty(),
+        "deadline expiry must not dispatch another mutation retry"
+    );
+}
+
+async fn commit_finalization_fact_after_lost_ack(
+    h: &mut TestHarness,
+    kind: crate::TimelineEventKind,
+) -> crate::TimelineEvent {
+    let write = {
+        let handle = h.handle.clone();
+        tokio::spawn(async move { handle.record_timeline_event_durably(kind).await })
+    };
+    let first_ack = h
+        .persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("first finalization fact append");
+    let first_event = h
+        .drain_persistence()
+        .into_iter()
+        .find_map(|record| match record {
+            PersistenceRecord::Timeline(event) => Some(event),
+            PersistenceRecord::Flush => None,
+        })
+        .expect("first finalization fact is dispatched");
+    drop(first_ack);
+
+    let retry_ack = h
+        .persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("a lost ACK retries the same fact");
+    let retry_event = h
+        .drain_persistence()
+        .into_iter()
+        .find_map(|record| match record {
+            PersistenceRecord::Timeline(event) => Some(event),
+            PersistenceRecord::Flush => None,
+        })
+        .expect("retry finalization fact is dispatched");
+    assert_eq!(
+        serde_json::to_vec(&retry_event).unwrap(),
+        serde_json::to_vec(&first_event).unwrap(),
+        "exact retry preserves event sequence and payload"
+    );
+    retry_ack.send(Ok(())).expect("retry ACK is pending");
+    let committed = write.await.unwrap().unwrap();
+    assert_eq!(
+        serde_json::to_vec(&committed).unwrap(),
+        serde_json::to_vec(&first_event).unwrap()
+    );
+    first_event
+}
+
+#[tokio::test]
+async fn child_result_and_parent_ended_retries_keep_their_canonical_event_once() {
+    let mut child = TestHarness::with_manual_timeline_ack(vec![]);
+    commit_finalization_fact_after_lost_ack(
+        &mut child,
+        crate::TimelineEventKind::SubagentSeed(crate::SubagentSeedEvent {
+            parent_timeline_id: "parent-session".into(),
+            parent_spawn_seq: 0,
+            subagent_id: "child-result-retry".into(),
+            security_parent_session_id: "parent-session".into(),
+            context_source: crate::SubagentContextSource::New,
+            source_ref: None,
+            normalized: false,
+        }),
+    )
+    .await;
+    let child_result = commit_finalization_fact_after_lost_ack(
+        &mut child,
+        crate::TimelineEventKind::SubagentResult(crate::SubagentResultEvent {
+            subagent_id: "child-result-retry".into(),
+            outcome: crate::SubagentOutcome::Completed,
+            duration_ms: 19,
+            tool_calls: 1,
+            turns: 1,
+            tokens_used: 7,
+            error: None,
+            output_ref: Some(format!(
+                "artifact:subagent-output:blake3:{}",
+                "b".repeat(64)
+            )),
+        }),
+    )
+    .await;
+    assert_eq!(
+        child
+            .handle
+            .timeline_events()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                serde_json::to_vec(*event).unwrap() == serde_json::to_vec(&child_result).unwrap()
+            })
+            .count(),
+        1,
+        "the child ledger has one canonical result"
+    );
+
+    let mut parent = TestHarness::with_manual_timeline_ack(vec![]);
+    let spawn = commit_finalization_fact_after_lost_ack(
+        &mut parent,
+        crate::TimelineEventKind::Subagent(crate::SubagentEvent::Spawned(
+            crate::SubagentSpawnEvent {
+                subagent_id: "parent-ended-retry".into(),
+                child_session_id: "child-session".into(),
+                security_parent_session_id: "parent-session".into(),
+                subagent_type: "task".into(),
+                description: "finalization test".into(),
+                prompt: "complete the task".into(),
+                context_source: crate::SubagentContextSource::New,
+                source_ref: None,
+                context_normalized: false,
+                resumed_from: None,
+                parent_prompt_id: None,
+                capability_mode: None,
+                permission_mode: None,
+                effective_permission_mode: None,
+                workflow_run_id: None,
+                goal_id: None,
+                goal_definition_revision: None,
+                surface_completion: true,
+                child_cwd: "/tmp".into(),
+                worktree_path: None,
+                effective_model_id: "test-model".into(),
+                model_transport_key: sampling_types::model_image_input_key(&test_config()),
+                reasoning_effort: None,
+            },
+        )),
+    )
+    .await;
+    let parent_terminal = commit_finalization_fact_after_lost_ack(
+        &mut parent,
+        crate::TimelineEventKind::Subagent(crate::SubagentEvent::Ended(
+            crate::SubagentTerminalEvent {
+                subagent_id: "parent-ended-retry".into(),
+                child_session_id: "child-session".into(),
+                outcome: crate::SubagentOutcome::Completed,
+                duration_ms: 19,
+                tool_calls: 1,
+                turns: 1,
+                tokens_used: 7,
+                error: None,
+                result_ref: Some(crate::TimelineRangeRef {
+                    timeline_id: "child-session".into(),
+                    first_seq: 1,
+                    last_seq: 1,
+                }),
+                snapshot_ref: None,
+            },
+        )),
+    )
+    .await;
+    assert_eq!(
+        parent_terminal.seq.get(),
+        spawn.seq.get() + 1,
+        "parent Ended follows its one acknowledged Spawned fact"
+    );
+    assert_eq!(
+        parent
+            .handle
+            .timeline_events()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|event| {
+                serde_json::to_vec(*event).unwrap() == serde_json::to_vec(&parent_terminal).unwrap()
+            })
+            .count(),
+        1,
+        "the parent ledger has one canonical Ended fact"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn explicit_timeline_deadline_keeps_exact_pending_event_and_poison_state() {
+    let (mock, mut persistence_rx) = MockTimelinePersistence::new_with_manual_timeline_ack();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = ChatStateActor::spawn(
+        Vec::new(),
+        test_config(),
+        Box::new(mock),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    );
+    let observer = handle.clone();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let write = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .record_timeline_event_durably_before(
+                    crate::TimelineEventKind::Observation(crate::ObservationEvent {
+                        scope: "test".into(),
+                        name: "explicit_deadline".into(),
+                        turn: None,
+                        step: None,
+                        data: None,
+                    }),
+                    deadline,
+                )
+                .await
+        })
+    };
+    let ack = persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("append starts before its deadline");
+    let pending_before = observer
+        .pending_timeline_commit()
+        .expect("exact pending event is visible during persistence");
+
+    tokio::time::advance(Duration::from_secs(4)).await;
+    assert!(matches!(
+        write.await.expect("write task"),
+        Err(crate::TimelineWriteError::DeadlineExceeded)
+    ));
+    let pending_after = observer
+        .pending_timeline_commit()
+        .expect("deadline retains pending event identity");
+    assert_eq!(
+        serde_json::to_vec(&pending_after.event).unwrap(),
+        serde_json::to_vec(&pending_before.event).unwrap()
+    );
+    assert!(pending_after.acknowledgement_lost);
+    assert!(handle.is_closed(), "deadline poisons the writer epoch");
+    assert!(
+        ack.send(Ok(())).is_err(),
+        "late acknowledgement is rejected"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn already_elapsed_timeline_deadline_does_not_dispatch_append() {
+    let (mock, mut persistence_rx) = MockTimelinePersistence::new_with_manual_timeline_ack();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = ChatStateActor::spawn(
+        Vec::new(),
+        test_config(),
+        Box::new(mock),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    );
+    let deadline = tokio::time::Instant::now() - Duration::from_secs(1);
+
+    let result = handle
+        .record_timeline_event_durably_before(
+            crate::TimelineEventKind::Observation(crate::ObservationEvent {
+                scope: "test".into(),
+                name: "expired_before_append".into(),
+                turn: None,
+                step: None,
+                data: None,
+            }),
+            deadline,
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(crate::TimelineWriteError::DeadlineExceeded)
+    ));
+    let pending = handle
+        .pending_timeline_commit()
+        .expect("prepared event identity survives pre-append expiry");
+    assert_eq!(pending.event.seq.get(), 0);
+    assert!(!pending.acknowledgement_lost);
+    assert!(
+        persistence_rx.drain().is_empty(),
+        "no append was dispatched"
+    );
+    assert!(
+        handle.is_closed(),
+        "pre-append deadline poisons writer epoch"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn already_elapsed_receipt_deadline_reaches_chat_state_before_append() {
+    let (mock, mut persistence_rx) = MockTimelinePersistence::new_with_manual_timeline_ack();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = ChatStateActor::spawn(
+        Vec::new(),
+        test_config(),
+        Box::new(mock),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    );
+    let deadline = tokio::time::Instant::now() - Duration::from_secs(1);
+    let result = handle
+        .receive_notification_durably_before(
+            "session-1".into(),
+            crate::NotificationSource::SubagentCompleted {
+                subagent_id: "child-1".into(),
+                owner: crate::NotificationOwner::Session,
+            },
+            crate::NotificationSourceVersion::Ordinal { value: 1 },
+            crate::NotificationPayloadRef {
+                blake3: "00".repeat(32),
+                bytes: 1,
+            },
+            Some(deadline),
+        )
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(crate::TimelineWriteError::DeadlineExceeded)
+    ));
+    let pending = handle
+        .pending_timeline_commit()
+        .expect("receipt event identity remains pending");
+    assert!(matches!(
+        pending.event.kind,
+        crate::TimelineEventKind::Notification(_)
+    ));
+    assert!(!pending.acknowledgement_lost);
+    assert!(
+        persistence_rx.drain().is_empty(),
+        "expired receipt was never appended"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn already_elapsed_usage_deadline_reaches_chat_state_before_append() {
+    let (mock, mut persistence_rx) = MockTimelinePersistence::new_with_manual_timeline_ack();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = ChatStateActor::spawn(
+        Vec::new(),
+        test_config(),
+        Box::new(mock),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    );
+    let deadline = tokio::time::Instant::now() - Duration::from_secs(1);
+    let result = handle
+        .record_subagent_usage_before("child-1".into(), Vec::new(), false, true, Some(deadline))
+        .await;
+
+    assert!(matches!(
+        result,
+        Err(crate::TimelineWriteError::DeadlineExceeded)
+    ));
+    let pending = handle
+        .pending_timeline_commit()
+        .expect("usage event identity remains pending");
+    assert!(matches!(
+        &pending.event.kind,
+        crate::TimelineEventKind::Observation(event)
+            if event.scope == "session_usage" && event.name == "subagent_settled"
+    ));
+    assert!(!pending.acknowledgement_lost);
+    assert!(
+        persistence_rx.drain().is_empty(),
+        "expired usage was never appended"
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn repeated_transient_writes_keep_the_same_event_until_the_ack_deadline() {
+    let (mock, mut persistence_rx) = MockTimelinePersistence::new_with_manual_timeline_ack();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = ChatStateActor::spawn(
+        Vec::new(),
+        test_config(),
+        Box::new(mock),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    );
+    let caller_deadline = tokio::time::Instant::now() + Duration::from_secs(4);
+    let write = {
+        let handle = handle.clone();
+        tokio::spawn(async move {
+            handle
+                .record_timeline_event_durably_before(
+                    crate::TimelineEventKind::Observation(crate::ObservationEvent {
+                        scope: "test".into(),
+                        name: "retry_until_deadline".into(),
+                        turn: None,
+                        step: None,
+                        data: None,
+                    }),
+                    caller_deadline,
+                )
+                .await
+        })
+    };
+    let deadline = caller_deadline;
+    let mut exact_event = None;
+    let mut attempts = 0;
+    loop {
+        let ack = tokio::select! {
+            _ = tokio::time::sleep_until(deadline) => break,
+            ack = persistence_rx.next_timeline_ack() => {
+                let Some(ack) = ack else { break };
+                ack
+            }
+        };
+        let event = persistence_rx
+            .drain()
+            .into_iter()
+            .find_map(|record| match record {
+                PersistenceRecord::Timeline(event) => Some(event),
+                PersistenceRecord::Flush => None,
+            })
+            .expect("timeline retry record");
+        if let Some(first) = &exact_event {
+            assert_eq!(
+                serde_json::to_vec(&event).unwrap(),
+                serde_json::to_vec(first).unwrap(),
+                "retry {attempts} must retain seq, timestamp, and event kind"
+            );
+        } else {
+            exact_event = Some(event);
+        }
+        attempts += 1;
+        ack.send(Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "transient storage timeout",
+        )))
+        .unwrap();
+    }
+    assert!(
+        attempts > 2,
+        "transient retries must continue until the deadline"
+    );
+    let error = write
+        .await
+        .expect("write task")
+        .expect_err("retry deadline must expire");
+    assert!(matches!(error, crate::TimelineWriteError::DeadlineExceeded));
+    let pending = handle
+        .pending_timeline_commit()
+        .expect("pending event retained");
+    let first = exact_event.expect("at least one attempted event");
+    assert_eq!(
+        serde_json::to_vec(&pending.event).unwrap(),
+        serde_json::to_vec(&first).unwrap()
+    );
+    assert_eq!(pending.error_kind, Some(std::io::ErrorKind::TimedOut));
+    assert!(!pending.acknowledgement_lost);
 }
 
 #[tokio::test]
@@ -8962,7 +9661,9 @@ async fn durable_input_submission_is_idempotent_and_rejects_payload_conflicts() 
         )
         .await
         .expect("exact retry is idempotent");
-    assert_eq!(duplicate.seq, first.seq);
+    assert!(first.created);
+    assert!(!duplicate.created);
+    assert_eq!(duplicate.event.seq, first.event.seq);
     assert_eq!(
         h.handle
             .timeline_events()

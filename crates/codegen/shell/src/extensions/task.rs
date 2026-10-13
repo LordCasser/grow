@@ -70,6 +70,8 @@ pub enum SubagentCancelOutcomeDto {
     AlreadyFinished { status: String },
     /// The id is unknown (never existed / evicted) — no finish coming.
     NotFound,
+    /// The caller does not own this subagent id.
+    Unauthorized,
 }
 
 impl From<SubagentCancelOutcome> for SubagentCancelOutcomeDto {
@@ -78,6 +80,7 @@ impl From<SubagentCancelOutcome> for SubagentCancelOutcomeDto {
             SubagentCancelOutcome::Cancelled => Self::Cancelled,
             SubagentCancelOutcome::AlreadyFinished { status } => Self::AlreadyFinished { status },
             SubagentCancelOutcome::NotFound => Self::NotFound,
+            SubagentCancelOutcome::Unauthorized => Self::Unauthorized,
         }
     }
 }
@@ -317,6 +320,10 @@ impl SubagentSnapshotDto {
                 dto.turns = Some(turns);
                 dto.worktree_path = worktree_path;
             }
+            SubagentSnapshotStatus::FinalizationPending { outcome, error } => {
+                dto.status = "finalization_pending".into();
+                dto.failure_error = error.or(Some(outcome));
+            }
             SubagentSnapshotStatus::Failed { error } => {
                 dto.status = "failed".into();
                 dto.failure_error = Some(error);
@@ -409,59 +416,69 @@ pub async fn handle_subagent(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtRes
         "grow/subagent/cancel" => {
             let req: CancelSubagentRequest = parse(args)?;
             tracing::info!(subagent_id = %req.subagent_id, "Cancelling subagent via ext method");
-            let outcome = SubagentCancelOutcomeDto::from(
-                agent
-                    .cancel_subagent(&req.session_id, &req.subagent_id)
-                    .await,
-            );
-            respond(Ok::<_, String>(CancelSubagentResponse {
-                subagent_id: req.subagent_id,
-                outcome,
-            }))
+            let result = agent
+                .cancel_subagent(&req.session_id, &req.subagent_id)
+                .await
+                .map(|outcome| CancelSubagentResponse {
+                    subagent_id: req.subagent_id,
+                    outcome: SubagentCancelOutcomeDto::from(outcome),
+                })
+                .map_err(|error| error.to_string());
+            respond(result)
         }
         "grow/subagent/get" => {
             let req: GetSubagentRequest = parse(args)?;
             let block = req.block.unwrap_or(false);
             let timeout_ms = req.timeout_ms.unwrap_or(30_000);
 
-            let snapshot = agent
-                .query_subagent(&req.session_id, &req.subagent_id, block, Some(timeout_ms))
-                .await;
-            let inspection = agent
-                .inspect_subagent(&req.session_id, &req.subagent_id)
-                .await;
-            let (parent_session_id, child_session_id, provenance) = inspection
-                .map(|inspection| {
-                    (
-                        inspection.parent_session_id,
-                        inspection.child_session_id,
-                        SubagentProvenance {
-                            fork_parent_prompt_id: inspection.fork_parent_prompt_id,
-                            resumed_from: inspection.resumed_from,
-                        },
-                    )
+            let result = async {
+                let snapshot = agent
+                    .query_subagent(&req.session_id, &req.subagent_id, block, Some(timeout_ms))
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let inspection = agent
+                    .inspect_subagent(&req.session_id, &req.subagent_id)
+                    .await
+                    .map_err(|error| error.to_string())?;
+                let (parent_session_id, child_session_id, provenance) = inspection
+                    .map(|inspection| {
+                        (
+                            inspection.parent_session_id,
+                            inspection.child_session_id,
+                            SubagentProvenance {
+                                fork_parent_prompt_id: inspection.fork_parent_prompt_id,
+                                resumed_from: inspection.resumed_from,
+                            },
+                        )
+                    })
+                    .unwrap_or_default();
+                Ok::<_, String>(GetSubagentResponse {
+                    snapshot: snapshot.map(|snapshot| {
+                        SubagentSnapshotDto::from_snapshot(
+                            snapshot,
+                            parent_session_id,
+                            child_session_id,
+                            provenance,
+                        )
+                    }),
                 })
-                .unwrap_or_default();
-            respond(Ok::<_, String>(GetSubagentResponse {
-                snapshot: snapshot.map(|snapshot| {
-                    SubagentSnapshotDto::from_snapshot(
-                        snapshot,
-                        parent_session_id,
-                        child_session_id,
-                        provenance,
-                    )
-                }),
-            }))
+            }
+            .await;
+            respond(result)
         }
         "grow/subagent/list_running" => {
             let req: ListRunningSubagentsRequest = parse(args)?;
-            let subagents = agent
+            let result = agent
                 .list_running_subagents(&req.session_id)
                 .await
-                .into_iter()
-                .map(SubagentLiveSnapshotDto::from)
-                .collect();
-            respond(Ok::<_, String>(ListRunningSubagentsResponse { subagents }))
+                .map(|subagents| ListRunningSubagentsResponse {
+                    subagents: subagents
+                        .into_iter()
+                        .map(SubagentLiveSnapshotDto::from)
+                        .collect(),
+                })
+                .map_err(|error| error.to_string());
+            respond(result)
         }
         _ => Err(acp::Error::method_not_found()),
     }

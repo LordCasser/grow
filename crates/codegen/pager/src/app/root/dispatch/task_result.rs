@@ -636,19 +636,119 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         }
         TaskResult::PromptStatusResolved {
             agent_id,
+            session_id,
+            binding_epoch,
+            query_generation,
             prompt_id,
+            response_session_id,
+            response_control_epoch,
+            observation_source,
             status,
         } => {
             let is_active = app.active_view == ActiveView::Agent(agent_id);
-            let Some(agent) = app.agents.get_mut(&agent_id) else {
+            let Some(agent) = find_agent_view_by_session_id(&mut app.agents, session_id.0.as_ref())
+            else {
                 return vec![];
             };
-            if agent.session.current_prompt_id.as_deref() != Some(prompt_id.as_str()) {
+            if agent.session.id != agent_id
+                || agent.session.session_id.as_ref() != Some(&session_id)
+                || agent.session_binding_epoch != binding_epoch
+                || agent.session.current_prompt_id.as_deref() != prompt_id.as_deref()
+                || !agent.session.prompt_status_query_matches_generation_for(
+                    prompt_id.as_deref(),
+                    query_generation,
+                )
+            {
                 return vec![];
             }
             agent.session.clear_prompt_status_query();
+            if status.is_ok() {
+                let identity_valid = response_session_id.as_deref() == Some(session_id.0.as_ref())
+                    && match observation_source.as_deref() {
+                        Some("runtime") => response_control_epoch.as_deref().is_some_and(|epoch| {
+                            agent
+                                .session
+                                .prompt_status_control_epoch
+                                .as_ref()
+                                .is_none_or(|(bound_session, current)| {
+                                    bound_session == session_id.0.as_ref() && current == epoch
+                                })
+                        }),
+                        Some("durable") => response_control_epoch.is_none(),
+                        _ => false,
+                    };
+                if !identity_valid {
+                    agent.session.prompt_status_waiting_reason =
+                        Some(crate::acp::tracker::WaitingReason::ObservationUnknown);
+                    agent
+                        .session
+                        .defer_prompt_status_retry(std::time::Instant::now());
+                    agent.show_toast("Session status identity changed; the turn remains open.");
+                    return vec![];
+                }
+                if observation_source.as_deref() == Some("runtime")
+                    && agent
+                        .session
+                        .prompt_status_control_epoch
+                        .as_ref()
+                        .is_none_or(|(bound_session, _)| bound_session != session_id.0.as_ref())
+                {
+                    agent.session.prompt_status_control_epoch = response_control_epoch
+                        .clone()
+                        .map(|epoch| (session_id.0.to_string(), epoch));
+                }
+            }
+            if prompt_id.is_none() {
+                match status {
+                    Ok(PromptStatusWire::Running { .. } | PromptStatusWire::Queued { .. }) => {
+                        agent.session.prompt_status_waiting_reason = None;
+                        agent.session.last_status_observed_at = Some(std::time::Instant::now());
+                    }
+                    Ok(PromptStatusWire::Settling) => {
+                        agent.session.prompt_status_waiting_reason =
+                            Some(crate::acp::tracker::WaitingReason::Settling);
+                        agent.session.last_status_observed_at = Some(std::time::Instant::now());
+                    }
+                    Ok(PromptStatusWire::Terminal { .. }) => {
+                        // Session lifecycle status has no prompt identity. It
+                        // can confirm that the child runtime observed activity,
+                        // but cannot safely finalize a Pager turn.
+                        agent.session.prompt_status_waiting_reason =
+                            Some(crate::acp::tracker::WaitingReason::DeliveryPending);
+                        agent.session.last_status_observed_at = Some(std::time::Instant::now());
+                    }
+                    Ok(
+                        PromptStatusWire::Unknown
+                        | PromptStatusWire::Absent
+                        | PromptStatusWire::TimedOut
+                        | PromptStatusWire::Unavailable { .. }
+                        | PromptStatusWire::InvalidEvidence { .. },
+                    ) => {
+                        agent.session.prompt_status_waiting_reason =
+                            Some(crate::acp::tracker::WaitingReason::ObservationUnknown);
+                        agent
+                            .session
+                            .defer_prompt_status_retry(std::time::Instant::now());
+                        agent.show_toast("Child session status is unknown; its turn remains open.");
+                    }
+                    Err(error) => {
+                        agent.session.prompt_status_waiting_reason =
+                            Some(crate::acp::tracker::WaitingReason::ObservationUnknown);
+                        agent
+                            .session
+                            .defer_prompt_status_retry(std::time::Instant::now());
+                        tracing::warn!(%error, session_id = %session_id.0, "child lifecycle status query failed");
+                        agent.show_toast(
+                            "Child session status could not be confirmed; its turn remains open.",
+                        );
+                    }
+                }
+                return vec![];
+            }
+            let prompt_id = prompt_id.expect("prompt query checked above");
             match status {
                 Ok(PromptStatusWire::Running { turn_start_ms }) => {
+                    agent.session.prompt_status_waiting_reason = None;
                     let observed_at = std::time::Instant::now();
                     // The turn-start shim adopts a server-confirmed running
                     // turn and belongs to the still-Submitting window only
@@ -682,6 +782,7 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     vec![]
                 }
                 Ok(PromptStatusWire::Queued { .. }) => {
+                    agent.session.prompt_status_waiting_reason = None;
                     // The server admitted the prompt but has NOT promoted it
                     // — another turn is running and the promoting broadcast
                     // has not come yet (a busy foreground turn, e.g. a Goal
@@ -730,34 +831,231 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     app.apply_terminal_outcome(outcome, agent_id, is_active);
                     vec![]
                 }
-                Ok(PromptStatusWire::Unknown) => {
-                    if agent.session.state.is_turn_running() {
-                        agent.session.last_status_observed_at = Some(std::time::Instant::now());
-                        return vec![];
-                    }
-                    agent.session.state = crate::app::session::AgentState::Idle;
-                    agent.session.current_prompt_id = None;
-                    agent.session.in_flight_prompt = None;
-                    agent.mark_turn_finished();
-                    agent.show_toast("Prompt was not admitted by the session.");
-                    let drain = super::queue::maybe_drain_queue(agent);
-                    super::queue::note_peek_page_flip(app, agent_id, drain.page_flip_entry);
-                    drain.effects
+                Ok(
+                    PromptStatusWire::Unknown
+                    | PromptStatusWire::Absent
+                    | PromptStatusWire::TimedOut
+                    | PromptStatusWire::Unavailable { .. }
+                    | PromptStatusWire::InvalidEvidence { .. },
+                ) => {
+                    agent.session.prompt_status_waiting_reason =
+                        Some(crate::acp::tracker::WaitingReason::ObservationUnknown);
+                    agent
+                        .session
+                        .defer_prompt_status_retry(std::time::Instant::now());
+                    agent.show_toast("Prompt status is not confirmed; the turn remains open.");
+                    vec![]
+                }
+                Ok(PromptStatusWire::Settling) => {
+                    agent.session.prompt_status_waiting_reason =
+                        Some(crate::acp::tracker::WaitingReason::Settling);
+                    agent.session.last_status_observed_at = Some(std::time::Instant::now());
+                    vec![]
                 }
                 Err(error) => {
-                    if agent.session.state.is_turn_running() {
-                        agent.session.last_status_observed_at = Some(std::time::Instant::now());
-                        tracing::warn!(%error, %prompt_id, "prompt watchdog status query failed");
-                        return vec![];
+                    agent.session.prompt_status_waiting_reason =
+                        Some(crate::acp::tracker::WaitingReason::ObservationUnknown);
+                    agent
+                        .session
+                        .defer_prompt_status_retry(std::time::Instant::now());
+                    tracing::warn!(%error, %prompt_id, session_id = %session_id.0, "prompt watchdog status query failed");
+                    agent
+                        .show_toast("Prompt status could not be confirmed; the turn remains open.");
+                    vec![]
+                }
+            }
+        }
+        TaskResult::InputAdmissionStatusResolved {
+            agent_id,
+            session_id,
+            binding_epoch,
+            prompt_id,
+            response_session_id,
+            response_prompt_id,
+            response_source,
+            status,
+        } => {
+            let Some(agent) = find_agent_view_by_session_id(&mut app.agents, session_id.0.as_ref())
+            else {
+                return vec![];
+            };
+            if agent.session.id != agent_id
+                || agent.session.session_id.as_ref() != Some(&session_id)
+                || agent.session_binding_epoch != binding_epoch
+            {
+                return vec![];
+            }
+            let matches_inflight = agent
+                .session
+                .in_flight_prompt
+                .as_ref()
+                .and_then(|prompt| prompt.prompt_id.as_deref())
+                == Some(prompt_id.as_str());
+            let matches_queued = agent
+                .session
+                .pending_prompts
+                .iter()
+                .any(|prompt| prompt.prompt_id.as_deref() == Some(prompt_id.as_str()));
+            if !matches_inflight && !matches_queued {
+                return vec![];
+            }
+            if response_session_id.as_deref() != Some(session_id.0.as_ref())
+                || response_prompt_id.as_deref() != Some(prompt_id.as_str())
+                || response_source.as_deref() != Some("durable")
+            {
+                tracing::warn!(session_id = %session_id.0, %prompt_id, "input admission observation identity mismatch");
+                return vec![];
+            }
+            let query_error = status.as_ref().err().cloned();
+            let disposition = match status {
+                Ok(
+                    crate::app::actions::InputAdmissionStatusWire::Allowed { .. }
+                    | crate::app::actions::InputAdmissionStatusWire::Consumed { .. }
+                    | crate::app::actions::InputAdmissionStatusWire::Handled,
+                ) => Some(true),
+                Ok(
+                    crate::app::actions::InputAdmissionStatusWire::Blocked { .. }
+                    | crate::app::actions::InputAdmissionStatusWire::Dismissed { .. },
+                ) => Some(false),
+                Ok(
+                    crate::app::actions::InputAdmissionStatusWire::UnknownUnconfirmed
+                    | crate::app::actions::InputAdmissionStatusWire::Submitted
+                    | crate::app::actions::InputAdmissionStatusWire::Unavailable { .. }
+                    | crate::app::actions::InputAdmissionStatusWire::TimedOut
+                    | crate::app::actions::InputAdmissionStatusWire::InvalidEvidence { .. }
+                    | crate::app::actions::InputAdmissionStatusWire::Absent,
+                )
+                | Err(_) => None,
+            };
+            if let Some(prompt) = agent.session.in_flight_prompt.as_mut() {
+                if prompt.prompt_id.as_deref() == Some(prompt_id.as_str()) {
+                    prompt.admission_resolved = disposition;
+                }
+            }
+            if disposition == Some(true) {
+                // The validated durable input is already owned by Shell's
+                // queue or conversation. Remove only the duplicate local retry
+                // row; any newer composer draft remains untouched.
+                agent
+                    .session
+                    .pending_prompts
+                    .retain(|prompt| prompt.prompt_id.as_deref() != Some(prompt_id.as_str()));
+            }
+            match disposition {
+                Some(true) => agent.show_toast(
+                    "The original input was admitted. Its draft remains available for editing.",
+                ),
+                Some(false) => agent.show_toast(
+                    "The original input was rejected. An explicit resend will use a new identity.",
+                ),
+                None => {
+                    if let Some(error) = query_error {
+                        tracing::warn!(%error, session_id = %session_id.0, %prompt_id, "input admission observation unavailable");
                     }
-                    agent.session.state = crate::app::session::AgentState::Idle;
-                    agent.session.current_prompt_id = None;
-                    agent.session.in_flight_prompt = None;
-                    agent.mark_turn_finished();
-                    agent.show_toast(&error);
-                    let drain = super::queue::maybe_drain_queue(agent);
-                    super::queue::note_peek_page_flip(app, agent_id, drain.page_flip_entry);
-                    drain.effects
+                }
+            }
+            if disposition == Some(true) {
+                app.local_drafts
+                    .transfer_input_identity(agent_id, &session_id.0, &prompt_id);
+            }
+            vec![]
+        }
+        TaskResult::InputIntentCheckpointed {
+            agent_id,
+            session_id,
+            binding_epoch,
+            prompt_id,
+            send,
+            result,
+        } => {
+            let send_matches = send.prompt_rpc_identity().is_some_and(
+                |(expected_agent, expected_session, expected_prompt, _)| {
+                    expected_agent == agent_id
+                        && expected_session == &session_id
+                        && expected_prompt == prompt_id.as_str()
+                },
+            );
+            let binding_matches = app.agents.get(&agent_id).is_some_and(|agent| {
+                agent.session_binding_epoch == binding_epoch
+                    && agent.session.session_id.as_ref() == Some(&session_id)
+            });
+            if !send_matches || !binding_matches {
+                tracing::warn!(%prompt_id, "input intent checkpoint response identity mismatch");
+                return vec![];
+            }
+            match result {
+                Ok(()) => vec![Effect::ReadyInputIntent { send }],
+                Err(error) => {
+                    app.mark_input_ram_only(agent_id, prompt_id.clone());
+                    match *send {
+                        Effect::SendInterject {
+                            expected_turn_id,
+                            interjection_id,
+                            text,
+                            images,
+                            blocks,
+                            ..
+                        } => {
+                            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                                let chip_elements = images
+                                    .iter()
+                                    .filter_map(|image| {
+                                        let placeholder = crate::prompt_images::display_text(
+                                            image.display_number,
+                                        );
+                                        let start = text.find(&placeholder)?;
+                                        Some(crate::app::session::ChipElement {
+                                            range: start..start + placeholder.len(),
+                                            kind: crate::views::prompt_widget::KIND_IMAGE,
+                                            display: None,
+                                        })
+                                    })
+                                    .collect();
+                                let id = agent.session.next_queue_id;
+                                agent.session.next_queue_id += 1;
+                                agent.session.pending_prompts.push_front(
+                                    crate::app::session::QueuedPrompt {
+                                        id,
+                                        prompt_id: Some(interjection_id),
+                                        expected_turn_id: Some(expected_turn_id),
+                                        text,
+                                        kind: crate::app::session::QueueEntryKind::Prompt,
+                                        wire_blocks: blocks,
+                                        images,
+                                        requires_review: true,
+                                        display_as_skill: false,
+                                        chip_elements,
+                                        skill_token_ranges: Vec::new(),
+                                        combined_texts: Vec::new(),
+                                    },
+                                );
+                                agent.show_toast(&format!(
+                                    "This input could not be saved; its original content is available only in this process. Send it again to continue. {error}"
+                                ));
+                            }
+                        }
+                        send @ (Effect::SendPrompt { .. } | Effect::SendPromptBlocks { .. }) => {
+                            if let Some(agent) = app.agents.get_mut(&agent_id) {
+                                if let Some(draft) = agent
+                                    .session
+                                    .in_flight_prompt
+                                    .as_ref()
+                                    .filter(|draft| {
+                                        draft.prompt_id.as_deref() == Some(prompt_id.as_str())
+                                    })
+                                    .cloned()
+                                {
+                                    super::prompt::restore_failed_input_draft(agent, draft);
+                                }
+                                agent.show_toast(&format!(
+                                    "This input could not be saved; its original content is available only in this process. Send it again to continue. {error}"
+                                ));
+                            }
+                            let _ = send;
+                        }
+                        _ => {}
+                    }
+                    vec![]
                 }
             }
         }
@@ -1561,11 +1859,16 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         TaskResult::InterjectFailed {
             agent_id,
             error,
+            expected_turn_id,
+            interjection_id,
             text,
             blocks,
             images,
         } => {
+            app.restore_input_draft_ownership(agent_id, &interjection_id);
+            let mut query = None;
             if let Some(agent) = app.agents.get_mut(&agent_id) {
+                let has_images = !images.is_empty();
                 // The failed effect owns explicit attachments, but interject
                 // producers do not carry textarea elements. Bind only those
                 // attachments to chips so editing the retry cannot drop them.
@@ -1597,6 +1900,8 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                     .pending_prompts
                     .push_front(crate::app::session::QueuedPrompt {
                         id,
+                        prompt_id: Some(interjection_id.clone()),
+                        expected_turn_id: Some(expected_turn_id),
                         text,
                         kind: crate::app::session::QueueEntryKind::Prompt,
                         wire_blocks: blocks,
@@ -1607,11 +1912,30 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                         skill_token_ranges: Vec::new(),
                         combined_texts: Vec::new(),
                     });
-                agent.show_toast(&format!(
-                    "Interjection failed — draft held in queue for review: {error}"
-                ));
+                if has_images {
+                    agent.show_toast(&format!(
+                        "Interjection failed — its image snapshot cannot be recovered after restart; retry it in this session. {error}"
+                    ));
+                } else {
+                    agent.show_toast(&format!(
+                        "Interjection failed — draft held in queue for review: {error}"
+                    ));
+                }
+                query =
+                    agent.session.session_id.clone().map(|session_id| {
+                        (session_id, agent.session_binding_epoch, interjection_id)
+                    });
             }
-            vec![]
+            query
+                .map(|(session_id, binding_epoch, prompt_id)| {
+                    vec![Effect::QueryInputAdmissionStatus {
+                        agent_id,
+                        session_id,
+                        binding_epoch,
+                        prompt_id,
+                    }]
+                })
+                .unwrap_or_default()
         }
         TaskResult::SlashCommandExecuted {
             agent_id: _,

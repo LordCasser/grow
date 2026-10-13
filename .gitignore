@@ -13,3 +13,6 @@
 .playwright-mcp/
 .actrc
 /target-ohos/
+
+# 本地产物
+*.log

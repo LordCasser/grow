@@ -126,6 +126,302 @@ fn prefix_validation_rejects_short_blank_and_oversized_records() {
     assert!(error.to_string().contains("exceeds"));
 }
 
+async fn append_after_injected_sync_failure(
+    root: &Path,
+    info: &Info,
+    event: &chat_state::TimelineEvent,
+    failure_point: TimelineSyncPoint,
+    leave_partial_tail: bool,
+) {
+    let baseline = JsonlStorageAdapter::with_root(root.to_path_buf());
+    if leave_partial_tail {
+        let path = baseline.timeline_file(info);
+        use std::io::Write;
+        std::fs::OpenOptions::new()
+            .append(true)
+            .open(path)
+            .unwrap()
+            .write_all(b"{\"partial\":")
+            .unwrap();
+    }
+
+    let fail_once = Arc::new(AtomicBool::new(true));
+    let should_fail = Arc::clone(&fail_once);
+    let writer = JsonlStorageAdapter::with_timeline_sync_probe(root.to_path_buf(), move |point| {
+        if point == failure_point && should_fail.swap(false, Ordering::AcqRel) {
+            Err(io::Error::other(format!("injected {point:?} sync failure")))
+        } else {
+            Ok(())
+        }
+    });
+    let error = writer
+        .append_timeline_event_durable(info, event)
+        .await
+        .expect_err("the selected sync boundary must fail after the write");
+    assert!(error.to_string().contains("injected"));
+    drop(writer);
+
+    // A new adapter models restart after a lost ACK. Replaying the exact event
+    // must finish durability without adding another physical canonical fact.
+    let restarted = JsonlStorageAdapter::with_root(root.to_path_buf());
+    restarted
+        .append_timeline_event_durable(info, event)
+        .await
+        .expect("exact retry after restart");
+    let stored = restarted.read_timeline_events_sync(info).unwrap();
+    assert_eq!(
+        stored
+            .iter()
+            .filter(|candidate| candidate.seq == event.seq)
+            .count(),
+        1,
+        "the failed attempt and exact retry leave one event at the canonical sequence"
+    );
+    assert_eq!(
+        serde_json::to_value(stored.last().unwrap()).unwrap(),
+        serde_json::to_value(event).unwrap(),
+        "the canonical payload remains byte-equivalent at the event boundary"
+    );
+    chat_state::Timeline::from_events(stored.clone()).expect("committed prefix validates");
+    let physical = std::fs::read_to_string(restarted.timeline_file(info)).unwrap();
+    assert_eq!(physical.lines().count(), stored.len());
+    assert!(
+        !physical.contains("partial"),
+        "retry must truncate an incomplete physical tail before appending"
+    );
+}
+
+#[tokio::test]
+async fn child_finalization_canonical_boundaries_retry_after_file_and_directory_sync_failures() {
+    let root = tempfile::tempdir().unwrap();
+    let parent_info = Info {
+        id: acp::SessionId::new("finalization-matrix-parent"),
+        cwd: "/test/parent".into(),
+    };
+    let child_info = Info {
+        id: acp::SessionId::new("finalization-matrix-child"),
+        cwd: "/test/child".into(),
+    };
+    let initial = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    initial
+        .init_session(&parent_info, default_model_id())
+        .await
+        .unwrap();
+    initial
+        .init_session(&child_info, default_model_id())
+        .await
+        .unwrap();
+
+    // No dedicated pre-write failure hook exists for canonical Timeline appends.
+    // Exercise the existing sequence guard instead: a valid but skipped seq is
+    // rejected before bytes are written, then seq 0 can still be committed.
+    let mut skipped = chat_state::Timeline::default();
+    skipped
+        .record(chat_state::TimelineEventKind::Observation(
+            chat_state::ObservationEvent {
+                scope: "test".into(),
+                name: "first".into(),
+                turn: None,
+                step: None,
+                data: None,
+            },
+        ))
+        .unwrap();
+    let skipped_event = skipped
+        .record(chat_state::TimelineEventKind::Observation(
+            chat_state::ObservationEvent {
+                scope: "test".into(),
+                name: "skipped sequence".into(),
+                turn: None,
+                step: None,
+                data: None,
+            },
+        ))
+        .unwrap();
+    let initial_writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let error = initial_writer
+        .append_timeline_event_durable(&parent_info, &skipped_event)
+        .await
+        .expect_err("a new ledger cannot begin at seq 1");
+    assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+    assert_eq!(
+        std::fs::metadata(initial_writer.timeline_file(&parent_info))
+            .map(|metadata| metadata.len())
+            .unwrap_or(0),
+        0,
+        "pre-write sequence rejection leaves no canonical bytes"
+    );
+    drop(initial_writer);
+
+    let subagent_id = "finalization-matrix-child";
+    let mut parent = chat_state::Timeline::default();
+    let spawn = parent
+        .record(chat_state::TimelineEventKind::Subagent(
+            chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
+                subagent_id: subagent_id.into(),
+                child_session_id: child_info.id.0.to_string(),
+                security_parent_session_id: parent_info.id.0.to_string(),
+                subagent_type: "worker".into(),
+                description: "finalization boundary matrix".into(),
+                prompt: "complete the task".into(),
+                context_source: chat_state::SubagentContextSource::New,
+                source_ref: None,
+                context_normalized: false,
+                resumed_from: None,
+                parent_prompt_id: Some("parent-prompt".into()),
+                capability_mode: None,
+                permission_mode: None,
+                effective_permission_mode: None,
+                workflow_run_id: None,
+                goal_id: None,
+                goal_definition_revision: None,
+                surface_completion: true,
+                child_cwd: child_info.cwd.clone(),
+                worktree_path: None,
+                effective_model_id: "test-model".into(),
+                model_transport_key: sampling_types::ModelImageInputKey::new(
+                    "test-model",
+                    "responses",
+                    "test",
+                ),
+                reasoning_effort: None,
+            }),
+        ))
+        .unwrap();
+
+    let mut child = chat_state::Timeline::default();
+    let seed = child
+        .record(chat_state::TimelineEventKind::SubagentSeed(
+            chat_state::SubagentSeedEvent {
+                parent_timeline_id: parent_info.id.0.to_string(),
+                parent_spawn_seq: spawn.seq.get(),
+                subagent_id: subagent_id.into(),
+                security_parent_session_id: parent_info.id.0.to_string(),
+                context_source: chat_state::SubagentContextSource::New,
+                source_ref: None,
+                normalized: false,
+            },
+        ))
+        .unwrap();
+    let child_result = child
+        .record(chat_state::TimelineEventKind::SubagentResult(
+            chat_state::SubagentResultEvent {
+                subagent_id: subagent_id.into(),
+                outcome: chat_state::SubagentOutcome::Completed,
+                duration_ms: 17,
+                tool_calls: 1,
+                turns: 1,
+                tokens_used: 5,
+                error: None,
+                output_ref: Some(format!(
+                    "artifact:subagent-output:blake3:{}",
+                    "a".repeat(64)
+                )),
+            },
+        ))
+        .unwrap();
+    let usage = parent
+        .record(chat_state::TimelineEventKind::Observation(
+            chat_state::ObservationEvent {
+                scope: "session_usage".into(),
+                name: "subagent_settled".into(),
+                turn: None,
+                step: None,
+                data: Some(serde_json::json!({
+                    "subagent_id": subagent_id,
+                    "by_model": [["test-model", {
+                        "input_tokens": 3,
+                        "output_tokens": 2,
+                        "model_calls": 1,
+                        "cost_usd_ticks": null,
+                        "cached_read_tokens": 0,
+                        "cache_creation_tokens": 0,
+                        "cache_read_known_input_tokens": 0,
+                        "cache_read_unknown_calls": 0,
+                        "cache_write_unknown_calls": 0,
+                        "reasoning_tokens": 0,
+                        "api_duration_ms": 0,
+                        "cost_missing_calls": 0
+                    }]],
+                    "incomplete": false
+                })),
+            },
+        ))
+        .unwrap();
+    let ended = parent
+        .record(chat_state::TimelineEventKind::Subagent(
+            chat_state::SubagentEvent::Ended(chat_state::SubagentTerminalEvent {
+                subagent_id: subagent_id.into(),
+                child_session_id: child_info.id.0.to_string(),
+                outcome: chat_state::SubagentOutcome::Completed,
+                duration_ms: 17,
+                tool_calls: 1,
+                turns: 1,
+                tokens_used: 5,
+                error: None,
+                result_ref: Some(chat_state::TimelineRangeRef {
+                    timeline_id: child_info.id.0.to_string(),
+                    first_seq: child_result.seq.get(),
+                    last_seq: child_result.seq.get(),
+                }),
+                snapshot_ref: None,
+            }),
+        ))
+        .unwrap();
+    let parent_opened = initial.open_session(&parent_info).unwrap();
+    let payload_ref = crate::session::notification_inbox::write_payload(
+        parent_opened.directory(),
+        "Child finalization completed",
+    )
+    .unwrap();
+    let source = chat_state::NotificationSource::SubagentCompleted {
+        subagent_id: subagent_id.into(),
+        owner: chat_state::NotificationOwner::Session,
+    };
+    let source_version = chat_state::NotificationSourceVersion::Ordinal { value: 1 };
+    let receipt_id =
+        chat_state::notification_id(parent_info.id.0.as_ref(), &source, &source_version).unwrap();
+    let receipt = parent
+        .record(chat_state::TimelineEventKind::Notification(
+            chat_state::NotificationEvent::Received {
+                id: receipt_id,
+                owner_session_id: parent_info.id.0.to_string(),
+                source,
+                source_version,
+                payload_ref,
+            },
+        ))
+        .unwrap();
+    drop(parent_opened);
+    drop(initial);
+
+    for (info, event, point, partial_tail) in [
+        (&child_info, &seed, TimelineSyncPoint::Directory, false),
+        (&child_info, &child_result, TimelineSyncPoint::File, true),
+        (&parent_info, &spawn, TimelineSyncPoint::File, false),
+        (&parent_info, &usage, TimelineSyncPoint::Directory, false),
+        (&parent_info, &ended, TimelineSyncPoint::File, false),
+        (&parent_info, &receipt, TimelineSyncPoint::Directory, false),
+    ] {
+        append_after_injected_sync_failure(root.path(), info, event, point, partial_tail).await;
+    }
+
+    let reader = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let child_events = reader.read_timeline_events_sync(&child_info).unwrap();
+    let parent_events = reader.read_timeline_events_sync(&parent_info).unwrap();
+    assert_eq!(
+        serde_json::to_value(&child_events).unwrap(),
+        serde_json::to_value(child.events()).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(&parent_events).unwrap(),
+        serde_json::to_value(parent.events()).unwrap()
+    );
+    chat_state::Timeline::from_events(child_events).expect("child seed/result prefix");
+    chat_state::Timeline::from_events(parent_events)
+        .expect("parent spawn/usage/end/receipt prefix");
+}
+
 #[test]
 fn timeline_append_rejects_same_length_interior_replacement() {
     let dir = tempfile::tempdir().unwrap();

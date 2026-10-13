@@ -877,6 +877,13 @@ impl SessionActor {
                 .unwrap_or_default()
         };
 
+        self.runtime_observation.write().replace_queue_running(
+            Vec::new(),
+            Some((
+                prompt_id.clone(),
+                chrono::Utc::now().timestamp_millis().max(0) as u64,
+            )),
+        );
         *self
             .current_prompt_id
             .lock()

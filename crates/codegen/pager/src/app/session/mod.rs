@@ -96,6 +96,11 @@ impl QueueEntryKind {
 pub struct QueuedPrompt {
     /// Monotonic ID, unique within this agent's session. Never reused.
     pub id: u64,
+    /// Stable submission identity when this row represents an uncertain retry.
+    /// New user sends leave this empty and receive an ID at first dispatch.
+    pub prompt_id: Option<String>,
+    /// Original steer target for an uncertain queued retry; `None` is FIFO.
+    pub expected_turn_id: Option<String>,
     /// The prompt text (or command text, e.g. "/compact").
     pub text: String,
     /// Whether this is a prompt or a slash command.
@@ -130,6 +135,8 @@ impl QueuedPrompt {
     pub fn plain(id: u64, text: impl Into<String>, kind: QueueEntryKind) -> Self {
         Self {
             id,
+            prompt_id: None,
+            expected_turn_id: None,
             text: text.into(),
             kind,
             wire_blocks: None,
@@ -993,7 +1000,10 @@ pub struct AgentSession {
     agent_metadata_revision: u64,
     /// Prompt currently being reconciled by the submission watchdog. This
     /// bounds status requests to one in flight per prompt.
-    prompt_status_query_for: Option<String>,
+    prompt_status_query_for: Option<(Option<String>, u64)>,
+    prompt_status_query_generation: u64,
+    pub(crate) prompt_status_retry_at: Option<Instant>,
+    pub(crate) prompt_status_control_epoch: Option<(String, String)>,
     /// Prompt history for the current session, fetched from ACP
     /// (`grow/prompt_history` scoped via `session_id`). Most-recent-first.
     /// Fetched on session create/load; prompts sent in this session are
@@ -1092,6 +1102,9 @@ pub struct AgentSession {
     pub(crate) last_prompt_event_at: Option<Instant>,
     /// Last authoritative Running status observation for the current prompt.
     pub(crate) last_status_observed_at: Option<Instant>,
+    /// Read-only explanation from a matching runtime status observation. It
+    /// affects presentation only and never changes tracker or turn lifecycle.
+    pub(crate) prompt_status_waiting_reason: Option<crate::acp::tracker::WaitingReason>,
     /// Turn-start anchor a `turn.first_activity` log was already emitted for (fire-once-per-turn guard).
     pub first_activity_logged_for: Option<Instant>,
     /// Accumulated duration the turn timer was paused (while the user was
@@ -1219,6 +1232,15 @@ pub struct AgentSession {
 /// by any server activity. See `AgentSession::in_flight_prompt`.
 #[derive(Debug, Clone)]
 pub struct InFlightPrompt {
+    /// Client identity minted before the first dispatch. Replays retain it so
+    /// Shell can attach to the original durable admission decision.
+    pub prompt_id: Option<String>,
+    /// Original route target when this was a steer request.
+    pub expected_turn_id: Option<String>,
+    /// `Some(true)` means the durable admission decision allowed this input;
+    /// `Some(false)` means it was durably rejected or dismissed. `None` keeps
+    /// the result unknown or still Submitted.
+    pub admission_resolved: Option<bool>,
     pub text: String,
     pub images: Vec<crate::prompt_images::PastedImage>,
     /// Primary (last) user-prompt block for restore/cancel.
@@ -1290,6 +1312,9 @@ impl AgentSession {
             pending_authoritative_agent_change: None,
             agent_metadata_revision: 0,
             prompt_status_query_for: None,
+            prompt_status_query_generation: 0,
+            prompt_status_retry_at: None,
+            prompt_status_control_epoch: None,
             prompt_history: Vec::new(),
             prompt_history_loading: false,
             loading_replay: false,
@@ -1316,6 +1341,7 @@ impl AgentSession {
             turn_started_at: None,
             last_prompt_event_at: None,
             last_status_observed_at: None,
+            prompt_status_waiting_reason: None,
             first_activity_logged_for: None,
             turn_paused_duration: Duration::ZERO,
             turn_paused_wall: Duration::ZERO,
@@ -1366,7 +1392,6 @@ impl AgentSession {
         self.self_interjection_ids.remove(id)
     }
 
-    #[cfg(test)]
     pub(crate) fn has_self_interjection(&self, id: &str) -> bool {
         self.self_interjection_ids.contains(id)
     }
@@ -2369,15 +2394,63 @@ impl AgentSession {
     }
 
     pub(crate) fn prompt_status_query_matches(&self, prompt_id: &str) -> bool {
-        self.prompt_status_query_for.as_deref() == Some(prompt_id)
+        self.prompt_status_query_matches_for(Some(prompt_id))
     }
 
-    pub(crate) fn begin_prompt_status_query(&mut self, prompt_id: impl Into<String>) {
-        self.prompt_status_query_for = Some(prompt_id.into());
+    pub(crate) fn prompt_status_query_matches_for(&self, prompt_id: Option<&str>) -> bool {
+        self.prompt_status_query_for
+            .as_ref()
+            .is_some_and(|(query_prompt, _)| query_prompt.as_deref() == prompt_id)
+    }
+
+    pub(crate) fn begin_prompt_status_query(&mut self, prompt_id: impl Into<String>) -> u64 {
+        self.prompt_status_query_generation = self.prompt_status_query_generation.wrapping_add(1);
+        let generation = self.prompt_status_query_generation;
+        self.prompt_status_query_for = Some((Some(prompt_id.into()), generation));
+        self.prompt_status_retry_at = None;
+        generation
+    }
+
+    pub(crate) fn begin_lifecycle_status_query(&mut self) -> u64 {
+        self.prompt_status_query_generation = self.prompt_status_query_generation.wrapping_add(1);
+        let generation = self.prompt_status_query_generation;
+        self.prompt_status_query_for = Some((None, generation));
+        self.prompt_status_retry_at = None;
+        generation
+    }
+
+    pub(crate) fn prompt_status_query_matches_generation(
+        &self,
+        prompt_id: &str,
+        generation: u64,
+    ) -> bool {
+        self.prompt_status_query_matches_generation_for(Some(prompt_id), generation)
+    }
+
+    pub(crate) fn prompt_status_query_matches_generation_for(
+        &self,
+        prompt_id: Option<&str>,
+        generation: u64,
+    ) -> bool {
+        self.prompt_status_query_for
+            .as_ref()
+            .is_some_and(|(query_prompt, query_generation)| {
+                query_prompt.as_deref() == prompt_id && *query_generation == generation
+            })
+    }
+
+    pub(crate) fn defer_prompt_status_retry(&mut self, now: Instant) {
+        self.prompt_status_retry_at = now.checked_add(Duration::from_secs(5));
     }
 
     pub(crate) fn clear_prompt_status_query(&mut self) {
         self.prompt_status_query_for = None;
+        self.prompt_status_retry_at = None;
+    }
+
+    pub(crate) fn clear_prompt_status_observation(&mut self) {
+        self.prompt_status_waiting_reason = None;
+        self.clear_prompt_status_query();
     }
 
     pub(crate) fn mark_optimistic_queue_echo(&mut self, prompt_id: impl Into<String>) {
@@ -2701,6 +2774,8 @@ impl AgentSession {
         let id = self.next_queue_id;
         self.next_queue_id += 1;
         self.pending_prompts.push_front(QueuedPrompt {
+            prompt_id: prompt.prompt_id,
+            expected_turn_id: prompt.expected_turn_id,
             images: prompt.images,
             chip_elements: prompt.chip_elements,
             ..QueuedPrompt::plain(id, prompt.text, QueueEntryKind::Prompt)
@@ -2767,7 +2842,9 @@ impl AgentSession {
             .zip(id_strings.iter())
             .map(|(p, id)| CombineGate {
                 id: id.as_str(),
-                is_plain_prompt: p.kind == QueueEntryKind::Prompt && !p.requires_review,
+                is_plain_prompt: p.kind == QueueEntryKind::Prompt
+                    && !p.requires_review
+                    && p.prompt_id.is_none(),
                 is_synthetic: false,
                 is_expanded_skill: !p.wire_matches_display(),
                 is_bash: p.kind == QueueEntryKind::BashCommand,
@@ -3126,6 +3203,9 @@ mod tests {
             mime_type: "image/png".into(),
         });
         session.enqueue_in_flight_prompt_front(InFlightPrompt {
+            prompt_id: None,
+            admission_resolved: None,
+            expected_turn_id: None,
             text: "look [Image #1]".into(),
             images: vec![image],
             scrollback_entry: EntryId::new(1),

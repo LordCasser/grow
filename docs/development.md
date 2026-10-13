@@ -169,7 +169,19 @@ Chat 流在 finish reason 与完整 usage 都已解析后，若用户 steer 或�
 
 `UsageLedger` 同时保留账本所属 Agent 与每个已完成子 Agent 的身份分项；子 Agent 以稳定 `subagent_id` 沿既有终态 ACK fold 进入父账本并持久结算。`PromptUsage` 当前只投影包含全部 Agent 的总体和 provider/model 分项，不把 Agent 分项暴露到 `/usage`、headless 或 normal 状态栏。
 
-Pager 的 cancel notification 没有响应体；`TurnCancelling` 因此在短窗口后复用 exact-prompt status 查询，以 terminal/unknown/error 收敛，Running 只重新起算窗口。首次 session load 使用带来源 surface 的临时 Agent：失败会删除临时页并返回 Welcome、原 Agent 或 Dashboard，原地 reload 仍走既有事务回滚。
+Pager 的 cancel notification 没有响应体；`TurnCancelling` 因此在短窗口后核对原 prompt 或 child lifecycle。只有匹配身份的持久 terminal 才结束任务；Unknown/error 展示取消未确认并保留目标，Running/Settling 继续有界核对。首次 session load 使用带来源 surface 的临时 Agent：失败会删除临时页并返回 Welcome、原 Agent 或 Dashboard，原地 reload 仍走既有事务回滚。
+
+### Runtime 状态与恢复诊断
+
+Pager 的 prompt 与 input-admission 状态 RPC 共用 4 个工作许可和最多 8 个目标登记；watchdog 每轮最多派发 4 个查询，暂未获配额的目标在 250 ms 后重新核对。五秒期限包含许可等待；调用方超时后，仍在运行的 RPC 保留许可与目标登记，重连后的同目标查询不会绕过旧请求所有权。
+
+状态核对从 Shell 的 `grow/queue/prompt_status`、`grow/input/admission_status` 和 Tasks backend 查询开始，再看 Pager 打开的子页面及提示状态。状态读取区分 runtime 缺失、持久会话可读、不可达、超时和证据无效；5 秒是控制查询的默认总期限，含排队与加载，调用方更早的 deadline 优先。超时只结束调用方等待；仍在执行的文件读取继续占用 worker 许可。查询失败不刷新最后确认状态或工作进展时间。取消状态未知时可以继续编辑和查询，但不能把它视为取消完成、推进队列或启动替代执行。实现与契约见 [observe-session-runtime-health](../openspec/changes/archive/2026-10-08-observe-session-runtime-health/proposal.md)、[runtime observation](../openspec/specs/session-timeline/spec.md#requirement-runtime-observations-preserve-query-uncertainty-and-ownership) 与 [取消核对](../openspec/specs/client-surfaces/spec.md#requirement-cancelling-turns-reconcile-against-authoritative-prompt-state)。
+
+子 Agent 收尾受阻时，先查 Tasks 的执行 outcome/finalization 状态，再查 child Timeline、结果 artifact、父会话 Ended/usage 状态和 completion receipt。执行返回、child result、parent terminal、receipt 和交付分别确认；已有合法提交前缀必须 exact reconciliation，ACK 不明时核对原 identity/payload，不能重跑 provider 或工具。正常收尾把完整推进链放在共享 30 秒 deadline 内；后续恢复周期也共用固定的 30 秒绝对期限，查询和重连不重置期限，仅合法新准入屏障可开启下一周期。receipt 单次观察最多 5 秒、最多三次可重试尝试且复用同一总预算。等待结束而底层 I/O 仍在运行时，in-flight 标记和 writer lease 保留，不能派发重复写入或开启替代 writer；只有旧 I/O/owner 实际结束、完整 drain 并释放 lease 后，替代 writer 才能校验和 sync 恢复。panic 路径把 child handle、thread 和输出写入 in-flight 标记交给 Coordinator 持有的恢复责任，usage 保持 incomplete，不伪造输出或终态。内存中最多保留 64 项待收尾责任及合计 8 MiB 的原始输出；超额正文标为不可用，不生成替代内容。纯内存正文在永久不可写且进程退出时无法保证恢复。见 [recover-subagent-terminal-commit](../openspec/changes/archive/2026-10-08-recover-subagent-terminal-commit/proposal.md)、[收尾责任](../openspec/specs/session-timeline/spec.md#requirement-subagent-finalization-retains-one-accountable-owner)、[exact replay barrier](../openspec/specs/session-timeline/spec.md#requirement-exact-replay-commits-acknowledge-durable-barriers) 和 [取消结算边界](../openspec/specs/model-sampling/spec.md#requirement-subagent-cancellation-settles-admitted-attempts-before-closing-the-child-timeline)。
+
+输入发送 ACK 丢失时，Pager 保留原 session/prompt/input identity、请求摘要和可用快照；状态只读未发现输入不等于明确未接纳。未编辑重试必须复用原 identity 和精确快照；编辑后的内容只有用户显式发送才成为新意图。提交 Hook 中断按已有执行证据恢复，不自动重跑不明副作用。确认影响共享 Grow 存储域的满盘/配额故障后，该管理实例停止该域新的 prompt/child/provider/tool 准入；单 session 完整性或权限故障只关闭相应 owner，诊断、取消和合法恢复保留可用。自动清理基于已验证 Timeline、输入、子任务/回执和 artifact 引用；candidate scan 不是删除许可，删除时还须在稳定顺序取得相关 writer lease 并复核。独立 workspace GC 缺乏 session authority 时跳过关联任务资源；已修改工作树只有取得合法 snapshot 和引用保护后才能回收。TTL 发现最多检查 4,096 个候选及 8,192 个目录项；一次有界 Timeline 校验最多读取 16 MiB、50,000 个事件和 4,096 个引用，依赖扫描超过 4,096 个 child spawn 即停止并保留候选。扫描超预算、损坏或无法读取时保守保留并报告原因。存储不可写同时进程退出时，未持久化正文仍可能丢失；保留限制不是零损失承诺。见 [preserve-uncertain-input-and-recovery-resources](../openspec/changes/archive/2026-10-08-preserve-uncertain-input-and-recovery-resources/proposal.md)、[输入重试身份](../openspec/specs/input-admission/spec.md#requirement-user-submission-retries-retain-one-durable-input-identity)、[恢复资源清理](../openspec/specs/session-timeline/spec.md#requirement-destructive-maintenance-revalidates-recovery-references-at-deletion) 和 [已验证关闭会话清理](../openspec/specs/session-timeline/spec.md#requirement-completed-session-cleanup-is-independent-of-live-predecessors)。
+
+本地草稿继续使用现有单源格式和 256 KiB 记录预算，不持久化图片。含图片或超预算的请求不能完成本地 checkpoint 时，页面保留内存快照并提示未保存；用户显式选择继续发送后，退出进程可能丢失该快照。已持久接纳的图片由 Shell 的输入 payload 与附件引用恢复，不能用编辑后的正文重构原请求。
 
 ## 债务与历史
 

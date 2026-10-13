@@ -1381,3 +1381,76 @@ async fn agent_catalog_timeout_keeps_blocked_worker_permit() {
         .unwrap();
     drop(permit);
 }
+
+#[tokio::test(start_paused = true)]
+async fn status_rpc_budget_includes_admission_and_retains_timed_out_worker_permit() {
+    let slot = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+    let held = slot.clone().acquire_owned().await.unwrap();
+    let dispatched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_dispatched = dispatched.clone();
+    let admission_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+    let admission = run_status_rpc_with_slot(
+        slot.clone(),
+        admission_deadline,
+        (),
+        async move {
+            worker_dispatched.store(true, std::sync::atomic::Ordering::Release);
+        },
+    )
+    .await;
+    assert!(admission.unwrap_err().contains("timed out"));
+    assert!(
+        !dispatched.load(std::sync::atomic::Ordering::Acquire),
+        "a query that exhausted its budget waiting for admission must never start"
+    );
+    drop(held);
+
+    let session_id = format!("status-budget-{}", uuid::Uuid::now_v7());
+    let target = claim_prompt_status_rpc(&session_id, Some("prompt"))
+        .expect("register the exact status target");
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let worker_slot = slot.clone();
+    let worker = tokio::spawn(async move {
+        run_status_rpc_with_slot(
+            worker_slot,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            target,
+            async move {
+                let _ = started_tx.send(());
+                let _ = release_rx.await;
+            },
+        )
+        .await
+    });
+    started_rx.await.expect("status RPC worker started");
+    assert!(prompt_status_rpc_in_flight(&session_id, Some("prompt")));
+    assert!(worker.await.unwrap().unwrap_err().contains("timed out"));
+    assert_eq!(slot.available_permits(), 0);
+    assert!(
+        prompt_status_rpc_in_flight(&session_id, Some("prompt")),
+        "timing out the caller must leave the live worker and target claimed"
+    );
+
+    let skipped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let skipped_worker = skipped.clone();
+    let skipped_result = run_status_rpc_with_slot(
+        slot.clone(),
+        tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        (),
+        async move {
+            skipped_worker.store(true, std::sync::atomic::Ordering::Release);
+        },
+    )
+    .await;
+    assert!(skipped_result.unwrap_err().contains("timed out"));
+    assert!(!skipped.load(std::sync::atomic::Ordering::Acquire));
+
+    release_tx.send(()).unwrap();
+    let permit = tokio::time::timeout(std::time::Duration::from_secs(1), slot.acquire())
+        .await
+        .expect("worker eventually releases its slot")
+        .unwrap();
+    drop(permit);
+    assert!(!prompt_status_rpc_in_flight(&session_id, Some("prompt")));
+}

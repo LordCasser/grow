@@ -465,6 +465,7 @@ async fn handle_notification_with_ack(
                         },
                         source_version: chat_state::NotificationSourceVersion::Ordinal { value: 1 },
                         body,
+                        deadline: None,
                         respond_to,
                     })
                     .map_err(|_| "session stopped before task completion admission".to_owned())?;
@@ -673,6 +674,7 @@ async fn handle_notification_with_ack(
                         value: uuid::Uuid::now_v7().to_string(),
                     },
                     body: event.event_text,
+                    deadline: None,
                     respond_to: None,
                 });
         }

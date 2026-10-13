@@ -755,6 +755,14 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         let mut persistence_timer = crate::instrumentation_timer!("session.load_light");
         persistence_timer.with_field("session_id", session_id.0.as_ref());
         let claim_writer = resident_actor.is_none();
+        let mut recovery_token = if claim_writer {
+            self.storage_admission
+                .prepare_recovery(&session_info)
+                .await
+                .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?
+        } else {
+            None
+        };
         let (observed_info, observed_persistence) = crate::session::persistence::load_light(
                 &session_info,
                 Some(self.gateway.clone()),
@@ -795,6 +803,11 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                     );
                     self.remove_session_terminal(&session_id, SessionLiveState::DeadFailed);
                 }
+                recovery_token = self
+                    .storage_admission
+                    .prepare_recovery(&session_info)
+                    .await
+                    .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
                 let (owned_info, owned_persistence) = crate::session::persistence::load_light(
                         &session_info,
                         Some(self.gateway.clone()),
@@ -1311,9 +1324,8 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                     &subagent_projections,
                     !no_replay,
                     spawn_new_actor,
-                    &tools::implementations::grow_build::task::backend::ChannelBackend::for_session(
+                    &tools::implementations::grow_build::task::backend::ChannelBackend::for_authorized_observer(
                         self.subagent_event_tx.clone(),
-                        session_id.0.clone(),
                     ),
                     session_id.0.as_ref(),
                     &parent_chat_state,
@@ -1435,6 +1447,21 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             {
                 return Err(acp::Error::internal_error()
                     .data("Session ended while loading; retry the session load."));
+            }
+        }
+        if let Some(token) = recovery_token.take() {
+            let healthy_epoch = self.sessions.borrow().get(&session_id).and_then(|handle| {
+                (!handle.cmd_tx.is_closed()
+                    && !handle.chat_state_handle.is_closed()
+                    && handle.chat_state_handle.pending_timeline_commit().is_none())
+                    .then(|| handle.runtime_observation.read().control_epoch.clone())
+            });
+            if let Some(epoch) = healthy_epoch {
+                if self.storage_admission.complete_recovery(token, &epoch) {
+                    let _ = self.subagent_event_tx.send(tools::implementations::grow_build::task::types::SubagentEvent::OpenSpawnAdmission {
+                        parent_session_id: session_id.to_string(),
+                    });
+                }
             }
         }
         let response_meta = serde_json::Value::Object(response_meta_map);

@@ -30,6 +30,94 @@
     }
 
     #[test]
+    fn accepted_prompt_activity_clears_observation_and_invalidates_its_query() {
+        let mut app = make_app_with_agent("s1");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("prompt-active".into());
+        agent.session.prompt_status_waiting_reason =
+            Some(crate::acp::tracker::WaitingReason::ObservationUnknown);
+        let old_generation = agent
+            .session
+            .begin_prompt_status_query("prompt-active");
+
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let request = acp::SessionNotification::new(
+            acp::SessionId::new("s1"),
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                acp::ContentBlock::Text(acp::TextContent::new("new activity")),
+            )),
+        )
+        .meta(serde_json::json!({"promptId": "prompt-active"}).as_object().cloned());
+
+        assert!(handle(
+            AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
+                request,
+                response_tx: tx,
+            }),
+            &mut app,
+        ));
+
+        let session = &app.agents[&AgentId(0)].session;
+        assert_eq!(session.prompt_status_waiting_reason, None);
+        assert!(
+            !session.prompt_status_query_matches_generation("prompt-active", old_generation),
+            "a delayed observation response must be stale after accepted activity"
+        );
+    }
+
+    #[test]
+    fn duplicate_or_foreign_prompt_activity_keeps_observation_and_query() {
+        let mut app = make_app_with_agent("s1");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.attached_as_viewer = false;
+        agent.note_self_originated_prompt("prompt-foreign");
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("prompt-active".into());
+        agent.session.last_applied_event_seq = Some(8);
+        agent.session.prompt_status_waiting_reason =
+            Some(crate::acp::tracker::WaitingReason::ObservationUnknown);
+        let generation = agent
+            .session
+            .begin_prompt_status_query("prompt-active");
+
+        let notification = |prompt_id: &str, event_seq: u64| {
+            let (tx, _rx) = tokio::sync::oneshot::channel();
+            let request = acp::SessionNotification::new(
+                acp::SessionId::new("s1"),
+                acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                    acp::ContentBlock::Text(acp::TextContent::new("activity")),
+                )),
+            )
+            .meta(
+                serde_json::json!({
+                    "promptId": prompt_id,
+                    "eventId": format!("s1-{event_seq}"),
+                })
+                .as_object()
+                .cloned(),
+            );
+            AcpClientMessage::SessionNotification(acp_transport::AcpArgs {
+                request,
+                response_tx: tx,
+            })
+        };
+
+        // The high-water mark makes this duplicate a no-op.
+        assert!(!handle(notification("prompt-active", 8), &mut app));
+        // A newer event from an unrelated prompt is rejected by the actor's
+        // prompt-identity gate and must not supersede the current observation.
+        let _ = handle(notification("prompt-foreign", 9), &mut app);
+
+        let session = &app.agents[&AgentId(0)].session;
+        assert_eq!(
+            session.prompt_status_waiting_reason,
+            Some(crate::acp::tracker::WaitingReason::ObservationUnknown)
+        );
+        assert!(session.prompt_status_query_matches_generation("prompt-active", generation));
+    }
+
+    #[test]
     fn root_sampling_attempt_reaches_tracker_and_discards_tagged_preview() {
         let mut app = make_app_with_agent("root-sampling");
         let started = GrowSessionUpdate::SamplingAttempt {
@@ -754,6 +842,9 @@
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         session.in_flight_prompt = Some(InFlightPrompt {
+            prompt_id: None,
+            admission_resolved: None,
+            expected_turn_id: None,
             text: "hi".into(),
             images: Vec::new(),
             scrollback_entry: EntryId::new(1),
@@ -784,6 +875,9 @@
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         session.compact_held_prompt = Some(InFlightPrompt {
+            prompt_id: None,
+            admission_resolved: None,
+            expected_turn_id: None,
             text: "retry after login".into(),
             images: Vec::new(),
             scrollback_entry: EntryId::new(1),
@@ -876,6 +970,9 @@
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         session.in_flight_prompt = Some(InFlightPrompt {
+            prompt_id: None,
+            admission_resolved: None,
+            expected_turn_id: None,
             text: "retry me".into(),
             images: Vec::new(),
             scrollback_entry: EntryId::new(2),
@@ -1035,6 +1132,9 @@
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         session.in_flight_prompt = Some(InFlightPrompt {
+            prompt_id: None,
+            admission_resolved: None,
+            expected_turn_id: None,
             text: "failed BYOK request".into(),
             images: Vec::new(),
             scrollback_entry: EntryId::new(7),
@@ -1151,6 +1251,9 @@
         let mut session = make_session(Some("s1"));
         let mut scrollback = ScrollbackState::new();
         session.in_flight_prompt = Some(InFlightPrompt {
+            prompt_id: None,
+            admission_resolved: None,
+            expected_turn_id: None,
             text: "still working".into(),
             images: Vec::new(),
             scrollback_entry: EntryId::new(1),

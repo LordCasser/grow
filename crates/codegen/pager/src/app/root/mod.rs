@@ -862,6 +862,36 @@ impl AppView {
         self.local_drafts.checkpoint(&self.agents, active).await
     }
 
+    pub(crate) fn checkpoint_input_intent(
+        &mut self,
+        agent_id: AgentId,
+        prompt_id: String,
+        expected_turn_id: Option<String>,
+        fallback: Option<(String, bool)>,
+    ) -> std::io::Result<tokio::sync::oneshot::Receiver<std::io::Result<()>>> {
+        let active = match self.active_view {
+            ActiveView::Agent(id) => Some(id),
+            _ => None,
+        };
+        self.local_drafts.checkpoint_input_intent(
+            &self.agents,
+            active,
+            agent_id,
+            prompt_id,
+            expected_turn_id,
+            fallback,
+        )
+    }
+
+    pub(crate) fn mark_input_ram_only(&mut self, agent_id: AgentId, prompt_id: String) {
+        self.local_drafts.mark_input_ram_only(agent_id, prompt_id);
+    }
+
+    pub(crate) fn restore_input_draft_ownership(&mut self, agent_id: AgentId, prompt_id: &str) {
+        self.local_drafts
+            .restore_input_draft_ownership(agent_id, prompt_id);
+    }
+
     pub(crate) fn transfer_local_draft_ownership(&mut self, effect: &crate::app::actions::Effect) {
         self.local_drafts.transfer_prompt_rpc_ownership(effect);
     }

@@ -1356,7 +1356,13 @@ impl SessionActor {
             let provider_admitted = {
                 let _boundary = self.step_control_gate.lock().await;
                 let admission = self.state.lock().await;
-                admission.can_continue_regular_turn(req_id) && self.events.has_active_step()
+                admission.can_continue_regular_turn(req_id)
+                    && self.events.has_active_step()
+                    && self
+                        .tool_context
+                        .storage_admission
+                        .as_ref()
+                        .is_none_or(|gate| gate.check(self.session_info.id.0.as_ref()).is_ok())
             };
             if !provider_admitted {
                 return Ok(TurnOutcome::Cancelled {

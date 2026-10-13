@@ -292,7 +292,12 @@ impl AgentView {
                 }
                 let images = self.prompt.drain_images();
                 self.prompt.set_text("");
-                Some(Action::SteerPrompt { text, images })
+                Some(Action::SteerPrompt {
+                    text,
+                    images,
+                    expected_turn_id: None,
+                    prompt_id: None,
+                })
             }
         }
     }

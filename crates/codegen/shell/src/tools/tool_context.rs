@@ -190,6 +190,8 @@ pub struct ToolContext {
     /// contexts without one (subagents, defaults). Spawn sites enroll children
     /// into it; enrolled children are killed when the session closes.
     pub process_scope: Option<ProcessScope>,
+    /// Shared storage-domain admission gate inherited by child sessions.
+    pub(crate) storage_admission: Option<Arc<crate::session::storage_admission::StorageAdmission>>,
 }
 impl ToolContext {
     pub(crate) fn clamp_task_model_request(
@@ -249,6 +251,7 @@ impl ToolContext {
             task_output_token_budget: None,
             sampling_output_delivery: sampler::OutputDelivery::Irreversible,
             process_scope: None,
+            storage_admission: None,
         }
     }
     pub fn with_preloaded_env(
@@ -283,6 +286,7 @@ impl ToolContext {
             task_output_token_budget: None,
             sampling_output_delivery: sampler::OutputDelivery::Irreversible,
             process_scope: None,
+            storage_admission: None,
         }
     }
     pub fn with_file_state_handle(mut self, handle: FileStateHandle) -> Self {
@@ -370,6 +374,7 @@ mod tests {
                 task_output_token_budget: None,
                 sampling_output_delivery: sampler::OutputDelivery::Irreversible,
                 process_scope: None,
+                storage_admission: None,
             }
         }
     }

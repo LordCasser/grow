@@ -37,7 +37,8 @@ use tools::implementations::grow_build::task::TaskTool;
 use tools::implementations::grow_build::task::backend::{SubagentBackend, SubagentBackendResource};
 use tools::implementations::grow_build::task::types::{
     MaxSubagentDepth, SessionIdResource, SubagentCancelOutcome, SubagentDepthCounter,
-    SubagentRequest, SubagentResult, SubagentSnapshot, SubagentValidateTypeOutcome,
+    SubagentObservationError, SubagentRequest, SubagentResult, SubagentSnapshot,
+    SubagentValidateTypeOutcome,
 };
 use tools::implementations::grow_build::write::WriteTool;
 use tools::implementations::grow_build::{KillTaskTool, TaskOutputTool};
@@ -183,12 +184,12 @@ impl SubagentBackend for ImmediateSubagentBackend {
         _id: &str,
         _block: bool,
         _timeout_ms: Option<u64>,
-    ) -> Option<SubagentSnapshot> {
-        None
+    ) -> Result<Option<SubagentSnapshot>, SubagentObservationError> {
+        Ok(None)
     }
 
-    async fn cancel(&self, _id: &str) -> SubagentCancelOutcome {
-        SubagentCancelOutcome::NotFound
+    async fn cancel(&self, _id: &str) -> Result<SubagentCancelOutcome, SubagentObservationError> {
+        Ok(SubagentCancelOutcome::NotFound)
     }
 
     async fn validate_type(

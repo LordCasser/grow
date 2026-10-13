@@ -39,6 +39,40 @@ fn scrollback_has_recent_context_too_large(
     false
 }
 
+fn uncertain_submission_matches(agent: &AgentView, text: &str) -> bool {
+    let Some(inflight) = agent.session.in_flight_prompt.as_ref() else {
+        return false;
+    };
+    if inflight.text != text || inflight.images.len() != agent.prompt.images.len() {
+        return false;
+    }
+    let same_images = inflight
+        .images
+        .iter()
+        .zip(&agent.prompt.images)
+        .all(|(a, b)| {
+            a.mime_type == b.mime_type
+                && a.byte_len == b.byte_len
+                && a.dimensions == b.dimensions
+                && a.session_image_path == b.session_image_path
+                && a.source_path == b.source_path
+                && a.encoded_bytes.as_deref() == b.encoded_bytes.as_deref()
+        });
+    same_images && inflight.prompt_id.is_some()
+}
+
+fn matching_uncertain_prompt_id(agent: &AgentView, text: &str) -> Option<String> {
+    if !uncertain_submission_matches(agent, text) {
+        return None;
+    }
+    let inflight = agent.session.in_flight_prompt.as_ref()?;
+    // A terminal rejection is already durable. An explicit send after it is a
+    // fresh user intent; retrying the old identity would only replay rejection.
+    (inflight.admission_resolved != Some(false))
+        .then(|| inflight.prompt_id.clone())
+        .flatten()
+}
+
 /// Enqueue a prompt and try to drain immediately.
 ///
 /// The prompt is always pushed to the queue first. If the agent is idle
@@ -469,6 +503,34 @@ pub(super) fn dispatch_send_prompt_inner(
 
     let trimmed = text.trim();
 
+    if uncertain_submission_matches(agent, &text)
+        && let Some(inflight) = agent.session.in_flight_prompt.as_ref()
+    {
+        if inflight.admission_resolved == Some(true) {
+            agent.show_toast("This input was already admitted; edit it to send a new request.");
+            return vec![];
+        }
+        if let (Some(expected_turn_id), Some(prompt_id)) = (
+            inflight.expected_turn_id.clone(),
+            inflight.prompt_id.clone(),
+        ) {
+            if !agent.prompt.images.is_empty() {
+                agent.show_toast("The original steer image snapshot is not available for retry; edit it to create a new request.");
+                return vec![];
+            }
+            if consume_input {
+                agent.prompt.set_text("");
+            }
+            return super::interject::dispatch_steer_prompt_with_identity(
+                app,
+                text,
+                Vec::new(),
+                Some(expected_turn_id),
+                Some(prompt_id),
+            );
+        }
+    }
+
     let mut effects = Vec::new();
 
     // ── Registry-based slash command execution ─────────────────────
@@ -779,6 +841,7 @@ pub(super) fn dispatch_send_prompt_inner(
             .slash_controller
             .recognized_token_ranges(&text, &agent.session.models);
 
+        let retry_prompt_id = matching_uncertain_prompt_id(agent, &text);
         let immediate_server_send =
             immediate_server_send_eligible(agent) && agent.prompt.images.is_empty();
         tracing::debug!(
@@ -806,7 +869,9 @@ pub(super) fn dispatch_send_prompt_inner(
                 .clone()
                 .expect("session_id is_some checked");
             let agent_id = agent.session.id;
-            let prompt_id = uuid::Uuid::new_v4().to_string();
+            let prompt_id = retry_prompt_id
+                .clone()
+                .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             // Self-originated: when this prompt becomes the running turn (via the
             // `running_prompt_id` adoption + turn-start shim), the ACP gate must
             // treat its deltas as ours, not adopt them as another client's turn.
@@ -838,6 +903,17 @@ pub(super) fn dispatch_send_prompt_inner(
             // (turn-boundary semantics) so a stale re-delivery stays rejected.
             agent.clear_follow_ups();
 
+            agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
+                prompt_id: Some(prompt_id.clone()),
+                admission_resolved: None,
+                expected_turn_id: None,
+                text: text.clone(),
+                images: Vec::new(),
+                scrollback_entry: crate::scrollback::EntryId::new(0),
+                combined_scrollback_entries: Vec::new(),
+                chip_elements: Vec::new(),
+            });
+
             // `agent` borrow ends here; push the optimistic echo via `app`.
             let sid_str = session_id.0.to_string();
             push_server_queue_echo(app, agent_id, &sid_str, &prompt_id, &text, "prompt");
@@ -861,6 +937,11 @@ pub(super) fn dispatch_send_prompt_inner(
         agent
             .session
             .enqueue_prompt_with_skill_tokens(text.clone(), skill_token_ranges);
+        if let Some(prompt_id) = retry_prompt_id
+            && let Some(queued) = agent.session.pending_prompts.back_mut()
+        {
+            queued.prompt_id = Some(prompt_id);
+        }
         if consume_input {
             // Drain prompt images before clearing prompt state.
             drain_prompt_state_to_last_queued(agent);
@@ -1063,6 +1144,19 @@ pub(super) fn handle_prompt_response(
     _http_status: Option<u16>,
     prompt_id: Option<String>,
 ) -> Vec<Effect> {
+    if result.is_err()
+        && let Some(prompt_id) = prompt_id.as_deref()
+        && app.agents.get(&agent_id).is_some_and(|agent| {
+            agent
+                .session
+                .in_flight_prompt
+                .as_ref()
+                .and_then(|prompt| prompt.prompt_id.as_deref())
+                == Some(prompt_id)
+        })
+    {
+        app.restore_input_draft_ownership(agent_id, prompt_id);
+    }
     // The `agent` borrow lasts only through the pid gate and the shared
     // finalizer; the app-level tail (notifications, adoption handoff, queue
     // drain, suggestion fetch) re-borrows per step.
@@ -1222,8 +1316,22 @@ pub(super) fn handle_prompt_response(
     }
 
     if let Some(draft) = failed_draft {
+        let query = draft
+            .prompt_id
+            .clone()
+            .zip(agent.session.session_id.clone());
+        let binding_epoch = agent.session_binding_epoch;
         restore_failed_input_draft(agent, draft);
-        return vec![];
+        return query
+            .map(|(prompt_id, session_id)| {
+                vec![Effect::QueryInputAdmissionStatus {
+                    agent_id,
+                    session_id,
+                    binding_epoch,
+                    prompt_id,
+                }]
+            })
+            .unwrap_or_default();
     }
 
     if let Err(ref err) = result {
@@ -1296,14 +1404,24 @@ pub(super) fn restore_failed_input_draft(
             crate::app::agent_view::PromptMode::Normal
         )
     {
+        // Keep the original identity attached to this exact restored draft.
+        // An unchanged explicit send can reuse it; edited text or attachments
+        // receives a new identity in the normal send path.
+        agent.session.in_flight_prompt = Some(draft.clone());
         agent
             .prompt
             .restore(crate::views::prompt_widget::StashedPrompt::from_submission(
                 draft.text,
-                draft.images,
+                draft.images.clone(),
                 draft.chip_elements,
             ));
-        agent.show_toast("Input was not confirmed. Your draft and images were restored; review before resending.");
+        if draft.images.is_empty() {
+            agent.show_toast(
+                "Input was not confirmed. Your draft was restored; review before resending.",
+            );
+        } else {
+            agent.show_toast("Input was not confirmed. Its image snapshot cannot be recovered after restart; the current session can retry it.");
+        }
     } else {
         agent.session.enqueue_in_flight_prompt_front(draft);
         agent

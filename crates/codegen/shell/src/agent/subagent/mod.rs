@@ -33,13 +33,17 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tools::implementations::grow_build::task::coordinator::{
-    ChildCompletion, ChildControl, ChildReporter, ChildRunOutput, LocalBoxFuture, StartedChild,
-    SubagentProgress,
+    ChildCompletion, ChildControl, ChildReporter, ChildRunOutput, StartedChild, SubagentProgress,
 };
 use tools::implementations::grow_build::task::types::*;
 use tools::types::tool::ToolKind;
 use workspace::file_system::AsyncFileSystem;
+mod finalization;
+mod finalization_failure;
+use finalization_failure::{FinalizationFailure, FinalizationStage};
 mod handle_request;
+pub(crate) use finalization::reconcile_shell_child;
+pub(crate) use finalization::refresh_finalization_parent;
 pub(crate) mod resolution;
 pub(crate) use handle_request::run_shell_child;
 /// How the child session's initial context was bootstrapped.
@@ -96,6 +100,8 @@ impl AutoCompactThresholdTiers {
 /// Avoids passing `&MvpAgent` (which would require the coordinator to know
 /// about the full agent struct). Built by `MvpAgent::build_subagent_spawn_context()`.
 pub(crate) struct SubagentSpawnContext {
+    pub storage_admission: std::sync::Arc<crate::session::storage_admission::StorageAdmission>,
+    pub parent_control_epoch: String,
     pub sampling_output_delivery: sampler::OutputDelivery,
     /// Live child-session control routes. Child sessions intentionally stay
     /// out of the primary resident-session roster, but ACP model/Agent
@@ -423,29 +429,35 @@ impl SubagentSpawnContext {
 pub(crate) struct ShellChildRuntime {
     pub child_handle: SessionHandle,
     pub _child_thread: SessionThread,
+    pub progress_snapshot: Arc<std::sync::RwLock<Option<SubagentProgress>>>,
+    pub output_write_in_flight: Arc<std::sync::atomic::AtomicBool>,
+}
+impl ShellChildRuntime {
+    pub(crate) fn completion_after_panic(
+        &self,
+        request: &SubagentRequest,
+        execution_outcome: Option<&str>,
+    ) -> ShellCompletionData {
+        ShellCompletionData {
+            child_chat_state: Some(self.child_handle.chat_state_handle.clone()),
+            child_thread: Some(self._child_thread.clone()),
+            output_write_in_flight: self.output_write_in_flight.clone(),
+            receipt_required: request.surface_completion && execution_outcome != Some("cancelled"),
+            execution_outcome_confirmed: execution_outcome.is_some(),
+            usage_incomplete: true,
+            ..Default::default()
+        }
+    }
 }
 impl ChildControl for ShellChildRuntime {
-    type ProgressFuture = LocalBoxFuture<SubagentProgress>;
     type SecurityContext = SessionHandle;
 
     fn security_context(&self) -> Self::SecurityContext {
         self.child_handle.clone()
     }
 
-    fn progress(&self) -> Self::ProgressFuture {
-        let signals = self.child_handle.signals_handle.clone();
-        Box::pin(async move {
-            let snapshot = signals.snapshot().await.unwrap_or_default();
-            SubagentProgress {
-                turn_count: snapshot.turn_count,
-                tool_call_count: snapshot.tool_call_count,
-                tokens_used: snapshot.context_tokens_used,
-                context_window_tokens: snapshot.context_window_tokens,
-                context_usage_pct: snapshot.context_window_usage,
-                tools_used: snapshot.tools_used,
-                error_count: snapshot.error_count,
-            }
-        })
+    fn progress_snapshot(&self) -> Option<SubagentProgress> {
+        self.progress_snapshot.read().ok()?.clone()
     }
     fn cancel(&self) {
         let _ = self.child_handle.cmd_tx.send(SessionCommand::Cancel {
@@ -456,8 +468,12 @@ impl ChildControl for ShellChildRuntime {
             trigger: None,
         });
     }
+    fn runner_panicked(&self) {
+        self.cancel();
+        let _ = self.child_handle.cmd_tx.send(SessionCommand::Shutdown);
+    }
 }
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct ShellCompletionData {
     parent_cmd_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
     task_output_tool_name: Option<String>,
@@ -466,9 +482,33 @@ pub(crate) struct ShellCompletionData {
     spawned_notification_emitted: bool,
     persisted_output_ref: Option<String>,
     terminal_committed: bool,
+    execution_outcome_confirmed: bool,
     completion_receipt_admitted: bool,
+    receipt_required: bool,
+    receipt_in_flight: bool,
+    output_write_in_flight: Arc<std::sync::atomic::AtomicBool>,
+    parent_chat_state: Option<chat_state::ChatStateHandle>,
+    child_chat_state: Option<chat_state::ChatStateHandle>,
+    child_thread: Option<SessionThread>,
+    child_result_ref: Option<chat_state::TimelineRangeRef>,
+    snapshot_ref: Option<String>,
+    usage_by_model: Option<Vec<(String, chat_state::UsageTotals)>>,
+    usage_incomplete: bool,
+    usage_applied: bool,
+    usage_in_flight: bool,
+    finalization_error: Option<FinalizationFailure>,
+    finalization_deadline: Option<tokio::time::Instant>,
+    parent_epoch: Option<String>,
+    storage_admission: Option<Arc<crate::session::storage_admission::StorageAdmission>>,
 }
 impl ShellCompletionData {
+    pub(crate) fn not_admitted() -> Self {
+        Self {
+            terminal_committed: true,
+            ..Default::default()
+        }
+    }
+
     fn from_context(ctx: &SubagentSpawnContext) -> Self {
         Self {
             parent_cmd_tx: ctx.parent_cmd_tx.clone(),
@@ -477,8 +517,25 @@ impl ShellCompletionData {
             diagnostics_tokens: 0,
             spawned_notification_emitted: false,
             persisted_output_ref: None,
-            terminal_committed: false,
+            terminal_committed: true,
+            execution_outcome_confirmed: false,
             completion_receipt_admitted: false,
+            receipt_required: false,
+            receipt_in_flight: false,
+            output_write_in_flight: Arc::default(),
+            parent_chat_state: ctx.parent_chat_state.clone(),
+            child_chat_state: None,
+            child_thread: None,
+            child_result_ref: None,
+            snapshot_ref: None,
+            usage_by_model: None,
+            usage_incomplete: true,
+            usage_applied: false,
+            usage_in_flight: false,
+            finalization_error: None,
+            finalization_deadline: None,
+            parent_epoch: Some(ctx.parent_control_epoch.clone()),
+            storage_admission: Some(ctx.storage_admission.clone()),
         }
     }
     pub(crate) fn persisted_output_ref(&self) -> Option<&str> {
@@ -493,7 +550,11 @@ impl ShellCompletionData {
     }
 
     pub(crate) fn terminal_committed(&self) -> bool {
-        self.terminal_committed
+        self.terminal_committed && (!self.receipt_required || self.completion_receipt_admitted)
+    }
+
+    pub(crate) fn finalization_error(&self) -> Option<String> {
+        self.finalization_error.as_ref().map(ToString::to_string)
     }
 }
 pub(crate) struct SubagentPresentation {
@@ -580,9 +641,29 @@ async fn admit_notification_receipt(
     owner: chat_state::NotificationOwner,
     body: String,
 ) -> bool {
+    admit_notification_receipt_before(
+        cmd_tx,
+        subagent_id,
+        owner,
+        body,
+        tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+    )
+    .await
+}
+
+async fn admit_notification_receipt_before(
+    cmd_tx: &mpsc::UnboundedSender<SessionCommand>,
+    subagent_id: &str,
+    owner: chat_state::NotificationOwner,
+    body: String,
+    deadline: tokio::time::Instant,
+) -> bool {
     const MAX_ATTEMPTS: usize = 3;
 
     for attempt in 1..=MAX_ATTEMPTS {
+        if tokio::time::Instant::now() >= deadline {
+            return false;
+        }
         let (respond_to, admitted) = oneshot::channel();
         if cmd_tx
             .send(SessionCommand::ReceiveNotification {
@@ -592,6 +673,7 @@ async fn admit_notification_receipt(
                 },
                 source_version: chat_state::NotificationSourceVersion::Ordinal { value: 1 },
                 body: body.clone(),
+                deadline: Some(deadline),
                 respond_to: Some(respond_to),
             })
             .is_err()
@@ -599,10 +681,18 @@ async fn admit_notification_receipt(
             tracing::warn!(%subagent_id, "subagent completion delivery stopped because the parent mailbox closed");
             return false;
         }
-        let error = match admitted.await {
-            Ok(Ok(_)) => return true,
-            Ok(Err(error)) => error,
-            Err(error) => format!("acknowledgement dropped: {error}"),
+        let ack_deadline =
+            deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(5));
+        let error = match tokio::time::timeout_at(ack_deadline, admitted).await {
+            Err(_) => {
+                tracing::warn!(%subagent_id, "completion receipt acknowledgement timed out; original mailbox operation retains ownership");
+                return false;
+            }
+            Ok(result) => match result {
+                Ok(Ok(_)) => return true,
+                Ok(Err(error)) => error,
+                Err(error) => format!("acknowledgement dropped: {error}"),
+            },
         };
         if attempt == MAX_ATTEMPTS {
             tracing::error!(
@@ -620,7 +710,15 @@ async fn admit_notification_receipt(
             max_attempts = MAX_ATTEMPTS,
             "subagent completion receipt admission failed; retrying"
         );
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if tokio::time::timeout_at(
+            deadline,
+            tokio::time::sleep(std::time::Duration::from_millis(100)),
+        )
+        .await
+        .is_err()
+        {
+            return false;
+        }
     }
     unreachable!("the bounded receipt admission loop always returns")
 }
@@ -630,6 +728,23 @@ async fn admit_subagent_completion_receipt(
     subagent_id: &str,
     owner: &SubagentOwner,
     body: String,
+) -> bool {
+    admit_subagent_completion_receipt_before(
+        cmd_tx,
+        subagent_id,
+        owner,
+        body,
+        tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+    )
+    .await
+}
+
+async fn admit_subagent_completion_receipt_before(
+    cmd_tx: &mpsc::UnboundedSender<SessionCommand>,
+    subagent_id: &str,
+    owner: &SubagentOwner,
+    body: String,
+    deadline: tokio::time::Instant,
 ) -> bool {
     let owner = match owner {
         SubagentOwner::Goal {
@@ -643,7 +758,7 @@ async fn admit_subagent_completion_receipt(
             chat_state::NotificationOwner::Session
         }
     };
-    admit_notification_receipt(cmd_tx, subagent_id, owner, body).await
+    admit_notification_receipt_before(cmd_tx, subagent_id, owner, body, deadline).await
 }
 
 /// Commit a child receipt before returning its terminal result to the
@@ -655,19 +770,49 @@ pub(super) async fn admit_completion_receipt_before_result(
     result: &SubagentResult,
     completion_data: &mut ShellCompletionData,
 ) {
-    if !request.surface_completion || result.cancelled || !completion_data.terminal_committed {
+    completion_data.receipt_required = request.surface_completion && !result.cancelled;
+    if !request.surface_completion
+        || result.cancelled
+        || !completion_data.terminal_committed
+        || completion_data.receipt_in_flight
+    {
         return;
     }
     let Some(cmd_tx) = completion_data.parent_cmd_tx.as_ref() else {
         return;
     };
+    let deadline = completion_data
+        .finalization_deadline
+        .unwrap_or_else(|| tokio::time::Instant::now() + std::time::Duration::from_secs(30));
+    if tokio::time::Instant::now() >= deadline {
+        completion_data.finalization_error = Some(FinalizationFailure::observation(
+            FinalizationStage::Receipt,
+            "finalization deadline reached before receipt dispatch",
+        ));
+        return;
+    }
+    completion_data.receipt_in_flight = true;
     let summary = tools::implementations::grow_build::task::completion_summary(request, result);
     let body = tools::reminders::task_completion::format_subagent_completion(
         &summary,
         completion_data.task_output_tool_name.as_deref(),
     );
-    completion_data.completion_receipt_admitted =
-        admit_subagent_completion_receipt(cmd_tx, &request.id, &request.owner, body).await;
+    completion_data.completion_receipt_admitted = admit_subagent_completion_receipt_before(
+        cmd_tx,
+        &request.id,
+        &request.owner,
+        body,
+        deadline,
+    )
+    .await;
+    if completion_data.completion_receipt_admitted {
+        completion_data.receipt_in_flight = false;
+    } else {
+        completion_data.finalization_error = Some(FinalizationFailure::observation(
+            FinalizationStage::Receipt,
+            "completion receipt admission unconfirmed",
+        ));
+    }
 }
 /// Resolve the sampling config and model ID for a subagent.
 ///
@@ -1901,6 +2046,24 @@ async fn record_child_result(
     })
 }
 
+async fn record_child_result_before(
+    child_chat_state: &chat_state::ChatStateHandle,
+    result: &SubagentResult,
+    output_ref: Option<String>,
+    deadline: tokio::time::Instant,
+) -> Result<chat_state::TimelineRangeRef, chat_state::TimelineWriteError> {
+    let kind =
+        chat_state::TimelineEventKind::SubagentResult(subagent_result_fact(result, output_ref));
+    let event = child_chat_state
+        .record_timeline_event_durably_before(kind, deadline)
+        .await?;
+    Ok(chat_state::TimelineRangeRef {
+        timeline_id: result.child_session_id.clone(),
+        first_seq: event.seq.get(),
+        last_seq: event.seq.get(),
+    })
+}
+
 async fn record_child_result_with_persistence(
     persistence: &session::persistence::PersistenceHandle,
     timeline_events: Vec<chat_state::TimelineEvent>,
@@ -1949,6 +2112,33 @@ async fn record_parent_subagent_end(
         .map(|_| ())
         .map_err(|error| format!("failed to commit parent subagent terminal: {error}"))
 }
+
+async fn record_parent_subagent_end_before(
+    parent_chat_state: &chat_state::ChatStateHandle,
+    result: &SubagentResult,
+    result_ref: Option<chat_state::TimelineRangeRef>,
+    snapshot_ref: Option<String>,
+    deadline: tokio::time::Instant,
+) -> Result<(), chat_state::TimelineWriteError> {
+    let kind = chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(
+        chat_state::SubagentTerminalEvent {
+            subagent_id: result.subagent_id.clone(),
+            child_session_id: result.child_session_id.clone(),
+            outcome: subagent_outcome(result),
+            duration_ms: result.duration_ms,
+            tool_calls: result.tool_calls,
+            turns: result.turns,
+            tokens_used: result.total_tokens_used,
+            error: result.error.clone(),
+            result_ref,
+            snapshot_ref,
+        },
+    ));
+    parent_chat_state
+        .record_timeline_event_durably_before(kind, deadline)
+        .await?;
+    Ok(())
+}
 /// Tear down a child whose pending-to-active promotion lost to cancellation.
 async fn cancel_pending_shell_child(
     subagent_id: &str,
@@ -1957,17 +2147,46 @@ async fn cancel_pending_shell_child(
     worktree_freshly_created: bool,
     duration_ms: u64,
 ) -> SubagentResult {
-    if worktree_freshly_created
-        && let Some(wt_path) = worktree_path
-        && let Err(e) = crate::session::worktree::remove_subagent_worktree(wt_path).await
-    {
-        tracing::warn!(
-            subagent_id,
-            worktree_path = %wt_path.display(),
-            error = %e,
-            "failed to remove pristine worktree for killed-while-pending subagent"
-        );
-    }
+    let retained_worktree_path = if let Some(wt_path) = worktree_path {
+        if worktree_freshly_created {
+            match workspace::worktree::is_worktree_pristine(wt_path) {
+                Ok(true) => match crate::session::worktree::remove_subagent_worktree(wt_path).await
+                {
+                    Ok(()) => None,
+                    Err(error) => {
+                        tracing::warn!(
+                            subagent_id,
+                            worktree_path = %wt_path.display(),
+                            %error,
+                            "failed to remove pristine worktree for killed-while-pending subagent"
+                        );
+                        Some(wt_path.to_string_lossy().into_owned())
+                    }
+                },
+                Ok(false) => {
+                    tracing::warn!(
+                        subagent_id,
+                        worktree_path = %wt_path.display(),
+                        "pending child worktree contains changes; preserving it"
+                    );
+                    Some(wt_path.to_string_lossy().into_owned())
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        subagent_id,
+                        worktree_path = %wt_path.display(),
+                        %error,
+                        "cannot verify pending child worktree is pristine; preserving it"
+                    );
+                    Some(wt_path.to_string_lossy().into_owned())
+                }
+            }
+        } else {
+            Some(wt_path.to_string_lossy().into_owned())
+        }
+    } else {
+        None
+    };
     SubagentResult {
         success: false,
         cancelled: true,
@@ -1975,6 +2194,7 @@ async fn cancel_pending_shell_child(
         subagent_id: subagent_id.to_string(),
         child_session_id: child_session_id.0.to_string(),
         duration_ms,
+        worktree_path: retained_worktree_path,
         ..Default::default()
     }
 }
@@ -2050,6 +2270,7 @@ fn progress_tick_should_emit(
 /// `grow/subagent/list_running` on reconnect.
 fn spawn_progress_publisher(
     signals_handle: crate::session::signals::SessionSignalsHandle,
+    progress_snapshot: Arc<std::sync::RwLock<Option<SubagentProgress>>>,
     gateway: GatewaySender,
     parent_session_id: String,
     subagent_id: String,
@@ -2072,6 +2293,17 @@ fn spawn_progress_publisher(
                 Some(s) => s,
                 None => break,
             };
+            if let Ok(mut latest) = progress_snapshot.write() {
+                *latest = Some(SubagentProgress {
+                    turn_count: signals.turn_count,
+                    tool_call_count: signals.tool_call_count,
+                    tokens_used: signals.context_tokens_used,
+                    context_window_tokens: signals.context_window_tokens,
+                    context_usage_pct: signals.context_window_usage,
+                    tools_used: signals.tools_used.clone(),
+                    error_count: signals.error_count,
+                });
+            }
             let sig: ProgressSignature = (
                 signals.turn_count,
                 signals.tool_call_count,
@@ -2122,6 +2354,7 @@ fn spawn_progress_publisher(
 #[cfg(test)]
 mod progress_publisher_tests {
     use super::{ProgressSignature, progress_tick_should_emit, spawn_progress_publisher};
+    use std::sync::Arc;
     const BASE: ProgressSignature = (3, 7, 12, 0, 30_000);
     #[test]
     fn token_only_change_emits() {
@@ -2147,6 +2380,7 @@ mod progress_publisher_tests {
                 let cancel = tokio_util::sync::CancellationToken::new();
                 spawn_progress_publisher(
                     signals.clone(),
+                    Arc::new(std::sync::RwLock::new(None)),
                     gateway,
                     "parent".into(),
                     "subagent".into(),
@@ -2184,7 +2418,7 @@ struct SubagentOutputArtifact {
 fn write_subagent_output(
     session: &crate::session::storage::ContainedDirectory,
     output: &str,
-) -> Result<SubagentOutputArtifact, String> {
+) -> std::io::Result<SubagentOutputArtifact> {
     let file = SubagentOutputFileRef {
         schema_version: SUBAGENT_OUTPUT_SCHEMA_VERSION,
         output,
@@ -2193,7 +2427,7 @@ fn write_subagent_output(
         Ok(json) => json,
         Err(e) => {
             tracing::warn!(error = %e, "failed to serialize subagent output");
-            return Err(format!("failed to serialize subagent output: {e}"));
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, e));
         }
     };
     let hash = blake3::hash(json.as_bytes()).to_hex().to_string();
@@ -2206,7 +2440,7 @@ fn write_subagent_output(
         json.as_bytes(),
     ) {
         tracing::warn!(error = %e, "failed to write subagent output");
-        return Err(format!("failed to write subagent output: {e}"));
+        return Err(e);
     }
     Ok(SubagentOutputArtifact {
         timeline_ref: format!("artifact:subagent-output:blake3:{hash}"),
@@ -2247,7 +2481,7 @@ fn read_subagent_output_from_directory(
 fn persist_subagent_output(
     session: &crate::session::storage::ContainedDirectory,
     result: &SubagentResult,
-) -> Result<Option<SubagentOutputArtifact>, String> {
+) -> std::io::Result<Option<SubagentOutputArtifact>> {
     if !result.success || result.output.is_empty() {
         return Ok(None);
     }
@@ -2338,7 +2572,11 @@ fn finish_from_durable_facts(
         .output_ref
         .as_deref()
         .map(|output_ref| load_subagent_output_ref_from_directory(opened.directory(), output_ref))
-        .transpose()?;
+        .transpose()
+        .unwrap_or_else(|error| {
+            tracing::warn!(%error, "canonical result output unavailable");
+            None
+        });
     Ok(finish_from_terminal(terminal, output))
 }
 
@@ -2386,7 +2624,7 @@ pub(crate) async fn durable_child_operation(
         return Ok(DurableChildOperation::Open);
     };
 
-    let (output, outcome, error) = if terminal.result_ref.is_some() {
+    let (output, outcome, error, output_unavailable) = if terminal.result_ref.is_some() {
         let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
         let child = storage
             .open_session_by_id(&spawn.child_session_id)
@@ -2406,19 +2644,28 @@ pub(crate) async fn durable_child_operation(
             .map(|output_ref| {
                 load_subagent_output_ref_from_directory(child.directory(), output_ref)
             })
-            .transpose()?;
+            .transpose()
+            .ok()
+            .flatten();
         (
-            output.unwrap_or_default(),
+            output.clone().unwrap_or_default(),
             result.outcome,
             result.error.clone(),
+            result.output_ref.is_some() && output.is_none(),
         )
     } else {
         if terminal.outcome == chat_state::SubagentOutcome::Completed {
             return Err("completed child terminal has no canonical result reference".into());
         }
-        (String::new(), terminal.outcome, terminal.error.clone())
+        (
+            String::new(),
+            terminal.outcome,
+            terminal.error.clone(),
+            false,
+        )
     };
     Ok(DurableChildOperation::Completed(SubagentResult {
+        output_unavailable,
         success: outcome == chat_state::SubagentOutcome::Completed,
         output: std::sync::Arc::from(output),
         error,
@@ -2514,11 +2761,11 @@ struct RecoveredInspectionResult {
 fn result_from_inspection(
     spawn: &chat_state::SubagentSpawnEvent,
     inspection: Option<&SubagentInspection>,
-    duration_ms: u64,
-) -> RecoveredInspectionResult {
+    _duration_ms: u64,
+) -> Option<RecoveredInspectionResult> {
     let observed_duration_ms = inspection
         .map(|inspection| inspection.snapshot.duration_ms)
-        .unwrap_or(duration_ms);
+        .unwrap_or(0);
     let (outcome, error, tool_calls, turns, tokens_used, output) =
         match inspection.map(|value| &value.snapshot.status) {
             Some(SubagentSnapshotStatus::Completed {
@@ -2535,9 +2782,20 @@ fn result_from_inspection(
                 *tokens_used,
                 (!output.is_empty()).then(|| output.clone()),
             ),
-            Some(SubagentSnapshotStatus::CompletedOutputUnavailable { .. }) => {
-                unreachable!("unverifiable completed outputs are filtered before recovery")
-            }
+            Some(SubagentSnapshotStatus::CompletedOutputUnavailable {
+                tool_calls,
+                turns,
+                tokens_used,
+                ..
+            }) => (
+                chat_state::SubagentOutcome::Completed,
+                None,
+                *tool_calls,
+                *turns,
+                *tokens_used,
+                None,
+            ),
+            Some(SubagentSnapshotStatus::FinalizationPending { .. }) => return None,
             Some(SubagentSnapshotStatus::Failed { error }) => (
                 chat_state::SubagentOutcome::Failed,
                 Some(error.clone()),
@@ -2562,7 +2820,7 @@ fn result_from_inspection(
                 unreachable!("running inspections are filtered before recovery")
             }
             None => (
-                chat_state::SubagentOutcome::Cancelled,
+                chat_state::SubagentOutcome::Failed,
                 Some(ORPHAN_RECONCILE_REASON.to_string()),
                 0,
                 0,
@@ -2570,7 +2828,7 @@ fn result_from_inspection(
                 None,
             ),
         };
-    RecoveredInspectionResult {
+    Some(RecoveredInspectionResult {
         event: chat_state::SubagentResultEvent {
             subagent_id: spawn.subagent_id.clone(),
             outcome,
@@ -2582,7 +2840,7 @@ fn result_from_inspection(
             output_ref: None,
         },
         output,
-    }
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -2625,6 +2883,7 @@ async fn ensure_recovered_child_result(
         fallback,
         &opened,
         &storage,
+        None,
     )
     .await
 }
@@ -2667,6 +2926,7 @@ async fn ensure_recovered_child_result_in_dir(
         fallback,
         &opened,
         &storage,
+        None,
     )
     .await
 }
@@ -2678,6 +2938,7 @@ async fn ensure_recovered_child_result_with_opened(
     fallback: RecoveredInspectionResult,
     opened: &crate::session::storage::jsonl::OpenedSession,
     storage: &crate::session::storage::jsonl::JsonlStorageAdapter,
+    deadline: Option<tokio::time::Instant>,
 ) -> Result<
     (
         chat_state::TimelineRangeRef,
@@ -2688,6 +2949,33 @@ async fn ensure_recovered_child_result_with_opened(
 > {
     validate_child_session_identity(opened, parent_timeline_id, spawn)
         .map_err(ChildResultRecoveryError::Invalid)?;
+    storage
+        .claim_recovery_writer(&opened.summary().info)
+        .map_err(|error| {
+            ChildResultRecoveryError::Invalid(format!(
+                "child writer is not available for recovery: {error}"
+            ))
+        })?;
+    let sync_prefix = storage.sync_recovery_prefix(&opened.summary().info);
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, sync_prefix)
+            .await
+            .map_err(|_| {
+                ChildResultRecoveryError::Invalid(
+                    "finalization deadline elapsed waiting for child prefix sync".into(),
+                )
+            })?
+            .map_err(|error| {
+                ChildResultRecoveryError::Invalid(format!(
+                    "child prefix is readable but not durably confirmed: {error}"
+                ))
+            })?,
+        None => sync_prefix.await.map_err(|error| {
+            ChildResultRecoveryError::Invalid(format!(
+                "child prefix is readable but not durably confirmed: {error}"
+            ))
+        })?,
+    }
     let mut timeline = opened
         .validated_timeline(&spawn.child_session_id)
         .map_err(|error| {
@@ -2714,7 +3002,10 @@ async fn ensure_recovered_child_result_with_opened(
                 load_subagent_output_ref_from_directory(opened.directory(), output_ref)
             })
             .transpose()
-            .map_err(ChildResultRecoveryError::Invalid)?;
+            .unwrap_or_else(|error| {
+                tracing::warn!(%error, "canonical child output unavailable; retaining outcome");
+                None
+            });
         return Ok((
             chat_state::TimelineRangeRef {
                 timeline_id: spawn.child_session_id.clone(),
@@ -2726,11 +3017,83 @@ async fn ensure_recovered_child_result_with_opened(
         ));
     }
     let mut fallback_event = fallback.event;
+    // A new lease proves the prior writer has relinquished ownership. Close
+    // scopes and settle interrupted attempts before the child Result fact.
+    let recovery = timeline
+        .recover_interrupted()
+        .map_err(|error| ChildResultRecoveryError::Invalid(error.to_string()))?;
+    for event in recovery {
+        append_recovery_event(storage, &opened.summary().info, &event, deadline)
+            .await
+            .map_err(|error| ChildResultRecoveryError::Invalid(error.to_string()))?;
+    }
+    let usage = chat_state::actor::state::project_timeline_usage(&timeline)
+        .map_err(|error| ChildResultRecoveryError::Invalid(error.to_string()))?;
+    // Verified runtime metadata can retain a larger known lower bound than
+    // an interrupted bill. Never erase it merely because settlement failed.
+    let usage_incomplete = usage.incomplete
+        || fallback_event.tokens_used > usage.totals.total_tokens()
+        || fallback_event.error.as_deref() == Some(ORPHAN_RECONCILE_REASON);
+    fallback_event.tokens_used = fallback_event.tokens_used.max(usage.totals.total_tokens());
+    if usage_incomplete && !usage.incomplete {
+        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            return Err(ChildResultRecoveryError::Invalid(
+                "finalization deadline elapsed before incomplete usage append".into(),
+            ));
+        }
+        let incomplete = timeline
+            .record(chat_state::TimelineEventKind::Observation(
+                chat_state::ObservationEvent {
+                    scope: "session_usage".into(),
+                    name: "incomplete".into(),
+                    turn: None,
+                    step: None,
+                    data: None,
+                },
+            ))
+            .map_err(|error| ChildResultRecoveryError::Invalid(error.to_string()))?;
+        append_recovery_event(storage, &opened.summary().info, &incomplete, deadline)
+            .await
+            .map_err(|error| ChildResultRecoveryError::Invalid(error.to_string()))?;
+    }
+    if fallback_event.error.as_deref() == Some(ORPHAN_RECONCILE_REASON) {
+        fallback_event.outcome = chat_state::SubagentOutcome::Failed;
+        fallback_event.duration_ms = 0;
+        fallback_event.turns = timeline
+            .events()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.kind,
+                    chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started { .. })
+                )
+            })
+            .count() as u32;
+        fallback_event.tool_calls = timeline
+            .events()
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event.kind,
+                    chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Started { .. })
+                )
+            })
+            .count() as u32;
+        fallback_event.error = Some(
+            "execution interrupted after previous writer exit; unsettled usage remains incomplete"
+                .into(),
+        );
+    }
     if fallback_event.outcome == chat_state::SubagentOutcome::Completed
         && let Some(output) = fallback.output.as_deref()
     {
+        if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+            return Err(ChildResultRecoveryError::Invalid(
+                "finalization deadline elapsed before recovered output publication".into(),
+            ));
+        }
         let artifact = write_subagent_output(opened.directory(), output)
-            .map_err(ChildResultRecoveryError::Invalid)?;
+            .map_err(|error| ChildResultRecoveryError::Invalid(error.to_string()))?;
         fallback_event.output_ref = Some(artifact.timeline_ref);
     }
     let event = timeline
@@ -2740,15 +3103,13 @@ async fn ensure_recovered_child_result_with_opened(
         .map_err(|error| {
             ChildResultRecoveryError::Invalid(format!("invalid recovered child result: {error}"))
         })?;
-    crate::session::storage::StorageAdapter::append_timeline_event_durable(
-        storage,
-        &opened.summary().info,
-        &event,
-    )
-    .await
-    .map_err(|error| {
-        ChildResultRecoveryError::Invalid(format!("cannot persist recovered child result: {error}"))
-    })?;
+    append_recovery_event(storage, &opened.summary().info, &event, deadline)
+        .await
+        .map_err(|error| {
+            ChildResultRecoveryError::Invalid(format!(
+                "cannot persist recovered child result: {error}"
+            ))
+        })?;
     Ok((
         chat_state::TimelineRangeRef {
             timeline_id: spawn.child_session_id.clone(),
@@ -2758,6 +3119,34 @@ async fn ensure_recovered_child_result_with_opened(
         fallback_event,
         fallback.output,
     ))
+}
+
+async fn append_recovery_event(
+    storage: &crate::session::storage::jsonl::JsonlStorageAdapter,
+    info: &crate::session::info::Info,
+    event: &chat_state::TimelineEvent,
+    deadline: Option<tokio::time::Instant>,
+) -> std::io::Result<()> {
+    if deadline.is_some_and(|deadline| tokio::time::Instant::now() >= deadline) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "finalization deadline elapsed before child append",
+        ));
+    }
+    let append = crate::session::storage::StorageAdapter::append_timeline_event_durable(
+        storage, info, event,
+    );
+    match deadline {
+        Some(deadline) => tokio::time::timeout_at(deadline, append)
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "finalization deadline elapsed waiting for child append",
+                )
+            })?,
+        None => append.await,
+    }
 }
 
 fn subagent_notification_owner(
@@ -2957,7 +3346,13 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
         if terminals.contains_key(&subagent_id) {
             continue;
         }
-        let inspection = backend.inspect(&subagent_id).await;
+        let inspection = match backend.inspect(&subagent_id).await {
+            Ok(inspection) => inspection,
+            Err(error) => {
+                tracing::warn!(%subagent_id, %error, "backend inspection unavailable; leaving parent spawn open");
+                continue;
+            }
+        };
         if let Some(inspection) = &inspection
             && (inspection.parent_session_id != parent_session_id
                 || inspection.child_session_id != spawn.child_session_id
@@ -2974,40 +3369,30 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
             );
             continue;
         }
-        if inspection.as_ref().is_some_and(|inspection| {
-            matches!(
-                inspection.snapshot.status,
-                SubagentSnapshotStatus::CompletedOutputUnavailable { .. }
-            )
-        }) {
-            tracing::error!(
-                %subagent_id,
-                "completed backend output is unavailable or invalid; leaving parent spawn open"
-            );
-            continue;
-        }
         if inspection
             .as_ref()
             .is_some_and(|inspection| inspection.snapshot.is_running())
         {
             continue;
         }
+        if inspection.is_none() && !cold_recovery {
+            tracing::debug!(%subagent_id, "child absence is not actionable outside cold recovery");
+            continue;
+        }
         let duration_ms = chrono::Utc::now()
             .timestamp_millis()
             .saturating_sub(spawned_at_ms)
             .max(0) as u64;
-        let fallback = result_from_inspection(&spawn, inspection.as_ref(), duration_ms);
+        let Some(fallback) = result_from_inspection(&spawn, inspection.as_ref(), duration_ms)
+        else {
+            tracing::warn!(%subagent_id, "finalization evidence is pending; leaving parent spawn open");
+            continue;
+        };
         let recovered =
             ensure_recovered_child_result(parent_session_id, spawn_seq, &spawn, fallback.clone())
                 .await;
         let (result_ref, result, output) = match recovered {
             Ok((result_ref, result, output)) => (Some(result_ref), result, output),
-            Err(ChildResultRecoveryError::Unpublished(error))
-                if fallback.event.outcome != chat_state::SubagentOutcome::Completed =>
-            {
-                tracing::warn!(%subagent_id, %error, "closing an unpublished child without a result reference");
-                (None, fallback.event, None)
-            }
             Err(error) => {
                 tracing::error!(
                     %subagent_id,
@@ -3017,6 +3402,31 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
                 continue;
             }
         };
+        if let Some(reference) = &result_ref {
+            let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
+            let usage = storage
+                .open_session_by_id_shared_read(&reference.timeline_id)
+                .ok()
+                .flatten()
+                .and_then(|child| child.validated_timeline(&reference.timeline_id).ok())
+                .and_then(|validated| {
+                    chat_state::actor::state::project_timeline_usage(&validated.timeline).ok()
+                });
+            let Some(usage) = usage else {
+                continue;
+            };
+            if !handle_request::record_subagent_usage(
+                parent_cmd_tx,
+                subagent_id.clone(),
+                Some(usage.by_model.into_iter().collect()),
+                spawn.parent_prompt_id.clone(),
+                usage.incomplete,
+            )
+            .await
+            {
+                continue;
+            }
+        }
         let terminal = chat_state::SubagentTerminalEvent {
             subagent_id: subagent_id.clone(),
             child_session_id: spawn.child_session_id.clone(),

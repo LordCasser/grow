@@ -1,0 +1,76 @@
+## Verification status
+
+2026-10-08（Asia/Shanghai）。已确认回归：Pager dispatch 1062 passed、Pager observation 8 passed、Pager `session_events` 45 passed、Pager `views::turn_status` 44 passed；Pager `status_rpc` 1 passed (5-second virtual-clock budget includes queue wait and keeps timed-out worker permits/targets); Shell `agent::handlers::session` 3 passed（含 durable SessionInfo 隔离根只读读取）；Shell `agent::subagent` 224 passed；ChatState `actor::tests` 196 passed；Shell `session::storage::jsonl` 162 passed；Shell `runtime_observation` 2 passed；`extensions::session_admin` 5 passed；`storage_admission` 6 passed；Tools `implementations::grow_build::task` 187 passed（含 panic owner transfer、Unauthorized 映射和 finalization cycle 绝对期限）；Shell `failed_session_init_join_tests` 10 passed；Shell `notification_drain` 26 passed（以 `RUST_MIN_STACK=33554432` 重跑，首轮默认线程栈溢出而非断言失败）；Shell `session::workflow` 137 passed。Shell Input admission 10 passed。组件用例为直接证据，但不代表跨进程端到端或完整故障矩阵。
+
+### Final command evidence
+
+- `cargo test --locked -p pager --lib dispatch -- --test-threads=2`: 1062 passed.
+- `cargo test --locked -p pager --lib status_rpc -- --test-threads=2`: 1 passed (`status_rpc_budget_includes_admission_and_retains_timed_out_worker_permit`).
+- `cargo check --locked -p cli --bin grow`: passed.
+- Cargo runs used `CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0 CARGO_INCREMENTAL=0 CARGO_BUILD_JOBS=2 RUST_MIN_STACK=33554432`. Scoped rustfmt check (96 Rust files) and `git diff --check` passed.
+
+契约以归档后主规范为准：[session-timeline](../../../specs/session-timeline/spec.md#requirement-session-observation-does-not-repair-durable-projections)、[client-surfaces](../../../specs/client-surfaces/spec.md#requirement-cancelling-turns-reconcile-against-authoritative-prompt-state)。本 change 已归档；delta 保留变更过程，当前行为契约以主规范为准。
+
+## Scenario → test
+
+| Scenario | 对应测试 | 结果/缺口 |
+| --- | --- | --- |
+| Runtime registration is absent but history exists | `owner_drop_marks_snapshot_unavailable` (`shell/src/session/actor/runtime_observation.rs`); `durable_session_info_reads_isolated_root_without_mutation_or_writer_conflict` (`shell/src/agent/handlers/session.rs`); `session_info_rows_covers_core_facts_and_skips_absent` (`pager/src/views/usage_modal.rs`) | Shell owner loss and durable isolated-root read-only SessionInfo each have direct tests; Pager session-info rendering is separately covered. The end-to-end Shell fetch through Pager is not joined in one test, but the task's durable observation behavior is directly covered at both handling and display layers. |
+| Coordinator cannot answer | `channel_backend_query_live_sender_without_reply_times_out`; `channel_backend_query_dropped_responder_is_unavailable`; `channel_backend_query_closed_channel` (`tools/src/implementations/grow_build/task/backend_tests.rs`); `cancelling_unknown_or_error_preserves_target_without_draining` (`pager/src/app/root/dispatch/tests/turn.rs`) | Tools and Pager suites passed; typed timeout/unavailable classification has direct component evidence. |
+| Caller lacks source access | `session_backend_cannot_query_or_cancel_foreign_child` (`tools/src/implementations/grow_build/task/coordinator_tests.rs`); `channel_backend_query_not_found`; `channel_backend_query_closed_channel` (`tools/src/implementations/grow_build/task/backend_tests.rs`) | Tools suite passed; it distinguishes foreign-owner authorization from absent/closed backend at component boundary. RPC end-to-end non-disclosure remains unverified. |
+| Persistence acknowledgment never arrives | `timed_out_durable_timeline_append_keeps_lease_until_blocking_sync_exits`; `cleanup_live_process_lease_survives_durable_append_until_process_exit` (`shell/src/session/storage/jsonl/tests.rs`); `cancelling_unknown_or_error_preserves_target_without_draining` (`pager/src/app/root/dispatch/tests/turn.rs`) | JSONL 162 passed, Pager dispatch passed. Durable writer lease and nonterminal UI behavior both have component coverage; Shell durable lease and Pager nonterminal UI behavior are directly covered; no single cross-layer stalled-ACK E2E is claimed. |
+| Durable metadata read exceeds the deadline | `timed_out_read_retains_worker_permit_and_queue_deadline` (`shell/src/extensions/session_admin.rs`) | session_admin 5 passed, including virtual-clock total deadline and permit retention after timed-out blocking read. |
+| Execution returned before result publication | `execution_returned_query_reports_finalization_pending_without_waiting` (`tools/src/implementations/grow_build/task/coordinator_tests.rs`); `active_child_without_prompt_id_queries_session_lifecycle` (`pager/src/app/root/dispatch/tests/turn.rs`) | Tools and Pager suites passed; direct component evidence for finalization-pending and lifecycle query, but not whole delivery E2E. |
+| Nested child loses its completion notification | `nested_prompt_watchdog_targets_the_child_session`; `active_child_without_prompt_id_queries_session_lifecycle` (`pager/src/app/root/dispatch/tests/turn.rs`) | dispatch suite 已通过。 |
+| Repeated failed probes | `cancelling_unknown_or_error_preserves_target_without_draining`; `running_turn_query_in_flight_skips_duplicate`; `running_status_response_rearms_from_observation_time` (`pager/src/app/root/dispatch/tests/turn.rs`) | dispatch suite 已通过；无跨目标压力/公平性验证。 |
+| Reply belongs to an earlier binding or incarnation | `late_prompt_status_reply_does_not_clear_a_newer_query_generation`; `prompt_status_from_a_different_control_epoch_cannot_finalize_cancelled_turn` (`pager/src/app/root/dispatch/tests/turn.rs`) | Pager dispatch 1062 passed; request generation/control epoch are directly covered. A separately replaced writer incarnation remains distinct from those Pager-side identity checks. |
+| Observation reports progress without terminal evidence | `nonterminal_watchdog_answers_never_end_a_running_turn`; `running_status_response_rearms_from_observation_time` (`pager/src/app/root/dispatch/tests/turn.rs`) | dispatch suite 已通过。 |
+| Cancel targets a vanished session | `cancelling_unknown_or_error_preserves_target_without_draining` (`pager/src/app/root/dispatch/tests/turn.rs`) | dispatch suite 已通过。 |
+| Cancel is still being processed | `cancelling_running_status_rearms_without_unlocking` (`pager/src/app/root/dispatch/tests/turn.rs`) | dispatch suite 已通过。 |
+| Cancel terminal notification was missed | `cancelling_terminal_status_uses_first_wins_finalizer` (`pager/src/app/root/dispatch/tests/turn.rs`) | dispatch suite 已通过。 |
+| Cancel status query times out | `cancelling_unknown_or_error_preserves_target_without_draining` (`pager/src/app/root/dispatch/tests/turn.rs`) | Pager dispatch 1062 passed; unknown/error fallback keeps the target and last confirmed timestamp. Pager `status_rpc_budget_includes_admission_and_retains_timed_out_worker_permit` also passed, covering the 5-second virtual deadline including queue wait and retaining the worker permit/target after timeout. |
+
+## Suite evidence
+
+- `runtime_observation`: 2 passed — snapshot bounded facts and owner-drop unavailability.
+- `agent::handlers::session`: 3 passed; includes `durable_session_info_reads_isolated_root_without_mutation_or_writer_conflict`.
+- Pager observation: 8 passed; `session_events`: 45 passed; `views::turn_status`: 44 passed. These cover Pager observations, delivered session-event identity, and visible status phase separately.
+- `extensions::session_admin`: 5 passed — running/settling lifecycle mapping, completion receipt gating, and virtual-clock blocking-worker limit.
+- `storage_admission`: 6 passed — per-owner versus shared-domain failure, failure capacity, matching recovery epoch, and barrier failure retaining closed admission.
+- `failed_session_init_join_tests`: 10 passed — initialization failure/panic and canceled waiter keep the registered owner joined before retry or persistence teardown.
+- `notification_drain`: 26 passed with `RUST_MIN_STACK=33554432` — receipt retry, durable notification consumption, goal revision ownership, and active-task completion boundaries. The default-stack first run overflowed during the suite and was not an assertion failure.
+- `session::workflow`: 137 passed — includes `unconfirmed_child_results_fail_the_original_workflow_operation_without_retrying`.
+- `session::storage::jsonl`: 162 passed — durable timeline sync and writer/process lease behavior relevant to stalled observation.
+- Tools task suite: 187 passed, including panic owner transfer, Unauthorized mapping, and the absolute finalization-cycle deadline test. Shell Input admission suite: 10 passed after the randomized turn-identity fixture repair.
+
+## Task evidence and verification boundary
+
+| Task | Direct evidence | Additional scope boundary |
+| --- | --- | --- |
+| 1.1 Typed query outcomes across Shell/tools/protocol | `channel_backend_query_not_found`, `channel_backend_query_live_sender_without_reply_times_out`, `channel_backend_query_dropped_responder_is_unavailable`, `session_backend_cannot_query_or_cancel_foreign_child`; `coordinator_running_states_map_to_running_and_settlement_states_do_not_end_lifecycle` (`tools/.../task/{backend_tests,coordinator_tests}.rs`, `shell/src/extensions/session_admin.rs`). Tools 187, session_admin 5 passed. | Timeout/unavailable/absent and foreign-owner outcomes have direct component evidence. The non-disclosure result through the external RPC boundary is not covered by these component tests. |
+| 1.2 Owner snapshot and exit/panic updates outside blocked work | `prompt_lookup_preserves_bounded_runtime_facts`, `owner_drop_marks_snapshot_unavailable` (`shell/src/session/actor/runtime_observation.rs`); `execution_returned_query_reports_finalization_pending_without_waiting` (Tools); `failed_initialization_waits_for_thread_teardown`, `failed_initialization_observes_thread_panic`, `cancelling_init_waiter_cannot_detach_the_registered_thread` (`shell/src/session/actor/spawn.rs`). Runtime observation 2, Tools 187, failed-init join 10 passed. | Owner loss/panic and failed initialization ownership have direct component evidence; a full multi-owner ACK-stall combination matrix is not claimed or required. |
+| 1.3 Five-second deadline, worker permit, in-flight and coalescing bounds | `timed_out_read_retains_worker_permit_and_queue_deadline` (`shell/src/extensions/session_admin.rs`); `running_turn_query_in_flight_skips_duplicate`, `cancelling_unknown_or_error_preserves_target_without_draining` (Pager); backend timeout tests (Tools). | These cover distinct permit, one-in-flight and timeout layers. Cross-layer queued-control + all-target concurrency stress is not asserted by one test. |
+| 1.4 Dormant-session read-only observation | `durable_session_info_reads_isolated_root_without_mutation_or_writer_conflict` (`shell/src/agent/handlers/session.rs`); `model_change_observation_is_read_only_and_replacement_writer_repairs_summary`, `coordination_observer_preserves_live_sideband_and_new_writer_recovers_once` (`shell/src/session/storage/jsonl/tests.rs`); `read_durable_prompt_status`, `read_durable_subagent_lifecycle` (`shell/src/extensions/session_admin.rs`). Session handler 3, JSONL 162 and session_admin 5 passed. | Durable SessionInfo on isolated storage, no mutation/writer conflict, JSONL observation-versus-repair, and durable status source/failure classification have direct component evidence. No single Shell→Pager fetch/display E2E was run; the task does not require every read path to share one fixture. |
+| 2.1 Root/nested child and no-prompt lifecycle probing | `nested_prompt_watchdog_targets_the_child_session`, `active_child_without_prompt_id_queries_session_lifecycle`, `child_lifecycle_terminal_without_prompt_identity_does_not_finalize_turn` (Pager dispatch 1062); Pager observation 8 and `session_events` 45 passed. | Query target, nested/no-prompt lifecycle, observation rendering and event identity have direct coverage. `root_and_nested_watchdog_queries_survive_disconnect_and_replay_generation_change` is the focused joined Pager reconnect/replay case. |
+| 2.2 Identity, epoch, incarnation, freshness and retry time | `late_prompt_status_reply_does_not_clear_a_newer_query_generation`, `prompt_status_from_a_different_control_epoch_cannot_finalize_cancelled_turn`, `cancelling_unknown_or_error_preserves_target_without_draining`, `running_status_response_rearms_from_observation_time` (Pager dispatch 1062); session_events 45 passed. | Pager request generation/control epoch and stale timestamps have direct coverage. A separate Shell writer-incarnation replacement assertion is not established by these Pager tests. |
+| 2.3 Status rendering and cancellation reducer | `cancelling_unknown_or_error_preserves_target_without_draining`, `cancelling_terminal_status_uses_first_wins_finalizer`, `nonterminal_watchdog_answers_never_end_a_running_turn`, `running_watchdog_terminal_response_finalizes_via_first_wins_finalizer` (Pager dispatch 1062); Pager `views::turn_status` 44 passed. | Reducer and visible phase/rendering tests both passed. |
+| 3.1 Lost-terminal root/nested integration | Pager dispatch 1062 covers root/nested lifecycle target selection, no-prompt child lookup, terminal finalization, disconnect/replay recovery and bounded batches; Shell `notification_drain` covers durable child completion and parent receipt delivery (26); Pager `session_events` 45 covers event identities/replay and retired epochs. | `root_and_nested_watchdog_queries_survive_disconnect_and_replay_generation_change` and `prompt_status_watchdog_bounds_each_poll_and_retries_skipped_children` passed in Pager dispatch 1062. Together they cover root/nested status recovery across disconnect/replay, late-generation fencing, and bounded polling/retry. These are focused Pager fixtures, not a full external-system E2E or failure Cartesian product. |
+| 3.2 Affected suites | Pager dispatch 1062, observation 8, session_events 45 and views::turn_status 44 passed; Shell SessionInfo/failed-init/notification/workflow and Tools counts are listed above. `status_rpc` 1 and CLI check passed. | Focused Pager joined root/nested recovery/replay, batch cap, queue-inclusive 5-second budget, and CLI production check are green; OpenSpec gate results are recorded below. |
+| 3.3 Development guide and OpenSpec gate | `docs/development.md` now describes diagnostic entry points and links current specs; all delta Scenarios are mapped above. | OpenSpec validation and archive gate results are recorded below. |
+
+## Scope limits
+
+已通过结果只覆盖记录中列出的 Rust suite。没有证明运行中 actor 的 storage stall、授权拒绝、慢/卡住文件系统 worker、跨根与嵌套 UI 的真实通知丢失同时发生时的完整故障矩阵。运行窗口继续以现有 30 秒失活门槛和 5 秒状态查询总期限为边界；错误或 Unknown 不更新时间戳。不能把本 change 单独表述为自动恢复或自动提交能力。
+
+## Final archive gate
+
+2026-10-08：三项 change 按 observation → finalization → input/resources 顺序完成实现、验证和归档，依赖项均已落实。
+
+- 归档前 `openspec validate --all --strict --no-interactive`：17 passed, 0 failed。
+- 三次 `openspec archive <change> --yes` 均成功；共更新 6 个主规范，新增 17 项 Requirement、修改 1 项。
+- 归档后 `openspec validate --all --strict --no-interactive`：14 passed, 0 failed。
+- `openspec validate --archived --strict --no-interactive`：574 passed, 0 failed。
+- 最终 scoped rustfmt：96 个 Rust 文件通过；`git diff --check` 通过；三项归档文档的 17 个本地链接/锚点核对通过。
+- 确认无运行中的 Cargo/rustc/测试进程后，按本次涉及的 8 个 package 执行 `cargo clean -p ...`，释放 3.7 GiB 编译产物。
+
+上文测试覆盖范围和限制保持有效；归档不代表未运行的长时间 soak 或完整外部系统故障组合已验证。

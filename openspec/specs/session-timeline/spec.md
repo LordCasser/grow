@@ -755,3 +755,185 @@ The subagent spawn Grow projection SHALL carry the effective reasoning effort se
 
 - **WHEN** a child has no effective reasoning effort
 - **THEN** the spawn projection omits the optional effort field.
+
+### Requirement: Runtime observations preserve query uncertainty and ownership
+
+会话与子任务状态查询 SHALL 区分已确认观察、已确认不存在、不可达、超时及证据无效，并明确不存在所指的 runtime、prompt 或持久记录范围。观察 SHALL 保留 session、适用的 child/prompt identity 及运行实例身份；不得把通信错误、注册表缺项或取消发送失败解释为持久任务已结束。查询 SHALL 在既有授权边界内处理。
+
+#### Scenario: Runtime registration is absent but history exists
+- **WHEN** 运行实例已移除，但授权会话仍有可验证持久记录
+- **THEN** 查询区分实例不存在和记录存在，返回可确认的持久状态，不报告整个 session 不存在。
+
+#### Scenario: Coordinator cannot answer
+- **WHEN** 查询发送失败、响应丢失或超过期限
+- **THEN** 返回对应的不可达或超时，保持执行 outcome 未确认，不据此生成 interrupted 或 cancelled 终态。
+
+#### Scenario: Caller lacks source access
+- **WHEN** 调用者无权查询目标来源
+- **THEN** 返回授权拒绝，不通过状态分类泄漏目标是否存在。
+
+证据与实施入口：`crates/codegen/tools/src/implementations/grow_build/task/backend.rs::inspect/query/cancel`、`crates/codegen/shell/src/extensions/session_admin.rs::handle_prompt_status`。上述区分为本 change 新增契约。
+
+### Requirement: Session health observation remains bounded and read only
+
+状态观察 SHALL 分别报告可确认的执行、持久提交、交付和观察新鲜度。控制查询 SHALL 在总计不超过五秒或调用方更早期限内结束等待，包含排队与加载等待；其完成不得依赖被观察的模型、工具、hook 或写入操作结束。查询并发与快照积压 SHALL 有界。读取持久会话信息 SHALL 遵循只读观察契约，不隐式恢复执行或修改磁盘投影。
+
+#### Scenario: Persistence acknowledgment never arrives
+- **WHEN** 会话写入 ACK 一直不返回且运行实例尚未退出
+- **THEN** 状态查询仍能返回最后确认的提交位置和观察限制，或在期限内返回超时，不能永久排在该 ACK 后面。
+
+#### Scenario: Durable metadata read exceeds the deadline
+- **WHEN** 无 handle 的会话只读扫描超过查询期限
+- **THEN** 调用方获得超时；仍在运行的读取保留其工作许可，后续请求不能绕过并发上限，也不启动 writer 修复。
+
+#### Scenario: Execution returned before result publication
+- **WHEN** owner 已确认执行返回，但结果提交尚未确认
+- **THEN** 观察同时保留这两个事实，不显示为仍等待模型，也不发布未确认的 durable Finished。
+
+证据与实施入口：`crates/codegen/shell/src/session/handle.rs`、`crates/codegen/shell/src/session/actor/spawn.rs::SessionThread`、`crates/codegen/shell/src/session/storage/jsonl/mod.rs`；既有只读与 writer drain 契约继续适用。
+
+### Requirement: Subagent finalization retains one accountable owner
+
+子任务执行返回、失败、panic 或取消后，系统 SHALL 保留该 child 的收尾责任，直到所需持久事实和交付责任已确认，或明确展示仍待修复。执行 outcome、提交状态和交付状态 SHALL 分离。未确认收尾不得被普通完成缓存淘汰、作为已完成依赖使用或用于绕过源实例仍存活时的 resume 拒绝。并发推进和暂存资源 SHALL 有界。
+
+#### Scenario: Runner exits after output publication fails
+- **WHEN** runner 已返回，但 output artifact 或 child result 提交失败
+- **THEN** 查询显示执行已返回且提交受阻，保留同一 child 的收尾责任；不会把它静默移入可淘汰的完成项。
+
+#### Scenario: Panic competes with cancellation
+- **WHEN** runner panic 与取消或正常收尾竞争
+- **THEN** 只有一个收尾 owner 推进原 child 的事实；已确认 outcome 不被覆盖，未确认状态仍可查询。
+
+#### Scenario: Pending finalization reaches capacity
+- **WHEN** 待收尾元数据或未持久正文达到容量上限
+- **THEN** 新准入受到反压，超限正文保全失败可见，既有未确认责任不被当作成功完成或静默丢弃。
+
+证据与实施入口：`crates/codegen/tools/src/implementations/grow_build/task/coordinator.rs::finish_child/finish_panicked_child`、`crates/codegen/shell/src/agent/subagent/handle_request.rs`。
+
+### Requirement: Subagent reconciliation advances only verified commit prefixes
+
+运行期与重启恢复 SHALL 按同一 child/parent 身份链核对已提交前缀，依序补齐结算、结果、父引用和回执。重试 SHALL 保留原 immutable event identity 与 payload；ACK 不明不得解释为未写入。writer 失效后 SHALL 先满足完整 writer drain、重新取得独占 lease 并校验记录，才执行后续写入。普通观察不得隐式触发修复。
+
+#### Scenario: Commit succeeds but acknowledgment is lost
+- **WHEN** 任一收尾事实可能已写入但调用方未取得 ACK
+- **THEN** 系统核对或 exact 重放该事实并完成所需同步屏障，不追加重复事实、不改变原 outcome，也不重发 provider 或工具。
+
+#### Scenario: Space becomes available after writer failure
+- **WHEN** StorageFull 使 writer 失效，随后磁盘空间恢复
+- **THEN** 只有旧 actor/persistence owner 结束且 lease 释放后，新 owner 才能校验原记录并继续收尾；旧 handle 不被重新视为有效 writer。
+
+#### Scenario: Actor exited while persistence still owns storage
+- **WHEN** actor 已退出但 persistence task 或已派发 I/O 尚未完成
+- **THEN** 替代 writer 仍被拒绝，等待者可得到待确认状态，原写入所有权不会因超时被清除。
+
+#### Scenario: Parent terminal already exists
+- **WHEN** child result 与 parent Ended 已通过严格链接校验，但回执或展示投影缺失
+- **THEN** 恢复只补缺失部分，保留原终态及一次性的用量累计。
+
+#### Scenario: Conflicting evidence is found
+- **WHEN** 同 identity 的 payload、序号或父子链接冲突
+- **THEN** 停止自动收尾并保留证据，不覆盖记录或猜测另一份结果。
+
+证据与实施入口：`crates/codegen/shell/src/agent/subagent/mod.rs::reconcile_orphaned_subagents_with_backend/ensure_recovered_child_result_with_opened`、`crates/codegen/shell/src/session/storage/jsonl/mod.rs`、`crates/codegen/chat-state/src/actor/mod.rs`。
+
+### Requirement: Recovered child outcomes preserve evidence and availability
+
+已经验证的 child terminal outcome SHALL 保持不变，正文可用性与交付失败分别报告。只有证明原执行实例已结束、合法 writer 已取得所有权且无有效终态时，恢复才可在结算未闭合 scope 后记录 Recovery 来源的 interrupted 结果。未知用量 SHALL 保持 incomplete，未知时间不得以整个离线间隔冒充执行耗时。
+
+#### Scenario: Completed child loses its output artifact
+- **WHEN** child terminal 及父子身份可验证，但结果正文文件缺失或校验失败
+- **THEN** 已确认 outcome 仍可只读展示，并明确正文不可用；不得改写成新的失败 outcome 或拼凑正文交付。
+
+#### Scenario: Inspection failed while child may still run
+- **WHEN** backend 不可达或超时，无法确认旧实例已退出
+- **THEN** 保持收尾待确认，不生成 interrupted/cancelled 结果，也不抢占 writer。
+
+#### Scenario: Cold recovery finds an interrupted child
+- **WHEN** 新 writer 验证原实例已结束、没有有效 child terminal 且还有未闭合执行或结算
+- **THEN** 先按既有结算规则恢复这些 scope，再记录明确的恢复中断来源及用量下界；不伪造用户取消或零消费。
+
+证据与实施入口：`crates/codegen/shell/src/agent/subagent/mod.rs::result_from_inspection/finish_from_durable_facts`、`crates/codegen/chat-state/src/timeline.rs::SubagentResultEvent`。
+
+### Requirement: Finalization wait deadlines preserve durable delivery ownership
+
+单次收尾推进与回执交接的 caller 等待 SHALL 默认总计不超过三十秒，回执每次 ACK 等待不超过五秒，调用方更早期限优先。收尾写入重试 SHALL 共享本周期绝对期限，期限到达后不再派发新的 append。等待超时 SHALL 返回提交/交付未确认而非虚构执行失败，且不取消仍需持有的写入所有权。未确认操作仍在途时不得叠加 mutation 重试；明确可重试的回执尝试每周期至多三次。迟到结果 SHALL 通过原身份的持久回执交接，每个 tool call 只提交一份 tool_result。
+
+#### Scenario: Receipt producer remains alive without replying
+- **WHEN** 回执 ACK sender 始终存活但不回复
+- **THEN** caller 在期限内退出等待并报告交付未确认，原操作继续受 owner 管理，不因 sender 存活无限挂起 caller。
+
+#### Scenario: Caller already received a pending result
+- **WHEN** 等待工具已结束原 tool call，之后 canonical terminal 和回执提交成功
+- **THEN** 结果经既有通知交付，不给原 call id 再提交第二份 tool_result，回执消费按原 identity 去重。
+
+#### Scenario: Transient failures exhaust the recovery period
+- **WHEN** 收尾持久化持续返回可重试错误直至本周期期限
+- **THEN** 不再派发新的重试，返回待修复状态并保留责任；重连不重新起表，在途 I/O 的所有权保持到其实际结束。
+
+#### Scenario: Parent writer also fails
+- **WHEN** 父会话无法持久接纳 tool_result 或回执
+- **THEN** 显示未确认交付并保留恢复事实，不把内存发送成功声称为持久接纳。
+
+证据与实施入口：`crates/codegen/shell/src/agent/subagent/mod.rs::admit_notification_receipt`、`crates/codegen/shell/src/session/actor/completion_delivery.rs`、`notification_drain.rs`。
+
+### Requirement: Recovery dependencies constrain automatic resource reclamation
+
+自动 session、artifact、worktree 及 snapshot 回收 SHALL 保留未闭合子任务链、未确认输入和未完成交付所需的可验证资源。清理资格 SHALL 由持久身份、引用及实际 owner 规则决定，不仅由 TTL、最近 activity、runtime handle 或 completed cache 决定。无需通知的 child 及已持久消费/按规则 dismissed 的回执 SHALL 按各自事实判定，不人为制造永久交付依赖。
+
+#### Scenario: Inactive child has an unresolved parent spawn
+- **WHEN** 旧 writer 已退出且 TTL 已到，但原 child/parent 结果链尚未闭合
+- **THEN** 自动清理保留恢复所需 session、结果和工作资源，并报告保留原因。
+
+#### Scenario: Parent terminal exists but delivery is pending
+- **WHEN** parent Ended 已提交，但对应结果尚需回执或消费
+- **THEN** 清理保留尚需读取的结果及关联证据，不能因任务已显示完成就删除。
+
+#### Scenario: Worktree snapshot failed on a full disk
+- **WHEN** 含修改的工作树未取得可验证持久 snapshot 及必要引用
+- **THEN** 原工作树保持可恢复，正常收尾和自动 GC 都不能把快照尝试当作保全成功。
+
+#### Scenario: Internal child needs no completion notification
+- **WHEN** 原 spawn 明确不产生模型完成回执且其其他生命周期义务已确认
+- **THEN** 不因不存在本就无需创建的回执而保留无效交付依赖，仍需满足其他清理条件。
+
+证据与实施入口：`crates/codegen/shell/src/session/storage/jsonl/mod.rs::cleanup_stale_sessions_sync`、`crates/codegen/shell/src/agent/subagent/handle_request.rs`、`crates/codegen/workspace/src/worktree/mod.rs`、`crates/codegen/fast-worktree/src/api.rs`。
+
+### Requirement: Destructive maintenance revalidates recovery references at deletion
+
+自动维护 SHALL 在实际删除的所有权边界内重新核对同一资源实体、引用和可回收资格，并与相关发布/写者操作串行化。扫描缓存、临时路径相同或无 live handle 不构成删除许可。无法取得所需所有权、校验失败、扫描超预算或缺少上层恢复证据时 SHALL 保留该候选；仍在运行的读取或删除不得因 caller 超时而被重复派发。
+
+#### Scenario: New reference appears after candidate scanning
+- **WHEN** 资源曾被扫描为候选，但在取得删除所有权前产生了应保留的引用
+- **THEN** 删除边界的重新核对发现引用并保留原资源，不依据旧扫描结果删除。
+
+#### Scenario: Standalone worktree GC lacks session authority
+- **WHEN** 独立 GC 遇到任务关联 worktree 或其 snapshot，但不能验证相应恢复义务
+- **THEN** 普通自动清理跳过该资源，不以年龄或进程消失替代资格证明。
+
+#### Scenario: Recovery dependency scan cannot complete
+- **WHEN** 所需记录不可读、损坏或扫描达到预算
+- **THEN** 报告本轮资格未确认并保留候选，未扫描的引用不被解释为不存在。
+
+#### Scenario: Fresh pristine worktree was never admitted
+- **WHEN** 创建失败有明确证据表明新 pristine worktree 尚未发布 spawn、未交给执行器且没有引用
+- **THEN** 允许既有回滚清理；ACK 不明或包含用户修改的资源不能使用此例外。
+
+证据与实施入口：`crates/codegen/shell/src/session/storage/jsonl/mod.rs::delete_if_still_stale`、`crates/codegen/shell/src/session/worktree.rs::cleanup_worktree_on_failure`、`crates/codegen/workspace/src/worktree/mod.rs::run_auto_gc_best_effort`、`crates/codegen/shell/src/session/input_inbox.rs`。
+
+### Requirement: Confirmed storage failure bounds new execution admission
+
+已确认使持久写入不可用的故障 SHALL 关闭受影响 owner，或当前运行管理实例内已确认共享故障存储域的新执行准入，包含 prompt promotion、child spawn 和后续 provider/tool 派发。故障范围 SHALL 根据来源与存储身份确认，不能仅凭 errno 影响无关域或声称控制其他独立进程。诊断、取消及合法收尾恢复仍可执行。准入恢复 SHALL 确认有效 writer 的持久屏障，并继续受既有 Goal/权限/预算约束；剩余磁盘字节变化本身不构成恢复成功。运行中的外部副作用不得被声称已经撤回。
+
+#### Scenario: Shared session storage reports no space
+- **WHEN** 写入确认共享 Grow 存储域空间或配额耗尽
+- **THEN** 当前管理实例内该域不继续准入依赖持久化的新工作，已有任务保持可观察和可请求取消，收尾责任仍被保留。
+
+#### Scenario: Failure belongs to a single owner
+- **WHEN** 一个 session 的权限或完整性故障没有证据影响其他存储 owner
+- **THEN** 关闭该 owner 的准入，不无依据关闭无关域。
+
+#### Scenario: Space recovers but old writer remains invalid
+- **WHEN** 磁盘空间恢复而旧 writer 已失效或尚未退出
+- **THEN** 不重开执行；合法 writer 恢复并确认持久屏障后才重新评估准入。
+
+证据与实施入口：`crates/codegen/chat-state/src/persistence.rs::persistence_error_is_permanent`、`crates/codegen/shell/src/session/actor/run_loop.rs`、`crates/codegen/tools/src/implementations/grow_build/task/coordinator.rs`；此处新增故障准入契约，不替代既有 Goal 准入权威。

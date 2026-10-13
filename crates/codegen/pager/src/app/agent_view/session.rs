@@ -453,7 +453,7 @@ impl AgentView {
     /// wall-max against a previous attempt's anchor in
     /// [`honest_turn_elapsed`].
     pub fn mark_turn_finished(&mut self) {
-        self.session.clear_prompt_status_query();
+        self.session.clear_prompt_status_observation();
         self.session.last_prompt_event_at = None;
         self.session.last_status_observed_at = None;
         self.session.turn_started_at = None;
@@ -726,7 +726,7 @@ impl AgentView {
     /// it. Deliberately NOT used by server-initiated synthetic turns
     /// (auto-wake / actor runs): they never call `start_turn`.
     pub(crate) fn start_turn_boundary(&mut self, starting_prompt_id: Option<&str>) {
-        self.session.clear_prompt_status_query();
+        self.session.clear_prompt_status_observation();
         self.session.last_prompt_event_at = None;
         self.session.last_status_observed_at = None;
         // A new turn invalidates the previous turn's finalized marker: a
@@ -975,6 +975,13 @@ impl AgentView {
     pub(crate) fn resolve_turn_activity(&self) -> Option<crate::acp::tracker::TurnActivity> {
         use crate::acp::tracker::{TurnActivity, WaitingReason};
         use crate::app::session::AgentState;
+        if matches!(
+            self.session.state,
+            AgentState::TurnSubmitting | AgentState::TurnRunning | AgentState::TurnCancelling
+        ) && let Some(reason) = self.session.prompt_status_waiting_reason.clone()
+        {
+            return Some(TurnActivity::Waiting(reason));
+        }
         if let Some(activity) = self.session.turn_activity() {
             return Some(self.enrich_waiting_activity(activity));
         }
@@ -1488,6 +1495,36 @@ mod resolve_turn_activity_tests {
         assert_eq!(
             view.resolve_turn_activity(),
             Some(TurnActivity::AutoCompacting)
+        );
+    }
+
+    #[test]
+    fn prompt_status_observation_is_displayed_without_rewriting_tracker_activity() {
+        let mut view = running_view();
+        view.session
+            .set_compaction_activity(Some(TurnActivity::Responding));
+        view.session.prompt_status_waiting_reason = Some(WaitingReason::ObservationUnknown);
+
+        assert_eq!(
+            view.resolve_turn_activity(),
+            Some(TurnActivity::Waiting(WaitingReason::ObservationUnknown))
+        );
+        assert_eq!(
+            view.session.turn_activity(),
+            Some(TurnActivity::Responding),
+            "the read-only observation must not fabricate tracker activity"
+        );
+    }
+
+    #[test]
+    fn settling_observation_is_displayed_while_cancelling() {
+        let mut view = running_view();
+        view.session.state = AgentState::TurnCancelling;
+        view.session.prompt_status_waiting_reason = Some(WaitingReason::Settling);
+
+        assert_eq!(
+            view.resolve_turn_activity(),
+            Some(TurnActivity::Waiting(WaitingReason::Settling))
         );
     }
     /// When waiting on task output, the spinner subject is the bg task's

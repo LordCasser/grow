@@ -28,6 +28,8 @@ pub enum TimelineWriteError {
     Persistence(#[source] std::io::Error),
     #[error("timeline persistence acknowledgement was lost")]
     AcknowledgementLost,
+    #[error("timeline write deadline elapsed before durable acknowledgement")]
+    DeadlineExceeded,
     #[error("timeline persistence was cancelled before the pending event became durable")]
     Cancelled,
     #[error("response admission identity was already used with different items")]
@@ -53,6 +55,15 @@ pub enum TimelineWriteError {
         name: String,
         reason: String,
     },
+}
+
+/// Result of atomically submitting an input. `created` is true only for the
+/// caller that appended the Submitted fact; exact retries receive the
+/// original event with `created` false.
+#[derive(Debug, Clone)]
+pub struct SubmitInputResult {
+    pub event: crate::TimelineEvent,
+    pub created: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -136,6 +147,7 @@ pub enum ChatStateCommand {
     /// not process another command while awaiting this acknowledgement.
     RecordTimelineEventDurably {
         kind: TimelineEventKind,
+        deadline: Option<tokio::time::Instant>,
         reply: oneshot::Sender<Result<crate::TimelineEvent, TimelineWriteError>>,
     },
 
@@ -147,6 +159,7 @@ pub enum ChatStateCommand {
         source: crate::NotificationSource,
         source_version: crate::NotificationSourceVersion,
         payload_ref: crate::NotificationPayloadRef,
+        deadline: Option<tokio::time::Instant>,
         reply: oneshot::Sender<Result<crate::TimelineEvent, TimelineWriteError>>,
     },
 
@@ -157,7 +170,7 @@ pub enum ChatStateCommand {
         input_id: String,
         intent: crate::InputIntent,
         payload_ref: crate::InputPayloadRef,
-        reply: oneshot::Sender<Result<crate::TimelineEvent, TimelineWriteError>>,
+        reply: oneshot::Sender<Result<SubmitInputResult, TimelineWriteError>>,
     },
 
     /// Re-run deterministic local recovery after external entities have been
@@ -270,6 +283,7 @@ pub enum ChatStateCommand {
         attribute_to_prompt: bool,
         /// Nested subagent bill may under-count.
         incomplete: bool,
+        deadline: Option<tokio::time::Instant>,
         reply: oneshot::Sender<Result<bool, TimelineWriteError>>,
     },
 

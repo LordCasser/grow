@@ -1,5 +1,6 @@
 #![cfg_attr(rustfmt, rustfmt::skip)]
 use std::path::Path;
+use std::{collections::HashSet, future::Future, sync::Mutex, time::Duration};
 use acp_transport::protocol as acp;
 use tokio::task::JoinSet;
 use acp_transport::{AcpAgentTx, acp_send};
@@ -11,6 +12,127 @@ use shell::sampling::error::{
 };
 use shell::session::ExtMethodResult;
 use shell::session::unified_list::ListScope;
+
+pub(super) const STATUS_RPC_MAX_CONCURRENCY: usize = 4;
+pub(super) const STATUS_RPC_MAX_IN_FLIGHT_TARGETS: usize = 8;
+pub(super) const STATUS_RPC_DEADLINE: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum StatusRpcKind {
+    Prompt,
+    InputAdmission,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct StatusRpcTarget {
+    kind: StatusRpcKind,
+    session_id: String,
+    prompt_id: Option<String>,
+}
+
+struct StatusRpcTargetGuard(StatusRpcTarget);
+
+impl Drop for StatusRpcTargetGuard {
+    fn drop(&mut self) {
+        let mut targets = STATUS_RPC_TARGETS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        targets.remove(&self.0);
+    }
+}
+
+static STATUS_RPC_SLOTS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| {
+        std::sync::Arc::new(tokio::sync::Semaphore::new(STATUS_RPC_MAX_CONCURRENCY))
+    });
+static STATUS_RPC_TARGETS: std::sync::LazyLock<Mutex<HashSet<StatusRpcTarget>>> =
+    std::sync::LazyLock::new(|| Mutex::new(HashSet::new()));
+
+fn claim_status_rpc_target(
+    kind: StatusRpcKind,
+    session_id: &str,
+    prompt_id: Option<&str>,
+) -> Result<StatusRpcTargetGuard, String> {
+    let target = StatusRpcTarget {
+        kind,
+        session_id: session_id.to_owned(),
+        prompt_id: prompt_id.map(str::to_owned),
+    };
+    let mut targets = STATUS_RPC_TARGETS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if targets.contains(&target) {
+        return Err("status query is already in flight for this target".into());
+    }
+    if targets.len() >= STATUS_RPC_MAX_IN_FLIGHT_TARGETS {
+        return Err("status query capacity is busy".into());
+    }
+    targets.insert(target.clone());
+    Ok(StatusRpcTargetGuard(target))
+}
+
+pub(crate) fn prompt_status_rpc_in_flight(session_id: &str, prompt_id: Option<&str>) -> bool {
+    let target = StatusRpcTarget {
+        kind: StatusRpcKind::Prompt,
+        session_id: session_id.to_owned(),
+        prompt_id: prompt_id.map(str::to_owned),
+    };
+    STATUS_RPC_TARGETS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .contains(&target)
+}
+
+pub(crate) fn status_rpc_capacity_available() -> bool {
+    STATUS_RPC_TARGETS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .len()
+        < STATUS_RPC_MAX_IN_FLIGHT_TARGETS
+}
+
+pub(super) fn claim_prompt_status_rpc(
+    session_id: &str,
+    prompt_id: Option<&str>,
+) -> Result<impl Send + 'static, String> {
+    claim_status_rpc_target(StatusRpcKind::Prompt, session_id, prompt_id)
+}
+
+pub(super) fn claim_input_admission_status_rpc(
+    session_id: &str,
+    prompt_id: &str,
+) -> Result<impl Send + 'static, String> {
+    claim_status_rpc_target(StatusRpcKind::InputAdmission, session_id, Some(prompt_id))
+}
+
+pub(super) fn status_rpc_slots() -> std::sync::Arc<tokio::sync::Semaphore> {
+    STATUS_RPC_SLOTS.clone()
+}
+
+pub(super) async fn run_status_rpc_with_slot<T, Hold>(
+    slot: std::sync::Arc<tokio::sync::Semaphore>,
+    deadline: tokio::time::Instant,
+    hold: Hold,
+    rpc: impl Future<Output = T> + Send + 'static,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    Hold: Send + 'static,
+{
+    let permit = tokio::time::timeout_at(deadline, slot.acquire_owned())
+        .await
+        .map_err(|_| "status query timed out after 5 seconds".to_owned())?
+        .map_err(|error| format!("status query worker capacity closed: {error}"))?;
+    let worker = tokio::spawn(async move {
+        let _permit = permit;
+        let _hold = hold;
+        rpc.await
+    });
+    tokio::time::timeout_at(deadline, worker)
+        .await
+        .map_err(|_| "status query timed out after 5 seconds".to_owned())?
+        .map_err(|error| format!("status query worker failed: {error}"))
+}
 
 /// Snapshot only explicit attachments. All file lengths and the aggregate
 /// Base64 budget are checked before reading/encoding the first image. The
@@ -917,6 +1039,7 @@ pub(super) fn parse_subagent_kill_outcome(resp: &str) -> SubagentKillOutcome {
                 status: None,
             }
         }
+        SubagentCancelOutcomeDto::Unauthorized => SubagentKillOutcome::RpcFailed,
     }
 }
 /// Fire-and-forget blocking write of one `[hints]` value to config.toml.

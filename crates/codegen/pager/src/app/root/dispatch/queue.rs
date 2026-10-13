@@ -417,6 +417,7 @@ pub(crate) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         log_blocked("failed_input_requires_review", Some(&session_id.0));
         return QueueDrain::blocked();
     }
+
     if let PromptMode::EditingQueued { id, .. } = &agent.prompt_mode
         && agent
             .session
@@ -438,7 +439,7 @@ pub(crate) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
         PromptMode::EditingQueued { id, .. } => Some(*id),
         _ => None,
     };
-    let queued = match if combine_queued_prompts_enabled() {
+    let mut queued = match if combine_queued_prompts_enabled() {
         agent.session.dequeue_combined_prompt(editing_id)
     } else {
         agent.session.dequeue_prompt()
@@ -490,7 +491,10 @@ pub(crate) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
     // threaded through PromptRequest._meta to the agent and echoed on every
     // SessionNotification + the PromptResponse, letting us correlate
     // notifications back to the originating prompt for cancel/rewind.
-    let prompt_id = uuid::Uuid::new_v4().to_string();
+    let prompt_id = queued
+        .prompt_id
+        .take()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     // Record it as self-originated so the ACP gate treats this turn's deltas as
     // ours (drive it; drop a stale post-rewind chunk on a mismatch) rather than
@@ -544,6 +548,9 @@ pub(crate) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                     .filter(|id| *id != prompt_entry_id)
                     .collect();
                 agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
+                    prompt_id: Some(prompt_id.clone()),
+                    admission_resolved: None,
+                    expected_turn_id: queued.expected_turn_id.clone(),
                     text: queued.text.clone(),
                     images: queued.images.clone(),
                     scrollback_entry: prompt_entry_id,
@@ -841,6 +848,9 @@ pub(crate) fn apply_turn_start_shim(
             // attachments, so a Ctrl+C rewind restores just the joined text.
             // The local drain path, which owns the data, restores images/chips.
             agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
+                prompt_id: Some(prompt_id.clone()),
+                admission_resolved: None,
+                expected_turn_id: None,
                 text: restore,
                 images: Vec::new(),
                 scrollback_entry: last_id,
@@ -880,6 +890,9 @@ pub(crate) fn apply_turn_start_shim(
                 _ => text,
             };
             agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
+                prompt_id: Some(prompt_id.clone()),
+                admission_resolved: None,
+                expected_turn_id: None,
                 text: restore_text,
                 images: Vec::new(),
                 scrollback_entry: prompt_entry_id,

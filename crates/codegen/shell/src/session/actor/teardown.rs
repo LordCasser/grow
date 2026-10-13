@@ -343,6 +343,18 @@ pub(super) async fn terminate_failed_timeline_writer(
     session: &SessionActor,
     cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
 ) {
+    if let Some(gate) = session.tool_context.storage_admission.as_ref() {
+        let pending = session.chat_state_handle.pending_timeline_commit();
+        let error_kind = pending.as_ref().and_then(|pending| pending.error_kind);
+        let epoch = session.runtime_observation.read().control_epoch.clone();
+        gate.record_failure(
+            session.session_info.id.0.as_ref(),
+            &epoch,
+            pending,
+            error_kind,
+            "Timeline writer terminated after a permanent persistence failure",
+        );
+    }
     // Fatal teardown is a fail-stop barrier, not merely a final flush. Close
     // admission and cancel every detached owner before dismantling shared
     // authorities so no producer can append UI/persistence work afterwards.

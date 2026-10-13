@@ -1728,21 +1728,25 @@ Pager SHALL assign the terminal content of a generic successful tool call to its
 
 ### Requirement: Cancelling turns reconcile against authoritative prompt state
 
-Pager SHALL 在发送取消后用短时、单请求在途的 prompt-status 对账窗口覆盖 `TurnCancelling`。只有 shell 返回 terminal、unknown 或查询错误时才收敛本地状态；时间本身 SHALL NOT 伪造成功终态。
+Pager SHALL 在发送取消后用短时、单请求在途且有总期限的状态核对覆盖 `TurnCancelling`。只有匹配目标的持久 terminal 才确认任务结束。Unknown、不可达或超时 SHALL 结束界面上的阻塞等待并展示取消未确认，保留目标身份和取消意图；用户可编辑草稿及继续核对，但不得据此推进下一条执行或发布取消成功。时间本身 SHALL NOT 伪造成功终态。
 
 #### Scenario: Cancel targets a vanished session
-- **WHEN** Pager 已进入 `TurnCancelling`，但 shell 不再拥有该 session，因而不会发送取消终态
-- **THEN** Pager 在短窗口后查询该 prompt，依据 unknown/error 退出 cancelling、恢复输入，并提示 session/prompt 已不可用。
+- **WHEN** Pager 已进入 `TurnCancelling`，但 shell 不再拥有运行 handle，因而不会发送取消终态
+- **THEN** Pager 在短窗口后核对 runtime 与持久状态；没有 terminal 证据时显示取消未确认并允许编辑输入，不把 handle 缺失当作 session 消失或自动派发队列。
 
 #### Scenario: Cancel is still being processed
-- **WHEN** 权威查询仍返回 running
-- **THEN** Pager 保持 `TurnCancelling`，刷新下一次对账窗口，且同一 prompt 同时最多一个查询在途。
+- **WHEN** 权威查询仍返回 running 或 settling
+- **THEN** Pager 保留取消意图，显示相应阶段，安排下一次有界核对，且同一目标同时最多一个实际查询在途。
 
 #### Scenario: Cancel terminal notification was missed
-- **WHEN** 权威查询返回该 prompt 的 terminal 状态
+- **WHEN** 权威查询返回同一 session、prompt 与实例对应的 terminal 状态
 - **THEN** Pager 通过既有 single-finalizer 路径结束原 turn，不重复添加终态或重复推进队列。
 
-证据入口：`crates/codegen/pager/src/app/root/dispatch/turn.rs`、`task_result.rs` 及其 tests。
+#### Scenario: Cancel status query times out
+- **WHEN** 状态查询在期限内没有完成
+- **THEN** Pager 显示取消尚未确认并保持可交互，不宣称底层执行或写入已停止，也不因本次超时启动替代执行。
+
+证据入口：`crates/codegen/pager/src/app/root/dispatch/turn.rs`、`task_result.rs` 及其 tests。本 change 收紧既有 unknown/error 退出 cancelling 的含义。
 
 ### Requirement: Failed initial session load returns to its origin
 
@@ -3641,3 +3645,65 @@ Resume SHALL 恢复普通会话的原历史展示，不把历史恢复当作新�
 #### Scenario: Reconnect cursor crosses synthesized history
 - **WHEN** 本次恢复需合成不在 physical cache 中的历史记录，不能证明当前 cursor 已涵盖它
 - **THEN** 按既有完整替换规则重建有序历史；合成记录不充当源缓存 cursor，重复 reload 不重复显示。
+
+### Requirement: Agent tree status reconciliation preserves freshness and binding
+
+Pager SHALL 对根和嵌套子代理执行有界状态核对，包括尚无当前 prompt identity 的 child lifecycle。每个目标最多一个实际在途查询，整体并发及重试速率有界。查询结果 SHALL 核对 session、适用的 child/prompt identity、当前视图绑定及运行实例；查询失败不得刷新最后确认存活或工作进展的时间。页面 SHALL 明确展示过期或无法确认的观察，不能仅因原状态是 Running 就持续声称正在等待模型响应。
+
+#### Scenario: Nested child loses its completion notification
+- **WHEN** 嵌套子页面只有 spawn 展示，完成通知丢失或其当前 prompt identity 不可得
+- **THEN** 失活检查、打开页面或重连按 child identity 发起有界核对，并展示已确认状态或状态未知。
+
+#### Scenario: Repeated failed probes
+- **WHEN** 多次查询失败且没有新的权威观察
+- **THEN** 最后确认时间保持不变，页面显示持续的观察缺口，重试按有界退避执行，不无限堆积请求。
+
+#### Scenario: Reply belongs to an earlier binding or incarnation
+- **WHEN** 原查询回复到达时，页面已重新绑定或目标执行实例已换代
+- **THEN** 原回复不改变新目标状态、不清除新目标查询标记，也不关闭新 turn。
+
+#### Scenario: Observation reports progress without terminal evidence
+- **WHEN** 查询确认执行仍活跃或正在结算，但没有该目标的持久终态
+- **THEN** 页面显示对应阶段，不因耗时长自动杀死子任务或伪造完成。
+
+证据与实施入口：`crates/codegen/pager/src/app/root/dispatch/turn.rs::poll_stalled_prompt_submissions`、`task_result.rs::PromptStatusResolved`、`crates/codegen/pager/src/app/root/effects/mod.rs`、`crates/codegen/pager/src/app/agent_view/session.rs`。
+
+### Requirement: Unconfirmed drafts retain their original submission identity
+
+Pager 对未确认发送恢复的草稿 SHALL 保留原 session/prompt identity、请求摘要、可用的不可变快照及接纳未知 disposition，并遵守既有草稿单源与大小限制。自动恢复不得生成新身份派发。原请求重试 SHALL 核对原输入且使用精确原快照；快照不可得时只能核对状态或显式新发送。编辑内容的新发送必须是显式新意图。迟到 ACK 不得覆盖新绑定或删除用户的新编辑内容。
+
+#### Scenario: Draft is restored after an ambiguous send
+- **WHEN** 发送响应丢失，客户端恢复文字和图片
+- **THEN** 显示接纳尚未确认并关联原提交，不声称服务端未收到，不自动新建请求或重复执行。
+
+#### Scenario: Original submission was already admitted
+- **WHEN** 核对发现原输入已排队、执行或完成
+- **THEN** 草稿恢复项关联原输入状态，不再派发另一输入，用户后续编辑保持可用。
+
+#### Scenario: User edits an uncertain draft
+- **WHEN** 用户修改尚未确认的原草稿并显式发起新发送
+- **THEN** 展示旧提交的已知/未知状态，为新意图使用新身份；不会将修改后的内容重放到原身份。
+
+#### Scenario: Local checkpoint fails before process exit
+- **WHEN** 原提交身份或草稿内容未能保存到本地存储
+- **THEN** 页面保留当前内存内容并显示未保存限制，不声称退出后必然能够恢复。
+
+#### Scenario: Original request snapshot is unavailable after editing
+- **WHEN** 草稿已保存新编辑内容，旧提交仅余 identity/摘要而精确快照不可得
+- **THEN** 页面保留旧提交核对入口及新内容，不把新内容绑定旧 identity 重试，也不保存第二份冲突的草稿来源。
+
+证据与实施入口：`crates/codegen/pager/src/app/root/dispatch/prompt.rs`、`crates/codegen/pager/src/app/session/mod.rs::InFlightPrompt` 及既有 local draft 路径。
+
+### Requirement: Recovery resource protection exposes actionable limitations
+
+因恢复依赖或证据不足跳过清理时，系统 SHALL 显示资源归属和具体保留原因，不报告删除成功。收尾状态 SHALL 区分已持久保全、仅内存暂存和无法保全；不得承诺在不可写存储与进程退出同时发生时恢复所有未提交内容。诊断与保留项列表 SHALL 有界。
+
+#### Scenario: Automatic maintenance preserves an unresolved worktree
+- **WHEN** 清理因未确认结果、未完成 snapshot 或引用无法校验而跳过 worktree
+- **THEN** 用户可识别关联任务及保留原因，清理统计不把它算作已删除。
+
+#### Scenario: Volatile result retention exceeds its allowance
+- **WHEN** 未提交正文无法在内存预算内继续保留
+- **THEN** 显示正文保全限制及已有持久证据的位置，不伪造内容已保存或任务仍在执行。
+
+证据与实施入口：`crates/codegen/shell/src/session/storage/jsonl/mod.rs::cleanup_stale_sessions_sync`、`crates/codegen/workspace/src/worktree/mod.rs`、第一项新增的运行健康展示。

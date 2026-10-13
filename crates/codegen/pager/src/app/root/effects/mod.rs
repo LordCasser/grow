@@ -13,8 +13,8 @@ use super::{dispatch};
 use crate::app::session as agent;
 pub(super) use helpers::parse_session_load_foreground;
 pub(crate) use helpers::{
-    EffectMeta, SessionFlags, persist_setting,
-    sanitize_user_error,
+    EffectMeta, SessionFlags, persist_setting, prompt_status_rpc_in_flight,
+    sanitize_user_error, status_rpc_capacity_available,
 };
 use helpers::*;
 use std::path::{Path, PathBuf};
@@ -181,6 +181,9 @@ pub(crate) fn execute(
         Effect::Quit => {
             ulog::info("pager quit", None, None);
             return (true, meta);
+        }
+        Effect::ReadyInputIntent { .. } => {
+            unreachable!("ready input intent is unwrapped by process_effects")
         }
         Effect::SetWorkingDir { path } => {
             if let Err(e) = std::env::set_current_dir(&path) {
@@ -3294,7 +3297,15 @@ pub(crate) fn execute(
                     };
                     let send_blocks = match send_blocks {
                         Ok(blocks) => blocks,
-                        Err(error) => return TaskResult::InterjectFailed { agent_id, error, text, blocks, images },
+                        Err(error) => return TaskResult::InterjectFailed {
+                            agent_id,
+                            error,
+                            expected_turn_id,
+                            interjection_id,
+                            text,
+                            blocks,
+                            images,
+                        },
                     };
                     let params = build_interject_params(
                         &session_id,
@@ -3321,6 +3332,8 @@ pub(crate) fn execute(
                                 error: sanitize_user_error(
                                     &format!("couldn't send interjection: {e}"),
                                 ),
+                                expected_turn_id,
+                                interjection_id,
                                 text,
                                 blocks,
                                 images,
@@ -3360,10 +3373,13 @@ pub(crate) fn execute(
         Effect::QueryPromptStatus {
             agent_id,
             session_id,
+            binding_epoch,
+            query_generation,
             prompt_id,
         } => {
             let tx = acp_tx.clone();
             tasks.spawn(async move {
+                let deadline = tokio::time::Instant::now() + STATUS_RPC_DEADLINE;
                 let params = serde_json::json!({
                     "sessionId": session_id.0.to_string(),
                     "promptId": prompt_id,
@@ -3374,17 +3390,162 @@ pub(crate) fn execute(
                         .expect("serialize prompt status params")
                         .into(),
                 );
-                let status = match acp_send(request, &tx).await {
-                    Ok(response) => serde_json::from_str(response.0.get()).map_err(|error| {
-                        sanitize_user_error(&format!("invalid prompt status response: {error}"))
-                    }),
-                    Err(error) => Err(sanitize_user_error(&format!(
-                        "couldn't reconcile prompt status: {error}"
-                    ))),
+                let response = match claim_prompt_status_rpc(
+                    session_id.0.as_ref(),
+                    prompt_id.as_deref(),
+                ) {
+                    Ok(target) => {
+                        run_status_rpc_with_slot(
+                            status_rpc_slots(),
+                            deadline,
+                            target,
+                            async move { acp_send(request, &tx).await },
+                        )
+                        .await
+                        .and_then(|response| {
+                            response.map_err(|error| {
+                                sanitize_user_error(&format!(
+                                    "couldn't reconcile prompt status: {error}"
+                                ))
+                            })
+                        })
+                        .map_err(|error| {
+                            if error.contains("timed out") {
+                                error
+                            } else {
+                                sanitize_user_error(&error)
+                            }
+                        })
+                    }
+                    Err(error) => Err(error),
                 };
+                let (response_session_id, response_control_epoch, observation_source, status) =
+                    match response {
+                        Ok(response) => {
+                        let parsed = serde_json::from_str::<serde_json::Value>(response.0.get())
+                            .map_err(|error| sanitize_user_error(&format!("invalid prompt status response: {error}")));
+                        match parsed {
+                            Ok(value) => {
+                                let response_session_id = value.get("sessionId").and_then(serde_json::Value::as_str).map(str::to_owned);
+                                let response_control_epoch = value.get("controlEpoch").and_then(serde_json::Value::as_str).map(str::to_owned);
+                                let observation_source = value.get("source").and_then(serde_json::Value::as_str).map(str::to_owned);
+                                let status = serde_json::from_value(value).map_err(|error| sanitize_user_error(&format!("invalid prompt status response: {error}")));
+                                (response_session_id, response_control_epoch, observation_source, status)
+                            }
+                            Err(error) => (None, None, None, Err(error)),
+                        }
+                        }
+                        Err(error) => (None, None, None, Err(error)),
+                    };
                 TaskResult::PromptStatusResolved {
                     agent_id,
+                    session_id,
+                    binding_epoch,
+                    query_generation,
                     prompt_id,
+                    response_session_id,
+                    response_control_epoch,
+                    observation_source,
+                    status,
+                }
+            });
+        }
+        Effect::QueryInputAdmissionStatus {
+            agent_id,
+            session_id,
+            binding_epoch,
+            prompt_id,
+        } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let deadline = tokio::time::Instant::now() + STATUS_RPC_DEADLINE;
+                let params = serde_json::json!({
+                    "sessionId": session_id.0.to_string(),
+                    "promptId": prompt_id,
+                });
+                let request = acp::ExtRequest::new(
+                    "grow/input/admission_status",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize input admission status params")
+                        .into(),
+                );
+                let response = match claim_input_admission_status_rpc(
+                    session_id.0.as_ref(),
+                    &prompt_id,
+                ) {
+                    Ok(target) => run_status_rpc_with_slot(
+                        status_rpc_slots(),
+                        deadline,
+                        target,
+                        async move { acp_send(request, &tx).await },
+                    )
+                    .await
+                    .and_then(|response| {
+                        response.map_err(|error| {
+                            sanitize_user_error(&format!(
+                                "couldn't reconcile input admission status: {error}"
+                            ))
+                        })
+                    })
+                    .map_err(|error| {
+                        if error.contains("timed out") {
+                            error
+                        } else {
+                            sanitize_user_error(&error)
+                        }
+                    }),
+                    Err(error) => Err(error),
+                };
+                let (response_session_id, response_prompt_id, response_source, status) =
+                    match response {
+                        Err(error) => (None, None, None, Err(error)),
+                        Ok(response) => {
+                        match serde_json::from_str::<serde_json::Value>(response.0.get()) {
+                            Ok(value) => {
+                                let response_session_id = value
+                                    .get("sessionId")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_owned);
+                                let response_prompt_id = value
+                                    .get("promptId")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_owned);
+                                let response_source = value
+                                    .get("source")
+                                    .and_then(serde_json::Value::as_str)
+                                    .map(str::to_owned);
+                                let status = value
+                                    .get("status")
+                                    .cloned()
+                                    .ok_or_else(|| "missing input status field".to_string())
+                                    .and_then(|status| {
+                                        serde_json::from_value(status).map_err(|error| {
+                                            sanitize_user_error(&format!(
+                                                "invalid input admission status response: {error}"
+                                            ))
+                                        })
+                                    });
+                                (response_session_id, response_prompt_id, response_source, status)
+                            }
+                            Err(error) => (
+                                None,
+                                None,
+                                None,
+                                Err(sanitize_user_error(&format!(
+                                    "invalid input admission status response: {error}"
+                                ))),
+                            ),
+                        }
+                    }
+                };
+                TaskResult::InputAdmissionStatusResolved {
+                    agent_id,
+                    session_id,
+                    binding_epoch,
+                    prompt_id,
+                    response_session_id,
+                    response_prompt_id,
+                    response_source,
                     status,
                 }
             });

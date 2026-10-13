@@ -13,6 +13,7 @@ pub mod notifications;
 pub mod pending_interaction;
 pub mod prompt_queue;
 pub(crate) mod sampling_evidence;
+pub(crate) mod storage_admission;
 pub(crate) mod subagent_capability;
 pub use self::acp_types::*;
 pub use self::actor::*;

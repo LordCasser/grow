@@ -165,32 +165,53 @@ async fn cleanup_worktree_on_failure(source_cwd: &str, worktree_path: &str) {
     if !wt.exists() {
         return;
     }
-    let is_jj = find_git_root_from_path(std::path::Path::new(source_cwd))
-        .ok()
-        .is_some_and(|root| workspace::session::git::detect_vcs_kind(&root).is_jj());
-    if is_jj {
-        if let Err(e) = remove_jj_workspace(worktree_path).await {
-            tracing::warn!(error = %e, "failed to clean up jj workspace after failure");
+    let source = std::path::Path::new(source_cwd);
+    let root = match find_git_root_from_path(source) {
+        Ok(root) => root,
+        Err(error) => {
+            tracing::warn!(%error, worktree_path, "cannot establish source repository for failed-worktree cleanup; preserving worktree");
+            return;
         }
-    } else {
-        let wt_path = wt.to_path_buf();
-        match tokio::task::spawn_blocking(move || fast_worktree::remove_worktree(&wt_path)).await {
-            Ok(Ok(_)) => {}
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, "fast remove_worktree failed during cleanup, trying rm");
-                let _ = tokio::fs::remove_dir_all(wt).await;
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "remove_worktree task panicked during cleanup, trying rm");
-                let _ = tokio::fs::remove_dir_all(wt).await;
-            }
+    };
+    if workspace::session::git::detect_vcs_kind(&root).is_jj() {
+        tracing::debug!(
+            worktree_path,
+            "cannot prove a jj workspace pristine; preserving after failure"
+        );
+        return;
+    }
+    match workspace::worktree::is_worktree_pristine(wt) {
+        Ok(true) => {}
+        Ok(false) => {
+            tracing::warn!(
+                worktree_path,
+                "failed-worktree cleanup found user-visible changes; preserving worktree"
+            );
+            return;
         }
-        if let Ok(root) = find_git_root_from_path(std::path::Path::new(source_cwd)) {
+        Err(error) => {
+            tracing::warn!(%error, worktree_path, "cannot verify failed worktree is pristine; preserving worktree");
+            return;
+        }
+    }
+
+    let wt_path = wt.to_path_buf();
+    match tokio::task::spawn_blocking(move || fast_worktree::remove_worktree(&wt_path)).await {
+        Ok(Ok(_)) => {
             let wt_path = wt.to_path_buf();
-            let _ = tokio::task::spawn_blocking(move || {
+            if let Err(error) = tokio::task::spawn_blocking(move || {
                 fast_worktree::remove_stale_worktree_registration(&root, &wt_path)
             })
-            .await;
+            .await
+            {
+                tracing::warn!(%error, worktree_path, "failed to remove stale worktree registration after cleanup");
+            }
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(%error, worktree_path, "failed to clean up pristine worktree; preserving it");
+        }
+        Err(error) => {
+            tracing::warn!(%error, worktree_path, "worktree cleanup task failed; preserving it");
         }
     }
 }
@@ -1016,6 +1037,32 @@ mod tests {
             "worktree directory should be removed after cleanup",
         );
         assert!(repo_path.join("file.txt").exists());
+    }
+    #[tokio::test]
+    async fn cleanup_worktree_on_failure_preserves_changed_worktree() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let repo_path = tmp.path().join("repo");
+        std::fs::create_dir(&repo_path).unwrap();
+        init_git_repo(&repo_path);
+        std::fs::write(repo_path.join("file.txt"), "original").unwrap();
+        git_commit_all(&repo_path, "initial");
+        let source_cwd = repo_path.to_string_lossy().to_string();
+        let wt_resp = create_worktree_for_resume(
+            &source_cwd,
+            WorktreeCopyMode::Clean,
+            ShellWorktreeType::Linked,
+            None,
+        )
+        .await
+        .expect("worktree creation should succeed");
+        let wt_path = std::path::Path::new(&wt_resp.worktree_path);
+        std::fs::write(wt_path.join("file.txt"), "user change").unwrap();
+        cleanup_worktree_on_failure(&source_cwd, &wt_resp.worktree_path).await;
+        assert!(wt_path.exists(), "a changed worktree remains recoverable");
+        assert_eq!(
+            std::fs::read_to_string(wt_path.join("file.txt")).unwrap(),
+            "user change"
+        );
     }
     #[test]
     fn worktree_base_dir_extracts_repo_name() {

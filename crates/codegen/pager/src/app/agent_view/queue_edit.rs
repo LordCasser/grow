@@ -526,6 +526,10 @@ impl AgentView {
                         }
                     }
                     entry.text = new_text;
+                    // Editing changes the request snapshot. A later explicit
+                    // send is a new intent and must receive a new identity.
+                    entry.prompt_id = None;
+                    entry.expected_turn_id = None;
                     entry.requires_review = false;
                     entry.images = std::mem::take(&mut images);
                     entry.chip_elements = chip_elements;

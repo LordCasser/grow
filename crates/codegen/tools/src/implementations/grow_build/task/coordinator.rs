@@ -5,9 +5,10 @@
 //! terminal delivery disposition. All hosts drive it through `ChannelBackend`;
 //! only their `ChildRunner` implementations differ.
 //!
-//! There is intentionally no shared mutable state in this module. A runner's
-//! associated futures may be `Send` or non-`Send`; the resulting actor future
-//! inherits that property naturally on stable Rust.
+//! Lifecycle state stays actor-owned. A runner's lifecycle futures may be
+//! `Send` or non-`Send`; the resulting actor future inherits this property
+//! naturally on stable Rust. Persisted-output reads use a bounded `Send`
+//! worker queue so filesystem I/O never blocks command handling.
 
 mod query;
 
@@ -19,10 +20,10 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use tokio::sync::{mpsc, oneshot};
 
 use super::coordinator_state::{
-    ActiveChild, BlockingWaiter, ChildRecord, CompletedChild, InternalEvent, ListRequest,
-    PendingChild, ProgressFuture, ProgressTarget, ReplyFuture, TaggedFuture, active_summary,
-    background_at_deadline, background_if_caller_gone, completed_snapshot, sleep_until,
-    workflow_outstanding,
+    ActiveChild, BlockingWaiter, ChildRecord, CompletedChild, InternalEvent,
+    MAX_FINALIZATION_OUTPUT_BYTES, MAX_FINALIZATIONS, OutputReadRequest, PendingChild, ReplyFuture,
+    TaggedFuture, active_summary, background_at_deadline, background_if_caller_gone,
+    completed_snapshot, sleep_until, workflow_outstanding,
 };
 use super::types::{
     SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelTarget, SubagentEvent,
@@ -47,6 +48,10 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     active: HashMap<String, ActiveChild<R::Control>>,
     completed: HashMap<String, CompletedChild>,
     completed_order: VecDeque<String>,
+    finalizations: HashMap<String, PendingFinalization<R::CompletionData>>,
+    reconciliations: FuturesUnordered<
+        TaggedFuture<futures::future::CatchUnwind<std::panic::AssertUnwindSafe<R::RunFuture>>>,
+    >,
     waiters: HashMap<String, Vec<BlockingWaiter>>,
     goal_cancel_waiters: Vec<GoalCancelWaiter>,
     session_cancel_waiters: Vec<GoalCancelWaiter>,
@@ -63,9 +68,22 @@ pub struct SubagentCoordinator<R: ChildRunner> {
         TaggedFuture<futures::future::CatchUnwind<std::panic::AssertUnwindSafe<R::RunFuture>>>,
     >,
     validations: FuturesUnordered<ReplyFuture<R::ValidateFuture, SubagentValidateTypeOutcome>>,
-    progress: FuturesUnordered<ProgressFuture<<R::Control as ChildControl>::ProgressFuture>>,
-    list_requests: HashMap<u64, ListRequest>,
-    next_list_request_id: u64,
+    output_reads: FuturesUnordered<
+        TaggedFuture<
+            SendBoxFuture<Result<Option<Arc<str>>, super::types::SubagentObservationError>>,
+        >,
+    >,
+    output_read_requests: HashMap<String, OutputReadRequest>,
+    output_read_permits: Arc<tokio::sync::Semaphore>,
+}
+
+struct PendingFinalization<D> {
+    output: ChildRunOutput<D>,
+    disposition: CompletionDisposition,
+    attempts: usize,
+    cycle_deadline: tokio::time::Instant,
+    next_cycle_deadline: Option<tokio::time::Instant>,
+    in_flight: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -172,6 +190,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             active: HashMap::new(),
             completed: HashMap::new(),
             completed_order: VecDeque::new(),
+            finalizations: HashMap::new(),
+            reconciliations: FuturesUnordered::new(),
             waiters: HashMap::new(),
             goal_cancel_waiters: Vec::new(),
             session_cancel_waiters: Vec::new(),
@@ -181,19 +201,21 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             usage_not_applied_prompts: HashSet::new(),
             runs: FuturesUnordered::new(),
             validations: FuturesUnordered::new(),
-            progress: FuturesUnordered::new(),
-            list_requests: HashMap::new(),
-            next_list_request_id: 0,
+            output_reads: FuturesUnordered::new(),
+            output_read_requests: HashMap::new(),
+            output_read_permits: Arc::new(tokio::sync::Semaphore::new(8)),
         }
     }
 
     pub async fn run(mut self) {
         let mut commands_open = true;
+        let mut recovery_tick = tokio::time::interval(std::time::Duration::from_secs(2));
         loop {
             if !commands_open
                 && self.runs.is_empty()
+                && self.reconciliations.is_empty()
                 && self.validations.is_empty()
-                && self.progress.is_empty()
+                && self.output_reads.is_empty()
             {
                 break;
             }
@@ -208,11 +230,15 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         Err(_) => self.finish_panicked_child(&id),
                     }
                 }
+                Some((id, output)) = self.reconciliations.next(), if !self.reconciliations.is_empty() => {
+                    self.finish_reconciliation(&id, output);
+                }
+                _ = recovery_tick.tick(), if !self.finalizations.is_empty() => self.advance_finalizations(),
                 Some((respond_to, outcome)) = self.validations.next(), if !self.validations.is_empty() => {
                     let _ = respond_to.send(outcome);
                 }
-                Some((seed, target, progress)) = self.progress.next(), if !self.progress.is_empty() => {
-                    self.finish_progress(seed, target, progress);
+                Some((key, output)) = self.output_reads.next(), if !self.output_reads.is_empty() => {
+                    self.finish_output_read(&key, output);
                 }
                 command = self.commands.recv(), if commands_open => {
                     match command {
@@ -354,6 +380,16 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     });
                     return;
                 }
+                if self.pending.len() + self.active.len() + self.finalizations.len()
+                    >= MAX_FINALIZATIONS
+                {
+                    let _ = command.result_tx.send(SubagentResult {
+                        error: Some("subagent recovery capacity exhausted; resolve pending finalizations before spawning".into()),
+                        subagent_id: request.id.clone(), child_session_id: request.id.clone(),
+                        ..Default::default()
+                    });
+                    return;
+                }
                 let cancellation = request.cancel_token.clone();
                 let handle_only = request.run_in_background;
                 let foreground_deadline = (!request.run_in_background
@@ -402,7 +438,41 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             }
             SubagentEvent::Cancel(request) => match request.target {
                 SubagentCancelTarget::SubagentId(id) => {
-                    let outcome = self.cancel_one(&id, request.parent_session_id.as_deref(), true);
+                    let known = self
+                        .pending
+                        .get(&id)
+                        .map(|child| {
+                            belongs_to_session(
+                                &child.request,
+                                &child.immediate_parent_session_id,
+                                request.parent_session_id.as_deref(),
+                            )
+                        })
+                        .or_else(|| {
+                            self.active.get(&id).map(|child| {
+                                belongs_to_session(
+                                    &child.request,
+                                    &child.immediate_parent_session_id,
+                                    request.parent_session_id.as_deref(),
+                                )
+                            })
+                        })
+                        .or_else(|| {
+                            self.completed.get(&id).map(|child| {
+                                belongs_to_session(
+                                    &child.request,
+                                    &child.immediate_parent_session_id,
+                                    request.parent_session_id.as_deref(),
+                                )
+                            })
+                        });
+                    let outcome = if known == Some(false)
+                        || (known.is_none() && request.parent_session_id.is_some())
+                    {
+                        SubagentCancelOutcome::Unauthorized
+                    } else {
+                        self.cancel_one(&id, request.parent_session_id.as_deref(), true)
+                    };
                     let _ = request.respond_to.send(outcome);
                 }
                 SubagentCancelTarget::ParentPromptId(prompt_id) => {
@@ -485,6 +555,27 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             }
             SubagentEvent::OpenSpawnAdmission { parent_session_id } => {
                 self.spawn_blocked_sessions.remove(&parent_session_id);
+                // This is emitted after a new turn's durable admission barrier.
+                // It supplies an explicit new recovery cycle, never reconnect.
+                for (id, pending) in &mut self.finalizations {
+                    if self
+                        .completed
+                        .get(id)
+                        .is_some_and(|child| child.request.parent_session_id == parent_session_id)
+                    {
+                        let deadline =
+                            tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+                        if pending.in_flight {
+                            // The current owner cannot be displaced. Preserve
+                            // this explicit admission so its result can open
+                            // the next cycle after the in-flight attempt ends.
+                            pending.next_cycle_deadline = Some(deadline);
+                        } else {
+                            pending.attempts = 0;
+                            pending.cycle_deadline = deadline;
+                        }
+                    }
+                }
             }
             SubagentEvent::Outstanding(request) => {
                 // Reap again here so turn-freeze / Outstanding polls see
@@ -786,6 +877,21 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
 
     fn handle_internal(&mut self, event: InternalEvent<R::Control>) {
         match event {
+            InternalEvent::ExecutionReturned {
+                subagent_id,
+                outcome,
+            } => {
+                if let Some(child) = self.active.get_mut(&subagent_id) {
+                    child.execution_outcome.get_or_insert(outcome);
+                    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+                    child.foreground_deadline = Some(
+                        child
+                            .foreground_deadline
+                            .map_or(deadline, |previous| previous.min(deadline)),
+                    );
+                }
+                self.running_count_changed();
+            }
             InternalEvent::Started {
                 subagent_id,
                 child,
@@ -803,6 +909,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 self.active.insert(
                     subagent_id,
                     ActiveChild {
+                        execution_outcome: None,
                         request: pending.request,
                         immediate_parent_session_id: pending.immediate_parent_session_id,
                         started_at: pending.started_at,
@@ -872,14 +979,20 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 ),
             };
 
-        if !self.runner.terminal_committed(&output.completion_data) {
-            output.result.success = false;
-            output.result.cancelled = false;
-            output.result.output = Arc::from("");
-            output.result.error.get_or_insert_with(|| {
-                "subagent completion is unavailable because its canonical terminal did not commit"
-                    .to_owned()
-            });
+        let finalization_pending = !self.runner.terminal_committed(&output.completion_data);
+        output.result.finalization_pending = finalization_pending;
+
+        if finalization_pending {
+            let held_bytes: usize = self
+                .finalizations
+                .values()
+                .map(|entry| entry.output.result.output.len())
+                .sum();
+            if held_bytes.saturating_add(output.result.output.len()) > MAX_FINALIZATION_OUTPUT_BYTES
+            {
+                output.result.output = Arc::from("");
+                output.result.output_unavailable = true;
+            }
         }
 
         let persisted_output_ref = self.runner.persisted_output_ref(&output.completion_data);
@@ -890,13 +1003,16 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             child_session_id,
             resumed_from,
             persisted_output_ref,
+            finalization_error: self.runner.finalization_error(&output.completion_data).or_else(|| {
+                output.result.output_unavailable.then(|| "original output is unavailable or exceeded the bounded recovery retention budget".into())
+            }),
             result: output.result.clone(),
         };
         let snapshot = completed_snapshot(&completed, None, false);
 
         let mut waiter_delivered = false;
         for waiter in self.waiters.remove(id).unwrap_or_default() {
-            waiter_delivered |= waiter.respond_to.send(Some(snapshot.clone())).is_ok();
+            waiter_delivered |= waiter.respond_to.send(Ok(Some(snapshot.clone()))).is_ok();
         }
 
         let mut foreground_delivered = false;
@@ -910,7 +1026,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             handle_only = true;
         }
 
-        if completed.persisted_output_ref.is_some() {
+        if completed.persisted_output_ref.is_some() && !finalization_pending {
             completed.result.output = Arc::from("");
         }
 
@@ -927,8 +1043,30 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             should_surface,
         };
         self.completed.insert(id.to_owned(), completed);
-        self.completed_order.push_back(id.to_owned());
         self.running_count_changed();
+        if finalization_pending {
+            // A pending response is not delivery of a terminal tool result.
+            // Late canonical completion is handed to the existing inbox.
+            let mut disposition = disposition;
+            disposition.foreground_delivered = false;
+            disposition.waiter_delivered = false;
+            disposition.should_surface =
+                request.surface_completion && !explicitly_killed && !output.result.cancelled;
+            self.finalizations.insert(
+                id.to_owned(),
+                PendingFinalization {
+                    output,
+                    disposition,
+                    attempts: 0,
+                    cycle_deadline: tokio::time::Instant::now()
+                        + std::time::Duration::from_secs(30),
+                    next_cycle_deadline: None,
+                    in_flight: false,
+                },
+            );
+            return;
+        }
+        self.completed_order.push_back(id.to_owned());
         let workflow_run_id = request.owner.workflow_run_id().map(str::to_owned);
         self.runner.on_completed(ChildCompletion {
             request,
@@ -943,7 +1081,113 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
     }
 
+    fn advance_finalizations(&mut self) {
+        for (id, pending) in &mut self.finalizations {
+            if pending.in_flight
+                || pending.attempts >= 3
+                || tokio::time::Instant::now() >= pending.cycle_deadline
+            {
+                continue;
+            }
+            let Some(child) = self.completed.get(id) else {
+                continue;
+            };
+            pending.attempts += 1;
+            match self.runner.reconcile(
+                child.request.clone(),
+                pending.output.clone(),
+                pending.cycle_deadline,
+            ) {
+                Ok(future) => {
+                    pending.in_flight = true;
+                    self.reconciliations.push(TaggedFuture {
+                        subagent_id: id.clone(),
+                        future: Box::pin(std::panic::AssertUnwindSafe(future).catch_unwind()),
+                    });
+                }
+                Err(output) => {
+                    pending.output = output;
+                    pending.attempts = 3;
+                }
+            }
+        }
+    }
+
+    fn finish_reconciliation(
+        &mut self,
+        id: &str,
+        output: std::thread::Result<ChildRunOutput<R::CompletionData>>,
+    ) {
+        let Some(pending) = self.finalizations.get_mut(id) else {
+            return;
+        };
+        pending.in_flight = false;
+        let next_cycle_deadline = pending.next_cycle_deadline.take();
+        let Ok(mut output) = output else {
+            if let Some(deadline) = next_cycle_deadline {
+                pending.attempts = 0;
+                pending.cycle_deadline = deadline;
+            } else {
+                pending.attempts = 3;
+            }
+            return;
+        };
+        if !self.runner.terminal_committed(&output.completion_data) {
+            if let Some(child) = self.completed.get_mut(id) {
+                child.finalization_error = self.runner.finalization_error(&output.completion_data);
+            }
+            pending.output = output;
+            if let Some(deadline) = next_cycle_deadline {
+                pending.attempts = 0;
+                pending.cycle_deadline = deadline;
+            }
+            return;
+        }
+        output.result.finalization_pending = false;
+        let Some(pending) = self.finalizations.remove(id) else {
+            return;
+        };
+        let Some(child) = self.completed.get_mut(id) else {
+            return;
+        };
+        child.result = output.result.clone();
+        child.finalization_error = None;
+        child.persisted_output_ref = self.runner.persisted_output_ref(&output.completion_data);
+        if child.persisted_output_ref.is_some() {
+            child.result.output = Arc::from("");
+        }
+        let request = child.request.clone();
+        let workflow_run_id = request.owner.workflow_run_id().map(str::to_owned);
+        self.completed_order.push_back(id.to_owned());
+        self.runner.on_completed(ChildCompletion {
+            request,
+            result: output.result,
+            completion_data: output.completion_data,
+            disposition: pending.disposition,
+        });
+        self.resolve_goal_cancel_waiters(id);
+        self.resolve_session_cancel_waiters(id);
+        if let Some(run_id) = workflow_run_id {
+            self.resolve_workflow_cancel_waiters(&run_id);
+        }
+    }
+
     fn finish_panicked_child(&mut self, id: &str) {
+        // Polling the runner can enqueue a phase fact and panic in the same
+        // poll, after select already polled the internal receiver. Apply those
+        // accepted facts before deriving the panic outcome or dropping control.
+        while let Ok(event) = self.internal_rx.try_recv() {
+            self.handle_internal(event);
+        }
+        let execution_outcome = self
+            .active
+            .get(id)
+            .and_then(|child| child.execution_outcome.clone());
+        let child_session_id = self
+            .active
+            .get(id)
+            .map(|child| child.child_session_id.clone())
+            .or_else(|| self.pending.get(id).map(|child| child.request.id.clone()));
         let request = self
             .active
             .get(id)
@@ -952,18 +1196,27 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         let Some(request) = request else {
             return;
         };
+        let control = self.active.get(id).map(|child| &child.control);
+        let completion_data =
+            self.runner
+                .completion_after_panic(&request, control, execution_outcome.as_deref());
+        if let Some(control) = control {
+            control.runner_panicked();
+        }
         tracing::error!(subagent_id = id, "subagent child runner panicked");
         self.finish_child(
             id,
             ChildRunOutput {
                 result: SubagentResult {
-                    success: false,
+                    success: execution_outcome.as_deref() == Some("completed"),
+                    cancelled: execution_outcome.as_deref() == Some("cancelled"),
+                    output_unavailable: execution_outcome.is_some(),
                     error: Some("Subagent runtime panicked".to_owned()),
                     subagent_id: request.id.clone(),
-                    child_session_id: request.id,
+                    child_session_id: child_session_id.unwrap_or(request.id),
                     ..Default::default()
                 },
-                completion_data: R::CompletionData::default(),
+                completion_data,
             },
         );
     }
@@ -1337,18 +1590,52 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 if waiter.respond_to.is_closed() {
                     continue;
                 }
-                if self.active.contains_key(&id) {
-                    self.queue_active_progress(&id, ProgressTarget::Query(waiter.respond_to));
+                if let Some(child) = self.active.get(&id) {
+                    let result = if let Some(outcome) = &child.execution_outcome {
+                        Ok(Some(query::active_finalization_snapshot(child, outcome)))
+                    } else if child.request.owner.is_workflow() {
+                        Err(super::types::SubagentObservationError::Unauthorized)
+                    } else {
+                        child
+                            .control
+                            .progress_snapshot()
+                            .map(|progress| {
+                                Some(
+                                    super::coordinator_state::running_inspection(
+                                        super::coordinator_state::running_seed(child),
+                                        progress,
+                                    )
+                                    .snapshot,
+                                )
+                            })
+                            .ok_or(super::types::SubagentObservationError::Unavailable)
+                    };
+                    let _ = waiter.respond_to.send(result);
+                } else if self.pending.contains_key(&id) {
+                    let _ = waiter.respond_to.send(
+                        self.pending
+                            .get(&id)
+                            .map(|child| {
+                                Ok(Some(super::coordinator_state::pending_snapshot(child)))
+                            })
+                            .unwrap_or(Ok(None)),
+                    );
                 } else {
-                    let _ = waiter.respond_to.send(self.ready_snapshot(&id));
+                    let _ = waiter.respond_to.send(Ok(self.ready_snapshot(&id)));
                 }
             }
         }
     }
 
     fn running_count_changed(&self) {
-        self.runner
-            .running_count_changed(self.pending.len() + self.active.len());
+        self.runner.running_count_changed(
+            self.pending.len()
+                + self
+                    .active
+                    .values()
+                    .filter(|child| child.execution_outcome.is_none())
+                    .count(),
+        );
     }
 
     fn cancel_all_children(&self) {

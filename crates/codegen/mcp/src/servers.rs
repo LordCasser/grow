@@ -17,7 +17,7 @@ use tokio::{
 use rmcp::{
     ClientHandler, ServiceExt,
     model::{
-        CallToolRequest, CallToolRequestParams, ClientCapabilities, ClientInfo, ClientRequest,
+        CallToolRequest, CallToolRequestParams, ClientCapabilities, ClientConfig, ClientRequest,
         Implementation, PaginatedRequestParams, ServerResult,
     },
     service::{
@@ -2505,9 +2505,9 @@ enum PendingTransport {
 }
 
 /// A connected MCP service (rmcp's RunningService wrapped in Arc).
-/// Uses [`GrowClientHandler`] rather than rmcp's default `ClientInfo`
-/// handler: rmcp 2.2 parameterizes `RunningService` over the handler
-/// type, and `ClientInfo` is only a `ClientHandler` impl with no
+/// Uses [`GrowClientHandler`] rather than rmcp's default `ClientConfig`
+/// handler: rmcp 3.5.1 parameterizes `RunningService` over the handler
+/// type, and `ClientConfig` is only a `ClientHandler` impl with no
 /// notification routing. The custom handler keeps the same protocol
 /// behavior (same `get_info`) while plumbing
 /// `tools/list_changed` / `resources/list_changed` notifications
@@ -3551,7 +3551,7 @@ impl McpClient {
         }
     }
 
-    fn make_client_info(server_name: &str) -> ClientInfo {
+    fn make_client_info(server_name: &str) -> ClientConfig {
         let mut extensions = rmcp::model::ExtensionCapabilities::new();
         extensions.insert(
             "io.modelcontextprotocol/ui".to_string(),
@@ -3562,7 +3562,7 @@ impl McpClient {
         );
         let mut capabilities = ClientCapabilities::default();
         capabilities.extensions = Some(extensions);
-        ClientInfo::new(
+        ClientConfig::new(
             capabilities,
             Implementation::new(
                 format!("grow-shell-{server_name}"),
@@ -3733,10 +3733,9 @@ impl McpClient {
     /// Semantics:
     /// - `Ready(service)` with an open transport → `true`.
     /// - `Ready(service)` whose receiver-side has been dropped (typically
-    ///   because the rmcp service loop terminated) → `false`. rmcp 2.2
-    ///   `Peer::is_transport_closed` reports `self.tx.is_closed()` at
-    ///   `service.rs:703-705`; `RunningService` derefs to `Peer` at
-    ///   `service.rs:716-722`.
+    ///   because the rmcp service loop terminated) → `false`. rmcp 3.5.1
+    ///   `Peer::is_transport_closed` reports `self.tx.is_closed()`;
+    ///   `RunningService` derefs to `Peer`.
     /// - Any other variant (`Empty`, `Pending`, `Initializing`) →
     ///   `false`.
     ///
@@ -4371,7 +4370,7 @@ impl McpClient {
 
 /// rmcp [`ClientHandler`] used by all MCP transports.
 ///
-/// Replaces the previous bare [`ClientInfo`] handler at the three
+/// Replaces the previous bare [`ClientConfig`] handler at the three
 /// `client.serve(...)` call sites in [`McpClient::try_handshake`].
 /// Plumbs server-pushed notifications through an
 /// [`tokio::sync::mpsc::UnboundedSender<McpClientEvent>`] so the
@@ -4380,10 +4379,9 @@ impl McpClient {
 ///
 /// ## RPIT, not `#[async_trait]`
 ///
-/// rmcp 2.2's [`ClientHandler`] declares its async methods as
+/// rmcp 3.5.1's [`ClientHandler`] declares its async methods as
 /// return-position `impl Future` (see
-/// `~/.cargo/registry/src/.../rmcp-2.2.0/src/handler/client.rs`,
-/// lines 202–217). Applying `#[async_trait]` here would produce
+/// `rmcp/src/handler/client.rs`). Applying `#[async_trait]` here would produce
 /// methods whose signature mismatches the trait, and the impl would
 /// not satisfy the bound. The macro path is also unnecessary — the
 /// trait already supports `async fn` syntax indirectly via
@@ -4402,9 +4400,9 @@ impl McpClient {
 /// notification handler or the service loop tears down.
 #[derive(Debug)]
 pub struct GrowClientHandler {
-    /// Static `ClientInfo` returned by [`Self::get_info`]; built once
+    /// Static `ClientConfig` returned by [`Self::get_info`]; built once
     /// at handshake time and stored to avoid re-allocating per call.
-    info: ClientInfo,
+    info: ClientConfig,
     /// MCP server name this handler is bound to. Cloned into emitted
     /// events so the dispatcher can route per-server.
     server_name: McpServerName,
@@ -4438,7 +4436,7 @@ impl GrowClientHandler {
 impl ClientHandler for GrowClientHandler {
     // NOTE: `async fn` here is sugar for the trait's
     // `-> impl Future<Output = ()> + Send + '_`. We INTENTIONALLY do
-    // not use `#[async_trait]` — rmcp 2.2's `ClientHandler` declares
+    // not use `#[async_trait]` — rmcp 3.5.1's `ClientHandler` declares
     // its notification methods as return-position `impl Future`, and
     // async_trait would produce a different (incompatible) signature.
     // See the [`GrowClientHandler`] doc-comment for the full RPIT
@@ -4457,7 +4455,7 @@ impl ClientHandler for GrowClientHandler {
         });
     }
 
-    fn get_info(&self) -> ClientInfo {
+    fn get_info(&self) -> ClientConfig {
         self.info.clone()
     }
 }
@@ -8370,7 +8368,7 @@ mod tests {
         // No assertion needed — reaching this line means no panic.
     }
 
-    /// Contract: get_info returns a clone of the stored ClientInfo.
+    /// Contract: get_info returns a clone of the stored ClientConfig.
     #[tokio::test]
     async fn client_handler_get_info_round_trips() {
         let info = McpClient::make_client_info("test-srv");
@@ -8381,7 +8379,7 @@ mod tests {
             notify_tx: Arc::new(parking_lot::Mutex::new(None)),
         };
         let got = handler.get_info();
-        // ClientInfo doesn't derive PartialEq; check the visible
+        // ClientConfig doesn't derive PartialEq; check the visible
         // fields the constructor sets.
         assert_eq!(got.client_info.name, info.client_info.name);
         assert_eq!(got.client_info.version, info.client_info.version);

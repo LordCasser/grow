@@ -72,6 +72,10 @@ use workspace::file_system::CodebaseIndexManager;
 use workspace::permission::{AccessKind, ClientType, Decision, PermissionHandle};
 use workspace::session::file_state::{FileStateHandle, FileStateTracker};
 const SESSION_LOG: &str = "grow_session";
+pub(crate) mod runtime_observation;
+pub(crate) use runtime_observation::{
+    RuntimeObservationOwnerGuard, RuntimeObservationSnapshot, SharedRuntimeObservation,
+};
 pub(crate) mod compaction;
 pub(crate) mod context_recall;
 mod types;
@@ -1489,9 +1493,14 @@ pub(crate) struct SessionActor {
     /// and post-commit reclamation so a same-content receipt cannot race an
     /// in-flight content-addressed payload deletion.
     pub(crate) notification_artifact_gate: TokioMutex<()>,
+    /// Linearizes identity-bearing input admission before artifact access.
+    pub(crate) input_admission_gate: TokioMutex<()>,
     /// Serializes immutable input artifacts and published user-image assets
     /// with their Timeline admission and orphan sweeps.
     pub(crate) input_artifact_gate: TokioMutex<()>,
+    /// Synchronously readable lifecycle facts. Query readers never wait on the
+    /// actor command queue, model execution, hooks, or persistence ACKs.
+    pub(crate) runtime_observation: SharedRuntimeObservation,
     /// ACP method selected for this BYOK-only session.
     pub(crate) auth_method_id: crate::agent::auth_method::SharedAuthMethodId,
     /// Memoized per-model auth state, read through

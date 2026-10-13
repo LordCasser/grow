@@ -639,7 +639,12 @@ impl AgentView {
                         // Drain images BEFORE set_text("") wipes the chip elements.
                         let images = self.prompt.drain_images();
                         self.prompt.set_text("");
-                        return InputOutcome::Action(Action::SteerPrompt { text, images });
+                        return InputOutcome::Action(Action::SteerPrompt {
+                            text,
+                            images,
+                            expected_turn_id: None,
+                            prompt_id: None,
+                        });
                     }
                     if turn_running
                         && let Some(outcome) = self.try_send_now_queued_from_prompt(effects)

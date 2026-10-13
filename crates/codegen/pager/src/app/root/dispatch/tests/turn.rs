@@ -1,5 +1,6 @@
 //! Tests for turn cancellation, subagent kills, and cancel preferences.
 
+use super::super::turn::{PROMPT_STATUS_CAPACITY_RETRY_DELAY, PROMPT_STATUS_QUERY_BATCH_LIMIT};
 use super::*;
 
 #[test]
@@ -800,7 +801,7 @@ fn stalled_unacknowledged_submission_queries_exact_prompt_status() {
             agent_id,
             prompt_id,
             ..
-        }] if *agent_id == id && prompt_id == "pid-submitting"
+        }] if *agent_id == id && prompt_id.as_deref() == Some("pid-submitting")
     ));
     assert_eq!(
         app.agents[&id]
@@ -833,7 +834,7 @@ fn cancelling_turn_queries_exact_prompt_after_short_window() {
             agent_id,
             prompt_id,
             ..
-        }] if *agent_id == id && prompt_id == "pid-cancelling"
+        }] if *agent_id == id && prompt_id.as_deref() == Some("pid-cancelling")
     ));
     assert!(
         app.agents[&id]
@@ -861,7 +862,13 @@ fn cancelling_running_status_rearms_without_unlocking() {
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptStatusResolved {
             agent_id: id,
-            prompt_id: "pid-cancelling".into(),
+            session_id: acp::SessionId::new("test-session"),
+            binding_epoch: 0,
+            query_generation: 1,
+            prompt_id: Some("pid-cancelling".into()),
+            response_session_id: Some("test-session".into()),
+            response_control_epoch: Some("test-epoch".into()),
+            observation_source: Some("runtime".into()),
             status: Ok(crate::app::actions::PromptStatusWire::Running { turn_start_ms: 1 }),
         }),
         &mut app,
@@ -884,37 +891,237 @@ fn cancelling_running_status_rearms_without_unlocking() {
 }
 
 #[test]
-fn cancelling_unknown_or_error_unlocks_composer() {
+fn cancelling_unknown_or_error_preserves_target_without_draining() {
     for status in [
         Ok(crate::app::actions::PromptStatusWire::Unknown),
         Err("session unavailable".to_string()),
     ] {
         let mut app = test_app_with_agent();
         let id = AgentId(0);
+        let last_confirmed = std::time::Instant::now() - std::time::Duration::from_secs(20);
         {
             let agent = app.agents.get_mut(&id).unwrap();
             agent.session.state = AgentState::TurnCancelling;
             agent.session.current_prompt_id = Some("pid-cancelling".into());
+            agent.session.last_status_observed_at = Some(last_confirmed);
             agent.session.begin_prompt_status_query("pid-cancelling");
         }
 
         let _ = dispatch(
             Action::TaskComplete(TaskResult::PromptStatusResolved {
                 agent_id: id,
-                prompt_id: "pid-cancelling".into(),
+                session_id: acp::SessionId::new("test-session"),
+                binding_epoch: 0,
+                query_generation: 1,
+                prompt_id: Some("pid-cancelling".into()),
+                response_session_id: Some("test-session".into()),
+                response_control_epoch: Some("test-epoch".into()),
+                observation_source: Some("runtime".into()),
                 status,
             }),
             &mut app,
         );
 
-        assert!(app.agents[&id].session.state.is_idle());
-        assert!(app.agents[&id].session.current_prompt_id.is_none());
+        assert!(app.agents[&id].session.state.is_cancelling());
+        assert_eq!(
+            app.agents[&id].session.last_status_observed_at,
+            Some(last_confirmed),
+            "unknown/error observations must not refresh the last confirmed timestamp"
+        );
+        assert_eq!(
+            app.agents[&id].session.current_prompt_id.as_deref(),
+            Some("pid-cancelling")
+        );
+        assert!(app.agents[&id].session.prompt_status_retry_at.is_some());
         assert!(
             !app.agents[&id]
                 .session
                 .prompt_status_query_matches("pid-cancelling")
         );
     }
+}
+
+#[test]
+fn late_prompt_status_reply_does_not_clear_a_newer_query_generation() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let newer_generation = {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnCancelling;
+        agent.session.current_prompt_id = Some("pid-cancelling".into());
+        agent.session.begin_prompt_status_query("pid-cancelling");
+        agent.session.begin_prompt_status_query("pid-cancelling")
+    };
+
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptStatusResolved {
+            agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            binding_epoch: 0,
+            query_generation: newer_generation - 1,
+            prompt_id: Some("pid-cancelling".into()),
+            response_session_id: Some("test-session".into()),
+            response_control_epoch: Some("test-epoch".into()),
+            observation_source: Some("runtime".into()),
+            status: Ok(crate::app::actions::PromptStatusWire::Terminal {
+                stop_reason: "cancelled".into(),
+                agent_result: None,
+            }),
+        }),
+        &mut app,
+    );
+
+    let session = &app.agents[&id].session;
+    assert!(session.state.is_cancelling());
+    assert!(session.prompt_status_query_matches_generation("pid-cancelling", newer_generation));
+}
+
+#[test]
+fn prompt_status_from_a_different_control_epoch_cannot_finalize_cancelled_turn() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.state = AgentState::TurnCancelling;
+        agent.session.current_prompt_id = Some("pid-cancelling".into());
+        agent.session.prompt_status_control_epoch =
+            Some(("test-session".into(), "epoch-old".into()));
+        agent.session.begin_prompt_status_query("pid-cancelling");
+    }
+
+    dispatch(
+        Action::TaskComplete(TaskResult::PromptStatusResolved {
+            agent_id: id,
+            session_id: acp::SessionId::new("test-session"),
+            binding_epoch: 0,
+            query_generation: 1,
+            prompt_id: Some("pid-cancelling".into()),
+            response_session_id: Some("test-session".into()),
+            response_control_epoch: Some("epoch-new".into()),
+            observation_source: Some("runtime".into()),
+            status: Ok(crate::app::actions::PromptStatusWire::Terminal {
+                stop_reason: "cancelled".into(),
+                agent_result: None,
+            }),
+        }),
+        &mut app,
+    );
+
+    let session = &app.agents[&id].session;
+    assert!(session.state.is_cancelling());
+    assert_eq!(session.current_prompt_id.as_deref(), Some("pid-cancelling"));
+    assert!(session.prompt_status_retry_at.is_some());
+    assert_eq!(
+        session
+            .prompt_status_control_epoch
+            .as_ref()
+            .map(|(_, epoch)| epoch.as_str()),
+        Some("epoch-old")
+    );
+}
+
+#[test]
+fn nested_prompt_watchdog_targets_the_child_session() {
+    let mut app = test_app_with_agent();
+    let root_id = AgentId(0);
+    let child_session_id = "nested-child";
+    let mut child = AgentView::new(
+        make_test_agent_session(&app, AgentId(1), child_session_id),
+        ScrollbackState::new(),
+    );
+    child.session.state = AgentState::TurnRunning;
+    child.session.current_prompt_id = Some("nested-prompt".into());
+    child.session.turn_started_at = Some(
+        std::time::Instant::now()
+            - PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
+            - std::time::Duration::from_secs(1),
+    );
+    app.agents
+        .get_mut(&root_id)
+        .unwrap()
+        .insert_subagent_view(child_session_id.into(), Box::new(child));
+
+    let effects = poll_stalled_prompt_submissions(&mut app, std::time::Instant::now())
+        .expect("nested child watchdog must fire");
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::QueryPromptStatus {
+            agent_id: AgentId(0),
+            session_id,
+            prompt_id,
+            ..
+        }] if session_id.0.as_ref() == child_session_id && prompt_id.as_deref() == Some("nested-prompt")
+    ));
+}
+
+#[test]
+fn active_child_without_prompt_id_queries_session_lifecycle() {
+    let mut app = test_app_with_agent();
+    let child_session_id = "nested-child-no-prompt";
+    let mut child = AgentView::new(
+        make_test_agent_session(&app, AgentId(1), child_session_id),
+        ScrollbackState::new(),
+    );
+    child.session.state = AgentState::TurnRunning;
+    child.session.turn_started_at = Some(
+        std::time::Instant::now()
+            - PROMPT_STATUS_RUNNING_WATCHDOG_DELAY
+            - std::time::Duration::from_secs(1),
+    );
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .insert_subagent_view(child_session_id.into(), Box::new(child));
+
+    let effects = poll_stalled_prompt_submissions(&mut app, std::time::Instant::now())
+        .expect("active child lifecycle watchdog must fire");
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::QueryPromptStatus {
+            session_id,
+            prompt_id: None,
+            ..
+        }] if session_id.0.as_ref() == child_session_id
+    ));
+}
+
+#[test]
+fn child_lifecycle_terminal_without_prompt_identity_does_not_finalize_turn() {
+    let mut app = test_app_with_agent();
+    let child_session_id = "nested-child-no-prompt";
+    let mut child = AgentView::new(
+        make_test_agent_session(&app, AgentId(1), child_session_id),
+        ScrollbackState::new(),
+    );
+    child.session.state = AgentState::TurnCancelling;
+    child.session.turn_started_at = Some(std::time::Instant::now());
+    let generation = child.session.begin_lifecycle_status_query();
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .insert_subagent_view(child_session_id.into(), Box::new(child));
+
+    dispatch(
+        Action::TaskComplete(TaskResult::PromptStatusResolved {
+            agent_id: AgentId(0),
+            session_id: acp::SessionId::new(child_session_id),
+            binding_epoch: 0,
+            query_generation: generation,
+            prompt_id: None,
+            response_session_id: Some(child_session_id.into()),
+            response_control_epoch: Some("child-epoch".into()),
+            observation_source: Some("runtime".into()),
+            status: Ok(crate::app::actions::PromptStatusWire::Terminal {
+                stop_reason: "cancelled".into(),
+                agent_result: None,
+            }),
+        }),
+        &mut app,
+    );
+
+    let child = &app.agents[&AgentId(0)].subagent_views[child_session_id];
+    assert!(child.session.state.is_cancelling());
+    assert!(child.session.current_prompt_id.is_none());
 }
 
 #[test]
@@ -931,7 +1138,13 @@ fn cancelling_terminal_status_uses_first_wins_finalizer() {
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptStatusResolved {
             agent_id: id,
-            prompt_id: "pid-cancelling".into(),
+            session_id: acp::SessionId::new("test-session"),
+            binding_epoch: 0,
+            query_generation: 1,
+            prompt_id: Some("pid-cancelling".into()),
+            response_session_id: Some("test-session".into()),
+            response_control_epoch: Some("test-epoch".into()),
+            observation_source: Some("runtime".into()),
             status: Ok(crate::app::actions::PromptStatusWire::Terminal {
                 stop_reason: "cancelled".into(),
                 agent_result: None,
@@ -984,7 +1197,7 @@ fn running_turn_stalled_without_activity_queries_prompt_status() {
             agent_id,
             prompt_id,
             ..
-        }] if *agent_id == id && prompt_id == "pid-running"
+        }] if *agent_id == id && prompt_id.as_deref() == Some("pid-running")
     ));
     assert_eq!(
         app.agents[&id]
@@ -1062,7 +1275,7 @@ fn running_turn_with_stale_activity_queries_prompt_status() {
             agent_id,
             prompt_id,
             ..
-        }] if *agent_id == id && prompt_id == "pid-stale"
+        }] if *agent_id == id && prompt_id.as_deref() == Some("pid-stale")
     ));
 }
 
@@ -1132,7 +1345,13 @@ fn running_status_response_rearms_from_observation_time() {
     let _ = dispatch(
         Action::TaskComplete(TaskResult::PromptStatusResolved {
             agent_id: id,
-            prompt_id: "pid-running".into(),
+            session_id: acp::SessionId::new("test-session"),
+            binding_epoch: 0,
+            query_generation: 1,
+            prompt_id: Some("pid-running".into()),
+            response_session_id: Some("test-session".into()),
+            response_control_epoch: Some("test-epoch".into()),
+            observation_source: Some("runtime".into()),
             status: Ok(crate::app::actions::PromptStatusWire::Running { turn_start_ms: 1 }),
         }),
         &mut app,
@@ -1184,7 +1403,13 @@ fn nonterminal_watchdog_answers_never_end_a_running_turn() {
         let effects = dispatch(
             Action::TaskComplete(TaskResult::PromptStatusResolved {
                 agent_id: id,
-                prompt_id: "pid-running".into(),
+                session_id: acp::SessionId::new("test-session"),
+                binding_epoch: 0,
+                query_generation: 1,
+                prompt_id: Some("pid-running".into()),
+                response_session_id: Some("test-session".into()),
+                response_control_epoch: Some("test-epoch".into()),
+                observation_source: Some("runtime".into()),
                 status,
             }),
             &mut app,
@@ -1198,7 +1423,7 @@ fn nonterminal_watchdog_answers_never_end_a_running_turn() {
             Some("pid-running")
         );
         assert_eq!(agent.session.turn_started_at, Some(old_start));
-        assert!(agent.session.last_status_observed_at.is_some());
+        assert!(agent.session.last_status_observed_at.is_none());
         assert!(
             next_prompt_watchdog_deadline(&app)
                 .is_some_and(|deadline| deadline > std::time::Instant::now())
@@ -1229,13 +1454,19 @@ fn running_watchdog_terminal_response_finalizes_via_first_wins_finalizer() {
         .expect("watchdog must fire");
     assert!(matches!(
         effects.as_slice(),
-        [Effect::QueryPromptStatus { prompt_id, .. }] if prompt_id == "pid-terminal"
+        [Effect::QueryPromptStatus { prompt_id, .. }] if prompt_id.as_deref() == Some("pid-terminal")
     ));
 
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptStatusResolved {
             agent_id: id,
-            prompt_id: "pid-terminal".into(),
+            session_id: acp::SessionId::new("test-session"),
+            binding_epoch: 0,
+            query_generation: 1,
+            prompt_id: Some("pid-terminal".into()),
+            response_session_id: Some("test-session".into()),
+            response_control_epoch: Some("test-epoch".into()),
+            observation_source: Some("runtime".into()),
             status: Ok(crate::app::actions::PromptStatusWire::Terminal {
                 stop_reason: "end_turn".into(),
                 agent_result: None,
@@ -1284,7 +1515,13 @@ fn queued_prompt_status_observes_without_claiming_or_rearming_a_turn() {
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptStatusResolved {
             agent_id: id,
-            prompt_id: "pid-queued".into(),
+            session_id: acp::SessionId::new("test-session"),
+            binding_epoch: 0,
+            query_generation: 1,
+            prompt_id: Some("pid-queued".into()),
+            response_session_id: Some("test-session".into()),
+            response_control_epoch: Some("test-epoch".into()),
+            observation_source: Some("runtime".into()),
             status: Ok(crate::app::actions::PromptStatusWire::Queued {
                 position: 2,
                 queue_version: 7,
@@ -1330,6 +1567,9 @@ fn queued_prompt_status_resolves_submitting_state() {
         agent.session.state = AgentState::TurnSubmitting;
         agent.session.current_prompt_id = Some("pid-queued".into());
         agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
+            prompt_id: None,
+            admission_resolved: None,
+            expected_turn_id: None,
             text: "hello".into(),
             images: vec![],
             scrollback_entry: crate::scrollback::EntryId::new(1),
@@ -1347,7 +1587,13 @@ fn queued_prompt_status_resolves_submitting_state() {
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptStatusResolved {
             agent_id: id,
-            prompt_id: "pid-queued".into(),
+            session_id: acp::SessionId::new("test-session"),
+            binding_epoch: 0,
+            query_generation: 1,
+            prompt_id: Some("pid-queued".into()),
+            response_session_id: Some("test-session".into()),
+            response_control_epoch: Some("test-epoch".into()),
+            observation_source: Some("runtime".into()),
             status: Ok(crate::app::actions::PromptStatusWire::Queued {
                 position: 2,
                 queue_version: 7,
@@ -1375,6 +1621,246 @@ fn queued_prompt_status_resolves_submitting_state() {
 }
 
 #[test]
+fn prompt_status_watchdog_bounds_each_poll_and_retries_skipped_children() {
+    let mut app = test_app_with_agent();
+    let root_id = AgentId(0);
+    let now = std::time::Instant::now();
+    for index in 0..7 {
+        let session_id = format!("bounded-child-{index}");
+        let mut child = AgentView::new(
+            make_test_agent_session(&app, AgentId(index + 1), &session_id),
+            ScrollbackState::new(),
+        );
+        child.session.state = AgentState::TurnSubmitting;
+        child.session.current_prompt_id = Some(format!("pid-{index}"));
+        child.session.turn_started_at =
+            Some(now - PROMPT_STATUS_WATCHDOG_DELAY - std::time::Duration::from_millis(1));
+        app.agents
+            .get_mut(&root_id)
+            .unwrap()
+            .insert_subagent_view(session_id, Box::new(child));
+    }
+
+    let first = poll_stalled_prompt_submissions(&mut app, now).expect("first bounded batch");
+    assert_eq!(
+        first.len(),
+        PROMPT_STATUS_QUERY_BATCH_LIMIT,
+        "one watchdog pass must never enqueue more than its fixed batch"
+    );
+    let skipped = app.agents[&root_id]
+        .subagent_views
+        .values()
+        .filter(|child| child.session.prompt_status_retry_at.is_some())
+        .count();
+    assert_eq!(skipped, 7 - PROMPT_STATUS_QUERY_BATCH_LIMIT);
+    assert!(
+        poll_stalled_prompt_submissions(&mut app, now).is_none(),
+        "in-flight targets and short retry_at values must prevent a repeated-poll burst"
+    );
+
+    let retry_at = now + PROMPT_STATUS_CAPACITY_RETRY_DELAY + std::time::Duration::from_millis(1);
+    let second =
+        poll_stalled_prompt_submissions(&mut app, retry_at).expect("deferred children retry");
+    assert_eq!(
+        second.len(),
+        7 - PROMPT_STATUS_QUERY_BATCH_LIMIT,
+        "skipped candidates must become eligible again after the short retry delay"
+    );
+}
+
+#[test]
+fn root_and_nested_watchdog_queries_survive_disconnect_and_replay_generation_change() {
+    let mut app = test_app_with_agent();
+    let root_id = AgentId(0);
+    let child_session_id = "watchdog-nested-child";
+    let old_confirmed = std::time::Instant::now() - std::time::Duration::from_secs(20);
+    let mut child = AgentView::new(
+        make_test_agent_session(&app, root_id, child_session_id),
+        ScrollbackState::new(),
+    );
+    child.session.state = AgentState::TurnCancelling;
+    child.session.current_prompt_id = Some("child-prompt".into());
+    child.session.last_status_observed_at = Some(old_confirmed);
+    {
+        let root = app.agents.get_mut(&root_id).unwrap();
+        root.session.state = AgentState::TurnCancelling;
+        root.session.current_prompt_id = Some("root-prompt".into());
+        root.session.last_status_observed_at = Some(old_confirmed);
+        root.insert_subagent_view(child_session_id.into(), Box::new(child));
+    }
+
+    let now = std::time::Instant::now();
+    let effects = poll_stalled_prompt_submissions(&mut app, now).expect("root and child probes");
+    assert_eq!(effects.len(), 2);
+    let root_query = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::QueryPromptStatus {
+                session_id,
+                query_generation,
+                ..
+            } if session_id.0.as_ref() == "test-session" => Some(*query_generation),
+            _ => None,
+        })
+        .expect("root status query");
+    let child_query = effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::QueryPromptStatus {
+                session_id,
+                query_generation,
+                ..
+            } if session_id.0.as_ref() == child_session_id => Some(*query_generation),
+            _ => None,
+        })
+        .expect("nested status query");
+
+    for (session_id, query_generation, prompt_id) in [
+        ("test-session", root_query, "root-prompt"),
+        (child_session_id, child_query, "child-prompt"),
+    ] {
+        let _ = dispatch(
+            Action::TaskComplete(TaskResult::PromptStatusResolved {
+                agent_id: root_id,
+                session_id: acp::SessionId::new(session_id),
+                binding_epoch: 0,
+                query_generation,
+                prompt_id: Some(prompt_id.into()),
+                response_session_id: None,
+                response_control_epoch: None,
+                observation_source: None,
+                status: Err("runtime disconnected".into()),
+            }),
+            &mut app,
+        );
+    }
+    assert_eq!(
+        app.agents[&root_id].session.last_status_observed_at,
+        Some(old_confirmed)
+    );
+    assert_eq!(
+        app.agents[&root_id].session.prompt_status_waiting_reason,
+        Some(crate::acp::tracker::WaitingReason::ObservationUnknown)
+    );
+    assert!(app.agents[&root_id].session.state.is_cancelling());
+
+    // The root query belongs to the pre-replay generation. A late terminal
+    // reply from it must not close the same prompt after reload starts.
+    let root = app.agents.get_mut(&root_id).unwrap();
+    root.begin_replay_window();
+    root.session.state = AgentState::TurnCancelling;
+    root.session.current_prompt_id = Some("root-prompt".into());
+    root.session.last_status_observed_at = Some(old_confirmed);
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptStatusResolved {
+            agent_id: root_id,
+            session_id: acp::SessionId::new("test-session"),
+            binding_epoch: 0,
+            query_generation: root_query,
+            prompt_id: Some("root-prompt".into()),
+            response_session_id: Some("test-session".into()),
+            response_control_epoch: Some("test-epoch".into()),
+            observation_source: Some("runtime".into()),
+            status: Ok(crate::app::actions::PromptStatusWire::Terminal {
+                stop_reason: "cancelled".into(),
+                agent_result: None,
+            }),
+        }),
+        &mut app,
+    );
+    assert!(app.agents[&root_id].session.state.is_cancelling());
+
+    let retry_at = std::time::Instant::now()
+        + PROMPT_STATUS_CANCEL_WATCHDOG_DELAY
+        + PROMPT_STATUS_CAPACITY_RETRY_DELAY
+        + std::time::Duration::from_millis(10);
+    let requery = poll_stalled_prompt_submissions(&mut app, retry_at)
+        .expect("replay invalidation permits a fresh exact query");
+    let next_root_query = requery
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::QueryPromptStatus {
+                session_id,
+                query_generation,
+                ..
+            } if session_id.0.as_ref() == "test-session" => Some(*query_generation),
+            _ => None,
+        })
+        .expect("new root generation");
+    assert_ne!(next_root_query, root_query);
+    let _ = dispatch(
+        Action::TaskComplete(TaskResult::PromptStatusResolved {
+            agent_id: root_id,
+            session_id: acp::SessionId::new("test-session"),
+            binding_epoch: 0,
+            query_generation: next_root_query,
+            prompt_id: Some("root-prompt".into()),
+            response_session_id: Some("test-session".into()),
+            response_control_epoch: Some("test-epoch".into()),
+            observation_source: Some("runtime".into()),
+            status: Ok(crate::app::actions::PromptStatusWire::Settling),
+        }),
+        &mut app,
+    );
+    assert!(app.agents[&root_id].session.state.is_cancelling());
+    assert_eq!(
+        app.agents[&root_id].session.prompt_status_waiting_reason,
+        Some(crate::acp::tracker::WaitingReason::Settling)
+    );
+
+    let terminal_at = std::time::Instant::now()
+        + PROMPT_STATUS_CANCEL_WATCHDOG_DELAY
+        + PROMPT_STATUS_CAPACITY_RETRY_DELAY
+        + std::time::Duration::from_millis(10);
+    let terminal_query = poll_stalled_prompt_submissions(&mut app, terminal_at)
+        .expect("Settling re-arms a bounded status observation");
+    let terminal_generation = terminal_query
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::QueryPromptStatus {
+                session_id,
+                query_generation,
+                ..
+            } if session_id.0.as_ref() == "test-session" => Some(*query_generation),
+            _ => None,
+        })
+        .expect("fresh terminal query");
+    for _ in 0..2 {
+        let _ = dispatch(
+            Action::TaskComplete(TaskResult::PromptStatusResolved {
+                agent_id: root_id,
+                session_id: acp::SessionId::new("test-session"),
+                binding_epoch: 0,
+                query_generation: terminal_generation,
+                prompt_id: Some("root-prompt".into()),
+                response_session_id: Some("test-session".into()),
+                response_control_epoch: Some("test-epoch".into()),
+                observation_source: Some("runtime".into()),
+                status: Ok(crate::app::actions::PromptStatusWire::Terminal {
+                    stop_reason: "cancelled".into(),
+                    agent_result: None,
+                }),
+            }),
+            &mut app,
+        );
+    }
+    assert!(app.agents[&root_id].session.state.is_idle());
+    let completed_markers = (0..app.agents[&root_id].scrollback.len())
+        .filter(|&index| {
+            matches!(
+                app.agents[&root_id].scrollback.entry(index).map(|entry| &entry.block),
+                Some(RenderBlock::SessionEvent(event))
+                    if matches!(event.event, SessionEvent::TurnCancelled { .. })
+            )
+        })
+        .count();
+    assert_eq!(
+        completed_markers, 1,
+        "only the accepted terminal query finalizes"
+    );
+}
+
+#[test]
 fn terminal_prompt_status_uses_same_first_wins_finalizer() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
@@ -1388,7 +1874,13 @@ fn terminal_prompt_status_uses_same_first_wins_finalizer() {
     let effects = dispatch(
         Action::TaskComplete(TaskResult::PromptStatusResolved {
             agent_id: id,
-            prompt_id: "pid-terminal".into(),
+            session_id: acp::SessionId::new("test-session"),
+            binding_epoch: 0,
+            query_generation: 1,
+            prompt_id: Some("pid-terminal".into()),
+            response_session_id: Some("test-session".into()),
+            response_control_epoch: Some("test-epoch".into()),
+            observation_source: Some("runtime".into()),
             status: Ok(crate::app::actions::PromptStatusWire::Terminal {
                 stop_reason: "end_turn".into(),
                 agent_result: None,
@@ -1617,6 +2109,9 @@ fn cancel_rewind_removes_all_combined_segment_blocks() {
             .scrollback
             .push_block(RenderBlock::user_prompt("second"));
         agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
+            prompt_id: None,
+            admission_resolved: None,
+            expected_turn_id: None,
             text: "first\n\nsecond".into(),
             images: Vec::new(),
             scrollback_entry: last_id,
@@ -1661,6 +2156,9 @@ fn cancel_with_newer_draft_skips_pristine_rewind_and_keeps_draft() {
             .scrollback
             .push_block(RenderBlock::user_prompt("sent prompt"));
         agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
+            prompt_id: None,
+            admission_resolved: None,
+            expected_turn_id: None,
             text: "sent prompt".into(),
             images: Vec::new(),
             scrollback_entry: sent_id,

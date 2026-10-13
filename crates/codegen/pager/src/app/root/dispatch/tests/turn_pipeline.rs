@@ -15,6 +15,9 @@ fn failed_image_submission(app: &mut AppView) -> Vec<Effect> {
     agent.session.state = AgentState::TurnSubmitting;
     agent.session.current_prompt_id = Some("failed-image".into());
     agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
+        prompt_id: Some("failed-image".into()),
+        admission_resolved: None,
+        expected_turn_id: None,
         text,
         images,
         scrollback_entry: crate::scrollback::EntryId::new(1),
@@ -35,7 +38,10 @@ fn failed_image_submission(app: &mut AppView) -> Vec<Effect> {
 #[test]
 fn failed_image_admission_restores_structured_draft_for_explicit_retry() {
     let mut app = test_app_with_agent();
-    assert!(failed_image_submission(&mut app).is_empty());
+    assert!(matches!(
+        failed_image_submission(&mut app).as_slice(),
+        [Effect::QueryInputAdmissionStatus { prompt_id, .. }] if prompt_id == "failed-image"
+    ));
     let agent = &app.agents[&AgentId(0)];
     assert!(agent.prompt.text().starts_with("describe [Image #1]"));
     assert_eq!(agent.prompt.images.len(), 1);
@@ -45,9 +51,11 @@ fn failed_image_admission_restores_structured_draft_for_explicit_retry() {
     );
     let text = agent.prompt.text().to_owned();
     let effects = dispatch(Action::SendPrompt(text), &mut app);
-    assert!(
-        matches!(effects.as_slice(), [Effect::SendPromptBlocks { images, .. }] if images.len() == 1)
-    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SendPromptBlocks { images, prompt_id, .. }]
+            if images.len() == 1 && prompt_id == "failed-image"
+    ));
 }
 
 #[test]
@@ -58,7 +66,10 @@ fn failed_image_admission_preserves_newer_draft_and_holds_retry() {
         .unwrap()
         .prompt
         .set_text("new draft");
-    assert!(failed_image_submission(&mut app).is_empty());
+    assert!(matches!(
+        failed_image_submission(&mut app).as_slice(),
+        [Effect::QueryInputAdmissionStatus { .. }]
+    ));
     let agent = &app.agents[&AgentId(0)];
     assert_eq!(agent.prompt.text(), "new draft");
     let queued = agent.session.pending_prompts.front().unwrap();
@@ -69,6 +80,46 @@ fn failed_image_admission_preserves_newer_draft_and_holds_retry() {
         dispatch(Action::DrainQueue, &mut app).is_empty(),
         "failed input must not loop automatically"
     );
+}
+
+#[test]
+fn confirmed_admission_keeps_draft_and_prevents_duplicate_send() {
+    let mut app = test_app_with_agent();
+    let effects = failed_image_submission(&mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::QueryInputAdmissionStatus { .. }]
+    ));
+    let session_id = app.agents[&AgentId(0)].session.session_id.clone().unwrap();
+    dispatch(
+        Action::TaskComplete(TaskResult::InputAdmissionStatusResolved {
+            agent_id: AgentId(0),
+            session_id: session_id.clone(),
+            binding_epoch: app.agents[&AgentId(0)].session_binding_epoch,
+            prompt_id: "failed-image".into(),
+            response_session_id: Some(session_id.0.to_string()),
+            response_prompt_id: Some("failed-image".into()),
+            response_source: Some("durable".into()),
+            status: Ok(crate::app::actions::InputAdmissionStatusWire::Allowed {
+                route: chat_state::InputRoute::Fifo,
+            }),
+        }),
+        &mut app,
+    );
+    let text = app.agents[&AgentId(0)].prompt.text().to_owned();
+    assert!(dispatch(Action::SendPrompt(text), &mut app).is_empty());
+    assert!(
+        app.agents[&AgentId(0)]
+            .prompt
+            .text()
+            .starts_with("describe [Image #1]")
+    );
+    let edited = format!("{} please", app.agents[&AgentId(0)].prompt.text());
+    let effects = dispatch(Action::SendPrompt(edited), &mut app);
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SendPromptBlocks { prompt_id, .. }] if prompt_id != "failed-image"
+    ));
 }
 
 #[test]
@@ -90,19 +141,23 @@ fn failed_image_interjection_keeps_attachments_and_requires_review() {
         data: vec![1, 2, 3],
         mime_type: "image/png".into(),
     });
-    assert!(
-        dispatch(
-            Action::TaskComplete(TaskResult::InterjectFailed {
-                agent_id: AgentId(0),
-                error: "admission failed".into(),
-                text: "image".into(),
-                blocks: None,
-                images: vec![image],
-            }),
-            &mut app
-        )
-        .is_empty()
+    let effects = dispatch(
+        Action::TaskComplete(TaskResult::InterjectFailed {
+            agent_id: AgentId(0),
+            error: "admission failed".into(),
+            expected_turn_id: "turn-1".into(),
+            interjection_id: "interjection-1".into(),
+            text: "image".into(),
+            blocks: None,
+            images: vec![image],
+        }),
+        &mut app,
     );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::QueryInputAdmissionStatus { prompt_id, .. }]
+            if prompt_id == "interjection-1"
+    ));
     let draft = app.agents[&AgentId(0)]
         .session
         .pending_prompts
@@ -124,6 +179,35 @@ fn failed_image_interjection_keeps_attachments_and_requires_review() {
     assert_eq!(chips.len(), 1);
     assert_eq!(images[0].encoded_bytes.as_deref(), Some(&[1, 2, 3][..]));
     assert!(dispatch(Action::DrainQueue, &mut app).is_empty());
+    let (text, images, expected_turn_id, prompt_id) = {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.state = AgentState::TurnRunning;
+        agent.session.current_prompt_id = Some("newer-turn".into());
+        let row = agent.session.pending_prompts.front().unwrap();
+        (
+            row.text.clone(),
+            row.images.clone(),
+            row.expected_turn_id.clone(),
+            row.prompt_id.clone(),
+        )
+    };
+    let effects = dispatch(
+        Action::SteerPrompt {
+            text,
+            images,
+            expected_turn_id,
+            prompt_id,
+        },
+        &mut app,
+    );
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SendInterject {
+            expected_turn_id,
+            interjection_id,
+            ..
+        }] if expected_turn_id == "turn-1" && interjection_id == "interjection-1"
+    ));
 }
 
 #[test]
@@ -140,6 +224,8 @@ fn steer_targets_the_existing_turn_and_emits_no_new_prompt() {
         Action::SteerPrompt {
             text: "additional evidence".into(),
             images: vec![],
+            expected_turn_id: None,
+            prompt_id: None,
         },
         &mut app,
     );
@@ -162,6 +248,8 @@ fn steer_without_foreground_is_rejected_locally() {
         Action::SteerPrompt {
             text: "late".into(),
             images: vec![],
+            expected_turn_id: None,
+            prompt_id: None,
         },
         &mut app,
     );

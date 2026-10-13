@@ -2321,15 +2321,21 @@ pub(crate) async fn spawn_session_actor(
         sampling_config.clone(),
     );
     let workflow_run_id = startup_hints.workflow_run_id.clone();
+    let control_epoch = uuid::Uuid::now_v7().to_string();
+    let runtime_observation = std::sync::Arc::new(parking_lot::RwLock::new(
+        RuntimeObservationSnapshot::new(session_info.id.clone(), control_epoch.clone()),
+    ));
     let session = Arc::new_cyclic(|weak: &std::sync::Weak<SessionActor>| SessionActor {
         session_info: session_info.clone(),
-        control_epoch: uuid::Uuid::now_v7().to_string(),
+        control_epoch: control_epoch.clone(),
         #[cfg(test)]
         test_session_dir_guard: None,
         session_dir: session_dir.clone(),
         session_directory: session_directory.clone(),
         notification_artifact_gate: TokioMutex::new(()),
+        input_admission_gate: TokioMutex::new(()),
         input_artifact_gate: TokioMutex::new(()),
+        runtime_observation: runtime_observation.clone(),
         auth_method_id,
         model_auth_memo: std::cell::RefCell::new(None),
         state,
@@ -3040,7 +3046,9 @@ pub(crate) async fn spawn_session_actor(
         });
         session.notification_reconciliation_worker.arm(worker);
     }
+    let observation_owner = RuntimeObservationOwnerGuard::new(runtime_observation.clone());
     tokio::task::spawn_local(async move {
+        let _observation_owner = observation_owner;
         ::diagnostics::session_ctx::with_session_ctx(
             diagnostics_ctx,
             run_session(
@@ -3065,6 +3073,7 @@ pub(crate) async fn spawn_session_actor(
             cmd_tx,
             goal_usage_window,
             persistence_tx: persistence.tx.clone(),
+            runtime_observation,
             current_prompt_id,
             pending_interactions,
             info: session_info,

@@ -25,7 +25,7 @@ sampling-types = { path = "../sampling-types" }
 token-estimation = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["full"] }
+tokio = { workspace = true, features = ["full", "test-util"] }
 
 [lints]
 workspace = true

@@ -627,6 +627,12 @@ fn make_test_handle_with_receiver(
         cmd_tx: cmd_tx.clone(),
         goal_usage_window: crate::session::actor::goal_support::GoalUsageWindow::new(cmd_tx, None),
         persistence_tx,
+        runtime_observation: std::sync::Arc::new(parking_lot::RwLock::new(
+            crate::session::actor::RuntimeObservationSnapshot::new(
+                acp::SessionId::new("test"),
+                "test-epoch".to_string(),
+            ),
+        )),
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
         pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
             std::collections::HashMap::new(),
@@ -4010,7 +4016,8 @@ context_window = 128000
             std::fs::write(root.join("test-session-id"), created.session_id.0.as_ref()).unwrap();
             created.session_id
         } else {
-            let sid = acp::SessionId::new(std::fs::read_to_string(root.join("test-session-id")).unwrap());
+            let sid =
+                acp::SessionId::new(std::fs::read_to_string(root.join("test-session-id")).unwrap());
             agent
                 .load_session(acp::LoadSessionRequest::new(sid.clone(), cwd.clone()))
                 .await
@@ -4056,24 +4063,40 @@ context_window = 128000
             usize::from(phase > 0)
         );
         if phase == 1 {
-            let bridge = events.iter().find_map(|event| match &event.kind {
-                chat_state::TimelineEventKind::Observation(observation)
-                    if observation.scope == "model"
-                        && observation.data.as_ref()?.get("reason")?.as_str()
-                            == Some("cold_load_catalog_rebind") =>
-                {
-                    observation.data.as_ref()
-                }
-                _ => None,
-            }).unwrap();
+            let bridge = events
+                .iter()
+                .find_map(|event| match &event.kind {
+                    chat_state::TimelineEventKind::Observation(observation)
+                        if observation.scope == "model"
+                            && observation.data.as_ref()?.get("reason")?.as_str()
+                                == Some("cold_load_catalog_rebind") =>
+                    {
+                        observation.data.as_ref()
+                    }
+                    _ => None,
+                })
+                .unwrap();
             assert_ne!(bridge["from_model_transport"], bridge["to_model_transport"]);
-            assert_eq!(bridge["to_model_transport"], serde_json::to_value(&current_transport).unwrap());
+            assert_eq!(
+                bridge["to_model_transport"],
+                serde_json::to_value(&current_transport).unwrap()
+            );
             agent
                 .load_session(acp::LoadSessionRequest::new(sid.clone(), cwd.clone()))
                 .await
                 .unwrap();
-            let resident = agent.control_session_handle(&sid).unwrap().chat_state_handle.timeline_events().await.unwrap();
-            assert_eq!(resident.len(), events.len(), "resident reconnect must not rebind");
+            let resident = agent
+                .control_session_handle(&sid)
+                .unwrap()
+                .chat_state_handle
+                .timeline_events()
+                .await
+                .unwrap();
+            assert_eq!(
+                resident.len(),
+                events.len(),
+                "resident reconnect must not rebind"
+            );
             let lock = agent.model_reload_lock.lock().await;
             let enqueued = crate::agent::handlers::model_switch::enqueue(
                 &agent,
@@ -4097,9 +4120,8 @@ context_window = 128000
                 id: no_route_sid.clone(),
                 cwd: cwd.to_str().unwrap().to_owned(),
             };
-            let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(
-                root.to_path_buf(),
-            );
+            let storage =
+                crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.to_path_buf());
             storage
                 .init_session_with_summary(
                     &info,
@@ -4108,7 +4130,9 @@ context_window = 128000
                         crate::agent::models::ModelId::new("test/default"),
                     )
                     .unwrap(),
-                    vec![crate::sampling::ConversationItem::system("prior system head")],
+                    vec![crate::sampling::ConversationItem::system(
+                        "prior system head",
+                    )],
                     Default::default(),
                     Vec::new(),
                 )

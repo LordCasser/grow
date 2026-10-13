@@ -497,6 +497,19 @@ impl tool_runtime::Tool for TaskTool {
             forwarder.abort();
         }
         let result = result?;
+        if result.finalization_pending {
+            return Ok(ToolOutput::Text(format!(
+                "Subagent execution has returned, but its durable result or delivery is unconfirmed. subagent_id: {id}. Recovery retains this original child; do not spawn it again. Query this ID to inspect finalization."
+            ).into()));
+        }
+        if result.output_unavailable {
+            return Err(tool_runtime::ToolError::custom(
+                "subagent_output_unavailable",
+                format!(
+                    "Canonical subagent result {id} is confirmed, but its output cannot be verified."
+                ),
+            ));
+        }
 
         // 5b. The await budget expired and the coordinator auto-backgrounded the
         // still-running child — return a task_id to poll, like the background

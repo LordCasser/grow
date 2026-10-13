@@ -215,6 +215,9 @@ pub(super) async fn cancel_and_drain_session_subagents(
                         SubagentCancelOutcome::Cancelled
                         | SubagentCancelOutcome::AlreadyFinished { .. }
                         | SubagentCancelOutcome::NotFound => Ok(()),
+                        SubagentCancelOutcome::Unauthorized => {
+                            Err("Subagent cancellation was not authorized".to_string())
+                        }
                     };
                 }
                 command = cmd_rx.recv() => {
@@ -1497,6 +1500,7 @@ pub(super) async fn run_session(
                         source,
                         source_version,
                         body,
+                        deadline,
                         respond_to,
                     } => {
                         let deferred_subject = match &source {
@@ -1514,7 +1518,7 @@ pub(super) async fn run_session(
                             | chat_state::NotificationSource::WorkflowHandoff { .. } => None,
                         };
                         let admission = session
-                            .receive_notification(source, source_version, body.clone())
+                            .receive_notification_before(source, source_version, body.clone(), deadline)
                             .await;
                         match &admission {
                             Ok(notification_id) => {
@@ -2106,15 +2110,17 @@ pub(super) async fn run_session(
                         by_model,
                         parent_prompt_id,
                         incomplete,
+                        deadline,
                         respond_to,
                     } => {
                         use super::updates::SubagentUsageApply;
                         match session
-                            .record_subagent_usage(
+                            .record_subagent_usage_before(
                                 &subagent_id,
                                 &by_model,
                                 parent_prompt_id.as_deref(),
                                 incomplete,
+                                deadline,
                             )
                             .await
                         {

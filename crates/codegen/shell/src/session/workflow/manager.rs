@@ -2892,6 +2892,121 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn retired_workflow_child_response_cannot_complete_a_later_run() {
+        use tools::implementations::grow_build::task::types::{SubagentEvent, SubagentResult};
+
+        let dir = tempfile::tempdir().unwrap();
+        let (mut manager, mut subagent_rx, _) =
+            test_manager_with_cancels(Some(dir.path().to_path_buf()));
+        let script = r#"let meta = #{ name: "t", description: "d" };
+                      let r = agent("work");
+                      complete(r.output);"#;
+        let (retired_run_id, retired_outcome) = manager
+            .launch(resolve_inline(script.into()).unwrap(), spec())
+            .await
+            .unwrap();
+        let SubagentEvent::Spawn(retired_child) =
+            subagent_rx.recv().await.expect("retired child spawn")
+        else {
+            panic!("expected retired child spawn");
+        };
+        let retired_child_id = retired_child.request.id.clone();
+        let late_response = retired_child.result_tx;
+
+        let terminal = manager.cancel(&retired_run_id).await.unwrap();
+        assert_eq!(terminal.status, WorkflowRunStatus::Cancelled);
+        assert!(matches!(
+            retired_outcome.await.unwrap(),
+            WorkflowOutcome::Cancelled
+        ));
+        assert_eq!(
+            manager.tracker.lock().get(&retired_run_id).unwrap().status,
+            WorkflowRunStatus::Cancelled,
+            "the old execution is terminal before its retained child response is released"
+        );
+
+        let (new_run_id, new_outcome) = manager
+            .launch(resolve_inline(script.into()).unwrap(), spec())
+            .await
+            .unwrap();
+        assert_ne!(new_run_id, retired_run_id);
+        let SubagentEvent::Spawn(new_child) =
+            subagent_rx.recv().await.expect("new run child spawn")
+        else {
+            panic!("expected new run child spawn");
+        };
+        assert_ne!(new_child.request.id, retired_child_id);
+
+        assert!(
+            late_response
+                .send(SubagentResult {
+                    success: true,
+                    output: std::sync::Arc::from("stale retired output"),
+                    subagent_id: retired_child_id.clone(),
+                    child_session_id: retired_child_id,
+                    ..Default::default()
+                })
+                .is_err(),
+            "retirement drops the old result receiver; a late child response cannot be reassigned"
+        );
+        tokio::pin!(new_outcome);
+        assert!(
+            matches!(
+                new_outcome.as_mut().get_mut().try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ),
+            "a late old response must not complete the new Run"
+        );
+        assert!(
+            subagent_rx.try_recv().is_err(),
+            "late completion must not restart the retired workflow operation"
+        );
+
+        let new_child_id = new_child.request.id.clone();
+        new_child
+            .result_tx
+            .send(SubagentResult {
+                success: true,
+                output: std::sync::Arc::from("new run output"),
+                subagent_id: new_child_id.clone(),
+                child_session_id: new_child_id.clone(),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(matches!(
+            new_outcome.await.unwrap(),
+            WorkflowOutcome::Completed { result } if result == serde_json::json!("new run output")
+        ));
+
+        let new_journal = std::fs::read_to_string(
+            dir.path()
+                .join("workflows")
+                .join(&new_run_id)
+                .join("journal.jsonl"),
+        )
+        .unwrap();
+        let entry = serde_json::from_str::<workflow::JournalEntry>(
+            new_journal.lines().last().expect("new run journal entry"),
+        )
+        .unwrap();
+        let agent = serde_json::from_value::<workflow::AgentResult>(entry.result).unwrap();
+        assert_eq!(agent.agent_id, new_child_id);
+        assert_eq!(agent.output, "new run output");
+        assert!(
+            !new_journal.contains("stale retired output"),
+            "a retired child result must not be written to a later Run journal"
+        );
+        assert!(
+            manager.tracker.lock().get(&retired_run_id).is_some(),
+            "late response does not remove the retired run record"
+        );
+        assert_eq!(
+            manager.tracker.lock().get(&retired_run_id).unwrap().status,
+            WorkflowRunStatus::Cancelled
+        );
+    }
+
+    #[tokio::test]
     async fn backgrounded_stub_fails_loudly() {
         use tools::implementations::grow_build::task::types::{SubagentEvent, SubagentResult};
 

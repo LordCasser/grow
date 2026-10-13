@@ -44,10 +44,10 @@ pub use actor::state::{
 };
 pub use commands::{
     ConditionalToolResultOutcome, ImageProjectionReport, ModelMetadata, PruneError, PruneReport,
-    RepairHistoryError, TimelineWriteError,
+    RepairHistoryError, SubmitInputResult, TimelineWriteError,
 };
 pub use events::ChatStateEvent;
-pub use handle::ChatStateHandle;
+pub use handle::{ChatStateHandle, PendingTimelineCommit};
 pub use persistence::{
     MockPersistenceReceiver, MockTimelinePersistence, NullTimelinePersistence, PersistenceRecord,
     TimelinePersistence, persistence_error_is_permanent,

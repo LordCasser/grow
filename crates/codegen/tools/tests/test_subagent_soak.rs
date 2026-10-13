@@ -281,13 +281,12 @@ struct SoakControl {
 }
 
 impl ChildControl for SoakControl {
-    type ProgressFuture = std::future::Ready<SubagentProgress>;
     type SecurityContext = ();
 
     fn security_context(&self) -> Self::SecurityContext {}
 
-    fn progress(&self) -> Self::ProgressFuture {
-        std::future::ready(SubagentProgress::default())
+    fn progress_snapshot(&self) -> Option<SubagentProgress> {
+        Some(SubagentProgress::default())
     }
 
     fn cancel(&self) {
@@ -401,7 +400,10 @@ async fn run_cycle(backend: &ChannelBackend, i: u64) {
 
     let blocking = true;
     let timeout_ms = Some(5_000);
-    let snapshot = backend.query(&bg_id, blocking, timeout_ms).await;
+    let snapshot = backend
+        .query(&bg_id, blocking, timeout_ms)
+        .await
+        .expect("query transport should be available");
     assert!(
         snapshot.is_some(),
         "cycle {i}: completed subagent must be queryable"

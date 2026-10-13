@@ -233,13 +233,27 @@ impl TaskOutputTool {
         } else {
             timeout_ms
         };
-        if let Some(backend) = backend
-            && let Some(snapshot) = backend
+        if let Some(backend) = backend {
+            match backend
                 .backend()
                 .query(task_id, waits, query_timeout_ms)
                 .await
-        {
-            return Ok(format_subagent_snapshot(&snapshot, wait_hint));
+            {
+                Ok(Some(snapshot)) => return Ok(format_subagent_snapshot(&snapshot, wait_hint)),
+                Ok(None) => {}
+                Err(super::task::types::SubagentObservationError::Unauthorized) => {
+                    return Err(tool_runtime::ToolError::custom(
+                        "unauthorized",
+                        "Subagent source access was not authorized",
+                    ));
+                }
+                Err(error) => {
+                    return Ok(TaskOutputOutput::Result(observation_unknown_result(
+                        task_id,
+                        &error.to_string(),
+                    )));
+                }
+            }
         }
 
         // Neither found
@@ -366,6 +380,25 @@ pub(crate) fn not_found_result(task_id: &str) -> TaskOutputResult {
     }
 }
 
+fn observation_unknown_result(task_id: &str, reason: &str) -> TaskOutputResult {
+    TaskOutputResult {
+        task_id: task_id.to_string(),
+        command: format!("[subagent:{task_id}]"),
+        status: "running".to_string(),
+        exit_code: None,
+        started: String::new(),
+        ended: None,
+        duration_secs: 0.0,
+        output: format!(
+            "Could not confirm subagent status ({reason}); its outcome remains unknown."
+        ),
+        output_file: String::new(),
+        truncated: false,
+        truncation_hint: String::new(),
+        raw_output_bytes: 0,
+    }
+}
+
 /// Outcome of resolving all tasks against terminal + subagent coordinator.
 pub(crate) struct ResolveResult {
     pub(crate) results: Vec<TaskOutputResult>,
@@ -399,16 +432,32 @@ pub(crate) async fn resolve_tasks(
             continue;
         }
 
-        if let Some(be) = backend
-            && let Some(snap) = be.backend().query(id, false, None).await
-        {
-            let is_terminal = snap.status.is_terminal();
-            if let TaskOutputOutput::Result(r) = format_subagent_snapshot(&snap, wait_hint) {
-                if !is_terminal {
-                    pending_subagent_ids.push(id.clone());
+        if let Some(be) = backend {
+            match be.backend().query(id, false, None).await {
+                Ok(Some(snap)) => {
+                    let is_terminal = snap.status.is_terminal();
+                    if let TaskOutputOutput::Result(r) = format_subagent_snapshot(&snap, wait_hint)
+                    {
+                        if !is_terminal {
+                            pending_subagent_ids.push(id.clone());
+                        }
+                        results.push(r);
+                        continue;
+                    }
                 }
-                results.push(r);
-                continue;
+                Ok(None) => {}
+                Err(super::task::types::SubagentObservationError::Unauthorized) => {
+                    let mut result =
+                        observation_unknown_result(id, "source access was not authorized");
+                    result.status = "unauthorized".into();
+                    results.push(result);
+                    continue;
+                }
+                Err(error) => {
+                    pending_subagent_ids.push(id.clone());
+                    results.push(observation_unknown_result(id, &error.to_string()));
+                    continue;
+                }
             }
         }
 
@@ -649,6 +698,24 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
                 )),
                 duration_secs: snap.duration_ms as f64 / 1000.0,
                 output: error.clone(),
+                output_file: String::new(),
+                truncated: false,
+                truncation_hint: String::new(),
+                raw_output_bytes,
+            })
+        }
+        SubagentSnapshotStatus::FinalizationPending { .. } => {
+            let output = "Subagent execution ended, but durable result finalization is still pending. Its outcome is not yet confirmed.".to_string();
+            let raw_output_bytes = output.len();
+            TaskOutputOutput::Result(TaskOutputResult {
+                task_id: snap.subagent_id.clone(),
+                command: format!("[subagent:{}] {}", snap.subagent_type, snap.description),
+                status: "finalization_pending".to_string(),
+                exit_code: None,
+                started,
+                ended: None,
+                duration_secs: snap.duration_ms as f64 / 1000.0,
+                output,
                 output_file: String::new(),
                 truncated: false,
                 truncation_hint: String::new(),
@@ -2012,7 +2079,7 @@ mod tests {
             let req = unwrap_query(query_rx.recv().await.unwrap());
             assert_eq!(req.subagent_id, "sub-done");
             req.respond_to
-                .send(Some(SubagentSnapshot {
+                .send(Ok(Some(SubagentSnapshot {
                     subagent_id: "sub-done".to_string(),
                     description: "find files".to_string(),
                     subagent_type: "explore".to_string(),
@@ -2025,7 +2092,7 @@ mod tests {
                     },
                     started_at_epoch_ms: 1_700_000_000_000,
                     duration_ms: 1500,
-                }))
+                })))
                 .unwrap();
         });
 
@@ -2060,7 +2127,7 @@ mod tests {
         let handle = tokio::spawn(async move {
             let req = unwrap_query(query_rx.recv().await.unwrap());
             req.respond_to
-                .send(Some(SubagentSnapshot {
+                .send(Ok(Some(SubagentSnapshot {
                     subagent_id: "sub-run".to_string(),
                     description: "exploring".to_string(),
                     subagent_type: "general-purpose".to_string(),
@@ -2075,7 +2142,7 @@ mod tests {
                     },
                     started_at_epoch_ms: 1_700_000_000_000,
                     duration_ms: 3000,
-                }))
+                })))
                 .unwrap();
         });
 
@@ -2109,7 +2176,7 @@ mod tests {
 
         let handle = tokio::spawn(async move {
             let req = unwrap_query(query_rx.recv().await.unwrap());
-            req.respond_to.send(None).unwrap();
+            req.respond_to.send(Ok(None)).unwrap();
         });
 
         let result = tool_runtime::Tool::run(

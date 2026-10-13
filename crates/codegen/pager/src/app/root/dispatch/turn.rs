@@ -6,7 +6,7 @@ use crate::app::actions::Effect;
 use crate::app::agent_view::ActivePane;
 use crate::app::agent_view::AgentView;
 use crate::app::root::{ActiveView, AppView};
-use crate::app::session::InterruptIntent;
+use crate::app::session::{AgentId, InterruptIntent};
 use crate::views::modal::GoalInterruptChoice;
 use std::time::Instant;
 
@@ -447,62 +447,159 @@ pub(crate) const PROMPT_STATUS_CANCEL_WATCHDOG_DELAY: std::time::Duration =
 pub(crate) const PROMPT_STATUS_RUNNING_WATCHDOG_DELAY: std::time::Duration =
     std::time::Duration::from_secs(30);
 
+/// Bound each watchdog pass so one large app tree cannot enqueue a burst of
+/// status RPCs or repeatedly favor later targets with an expired retry.
+pub(crate) const PROMPT_STATUS_QUERY_BATCH_LIMIT: usize = 4;
+pub(crate) const PROMPT_STATUS_CAPACITY_RETRY_DELAY: std::time::Duration =
+    std::time::Duration::from_millis(250);
+
 pub(crate) fn poll_stalled_prompt_submissions(
     app: &mut AppView,
     now: std::time::Instant,
 ) -> Option<Vec<Effect>> {
-    let stalled_submissions = app
-        .agents
-        .iter()
-        .filter_map(|(id, agent)| {
-            let prompt_id = agent.session.current_prompt_id.as_ref()?;
+    fn collect_stalled(
+        root_id: AgentId,
+        agent: &mut AgentView,
+        now: Instant,
+        out: &mut Vec<(
+            AgentId,
+            acp_transport::protocol::SessionId,
+            u32,
+            Option<String>,
+        )>,
+    ) {
+        if let (Some(prompt_id), Some(session_id)) = (
+            agent.session.current_prompt_id.as_ref(),
+            agent.session.session_id.clone(),
+        ) {
             // One status query in flight per prompt: the response handler
             // clears the marker, re-arming the watchdog for the next window.
-            if agent.session.prompt_status_query_matches(prompt_id) {
-                return None;
-            }
-            let stalled = if agent.session.state.is_turn_submitting() {
-                // Submission is silent client-side (no activity can exist),
-                // so the elapsed window alone decides.
-                agent.session.turn_started_at.is_some_and(|started| {
-                    now.saturating_duration_since(started) >= PROMPT_STATUS_WATCHDOG_DELAY
-                })
-            } else if matches!(
-                agent.session.state,
-                crate::app::session::AgentState::TurnCancelling
-            ) {
-                agent
+            let retry_deferred = agent
+                .session
+                .prompt_status_retry_at
+                .is_some_and(|retry| now < retry);
+            let stalled = !retry_deferred
+                && !agent
                     .session
-                    .last_status_observed_at
-                    .or(agent.session.turn_started_at)
-                    .is_some_and(|observed| {
-                        now.saturating_duration_since(observed)
-                            >= PROMPT_STATUS_CANCEL_WATCHDOG_DELAY
+                    .prompt_status_query_matches_for(Some(prompt_id))
+                && if agent.session.state.is_turn_submitting() {
+                    // Submission is silent client-side (no activity can exist),
+                    // so the elapsed window alone decides.
+                    agent.session.turn_started_at.is_some_and(|started| {
+                        now.saturating_duration_since(started) >= PROMPT_STATUS_WATCHDOG_DELAY
                     })
-            } else if agent.session.state.is_turn_running() {
-                running_turn_stalled(agent, now)
-            } else {
-                false
-            };
+                } else if matches!(
+                    agent.session.state,
+                    crate::app::session::AgentState::TurnCancelling
+                ) {
+                    agent
+                        .session
+                        .last_status_observed_at
+                        .or(agent.session.turn_started_at)
+                        .is_some_and(|observed| {
+                            now.saturating_duration_since(observed)
+                                >= PROMPT_STATUS_CANCEL_WATCHDOG_DELAY
+                        })
+                } else if agent.session.state.is_turn_running() {
+                    running_turn_stalled(agent, now)
+                } else {
+                    false
+                };
             if stalled {
-                Some((*id, prompt_id.clone(), agent.session.session_id.clone()?))
-            } else {
-                None
+                let prompt_id = Some(prompt_id.clone());
+                if out.len() >= PROMPT_STATUS_QUERY_BATCH_LIMIT
+                    || !crate::app::root::effects::status_rpc_capacity_available()
+                    || crate::app::root::effects::prompt_status_rpc_in_flight(
+                        session_id.0.as_ref(),
+                        prompt_id.as_deref(),
+                    )
+                {
+                    agent.session.prompt_status_retry_at =
+                        now.checked_add(PROMPT_STATUS_CAPACITY_RETRY_DELAY);
+                } else {
+                    out.push((root_id, session_id, agent.session_binding_epoch, prompt_id));
+                }
             }
-        })
-        .collect::<Vec<_>>();
+        } else if agent.is_subagent_view
+            && agent.session.current_prompt_id.is_none()
+            && agent.session.session_id.is_some()
+            && (agent.session.state.is_turn_submitting()
+                || agent.session.state.is_turn_running()
+                || matches!(
+                    agent.session.state,
+                    crate::app::session::AgentState::TurnCancelling
+                ))
+        {
+            let retry_deferred = agent
+                .session
+                .prompt_status_retry_at
+                .is_some_and(|retry| now < retry);
+            let stalled = !retry_deferred
+                && !agent.session.prompt_status_query_matches_for(None)
+                && if agent.session.state.is_turn_submitting() {
+                    agent.session.turn_started_at.is_some_and(|started| {
+                        now.saturating_duration_since(started) >= PROMPT_STATUS_WATCHDOG_DELAY
+                    })
+                } else if matches!(
+                    agent.session.state,
+                    crate::app::session::AgentState::TurnCancelling
+                ) {
+                    agent
+                        .session
+                        .last_status_observed_at
+                        .or(agent.session.turn_started_at)
+                        .is_some_and(|observed| {
+                            now.saturating_duration_since(observed)
+                                >= PROMPT_STATUS_CANCEL_WATCHDOG_DELAY
+                        })
+                } else {
+                    running_turn_stalled(agent, now)
+                };
+            if stalled {
+                let session_id = agent.session.session_id.clone().expect("checked above");
+                if out.len() >= PROMPT_STATUS_QUERY_BATCH_LIMIT
+                    || !crate::app::root::effects::status_rpc_capacity_available()
+                    || crate::app::root::effects::prompt_status_rpc_in_flight(
+                        session_id.0.as_ref(),
+                        None,
+                    )
+                {
+                    agent.session.prompt_status_retry_at =
+                        now.checked_add(PROMPT_STATUS_CAPACITY_RETRY_DELAY);
+                } else {
+                    out.push((root_id, session_id, agent.session_binding_epoch, None));
+                }
+            }
+        }
+        for child in agent.subagent_views.values_mut() {
+            collect_stalled(root_id, child, now, out);
+        }
+    }
+
+    let mut stalled_submissions = Vec::new();
+    for (root_id, agent) in &mut app.agents {
+        collect_stalled(*root_id, agent, now, &mut stalled_submissions);
+    }
     if stalled_submissions.is_empty() {
         return None;
     }
 
     let mut effects = Vec::new();
-    for (agent_id, prompt_id, session_id) in stalled_submissions {
-        if let Some(agent) = app.agents.get_mut(&agent_id) {
-            agent.session.begin_prompt_status_query(prompt_id.clone());
-        }
+    for (agent_id, session_id, binding_epoch, prompt_id) in stalled_submissions {
+        let Some(agent) =
+            super::ctx::find_agent_view_by_session_id(&mut app.agents, session_id.0.as_ref())
+        else {
+            continue;
+        };
+        let query_generation = match prompt_id.as_deref() {
+            Some(prompt_id) => agent.session.begin_prompt_status_query(prompt_id),
+            None => agent.session.begin_lifecycle_status_query(),
+        };
         effects.push(Effect::QueryPromptStatus {
             agent_id,
             session_id,
+            binding_epoch,
+            query_generation,
             prompt_id,
         });
     }
@@ -544,18 +641,22 @@ fn running_turn_stalled(agent: &AgentView, now: std::time::Instant) -> bool {
 
 /// Earliest lifecycle reconciliation deadline across every local agent.
 pub(crate) fn next_prompt_watchdog_deadline(app: &AppView) -> Option<std::time::Instant> {
-    app.agents
-        .values()
-        .filter_map(|agent| {
-            let prompt_id = agent.session.current_prompt_id.as_deref()?;
-            if agent.session.prompt_status_query_matches(prompt_id) {
+    fn view_deadline(agent: &AgentView) -> Option<Instant> {
+        let own = (|| {
+            let prompt_id = agent.session.current_prompt_id.as_deref();
+            if prompt_id.is_none() && !agent.is_subagent_view {
                 return None;
             }
+            if agent.session.prompt_status_query_matches_for(prompt_id) {
+                return None;
+            }
+            let retry_at = agent.session.prompt_status_retry_at;
             if agent.session.state.is_turn_submitting() {
                 return agent
                     .session
                     .turn_started_at?
-                    .checked_add(PROMPT_STATUS_WATCHDOG_DELAY);
+                    .checked_add(PROMPT_STATUS_WATCHDOG_DELAY)
+                    .map(|deadline| retry_at.map_or(deadline, |retry| deadline.max(retry)));
             }
             if matches!(
                 agent.session.state,
@@ -565,7 +666,8 @@ pub(crate) fn next_prompt_watchdog_deadline(app: &AppView) -> Option<std::time::
                     .session
                     .last_status_observed_at
                     .or(agent.session.turn_started_at)?
-                    .checked_add(PROMPT_STATUS_CANCEL_WATCHDOG_DELAY);
+                    .checked_add(PROMPT_STATUS_CANCEL_WATCHDOG_DELAY)
+                    .map(|deadline| retry_at.map_or(deadline, |retry| deadline.max(retry)));
             }
             if !agent.session.state.is_turn_running() {
                 return None;
@@ -579,8 +681,16 @@ pub(crate) fn next_prompt_watchdog_deadline(app: &AppView) -> Option<std::time::
             .flatten()
             .max()?
             .checked_add(PROMPT_STATUS_RUNNING_WATCHDOG_DELAY)
-        })
-        .min()
+            .map(|deadline| retry_at.map_or(deadline, |retry| deadline.max(retry)))
+        })();
+        agent
+            .subagent_views
+            .values()
+            .filter_map(|view| view_deadline(view))
+            .chain(own)
+            .min()
+    }
+    app.agents.values().filter_map(view_deadline).min()
 }
 
 pub(super) fn dispatch_cancel_scheduled_task(app: &mut AppView, task_id: String) -> Vec<Effect> {

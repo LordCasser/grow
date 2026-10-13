@@ -230,6 +230,7 @@ impl SessionActor {
         };
 
         if entered_settling {
+            self.runtime_observation.write().settling(&prompt_id);
             self.send_available_commands_update().await;
         }
 
@@ -287,6 +288,9 @@ impl SessionActor {
         self.flush_pending_system_reminders().await;
 
         if !project_terminal {
+            self.runtime_observation
+                .write()
+                .unavailable("timeline writer failed; execution settlement is unconfirmed");
             return;
         }
         let emit_terminal = !matches!(
@@ -365,6 +369,11 @@ impl SessionActor {
         cancel_trigger: Option<&str>,
     ) {
         let (stop_reason, agent_result) = crate::sampling::error::prompt_complete_fields(mapped);
+        self.runtime_observation.write().terminal(
+            &prompt_id,
+            stop_reason.as_str().unwrap_or("error").to_owned(),
+            agent_result.as_str().map(str::to_owned),
+        );
         self.state.lock().await.record_recent_terminal(
             crate::session::prompt_queue::RecentPromptTerminal {
                 prompt_id: prompt_id.clone(),

@@ -80,6 +80,13 @@ pub enum WaitingReason {
     },
     /// Explicit sleep / await (`Await` / `Sleep …`).
     Sleep,
+    /// The work completed but the shell is still committing its terminal result.
+    Settling,
+    /// A status query could not confirm the target's current state.
+    ObservationUnknown,
+    /// A terminal result exists, but this view cannot safely finalize without
+    /// the exact prompt identity or delivery confirmation.
+    DeliveryPending,
 }
 /// Max chars for wait/tool *description* subjects in status UI (matches
 /// tool-title truncation in `format_activity_label`).
@@ -132,6 +139,9 @@ impl WaitingReason {
             } => format_waiting_for_subject(subject),
             Self::TaskOutput { .. } => "Waiting on task output…".to_string(),
             Self::Sleep => "Sleeping…".to_string(),
+            Self::Settling => "Finalizing result…".to_string(),
+            Self::ObservationUnknown => "Status unconfirmed…".to_string(),
+            Self::DeliveryPending => "Result committed; delivery pending…".to_string(),
         }
     }
     /// Short, stable snake_case label for diagnostics / phase-transition logs.
@@ -142,6 +152,9 @@ impl WaitingReason {
             Self::Subagent => "waiting_subagent",
             Self::TaskOutput { .. } => "waiting_task_output",
             Self::Sleep => "waiting_sleep",
+            Self::Settling => "finalizing_result",
+            Self::ObservationUnknown => "status_unconfirmed",
+            Self::DeliveryPending => "delivery_pending",
         }
     }
 }
@@ -498,6 +511,9 @@ impl AcpUpdateTracker {
                 WaitingReason::Subagent => 2,
                 WaitingReason::Model => 3,
                 WaitingReason::AgentSwitch => 4,
+                WaitingReason::Settling => 5,
+                WaitingReason::ObservationUnknown => 6,
+                WaitingReason::DeliveryPending => 7,
             })
             .map(|w| w.reason.clone())
     }

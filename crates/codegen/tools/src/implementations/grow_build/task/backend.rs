@@ -9,15 +9,17 @@
 //! the child runner plugged into that actor differs by host.
 
 use std::sync::Arc;
+use std::sync::OnceLock;
 
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Semaphore, mpsc, oneshot};
 
 use super::types::{
     SpawnedSubagentRef, SubagentCancelOutcome, SubagentCancelRequest, SubagentCancelTarget,
     SubagentEvent, SubagentInspectRequest, SubagentInspection, SubagentListRunningRequest,
-    SubagentQueryRequest, SubagentRegistryCounts, SubagentRegistryCountsRequest, SubagentRequest,
-    SubagentResult, SubagentSnapshot, SubagentSpawnRequest, SubagentSpawnedRefsRequest,
-    SubagentValidateTypeOutcome, SubagentValidateTypeRequest,
+    SubagentObservationError, SubagentQueryRequest, SubagentRegistryCounts,
+    SubagentRegistryCountsRequest, SubagentRequest, SubagentResult, SubagentSnapshot,
+    SubagentSpawnRequest, SubagentSpawnedRefsRequest, SubagentValidateTypeOutcome,
+    SubagentValidateTypeRequest,
 };
 use crate::register_resource;
 use tool_runtime::ToolError;
@@ -55,10 +57,10 @@ pub trait SubagentBackend: Send + Sync + 'static {
         id: &str,
         block: bool,
         timeout_ms: Option<u64>,
-    ) -> Option<SubagentSnapshot>;
+    ) -> Result<Option<SubagentSnapshot>, SubagentObservationError>;
 
     /// Request cancellation of a subagent by ID.
-    async fn cancel(&self, id: &str) -> SubagentCancelOutcome;
+    async fn cancel(&self, id: &str) -> Result<SubagentCancelOutcome, SubagentObservationError>;
 
     /// Validate a subagent type synchronously before spawning.
     /// Returns `ValidationUnavailable` on channel close / responder drop / timeout.
@@ -67,6 +69,33 @@ pub trait SubagentBackend: Send + Sync + 'static {
         subagent_type: &str,
         parent_session_id: &str,
     ) -> SubagentValidateTypeOutcome;
+}
+
+const OBSERVATION_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+const QUERY_DEADLINE_ALLOWANCE: std::time::Duration = std::time::Duration::from_secs(5);
+const MAX_QUERY_CALLER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+const MAX_CONCURRENT_SUBAGENT_QUERIES: usize = 32;
+
+fn query_semaphore() -> &'static Semaphore {
+    static SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
+    SEMAPHORE.get_or_init(|| Semaphore::new(MAX_CONCURRENT_SUBAGENT_QUERIES))
+}
+
+fn query_deadlines(block: bool, timeout_ms: Option<u64>) -> (std::time::Duration, Option<u64>) {
+    if !block {
+        return (OBSERVATION_DEADLINE, timeout_ms);
+    }
+    let coordinator_wait_ms = timeout_ms
+        .unwrap_or(OBSERVATION_DEADLINE.as_millis() as u64)
+        .min(
+            MAX_QUERY_CALLER_DEADLINE
+                .saturating_sub(QUERY_DEADLINE_ALLOWANCE)
+                .as_millis() as u64,
+        );
+    let total = std::time::Duration::from_millis(coordinator_wait_ms)
+        .saturating_add(QUERY_DEADLINE_ALLOWANCE)
+        .min(MAX_QUERY_CALLER_DEADLINE);
+    (total, Some(coordinator_wait_ms))
 }
 
 /// Resource wrapper injected into every session's `Resources`.
@@ -106,12 +135,18 @@ pub struct ChannelBackend {
 }
 
 impl ChannelBackend {
-    #[cfg(test)]
-    pub fn new(tx: mpsc::UnboundedSender<SubagentEvent>) -> Self {
+    /// Host-only observer after source access has been established from the
+    /// owning session's durable facts. Never inject this into model resources.
+    pub fn for_authorized_observer(tx: mpsc::UnboundedSender<SubagentEvent>) -> Self {
         Self {
             tx,
             parent_session_id: None,
         }
+    }
+
+    #[cfg(test)]
+    pub fn new(tx: mpsc::UnboundedSender<SubagentEvent>) -> Self {
+        Self::for_authorized_observer(tx)
     }
 
     /// Bind model-facing operations to one parent session.
@@ -193,7 +228,15 @@ impl ChannelBackend {
             .is_ok()
     }
 
-    pub async fn inspect(&self, id: &str) -> Option<SubagentInspection> {
+    pub async fn inspect(
+        &self,
+        id: &str,
+    ) -> Result<Option<SubagentInspection>, SubagentObservationError> {
+        let deadline = tokio::time::Instant::now() + OBSERVATION_DEADLINE;
+        let _permit = tokio::time::timeout_at(deadline, query_semaphore().acquire())
+            .await
+            .map_err(|_| SubagentObservationError::TimedOut)?
+            .map_err(|_| SubagentObservationError::Unavailable)?;
         let (respond_to, response_rx) = oneshot::channel();
         self.tx
             .send(SubagentEvent::Inspect(SubagentInspectRequest {
@@ -201,11 +244,23 @@ impl ChannelBackend {
                 parent_session_id: self.parent_session_id(),
                 respond_to,
             }))
-            .ok()?;
-        response_rx.await.ok().flatten()
+            .map_err(|_| SubagentObservationError::Unavailable)?;
+        match tokio::time::timeout_at(deadline, response_rx).await {
+            Err(_) => Err(SubagentObservationError::TimedOut),
+            Ok(Err(_)) => Err(SubagentObservationError::Unavailable),
+            Ok(Ok(result)) => result,
+        }
     }
 
-    pub async fn list_running(&self, parent_session_id: &str) -> Vec<SubagentInspection> {
+    pub async fn list_running(
+        &self,
+        parent_session_id: &str,
+    ) -> Result<Vec<SubagentInspection>, SubagentObservationError> {
+        let deadline = tokio::time::Instant::now() + OBSERVATION_DEADLINE;
+        let _permit = tokio::time::timeout_at(deadline, query_semaphore().acquire())
+            .await
+            .map_err(|_| SubagentObservationError::TimedOut)?
+            .map_err(|_| SubagentObservationError::Unavailable)?;
         let (respond_to, response_rx) = oneshot::channel();
         if self
             .tx
@@ -215,9 +270,13 @@ impl ChannelBackend {
             }))
             .is_err()
         {
-            return Vec::new();
+            return Err(SubagentObservationError::Unavailable);
         }
-        response_rx.await.unwrap_or_default()
+        match tokio::time::timeout_at(deadline, response_rx).await {
+            Err(_) => Err(SubagentObservationError::TimedOut),
+            Ok(Err(_)) => Err(SubagentObservationError::Unavailable),
+            Ok(Ok(result)) => result,
+        }
     }
 
     pub async fn spawned_refs_for_prompt(
@@ -371,22 +430,33 @@ impl SubagentBackend for ChannelBackend {
         id: &str,
         block: bool,
         timeout_ms: Option<u64>,
-    ) -> Option<SubagentSnapshot> {
+    ) -> Result<Option<SubagentSnapshot>, SubagentObservationError> {
+        let (budget, coordinator_timeout_ms) = query_deadlines(block, timeout_ms);
+        let deadline = tokio::time::Instant::now() + budget;
+        let _permit = tokio::time::timeout_at(deadline, query_semaphore().acquire())
+            .await
+            .map_err(|_| SubagentObservationError::TimedOut)?
+            .map_err(|_| SubagentObservationError::Unavailable)?;
         let (respond_to, response_rx) = oneshot::channel();
         let sent = self.tx.send(SubagentEvent::Query(SubagentQueryRequest {
             subagent_id: id.to_string(),
             parent_session_id: self.parent_session_id(),
             block,
-            timeout_ms,
+            timeout_ms: coordinator_timeout_ms,
             respond_to,
         }));
         if sent.is_err() {
-            return None;
+            return Err(SubagentObservationError::Unavailable);
         }
-        response_rx.await.ok().flatten()
+        match tokio::time::timeout_at(deadline, response_rx).await {
+            Err(_) => Err(SubagentObservationError::TimedOut),
+            Ok(Err(_)) => Err(SubagentObservationError::Unavailable),
+            Ok(Ok(result)) => result,
+        }
     }
 
-    async fn cancel(&self, id: &str) -> SubagentCancelOutcome {
+    async fn cancel(&self, id: &str) -> Result<SubagentCancelOutcome, SubagentObservationError> {
+        let deadline = tokio::time::Instant::now() + OBSERVATION_DEADLINE;
         let (respond_to, response_rx) = oneshot::channel();
         let sent = self.tx.send(SubagentEvent::Cancel(SubagentCancelRequest {
             parent_session_id: self.parent_session_id(),
@@ -394,9 +464,16 @@ impl SubagentBackend for ChannelBackend {
             respond_to,
         }));
         if sent.is_err() {
-            return SubagentCancelOutcome::NotFound;
+            return Err(SubagentObservationError::Unavailable);
         }
-        response_rx.await.unwrap_or(SubagentCancelOutcome::NotFound)
+        match tokio::time::timeout_at(deadline, response_rx).await {
+            Err(_) => Err(SubagentObservationError::TimedOut),
+            Ok(Err(_)) => Err(SubagentObservationError::Unavailable),
+            Ok(Ok(SubagentCancelOutcome::Unauthorized)) => {
+                Err(SubagentObservationError::Unauthorized)
+            }
+            Ok(Ok(outcome)) => Ok(outcome),
+        }
     }
 
     async fn validate_type(

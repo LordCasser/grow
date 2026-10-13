@@ -3196,6 +3196,53 @@ fn process_effects(
         resume_local_miss: app.resume_local_miss.clone(),
     };
     for eff in effs {
+        let eff = match eff {
+            Effect::ReadyInputIntent { send } => *send,
+            eff => {
+                if let Some((agent_id, session_id, prompt_id, expected_turn_id)) = eff
+                    .prompt_rpc_identity()
+                    .map(|(agent, session, prompt, route)| {
+                        (
+                            agent,
+                            session.clone(),
+                            prompt.to_owned(),
+                            route.map(str::to_owned),
+                        )
+                    })
+                {
+                    let binding_epoch = app
+                        .agents
+                        .get(&agent_id)
+                        .map(|agent| agent.session_binding_epoch)
+                        .unwrap_or_default();
+                    let checkpoint = app.checkpoint_input_intent(
+                        agent_id,
+                        prompt_id.clone(),
+                        expected_turn_id,
+                        eff.checkpoint_fallback(),
+                    );
+                    tasks.spawn(async move {
+                        let result = match checkpoint {
+                            Ok(done) => done
+                                .await
+                                .map_err(|error| error.to_string())
+                                .and_then(|result| result.map_err(|error| error.to_string())),
+                            Err(error) => Err(error.to_string()),
+                        };
+                        TaskResult::InputIntentCheckpointed {
+                            agent_id,
+                            session_id,
+                            binding_epoch,
+                            prompt_id,
+                            send: Box::new(eff),
+                            result,
+                        }
+                    });
+                    continue;
+                }
+                eff
+            }
+        };
         // From this point every ACP prompt variant belongs to the request
         // lifecycle, not to the Pager's unsent-draft recovery domain.
         app.transfer_local_draft_ownership(&eff);

@@ -612,6 +612,14 @@ fn usage_from_timeline(
     ))
 }
 
+/// The same accounting fold used by actor restoration, available to recovery
+/// without constructing a sampler or activating a session.
+pub fn project_timeline_usage(
+    timeline: &Timeline,
+) -> Result<UsageLedger, crate::TimelineWriteError> {
+    usage_from_timeline(timeline).map(|(_, _, _, _, ledger)| ledger)
+}
+
 #[derive(Debug, Clone)]
 struct NativeSpanRecord {
     surface_ids: Vec<SurfaceId>,

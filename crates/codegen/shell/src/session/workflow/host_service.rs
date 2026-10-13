@@ -597,6 +597,12 @@ impl HostService {
                     }
                 }
             };
+            if result.finalization_pending || result.output_unavailable {
+                row.finish("failed", total_tokens, total_duration);
+                return Err(HostError::Failed(format!(
+                    "workflow operation {child_id} remains bound to its original child; durable finalization or output is unavailable; reconcile before resume"
+                )));
+            }
             total_tokens = total_tokens.saturating_add(result.total_tokens_used);
             total_duration += result.duration_ms;
             if self.params.cancel.is_cancelled() {
@@ -1063,6 +1069,173 @@ mod tests {
         drop(host_tx);
         cancel.cancel();
         let _ = tokio::time::timeout(Duration::from_secs(2), handle).await;
+    }
+
+    #[tokio::test]
+    async fn unconfirmed_child_results_fail_the_original_workflow_operation_without_retrying() {
+        let run_id = "wf_unconfirmed_child".to_string();
+        let mut initial_tracker = WorkflowTracker::default();
+        initial_tracker.start_run(
+            run_id.clone(),
+            "demo".into(),
+            "objective".into(),
+            vec![],
+            None,
+            None,
+            crate::session::workflow::tracker::test_runtime_route(),
+        );
+        let tracker = Arc::new(parking_lot::Mutex::new(initial_tracker));
+        let (persist_tx, _persist_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+        let store = WorkflowRunStore::new(None, persist_tx.clone());
+        let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+        let notify = WorkflowNotifySender::new(
+            agent_client_protocol::schema::v1::SessionId::new("test-session"),
+            acp_transport::AcpAgentGatewaySender::new(gateway_tx),
+            persist_tx,
+            sampler::PreviewEventBudget::default(),
+            Arc::new(parking_lot::Mutex::new(None)),
+            store.clone(),
+        );
+        let (subagent_tx, mut subagent_rx) = mpsc::unbounded_channel();
+        let cancel = CancellationToken::new();
+        let params = WorkflowHostParams {
+            run_id: run_id.clone(),
+            cwd: std::env::temp_dir(),
+            scratch_directory: scratch_directory(),
+            tracker: tracker.clone(),
+            store,
+            notify,
+            subagent_event_tx: subagent_tx,
+            parent_session_id: "parent".into(),
+            parent_timeline: None,
+            allow_fork_context: false,
+            templates: Default::default(),
+            diagnostics: Arc::new(|_, _, _| {}),
+            cancel: cancel.clone(),
+            max_concurrency: 1,
+            runtime_route: crate::session::workflow::tracker::test_runtime_route(),
+        };
+        let service = Arc::new(HostService {
+            active_agents: AtomicU32::new(0),
+            agent_runs: AtomicU32::new(0),
+            script_diagnostics_events: AtomicU32::new(0),
+            scratch_io: tokio::sync::Mutex::new(()),
+            agent_slots: tokio::sync::Semaphore::new(1),
+            params,
+        });
+
+        for (operation_id, finalization_pending, output_unavailable) in [
+            ("pending-child", true, false),
+            ("unavailable-output", false, true),
+        ] {
+            let service_for_call = service.clone();
+            let operation = tokio::spawn(async move {
+                service_for_call
+                    .spawn_agent(
+                        operation_id.into(),
+                        AgentOpts {
+                            prompt: "return an object".into(),
+                            output_schema: Some(serde_json::json!({"type": "object"})),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+            });
+
+            let SubagentEvent::Spawn(spawn) =
+                tokio::time::timeout(Duration::from_secs(1), subagent_rx.recv())
+                    .await
+                    .expect("workflow operation should dispatch its child")
+                    .expect("subagent event channel remains open")
+            else {
+                panic!("expected one child spawn for the workflow operation")
+            };
+            assert_eq!(spawn.request.id, operation_id);
+            spawn
+                .result_tx
+                .send(
+                    tools::implementations::grow_build::task::types::SubagentResult {
+                        success: true,
+                        finalization_pending,
+                        output_unavailable,
+                        output: Arc::from("not the workflow value"),
+                        subagent_id: spawn.request.id.clone(),
+                        child_session_id: spawn.request.id.clone(),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+
+            let error = tokio::time::timeout(Duration::from_secs(1), operation)
+                .await
+                .expect("unconfirmed result must release the operation caller")
+                .unwrap()
+                .expect_err("an unconfirmed child cannot produce a workflow value");
+            assert!(
+                matches!(error, HostError::Failed(ref message)
+                    if message.contains(operation_id)
+                        && message.contains("reconcile before resume")),
+                "unexpected unconfirmed child result: {error:?}"
+            );
+            assert_eq!(
+                service.active_agents.load(Ordering::Relaxed),
+                0,
+                "unconfirmed child completion releases the active-agent count"
+            );
+            let row = tracker
+                .lock()
+                .get(&run_id)
+                .unwrap()
+                .agents
+                .into_iter()
+                .find(|row| row.agent_id == operation_id)
+                .expect("the roster row retains the original child identity");
+            assert_eq!(row.state, "failed");
+            assert!(
+                tokio::time::timeout(Duration::from_millis(50), subagent_rx.recv())
+                    .await
+                    .is_err(),
+                "invalid schema output must not start a contract-correction child"
+            );
+        }
+
+        // The next independent operation acquires the only slot, proving the
+        // failed unconfirmed child returned its active permit.
+        let service_for_next = service.clone();
+        let next_operation = tokio::spawn(async move {
+            service_for_next
+                .spawn_agent(
+                    "after-unconfirmed".into(),
+                    AgentOpts {
+                        prompt: "next operation".into(),
+                        ..Default::default()
+                    },
+                )
+                .await
+        });
+        let SubagentEvent::Spawn(next) =
+            tokio::time::timeout(Duration::from_secs(1), subagent_rx.recv())
+                .await
+                .expect("a new operation can acquire the released permit")
+                .expect("subagent event channel remains open")
+        else {
+            panic!("expected the independent child spawn")
+        };
+        assert_eq!(next.request.id, "after-unconfirmed");
+        next.result_tx
+            .send(
+                tools::implementations::grow_build::task::types::SubagentResult {
+                    success: true,
+                    output: Arc::from("done"),
+                    subagent_id: next.request.id.clone(),
+                    child_session_id: next.request.id.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        assert!(next_operation.await.unwrap().is_ok());
+        assert_eq!(service.active_agents.load(Ordering::Relaxed), 0);
+        cancel.cancel();
     }
 
     #[tokio::test]

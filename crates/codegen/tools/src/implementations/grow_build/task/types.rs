@@ -238,6 +238,10 @@ pub fn is_valid_resume_id(s: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct SubagentResult {
     pub success: bool,
+    /// Execution returned; its durable result/delivery remains unconfirmed.
+    /// The original execution outcome is preserved independently.
+    pub finalization_pending: bool,
+    pub output_unavailable: bool,
     /// The subagent's final output text.
     ///
     /// Stored as `Arc<str>` so cloning into completion payloads, snapshot
@@ -273,6 +277,8 @@ impl Default for SubagentResult {
     fn default() -> Self {
         Self {
             success: false,
+            finalization_pending: false,
+            output_unavailable: false,
             output: Arc::from(""),
             error: None,
             cancelled: false,
@@ -294,7 +300,11 @@ impl Default for SubagentResult {
 impl SubagentResult {
     /// Terminal status string: `"cancelled"`, `"completed"`, or `"failed"`.
     pub fn status(&self) -> &'static str {
-        if self.cancelled {
+        if self.finalization_pending {
+            "finalization_pending"
+        } else if self.output_unavailable {
+            "output_unavailable"
+        } else if self.cancelled {
             "cancelled"
         } else if self.success {
             "completed"
@@ -320,7 +330,21 @@ pub struct SubagentQueryRequest {
     pub timeout_ms: Option<u64>,
     /// Oneshot for the coordinator to send back the snapshot.
     #[educe(Debug(ignore))]
-    pub respond_to: oneshot::Sender<Option<SubagentSnapshot>>,
+    pub respond_to: oneshot::Sender<Result<Option<SubagentSnapshot>, SubagentObservationError>>,
+}
+
+/// Why a subagent snapshot could not be confirmed. `Ok(None)` remains an
+/// authoritative absence; transport or evidence failures are never absence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum SubagentObservationError {
+    #[error("subagent observation is unavailable")]
+    Unavailable,
+    #[error("subagent observation timed out")]
+    TimedOut,
+    #[error("subagent lifecycle evidence is invalid or unavailable")]
+    InvalidEvidence,
+    #[error("subagent is outside the caller's authorized scope")]
+    Unauthorized,
 }
 
 #[derive(Educe)]
@@ -369,12 +393,17 @@ impl SubagentSnapshot {
 /// Status of a subagent snapshot.
 #[derive(Debug, Clone)]
 pub enum SubagentSnapshotStatus {
+    /// Execution is over; the coordinator owns the uncommitted prefix.
+    FinalizationPending {
+        outcome: String,
+        error: Option<String>,
+    },
     /// Subagent is being set up (creating worktree, resolving config, spawning
     /// session). Queries during this phase should report the subagent as
     /// initializing rather than "not found".
     Initializing,
-    /// Child session is still running. Fields are populated from the child
-    /// session's `SessionSignals` snapshot at query time (pull-based).
+    /// Child session is still running. Fields come from the latest shared
+    /// `SessionSignals` sample; they may lag the child by one sampling interval.
     Running {
         /// Number of completed turns so far.
         turn_count: u32,
@@ -463,6 +492,7 @@ pub enum SubagentCancelOutcome {
     Cancelled,
     AlreadyFinished { status: String },
     NotFound,
+    Unauthorized,
 }
 
 /// Model-facing projection of one completed subagent. The shell serializes it
@@ -545,7 +575,7 @@ pub struct SubagentInspectRequest {
     pub subagent_id: String,
     pub parent_session_id: Option<String>,
     #[educe(Debug(ignore))]
-    pub respond_to: oneshot::Sender<Option<SubagentInspection>>,
+    pub respond_to: oneshot::Sender<Result<Option<SubagentInspection>, SubagentObservationError>>,
 }
 
 /// Request for all running children owned by one parent session.
@@ -554,7 +584,7 @@ pub struct SubagentInspectRequest {
 pub struct SubagentListRunningRequest {
     pub parent_session_id: String,
     #[educe(Debug(ignore))]
-    pub respond_to: oneshot::Sender<Vec<SubagentInspection>>,
+    pub respond_to: oneshot::Sender<Result<Vec<SubagentInspection>, SubagentObservationError>>,
 }
 
 /// Fork/resume provenance retained by the shared coordinator.

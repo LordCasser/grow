@@ -386,6 +386,8 @@ struct RetainedResources {
     dispatch_lock: Option<std::rc::Rc<tokio::sync::Mutex<()>>>,
 }
 pub struct MvpAgent {
+    /// Manager-local admission barrier for durable storage failures.
+    pub(crate) storage_admission: std::sync::Arc<crate::session::storage_admission::StorageAdmission>,
     /// LEADER-SAFE(per-session). Removed by `remove_session` / `sweep_dead_sessions`.
     pub(crate) sessions: RefCell<HashMap<acp::SessionId, SessionHandle>>,
     /// Live child actors addressable by session-scoped control APIs. Kept

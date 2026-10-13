@@ -114,7 +114,7 @@ async fn channel_backend_query_found() {
         assert!(req.block);
         assert_eq!(req.timeout_ms, Some(5000));
         req.respond_to
-            .send(Some(SubagentSnapshot {
+            .send(Ok(Some(SubagentSnapshot {
                 subagent_id: "sub-1".to_string(),
                 description: "find bugs".to_string(),
                 subagent_type: "explore".to_string(),
@@ -127,11 +127,11 @@ async fn channel_backend_query_found() {
                 },
                 started_at_epoch_ms: 1000,
                 duration_ms: 200,
-            }))
+            })))
             .unwrap();
     });
 
-    let snap = backend.query("sub-1", true, Some(5000)).await;
+    let snap = backend.query("sub-1", true, Some(5000)).await.unwrap();
     let snap = snap.expect("snapshot should be present");
     assert_eq!(snap.subagent_id, "sub-1");
     assert_eq!(snap.description, "find bugs");
@@ -168,11 +168,11 @@ async fn channel_backend_query_non_blocking_passes_through() {
         assert_eq!(req.subagent_id, "sub-nb");
         assert!(!req.block, "block should be false");
         assert_eq!(req.timeout_ms, None, "timeout_ms should be None");
-        req.respond_to.send(None).unwrap();
+        req.respond_to.send(Ok(None)).unwrap();
     });
 
     let snap = backend.query("sub-nb", false, None).await;
-    assert!(snap.is_none());
+    assert!(snap.unwrap().is_none());
 
     handle.await.unwrap();
 }
@@ -184,12 +184,42 @@ async fn channel_backend_query_not_found() {
 
     let handle = tokio::spawn(async move {
         let req = recv_event!(rx, Query);
-        req.respond_to.send(None).unwrap();
+        req.respond_to.send(Ok(None)).unwrap();
     });
 
     let snap = backend.query("nonexistent", false, None).await;
-    assert!(snap.is_none());
+    assert!(snap.unwrap().is_none());
 
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn channel_backend_query_live_sender_without_reply_times_out() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<SubagentEvent>();
+    let backend = ChannelBackend::new(tx);
+
+    let handle = tokio::spawn(async move {
+        let _request = recv_event!(rx, Query);
+        tokio::time::sleep(std::time::Duration::from_secs(6)).await;
+    });
+
+    let result = backend.query("silent", false, None).await;
+    assert!(matches!(result, Err(SubagentObservationError::TimedOut)));
+    handle.abort();
+}
+
+#[tokio::test]
+async fn channel_backend_query_dropped_responder_is_unavailable() {
+    let (tx, mut rx) = mpsc::unbounded_channel::<SubagentEvent>();
+    let backend = ChannelBackend::new(tx);
+
+    let handle = tokio::spawn(async move {
+        let request = recv_event!(rx, Query);
+        drop(request.respond_to);
+    });
+
+    let result = backend.query("dropped", false, None).await;
+    assert!(matches!(result, Err(SubagentObservationError::Unavailable)));
     handle.await.unwrap();
 }
 
@@ -210,7 +240,7 @@ async fn channel_backend_cancel_success() {
     });
 
     let outcome = backend.cancel("sub-cancel").await;
-    assert!(matches!(outcome, SubagentCancelOutcome::Cancelled));
+    assert!(matches!(outcome, Ok(SubagentCancelOutcome::Cancelled)));
 
     handle.await.unwrap();
 }
@@ -223,7 +253,10 @@ async fn channel_backend_cancel_closed_channel() {
     let backend = ChannelBackend::new(tx);
 
     let outcome = backend.cancel("sub-cancel").await;
-    assert!(matches!(outcome, SubagentCancelOutcome::NotFound));
+    assert!(matches!(
+        outcome,
+        Err(SubagentObservationError::Unavailable)
+    ));
 }
 
 #[tokio::test]
@@ -318,8 +351,8 @@ async fn channel_backend_query_closed_channel() {
 
     let backend = ChannelBackend::new(tx);
 
-    let snap = backend.query("sub-1", false, None).await;
-    assert!(snap.is_none());
+    let result = backend.query("sub-1", false, None).await;
+    assert!(matches!(result, Err(SubagentObservationError::Unavailable)));
 }
 
 // ── validate_type ────────────────────────────────────────────────

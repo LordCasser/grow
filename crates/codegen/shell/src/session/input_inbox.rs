@@ -23,6 +23,8 @@ const ORPHAN_SWEEP_BATCH_SIZE: usize = 256;
 pub(crate) enum InputPayload<Block = ContentBlock> {
     Prompt {
         prompt_id: String,
+        #[serde(default)]
+        requested_route: InputRequestRoute,
         prompt_blocks: Vec<Block>,
         client_identifier: Option<String>,
         screen_mode: Option<String>,
@@ -32,6 +34,31 @@ pub(crate) enum InputPayload<Block = ContentBlock> {
         turn_kind: crate::session::TurnKind,
         queue: Option<StoredQueueEntry>,
     },
+}
+
+/// Route intent fixed by the first submission, before Hook admission. A steer
+/// target is the caller's original target identity; Timeline records the
+/// resolved durable turn only after the Hook completes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "route", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum InputRequestRoute {
+    Fifo,
+    Steer { expected_turn_id: String },
+}
+
+impl Default for InputRequestRoute {
+    fn default() -> Self {
+        Self::Fifo
+    }
+}
+
+pub(crate) fn input_id_for_prompt(session_id: &str, prompt_id: &str) -> String {
+    let mut hasher = blake3::Hasher::new_derive_key("grow.shell.input-identity.v1");
+    hasher.update(&(session_id.len() as u64).to_le_bytes());
+    hasher.update(session_id.as_bytes());
+    hasher.update(&(prompt_id.len() as u64).to_le_bytes());
+    hasher.update(prompt_id.as_bytes());
+    format!("input-{}", hasher.finalize().to_hex())
 }
 
 // Only this codec knows about references. Runtime callers and Hooks continue
@@ -80,6 +107,7 @@ impl<Block> InputPayload<Block> {
     ) -> io::Result<InputPayload<T>> {
         let Self::Prompt {
             prompt_id,
+            requested_route,
             prompt_blocks,
             client_identifier,
             screen_mode,
@@ -91,6 +119,7 @@ impl<Block> InputPayload<Block> {
         } = self;
         Ok(InputPayload::Prompt {
             prompt_id,
+            requested_route,
             prompt_blocks: prompt_blocks
                 .into_iter()
                 .map(map)
@@ -398,6 +427,15 @@ pub(crate) fn read_payload(
                 })
         }
     })
+}
+
+pub(crate) fn read_prompt_id(
+    session: &crate::session::storage::ContainedDirectory,
+    payload: &chat_state::InputPayloadRef,
+) -> io::Result<String> {
+    let stored = read_manifest(session, payload)?;
+    let InputPayload::Prompt { prompt_id, .. } = stored;
+    Ok(prompt_id)
 }
 
 fn read_image(
@@ -717,9 +755,18 @@ pub(crate) fn remove_payload_hashes(
 pub(crate) mod tests {
     use super::*;
 
-    fn prompt_payload(text: &str) -> InputPayload {
+    #[test]
+    fn prompt_input_identity_is_stable_within_its_session() {
+        let first = input_id_for_prompt("session-a", "prompt-1");
+        assert_eq!(first, input_id_for_prompt("session-a", "prompt-1"));
+        assert_ne!(first, input_id_for_prompt("session-b", "prompt-1"));
+        assert_ne!(first, input_id_for_prompt("session-a", "prompt-2"));
+    }
+
+    pub(crate) fn text_payload(prompt_id: &str, text: &str) -> InputPayload {
         InputPayload::Prompt {
-            prompt_id: "prompt-1".into(),
+            prompt_id: prompt_id.into(),
+            requested_route: InputRequestRoute::Fifo,
             prompt_blocks: vec![agent_client_protocol::schema::v1::ContentBlock::Text(
                 agent_client_protocol::schema::v1::TextContent::new(text),
             )],
@@ -731,6 +778,10 @@ pub(crate) mod tests {
             turn_kind: crate::session::TurnKind::User,
             queue: None,
         }
+    }
+
+    fn prompt_payload(text: &str) -> InputPayload {
+        text_payload("prompt-1", text)
     }
 
     pub(crate) fn image_payload() -> InputPayload {
@@ -748,7 +799,7 @@ pub(crate) mod tests {
         let mut png = std::io::Cursor::new(Vec::new());
         image.write_to(&mut png, image::ImageFormat::Png).unwrap();
         assert!(png.get_ref().len() > 1_237_672);
-        let mut payload = prompt_payload("describe [Image #1]");
+        let mut payload = text_payload("prompt-1", "describe [Image #1]");
         let InputPayload::Prompt {
             prompt_blocks,
             json_schema,
@@ -1192,7 +1243,7 @@ pub(crate) mod tests {
 
     #[test]
     fn structured_hook_prompt_binds_images_verbatim_and_schema() {
-        let mut payload = prompt_payload("describe this");
+        let mut payload = text_payload("prompt-1", "describe this");
         let InputPayload::Prompt {
             prompt_blocks,
             verbatim,

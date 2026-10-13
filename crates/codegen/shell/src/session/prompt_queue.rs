@@ -64,7 +64,18 @@ impl QueueControlResult {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum PromptStatus {
+    /// The session is available, but this prompt id is absent from the
+    /// bounded runtime queue, current turn, and recent terminal index.
     Unknown,
+    /// The shared durable store has no session with this identity.
+    Absent,
+    Unavailable {
+        reason: String,
+    },
+    TimedOut,
+    InvalidEvidence {
+        reason: String,
+    },
     Queued {
         position: usize,
         queue_version: u64,
@@ -72,6 +83,7 @@ pub enum PromptStatus {
     Running {
         turn_start_ms: u64,
     },
+    Settling,
     Terminal {
         stop_reason: String,
         agent_result: Option<String>,

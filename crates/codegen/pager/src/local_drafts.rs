@@ -196,7 +196,18 @@ pub(crate) struct LocalDraftRecord {
     revision: u64,
     composer: Option<DraftPrompt>,
     staged_prompt: Option<DraftPrompt>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    uncertain_submission: Option<UncertainSubmission>,
     deferred_session_mode: Option<tools::types::BehaviorId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct UncertainSubmission {
+    prompt_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expected_turn_id: Option<String>,
+    prompt: DraftPrompt,
 }
 
 impl LocalDraftRecord {
@@ -206,6 +217,7 @@ impl LocalDraftRecord {
             revision,
             composer: None,
             staged_prompt: None,
+            uncertain_submission: None,
             deferred_session_mode: None,
         }
     }
@@ -213,6 +225,7 @@ impl LocalDraftRecord {
     fn has_payload(&self) -> bool {
         self.composer.as_ref().is_some_and(|p| !p.is_empty())
             || self.staged_prompt.as_ref().is_some_and(|p| !p.is_empty())
+            || self.uncertain_submission.is_some()
             || self.deferred_session_mode.is_some()
     }
 }
@@ -581,6 +594,77 @@ impl DraftSubject for DraftSnapshot {
 
 type DraftSnapshotSet = indexmap::IndexMap<AgentId, DraftSnapshot>;
 
+fn strip_transferred_inputs(
+    snapshots: &mut DraftSnapshotSet,
+    transferred: &HashSet<(AgentId, String)>,
+) {
+    for (agent_id, snapshot) in snapshots {
+        let DraftCapture::Record(record) = &mut snapshot.capture else {
+            continue;
+        };
+        if record
+            .uncertain_submission
+            .as_ref()
+            .is_some_and(|intent| transferred.contains(&(*agent_id, intent.prompt_id.clone())))
+        {
+            record.uncertain_submission = None;
+            snapshot.original = DraftCapture::Record(record.clone());
+        }
+    }
+}
+
+fn attach_input_fallback(
+    snapshots: &mut DraftSnapshotSet,
+    agent_id: AgentId,
+    prompt_id: &str,
+    expected_turn_id: Option<&str>,
+    fallback: &(String, bool),
+) -> io::Result<()> {
+    let (text, has_structured_content) = fallback;
+    if *has_structured_content {
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "structured or image interjection content exceeds the local draft snapshot format",
+        ));
+    }
+    let snapshot = snapshots.get_mut(&agent_id).ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            "input owner is absent from draft snapshot",
+        )
+    })?;
+    let DraftCapture::Record(mut record) = snapshot.capture.clone() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "current draft cannot be captured alongside this input",
+        ));
+    };
+    if let Some(existing) = &record.uncertain_submission
+        && existing.prompt_id == prompt_id
+        && existing.expected_turn_id.as_deref() == expected_turn_id
+        && existing.prompt.text == *text
+    {
+        return Ok(());
+    }
+    let prompt = DraftPrompt::from_parts(text, text.len(), &[])?;
+    if record
+        .composer
+        .as_ref()
+        .is_some_and(|composer| composer.text == prompt.text)
+    {
+        record.composer = None;
+    }
+    record.uncertain_submission = Some(UncertainSubmission {
+        prompt_id: prompt_id.to_owned(),
+        expected_turn_id: expected_turn_id.map(str::to_owned),
+        prompt,
+    });
+    let capture = DraftCapture::Record(record);
+    snapshot.original = capture.clone();
+    snapshot.capture = capture;
+    Ok(())
+}
+
 fn draft_key_transition(before: &DraftSnapshotSet, after: &DraftSnapshotSet) -> bool {
     before.iter().any(|(id, old)| {
         after
@@ -604,11 +688,17 @@ enum DraftIoCommand {
     Invalidate {
         agent_id: AgentId,
         session_id: String,
+        prompt_id: String,
+    },
+    DiscardInputIdentity {
+        agent_id: AgentId,
+        prompt_id: String,
     },
     Checkpoint {
         agents: DraftSnapshotSet,
         active: Option<AgentId>,
-        ack: tokio::sync::oneshot::Sender<()>,
+        required_input: Option<(AgentId, String, Option<String>, Option<(String, bool)>)>,
+        ack: tokio::sync::oneshot::Sender<io::Result<()>>,
     },
 }
 
@@ -725,19 +815,36 @@ impl DraftIoWorker {
                         Ok(DraftIoCommand::Invalidate {
                             agent_id,
                             session_id,
+                            prompt_id,
                         }) => {
                             unresolved_restores.remove(&agent_id);
-                            runtime.transfer_prompt_rpc_identity(agent_id, &session_id);
+                            runtime.transfer_prompt_rpc_identity(agent_id, &session_id, &prompt_id);
+                        }
+                        Ok(DraftIoCommand::DiscardInputIdentity {
+                            agent_id,
+                            prompt_id,
+                        }) => {
+                            unresolved_restores.remove(&agent_id);
+                            runtime.discard_input_identity(agent_id, &prompt_id);
                         }
                         Ok(DraftIoCommand::Checkpoint {
                             mut agents,
                             active,
+                            required_input,
                             ack,
                         }) => {
                             restore_unacknowledged_loads(&mut agents, &mut unresolved_restores);
                             runtime.sync_subjects(&mut agents, active, Instant::now());
-                            runtime.flush_all();
-                            let _ = ack.send(());
+                            let result = match required_input {
+                                Some((agent_id, prompt_id, expected_turn_id, _fallback)) => runtime
+                                    .persist_input_checkpoint(
+                                        agent_id,
+                                        &prompt_id,
+                                        expected_turn_id.as_deref(),
+                                    ),
+                                None => runtime.flush_all_checked(),
+                            };
+                            let _ = ack.send(result);
                         }
                         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                             runtime.flush_due(Instant::now());
@@ -838,9 +945,11 @@ impl DraftIoWorker {
         agents: &mut indexmap::IndexMap<AgentId, AgentView>,
         active: Option<AgentId>,
         now: Instant,
+        transferred_input_ids: &HashSet<(AgentId, String)>,
     ) {
         self.poll(agents);
         let mut snapshot = self.snapshot(agents);
+        strip_transferred_inputs(&mut snapshot, transferred_input_ids);
         if let Some((_, prior, _)) = &self.latest {
             for (id, current) in &mut snapshot {
                 if prior
@@ -878,13 +987,14 @@ impl DraftIoWorker {
         }
     }
 
-    fn invalidate(&mut self, agent_id: AgentId, session_id: &str) {
-        *self.ownership_epochs.entry(agent_id).or_default() += 1;
-        self.generation = self.generation.saturating_add(1);
-        self.latest = None;
+    fn invalidate(&mut self, agent_id: AgentId, session_id: &str, prompt_id: &str) {
+        if let Some((_, latest, _)) = &mut self.latest {
+            strip_transferred_inputs(latest, &HashSet::from([(agent_id, prompt_id.to_owned())]));
+        }
         let _ = self.tx.send(DraftIoCommand::Invalidate {
             agent_id,
             session_id: session_id.to_owned(),
+            prompt_id: prompt_id.to_owned(),
         });
     }
 
@@ -892,6 +1002,7 @@ impl DraftIoWorker {
         &mut self,
         agents: &indexmap::IndexMap<AgentId, AgentView>,
         active: Option<AgentId>,
+        filtered_input_ids: &HashSet<(AgentId, String)>,
     ) -> io::Result<()> {
         let (ack, done) = tokio::sync::oneshot::channel();
         if let Some((generation, latest, latest_active)) = &self.latest
@@ -908,10 +1019,13 @@ impl DraftIoWorker {
                 })?;
             self.dispatched_generation = *generation;
         }
+        let mut snapshot = self.snapshot(agents);
+        strip_transferred_inputs(&mut snapshot, filtered_input_ids);
         self.tx
             .send(DraftIoCommand::Checkpoint {
-                agents: self.snapshot(agents),
+                agents: snapshot,
                 active,
+                required_input: None,
                 ack,
             })
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "local draft worker stopped"))?;
@@ -920,7 +1034,54 @@ impl DraftIoWorker {
                 io::ErrorKind::BrokenPipe,
                 "local draft worker stopped before checkpoint",
             )
-        })
+        })?
+    }
+
+    fn checkpoint_input_intent(
+        &mut self,
+        agents: &indexmap::IndexMap<AgentId, AgentView>,
+        active: Option<AgentId>,
+        agent_id: AgentId,
+        prompt_id: String,
+        expected_turn_id: Option<String>,
+        fallback: Option<(String, bool)>,
+        filtered_input_ids: &HashSet<(AgentId, String)>,
+    ) -> io::Result<tokio::sync::oneshot::Receiver<io::Result<()>>> {
+        if let Some((generation, latest, latest_active)) = &self.latest
+            && *generation > self.dispatched_generation
+        {
+            self.tx
+                .send(DraftIoCommand::Boundary {
+                    agents: latest.clone(),
+                    active: *latest_active,
+                    now: Instant::now(),
+                })
+                .map_err(|_| {
+                    io::Error::new(io::ErrorKind::BrokenPipe, "local draft worker stopped")
+                })?;
+            self.dispatched_generation = *generation;
+        }
+        let mut snapshot = self.snapshot(agents);
+        strip_transferred_inputs(&mut snapshot, filtered_input_ids);
+        if let Some(fallback) = fallback.as_ref() {
+            attach_input_fallback(
+                &mut snapshot,
+                agent_id,
+                &prompt_id,
+                expected_turn_id.as_deref(),
+                fallback,
+            )?;
+        }
+        let (ack, done) = tokio::sync::oneshot::channel();
+        self.tx
+            .send(DraftIoCommand::Checkpoint {
+                agents: snapshot,
+                active,
+                required_input: Some((agent_id, prompt_id, expected_turn_id, fallback)),
+                ack,
+            })
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "local draft worker stopped"))?;
+        Ok(done)
     }
 }
 
@@ -944,6 +1105,8 @@ pub(crate) struct LocalDraftRuntime {
     active_key: Option<LocalDraftKey>,
     next_revision: u64,
     worker: Option<DraftIoWorker>,
+    ram_only_input_ids: HashSet<(AgentId, String)>,
+    transferred_input_ids: HashSet<(AgentId, String)>,
 }
 
 impl Default for LocalDraftRuntime {
@@ -963,6 +1126,8 @@ impl Default for LocalDraftRuntime {
             active_key: None,
             next_revision: 0,
             worker,
+            ram_only_input_ids: HashSet::new(),
+            transferred_input_ids: HashSet::new(),
         }
     }
 }
@@ -978,6 +1143,8 @@ impl LocalDraftRuntime {
             active_key: None,
             next_revision: 0,
             worker: None,
+            ram_only_input_ids: HashSet::new(),
+            transferred_input_ids: HashSet::new(),
         }
     }
 
@@ -993,11 +1160,28 @@ impl LocalDraftRuntime {
         active: Option<AgentId>,
         now: Instant,
     ) {
+        let filtered_input_ids = self
+            .transferred_input_ids
+            .union(&self.ram_only_input_ids)
+            .cloned()
+            .collect::<HashSet<_>>();
         if let Some(worker) = &mut self.worker {
-            worker.sync(agents, active, now);
+            worker.sync(agents, active, now, &filtered_input_ids);
             return;
         }
-        self.sync_subjects(agents, active, now);
+        let mut snapshots = agents
+            .iter()
+            .map(|(id, agent)| (*id, DraftSnapshot::from_agent(agent, 0, 0)))
+            .collect::<DraftSnapshotSet>();
+        strip_transferred_inputs(&mut snapshots, &filtered_input_ids);
+        self.sync_subjects(&mut snapshots, active, now);
+        for (id, snapshot) in snapshots {
+            if let Some(record) = snapshot.restored.as_ref()
+                && let Some(agent) = agents.get_mut(&id)
+            {
+                agent.restore_draft(record);
+            }
+        }
     }
 
     fn sync_subjects<S: DraftSubject>(
@@ -1160,16 +1344,40 @@ impl LocalDraftRuntime {
     }
 
     /// Transfers every ACP prompt-RPC variant out of the local recovery
-    /// domain. The Effect classifier is the sole variant list.
+    /// domain by retiring only the checkpointed input identity. The Effect
+    /// classifier is the sole variant list.
     pub(crate) fn transfer_prompt_rpc_ownership(&mut self, effect: &crate::app::actions::Effect) {
-        let Some((agent_id, session_id)) = effect.prompt_rpc_identity() else {
+        let Some((agent_id, session_id, prompt_id, _)) = effect.prompt_rpc_identity() else {
             return;
         };
+        self.transfer_input_identity(agent_id, &session_id.0, prompt_id);
+    }
+
+    pub(crate) fn transfer_input_identity(
+        &mut self,
+        agent_id: AgentId,
+        session_id: &str,
+        prompt_id: &str,
+    ) {
+        self.ram_only_input_ids
+            .remove(&(agent_id, prompt_id.to_owned()));
+        if self.transferred_input_ids.len() >= 256
+            && let Some(oldest) = self.transferred_input_ids.iter().next().cloned()
+        {
+            self.transferred_input_ids.remove(&oldest);
+        }
+        self.transferred_input_ids
+            .insert((agent_id, prompt_id.to_owned()));
         if let Some(worker) = &mut self.worker {
-            worker.invalidate(agent_id, &session_id.0);
+            worker.invalidate(agent_id, session_id, prompt_id);
             return;
         }
-        self.transfer_prompt_rpc_identity(agent_id, &session_id.0);
+        self.transfer_prompt_rpc_identity(agent_id, session_id, prompt_id);
+    }
+
+    pub(crate) fn restore_input_draft_ownership(&mut self, agent_id: AgentId, prompt_id: &str) {
+        self.transferred_input_ids
+            .remove(&(agent_id, prompt_id.to_owned()));
     }
 
     pub(crate) async fn checkpoint(
@@ -1177,29 +1385,183 @@ impl LocalDraftRuntime {
         agents: &indexmap::IndexMap<AgentId, AgentView>,
         active: Option<AgentId>,
     ) -> io::Result<()> {
+        let filtered_input_ids = self
+            .transferred_input_ids
+            .union(&self.ram_only_input_ids)
+            .cloned()
+            .collect::<HashSet<_>>();
         if let Some(worker) = &mut self.worker {
-            worker.checkpoint(agents, active).await
+            worker.checkpoint(agents, active, &filtered_input_ids).await
         } else {
             self.flush_all();
             Ok(())
         }
     }
 
-    fn transfer_prompt_rpc_identity(&mut self, agent_id: AgentId, session_id: &str) {
+    pub(crate) fn checkpoint_input_intent(
+        &mut self,
+        agents: &indexmap::IndexMap<AgentId, AgentView>,
+        active: Option<AgentId>,
+        agent_id: AgentId,
+        prompt_id: String,
+        expected_turn_id: Option<String>,
+        fallback: Option<(String, bool)>,
+    ) -> io::Result<tokio::sync::oneshot::Receiver<io::Result<()>>> {
+        if self
+            .ram_only_input_ids
+            .contains(&(agent_id, prompt_id.clone()))
+        {
+            let (ack, done) = tokio::sync::oneshot::channel();
+            let _ = ack.send(Ok(()));
+            return Ok(done);
+        }
+        let filtered_input_ids = self
+            .transferred_input_ids
+            .union(&self.ram_only_input_ids)
+            .cloned()
+            .collect::<HashSet<_>>();
+        let Some(worker) = &mut self.worker else {
+            let mut snapshots = agents
+                .iter()
+                .map(|(id, agent)| (*id, DraftSnapshot::from_agent(agent, 0, 0)))
+                .collect::<DraftSnapshotSet>();
+            strip_transferred_inputs(&mut snapshots, &filtered_input_ids);
+            if let Some(fallback) = fallback.as_ref() {
+                attach_input_fallback(
+                    &mut snapshots,
+                    agent_id,
+                    &prompt_id,
+                    expected_turn_id.as_deref(),
+                    fallback,
+                )?;
+            }
+            self.sync_subjects(&mut snapshots, active, Instant::now());
+            self.persist_input_checkpoint(agent_id, &prompt_id, expected_turn_id.as_deref())?;
+            let (ack, done) = tokio::sync::oneshot::channel();
+            let _ = ack.send(Ok(()));
+            return Ok(done);
+        };
+        worker.checkpoint_input_intent(
+            agents,
+            active,
+            agent_id,
+            prompt_id,
+            expected_turn_id,
+            fallback,
+            &filtered_input_ids,
+        )
+    }
+
+    pub(crate) fn mark_input_ram_only(&mut self, agent_id: AgentId, prompt_id: String) {
+        if self.ram_only_input_ids.len() >= 256
+            && let Some(oldest) = self.ram_only_input_ids.iter().next().cloned()
+        {
+            self.ram_only_input_ids.remove(&oldest);
+        }
+        self.ram_only_input_ids
+            .insert((agent_id, prompt_id.clone()));
+        if let Some(worker) = &mut self.worker {
+            if let Some((_, latest, _)) = &mut worker.latest {
+                strip_transferred_inputs(latest, &HashSet::from([(agent_id, prompt_id.clone())]));
+            }
+            let _ = worker.tx.send(DraftIoCommand::DiscardInputIdentity {
+                agent_id,
+                prompt_id,
+            });
+        } else {
+            self.discard_input_identity(agent_id, &prompt_id);
+        }
+    }
+
+    fn transfer_prompt_rpc_identity(
+        &mut self,
+        agent_id: AgentId,
+        session_id: &str,
+        prompt_id: &str,
+    ) {
         // Session binding and the event-loop sync are intentionally decoupled.
         // Capture the runtime's current key before disarming: during that
         // window it can still be the canonical-cwd key even though the Effect
         // already carries the newly bound SessionId.
         let current_key = self.keys.get(&agent_id).cloned();
-        let now = Instant::now();
-        if let Some(key) = current_key.as_ref() {
-            self.invalidate_key(key, now);
+        let mut keys = current_key.into_iter().collect::<Vec<_>>();
+        if let Ok(session_key) = LocalDraftKey::session(session_id)
+            && !keys.contains(&session_key)
+        {
+            keys.push(session_key);
         }
-        let Ok(session_key) = LocalDraftKey::session(session_id) else {
+        for key in keys {
+            let mut record = self
+                .tracked
+                .get(&key)
+                .map(|tracked| tracked.record.clone())
+                .or_else(|| self.store.load(&key).ok().flatten());
+            let Some(record) = record.as_mut() else {
+                continue;
+            };
+            if record
+                .uncertain_submission
+                .as_ref()
+                .is_none_or(|intent| intent.prompt_id != prompt_id)
+            {
+                continue;
+            }
+            record.uncertain_submission = None;
+            self.persist_retired_input_record(key, record.clone(), prompt_id);
+        }
+    }
+
+    fn discard_input_identity(&mut self, agent_id: AgentId, prompt_id: &str) {
+        let Some(key) = self.keys.get(&agent_id).cloned() else {
             return;
         };
-        if current_key.as_ref() != Some(&session_key) {
-            self.invalidate_key(&session_key, now);
+        let Some(mut record) = self
+            .tracked
+            .get(&key)
+            .map(|tracked| tracked.record.clone())
+            .or_else(|| self.store.load(&key).ok().flatten())
+        else {
+            return;
+        };
+        if record
+            .uncertain_submission
+            .as_ref()
+            .is_none_or(|intent| intent.prompt_id != prompt_id)
+        {
+            return;
+        }
+        record.uncertain_submission = None;
+        self.persist_retired_input_record(key, record, prompt_id);
+    }
+
+    fn persist_retired_input_record(
+        &mut self,
+        key: LocalDraftKey,
+        record: LocalDraftRecord,
+        prompt_id: &str,
+    ) {
+        let serialized = serde_json::to_vec(&record).unwrap_or_default();
+        self.tracked.insert(
+            key.clone(),
+            TrackedDraft {
+                last_deferred: record.deferred_session_mode,
+                record: record.clone(),
+                serialized,
+                due: Some(Instant::now()),
+            },
+        );
+        match self.store.write(&key, &record) {
+            Ok(()) => {
+                if let Some(tracked) = self.tracked.get_mut(&key) {
+                    tracked.due = None;
+                }
+            }
+            Err(error) => {
+                if let Some(tracked) = self.tracked.get_mut(&key) {
+                    tracked.due = Some(Instant::now() + WRITE_RETRY_BACKOFF);
+                }
+                tracing::warn!(?error, %prompt_id, "failed to clear stale checkpointed local input identity");
+            }
         }
     }
 
@@ -1233,6 +1595,50 @@ impl LocalDraftRuntime {
         for key in self.invalidations.keys().cloned().collect::<Vec<_>>() {
             self.retry_invalidation(&key, now);
         }
+    }
+
+    fn flush_all_checked(&mut self) -> io::Result<()> {
+        let keys = self.tracked.keys().cloned().collect::<Vec<_>>();
+        for key in keys {
+            self.flush_key_checked(&key)?;
+        }
+        Ok(())
+    }
+
+    fn persist_input_checkpoint(
+        &mut self,
+        agent_id: AgentId,
+        prompt_id: &str,
+        expected_turn_id: Option<&str>,
+    ) -> io::Result<()> {
+        let key = self.keys.get(&agent_id).cloned().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "input draft key is unavailable")
+        })?;
+        let tracked = self.tracked.get(&key).ok_or_else(|| {
+            io::Error::new(io::ErrorKind::NotFound, "input intent was not captured")
+        })?;
+        let Some(intent) = &tracked.record.uncertain_submission else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "input intent is absent from the local draft snapshot",
+            ));
+        };
+        if intent.prompt_id != prompt_id || intent.expected_turn_id.as_deref() != expected_turn_id {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "local draft snapshot belongs to a different input identity or route",
+            ));
+        }
+        self.flush_key_checked(&key)
+    }
+
+    fn flush_key_checked(&mut self, key: &LocalDraftKey) -> io::Result<()> {
+        let Some(tracked) = self.tracked.get_mut(key) else {
+            return Ok(());
+        };
+        self.store.write(key, &tracked.record)?;
+        tracked.due = None;
+        Ok(())
     }
 
     fn flush_due(&mut self, now: Instant) {
@@ -1305,6 +1711,32 @@ impl DraftSubject for AgentView {
 
 fn capture_agent(agent: &AgentView, revision: u64) -> io::Result<LocalDraftRecord> {
     let mut record = LocalDraftRecord::empty(revision);
+    let uncertain = agent
+        .session
+        .in_flight_prompt
+        .as_ref()
+        .filter(|prompt| prompt.prompt_id.is_some());
+    let uncertain = uncertain
+        .map(|prompt| {
+            (
+                prompt.prompt_id.as_deref().expect("filtered above"),
+                prompt.expected_turn_id.as_deref(),
+                prompt.text.as_str(),
+                prompt.images.as_slice(),
+                prompt.chip_elements.as_slice(),
+            )
+        })
+        .or_else(|| {
+            agent.session.pending_prompts.iter().find_map(|prompt| {
+                Some((
+                    prompt.prompt_id.as_deref()?,
+                    prompt.expected_turn_id.as_deref(),
+                    prompt.text.as_str(),
+                    prompt.images.as_slice(),
+                    prompt.chip_elements.as_slice(),
+                ))
+            })
+        });
     let stash = normal_stash(agent);
     record.composer = if let Some(stash) = stash {
         if !stash.images.is_empty() || !stash.image_undo_stash.is_empty() {
@@ -1334,8 +1766,33 @@ fn capture_agent(agent: &AgentView, revision: u64) -> io::Result<LocalDraftRecor
     };
     record.composer = record.composer.filter(|p| !p.is_empty());
 
+    if let Some((prompt_id, expected_turn_id, text, images, chips)) = uncertain {
+        if !images.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "uncertain submission contains images outside the local draft budget",
+            ));
+        }
+        let uncertain_prompt = DraftPrompt::from_parts(text, text.len(), chips)?;
+        if record
+            .composer
+            .as_ref()
+            .is_some_and(|composer| composer.text == uncertain_prompt.text)
+        {
+            // The uncertain snapshot is the one durable source for an
+            // unchanged retry. Do not serialize the same prompt twice.
+            record.composer = None;
+        }
+        record.uncertain_submission = Some(UncertainSubmission {
+            prompt_id: prompt_id.to_owned(),
+            expected_turn_id: expected_turn_id.map(str::to_owned),
+            prompt: uncertain_prompt,
+        });
+    }
+
     let mut staged = agent.session.pending_prompts.iter().filter(|prompt| {
         prompt.kind == QueueEntryKind::Prompt
+            && prompt.prompt_id.is_none()
             && prompt.wire_blocks.is_none()
             && !prompt.display_as_skill
             && prompt.combined_texts.is_empty()
@@ -1392,7 +1849,16 @@ fn restore_agent(agent: &mut AgentView, record: &LocalDraftRecord) {
     }
     // A staged prompt never crossed ACP. Put it back in the composer rather
     // than recreating the queue, so recovery cannot send by itself.
-    let prompt = record.staged_prompt.as_ref().or(record.composer.as_ref());
+    let prompt = record
+        .staged_prompt
+        .as_ref()
+        .or(record.composer.as_ref())
+        .or_else(|| {
+            record
+                .uncertain_submission
+                .as_ref()
+                .map(|submission| &submission.prompt)
+        });
     if let Some(prompt) = prompt {
         agent.prompt.set_text(&prompt.text);
         agent.prompt.restore_chip_elements(&prompt.chip_elements());
@@ -1400,6 +1866,18 @@ fn restore_agent(agent: &mut AgentView, record: &LocalDraftRecord) {
     }
     if agent.session.deferred_session_mode.is_none() {
         agent.session.deferred_session_mode = record.deferred_session_mode;
+    }
+    if let Some(submission) = &record.uncertain_submission {
+        agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
+            prompt_id: Some(submission.prompt_id.clone()),
+            admission_resolved: None,
+            expected_turn_id: submission.expected_turn_id.clone(),
+            text: submission.prompt.text.clone(),
+            images: Vec::new(),
+            scrollback_entry: crate::scrollback::EntryId::new(0),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: submission.prompt.chip_elements(),
+        });
     }
 }
 
@@ -1422,6 +1900,14 @@ fn validate_record(record: &LocalDraftRecord) -> bool {
     };
     record.composer.as_ref().is_none_or(valid_prompt)
         && record.staged_prompt.as_ref().is_none_or(valid_prompt)
+        && record
+            .uncertain_submission
+            .as_ref()
+            .is_none_or(|submission| {
+                !submission.prompt_id.is_empty()
+                    && submission.prompt_id.len() <= 1024
+                    && valid_prompt(&submission.prompt)
+            })
 }
 
 fn count_records(root: &Path) -> io::Result<usize> {
@@ -1508,12 +1994,13 @@ mod tests {
                 chips: Vec::new(),
             }),
             staged_prompt: None,
+            uncertain_submission: None,
             deferred_session_mode: mode,
         }
     }
 
-    #[test]
-    fn failed_rpc_invalidation_survives_binding_close_and_reopen() {
+    #[tokio::test]
+    async fn rpc_transfer_retires_only_the_original_input_identity() {
         for structured in [false, true] {
             let directory = tempfile::tempdir().unwrap();
             let root = directory.path().join("drafts");
@@ -1523,22 +2010,33 @@ mod tests {
                 ..Default::default()
             };
             let id = *app.agents.keys().next().unwrap();
-            let agent = app.agents.get_mut(&id).unwrap();
-            agent.session.session_id = None;
-            agent.prompt.set_text("submitted cwd draft");
-            let cwd_key = LocalDraftKey::cwd(&agent.session.cwd).unwrap();
+            let (cwd_key, sid) = {
+                let agent = app.agents.get_mut(&id).unwrap();
+                agent.session.session_id = None;
+                agent.prompt.set_text("newer composer draft");
+                agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
+                    prompt_id: Some(if structured { "blocks" } else { "text" }.into()),
+                    admission_resolved: None,
+                    expected_turn_id: None,
+                    text: "submitted request".into(),
+                    images: Vec::new(),
+                    scrollback_entry: crate::scrollback::EntryId::new(1),
+                    combined_scrollback_entries: Vec::new(),
+                    chip_elements: Vec::new(),
+                });
+                (
+                    LocalDraftKey::cwd(&agent.session.cwd).unwrap(),
+                    acp_transport::protocol::SessionId::new("invalidation-bind"),
+                )
+            };
             let now = Instant::now();
             app.sync_local_drafts(now);
             app.sync_local_drafts(now + DEBOUNCE);
-            let sid = acp_transport::protocol::SessionId::new("invalidation-bind");
             let session_key = LocalDraftKey::session(&sid.0).unwrap();
             app.local_drafts
                 .store
                 .write(&session_key, &record("stale session draft", None))
                 .unwrap();
-            let blocked = directory.path().join("blocked");
-            fs::write(&blocked, b"not a directory").unwrap();
-            app.local_drafts.store = LocalDraftStore::new(blocked);
             let effect = if structured {
                 crate::app::actions::Effect::SendPromptBlocks {
                     agent_id: id,
@@ -1556,27 +2054,25 @@ mod tests {
                     skill_token_ranges: vec![],
                 }
             };
+            let checkpoint = app
+                .local_drafts
+                .checkpoint_input_intent(
+                    &app.agents,
+                    Some(id),
+                    id,
+                    if structured { "blocks" } else { "text" }.into(),
+                    None,
+                    None,
+                )
+                .unwrap();
+            checkpoint.await.unwrap().unwrap();
+            app.agents.get_mut(&id).unwrap().session.session_id = Some(sid.clone());
             app.transfer_local_draft_ownership(&effect);
-            assert_eq!(app.local_drafts.invalidations.len(), 2);
-            let deadline = app.local_drafts.next_deadline().unwrap();
-            let before = deadline - Duration::from_millis(100);
-            app.local_drafts.store = LocalDraftStore::new(root);
-            let agent = app.agents.get_mut(&id).unwrap();
-            agent.session.session_id = Some(sid);
-            agent.prompt.set_text("");
-            app.sync_local_drafts(before);
-            assert_eq!(app.local_drafts.invalidations.len(), 2);
-            assert_eq!(
-                app.local_drafts
-                    .store
-                    .load(&cwd_key)
-                    .unwrap()
-                    .unwrap()
-                    .composer
-                    .unwrap()
-                    .text,
-                "submitted cwd draft"
-            );
+            let cwd_record = LocalDraftStore::new(root.clone())
+                .load(&cwd_key)
+                .unwrap()
+                .unwrap();
+            assert_eq!(cwd_record.composer.unwrap().text, "newer composer draft");
             assert_eq!(
                 app.local_drafts
                     .store
@@ -1588,19 +2084,11 @@ mod tests {
                     .text,
                 "stale session draft"
             );
-            let mut closed = app.agents.shift_remove(&id).unwrap();
-            app.sync_local_drafts(before);
-            closed.prompt.set_text("");
-            let reopened = AgentId(9900);
-            app.agents.insert(reopened, closed);
-            app.active_view = crate::app::root::ActiveView::Agent(reopened);
-            app.sync_local_drafts(before);
-            assert!(app.agents[&reopened].prompt.text().is_empty());
-            assert_eq!(app.local_drafts.next_deadline(), Some(deadline));
-            app.sync_local_drafts(deadline);
-            assert!(app.local_drafts.invalidations.is_empty());
-            assert!(app.local_drafts.store.load(&cwd_key).unwrap().is_none());
-            assert!(app.local_drafts.store.load(&session_key).unwrap().is_none());
+            let saved = LocalDraftStore::new(root.clone())
+                .load(&cwd_key)
+                .unwrap()
+                .unwrap();
+            assert!(saved.uncertain_submission.is_none());
         }
     }
 
@@ -2163,6 +2651,279 @@ mod tests {
     }
 
     #[test]
+    fn uncertain_submission_restores_original_identity_without_queuing() {
+        let mut first = crate::app::root::tests::test_app_with_agent();
+        let agent = first.agents.values_mut().next().unwrap();
+        agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
+            prompt_id: Some("original-prompt-id".into()),
+            admission_resolved: None,
+            expected_turn_id: Some("original-turn-id".into()),
+            text: "submitted once".into(),
+            images: Vec::new(),
+            scrollback_entry: crate::scrollback::EntryId::new(1),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+        let captured = capture_agent(agent, 1).unwrap();
+        assert!(captured.composer.is_none());
+        let (root, store) = temp_store();
+        let key = LocalDraftKey::session("uncertain").unwrap();
+        store.write(&key, &captured).unwrap();
+        let restored = store.load(&key).unwrap().unwrap();
+
+        let mut second = crate::app::root::tests::test_app_with_agent();
+        let agent = second.agents.values_mut().next().unwrap();
+        restore_agent(agent, &restored);
+        assert_eq!(agent.prompt.text(), "submitted once");
+        assert_eq!(
+            agent
+                .session
+                .in_flight_prompt
+                .as_ref()
+                .and_then(|prompt| prompt.prompt_id.as_deref()),
+            Some("original-prompt-id")
+        );
+        assert_eq!(
+            agent
+                .session
+                .in_flight_prompt
+                .as_ref()
+                .and_then(|prompt| prompt.expected_turn_id.as_deref()),
+            Some("original-turn-id")
+        );
+        assert!(agent.session.pending_prompts.is_empty());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn persisted_uncertain_fifo_retry_reuses_identity_and_late_admission_keeps_edit() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("drafts");
+        let agent_id = AgentId(0);
+        let session_id = acp_transport::protocol::SessionId::new("joined-input-retry");
+        let prompt_id = "original-fifo-prompt";
+        let original_text = "the frozen request";
+
+        let mut first = crate::app::root::tests::test_app_with_agent();
+        first.local_drafts = LocalDraftRuntime::direct(LocalDraftStore::new(root.clone()));
+        first
+            .agents
+            .get_mut(&agent_id)
+            .expect("test agent")
+            .session
+            .session_id = Some(session_id.clone());
+        first
+            .agents
+            .get_mut(&agent_id)
+            .expect("test agent")
+            .session
+            .in_flight_prompt = Some(crate::app::session::InFlightPrompt {
+            prompt_id: Some(prompt_id.into()),
+            admission_resolved: None,
+            expected_turn_id: None,
+            text: original_text.into(),
+            images: Vec::new(),
+            scrollback_entry: crate::scrollback::EntryId::new(1),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+        let checkpoint = first
+            .checkpoint_input_intent(agent_id, prompt_id.into(), None, None)
+            .expect("checkpoint input intent");
+        checkpoint
+            .await
+            .expect("checkpoint acknowledgement")
+            .unwrap();
+
+        let key = LocalDraftKey::session(&session_id.0).unwrap();
+        let saved = LocalDraftStore::new(root.clone())
+            .load(&key)
+            .unwrap()
+            .expect("durable local draft snapshot");
+        let saved_input = saved
+            .uncertain_submission
+            .as_ref()
+            .expect("uncertain submission snapshot");
+        assert_eq!(saved_input.prompt_id, prompt_id);
+        assert_eq!(
+            saved_input.expected_turn_id, None,
+            "FIFO route has no steer target"
+        );
+        assert_eq!(saved_input.prompt.text, original_text);
+
+        // A fresh app loads the persisted snapshot. Loading restores state only;
+        // it cannot drain a queue or issue a prompt RPC.
+        let mut restored = crate::app::root::tests::test_app_with_agent();
+        restored.local_drafts = LocalDraftRuntime::direct(LocalDraftStore::new(root));
+        restored
+            .agents
+            .get_mut(&agent_id)
+            .expect("fresh test agent")
+            .session
+            .session_id = Some(session_id.clone());
+        restored.sync_local_drafts(Instant::now() + DEBOUNCE);
+        let restored_agent = &restored.agents[&agent_id];
+        assert_eq!(restored_agent.prompt.text(), original_text);
+        assert!(restored_agent.session.pending_prompts.is_empty());
+        assert_eq!(
+            restored_agent
+                .session
+                .in_flight_prompt
+                .as_ref()
+                .and_then(|input| input.prompt_id.as_deref()),
+            Some(prompt_id)
+        );
+
+        let effects = crate::app::root::dispatch::dispatch(
+            crate::app::actions::Action::SendPrompt(original_text.into()),
+            &mut restored,
+        );
+        let retries = effects
+            .iter()
+            .filter_map(|effect| match effect {
+                crate::app::actions::Effect::SendPrompt {
+                    prompt_id, text, ..
+                } => Some((prompt_id.as_str(), text.as_str())),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(retries, vec![(prompt_id, original_text)]);
+        assert!(effects.iter().all(|effect| !matches!(
+            effect,
+            crate::app::actions::Effect::SendInterject { .. }
+                | crate::app::actions::Effect::SendPromptBlocks { .. }
+        )));
+
+        restored
+            .agents
+            .get_mut(&agent_id)
+            .expect("restored test agent")
+            .prompt
+            .set_text("newer user edit");
+        let binding_epoch = restored.agents[&agent_id].session_binding_epoch;
+        let late_admission = crate::app::root::dispatch::dispatch(
+            crate::app::actions::Action::TaskComplete(
+                crate::app::actions::TaskResult::InputAdmissionStatusResolved {
+                    agent_id,
+                    session_id: session_id.clone(),
+                    binding_epoch,
+                    prompt_id: prompt_id.into(),
+                    response_session_id: Some(session_id.0.to_string()),
+                    response_prompt_id: Some(prompt_id.into()),
+                    response_source: Some("durable".into()),
+                    status: Ok(crate::app::actions::InputAdmissionStatusWire::Allowed {
+                        route: chat_state::InputRoute::Fifo,
+                    }),
+                },
+            ),
+            &mut restored,
+        );
+        assert!(late_admission.is_empty());
+        let agent = &restored.agents[&agent_id];
+        assert_eq!(agent.prompt.text(), "newer user edit");
+        assert!(agent.session.pending_prompts.is_empty());
+        let original = agent
+            .session
+            .in_flight_prompt
+            .as_ref()
+            .expect("original input identity remains observable");
+        assert_eq!(original.prompt_id.as_deref(), Some(prompt_id));
+        assert_eq!(original.admission_resolved, Some(true));
+
+        assert!(
+            crate::app::root::dispatch::dispatch(
+                crate::app::actions::Action::SendPrompt(original_text.into()),
+                &mut restored,
+            )
+            .is_empty()
+        );
+        assert_eq!(restored.agents[&agent_id].prompt.text(), "newer user edit");
+    }
+
+    #[tokio::test]
+    async fn input_checkpoint_ack_requires_the_frozen_prompt_and_route() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        let agent_id = *app.agents.keys().next().unwrap();
+        let session_id = acp_transport::protocol::SessionId::new("checkpoint-session");
+        let agent = app.agents.get_mut(&agent_id).unwrap();
+        agent.session.session_id = Some(session_id.clone());
+        agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
+            prompt_id: Some("checkpoint-prompt".into()),
+            admission_resolved: None,
+            expected_turn_id: Some("checkpoint-turn".into()),
+            text: "frozen request".into(),
+            images: Vec::new(),
+            scrollback_entry: crate::scrollback::EntryId::new(1),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+        app.local_drafts =
+            LocalDraftRuntime::direct(LocalDraftStore::new(directory.path().to_path_buf()));
+
+        let acknowledged = app
+            .local_drafts
+            .checkpoint_input_intent(
+                &app.agents,
+                Some(agent_id),
+                agent_id,
+                "checkpoint-prompt".into(),
+                Some("checkpoint-turn".into()),
+                None,
+            )
+            .unwrap();
+        acknowledged.await.unwrap().unwrap();
+        let key = LocalDraftKey::session(&session_id.0).unwrap();
+        let saved = app.local_drafts.store.load(&key).unwrap().unwrap();
+        assert_eq!(
+            saved.uncertain_submission.as_ref().unwrap().prompt_id,
+            "checkpoint-prompt"
+        );
+        assert_eq!(
+            saved
+                .uncertain_submission
+                .as_ref()
+                .unwrap()
+                .expected_turn_id
+                .as_deref(),
+            Some("checkpoint-turn")
+        );
+
+        let failed = app.local_drafts.checkpoint_input_intent(
+            &app.agents,
+            Some(agent_id),
+            agent_id,
+            "checkpoint-prompt".into(),
+            Some("changed-turn".into()),
+            None,
+        );
+        assert!(matches!(
+            failed,
+            Err(error) if error.kind() == io::ErrorKind::InvalidData
+        ));
+    }
+
+    #[tokio::test]
+    async fn ram_only_input_retry_does_not_loop_through_the_failed_writer() {
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        let agent_id = *app.agents.keys().next().unwrap();
+        app.local_drafts
+            .mark_input_ram_only(agent_id, "ram-only-id".into());
+        let acknowledged = app
+            .local_drafts
+            .checkpoint_input_intent(
+                &app.agents,
+                Some(agent_id),
+                agent_id,
+                "ram-only-id".into(),
+                Some("original-turn".into()),
+                None,
+            )
+            .unwrap();
+        acknowledged.await.unwrap().unwrap();
+    }
+
+    #[test]
     fn runtime_restores_composer_and_deferred_latch_without_sending() {
         let (root, store) = temp_store();
         let mut first = crate::app::root::tests::test_app_with_agent();
@@ -2212,6 +2973,16 @@ mod tests {
             let (agent_id, session_id) = {
                 let (agent_id, agent) = app.agents.iter_mut().next().unwrap();
                 agent.prompt.set_text("owned by the next RPC");
+                agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
+                    prompt_id: Some(if structured { "blocks" } else { "text" }.into()),
+                    admission_resolved: None,
+                    expected_turn_id: None,
+                    text: "owned by the next RPC".into(),
+                    images: Vec::new(),
+                    scrollback_entry: crate::scrollback::EntryId::new(1),
+                    combined_scrollback_entries: Vec::new(),
+                    chip_elements: Vec::new(),
+                });
                 (*agent_id, agent.session.session_id.clone().unwrap())
             };
             let now = Instant::now();
@@ -2263,8 +3034,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn ownership_transfer_clears_cwd_key_before_bind_rekey_sync() {
+    #[tokio::test]
+    async fn ownership_transfer_clears_cwd_key_before_bind_rekey_sync() {
         let (root, store) = temp_store();
         let mut app = crate::app::root::tests::test_app_with_agent();
         app.local_drafts = LocalDraftRuntime {
@@ -2278,9 +3049,35 @@ mod tests {
             (*agent_id, agent.session.cwd.clone())
         };
         let cwd_key = LocalDraftKey::cwd(&cwd).unwrap();
+        app.agents
+            .get_mut(&agent_id)
+            .unwrap()
+            .session
+            .in_flight_prompt = Some(crate::app::session::InFlightPrompt {
+            prompt_id: Some("binding-race".into()),
+            admission_resolved: None,
+            expected_turn_id: None,
+            text: "pre-bind draft".into(),
+            images: Vec::new(),
+            scrollback_entry: crate::scrollback::EntryId::new(1),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
         let now = Instant::now();
         app.sync_local_drafts(now);
         app.sync_local_drafts(now + DEBOUNCE);
+        let checkpoint = app
+            .local_drafts
+            .checkpoint_input_intent(
+                &app.agents,
+                Some(agent_id),
+                agent_id,
+                "binding-race".into(),
+                None,
+                None,
+            )
+            .unwrap();
+        checkpoint.await.unwrap().unwrap();
         assert!(
             LocalDraftStore::new(root.clone())
                 .load(&cwd_key)
@@ -2490,7 +3287,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn ownership_invalidation_follows_blocked_write_before_new_draft() {
+    async fn identity_transfer_follows_blocked_write_before_new_draft() {
         let directory = tempfile::tempdir().unwrap();
         let gate = StoreGate::new("write");
         let mut store = LocalDraftStore::new(directory.path().to_path_buf());
@@ -2503,12 +3300,19 @@ mod tests {
         let id = *app.agents.keys().next().unwrap();
         let session_id = acp_transport::protocol::SessionId::new("ordered-invalidation");
         let key = LocalDraftKey::session(&session_id.0).unwrap();
-        app.agents.get_mut(&id).unwrap().session.session_id = Some(session_id.clone());
-        app.agents
-            .get_mut(&id)
-            .unwrap()
-            .prompt
-            .set_text("submitted");
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(session_id.clone());
+        agent.prompt.set_text("submitted");
+        agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
+            prompt_id: Some("ordered-invalidation".into()),
+            admission_resolved: None,
+            expected_turn_id: None,
+            text: "submitted".into(),
+            images: Vec::new(),
+            scrollback_entry: crate::scrollback::EntryId::new(1),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
         app.sync_local_drafts(Instant::now());
         gate.entered.wait();
         let effect = crate::app::actions::Effect::SendPrompt {

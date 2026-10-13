@@ -14,6 +14,9 @@ use super::types::{
 
 /// Cap on retained completed-subagent entries before the oldest are evicted.
 pub const MAX_COMPLETED_ENTRIES: usize = 1024;
+/// Recovery responsibility is never evicted by the presentation cache.
+pub const MAX_FINALIZATIONS: usize = 64;
+pub const MAX_FINALIZATION_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 
 pub type LocalBoxFuture<T> = Pin<Box<dyn Future<Output = T> + 'static>>;
 pub type SendBoxFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>>;
@@ -32,14 +35,18 @@ pub struct SubagentProgress {
 
 /// Runtime handle retained while a child is active.
 pub trait ChildControl: 'static {
-    type ProgressFuture: Future<Output = SubagentProgress> + 'static;
     /// Runtime-owned security context for the immediate spawning child.
     /// Lifecycle ownership may be reparented independently.
     type SecurityContext: Clone + 'static;
 
-    fn progress(&self) -> Self::ProgressFuture;
+    /// Latest signal-derived progress. `None` means no authoritative sample is
+    /// available yet; callers must not turn that into zero counters.
+    fn progress_snapshot(&self) -> Option<SubagentProgress>;
     fn security_context(&self) -> Self::SecurityContext;
     fn cancel(&self);
+    fn runner_panicked(&self) {
+        self.cancel();
+    }
 }
 
 /// Data reported when runtime initialization has produced a live child.
@@ -67,6 +74,7 @@ pub struct ChildRunRequest<C: ChildControl> {
 }
 
 /// Terminal output from one runtime-specific child run.
+#[derive(Clone)]
 pub struct ChildRunOutput<D> {
     pub result: SubagentResult,
     pub completion_data: D,
@@ -108,11 +116,20 @@ pub trait ChildRunner: 'static {
     }
 
     type Control: ChildControl;
-    type CompletionData: Default + 'static;
+    type CompletionData: Default + Clone + 'static;
     type RunFuture: Future<Output = ChildRunOutput<Self::CompletionData>> + 'static;
     type ValidateFuture: Future<Output = SubagentValidateTypeOutcome> + 'static;
 
     fn run(&self, request: ChildRunRequest<Self::Control>) -> Self::RunFuture;
+
+    fn completion_after_panic(
+        &self,
+        _request: &SubagentRequest,
+        _control: Option<&Self::Control>,
+        _execution_outcome: Option<&str>,
+    ) -> Self::CompletionData {
+        Self::CompletionData::default()
+    }
 
     fn validate_type(
         &self,
@@ -134,13 +151,32 @@ pub trait ChildRunner: 'static {
         true
     }
 
-    fn load_persisted_output(
-        &self,
-        _request: &SubagentRequest,
-        _child_session_id: &str,
-        _reference: &str,
-    ) -> Option<Arc<str>> {
+    fn finalization_error(&self, _completion_data: &Self::CompletionData) -> Option<String> {
         None
+    }
+
+    /// Resume persistence/delivery only. This must never run the child again.
+    fn reconcile(
+        &self,
+        _request: SubagentRequest,
+        output: ChildRunOutput<Self::CompletionData>,
+        _deadline: tokio::time::Instant,
+    ) -> Result<Self::RunFuture, ChildRunOutput<Self::CompletionData>> {
+        Err(output)
+    }
+
+    fn load_persisted_output_async(
+        &self,
+        request: SubagentRequest,
+        child_session_id: String,
+        reference: String,
+        permit: tokio::sync::OwnedSemaphorePermit,
+    ) -> SendBoxFuture<Result<Option<Arc<str>>, super::types::SubagentObservationError>> {
+        let _ = (request, child_session_id, reference);
+        Box::pin(async move {
+            drop(permit);
+            Ok(None)
+        })
     }
 }
 
@@ -174,6 +210,14 @@ impl<C> Clone for ChildReporter<C> {
 }
 
 impl<C: 'static> ChildReporter<C> {
+    /// Execution and durable completion are separate frontiers. The owning
+    /// runner keeps its future/lease while this compact fact becomes visible.
+    pub fn execution_returned(&self, outcome: &str) {
+        let _ = self.tx.send(InternalEvent::ExecutionReturned {
+            subagent_id: self.subagent_id.clone(),
+            outcome: outcome.to_owned(),
+        });
+    }
     /// Promote the pending child to active. The acknowledgement closes the
     /// cancel-at-promote race: `false` means cancellation won and the adapter
     /// must tear down the half-initialized runtime.
@@ -213,6 +257,10 @@ impl<C: 'static> ChildReporter<C> {
 }
 
 pub(super) enum InternalEvent<C> {
+    ExecutionReturned {
+        subagent_id: String,
+        outcome: String,
+    },
     Started {
         subagent_id: String,
         child: StartedChild<C>,
@@ -239,6 +287,7 @@ pub(super) struct PendingChild {
 }
 
 pub(super) struct ActiveChild<C> {
+    pub(super) execution_outcome: Option<String>,
     pub(super) request: SubagentRequest,
     /// Session that directly spawned this child. `request.parent_session_id`
     /// may be reparented to the lifecycle root for nested children.
@@ -257,6 +306,7 @@ pub(super) struct ActiveChild<C> {
     pub(super) control: C,
 }
 
+#[derive(Clone)]
 pub(super) struct CompletedChild {
     pub(super) request: SubagentRequest,
     /// Session that directly spawned this child. `request.parent_session_id`
@@ -266,12 +316,28 @@ pub(super) struct CompletedChild {
     pub(super) child_session_id: String,
     pub(super) resumed_from: Option<String>,
     pub(super) persisted_output_ref: Option<String>,
+    pub(super) finalization_error: Option<String>,
     pub(super) result: SubagentResult,
 }
 
 pub(super) struct BlockingWaiter {
     pub(super) deadline: tokio::time::Instant,
-    pub(super) respond_to: oneshot::Sender<Option<SubagentSnapshot>>,
+    pub(super) respond_to:
+        oneshot::Sender<Result<Option<SubagentSnapshot>, super::types::SubagentObservationError>>,
+}
+
+pub(super) enum OutputReadTarget {
+    Query(
+        oneshot::Sender<Result<Option<SubagentSnapshot>, super::types::SubagentObservationError>>,
+    ),
+    Inspect(
+        oneshot::Sender<Result<Option<SubagentInspection>, super::types::SubagentObservationError>>,
+    ),
+}
+
+pub(super) struct OutputReadRequest {
+    pub(super) child: CompletedChild,
+    pub(super) targets: Vec<OutputReadTarget>,
 }
 
 pub(super) struct TaggedFuture<F> {
@@ -327,46 +393,6 @@ pub(super) struct RunningSeed {
     pub(super) resumed_from: Option<String>,
 }
 
-pub(super) enum ProgressTarget {
-    Query(oneshot::Sender<Option<SubagentSnapshot>>),
-    Inspect(oneshot::Sender<Option<SubagentInspection>>),
-    List { request_id: u64, index: usize },
-}
-
-pub(super) struct ProgressFuture<F> {
-    pub(super) future: Pin<Box<F>>,
-    pub(super) seed: Option<RunningSeed>,
-    pub(super) target: Option<ProgressTarget>,
-}
-
-impl<F> Future for ProgressFuture<F>
-where
-    F: Future<Output = SubagentProgress>,
-{
-    type Output = (RunningSeed, ProgressTarget, SubagentProgress);
-
-    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        let this = self.get_mut();
-        this.future.as_mut().poll(cx).map(|progress| {
-            let seed = match this.seed.take() {
-                Some(seed) => seed,
-                None => unreachable!("progress future polled without a seed"),
-            };
-            let target = match this.target.take() {
-                Some(target) => target,
-                None => unreachable!("progress future polled without a target"),
-            };
-            (seed, target, progress)
-        })
-    }
-}
-
-pub(super) struct ListRequest {
-    pub(super) slots: Vec<Option<SubagentInspection>>,
-    pub(super) remaining: usize,
-    pub(super) respond_to: oneshot::Sender<Vec<SubagentInspection>>,
-}
-
 pub(super) enum ChildRecord<C> {
     Pending(PendingChild),
     Active(ActiveChild<C>),
@@ -403,6 +429,9 @@ pub(super) trait ForegroundChild {
     /// child was still treated as turn-blocking (old shell `ParentGone`).
     fn caller_gone(&self) -> bool;
     fn is_workflow(&self) -> bool;
+    fn execution_outcome(&self) -> Option<&str> {
+        None
+    }
     fn take_reply(&mut self) -> Option<oneshot::Sender<SubagentResult>>;
     fn mark_backgrounded(&mut self);
     /// Cancel the child's execution (token + active control where present).
@@ -445,6 +474,9 @@ impl ForegroundChild for PendingChild {
 }
 
 impl<C: ChildControl> ForegroundChild for ActiveChild<C> {
+    fn execution_outcome(&self) -> Option<&str> {
+        self.execution_outcome.as_deref()
+    }
     fn id(&self) -> &str {
         &self.request.id
     }
@@ -497,8 +529,12 @@ pub(super) fn background_at_deadline(
         // Interim handoff, not a completion: keep `success: false` (default)
         // so `SubagentResult::status()` consumers cannot record a completed
         // status for a still-running child. Callers branch on `backgrounded`.
+        let outcome = child.execution_outcome();
         let _ = respond_to.send(SubagentResult {
-            backgrounded: true,
+            finalization_pending: outcome.is_some(),
+            success: outcome == Some("completed"),
+            cancelled: outcome == Some("cancelled"),
+            backgrounded: outcome.is_none(),
             subagent_id: child.id().to_owned(),
             child_session_id: child.child_session_id().to_owned(),
             ..Default::default()
@@ -629,11 +665,28 @@ pub(super) fn completed_snapshot(
     persisted_output: Option<&str>,
     persisted_output_unavailable: bool,
 ) -> SubagentSnapshot {
-    let status = if child.result.cancelled {
+    let status = if child.result.finalization_pending {
+        SubagentSnapshotStatus::FinalizationPending {
+            outcome: if child.result.cancelled {
+                "cancelled"
+            } else if child.result.success {
+                "completed"
+            } else {
+                "failed"
+            }
+            .to_owned(),
+            error: child
+                .finalization_error
+                .clone()
+                .or_else(|| child.result.error.clone()),
+        }
+    } else if child.result.cancelled {
         SubagentSnapshotStatus::Cancelled {
             reason: child.result.error.clone(),
         }
-    } else if child.result.success && persisted_output_unavailable {
+    } else if child.result.success
+        && (persisted_output_unavailable || child.result.output_unavailable)
+    {
         SubagentSnapshotStatus::CompletedOutputUnavailable {
             error: "content-addressed subagent output is missing or invalid".into(),
             tool_calls: child.result.tool_calls,

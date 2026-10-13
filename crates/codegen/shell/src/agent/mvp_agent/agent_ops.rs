@@ -524,9 +524,13 @@ impl MvpAgent {
         let coordination = crate::coordination::CoordinationRuntime::new(
             crate::util::grow_home::grow_home(),
         );
+        let storage_admission = std::sync::Arc::new(crate::session::storage_admission::StorageAdmission::new(
+            crate::util::grow_home::grow_home().to_path_buf(),
+        ));
         let bundle_service_credential =
             crate::remote::BundleServiceCredential::from_environment();
         Self {
+            storage_admission,
             sessions: RefCell::new(HashMap::new()),
             active_child_sessions: Default::default(),
             activity,
@@ -951,7 +955,10 @@ impl MvpAgent {
         &self,
         parent_session_id: &str,
         subagent_id: &str,
-    ) -> tools::implementations::grow_build::task::types::SubagentCancelOutcome {
+    ) -> Result<
+        tools::implementations::grow_build::task::types::SubagentCancelOutcome,
+        tools::implementations::grow_build::task::types::SubagentObservationError,
+    > {
         tools::implementations::grow_build::task::backend::ChannelBackend::for_session(
             self.subagent_event_tx.clone(),
             parent_session_id.to_owned(),
@@ -962,9 +969,9 @@ impl MvpAgent {
     pub(crate) async fn list_running_subagents(
         &self,
         parent_session_id: &str,
-    ) -> Vec<
+    ) -> Result<Vec<
         tools::implementations::grow_build::task::types::SubagentInspection,
-    > {
+    >, tools::implementations::grow_build::task::types::SubagentObservationError> {
         tools::implementations::grow_build::task::backend::ChannelBackend::for_session(
             self.subagent_event_tx.clone(),
             parent_session_id.to_owned(),
@@ -976,9 +983,9 @@ impl MvpAgent {
         &self,
         parent_session_id: &str,
         subagent_id: &str,
-    ) -> Option<
+    ) -> Result<Option<
         tools::implementations::grow_build::task::types::SubagentInspection,
-    > {
+    >, tools::implementations::grow_build::task::types::SubagentObservationError> {
         tools::implementations::grow_build::task::backend::ChannelBackend::for_session(
             self.subagent_event_tx.clone(),
             parent_session_id.to_owned(),
@@ -992,9 +999,9 @@ impl MvpAgent {
         subagent_id: &str,
         block: bool,
         timeout_ms: Option<u64>,
-    ) -> Option<
+    ) -> Result<Option<
         tools::implementations::grow_build::task::types::SubagentSnapshot,
-    > {
+    >, tools::implementations::grow_build::task::types::SubagentObservationError> {
         tools::implementations::grow_build::task::backend::ChannelBackend::for_session(
             self.subagent_event_tx.clone(),
             parent_session_id.to_owned(),
@@ -1586,6 +1593,7 @@ impl MvpAgent {
             )
             .with_hunk_tracking_enabled(hunk_tracking_enabled);
         tool_ctx.process_scope = Some(ProcessScope::new());
+        tool_ctx.storage_admission = Some(self.storage_admission.clone());
         // A per-session declaration overrides initialize, including explicit
         // false injected by the leader. Client names are never capabilities.
         let lifecycle = session_meta.and_then(|meta| meta.get("samplingAttemptLifecycle"))

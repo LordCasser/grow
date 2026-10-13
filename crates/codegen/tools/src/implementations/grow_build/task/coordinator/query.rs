@@ -5,12 +5,22 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 
 use super::super::coordinator_state::{
-    BlockingWaiter, CompletedChild, ListRequest, ProgressFuture, ProgressTarget, RunningSeed,
-    completed_inspection, completed_snapshot, pending_inspection, pending_snapshot,
-    running_inspection, running_seed,
+    BlockingWaiter, CompletedChild, OutputReadRequest, OutputReadTarget, completed_inspection,
+    completed_snapshot, pending_inspection, pending_snapshot, running_inspection, running_seed,
 };
-use super::super::types::{SubagentInspection, SubagentSnapshot};
-use super::{ChildControl, ChildRunner, SubagentCoordinator, SubagentProgress, belongs_to_session};
+use super::super::types::{SubagentInspection, SubagentObservationError, SubagentSnapshot};
+use super::{ChildControl, ChildRunner, SubagentCoordinator, belongs_to_session};
+
+fn send_output_read_error(target: OutputReadTarget, error: SubagentObservationError) {
+    match target {
+        OutputReadTarget::Query(tx) => {
+            let _ = tx.send(Err(error));
+        }
+        OutputReadTarget::Inspect(tx) => {
+            let _ = tx.send(Err(error));
+        }
+    }
+}
 
 impl<R: ChildRunner> SubagentCoordinator<R> {
     pub(super) fn handle_query(
@@ -19,8 +29,34 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         parent_session_id: Option<String>,
         block: bool,
         timeout_ms: Option<u64>,
-        respond_to: oneshot::Sender<Option<SubagentSnapshot>>,
+        respond_to: oneshot::Sender<Result<Option<SubagentSnapshot>, SubagentObservationError>>,
     ) {
+        let known = self.completed.contains_key(&id)
+            || self.active.contains_key(&id)
+            || self.pending.contains_key(&id);
+        let authorized = self.completed.get(&id).is_some_and(|child| {
+            belongs_to_session(
+                &child.request,
+                &child.immediate_parent_session_id,
+                parent_session_id.as_deref(),
+            )
+        }) || self.active.get(&id).is_some_and(|child| {
+            belongs_to_session(
+                &child.request,
+                &child.immediate_parent_session_id,
+                parent_session_id.as_deref(),
+            )
+        }) || self.pending.get(&id).is_some_and(|child| {
+            belongs_to_session(
+                &child.request,
+                &child.immediate_parent_session_id,
+                parent_session_id.as_deref(),
+            )
+        });
+        if (known || parent_session_id.is_some()) && !authorized {
+            let _ = respond_to.send(Err(SubagentObservationError::Unauthorized));
+            return;
+        }
         if let Some(child) = self.completed.get(&id).filter(|child| {
             belongs_to_session(
                 &child.request,
@@ -28,9 +64,14 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 parent_session_id.as_deref(),
             )
         }) {
-            let snapshot = (!child.request.owner.is_workflow())
-                .then(|| self.completed_snapshot_for_query(child));
-            let _ = respond_to.send(snapshot);
+            if child.request.owner.is_workflow() {
+                let _ = respond_to.send(Err(SubagentObservationError::Unauthorized));
+            } else {
+                self.queue_completed_output_read(
+                    child.clone(),
+                    OutputReadTarget::Query(respond_to),
+                );
+            }
             return;
         }
         if let Some(child) = self.active.get(&id).filter(|child| {
@@ -41,17 +82,20 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             )
         }) {
             if child.request.owner.is_workflow() {
-                let _ = respond_to.send(None);
+                let _ = respond_to.send(Err(SubagentObservationError::Unauthorized));
                 return;
             }
-            if block {
+            if let Some(outcome) = &child.execution_outcome {
+                let _ = respond_to.send(Ok(Some(active_finalization_snapshot(child, outcome))));
+            } else if block {
                 self.waiters.entry(id).or_default().push(BlockingWaiter {
                     deadline: tokio::time::Instant::now()
                         + std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000)),
                     respond_to,
                 });
             } else {
-                self.queue_active_progress(&id, ProgressTarget::Query(respond_to));
+                let result = active_inspection(child).map(|inspection| inspection.snapshot);
+                let _ = respond_to.send(result.map(Some));
             }
             return;
         }
@@ -63,7 +107,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             )
         }) {
             if child.request.owner.is_workflow() {
-                let _ = respond_to.send(None);
+                let _ = respond_to.send(Err(SubagentObservationError::Unauthorized));
                 return;
             }
             if block {
@@ -73,18 +117,18 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     respond_to,
                 });
             } else {
-                let _ = respond_to.send(Some(pending_snapshot(child)));
+                let _ = respond_to.send(Ok(Some(pending_snapshot(child))));
             }
             return;
         }
-        let _ = respond_to.send(None);
+        let _ = respond_to.send(Ok(None));
     }
 
     pub(super) fn handle_inspect(
         &mut self,
         id: String,
         parent_session_id: Option<String>,
-        respond_to: oneshot::Sender<Option<SubagentInspection>>,
+        respond_to: oneshot::Sender<Result<Option<SubagentInspection>, SubagentObservationError>>,
     ) {
         if let Some(child) = self.completed.get(&id).filter(|child| {
             belongs_to_session(
@@ -93,7 +137,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 parent_session_id.as_deref(),
             )
         }) {
-            let _ = respond_to.send(Some(self.completed_inspection_for_query(child)));
+            if parent_session_id.is_some() && child.request.owner.is_workflow() {
+                let _ = respond_to.send(Err(SubagentObservationError::Unauthorized));
+                return;
+            }
+            self.queue_completed_output_read(child.clone(), OutputReadTarget::Inspect(respond_to));
         } else if let Some(child) = self.pending.get(&id).filter(|child| {
             belongs_to_session(
                 &child.request,
@@ -101,48 +149,141 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 parent_session_id.as_deref(),
             )
         }) {
-            let _ = respond_to.send(Some(pending_inspection(child)));
-        } else if self.active.get(&id).is_some_and(|child| {
+            if parent_session_id.is_some() && child.request.owner.is_workflow() {
+                let _ = respond_to.send(Err(SubagentObservationError::Unauthorized));
+                return;
+            }
+            let _ = respond_to.send(Ok(Some(pending_inspection(child))));
+        } else if let Some(child) = self.active.get(&id).filter(|child| {
             belongs_to_session(
                 &child.request,
                 &child.immediate_parent_session_id,
                 parent_session_id.as_deref(),
             )
         }) {
-            self.queue_active_progress(&id, ProgressTarget::Inspect(respond_to));
+            if parent_session_id.is_some() && child.request.owner.is_workflow() {
+                let _ = respond_to.send(Err(SubagentObservationError::Unauthorized));
+                return;
+            }
+            let inspection = child.execution_outcome.as_deref().map_or_else(
+                || active_inspection(child),
+                |outcome| Ok(active_finalization_inspection(child, outcome)),
+            );
+            let _ = respond_to.send(inspection.map(Some));
         } else {
-            let _ = respond_to.send(None);
+            let exists = self.completed.contains_key(&id)
+                || self.pending.contains_key(&id)
+                || self.active.contains_key(&id);
+            let result = if exists {
+                Err(SubagentObservationError::Unauthorized)
+            } else {
+                if parent_session_id.is_some() {
+                    Err(SubagentObservationError::Unauthorized)
+                } else {
+                    Ok(None)
+                }
+            };
+            let _ = respond_to.send(result);
         }
     }
 
-    fn persisted_output(&self, child: &CompletedChild) -> (Option<Arc<str>>, bool) {
-        let Some(reference) = child.persisted_output_ref.as_deref() else {
-            return (None, false);
+    fn queue_completed_output_read(&mut self, child: CompletedChild, target: OutputReadTarget) {
+        if child.result.finalization_pending {
+            let snapshot = completed_snapshot(&child, None, false);
+            let inspection = completed_inspection(&child, None, false);
+            match target {
+                OutputReadTarget::Query(tx) => {
+                    let _ = tx.send(Ok(Some(snapshot)));
+                }
+                OutputReadTarget::Inspect(tx) => {
+                    let _ = tx.send(Ok(Some(inspection)));
+                }
+            }
+            return;
+        }
+        let Some(reference) = child.persisted_output_ref.clone() else {
+            let snapshot = completed_snapshot(&child, None, false);
+            let inspection = completed_inspection(&child, None, false);
+            match target {
+                OutputReadTarget::Query(tx) => {
+                    let _ = tx.send(Ok(Some(snapshot)));
+                }
+                OutputReadTarget::Inspect(tx) => {
+                    let _ = tx.send(Ok(Some(inspection)));
+                }
+            }
+            return;
         };
-        match self
-            .runner
-            .load_persisted_output(&child.request, &child.child_session_id, reference)
-        {
-            Some(output) => (Some(output), false),
-            None => (None, true),
+        let key = format!("{}\0{}", child.request.id, reference);
+        if let Some(read) = self.output_read_requests.get_mut(&key) {
+            if read.targets.len() >= 32 {
+                send_output_read_error(target, SubagentObservationError::Unavailable);
+            } else {
+                read.targets.push(target);
+            }
+            return;
         }
+        let Ok(permit) = self.output_read_permits.clone().try_acquire_owned() else {
+            send_output_read_error(target, SubagentObservationError::Unavailable);
+            return;
+        };
+        let future = self.runner.load_persisted_output_async(
+            child.request.clone(),
+            child.child_session_id.clone(),
+            reference,
+            permit,
+        );
+        self.output_read_requests.insert(
+            key.clone(),
+            OutputReadRequest {
+                child,
+                targets: vec![target],
+            },
+        );
+        self.output_reads
+            .push(super::super::coordinator_state::TaggedFuture {
+                subagent_id: key,
+                future: Box::pin(future),
+            });
     }
 
-    fn completed_snapshot_for_query(&self, child: &CompletedChild) -> SubagentSnapshot {
-        let (output, unavailable) = self.persisted_output(child);
-        completed_snapshot(child, output.as_deref(), unavailable)
-    }
-
-    fn completed_inspection_for_query(&self, child: &CompletedChild) -> SubagentInspection {
-        let (output, unavailable) = self.persisted_output(child);
-        completed_inspection(child, output.as_deref(), unavailable)
+    pub(super) fn finish_output_read(
+        &mut self,
+        key: &str,
+        output: Result<Option<Arc<str>>, SubagentObservationError>,
+    ) {
+        let Some(read) = self.output_read_requests.remove(key) else {
+            return;
+        };
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => {
+                for target in read.targets {
+                    send_output_read_error(target, error);
+                }
+                return;
+            }
+        };
+        let unavailable = output.is_none();
+        let snapshot = completed_snapshot(&read.child, output.as_deref(), unavailable);
+        let inspection = completed_inspection(&read.child, output.as_deref(), unavailable);
+        for target in read.targets {
+            match target {
+                OutputReadTarget::Query(tx) => {
+                    let _ = tx.send(Ok(Some(snapshot.clone())));
+                }
+                OutputReadTarget::Inspect(tx) => {
+                    let _ = tx.send(Ok(Some(inspection.clone())));
+                }
+            }
+        }
     }
 
     pub(super) fn ready_snapshot(&self, id: &str) -> Option<SubagentSnapshot> {
         self.completed
             .get(id)
             .filter(|child| !child.request.owner.is_workflow())
-            .map(|child| self.completed_snapshot_for_query(child))
+            .map(|child| completed_snapshot(child, None, false))
             .or_else(|| {
                 self.pending
                     .get(id)
@@ -154,9 +295,9 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     pub(super) fn handle_list_running(
         &mut self,
         parent_session_id: String,
-        respond_to: oneshot::Sender<Vec<SubagentInspection>>,
+        respond_to: oneshot::Sender<Result<Vec<SubagentInspection>, SubagentObservationError>>,
     ) {
-        let ids: Vec<_> = self
+        let inspections = self
             .active
             .values()
             .filter(|child| {
@@ -166,111 +307,55 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     Some(&parent_session_id),
                 ) && !child.request.owner.is_workflow()
             })
-            .map(|child| child.request.id.clone())
-            .collect();
-        if ids.is_empty() {
-            let _ = respond_to.send(Vec::new());
-            return;
-        }
-
-        let request_id = self.next_list_request_id;
-        self.next_list_request_id = self.next_list_request_id.wrapping_add(1);
-        self.list_requests.insert(
-            request_id,
-            ListRequest {
-                slots: vec![None; ids.len()],
-                remaining: ids.len(),
-                respond_to,
-            },
-        );
-        for (index, id) in ids.into_iter().enumerate() {
-            self.queue_active_progress(&id, ProgressTarget::List { request_id, index });
-        }
+            .map(|child| {
+                child.execution_outcome.as_deref().map_or_else(
+                    || active_inspection(child),
+                    |outcome| Ok(active_finalization_inspection(child, outcome)),
+                )
+            })
+            .collect::<Result<Vec<_>, _>>();
+        let _ = respond_to.send(inspections);
     }
+}
 
-    pub(super) fn queue_active_progress(&mut self, id: &str, target: ProgressTarget) {
-        let Some(child) = self.active.get(id) else {
-            match target {
-                ProgressTarget::Query(tx) => {
-                    let _ = tx.send(self.ready_snapshot(id));
-                }
-                ProgressTarget::Inspect(tx) => {
-                    let value = self
-                        .completed
-                        .get(id)
-                        .map(|child| self.completed_inspection_for_query(child));
-                    let _ = tx.send(value);
-                }
-                ProgressTarget::List { request_id, index } => {
-                    self.finish_list_slot(request_id, index, None);
-                }
-            }
-            return;
-        };
-        self.progress.push(ProgressFuture {
-            future: Box::pin(child.control.progress()),
-            seed: Some(running_seed(child)),
-            target: Some(target),
-        });
+fn active_inspection<C: ChildControl>(
+    child: &super::super::coordinator_state::ActiveChild<C>,
+) -> Result<SubagentInspection, SubagentObservationError> {
+    let progress = child
+        .control
+        .progress_snapshot()
+        .ok_or(SubagentObservationError::Unavailable)?;
+    Ok(running_inspection(running_seed(child), progress))
+}
+
+pub(super) fn active_finalization_snapshot<C>(
+    child: &super::super::coordinator_state::ActiveChild<C>,
+    outcome: &str,
+) -> SubagentSnapshot {
+    let seed = running_seed(child);
+    SubagentSnapshot {
+        subagent_id: seed.subagent_id,
+        description: seed.description,
+        subagent_type: seed.subagent_type,
+        status: super::super::types::SubagentSnapshotStatus::FinalizationPending {
+            outcome: outcome.to_owned(),
+            error: None,
+        },
+        started_at_epoch_ms: seed.started_at_epoch_ms,
+        duration_ms: seed.duration_ms,
     }
+}
 
-    pub(super) fn finish_progress(
-        &mut self,
-        seed: RunningSeed,
-        target: ProgressTarget,
-        progress: SubagentProgress,
-    ) {
-        let still_active = self.active.contains_key(&seed.subagent_id);
-        if !still_active {
-            match target {
-                ProgressTarget::Query(respond_to) => {
-                    let _ = respond_to.send(self.ready_snapshot(&seed.subagent_id));
-                }
-                ProgressTarget::Inspect(respond_to) => {
-                    let value = self
-                        .completed
-                        .get(&seed.subagent_id)
-                        .map(|child| self.completed_inspection_for_query(child));
-                    let _ = respond_to.send(value);
-                }
-                ProgressTarget::List { request_id, index } => {
-                    self.finish_list_slot(request_id, index, None);
-                }
-            }
-            return;
-        }
-        let inspection = running_inspection(seed, progress);
-        match target {
-            ProgressTarget::Query(respond_to) => {
-                let _ = respond_to.send(Some(inspection.snapshot));
-            }
-            ProgressTarget::Inspect(respond_to) => {
-                let _ = respond_to.send(Some(inspection));
-            }
-            ProgressTarget::List { request_id, index } => {
-                self.finish_list_slot(request_id, index, Some(inspection));
-            }
-        }
-    }
-
-    fn finish_list_slot(
-        &mut self,
-        request_id: u64,
-        index: usize,
-        inspection: Option<SubagentInspection>,
-    ) {
-        let Some(request) = self.list_requests.get_mut(&request_id) else {
-            return;
-        };
-        request.slots[index] = inspection;
-        request.remaining = request.remaining.saturating_sub(1);
-        if request.remaining != 0 {
-            return;
-        }
-        let Some(request) = self.list_requests.remove(&request_id) else {
-            return;
-        };
-        let values = request.slots.into_iter().flatten().collect();
-        let _ = request.respond_to.send(values);
+fn active_finalization_inspection<C>(
+    child: &super::super::coordinator_state::ActiveChild<C>,
+    outcome: &str,
+) -> SubagentInspection {
+    let seed = running_seed(child);
+    SubagentInspection {
+        snapshot: active_finalization_snapshot(child, outcome),
+        parent_session_id: seed.parent_session_id,
+        child_session_id: seed.child_session_id,
+        fork_parent_prompt_id: seed.fork_parent_prompt_id,
+        resumed_from: seed.resumed_from,
     }
 }

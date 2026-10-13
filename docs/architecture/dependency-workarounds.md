@@ -75,7 +75,7 @@ packages every included C file.
 
 ## 5. rmcp's reqwest 0.13 integration
 
-**Why**: rmcp 2.2 (the MCP protocol client used by the mcp crate) requires
+**Why**: rmcp 3.5.1 (the MCP protocol client used by the mcp crate) requires
 `reqwest >= 0.13.2`.
 
 **Status (2026-08-31): RESOLVED.** The async-openai fork was rebased onto
@@ -129,3 +129,22 @@ release:
   (095ab55), the pager's BYOK gate refuses to start without a configured LLM,
   so every spawn-based PTY test must seed it. `scroll_correctness_ptyctl.rs`
   and `scroll_matrix/session.rs` rely on it.
+
+## 9. rmcp 3.5.1 SDK integration boundary (2026-10-11)
+
+The `mcp` crate pins official rmcp 3.5.1 and remains the only SDK dependency
+entry point. reqwest 0.13.4, http 1.5.0, sse-stream 0.2.5 and the Rust 1.93.1
+toolchain remain compatible; the no-provider/ring constraint in §1 stays.
+`StreamableHttpClient::get_stream` now accepts an optional session id.
+
+Keep the SSE throttle: the SDK backs off graceful EOF but still reconnects
+immediately after an established body error. The existing abnormal-body,
+throttled and healthy-server fixtures pass against 3.5.1. Keep the legacy
+call cancellation guard: SDK RequestHandle has no Drop cancellation, and
+Grow uses no SDK timeout options, avoiding duplicate timeout notifications.
+
+SDK automatic MRTR and discovery run in fixtures. Product integration is
+gated on upstream host extension points: call-scoped capabilities, whole-round
+admission, cancellation/deadlines and continuation dispatch policy. See the
+[active change's evidence and gate](../../openspec/changes/add-mcp-multi-round-elicitation/sdk-integration.md).
+Do not replace those missing hooks with a Grow protocol loop or wire rewriter.

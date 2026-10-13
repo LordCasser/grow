@@ -47,6 +47,7 @@ pub struct ChatStateActor {
     /// unaccepted sequence, so the mailbox must close after the current
     /// command receives its failure.
     persistence_poisoned: bool,
+    pending_commit: std::sync::Arc<std::sync::Mutex<Option<crate::PendingTimelineCommit>>>,
 }
 
 impl ChatStateActor {
@@ -59,7 +60,16 @@ impl ChatStateActor {
         &mut self,
         event: TimelineEvent,
     ) -> Result<TimelineEvent, crate::commands::TimelineWriteError> {
-        self.persist_pending_timeline_event(&event).await?;
+        self.commit_timeline_event_before(event, None).await
+    }
+
+    async fn commit_timeline_event_before(
+        &mut self,
+        event: TimelineEvent,
+        caller_deadline: Option<tokio::time::Instant>,
+    ) -> Result<TimelineEvent, crate::commands::TimelineWriteError> {
+        self.persist_pending_timeline_event(&event, caller_deadline)
+            .await?;
         let committed = event.clone();
         let previous_prompt_index = self.state.timeline.next_prompt_index();
         if let Err(error) = self.state.timeline.accept(event) {
@@ -77,14 +87,45 @@ impl ChatStateActor {
     async fn persist_pending_timeline_event(
         &mut self,
         event: &TimelineEvent,
+        caller_deadline: Option<tokio::time::Instant>,
     ) -> Result<(), crate::commands::TimelineWriteError> {
         let mut retry_delay = std::time::Duration::from_millis(25);
+        let hard_deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        let deadline = caller_deadline.map_or(hard_deadline, |caller| caller.min(hard_deadline));
+        *self
+            .pending_commit
+            .lock()
+            .unwrap_or_else(|e| e.into_inner()) = Some(crate::PendingTimelineCommit {
+            event: event.clone(),
+            error_kind: None,
+            acknowledgement_lost: false,
+        });
         loop {
+            if tokio::time::Instant::now() >= deadline {
+                self.persistence_poisoned = true;
+                return Err(crate::commands::TimelineWriteError::DeadlineExceeded);
+            }
             let acknowledgement = self.persistence.persist_timeline_event_and_ack(event);
             let result = tokio::select! {
                 biased;
                 _ = self.cancellation_token.cancelled() => {
+                    self.persistence_poisoned = true;
+                    if let Some(pending) = self.pending_commit.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+                        pending.acknowledgement_lost = true;
+                    }
                     return Err(crate::commands::TimelineWriteError::Cancelled);
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    self.persistence_poisoned = true;
+                    if let Some(pending) = self
+                        .pending_commit
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_mut()
+                    {
+                        pending.acknowledgement_lost = true;
+                    }
+                    return Err(crate::commands::TimelineWriteError::DeadlineExceeded);
                 }
                 result = acknowledgement => result,
             };
@@ -93,7 +134,13 @@ impl ChatStateActor {
                 Err(_) => Err(crate::commands::TimelineWriteError::AcknowledgementLost),
             };
             match result {
-                Ok(()) => return Ok(()),
+                Ok(()) => {
+                    *self
+                        .pending_commit
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner()) = None;
+                    return Ok(());
+                }
                 Err(crate::commands::TimelineWriteError::Persistence(error))
                     if crate::persistence::persistence_error_is_permanent(&error) =>
                 {
@@ -103,9 +150,33 @@ impl ChatStateActor {
                         "Timeline persistence entered a permanent failed state"
                     );
                     self.persistence_poisoned = true;
+                    if let Some(pending) = self
+                        .pending_commit
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_mut()
+                    {
+                        pending.error_kind = Some(error.kind());
+                    }
                     return Err(crate::commands::TimelineWriteError::Persistence(error));
                 }
                 Err(error) => {
+                    if let Some(pending) = self
+                        .pending_commit
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .as_mut()
+                    {
+                        match &error {
+                            crate::commands::TimelineWriteError::Persistence(error) => {
+                                pending.error_kind = Some(error.kind())
+                            }
+                            crate::commands::TimelineWriteError::AcknowledgementLost => {
+                                pending.acknowledgement_lost = true
+                            }
+                            _ => {}
+                        }
+                    }
                     tracing::warn!(
                         %error,
                         seq = event.seq.get(),
@@ -117,7 +188,12 @@ impl ChatStateActor {
             tokio::select! {
                 biased;
                 _ = self.cancellation_token.cancelled() => {
+                    self.persistence_poisoned = true;
                     return Err(crate::commands::TimelineWriteError::Cancelled);
+                }
+                _ = tokio::time::sleep_until(deadline) => {
+                    self.persistence_poisoned = true;
+                    return Err(crate::commands::TimelineWriteError::DeadlineExceeded);
                 }
                 _ = tokio::time::sleep(retry_delay) => {}
             }
@@ -128,7 +204,11 @@ impl ChatStateActor {
     }
 
     async fn commit_buffered_timeline_event(&mut self, event: TimelineEvent) -> bool {
-        if self.persist_pending_timeline_event(&event).await.is_err() {
+        if self
+            .persist_pending_timeline_event(&event, None)
+            .await
+            .is_err()
+        {
             return false;
         }
         let previous_prompt_index = self.state.timeline.next_prompt_index();
@@ -230,6 +310,7 @@ impl ChatStateActor {
         let (cmd_tx, cmd_rx) = mpsc::unbounded_channel();
 
         let actor_cancellation = cancellation_token.child_token();
+        let handle = ChatStateHandle::new(cmd_tx, actor_cancellation.clone());
         let actor = ChatStateActor {
             state,
             persistence,
@@ -238,17 +319,22 @@ impl ChatStateActor {
             event_tx,
             cancellation_token: actor_cancellation.clone(),
             persistence_poisoned: false,
+            pending_commit: handle.pending_commit.clone(),
         };
 
         tokio::spawn(actor.run());
 
-        ChatStateHandle::new(cmd_tx, actor_cancellation)
+        handle
     }
 
     /// Main actor loop — processes commands until shutdown or cancellation.
     async fn run(mut self) {
         for event in std::mem::take(&mut self.bootstrap_events) {
-            if self.persist_pending_timeline_event(&event).await.is_err() {
+            if self
+                .persist_pending_timeline_event(&event, None)
+                .await
+                .is_err()
+            {
                 debug!("ChatStateActor cancelled before bootstrap Timeline became durable");
                 return;
             }
@@ -292,10 +378,14 @@ impl ChatStateActor {
                     Err(error) => tracing::error!(%error, "rejected invalid timeline event"),
                 }
             }
-            ChatStateCommand::RecordTimelineEventDurably { kind, reply } => {
+            ChatStateCommand::RecordTimelineEventDurably {
+                kind,
+                deadline,
+                reply,
+            } => {
                 let result = match self.state.timeline.prepare(kind) {
                     Err(error) => Err(crate::commands::TimelineWriteError::Invalid(error)),
-                    Ok(event) => self.commit_timeline_event(event).await,
+                    Ok(event) => self.commit_timeline_event_before(event, deadline).await,
                 };
                 let _ = reply.send(result);
             }
@@ -304,6 +394,7 @@ impl ChatStateActor {
                 source,
                 source_version,
                 payload_ref,
+                deadline,
                 reply,
             } => {
                 let existing = self
@@ -350,7 +441,9 @@ impl ChatStateActor {
                                     Err(error) => {
                                         Err(crate::commands::TimelineWriteError::Invalid(error))
                                     }
-                                    Ok(event) => self.commit_timeline_event(event).await,
+                                    Ok(event) => {
+                                        self.commit_timeline_event_before(event, deadline).await
+                                    }
                                 }
                             }
                         }
@@ -382,7 +475,10 @@ impl ChatStateActor {
                         _ => None,
                     });
                 let result = match existing {
-                    Some((event, true)) => Ok(event),
+                    Some((event, true)) => Ok(crate::commands::SubmitInputResult {
+                        event,
+                        created: false,
+                    }),
                     Some((_, false)) => Err(crate::commands::TimelineWriteError::Invalid(
                         crate::TimelineError::InvalidInput,
                     )),
@@ -394,7 +490,12 @@ impl ChatStateActor {
                         },
                     )) {
                         Err(error) => Err(crate::commands::TimelineWriteError::Invalid(error)),
-                        Ok(event) => self.commit_timeline_event(event).await,
+                        Ok(event) => self.commit_timeline_event(event).await.map(|event| {
+                            crate::commands::SubmitInputResult {
+                                event,
+                                created: true,
+                            }
+                        }),
                     },
                 };
                 let _ = reply.send(result);
@@ -561,10 +662,17 @@ impl ChatStateActor {
                 by_model,
                 attribute_to_prompt,
                 incomplete,
+                deadline,
                 reply,
             } => {
                 let result = self
-                    .record_subagent_usage(&subagent_id, &by_model, attribute_to_prompt, incomplete)
+                    .record_subagent_usage_before(
+                        &subagent_id,
+                        &by_model,
+                        attribute_to_prompt,
+                        incomplete,
+                        deadline,
+                    )
                     .await;
                 let _ = reply.send(result);
             }

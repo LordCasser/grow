@@ -81,6 +81,142 @@ async fn shared_read_session_resolution_stays_out_of_the_writer_cache() {
 }
 
 #[tokio::test]
+async fn bounded_shared_read_resolution_fails_closed_at_the_cwd_scan_limit() {
+    let root = TempDir::new().unwrap();
+    let sessions = root.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    for index in 0..BOUNDED_SESSION_ID_SCAN_ENTRIES {
+        std::fs::create_dir(sessions.join(format!("cwd-{index}"))).unwrap();
+    }
+
+    let observer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let error = observer
+        .open_session_by_id_shared_read_bounded("missing-session")
+        .err()
+        .expect("a partial scan cannot prove that an id is absent");
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    assert!(observer.opened_sessions.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn timed_out_durable_timeline_append_keeps_lease_until_blocking_sync_exits() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let root = TempDir::new().unwrap();
+    let info = create_test_info();
+    let (sync_entered, sync_entered_receiver) = std::sync::mpsc::channel();
+    let (release_sync, release_receiver) = std::sync::mpsc::channel();
+    let release_receiver = std::sync::Mutex::new(release_receiver);
+    let block_once = std::sync::Arc::new(AtomicBool::new(true));
+    let should_block = std::sync::Arc::clone(&block_once);
+    let sync_points = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded_sync_points = std::sync::Arc::clone(&sync_points);
+    let writer = JsonlStorageAdapter::with_timeline_sync_probe(
+        root.path().to_path_buf(),
+        move |point| {
+            recorded_sync_points.lock().unwrap().push(point);
+            if point == TimelineSyncPoint::File && should_block.swap(false, Ordering::SeqCst) {
+                sync_entered.send(()).unwrap();
+                release_receiver.lock().unwrap().recv().unwrap();
+            }
+            Ok(())
+        },
+    );
+    writer.init_session(&info, default_model_id()).await.unwrap();
+
+    let mut timeline = chat_state::Timeline::default();
+    let event = timeline
+        .record(chat_state::TimelineEventKind::Observation(
+            chat_state::ObservationEvent {
+                scope: "test".into(),
+                name: "sync boundary".into(),
+                turn: None,
+                step: None,
+                data: None,
+            },
+        ))
+        .unwrap();
+    let append_writer = writer.clone();
+    let append_info = info.clone();
+    let append_event = event.clone();
+    let append = tokio::spawn(async move {
+        tokio::time::timeout(
+            std::time::Duration::from_millis(20),
+            append_writer.append_timeline_event_durable(&append_info, &append_event),
+        )
+        .await
+    });
+    drop(writer);
+    tokio::task::spawn_blocking(move || sync_entered_receiver.recv().unwrap())
+        .await
+        .unwrap();
+    assert!(append.await.unwrap().is_err(), "caller should time out while durable file sync is held");
+
+    let replay_sync_points = std::sync::Arc::clone(&sync_points);
+    let replacement = JsonlStorageAdapter::with_timeline_sync_probe(
+        root.path().to_path_buf(),
+        move |point| {
+            replay_sync_points.lock().unwrap().push(point);
+            Ok(())
+        },
+    );
+    assert!(
+        !replacement.try_acquire_writer_lease(&info).unwrap(),
+        "the blocking append still owns the writer lease after its caller is dropped"
+    );
+
+    release_sync.send(()).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            if replacement.try_acquire_writer_lease(&info).unwrap() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("blocking IO must eventually release its writer owner");
+
+    replacement
+        .append_timeline_event_durable(&info, &event)
+        .await
+        .expect("exact replay must sync the already committed tail");
+    assert_eq!(
+        *sync_points.lock().unwrap(),
+        vec![
+            TimelineSyncPoint::File,
+            TimelineSyncPoint::Directory,
+            TimelineSyncPoint::File,
+            TimelineSyncPoint::Directory,
+        ],
+        "the committed event and its exact replay both sync file then directory"
+    );
+    let conflict = chat_state::Timeline::default()
+        .record(chat_state::TimelineEventKind::Observation(
+            chat_state::ObservationEvent {
+                scope: "test".into(),
+                name: "different payload".into(),
+                turn: None,
+                step: None,
+                data: None,
+            },
+        ))
+        .unwrap();
+    let error = replacement
+        .append_timeline_event_durable(&info, &conflict)
+        .await
+        .expect_err("the same sequence with different content must conflict");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(
+        std::fs::read_to_string(replacement.timeline_file(&info))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn write_load_claims_the_session_lease_before_timeline_replay() {
     let root = TempDir::new().unwrap();
     let info = create_test_info();
@@ -5556,6 +5692,717 @@ async fn cleanup_rechecks_activity_after_scan_under_writer_lease() {
     }
 }
 
+#[tokio::test]
+async fn cleanup_ttl_requires_closed_timeline_and_preserves_new_references() {
+    for case in ["closed", "turn", "input", "tool", "receipt", "corrupt"] {
+        let root = TempDir::new().unwrap();
+        let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        let info = create_test_info();
+        let mut summary = writer.init_session(&info, default_model_id()).await.unwrap();
+        summary.created_at = chrono::Utc::now() - chrono::Duration::days(60);
+        summary.updated_at = chrono::Utc::now() - chrono::Duration::days(40);
+        summary.last_active_at = Some(summary.updated_at);
+        writer.write_summary_sync(&info, &summary).unwrap();
+
+        if case != "closed" && case != "corrupt" {
+            let mut timeline = chat_state::Timeline::default();
+            let turn = chat_state::TurnId(1);
+            let step = chat_state::StepId { turn, index: 0 };
+            let kinds = match case {
+                "turn" => vec![chat_state::TimelineEventKind::Turn(
+                    chat_state::TurnEvent::Started {
+                        id: turn,
+                        input_ids: Vec::new(),
+                        identity: chat_state::TurnIdentity {
+                            origin: "user".into(),
+                            turn_kind: "internal".into(),
+                            goal_id: None,
+                            goal_definition_revision: None,
+                            stage_id: None,
+                        },
+                        model_id: "model".into(),
+                        input_message_count: 0,
+                        prompt_index: 0,
+                        prompt_text: "recover".into(),
+                        input_kind: chat_state::TurnInputKind::Prompt,
+                        redirect_kind: None,
+                    },
+                )],
+                "input" => vec![chat_state::TimelineEventKind::Input(
+                    chat_state::InputEvent::Submitted {
+                        input_id: "pending-input".into(),
+                        intent: chat_state::InputIntent::Prompt,
+                        payload_ref: chat_state::InputPayloadRef {
+                            blake3: blake3::hash(b"pending").to_hex().to_string(),
+                            bytes: 7,
+                        },
+                    },
+                )],
+                "tool" => vec![
+                    chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started {
+                        id: turn,
+                        input_ids: Vec::new(),
+                        identity: chat_state::TurnIdentity {
+                            origin: "user".into(),
+                            turn_kind: "internal".into(),
+                            goal_id: None,
+                            goal_definition_revision: None,
+                            stage_id: None,
+                        },
+                        model_id: "model".into(),
+                        input_message_count: 0,
+                        prompt_index: 0,
+                        prompt_text: "recover".into(),
+                        input_kind: chat_state::TurnInputKind::Prompt,
+                        redirect_kind: None,
+                    }),
+                    chat_state::TimelineEventKind::Step(chat_state::StepEvent::Started {
+                        id: step,
+                    }),
+                    chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Started {
+                        call_id: "open-tool".into(),
+                        turn,
+                        step,
+                        name: "test".into(),
+                        input: None,
+                    }),
+                ],
+                "receipt" => {
+                    let source = chat_state::NotificationSource::ParentMessage {
+                        parent_session_id: "parent".into(),
+                        message_id: "message".into(),
+                        interrupt: false,
+                    };
+                    let source_version = chat_state::NotificationSourceVersion::Ordinal {
+                        value: chat_state::PARENT_MESSAGE_SOURCE_VERSION,
+                    };
+                    let id = chat_state::notification_id(
+                        info.id.0.as_ref(),
+                        &source,
+                        &source_version,
+                    )
+                    .unwrap();
+                    vec![chat_state::TimelineEventKind::Notification(
+                        chat_state::NotificationEvent::Received {
+                            id,
+                            owner_session_id: info.id.0.to_string(),
+                            source,
+                            source_version,
+                            payload_ref: chat_state::NotificationPayloadRef {
+                                blake3: blake3::hash(b"receipt").to_hex().to_string(),
+                                bytes: 7,
+                            },
+                        },
+                    )]
+                }
+                _ => unreachable!(),
+            };
+            for kind in kinds {
+                let event = timeline.record(kind).unwrap();
+                writer.append_timeline_event_durable(&info, &event).await.unwrap();
+            }
+        } else if case == "corrupt" {
+            std::fs::write(writer.session_dir(&info).join("timeline.jsonl"), b"bad ledger\n")
+                .unwrap();
+        }
+        drop(writer);
+        let cleaner = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        let session_dir = cleaner.session_dir(&info);
+        let (deleted, errors) = cleaner.cleanup_stale_sessions_sync(30, None, |_| {}).unwrap();
+        if case == "closed" {
+            assert_eq!((deleted, errors), (1, 0));
+            assert!(!session_dir.exists());
+        } else if case == "corrupt" {
+            assert_eq!((deleted, errors), (0, 1));
+            assert!(session_dir.is_dir());
+        } else {
+            assert_eq!((deleted, errors), (0, 0), "{case}");
+            assert!(session_dir.is_dir(), "{case}");
+        }
+    }
+
+    // Discovery finishes before deletion. A committed receipt added between
+    // those phases is observed under the newly acquired candidate lease.
+    let root = TempDir::new().unwrap();
+    let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let info = create_test_info();
+    let mut summary = writer.init_session(&info, default_model_id()).await.unwrap();
+    summary.updated_at = chrono::Utc::now() - chrono::Duration::days(40);
+    summary.last_active_at = Some(summary.updated_at);
+    writer.write_summary_sync(&info, &summary).unwrap();
+    let cleaner = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let candidate = cleaner.scan_opened_sessions(None, |opened| opened).unwrap().pop().unwrap();
+    let mut timeline = chat_state::Timeline::default();
+    let source = chat_state::NotificationSource::ParentMessage {
+        parent_session_id: "parent".into(),
+        message_id: "late-message".into(),
+        interrupt: false,
+    };
+    let source_version = chat_state::NotificationSourceVersion::Ordinal {
+        value: chat_state::PARENT_MESSAGE_SOURCE_VERSION,
+    };
+    let event = timeline.record(chat_state::TimelineEventKind::Notification(
+        chat_state::NotificationEvent::Received {
+            id: chat_state::notification_id(info.id.0.as_ref(), &source, &source_version).unwrap(),
+            owner_session_id: info.id.0.to_string(),
+            source,
+            source_version,
+            payload_ref: chat_state::NotificationPayloadRef {
+                blake3: blake3::hash(b"late").to_hex().to_string(),
+                bytes: 4,
+            },
+        },
+    )).unwrap();
+    writer.append_timeline_event_durable(&info, &event).await.unwrap();
+    drop(writer);
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
+    assert!(!cleaner.delete_if_still_stale(candidate, cutoff).unwrap());
+    assert!(cleaner.session_dir(&info).is_dir());
+}
+
+#[tokio::test]
+async fn cleanup_ttl_allows_a_dismissed_goal_receipt_without_its_body() {
+    let root = TempDir::new().unwrap();
+    let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let info = create_test_info();
+    let mut summary = writer.init_session(&info, default_model_id()).await.unwrap();
+    summary.updated_at = chrono::Utc::now() - chrono::Duration::days(40);
+    summary.last_active_at = Some(summary.updated_at);
+    writer.write_summary_sync(&info, &summary).unwrap();
+
+    let source = chat_state::NotificationSource::TaskCompleted {
+        task_id: "goal-task".into(),
+        task_kind: chat_state::NotificationTaskKind::Task,
+        owner: chat_state::NotificationOwner::Goal {
+            goal_id: "goal-1".into(),
+            definition_revision: 1,
+        },
+    };
+    let source_version = chat_state::NotificationSourceVersion::Ordinal { value: 1 };
+    let mut timeline = chat_state::Timeline::default();
+    let receipt_id = chat_state::notification_id(
+        info.id.0.as_ref(),
+        &source,
+        &source_version,
+    )
+    .unwrap();
+    timeline
+        .record(chat_state::TimelineEventKind::Notification(
+            chat_state::NotificationEvent::Received {
+                id: receipt_id.clone(),
+                owner_session_id: info.id.0.to_string(),
+                source,
+                source_version,
+                payload_ref: chat_state::NotificationPayloadRef {
+                    blake3: blake3::hash(b"receipt body deliberately absent")
+                        .to_hex()
+                        .to_string(),
+                    bytes: 31,
+                },
+            },
+        ))
+        .unwrap();
+    timeline
+        .record(chat_state::TimelineEventKind::Notification(
+            chat_state::NotificationEvent::Dismissed {
+                notification_ids: vec![receipt_id],
+                reason: chat_state::NotificationDismissReason::GoalOwnedAutostart {
+                    goal_id: "goal-1".into(),
+                    definition_revision: 1,
+                },
+            },
+        ))
+        .unwrap();
+    for event in timeline.events() {
+        writer
+            .append_timeline_event_durable(&info, event)
+            .await
+            .unwrap();
+    }
+    drop(writer);
+
+    let cleaner = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let session_dir = cleaner.session_dir(&info);
+    assert_eq!(cleaner.cleanup_stale_sessions_sync(30, None, |_| {}).unwrap(), (1, 0));
+    assert!(!session_dir.exists());
+}
+
+#[tokio::test]
+async fn cleanup_child_seed_requires_exact_parent_terminal_result_chain() {
+    for (has_terminal, surface_completion, receipt, outcome, hold_parent_writer, stale) in [
+        (
+            false,
+            true,
+            "missing",
+            chat_state::SubagentOutcome::Completed,
+            false,
+            "both",
+        ),
+        (
+            true,
+            true,
+            "missing",
+            chat_state::SubagentOutcome::Completed,
+            false,
+            "parent",
+        ),
+        (
+            true,
+            true,
+            "missing",
+            chat_state::SubagentOutcome::Completed,
+            false,
+            "child",
+        ),
+        (
+            true,
+            true,
+            "pending",
+            chat_state::SubagentOutcome::Completed,
+            false,
+            "child",
+        ),
+        (
+            true,
+            true,
+            "consumed",
+            chat_state::SubagentOutcome::Completed,
+            false,
+            "parent",
+        ),
+        (
+            true,
+            true,
+            "consumed",
+            chat_state::SubagentOutcome::Completed,
+            false,
+            "child",
+        ),
+        (
+            true,
+            false,
+            "missing",
+            chat_state::SubagentOutcome::Completed,
+            false,
+            "parent",
+        ),
+        (
+            true,
+            false,
+            "missing",
+            chat_state::SubagentOutcome::Completed,
+            false,
+            "child",
+        ),
+        (
+            true,
+            true,
+            "missing",
+            chat_state::SubagentOutcome::Cancelled,
+            false,
+            "parent",
+        ),
+        (
+            true,
+            true,
+            "missing",
+            chat_state::SubagentOutcome::Cancelled,
+            false,
+            "child",
+        ),
+        (
+            true,
+            true,
+            "consumed",
+            chat_state::SubagentOutcome::Completed,
+            true,
+            "child",
+        ),
+    ] {
+        let root = TempDir::new().unwrap();
+        let parent_info = Info {
+            id: acp::SessionId::new("cleanup-parent"),
+            cwd: "/cleanup-parent".into(),
+        };
+        let child_info = Info {
+            id: acp::SessionId::new("cleanup-child"),
+            cwd: "/cleanup-child".into(),
+        };
+        let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        writer
+            .init_session(&parent_info, default_model_id())
+            .await
+            .unwrap();
+        writer
+            .init_session(&child_info, default_model_id())
+            .await
+            .unwrap();
+
+        let mut parent = chat_state::Timeline::default();
+        let spawn = parent
+            .record(chat_state::TimelineEventKind::Subagent(
+                chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
+                    subagent_id: "cleanup-agent".into(),
+                    child_session_id: child_info.id.0.to_string(),
+                    security_parent_session_id: parent_info.id.0.to_string(),
+                    subagent_type: "worker".into(),
+                    description: "cleanup fixture".into(),
+                    prompt: "run".into(),
+                    context_source: chat_state::SubagentContextSource::New,
+                    source_ref: None,
+                    context_normalized: false,
+                    resumed_from: None,
+                    parent_prompt_id: None,
+                    capability_mode: None,
+                    permission_mode: None,
+                    effective_permission_mode: None,
+                    workflow_run_id: None,
+                    goal_id: None,
+                    goal_definition_revision: None,
+                    surface_completion,
+                    child_cwd: child_info.cwd.clone(),
+                    worktree_path: None,
+                    effective_model_id: "model".into(),
+                    model_transport_key: sampling_types::ModelImageInputKey::new(
+                        "model",
+                        "responses",
+                        "test",
+                    ),
+                    reasoning_effort: None,
+                }),
+            ))
+            .unwrap();
+
+        let mut child = chat_state::Timeline::default();
+        child
+            .record(chat_state::TimelineEventKind::SubagentSeed(
+                chat_state::SubagentSeedEvent {
+                    parent_timeline_id: parent_info.id.0.to_string(),
+                    parent_spawn_seq: spawn.seq.get(),
+                    subagent_id: "cleanup-agent".into(),
+                    security_parent_session_id: parent_info.id.0.to_string(),
+                    context_source: chat_state::SubagentContextSource::New,
+                    source_ref: None,
+                    normalized: false,
+                },
+            ))
+            .unwrap();
+        let child_result = if has_terminal {
+            let (error, result_outcome) = match outcome {
+                chat_state::SubagentOutcome::Completed => (None, outcome),
+                chat_state::SubagentOutcome::Cancelled => (Some("cancelled".to_owned()), outcome),
+                chat_state::SubagentOutcome::Failed => unreachable!(),
+            };
+            Some(
+                child
+                    .record(chat_state::TimelineEventKind::SubagentResult(
+                        chat_state::SubagentResultEvent {
+                            subagent_id: "cleanup-agent".into(),
+                            outcome: result_outcome,
+                            duration_ms: 1,
+                            tool_calls: 0,
+                            turns: 0,
+                            tokens_used: 0,
+                            error,
+                            output_ref: None,
+                        },
+                    ))
+                    .unwrap(),
+            )
+        } else {
+            None
+        };
+        for event in child.events() {
+            writer
+                .append_timeline_event_durable(&child_info, event)
+                .await
+                .unwrap();
+        }
+        if let Some(result) = child_result {
+            let terminal_error = if outcome == chat_state::SubagentOutcome::Cancelled {
+                Some("cancelled".to_owned())
+            } else {
+                None
+            };
+            parent
+                .record(chat_state::TimelineEventKind::Subagent(
+                    chat_state::SubagentEvent::Ended(chat_state::SubagentTerminalEvent {
+                        subagent_id: "cleanup-agent".into(),
+                        child_session_id: child_info.id.0.to_string(),
+                        outcome,
+                        duration_ms: 1,
+                        tool_calls: 0,
+                        turns: 0,
+                        tokens_used: 0,
+                        error: terminal_error,
+                        result_ref: Some(chat_state::TimelineRangeRef {
+                            timeline_id: child_info.id.0.to_string(),
+                            first_seq: result.seq.get(),
+                            last_seq: result.seq.get(),
+                        }),
+                        snapshot_ref: None,
+                    }),
+                ))
+                .unwrap();
+            if surface_completion && outcome != chat_state::SubagentOutcome::Cancelled {
+                let source = chat_state::NotificationSource::SubagentCompleted {
+                    subagent_id: "cleanup-agent".into(),
+                    owner: chat_state::NotificationOwner::Session,
+                };
+                let source_version = chat_state::NotificationSourceVersion::Ordinal { value: 1 };
+                let receipt_id = chat_state::notification_id(
+                    parent_info.id.0.as_ref(),
+                    &source,
+                    &source_version,
+                )
+                .unwrap();
+                parent
+                    .record(chat_state::TimelineEventKind::Notification(
+                        chat_state::NotificationEvent::Received {
+                            id: receipt_id.clone(),
+                            owner_session_id: parent_info.id.0.to_string(),
+                            source,
+                            source_version,
+                            payload_ref: chat_state::NotificationPayloadRef {
+                                blake3: blake3::hash(b"completion").to_hex().to_string(),
+                                bytes: 10,
+                            },
+                        },
+                    ))
+                    .unwrap();
+                if receipt == "consumed" {
+                    let turn = chat_state::TurnId(1);
+                    parent
+                        .record(chat_state::TimelineEventKind::Turn(
+                            chat_state::TurnEvent::Started {
+                                id: turn,
+                                input_ids: Vec::new(),
+                                identity: chat_state::TurnIdentity {
+                                    origin: "notification_drain".into(),
+                                    turn_kind: "internal".into(),
+                                    goal_id: None,
+                                    goal_definition_revision: None,
+                                    stage_id: None,
+                                },
+                                model_id: "model".into(),
+                                input_message_count: parent.surface_len(),
+                                prompt_index: 0,
+                                prompt_text: "notification available".into(),
+                                input_kind: chat_state::TurnInputKind::Prompt,
+                                redirect_kind: None,
+                            },
+                        ))
+                        .unwrap();
+                    parent
+                        .record(chat_state::TimelineEventKind::Notification(
+                            chat_state::NotificationEvent::Consumed {
+                                notification_ids: vec![receipt_id],
+                                turn,
+                                input: None,
+                            },
+                        ))
+                        .unwrap();
+                    parent
+                        .record(chat_state::TimelineEventKind::Turn(
+                            chat_state::TurnEvent::Ended {
+                                id: turn,
+                                outcome: "completed".into(),
+                                duration_ms: 1,
+                                tool_count: 0,
+                                terminal: chat_state::TurnTerminal {
+                                    source: chat_state::TurnTerminalSource::Host,
+                                    stop_reason: "end_turn".into(),
+                                    completion_kind: "completed".into(),
+                                },
+                                cancellation_category: None,
+                                details: None,
+                            },
+                        ))
+                        .unwrap();
+                }
+            }
+        }
+        for event in parent.events() {
+            writer
+                .append_timeline_event_durable(&parent_info, event)
+                .await
+                .unwrap();
+        }
+        // Appending Subagent lifecycle and result facts refreshes activity.
+        // Age projections only after all facts are durable so every case
+        // exercises the cleanup eligibility boundary as intended.
+        let cutoff_activity = chrono::Utc::now() - chrono::Duration::days(40);
+        let stale_infos: Vec<_> = match stale {
+            "both" => vec![&parent_info, &child_info],
+            "parent" => vec![&parent_info],
+            "child" => vec![&child_info],
+            _ => unreachable!(),
+        };
+        for info in stale_infos {
+            let mut stale = writer.open_session(info).unwrap().summary().clone();
+            stale.updated_at = cutoff_activity;
+            stale.last_active_at = Some(cutoff_activity);
+            writer.write_summary_sync(info, &stale).unwrap();
+        }
+        drop(writer);
+
+        let retained_parent_writer = if hold_parent_writer {
+            let live = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+            live.load_session_for_write_without_updates(&parent_info)
+                .await
+                .unwrap();
+            Some(live)
+        } else {
+            None
+        };
+
+        let cleaner = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        let child_dir = cleaner.session_dir(&child_info);
+        let parent_dir = cleaner.session_dir(&parent_info);
+        let (deleted, errors) = cleaner.cleanup_stale_sessions_sync(30, None, |_| {}).unwrap();
+        assert_eq!(errors, 0);
+        let chain_closed = has_terminal
+            && (!surface_completion
+                || outcome == chat_state::SubagentOutcome::Cancelled
+                || receipt == "consumed");
+        let target_deleted = chain_closed && !hold_parent_writer && stale != "both";
+        let expected_deleted = if target_deleted { 1 } else { 0 };
+        assert_eq!(deleted, expected_deleted, "{stale} / {receipt} / {outcome:?}");
+        if stale == "parent" && target_deleted {
+            assert!(!parent_dir.exists(), "a closed stale parent permits cleanup");
+            assert!(child_dir.is_dir(), "the fresh child remains independently retained");
+        } else if stale == "child" && target_deleted {
+            assert!(!child_dir.exists(), "a closed stale child permits cleanup");
+            assert!(parent_dir.is_dir(), "the fresh parent remains independently retained");
+        } else {
+            assert!(parent_dir.is_dir(), "an unresolved or live parent is retained");
+            assert!(child_dir.is_dir(), "an unresolved or live child is retained");
+        }
+        drop(retained_parent_writer);
+    }
+}
+
+#[tokio::test]
+async fn cleanup_live_process_lease_survives_durable_append_until_process_exit() {
+    const CHILD_MODE: &str = "GROW_TEST_CLEANUP_LIVE_LEASE_CHILD";
+    const READY_ENV: &str = "GROW_TEST_CLEANUP_LIVE_LEASE_READY";
+    const TEST: &str = "session::storage::jsonl::tests::cleanup_live_process_lease_survives_durable_append_until_process_exit";
+
+    if let Ok(root) = std::env::var(CHILD_MODE) {
+        let root = std::path::PathBuf::from(root);
+        let ready = std::path::PathBuf::from(std::env::var(READY_ENV).unwrap());
+        let info = Info {
+            id: acp::SessionId::new("cleanup-live-process"),
+            cwd: "/cleanup-live-process".into(),
+        };
+        let writer = JsonlStorageAdapter::with_timeline_sync_probe(root, move |point| {
+            if point == TimelineSyncPoint::File {
+                std::fs::write(&ready, b"file sync complete; directory sync pending")?;
+                loop {
+                    std::thread::park_timeout(std::time::Duration::from_secs(60));
+                }
+            }
+            Ok(())
+        });
+        let mut summary = writer.init_session(&info, default_model_id()).await.unwrap();
+        summary.updated_at = chrono::Utc::now() - chrono::Duration::days(40);
+        summary.last_active_at = Some(summary.updated_at);
+        writer.write_summary_sync(&info, &summary).unwrap();
+
+        let mut timeline = chat_state::Timeline::default();
+        let event = timeline
+            .record(chat_state::TimelineEventKind::Observation(
+                chat_state::ObservationEvent {
+                    scope: "cleanup-test".into(),
+                    name: "canonical append before process exit".into(),
+                    turn: None,
+                    step: None,
+                    data: None,
+                },
+            ))
+            .unwrap();
+        writer
+            .append_timeline_event_durable(&info, &event)
+            .await
+            .unwrap();
+        panic!("file sync probe must hold the child process until its parent kills it");
+    }
+
+    struct KillChildOnDrop(std::process::Child);
+    impl Drop for KillChildOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let temp = TempDir::new().unwrap();
+    let root = temp.path().join("isolated-session-root");
+    let ready = temp.path().join("child-ready");
+    let child = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", TEST, "--nocapture"])
+        .env(CHILD_MODE, &root)
+        .env(READY_ENV, &ready)
+        .spawn()
+        .unwrap();
+    let mut child = KillChildOnDrop(child);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    while !ready.is_file() && std::time::Instant::now() < deadline {
+        if let Some(status) = child.0.try_wait().unwrap() {
+            panic!("child exited before reaching the file-sync barrier: {status}");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(ready.is_file(), "child did not reach the file-sync barrier before deadline");
+    assert_eq!(
+        std::fs::read(&ready).unwrap(),
+        b"file sync complete; directory sync pending"
+    );
+
+    let info = Info {
+        id: acp::SessionId::new("cleanup-live-process"),
+        cwd: "/cleanup-live-process".into(),
+    };
+    let observer = JsonlStorageAdapter::with_root(root.clone());
+    assert!(
+        !observer.try_acquire_writer_lease(&info).unwrap(),
+        "a separate process's live writer lease must exclude replacement"
+    );
+    assert_eq!(
+        observer.cleanup_stale_sessions_sync(30, None, |_| {}).unwrap(),
+        (0, 0),
+        "TTL cleanup must retain a stale session while its writer process is alive"
+    );
+    assert!(observer.session_dir(&info).is_dir());
+
+    child.0.kill().unwrap();
+    let _ = child.0.wait().unwrap();
+    let replacement = JsonlStorageAdapter::with_root(root);
+    assert!(
+        replacement.try_acquire_writer_lease(&info).unwrap(),
+        "process exit releases the OS writer lock"
+    );
+    let loaded = replacement
+        .load_session_for_write_without_updates(&info)
+        .await
+        .unwrap();
+    assert_eq!(loaded.timeline.events().len(), 1);
+    let committed_tail = loaded.timeline.events().last().unwrap().clone();
+    replacement
+        .append_timeline_event_durable(&info, &committed_tail)
+        .await
+        .expect("replaying the exact committed event completes directory sync");
+    assert_eq!(
+        std::fs::read_to_string(replacement.timeline_file(&info))
+            .unwrap()
+            .lines()
+            .count(),
+        1,
+        "exact recovery replay must not duplicate the canonical fact"
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn cleanup_many_sessions_under_descriptor_limit() {
@@ -5717,4 +6564,47 @@ async fn operational_scan_errors_preserve_cleanup_candidates() {
         assert!(callbacks.is_empty(), "{case}: incomplete discovery must not delete");
         assert!(paths.iter().all(|path| path.is_dir()), "{case}");
     }
+}
+
+#[tokio::test]
+async fn bounded_validated_timeline_stops_before_reading_over_budget_bytes() {
+    let root = TempDir::new().unwrap();
+    let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let info = create_test_info();
+    writer.init_session(&info, default_model_id()).await.unwrap();
+    std::fs::write(
+        writer.timeline_file(&info),
+        vec![b' '; BOUNDED_VALIDATION_MAX_BYTES as usize + 1],
+    )
+    .unwrap();
+
+    let observer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let opened = observer.open_session(&info).unwrap();
+    let error = opened
+        .bounded_validated_timeline(info.id.0.as_ref())
+        .err()
+        .expect("oversized evidence must be reported as unavailable");
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+}
+
+#[tokio::test]
+async fn ttl_discovery_budget_exhaustion_preserves_every_candidate() {
+    let root = TempDir::new().unwrap();
+    let sessions = root.path().join("sessions");
+    std::fs::create_dir_all(&sessions).unwrap();
+    for index in 0..=TTL_DISCOVERY_MAX_DIRECTORY_ENTRIES {
+        std::fs::create_dir(sessions.join(format!("candidate-{index}"))).unwrap();
+    }
+
+    let cleaner = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let error = cleaner
+        .cleanup_stale_sessions_sync(30, None, |_| panic!("over-budget discovery cannot delete"))
+        .expect_err("TTL discovery must stop at its candidate budget");
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    assert_eq!(
+        std::fs::read_dir(&sessions).unwrap().count(),
+        TTL_DISCOVERY_MAX_DIRECTORY_ENTRIES + 1
+    );
+    assert!(cleaner.opened_sessions.lock().unwrap().is_empty());
+    assert!(cleaner.writer_leases.lock().unwrap().is_empty());
 }

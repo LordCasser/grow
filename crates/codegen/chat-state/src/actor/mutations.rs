@@ -774,12 +774,13 @@ impl ChatStateActor {
         Ok(true)
     }
 
-    pub(super) async fn record_subagent_usage(
+    pub(super) async fn record_subagent_usage_before(
         &mut self,
         subagent_id: &str,
         by_model: &[(String, crate::usage::UsageTotals)],
         attribute_to_prompt: bool,
         incomplete: bool,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<bool, crate::commands::TimelineWriteError> {
         if by_model.is_empty() && !incomplete {
             return Ok(false);
@@ -806,7 +807,7 @@ impl ChatStateActor {
                     data: Some(data),
                 },
             ))?;
-        self.commit_timeline_event(event).await?;
+        self.commit_timeline_event_before(event, deadline).await?;
 
         if attribute_to_prompt {
             self.state

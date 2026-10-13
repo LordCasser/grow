@@ -197,7 +197,17 @@ impl tool_runtime::Tool for KillTaskTool {
                         .cloned()
                 };
                 if let Some(backend) = backend {
-                    let outcome = backend.backend().cancel(&input.task_id).await;
+                    let outcome =
+                        backend
+                            .backend()
+                            .cancel(&input.task_id)
+                            .await
+                            .map_err(|error| {
+                                tool_runtime::ToolError::custom(
+                                    "subagent_observation_failed",
+                                    error.to_string(),
+                                )
+                            })?;
                     return Ok(match outcome {
                         SubagentCancelOutcome::Cancelled => {
                             KillTaskOutput::Result(KillTaskResult {
@@ -215,6 +225,12 @@ impl tool_runtime::Tool for KillTaskTool {
                         }
                         SubagentCancelOutcome::NotFound => {
                             not_found_response(&input.task_id, &terminal).await
+                        }
+                        SubagentCancelOutcome::Unauthorized => {
+                            return Err(tool_runtime::ToolError::custom(
+                                "unauthorized",
+                                "Subagent cancellation was not authorized",
+                            ));
                         }
                     });
                 }

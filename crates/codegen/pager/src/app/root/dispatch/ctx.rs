@@ -268,17 +268,25 @@ pub(super) fn find_agent_view_by_session_id<'a>(
     agents: &'a mut indexmap::IndexMap<AgentId, AgentView>,
     session_id: &str,
 ) -> Option<&'a mut AgentView> {
-    for agent in agents.values_mut() {
-        if agent
+    fn find_in_view<'a>(view: &'a mut AgentView, session_id: &str) -> Option<&'a mut AgentView> {
+        if view
             .session
             .session_id
             .as_ref()
             .is_some_and(|id| id.0.as_ref() == session_id)
         {
-            return Some(agent);
+            return Some(view);
         }
-        if let Some(child) = agent.subagent_views.get_mut(session_id) {
-            return Some(child);
+        for child in view.subagent_views.values_mut() {
+            if let Some(found) = find_in_view(child, session_id) {
+                return Some(found);
+            }
+        }
+        None
+    }
+    for agent in agents.values_mut() {
+        if let Some(found) = find_in_view(agent, session_id) {
+            return Some(found);
         }
     }
     None
