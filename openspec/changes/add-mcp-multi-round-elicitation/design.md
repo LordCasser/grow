@@ -2,7 +2,7 @@
 
 Grow 固定 HEAD 使用 rmcp 2.2，现有 PendingKind 为 Permission/Question/PlanApproval。上游固定版本使用 rmcp 3.4，已具备 MRTR、RequestTracker、Shell bridge 和 TUI Form/URL；其 inbox 与 pending UI 存在单槽替换，不是可直接采纳的完整 FIFO。
 
-当前工作树有109条原有状态记录，输入恢复/观察/存储准入改动不等于 HEAD。实现前须重新核对在制接口；本 change 不修改或承诺这些在制改动已发布。规范和代码证据映射见 [review](../record-upstream-review-2bdd1d6/review.md)。
+当前工作树有109条原有状态记录，输入恢复/观察/存储准入改动不等于 HEAD。实现前须重新核对在制接口；本 change 不修改或承诺这些在制改动已发布。规范和代码证据映射见 [review](../archive/2026-10-18-record-upstream-review-2bdd1d6/review.md)。
 
 ## Goals / Non-Goals
 

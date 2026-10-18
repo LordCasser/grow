@@ -33,4 +33,4 @@
 
 ## Evidence and Status
 
-本次仅建立提案，产品代码未实现。上游 post-turn gate 在公开本地后端默认关闭，测试打开不能作为可移植完整执行路径的证据。详见 [固定评审](../record-upstream-review-2bdd1d6/review.md)；[验收矩阵](acceptance.md) P-01～P-24 未执行。
+本次仅建立提案，产品代码未实现。上游 post-turn gate 在公开本地后端默认关闭，测试打开不能作为可移植完整执行路径的证据。详见 [固定评审](../archive/2026-10-18-record-upstream-review-2bdd1d6/review.md)；[验收矩阵](acceptance.md) P-01～P-24 未执行。

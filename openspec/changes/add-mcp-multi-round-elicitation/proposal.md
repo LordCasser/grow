@@ -33,4 +33,4 @@
 
 ## Evidence and Status
 
-上游仅针对两项主题评审至 `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8`，详见 [评审边界](../record-upstream-review-2bdd1d6/review.md)。本提案及 delta 是未来要求，尚未实现；[验收矩阵](acceptance.md) 的 M-01～M-25 未执行。
+上游仅针对两项主题评审至 `2bdd1d6a6369de0e8c68132ea4539e9abd9e14a8`，详见 [评审边界](../archive/2026-10-18-record-upstream-review-2bdd1d6/review.md)。本提案及 delta 是未来要求，尚未实现；[验收矩阵](acceptance.md) 的 M-01～M-25 未执行。

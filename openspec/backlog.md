@@ -4,7 +4,7 @@
 
 - **旧协议 MCP 调用的重试与副作用不确定性**：`mcp/src/servers.rs::should_recover_service_error/recover_and_retry` 对 TransportClosed/TransportSend 和部分 HTTP MCP error 会重发原调用，未以是否可能已发送区分。静态路径及既有两次调用测试不能证明外部写操作幂等。新 MRTR change 已要求不继承这条盲重试路径；旧协议普通调用另开最小 change 核对发送证据、SDK 恢复语义及 write-after-response-loss fixture，不顺带重构整个恢复系统。
 
-- **Remote Control / Agent Host 跨设备使用（暂缓、未排期）**：用户认可从其他设备连接和操作已有 Grow 会话的方向，但当前不实施、不设日期，不纳入 MCP 多轮或保留计划提案。本次不展开远端控制架构，也不因此引入统一 Dock、Memory 或其他大型功能。未来明确启动时另建 change，重新界定身份、权限、执行 owner、断线和恢复边界；本条不构成实现授权。决策见 [2026-10-11 上游主题评审](changes/record-upstream-review-2bdd1d6/review.md)。
+- **Remote Control / Agent Host 跨设备使用（暂缓、未排期）**：用户认可从其他设备连接和操作已有 Grow 会话的方向，但当前不实施、不设日期，不纳入 MCP 多轮或保留计划提案。本次不展开远端控制架构，也不因此引入统一 Dock、Memory 或其他大型功能。未来明确启动时另建 change，重新界定身份、权限、执行 owner、断线和恢复边界；本条不构成实现授权。决策见 [2026-10-11 上游主题评审](changes/archive/2026-10-18-record-upstream-review-2bdd1d6/review.md)。
 
 - **闭合父子结果链的联合回收**：恢复保护要求删除时验证原 parent Spawned/Ended、child Seed/Result 和交付事实。独立 TTL 删除先移除链的一端后，另一端可能因来源证据缺失而继续保留。当前选择保守保留；后续应单独定义整条闭合链的删除所有权和可验证资格，避免通过忽略缺失来源放宽恢复保护，也不在本次增加墓碑或跨库事务框架。
 - **实时未知 stop reason 的成功分类**：`pager/src/app/agent_view/turn_completion.rs::finalize_durable_turn_terminal` 的 `pr_ok` 只排除 cancelled/error/rate_limit；例如 interrupted 或未来扩展原因可能走 Completed。此次 export/replay 保留原始 stop reason，不改实时执行 UI。后续须单独定义协议终态分类及旧 terminal 去重场景，不能把未知原因默认当成功。
