@@ -105,6 +105,51 @@ struct ConfigWatchState {
     // One registration may consume configs from several repository ancestors.
     // Retain shared directory watches until their last cwd owner unregisters.
     project_roots: HashMap<PathBuf, Vec<PathBuf>>,
+    // Global/explicit sources own their parent watches independently of cwds.
+    permanent_dirs: Vec<PathBuf>,
+}
+
+impl ConfigWatchState {
+    fn change_for_path(&mut self, path: &Path, grow_home: &Path) -> Option<ConfigChangeEvent> {
+        let name = path.file_name().and_then(|n| n.to_str());
+        let parent = path.parent();
+
+        match name {
+            Some(".grow") if parent.is_some_and(|p| self.watched_cwds.contains(p)) => {
+                if let Some(debouncer) = &mut self.debouncer {
+                    // A replacement directory must not inherit a watch on the old inode.
+                    let _ = debouncer.watcher().unwatch(path);
+                    if path.is_dir() {
+                        if let Err(error) =
+                            debouncer.watcher().watch(path, RecursiveMode::NonRecursive)
+                        {
+                            log_watch_error(&error, "failed to attach project config directory");
+                        }
+                    }
+                }
+                Some(ConfigChangeEvent::ProjectConfigChanged {
+                    path: path.join("config.toml"),
+                })
+            }
+            Some("config.toml") if parent.is_some_and(|p| paths_equal(p, grow_home)) => {
+                Some(ConfigChangeEvent::GlobalConfigChanged)
+            }
+            Some("config.toml")
+                if parent.is_some_and(|dir| {
+                    dirs_contain(&self.permanent_dirs, dir)
+                        || (dir.file_name().and_then(|name| name.to_str()) == Some(".grow")
+                            && dir
+                                .parent()
+                                .is_some_and(|root| self.watched_cwds.contains(root)))
+                }) =>
+            {
+                Some(ConfigChangeEvent::ProjectConfigChanged {
+                    path: path.to_path_buf(),
+                })
+            }
+            _ => None,
+        }
+    }
 }
 
 impl ConfigFileWatcher {
@@ -127,6 +172,13 @@ impl ConfigFileWatcher {
             debouncer: None,
             watched_cwds: HashSet::new(),
             project_roots: HashMap::new(),
+            permanent_dirs: std::iter::once(grow_home_buf.clone())
+                .chain(
+                    extra_paths
+                        .iter()
+                        .filter_map(|path| path.parent().map(Path::to_path_buf)),
+                )
+                .collect(),
         }));
         let weak_state = std::sync::Arc::downgrade(&state);
         let mut debouncer = new_filtered_debouncer(debounce, move |res: DebounceEventResult| {
@@ -140,38 +192,7 @@ impl ConfigFileWatcher {
 
             let mut batch_events: Vec<ConfigChangeEvent> = Vec::new();
             for event in events {
-                let path = &event.path;
-                let name = path.file_name().and_then(|n| n.to_str());
-                let parent = path.parent();
-
-                let change = match name {
-                    Some(".grow") if parent.is_some_and(|p| state.watched_cwds.contains(p)) => {
-                        if let Some(debouncer) = &mut state.debouncer {
-                            // A replacement directory must not inherit a watch on the old inode.
-                            let _ = debouncer.watcher().unwatch(path);
-                            if path.is_dir() {
-                                if let Err(error) =
-                                    debouncer.watcher().watch(path, RecursiveMode::NonRecursive)
-                                {
-                                    log_watch_error(
-                                        &error,
-                                        "failed to attach project config directory",
-                                    );
-                                }
-                            }
-                        }
-                        Some(ConfigChangeEvent::ProjectConfigChanged {
-                            path: path.join("config.toml"),
-                        })
-                    }
-                    Some("config.toml") if parent == Some(grow_home_buf.as_path()) => {
-                        Some(ConfigChangeEvent::GlobalConfigChanged)
-                    }
-                    Some("config.toml") => {
-                        Some(ConfigChangeEvent::ProjectConfigChanged { path: path.clone() })
-                    }
-                    _ => None,
-                };
+                let change = state.change_for_path(&event.path, &grow_home_buf);
 
                 if let Some(evt) = change
                     && !batch_events.contains(&evt)
@@ -273,7 +294,8 @@ impl ConfigFileWatcher {
     /// cwds with no live sessions. **Callers must ref-count**: only
     /// unwatch once the *last* session sharing this cwd closes —
     /// `ConfigFileWatcher` tracks distinct cwd owners, not session counts;
-    /// shared ancestor watches remain until the last cwd owner releases them.
+    /// shared ancestor watches remain until the last cwd owner releases them;
+    /// global and explicit config sources retain their own directory watches.
     pub fn unwatch_path(&mut self, cwd: &Path) {
         let cwd = dunce::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
         let mut state = self.state.lock();
@@ -287,10 +309,18 @@ impl ConfigFileWatcher {
                 .any(|roots| roots.contains(&root))
             {
                 state.watched_cwds.remove(&root);
-                unwatch_cwd_dirs(
-                    state.debouncer.as_mut().expect("initialized watcher"),
-                    &root,
-                );
+                for path in [&root, &root.join(".grow")] {
+                    if !dirs_contain(&state.permanent_dirs, path)
+                        && let Err(error) = state
+                            .debouncer
+                            .as_mut()
+                            .expect("initialized watcher")
+                            .watcher()
+                            .unwatch(path)
+                    {
+                        tracing::debug!(error = %error, "failed to unwatch project config directory");
+                    }
+                }
             }
         }
     }
@@ -317,19 +347,6 @@ fn watch_cwd_dirs(debouncer: &mut Debouncer<AccessFilteredWatcher>, cwd: &Path) 
             &e,
             "failed to watch project .grow directory (non-recursive)",
         );
-    }
-}
-
-/// Remove the two non-recursive watches added by [`watch_cwd_dirs`].
-/// Best-effort: a `WatchNotFound` (never watched / already removed) is
-/// expected and logged at `debug!`.
-fn unwatch_cwd_dirs(debouncer: &mut Debouncer<AccessFilteredWatcher>, cwd: &Path) {
-    if let Err(e) = debouncer.watcher().unwatch(cwd) {
-        tracing::debug!(error = %e, "failed to unwatch project cwd");
-    }
-    let grow_dir = cwd.join(".grow");
-    if let Err(e) = debouncer.watcher().unwatch(&grow_dir) {
-        tracing::debug!(error = %e, "failed to unwatch project .grow directory");
     }
 }
 
@@ -861,6 +878,66 @@ mod tests {
 #[cfg(test)]
 mod late_config_directory_tests {
     use super::*;
+
+    #[test]
+    fn queued_project_paths_are_rechecked_after_unregistration() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let project = root.join("project");
+        let grow = project.join(".grow");
+        let config = grow.join("config.toml");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir_all(&grow).unwrap();
+        let (mut watcher, _rx) =
+            ConfigFileWatcher::start(&home, &[], Some(&project), None).unwrap();
+        assert_eq!(
+            watcher.state.lock().change_for_path(&config, &home),
+            Some(ConfigChangeEvent::ProjectConfigChanged {
+                path: config.clone()
+            })
+        );
+        watcher.unwatch_path(&project);
+        // Deliver the already queued paths through the production callback's
+        // path handler after the unregister boundary, without OS timing guesses.
+        for path in [&grow, &config] {
+            assert_eq!(watcher.state.lock().change_for_path(path, &home), None);
+        }
+    }
+
+    #[tokio::test]
+    async fn explicit_and_global_config_watches_outlive_project_registration() {
+        for global_shares_project in [false, true] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().canonicalize().unwrap();
+            let home = root.join("home");
+            let project = if global_shares_project {
+                home.clone()
+            } else {
+                root.join("project")
+            };
+            let grow = project.join(".grow");
+            let config = grow.join("config.toml");
+            std::fs::create_dir(&home).unwrap();
+            std::fs::create_dir_all(&grow).unwrap();
+            let (mut watcher, mut rx) = ConfigFileWatcher::start(
+                &home,
+                &[config.clone()],
+                Some(&project),
+                Some(Duration::from_millis(40)),
+            )
+            .unwrap();
+            watcher.unwatch_path(&project);
+            std::fs::write(&config, "explicit = true").unwrap();
+            expect_project_change(&mut rx, &config).await;
+            std::fs::write(home.join("config.toml"), "global = true").unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while rx.recv().await.unwrap() != ConfigChangeEvent::GlobalConfigChanged {}
+            })
+            .await
+            .expect("global config watch must remain active");
+        }
+    }
 
     #[tokio::test]
     async fn ancestor_config_watch_survives_other_cwd_unregistration() {

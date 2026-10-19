@@ -9,6 +9,8 @@
 
 - **持久 Bash 的快照局部名称遮蔽用户导出变量**：`dump_bash_state` 在 `export -p` 前声明 `env_vars`，会遮蔽同名用户全局变量；这是既有捕获边界，独立于本轮修复的 allexport 大载荷启动失败。本轮保留范围并记录，未来另建最小 change 处理捕获命名与用户值保留，不能把修复说明理解为任意同名变量都可无损恢复。证据见 [Bash 导出隔离验证](changes/archive/2026-10-19-isolate-shell-snapshot-export-state/verification.md)。
 
+- **动态项目配置 watch 的生产回收尚未接入**：生产调用会向 ConfigFileWatcher 注册 cwd，当前 `unwatch_path` 仅由 API 测试使用；本轮只修复既有注销契约和迟到回调，未接入新的 session teardown 生命周期。长期 leader 多 cwd 的 watch 回收需另建 change，先确认各生产注册者的共享引用所有权，不能直接在任一 session 关闭时注销共享目录。证据见 [配置监听注销验证](changes/archive/2026-10-19-reject-orphaned-config-watch-events/verification.md)。
+
 ## 本轮已解决
 
 | 问题 | 归档与验证 |

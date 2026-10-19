@@ -140,6 +140,8 @@ Bash 持久命令沿 `ShellState::prepare_command` 的 fd 3/4 传输快照；排
 
 快照 reader 必须等到完整结束标记行（含换行），并按固定后缀检查，避免大载荷反复全文扫描。背景进程仅持有 fd 4 不应阻止完整快照返回；五秒期限与不完整快照保留旧状态的语义不变。见 [快照结束边界](../openspec/specs/tool-authorization/spec.md#requirement-shell-dump-readers-require-complete-terminator-lines)。
 
+ConfigFileWatcher 在 debouncer 回调处理路径时重新核对配置源所有权；API 取消注册会阻止未交付的无主项目通知，已进入接收队列的通知不撤回。共享祖先、全局和显式配置源分别保留自己的 watch；当前生产注册路径尚未接入 `unwatch_path`，不代表已经实现 session 关闭时回收监听。见 [配置事件所有权](../openspec/specs/configuration-rules/spec.md#requirement-configuration-watch-delivery-retains-a-live-source-owner)。
+
 Agent 激活必须将新的 ToolBridge 绑定到原 SessionActor 的 Planning runtime，并从 Timeline 恢复局部计划投影。启动 hydration 与 Agent 替换共用该绑定；替换本身不提交新计划或重复发布 ACP plan。Plan 顶部阶段入口依赖 Behavior 投影，点击沿 canonical artifact 查询显示完整计划；TODO 徽标及面板独立保留。契约见 [Agent 替换与 TODO](../openspec/specs/task-planning/spec.md#requirement-agent-replacement-preserves-session-planning-access) 和 [Plan 顶部详情](../openspec/specs/client-surfaces/spec.md#requirement-active-plan-has-an-inspectable-top-status-entry)。
 
 Plan 完成时先保全原始报告，再将完成引用与退出 Normal 一起提交到 Control；提交确认后才发布完成标记并继续正常采样生成简短总结。canonical 查询同时读取计划与报告，Pager 用独立 Tab 展示；完成入口只在下一次成功手动选择 Behavior 时清除，同模式选择也适用。恢复和自动 Goal 控制保留该引用，fork 不继承完成展示。契约见 [完成结果持久化](../openspec/specs/behavior-goal/spec.md#requirement-plan-completion-retains-an-inspectable-durable-result) 与 [完成详情和总结](../openspec/specs/client-surfaces/spec.md#requirement-completed-plan-details-separate-the-full-report-from-the-summary)。
