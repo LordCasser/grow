@@ -224,6 +224,8 @@ jobs:
       - name: Build Grow (Windows)
         if: ${{ inputs.builder == 'windows' }}
         shell: pwsh
+        env:
+          RUSTFLAGS: "-D warnings"
         run: cargo build --locked --profile release-dist --features release-dist -p cli --bin grow --target $env:TARGET_TRIPLE
 
       # OpenHarmony build: runs scripts/build-ohos.sh inside the Harmonybrew

@@ -11,6 +11,8 @@
 
 - **动态项目配置 watch 的生产回收尚未接入**：生产调用会向 ConfigFileWatcher 注册 cwd，当前 `unwatch_path` 仅由 API 测试使用；本轮只修复既有注销契约和迟到回调，未接入新的 session teardown 生命周期。长期 leader 多 cwd 的 watch 回收需另建 change，先确认各生产注册者的共享引用所有权，不能直接在任一 session 关闭时注销共享目录。证据见 [配置监听注销验证](changes/archive/2026-10-19-reject-orphaned-config-watch-events/verification.md)。
 
+- **第三方交叉编译告警与 sqlite-vec 边界**：v2.4.1 首次候选的 GCC 构建暴露上游 sqlite-vec 的 pragma、符号比较及可能未初始化诊断，其中 `vec0_metadata_filter_text` 的 `size_t metadataInIdx = -1` 后检查 `< 0` 是无效哨兵判断；尚无 Grow 运行时触发复现。Grow 当前 vec0 schema 只有 chunk_id/embedding，查询为 MATCH/k，不使用 text metadata IN。供应商 C 与 v2.4.0 相同，既有打包 workaround 要求上游文件保持一致；后续另立最小 change 验证边界并选择上游修复或明确维护补丁，不能仅消音或声称所有诊断无害。另有 nix 0.26 的 musl `suseconds_t` 弃用提示，以及安装 cross 0.2.5 时其独立 lock 中 dunce 1.0.2 的撤回提示（Grow lock 为 1.0.5）；分别按依赖约束处理，不混入 MCP。证据见 [平台告警维护验证](changes/clear-platform-release-warnings/verification.md)。
+
 ## 本轮已解决
 
 | 问题 | 归档与验证 |

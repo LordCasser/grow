@@ -129,7 +129,8 @@ impl ParentPlan {
 pub(super) struct ParentAnchor {
     path: PathBuf,
     identity: FileIdentity,
-    directory: fs::File,
+    // Retain the parent handle until this anchor is dropped, including on Windows.
+    _directory: fs::File,
 }
 
 impl ParentAnchor {
@@ -148,7 +149,7 @@ impl ParentAnchor {
         Ok(Self {
             path: path.to_path_buf(),
             identity: FileIdentity::from_metadata(&metadata),
-            directory,
+            _directory: directory,
         })
     }
 
@@ -163,7 +164,7 @@ impl ParentAnchor {
     pub fn sync(&self) -> Result<(), ManagedConfigError> {
         #[cfg(unix)]
         {
-            self.directory
+            self._directory
                 .sync_all()
                 .map_err(|source| ManagedConfigError::Sync {
                     path: self.path.clone(),
