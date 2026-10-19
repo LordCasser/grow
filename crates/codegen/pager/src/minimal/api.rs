@@ -126,6 +126,24 @@ pub fn minimal_fps_overlay(app: &mut AppView) -> Option<crate::views::fps_hud::F
     app.fps_hud.overlay(0)
 }
 
+pub fn app_exit_suspension(app: &AppView) -> Option<crate::app::root::ExitSuspension> {
+    app.exit_suspension.clone()
+}
+
+pub fn app_exit_suspension_rows(app: &AppView, width: u16) -> u16 {
+    app.exit_suspension.as_ref().map_or(0, |suspension| {
+        crate::app::root::exit_suspension_notice_rows(suspension, width)
+    })
+}
+
+pub fn paint_exit_suspension_notice(
+    buffer: &mut Buffer,
+    area: Rect,
+    suspension: &crate::app::root::ExitSuspension,
+) {
+    crate::app::root::paint_exit_suspension_notice(buffer, area, suspension);
+}
+
 pub fn app_cwd(app: &AppView) -> &std::path::Path {
     app.cwd.as_path()
 }

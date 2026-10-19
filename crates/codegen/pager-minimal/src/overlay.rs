@@ -239,6 +239,10 @@ fn compute_content_target(
     let minimal_live_rows = minimal_api::app_appearance(app).minimal_live_rows;
     let ceiling = term_h.saturating_sub(1).max(3);
     let base = minimal_live_rows.clamp(3, ceiling);
+    let exit_rows = minimal_api::app_exit_suspension_rows(app, width);
+    if exit_rows > 0 {
+        return base.max(exit_rows).min(ceiling);
+    }
     // Ctrl+T "force-show" pin; effective visibility (auto-hide) is computed per
     // agent by `todo_panel_height`.
     let force_todos = minimal_api::minimal_show_todos(app);
@@ -1138,6 +1142,47 @@ mod tests {
         assert_eq!(content_target(5, 0, 0, 0, 1, 2), 2);
         // A tall /btw Done answer still clamps rather than overflowing.
         assert_eq!(content_target(0, 0, 20, 0, 1, 10), 10);
+    }
+
+    #[test]
+    fn unconfirmed_exit_reserves_shared_notice_rows_and_paints_controls() {
+        use pager::app::root::{ExitSuspension, ExitSuspensionPhase};
+
+        let mut app = minimal_api::test_minimal_app();
+        app.appearance.minimal_live_rows = 3;
+        app.exit_suspension = Some(ExitSuspension {
+            exit_id: "exit".into(),
+            phase: ExitSuspensionPhase::Unconfirmed {
+                error: "writer has not exited".into(),
+            },
+            restart_for_update: false,
+            deadline: std::time::Instant::now(),
+        });
+
+        assert_eq!(
+            compute_target(&mut app, 12, 12, pager::motion::FrameStamp::default()),
+            4
+        );
+        assert_eq!(
+            compute_target(&mut app, 12, 80, pager::motion::FrameStamp::default()),
+            3
+        );
+
+        let area = Rect::new(0, 0, 12, 4);
+        let mut buffer = Buffer::empty(area);
+        minimal_api::paint_exit_suspension_notice(
+            &mut buffer,
+            area,
+            app.exit_suspension.as_ref().unwrap(),
+        );
+        let line = |y| {
+            (0..area.width)
+                .filter_map(|x| buffer.cell((x, y)).map(|cell| cell.symbol()))
+                .collect::<Vec<_>>()
+                .concat()
+        };
+        assert!(line(2).contains("r retry"));
+        assert!(line(3).contains("f force"));
     }
 
     #[test]

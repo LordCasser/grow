@@ -38,6 +38,7 @@ mod stop_cancelled_tests;
 mod subagent_bash_permission_tests;
 mod subagent_usage_fold_tests;
 pub(crate) mod support;
+mod suspension_auxiliary_admission_tests;
 mod truncation_recovery_tests;
 mod turn_pipeline_v2_tests;
 mod usage_categories_tests;

@@ -2087,12 +2087,13 @@ pub(super) async fn run_session(
                             let _ = session.reload_hooks_impl().await;
                         }
                     }
+                    // Suspension closes finite-work admission while keeping this mailbox
+                    // alive for owner settlement, checkpoint queries, and retirement.
                     SessionCommand::RefreshSkillBaseline => {
                         let s = session.clone();
-                        let activity = session
-                            .session_activities
-                            .try_start("refresh_skill_baseline")
-                            .expect("command activity admission is open while mailbox is serviced");
+                        let Some(activity) = session.session_activities.try_start("refresh_skill_baseline") else {
+                            continue;
+                        };
                         tokio::task::spawn_local(async move {
                             let _activity = activity;
                             let cwd = s.tool_context.cwd.as_path().to_string_lossy();
@@ -2114,10 +2115,9 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::FlushMemory { respond_to } => {
                         let s = session.clone();
-                        let activity = session
-                            .session_activities
-                            .try_start("memory_flush_command")
-                            .expect("command activity admission is open while mailbox is serviced");
+                        let Some(activity) = session.session_activities.try_start("memory_flush_command") else {
+                            continue;
+                        };
                         tokio::task::spawn_local(async move {
                             let _activity = activity;
                             if s.memory.is_enabled() {
@@ -2324,6 +2324,9 @@ pub(super) async fn run_session(
                             .send(PersistenceMsg::FlushAndAck { respond_to });
                     }
                     SessionCommand::UpdateMcpServers { mcp_servers, respond_to } => {
+                        let Some(activity) = session.session_activities.try_start("update_mcp_servers") else {
+                            continue;
+                        };
                         if session.startup_hints.is_subagent {
                             tracing::debug!(
                                 session_id = %session.session_info.id.0,
@@ -2381,10 +2384,6 @@ pub(super) async fn run_session(
                         session.refresh_mcp_snapshot_and_schedule_reminder().await;
 
                         let session_for_mcp = session.clone();
-                        let activity = session
-                            .session_activities
-                            .try_start("update_mcp_servers")
-                            .expect("command activity admission is open while mailbox is serviced");
                         tokio::task::spawn_local(async move {
                             let _activity = activity;
                             session_for_mcp.ensure_mcp_tools_initialized().await;
@@ -2392,6 +2391,9 @@ pub(super) async fn run_session(
                         });
                     }
                     SessionCommand::ToggleMcpServer { server_name, enabled, server_config, respond_to } => {
+                        let Some(activity) = session.session_activities.try_start("toggle_mcp_server") else {
+                            continue;
+                        };
                         let mut mcp_state = session.mcp_state.lock().await;
                         let mut configs = mcp_state.configs.clone();
 
@@ -2445,10 +2447,6 @@ pub(super) async fn run_session(
                         let session_for_mcp = session.clone();
                         let sname = server_name.clone();
                         let session_cwd = session.session_info.cwd.clone();
-                        let activity = session
-                            .session_activities
-                            .try_start("toggle_mcp_server")
-                            .expect("command activity admission is open while mailbox is serviced");
                         tokio::task::spawn_local(async move {
                             let _activity = activity;
                             session_for_mcp.ensure_mcp_tools_initialized().await;
@@ -2469,6 +2467,9 @@ pub(super) async fn run_session(
                         });
                     }
                     SessionCommand::ToggleMcpTool { server_name, tool_name, enabled, respond_to } => {
+                        let Some(activity) = session.session_activities.try_start("toggle_mcp_tool") else {
+                            continue;
+                        };
                         let qualified = format!(
                             "{}{}{}",
                             server_name,
@@ -2549,10 +2550,6 @@ pub(super) async fn run_session(
                         let notifications = session.notifications.gateway.clone();
                         let session_id = session.session_info.id.0.clone();
                         let server_for_persist = server_name.clone();
-                        let activity = session
-                            .session_activities
-                            .try_start("toggle_mcp_tool")
-                            .expect("command activity admission is open while mailbox is serviced");
                         tokio::task::spawn_local(async move {
                             let _activity = activity;
                             if let Err(e) = crate::util::config::save_mcp_disabled_tools(
@@ -2607,10 +2604,9 @@ pub(super) async fn run_session(
                     SessionCommand::GetMcpStatus { respond_to } => {
                         let mcp_state = session.mcp_state.clone();
                         let tool_bridge = session.agent.borrow().tool_bridge().clone();
-                        let activity = session
-                            .session_activities
-                            .try_start("get_mcp_status")
-                            .expect("command activity admission is open while mailbox is serviced");
+                        let Some(activity) = session.session_activities.try_start("get_mcp_status") else {
+                            continue;
+                        };
                         tokio::task::spawn_local(async move {
                             let _activity = activity;
                             let snapshot = crate::extensions::mcp::build_mcp_status(
@@ -2622,10 +2618,9 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::CallMcpTool { server_name, server_url, tool_name, arguments, respond_to } => {
                         let mcp_state = session.mcp_state.clone();
-                        let activity = session
-                            .session_activities
-                            .try_start("call_mcp_tool")
-                            .expect("command activity admission is open while mailbox is serviced");
+                        let Some(activity) = session.session_activities.try_start("call_mcp_tool") else {
+                            continue;
+                        };
                         tokio::task::spawn_local(async move {
                             let _activity = activity;
                             let result = crate::extensions::mcp::call_mcp_tool(
@@ -2640,10 +2635,9 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::ReadMcpResource { server_name, uri, respond_to } => {
                         let mcp_state = session.mcp_state.clone();
-                        let activity = session
-                            .session_activities
-                            .try_start("read_mcp_resource")
-                            .expect("command activity admission is open while mailbox is serviced");
+                        let Some(activity) = session.session_activities.try_start("read_mcp_resource") else {
+                            continue;
+                        };
                         tokio::task::spawn_local(async move {
                             let _activity = activity;
                             let result = crate::extensions::mcp::read_mcp_resource(
@@ -2689,10 +2683,9 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::ReloadSkills => {
                         let s = session.clone();
-                        let activity = session
-                            .session_activities
-                            .try_start("reload_skills")
-                            .expect("command activity admission is open while mailbox is serviced");
+                        let Some(activity) = session.session_activities.try_start("reload_skills") else {
+                            continue;
+                        };
                         tokio::task::spawn_local(async move {
                             let _activity = activity;
                             s.reload_skills_from_disk().await;
@@ -2724,10 +2717,9 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::SideQuestion { question, respond_to } => {
                         let s = session.clone();
-                        let activity = session
-                            .session_activities
-                            .try_start("side_question")
-                            .expect("command activity admission is open while mailbox is serviced");
+                        let Some(activity) = session.session_activities.try_start("side_question") else {
+                            continue;
+                        };
                         tokio::task::spawn_local(async move {
                             let _activity = activity;
                             let result = s.handle_side_question(&question).await;
@@ -2759,10 +2751,9 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::Recap { auto, away_period_id } => {
                         let s = session.clone();
-                        let activity = session
-                            .session_activities
-                            .try_start("recap")
-                            .expect("command activity admission is open while mailbox is serviced");
+                        let Some(activity) = session.session_activities.try_start("recap") else {
+                            continue;
+                        };
                         tokio::task::spawn_local(async move {
                             let _activity = activity;
                             s.handle_recap(auto, away_period_id).await;
@@ -2770,10 +2761,10 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::AISuggest { prefix, cwd, model_override, respond_to } => {
                         let s = session.clone();
-                        let activity = session
-                            .session_activities
-                            .try_start("ai_suggest")
-                            .expect("command activity admission is open while mailbox is serviced");
+                        let Some(activity) = session.session_activities.try_start("ai_suggest") else {
+                            let _ = respond_to.send(None);
+                            continue;
+                        };
                         tokio::task::spawn_local(async move {
                             let _activity = activity;
                             super::recap::deliver_suggestion(
@@ -2784,10 +2775,10 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::SuggestPrompt { model_override, respond_to } => {
                         let s = session.clone();
-                        let activity = session
-                            .session_activities
-                            .try_start("suggest_prompt")
-                            .expect("command activity admission is open while mailbox is serviced");
+                        let Some(activity) = session.session_activities.try_start("suggest_prompt") else {
+                            let _ = respond_to.send(None);
+                            continue;
+                        };
                         tokio::task::spawn_local(async move {
                             let _activity = activity;
                             super::recap::deliver_suggestion(
@@ -2798,10 +2789,9 @@ pub(super) async fn run_session(
                     }
                     SessionCommand::RewriteMemoryNote { raw_text, context_summary, respond_to } => {
                         let s = session.clone();
-                        let activity = session
-                            .session_activities
-                            .try_start("rewrite_memory_note")
-                            .expect("command activity admission is open while mailbox is serviced");
+                        let Some(activity) = session.session_activities.try_start("rewrite_memory_note") else {
+                            continue;
+                        };
                         tokio::task::spawn_local(async move {
                             let _activity = activity;
                             let result = s.handle_rewrite_memory_note(&raw_text, &context_summary).await;

@@ -811,6 +811,15 @@ impl SessionActor {
             ));
             return;
         }
+        if tokio::time::Instant::now() >= deadline {
+            let _ = respond_to.send(Err(
+                "suspension request deadline elapsed before admission; retry with a fresh deadline"
+                    .into(),
+            ));
+            return;
+        }
+        // Fence new auxiliary work before the worker waits for its first durable ACK.
+        self.session_activities.close_admission();
         let session = self.clone();
         self.runtime_suspension_worker
             .arm(tokio::task::spawn_local(async move {
@@ -827,6 +836,8 @@ impl SessionActor {
         root_session_id: String,
         deadline: tokio::time::Instant,
     ) -> Result<RuntimeNodeRef, String> {
+        let started = std::time::Instant::now();
+        tracing::info!(session_id = %self.session_info.id.0, %operation_id, phase = "started", "session suspension progress");
         // Keep this owner alive when the caller's shared exit deadline expires.
         // No checkpoint ACK is returned while a physical producer is unjoined.
         let pending = self
@@ -849,7 +860,6 @@ impl SessionActor {
         }
         self.workflow_manager.lock().await.close_admission();
         self.workflow_service_shutdown.cancel();
-        self.session_activities.close_admission();
         self.sideband_cancel.cancel();
         self.finalizer_sideband_cancel.cancel();
         self.sideband_repair_cancel.cancel();
@@ -919,6 +929,7 @@ impl SessionActor {
             }
         }
         self.events.settle_requests_for_suspension().await;
+        tracing::info!(session_id = %self.session_info.id.0, %operation_id, phase = "sampler_settled", elapsed_ms = started.elapsed().as_millis() as u64, "session suspension progress");
         let previous_commands = self.chat_state_handle.runtime_state().await?.commands;
         let commands = reuse_or_capture_command_settlements(previous_commands, || async {
             let bridge = self.tool_bridge_handle();
@@ -976,6 +987,7 @@ impl SessionActor {
             Ok(commands)
         })
         .await?;
+        tracing::info!(session_id = %self.session_info.id.0, %operation_id, phase = "commands_settled", elapsed_ms = started.elapsed().as_millis() as u64, "session suspension progress");
         for command in &commands {
             if !command.is_backgrounded {
                 continue;
@@ -1226,9 +1238,20 @@ impl SessionActor {
         // Background storage workers must relinquish their exact ownership;
         // stopping the caller's timeout cannot detach them behind this frontier.
         self.background_service_shutdown.cancel();
+        tracing::info!(session_id = %self.session_info.id.0, %operation_id, phase = "draining_services", elapsed_ms = started.elapsed().as_millis() as u64, "session suspension progress");
         stop_session_background_services(self, false).await?;
+        tracing::info!(session_id = %self.session_info.id.0, %operation_id, phase = "draining_auxiliary_owners", elapsed_ms = started.elapsed().as_millis() as u64, "session suspension progress");
         self.session_activities.wait_idle().await;
         stop_permission_manager_and_drain_audit(self).await?;
+        tracing::info!(session_id = %self.session_info.id.0, %operation_id, phase = "owners_drained", elapsed_ms = started.elapsed().as_millis() as u64, "session suspension progress");
+        // Physical drain may outlive the caller. Do not start a new durable
+        // checkpoint write with its expired deadline and poison a healthy writer.
+        if tokio::time::Instant::now() >= deadline {
+            return Err(
+                "suspension owners settled after the deadline; retry the same operation identity"
+                    .into(),
+            );
+        }
         let mut open_interactions = std::collections::BTreeSet::new();
         for event in self
             .chat_state_handle
@@ -1309,6 +1332,7 @@ impl SessionActor {
             session_id: self.session_id_string(),
             checkpoint_seq: checkpoint.seq,
         };
+        tracing::info!(session_id = %self.session_info.id.0, %operation_id, phase = "checkpoint_committed", elapsed_ms = started.elapsed().as_millis() as u64, "session suspension progress");
         self.resolve_runtime_suspended_waiters(node.clone());
         for watcher in self.runtime_completion_watchers.borrow_mut().drain(..) {
             let _ = watcher.send(Ok(crate::session::commands::PromptTurnOk {

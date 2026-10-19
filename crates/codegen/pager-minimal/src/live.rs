@@ -106,6 +106,7 @@ pub fn draw_live(
     };
     let transcript_progress = minimal_api::minimal_transcript_progress(app);
     let fps_overlay = minimal_api::minimal_fps_overlay(app);
+    let exit_suspension = minimal_api::app_exit_suspension(app);
     minimal_api::with_minimal_live_state(app, |cursor, mut agent, appearance| {
         let theme = Theme::current();
         let commit_app = super::commit::committed_appearance(appearance);
@@ -128,7 +129,7 @@ pub fn draw_live(
         }
         pager::render::draw::draw_frame(terminal, cursor, |frame, link_spans| {
             let area = frame.area();
-            if area.height == 0 || area.width < 4 {
+            if area.height == 0 || area.width == 0 {
                 return (None, None);
             }
             Clear.render(area, frame.buffer_mut());
@@ -137,6 +138,13 @@ pub fn draw_live(
             } else {
                 area
             };
+            if let Some(suspension) = exit_suspension.as_ref() {
+                minimal_api::paint_exit_suspension_notice(frame.buffer_mut(), area, suspension);
+                return (None, None);
+            }
+            if area.width < 4 {
+                return (None, None);
+            }
             let Some(agent) = agent.as_deref_mut() else {
                 crate::startup::render_startup(frame.buffer_mut(), area, &theme, &auth_hint);
                 return (None, None);

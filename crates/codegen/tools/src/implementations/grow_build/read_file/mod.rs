@@ -1807,6 +1807,70 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
         );
     }
     #[tokio::test]
+    async fn read_file_png_rejects_pdf_parameters_then_reads_without_them() {
+        let tmp = TempDir::new().unwrap();
+        let png = make_small_png(16, 16);
+        std::fs::write(tmp.path().join("image.png"), &png).unwrap();
+        let shared = test_resources(tmp.path()).into_shared();
+
+        for input in [
+            ReadFileInput {
+                path: "image.png".to_string(),
+                offset: Some(1),
+                limit: Some(1),
+                pages: Some("1".to_string()),
+                format: None,
+            },
+            ReadFileInput {
+                path: "image.png".to_string(),
+                offset: None,
+                limit: None,
+                pages: Some("1".to_string()),
+                format: Some("image".to_string()),
+            },
+        ] {
+            let result = tool_runtime::Tool::run(&ReadFileTool, test_ctx(shared.clone()), input)
+                .await
+                .unwrap();
+            assert!(
+                matches!(
+                    &result,
+                    ReadFileOutput::FileReadError(message)
+                        if message.contains("The `pages` and `format` parameters are only valid for PDF files.")
+                ),
+                "expected the PDF-only parameter error for a PNG, got {result:?}"
+            );
+        }
+
+        for input in [
+            ReadFileInput {
+                path: "image.png".to_string(),
+                offset: Some(1),
+                limit: Some(1),
+                pages: None,
+                format: None,
+            },
+            ReadFileInput {
+                path: "image.png".to_string(),
+                offset: None,
+                limit: None,
+                pages: None,
+                format: None,
+            },
+        ] {
+            let result = tool_runtime::Tool::run(&ReadFileTool, test_ctx(shared.clone()), input)
+                .await
+                .unwrap();
+            match result {
+                ReadFileOutput::ImageContent(image) => {
+                    assert_eq!(image.mime_type, "image/png");
+                    assert!(!image.data.is_empty());
+                }
+                other => panic!("expected ImageContent for a PNG, got {other:?}"),
+            }
+        }
+    }
+    #[tokio::test]
     async fn read_file_binary_rejected() {
         let result = run_read_file_on("archive.zip", b"PK\x03\x04fake zip content").await;
         match result {

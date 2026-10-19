@@ -309,6 +309,79 @@ fn exit_suspension_requires_confirmation_and_retries_with_a_new_identity() {
 }
 
 #[test]
+fn confirmed_quit_input_retries_unconfirmed_exit_and_ignores_old_result() {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = test_app_with_agent();
+    let mut actions = crate::actions::default_actions(crate::app::ScreenMode::Fullscreen);
+    for def in &mut actions {
+        if def.id == crate::actions::ActionId::Quit {
+            def.default_key = crate::key!('q', CONTROL);
+            def.alt_keys = vec![crate::key!('d', CONTROL)];
+        }
+    }
+    app.registry = crate::actions::ActionRegistry::new(actions);
+    let ctrl_d = Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+
+    assert!(matches!(
+        app.handle_input(&ctrl_d),
+        crate::app::root::InputOutcome::Changed
+    ));
+    let effects = match app.handle_input(&ctrl_d) {
+        crate::app::root::InputOutcome::Action(action) => dispatch(action, &mut app),
+        other => panic!("confirmed quit should dispatch, got {other:?}"),
+    };
+    let [Effect::SuspendForExit { exit_id: old_id }] = effects.as_slice() else {
+        panic!("expected initial suspension request, got {effects:?}");
+    };
+    let old_id = old_id.clone();
+    dispatch_task_result(
+        TaskResult::ExitSuspensionResolved {
+            exit_id: old_id.clone(),
+            result: Err("writer has not exited".into()),
+        },
+        &mut app,
+    );
+    let old_deadline = app.exit_suspension.as_ref().unwrap().deadline;
+
+    assert!(matches!(
+        app.handle_input(&ctrl_d),
+        crate::app::root::InputOutcome::Changed
+    ));
+    assert_eq!(app.exit_suspension.as_ref().unwrap().deadline, old_deadline);
+    let retry_effects = match app.handle_input(&ctrl_d) {
+        crate::app::root::InputOutcome::Action(action) => dispatch(action, &mut app),
+        other => panic!("second quit press should dispatch retry, got {other:?}"),
+    };
+    let [Effect::SuspendForExit { exit_id: retry_id }] = retry_effects.as_slice() else {
+        panic!("expected retry suspension request, got {retry_effects:?}");
+    };
+    let retry_id = retry_id.clone();
+    assert_ne!(retry_id, old_id);
+
+    assert!(
+        dispatch_task_result(
+            TaskResult::ExitSuspensionResolved {
+                exit_id: old_id,
+                result: Ok(()),
+            },
+            &mut app,
+        )
+        .is_empty()
+    );
+    assert_eq!(app.exit_suspension.as_ref().unwrap().exit_id, retry_id);
+    let effects = dispatch_task_result(
+        TaskResult::ExitSuspensionResolved {
+            exit_id: retry_id,
+            result: Ok(()),
+        },
+        &mut app,
+    );
+    assert!(effects.iter().any(|effect| matches!(effect, Effect::Quit)));
+    assert!(app.exit_suspension.is_none());
+}
+
+#[test]
 fn force_quit_is_available_only_after_suspension_is_unconfirmed() {
     let mut app = test_app_with_agent();
     let pending = dispatch(Action::Quit, &mut app);

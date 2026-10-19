@@ -445,6 +445,31 @@ impl MvpAgent {
         Ok(snapshot)
     }
 
+    pub(super) async fn runtime_state_before(
+        &self,
+        handle: &SessionHandle,
+        deadline: tokio::time::Instant,
+    ) -> Result<chat_state::session_runtime::RuntimeLifecycle, String> {
+        // Root selection and retired-node checks need no event payload copies.
+        tokio::time::timeout_at(deadline, async {
+            if !handle.cmd_tx.is_closed() {
+                return handle.chat_state_handle.runtime_state().await;
+            }
+            let (loaded, observer) = crate::session::persistence::load_light(
+                &handle.info,
+                Some(self.gateway.clone()),
+                false,
+            )
+            .await
+            .map_err(|error| error.to_string())?;
+            let runtime = loaded.timeline.runtime_lifecycle().clone();
+            drop(observer);
+            Ok(runtime)
+        })
+        .await
+        .map_err(|_| "runtime state query exceeded suspension deadline".to_string())?
+    }
+
     async fn runtime_snapshot_before(
         &self,
         handle: &SessionHandle,
@@ -510,11 +535,13 @@ impl MvpAgent {
                     );
                     break;
                 }
+                let started = std::time::Instant::now();
                 if let Err(error) = agent.suspend_session_tree(&root, deadline).await {
-                    tracing::warn!(root_session_id = %root, %error, "session tree suspension remains unconfirmed");
+                    tracing::warn!(root_session_id = %root, elapsed_ms = started.elapsed().as_millis() as u64, %error, "session tree suspension remains unconfirmed");
                     failure = Some(error);
                     break;
                 }
+                tracing::info!(root_session_id = %root, elapsed_ms = started.elapsed().as_millis() as u64, "session tree suspension confirmed");
             }
             let _ = respond.send(failure.map_or(Ok(()), Err));
         });
@@ -948,8 +975,8 @@ impl MvpAgent {
         let requested_handle = self
             .control_session_handle(requested)
             .ok_or_else(|| "session is not resident".to_string())?;
-        let (previous, _) = self
-            .runtime_snapshot_before(&requested_handle, deadline)
+        let previous = self
+            .runtime_state_before(&requested_handle, deadline)
             .await?;
         let root = acp::SessionId::new(
             previous
@@ -1116,7 +1143,7 @@ impl MvpAgent {
                 {
                     continue;
                 }
-                let (saved, _) = self.runtime_snapshot_before(&handle, deadline).await?;
+                let saved = self.runtime_state_before(&handle, deadline).await?;
                 if saved.phase != RuntimePhase::Suspended
                     || saved.operation_id.as_deref() != Some(&operation_id)
                 {

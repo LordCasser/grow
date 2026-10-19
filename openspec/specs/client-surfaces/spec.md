@@ -3975,7 +3975,7 @@ Before publishing a durable Workflow, Goal, Control, or CurrentMode display row,
 
 Ctrl+C SHALL retain its existing composer/local-control behavior and cancel the current turn through the explicit cancellation path. It SHALL NOT request Quit, arm exit confirmation, suspend the tree, or escalate repeated cancellation into exit. At idle it SHALL remain local or a no-op. The default half-page-down shortcut SHALL be uppercase D so it does not conflict with Quit. The default global Quit shortcut SHALL be Ctrl+D, confirmed by a second press of the same shortcut within the existing one-second PendingAction window. The first press SHALL preserve drafts, admitted queues, current turn and Goal state without starting suspension. Expiry or another key SHALL clear the pending confirmation. Welcome, normal/minimal execution views and Dashboard SHALL use this same default confirmation; local scroll/input widgets SHALL NOT consume the registered global Quit key.
 
-Confirmed Quit SHALL request suspension of every session tree owned by the exiting process and exit only after the required durable boundaries and writer retirement. A child view SHALL resolve to its canonical root. Suspension SHALL retain the existing shared five-second absolute deadline, unconfirmed/retry/explicit-force UI, ownership and command interruption rules. Repeated Quit input while an exit operation exists SHALL coalesce without another request, deadline reset or force quit. Cancel and emergency force quit SHALL remain distinct actions. Read-only surfaces SHALL not start execution.
+Confirmed Quit SHALL request suspension of every session tree owned by the exiting process and exit only after the required durable boundaries and writer retirement. A child view SHALL resolve to its canonical root. Suspension SHALL retain the existing shared five-second absolute deadline, unconfirmed/retry/explicit-force UI, ownership and command interruption rules. Repeated Quit input while an exit operation is Pending SHALL coalesce without another request, deadline reset or force quit. While Unconfirmed, a newly confirmed Quit SHALL dispatch the existing explicit retry path with a fresh request deadline; r retry and explicit f force quit SHALL remain available. Error and recovery controls SHALL remain visible across Welcome, Agent, Dashboard and minimal rendering, with control space reserved even on a narrow terminal. Stale responses SHALL NOT settle a newer request. Cancel and emergency force quit SHALL remain distinct actions. Read-only surfaces SHALL not start execution.
 
 #### Scenario: Ctrl C preserves composer behavior
 - **WHEN** the composer has a draft and the user presses Ctrl+C
@@ -4008,6 +4008,18 @@ Confirmed Quit SHALL request suspension of every session tree owned by the exiti
 #### Scenario: Nested and multiple roots
 - **WHEN** a confirmed quit starts from a child view or owns multiple root trees
 - **THEN** each owned root is suspended with its descendants; another owner's independent sessions are unaffected, and local transcript/selection behavior cannot replace global Quit confirmation.
+
+#### Scenario: Quit is retried after failure
+- **WHEN** suspension is unconfirmed and the user presses the same configured Quit shortcut twice within one second
+- **THEN** the first press preserves the unconfirmed operation, the second starts the normal retry with a fresh request identity and deadline, and an old response cannot settle it.
+
+#### Scenario: Error text is long or terminal is narrow
+- **WHEN** an unconfirmed exit error wraps beyond its available rows, including on Welcome
+- **THEN** the English retry/force controls retain visible reserved space and remain usable without selecting force through Ctrl+D.
+
+#### Scenario: Minimal has an unconfirmed exit
+- **WHEN** minimal rendering owns the live viewport and exit suspension is pending or unconfirmed
+- **THEN** it uses the shared English exit status and controls with reserved viewport space, even when startup or another panel would normally render; failure is not silently hidden.
 
 ### Requirement: Active Plan has an inspectable top status entry
 

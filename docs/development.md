@@ -193,6 +193,12 @@ Pager 的 cancel notification 没有响应体；`TurnCancelling` 因此在短窗
 
 正常退出由默认全局 `Ctrl+D` 在一秒内连续按两次确认，再经 `grow/session/suspend_for_exit` 请求一个五秒共享期限的树挂起；首次按键不改变草稿、队列、当前回合或 Goal，UI 只有收到挂起确认才退出。挂起期间重复退出键合并到原操作，不强退。`Ctrl+C` 保留 composer 清理、局部控件操作和当前回合取消；取消中的重复 `Ctrl+C` 只重试取消，不关联退出。更新重启仍走同一树挂起屏障。排查恢复先核对 root 的 `TreeSuspended`、各节点 checkpoint、命令结算与物理 writer 退役，再检查 `RestorePrepared` / `Resumed` / `ExecutionReleased`。不要把 sampler 的部分输出、调用方超时或新的 actor 实例当作执行资格；中断或未知命令先核对其记录，不能自动重放。行为见 [session-timeline](../openspec/specs/session-timeline/spec.md) 与 [已确认退出契约](../openspec/specs/client-surfaces/spec.md#requirement-confirmed-quit-requests-bounded-session-tree-suspension)，验证见 [挂起记录](../openspec/changes/archive/2026-10-19-suspend-session-tree/verification.md)。
 
+退出未确认后再次连续两次 `Ctrl+D` 走重试，Pending 期间重复退出仍合并；`r` 重试、`f` 显式强退与旧响应身份校验保留。normal/minimal、Welcome 和 Dashboard 共用可见的英文退出状态，长错误不能挤掉恢复动作行。见 [未确认退出交互](../openspec/specs/client-surfaces/spec.md#requirement-confirmed-quit-requests-bounded-session-tree-suspension)。
+
+挂起接纳后立即关闭有限辅助活动准入，但 actor 邮箱继续处理既有 owner 的结算、checkpoint 查询和退役。迟到的 AI 补全/下一步建议返回无建议，其他有限命令沿既有关闭通道结束，不能在准入关闭后启动新模型请求或修改配置。五秒调用期限不取消尚未排空的物理 owner；未确认时保留原操作身份重试，不能伪造 checkpoint。该边界复用活动 tracker，见 [辅助活动挂起边界](../openspec/specs/model-sampling/spec.md#requirement-suspension-rejects-new-auxiliary-command-work-while-draining-admitted-owners)；交错回归见 [挂起准入验证](../openspec/changes/archive/2026-10-19-reject-auxiliary-commands-during-suspension/verification.md)。
+
+挂起性能排查可按 `session suspension progress` 的 started、sampler_settled、commands_settled、draining_services、draining_auxiliary_owners、owners_drained、checkpoint_committed 阶段与 elapsed_ms 核对节点，再看整树确认日志。root 身份及已退役节点状态查询不再复制用不到的完整历史；需要 child 事实的快照仍完整验证，不能以缓存跳过校验。测量范围见 [挂起观察成本](../openspec/changes/archive/2026-10-19-streamline-suspension-runtime-observation/verification.md)。
+
 任务计划通过 SessionActor 的 `PlanningControl` 串行更新，检查 `Planning.previous` 和具体 source/result 引用。父项有效非完成修改要求 child 自行重规划，Consumed 不等于 Handled；普通完成和 Goal 还需核对必需交付的验收/解除记录。Plan 延期审阅使用独立 retained candidate 和不可变 decision identity；重试同一决定时 action、feedback 和候选都必须相同。契约见 [task-planning](../openspec/specs/task-planning/spec.md) 与 [behavior-goal](../openspec/specs/behavior-goal/spec.md)，实现记录见 [局部计划](../openspec/changes/archive/2026-10-19-evolve-task-planning/verification.md) 和 [Plan 审阅](../openspec/changes/archive/2026-10-19-retain-plan-for-later-review/verification.md)。
 
 Pager 的 prompt 与 input-admission 状态 RPC 共用 4 个工作许可和最多 8 个目标登记；watchdog 每轮最多派发 4 个查询，暂未获配额的目标在 250 ms 后重新核对。五秒期限包含许可等待；调用方超时后，仍在运行的 RPC 保留许可与目标登记，重连后的同目标查询不会绕过旧请求所有权。

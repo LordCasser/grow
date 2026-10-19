@@ -12,3 +12,5 @@
 - **同步 compaction 的 TODO 展示清理**：`pager/src/app/acp_handler/session_notification.rs` 在 `AutoCompactCompleted { async_compact: false }` 时直接清空前端 TODO，而当前局部计划由 Timeline 持有。需独立核对同步压缩后的计划再投影及恢复顺序，确认是否存在暂时或持续丢失任务入口；本次 Plan 顶部入口及 Agent 切换修复不扩展到压缩路径。
 
 - **工具运行时错误被后续 Step 错误遮蔽（已确认，待独立立项）**：本轮 resource 模型管线回归曾触发 Timeline 参数校验拒绝；`shell/src/session/actor/turn/mod.rs` 的 `execute_tool_calls_result` 匹配把 `Err` 落到 `_ => false` 后尝试下一 Step，最终报告 Step/Turn 边界失败而遮蔽最初错误。resource 参数校验已在 strengthen-skill-loading 修正，正常路径与权限拒绝继续通过现有生命周期；通用工具运行时错误的 fail-stop、未完成 Tool/Step 的 durable 收尾及原始错误保留须另立最小 change，不顺带重写当前回合状态机。验收需注入 tool admission/result publication/terminal ACK 失败，断言不发下一模型请求，并检查冷恢复没有伪造完成或丢失原始错误。
+
+- **长会话挂起的历史复制与重放成本（已确认重复工作，进一步优化待测量）**：`shell/src/agent/mvp_agent/runtime_handoff.rs` 的 child 核对多次取得完整 Timeline，`CanonicalChildFacts::read` 又复制并通过 `Timeline::from_events` 重放。本轮 [最小性能优化](changes/archive/2026-10-19-streamline-suspension-runtime-observation/verification.md) 仅去掉 root 身份/退役节点观察中直接丢弃的完整历史复制，并增加阶段耗时。后续需先测量多节点长历史的 replay、native I/O、service/auxiliary drain 与 UI frame 成本，再决定复用权威派生状态或减少复制；不得直接删掉冷历史验证、并行退役父子节点或用超时丢弃仍在途 writer。该重复工作尚不能证明是两个用户会话长时间等待的唯一来源。

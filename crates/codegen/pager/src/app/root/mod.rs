@@ -856,12 +856,15 @@ fn paint_welcome_toast(
     }
 }
 
-fn paint_exit_suspension_notice(
+pub(crate) fn paint_exit_suspension_notice(
     buf: &mut ratatui::buffer::Buffer,
     area: ratatui::layout::Rect,
     suspension: &ExitSuspension,
 ) {
     use ratatui::widgets::{Paragraph, Widget, Wrap};
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let (tone, text) = match &suspension.phase {
         ExitSuspensionPhase::Pending => (
             crate::scrollback::blocks::NoticeTone::Info,
@@ -869,21 +872,26 @@ fn paint_exit_suspension_notice(
         ),
         ExitSuspensionPhase::Unconfirmed { error } => (
             crate::scrollback::blocks::NoticeTone::Error,
-            format!(
-                "Exit not confirmed: {error}\nr retry with a new 5-second request · f force quit (may be unrecoverable)"
-            ),
+            format!("Exit not confirmed: {error}"),
         ),
     };
-    if area.width == 0 || area.height == 0 {
-        return;
-    }
     let theme = crate::theme::Theme::current();
-    let height = if matches!(&suspension.phase, ExitSuspensionPhase::Pending) {
-        1
-    } else {
-        3
-    }
-    .min(area.height);
+    let (height, controls) = match &suspension.phase {
+        ExitSuspensionPhase::Pending => (1, None),
+        ExitSuspensionPhase::Unconfirmed { .. } => {
+            let controls: &[&str] = if area.width >= 64 {
+                &["Ctrl+D twice/r retry · f force quit (may be unrecoverable)"]
+            } else if area.width >= 22 {
+                &["r retry · f force quit"]
+            } else if area.height > 1 && area.width >= 7 {
+                &["r retry", "f force"]
+            } else {
+                &["r/f"]
+            };
+            (2 + controls.len() as u16, Some(controls))
+        }
+    };
+    let height = height.min(area.height);
     let rect = ratatui::layout::Rect {
         x: area.x,
         y: area.bottom().saturating_sub(height),
@@ -891,14 +899,46 @@ fn paint_exit_suspension_notice(
         height,
     };
     ratatui::widgets::Clear.render(rect, buf);
-    Paragraph::new(text)
-        .style(
-            ratatui::style::Style::default()
-                .fg(tone.color(&theme))
-                .bg(theme.bg_base),
-        )
-        .wrap(Wrap { trim: true })
-        .render(rect, buf);
+    let style = ratatui::style::Style::default()
+        .fg(tone.color(&theme))
+        .bg(theme.bg_base);
+    if let Some(controls) = controls {
+        let control_rows = (controls.len() as u16).min(height);
+        let text_rows = height.saturating_sub(control_rows);
+        if text_rows > 0 {
+            let text_rect = ratatui::layout::Rect {
+                height: text_rows,
+                ..rect
+            };
+            Paragraph::new(text)
+                .style(style)
+                .wrap(Wrap { trim: true })
+                .render(text_rect, buf);
+        }
+        for (index, control) in controls.iter().take(control_rows as usize).enumerate() {
+            let control_rect = ratatui::layout::Rect {
+                y: rect.y + text_rows + index as u16,
+                height: 1,
+                ..rect
+            };
+            Paragraph::new(*control)
+                .style(style)
+                .render(control_rect, buf);
+        }
+    } else {
+        Paragraph::new(text)
+            .style(style)
+            .wrap(Wrap { trim: true })
+            .render(rect, buf);
+    }
+}
+
+pub(crate) fn exit_suspension_notice_rows(suspension: &ExitSuspension, width: u16) -> u16 {
+    match &suspension.phase {
+        ExitSuspensionPhase::Pending => 1,
+        ExitSuspensionPhase::Unconfirmed { .. } if width >= 7 && width < 22 => 4,
+        ExitSuspensionPhase::Unconfirmed { .. } => 3,
+    }
 }
 
 impl AppView {
@@ -1604,8 +1644,19 @@ impl AppView {
         if let Some(key) = key_event
             && self.registry.lookup(key, When::Always) == Some(ActionId::Quit)
         {
-            if self.exit_suspension.is_some() {
-                return InputOutcome::Changed;
+            if let Some(exit) = self.exit_suspension.as_ref() {
+                if matches!(&exit.phase, ExitSuspensionPhase::Pending) {
+                    return InputOutcome::Changed;
+                }
+                if self.pending_action.as_ref().is_some_and(|pending| {
+                    matches!(pending.action, Action::Quit)
+                        && !pending.expired()
+                        && pending.shortcut.matches(key)
+                }) {
+                    self.pending_action = None;
+                    return InputOutcome::Action(Action::RetryExitSuspension);
+                }
+                return self.handle_global_action(ActionId::Quit, key);
             }
             if self.pending_action.as_ref().is_some_and(|pending| {
                 matches!(pending.action, Action::Quit)
@@ -1654,6 +1705,19 @@ impl AppView {
                 }
             }
         }
+        if let Some(key) = key_event
+            && let Some(exit) = self.exit_suspension.as_ref()
+            && matches!(&exit.phase, ExitSuspensionPhase::Unconfirmed { .. })
+        {
+            if key!('r').matches(key) {
+                self.pending_action = None;
+                return InputOutcome::Action(Action::RetryExitSuspension);
+            }
+            if key!('f').matches(key) {
+                self.pending_action = None;
+                return InputOutcome::Action(Action::ForceQuit);
+            }
+        }
         if let ActiveView::Agent(id) = self.active_view
             && let Some(agent) = self.agents.get_mut(&id)
             && agent.active_subagent.is_none()
@@ -1661,17 +1725,6 @@ impl AppView {
         {
             self.pending_action = None;
             return outcome;
-        }
-        if let Some(key) = key_event
-            && let Some(exit) = self.exit_suspension.as_ref()
-            && matches!(&exit.phase, ExitSuspensionPhase::Unconfirmed { .. })
-        {
-            if key!('r').matches(key) {
-                return InputOutcome::Action(Action::RetryExitSuspension);
-            }
-            if key!('f').matches(key) {
-                return InputOutcome::Action(Action::ForceQuit);
-            }
         }
         if let Event::Resize(_, rows) = ev {
             for agent in self.agents.values_mut() {
@@ -2871,6 +2924,9 @@ impl AppView {
     /// synchronized output, cursor blink preservation). See that module's
     /// docs for the full rationale.
     pub fn draw(&mut self, terminal: &mut PagerTerminal) {
+        use ratatui::Frame;
+        use ratatui_inline::LinkSpan;
+
         let frame_stamp = crate::motion::FrameStamp::capture(self.motion_origin);
         self.update_notifications(frame_stamp);
         self.resync_announcement_slash_gate_on_divergence();
@@ -2922,7 +2978,7 @@ impl AppView {
                     })
             });
         let fps_frame_started = fps_overlay.as_ref().map(|_| std::time::Instant::now());
-        crate::render::draw::draw_frame(terminal, cursor, |f, link_spans| {
+        let render_content = |f: &mut Frame, link_spans: &mut Vec<LinkSpan>| {
             let full_area = f.area();
             let tracing_height = 0u16;
             #[allow(unused_variables)]
@@ -3295,9 +3351,6 @@ impl AppView {
                                     frame_stamp,
                                 );
                             }
-                            if let Some(suspension) = exit_suspension.as_ref() {
-                                paint_exit_suspension_notice(f.buffer_mut(), full_area, suspension);
-                            }
                             if let Some(fps) = &fps_overlay {
                                 fps.render(full_area, f.buffer_mut());
                             }
@@ -3316,11 +3369,6 @@ impl AppView {
                     }
                 }
             }
-            if let Some(suspension) = exit_suspension.as_ref()
-                && !matches!(*active_view, ActiveView::Welcome)
-            {
-                paint_exit_suspension_notice(f.buffer_mut(), full_area, suspension);
-            }
             if let Some(fps) = &fps_overlay {
                 fps.render(full_area, f.buffer_mut());
             }
@@ -3328,6 +3376,18 @@ impl AppView {
                 panel.render(full_area, f.buffer_mut());
             }
             (None, Self::merge_escapes(notif_escapes, None))
+        };
+        crate::render::draw::draw_frame(terminal, cursor, |frame, links| {
+            let (cursor, post_flush) = render_content(frame, links);
+            // Every content branch may return early. Apply this process-wide
+            // exit state only after that callback, including the Agent page.
+            if let Some(suspension) = exit_suspension.as_ref() {
+                let area = frame.area();
+                paint_exit_suspension_notice(frame.buffer_mut(), area, suspension);
+                (None, post_flush)
+            } else {
+                (cursor, post_flush)
+            }
         });
         if let Some(started) = fps_frame_started {
             self.fps_hud.record(started.elapsed());
@@ -7007,6 +7067,182 @@ pub(crate) mod tests {
             assert!(matches!(app.handle_input(&ctrl_d()), InputOutcome::Changed));
             assert_eq!(app.exit_suspension.as_ref().unwrap().exit_id, first_id);
             assert!(app.pending_action.is_none());
+        }
+    }
+    #[test]
+    fn unconfirmed_exit_recovery_keys_clear_old_quit_confirmation() {
+        for force in [false, true] {
+            let mut app = test_app_with_agent();
+            app.exit_suspension = Some(ExitSuspension {
+                exit_id: "unconfirmed".into(),
+                phase: ExitSuspensionPhase::Unconfirmed {
+                    error: "deadline".into(),
+                },
+                restart_for_update: false,
+                deadline: Instant::now(),
+            });
+            assert!(matches!(app.handle_input(&ctrl_d()), InputOutcome::Changed));
+            assert!(app.pending_action.is_some());
+            let outcome = app.handle_input(&key_event(
+                KeyCode::Char(if force { 'f' } else { 'r' }),
+                KeyModifiers::NONE,
+            ));
+            assert!(if force {
+                matches!(outcome, InputOutcome::Action(Action::ForceQuit))
+            } else {
+                matches!(outcome, InputOutcome::Action(Action::RetryExitSuspension))
+            });
+            assert!(app.pending_action.is_none());
+        }
+    }
+    #[test]
+    fn unconfirmed_exit_notice_keeps_controls_visible_on_narrow_screen() {
+        let area = ratatui::layout::Rect::new(0, 0, 12, 5);
+        let mut buffer = ratatui::buffer::Buffer::empty(area);
+        paint_exit_suspension_notice(
+            &mut buffer,
+            area,
+            &ExitSuspension {
+                exit_id: "exit".into(),
+                phase: ExitSuspensionPhase::Unconfirmed {
+                    error: "writer failure: ".repeat(30),
+                },
+                restart_for_update: false,
+                deadline: Instant::now(),
+            },
+        );
+
+        let line = |y| {
+            (0..area.width)
+                .filter_map(|x| buffer.cell((x, y)).map(|cell| cell.symbol()))
+                .collect::<Vec<_>>()
+                .concat()
+        };
+        assert!(line(3).contains("r retry"));
+        assert!(line(4).contains("f force"));
+        assert!(line(1).contains("Exit not"));
+    }
+    #[test]
+    fn app_draw_keeps_unconfirmed_exit_notice_in_every_fullscreen_view() {
+        const CHILD_MARKER: &str = "GROW_TEST_APP_DRAW_EXIT_NOTICE_CHILD";
+        const TEST_NAME: &str =
+            "app::root::tests::app_draw_keeps_unconfirmed_exit_notice_in_every_fullscreen_view";
+
+        fn render_child() {
+            fn drain(sync: &crate::render::draw::WriterSync) {
+                assert!(matches!(
+                    sync.wait_drained(std::time::Duration::from_secs(3)),
+                    Ok(crate::render::draw::WriterDrain::Drained)
+                ));
+            }
+            fn draw_page(
+                name: &str,
+                app: &mut AppView,
+                terminal: &mut crate::app::PagerTerminal,
+                sync: &crate::render::draw::WriterSync,
+            ) {
+                use std::io::Write as _;
+
+                terminal.clear().expect("clear test viewport");
+                drain(sync);
+                let mut stderr = std::io::stderr().lock();
+                writeln!(stderr, "@@EXIT_NOTICE_START_{name}@@").unwrap();
+                drop(stderr);
+                app.draw(terminal);
+                drain(sync);
+                let mut stderr = std::io::stderr().lock();
+                writeln!(stderr, "@@EXIT_NOTICE_END_{name}@@").unwrap();
+            }
+            fn set_unconfirmed(app: &mut AppView, error: &str) {
+                app.exit_suspension = Some(ExitSuspension {
+                    exit_id: format!("exit-{error}"),
+                    phase: ExitSuspensionPhase::Unconfirmed {
+                        error: error.to_owned(),
+                    },
+                    restart_for_update: false,
+                    deadline: Instant::now(),
+                });
+            }
+
+            let (writer_tx, writer_sync, _events, writer_thread) =
+                crate::render::draw::spawn_writer_thread();
+            // This sender must drop before WriterThread joins during unwinding.
+            let frame_tx = writer_tx;
+            let backend = ratatui::backend::CrosstermBackend::new(
+                crate::render::draw::TermWriter::new(frame_tx.clone(), writer_sync.clone())
+                    .expect("single test writer"),
+            );
+            let mut terminal = ratatui_inline::Terminal::with_options(
+                backend,
+                ratatui::TerminalOptions {
+                    viewport: ratatui::Viewport::Fixed(ratatui::layout::Rect::new(0, 0, 80, 24)),
+                },
+            )
+            .expect("test terminal");
+
+            let mut agent = test_app_with_agent();
+            set_unconfirmed(&mut agent, "agent page error");
+            draw_page("AGENT", &mut agent, &mut terminal, &writer_sync);
+
+            let mut welcome = test_app_with_agent();
+            welcome.active_view = ActiveView::Welcome;
+            set_unconfirmed(&mut welcome, "welcome page error");
+            draw_page("WELCOME", &mut welcome, &mut terminal, &writer_sync);
+
+            let mut dashboard = test_app_with_agent();
+            dashboard.active_view = ActiveView::AgentDashboard;
+            dashboard.dashboard = Some(crate::views::dashboard::DashboardState::new());
+            set_unconfirmed(&mut dashboard, "dashboard page error");
+            draw_page("DASHBOARD", &mut dashboard, &mut terminal, &writer_sync);
+
+            drop(terminal);
+            drop(frame_tx);
+            writer_thread.join().expect("join test writer");
+        }
+
+        if std::env::var_os(CHILD_MARKER).is_some() {
+            render_child();
+            return;
+        }
+
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(CHILD_MARKER, "1")
+            .output()
+            .expect("run isolated AppView::draw child");
+        assert!(
+            output.status.success(),
+            "child draw failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let output = String::from_utf8_lossy(&output.stderr);
+        for page in ["AGENT", "WELCOME", "DASHBOARD"] {
+            let start = format!("@@EXIT_NOTICE_START_{page}@@");
+            let end = format!("@@EXIT_NOTICE_END_{page}@@");
+            let section = output
+                .split_once(&start)
+                .unwrap_or_else(|| panic!("missing {page} start marker in child output"))
+                .1
+                .split_once(&end)
+                .unwrap_or_else(|| panic!("missing {page} end marker in child output"))
+                .0;
+            let plain = crate::render::terminal_output::render_terminal_plain(section);
+            let compact = plain
+                .chars()
+                .filter(|ch| !ch.is_whitespace())
+                .collect::<String>();
+            assert!(
+                compact.contains("Exitnotconfirmed"),
+                "{page} draw omitted exit error: {plain:?}"
+            );
+            assert!(
+                compact.contains("rretry"),
+                "{page} draw omitted retry: {plain:?}"
+            );
+            assert!(
+                compact.contains("fforcequit"),
+                "{page} draw omitted force control: {plain:?}"
+            );
         }
     }
     #[test]
