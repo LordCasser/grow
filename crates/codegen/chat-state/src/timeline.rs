@@ -12861,6 +12861,103 @@ mod tests {
     }
 
     #[test]
+    fn image_projection_silent_tool_and_carrier_replay_for_all_sources() {
+        use sampling_types::conversation::{ContentPart, ToolCall, conversation_image_groups};
+        for kind in ["description", "ocr", "unsupported"] {
+            let mut timeline = Timeline::from_seed(vec![
+                ConversationItem::Reasoning(
+                    sampling_types::conversation::synthesized_reasoning_item("/secret/carrier.png"),
+                ),
+                ConversationItem::assistant_tool_calls(vec![ToolCall {
+                    id: "image_call".into(),
+                    name: "read_file".into(),
+                    arguments: r#"{"path":"/secret/image.png"}"#.into(),
+                }]),
+                ConversationItem::tool_result_with_images(
+                    "image_call",
+                    "image loaded",
+                    vec![ContentPart::Image {
+                        description: None,
+                        url: "data:image/png;base64,original".into(),
+                    }],
+                ),
+            ])
+            .unwrap();
+            let group = conversation_image_groups(timeline.surface()).remove(0);
+            let source = timeline.surface_ids()[2];
+            let provenance = match kind {
+                "description" => ImageShadowSource::Description {
+                    result_ref: record_image_description(&mut timeline, source),
+                },
+                "ocr" => ImageShadowSource::LocalOcr {
+                    engine: "tesseract".into(),
+                },
+                _ => ImageShadowSource::UnsupportedModel,
+            };
+            timeline
+                .record(TimelineEventKind::ImageProjection(ImageProjectionEvent {
+                    trigger_runtime: sampling_types::ModelImageInputKey::new(
+                        "text",
+                        "chat_completions",
+                        "endpoint",
+                    ),
+                    source_revision: timeline.surface_revision(),
+                    shadows: vec![ImageShadow {
+                        source,
+                        fingerprint: group.fingerprint,
+                        image_count: 1,
+                        replacement: if kind == "unsupported" {
+                            sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT
+                        } else {
+                            "image description"
+                        }
+                        .into(),
+                        provenance,
+                    }],
+                    tool_calls: vec![ImageToolCallShadow {
+                        source: timeline.surface_ids()[1],
+                        tool_call_ids: vec!["image_call".into()],
+                        carrier_sources: vec![timeline.surface_ids()[0]],
+                    }],
+                }))
+                .unwrap();
+            let replayed = Timeline::from_events(timeline.events().to_vec()).unwrap();
+            assert_eq!(
+                serde_json::to_value(timeline.surface()).unwrap(),
+                serde_json::to_value(replayed.surface()).unwrap()
+            );
+            assert_eq!(timeline.surface_ids(), replayed.surface_ids());
+            for surface in [timeline.surface(), replayed.surface()] {
+                let ConversationItem::Assistant(carrier) = &surface[0] else {
+                    panic!("silent carrier")
+                };
+                assert!(carrier.content.is_empty());
+                let ConversationItem::Assistant(call) = &surface[1] else {
+                    panic!("paired call")
+                };
+                assert!(call.content.is_empty());
+                assert_eq!(call.tool_calls[0].arguments.as_ref(), "{}");
+                let request = if kind == "unsupported" {
+                    surface.to_vec()
+                } else {
+                    image_text_request(surface)
+                };
+                let wire =
+                    serde_json::to_string(&sampling_types::conversation_to_chat_messages(request))
+                        .unwrap();
+                for marker in sampling_types::conversation::IMAGE_PROJECTION_PLACEHOLDERS {
+                    assert!(!wire.contains(marker));
+                }
+                assert!(!wire.contains("/secret/"));
+                assert!(wire.contains("image_call"));
+            }
+            let evidence = serde_json::to_string(timeline.events()).unwrap();
+            assert!(evidence.contains("/secret/image.png"));
+            assert!(evidence.contains("data:image/png;base64,original"));
+        }
+    }
+
+    #[test]
     fn unsupported_model_removal_redacts_image_tool_paths_and_carriers() {
         use sampling_types::conversation::{ContentPart, ToolCall, conversation_image_groups};
 
@@ -12942,17 +13039,11 @@ mod tests {
         };
         assert_eq!(assistant.tool_calls[0].id.as_ref(), "call_image");
         assert!(!assistant.tool_calls[0].arguments.contains("keep-query"));
-        assert_eq!(
-            assistant.content.as_ref(),
-            "[Image-associated assistant text projected to durable text.]"
-        );
+        assert!(assistant.content.is_empty());
         let ConversationItem::Assistant(carrier) = &timeline.surface()[0] else {
             panic!("expected replaced carrier");
         };
-        assert_eq!(
-            carrier.content.as_ref(),
-            "[Image-associated response carrier projected to durable text.]"
-        );
+        assert!(carrier.content.is_empty());
 
         let surface = serde_json::to_string(timeline.surface()).unwrap();
         assert!(!surface.contains("/secret/from-assistant.png"));

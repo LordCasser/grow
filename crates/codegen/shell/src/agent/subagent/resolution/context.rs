@@ -48,6 +48,9 @@ const FORK_NOISE_TAGS: &[&str] = &[
 pub fn normalize_forked_context(
     mut items: Vec<ConversationItem>,
 ) -> (Vec<ConversationItem>, usize) {
+    for item in &mut items {
+        sampling_types::conversation::clear_image_projection_placeholder(item);
+    }
     // Normalization changes the shape of the history, but it must never erase
     // multimodal evidence. Move every raw image into the single normalized
     // User item so the child keeps one causal image group. Sanitize the cloned
@@ -602,6 +605,26 @@ mod tests {
     }
 
     #[test]
+    fn normalized_fork_clears_legacy_assistant_markers_but_keeps_real_text() {
+        for marker in sampling_types::conversation::IMAGE_PROJECTION_PLACEHOLDERS {
+            let explanation = format!("The internal marker was {marker}");
+            let items = vec![
+                system_item("System"),
+                user_item(marker),
+                assistant_item(marker),
+                assistant_item(&explanation),
+            ];
+            let original = serde_json::to_value(&items).unwrap();
+            let (normalized, _) = normalize_forked_context(items.clone());
+            let text = extract_background_text(&normalized[1]);
+            assert_eq!(text.matches(marker).count(), 2);
+            assert!(text.contains(&format!("[User]: {marker}")));
+            assert!(text.contains(&format!("[Assistant]: {explanation}")));
+            assert_eq!(serde_json::to_value(&items).unwrap(), original);
+        }
+    }
+
+    #[test]
     fn normalized_fork_preserves_images_without_recoverable_source_paths() {
         use sampling_types::conversation::{ContentPart, UserItem};
 
@@ -663,7 +686,10 @@ mod tests {
             );
         }
         assert!(serialized.contains("Image preserved below for child projection"));
-        assert!(serialized.contains("image projected to durable text"));
+        for marker in sampling_types::conversation::IMAGE_PROJECTION_PLACEHOLDERS {
+            assert!(!serialized.contains(marker));
+        }
+        assert!(!serialized.contains("image projected to durable text"));
     }
 
     #[test]

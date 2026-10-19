@@ -21,6 +21,12 @@ use crate::types::{
     Usage,
 };
 
+/// Reserved legacy image-projection prose, never assistant speech in derived views.
+pub const IMAGE_PROJECTION_PLACEHOLDERS: [&str; 2] = [
+    "[Image-associated assistant text projected to durable text.]",
+    "[Image-associated response carrier projected to durable text.]",
+];
+
 // ============================================================================
 // Core Conversation Types
 // ============================================================================
@@ -1021,11 +1027,31 @@ pub fn redact_projected_image_tool_call(item: &mut ConversationItem, tool_call_i
     else {
         return false;
     };
-    call.arguments = Arc::<str>::from(r#"{"source":"[image projected to durable text]"}"#);
-    assistant.content =
-        Arc::<str>::from("[Image-associated assistant text projected to durable text.]");
+    call.arguments = Arc::from("{}");
+    assistant.content = Arc::from("");
     assistant.response_messages.clear();
     true
+}
+
+/// Clear an exact legacy internal placeholder in a derived assistant view.
+/// Raw Timeline/provider records and other roles must remain untouched.
+pub fn clear_image_projection_placeholder(item: &mut ConversationItem) {
+    if let ConversationItem::Assistant(assistant) = item
+        && IMAGE_PROJECTION_PLACEHOLDERS.contains(&assistant.content.as_ref())
+    {
+        assistant.content = Arc::from("");
+        assistant.response_messages.clear();
+    }
+}
+
+fn image_projection_request_items(mut items: Vec<ConversationItem>) -> Vec<ConversationItem> {
+    items.retain_mut(|item| {
+        clear_image_projection_placeholder(item);
+        !matches!(item, ConversationItem::Assistant(assistant)
+            if assistant.content.is_empty() && assistant.tool_calls.is_empty()
+                && assistant.response_messages.is_empty())
+    });
+    items
 }
 
 /// Redact source paths copied by an image-producing tool into its own textual
@@ -1078,7 +1104,8 @@ pub fn redact_projected_image_tool_result_references(
 }
 
 /// Replace every provider-native carrier emitted in the same response as an
-/// image-producing tool call with one protocol-neutral text item. Keeping a
+/// image-producing tool call with an empty neutral slot. This preserves Surface
+/// coordinates without manufacturing assistant speech. Keeping a
 /// Reasoning or BackendToolCall payload would leave a second carrier for the
 /// source path after the call arguments have been irreversibly shadowed.
 pub fn redact_projected_image_response_carrier(item: &mut ConversationItem) -> bool {
@@ -1088,9 +1115,7 @@ pub fn redact_projected_image_response_carrier(item: &mut ConversationItem) -> b
     ) {
         return false;
     }
-    *item = ConversationItem::assistant(
-        "[Image-associated response carrier projected to durable text.]",
-    );
+    *item = ConversationItem::assistant("");
     true
 }
 
@@ -2110,6 +2135,15 @@ enum RequestSegment {
     Native(NativeContinuationFragment),
 }
 
+impl RequestSegment {
+    fn items(items: Vec<ConversationItem>, replay_portable_reasoning: bool) -> Self {
+        Self::Items {
+            items: image_projection_request_items(items),
+            replay_portable_reasoning,
+        }
+    }
+}
+
 /// A native call's neutral mirror belongs to its span. The same ID on an
 /// assistant call outside that span belongs to a distinct exchange and cannot
 /// share one provider correlation key with the native call.
@@ -2157,19 +2191,18 @@ fn native_tool_id_conflicts_with_neutral_exchange(
 
 fn request_segments(req: &ConversationRequest, backend: ApiBackend) -> Vec<RequestSegment> {
     let Some(native) = &req.native_continuation else {
-        return vec![RequestSegment::Items {
-            items: req.items.clone(),
-            replay_portable_reasoning: false,
-        }];
+        return vec![RequestSegment::items(req.items.clone(), false)];
     };
     let replay_portable_reasoning = native.portable_reasoning_backend.as_ref() == Some(&backend)
         && backend != ApiBackend::Messages;
-    let portable_segment = |items: &[ConversationItem]| RequestSegment::Items {
-        items: project_portable_history_with_reasoning(
-            items,
-            replay_portable_reasoning.then(|| backend.clone()),
-        ),
-        replay_portable_reasoning,
+    let portable_segment = |items: &[ConversationItem]| {
+        RequestSegment::items(
+            project_portable_history_with_reasoning(
+                items,
+                replay_portable_reasoning.then(|| backend.clone()),
+            ),
+            replay_portable_reasoning,
+        )
     };
     let Some(portable_end) = native.portable_prefix_end(&req.items) else {
         return vec![portable_segment(&req.items)];
@@ -2183,7 +2216,15 @@ fn request_segments(req: &ConversationRequest, backend: ApiBackend) -> Vec<Reque
     }
 
     for span in &native.spans {
-        if span.fragment.backend() != backend {
+        // Do not rewrite native/signed bytes. A legacy placeholder in their
+        // neutral mirror requires the existing whole-request portable fallback.
+        if span.fragment.backend() != backend
+            || req.items[span.start..span.end].iter().any(|item| {
+                matches!(item,
+                ConversationItem::Assistant(assistant)
+                    if IMAGE_PROJECTION_PLACEHOLDERS.contains(&assistant.content.as_ref()))
+            })
+        {
             return vec![portable_segment(&req.items)];
         }
     }
@@ -2196,19 +2237,16 @@ fn request_segments(req: &ConversationRequest, backend: ApiBackend) -> Vec<Reque
     let mut cursor = portable_end;
     for span in &native.spans {
         if cursor < span.start {
-            segments.push(RequestSegment::Items {
-                items: req.items[cursor..span.start].to_vec(),
-                replay_portable_reasoning: false,
-            });
+            segments.push(RequestSegment::items(
+                req.items[cursor..span.start].to_vec(),
+                false,
+            ));
         }
         segments.push(RequestSegment::Native(span.fragment.clone()));
         cursor = span.end;
     }
     if cursor < req.items.len() {
-        segments.push(RequestSegment::Items {
-            items: req.items[cursor..].to_vec(),
-            replay_portable_reasoning: false,
-        });
+        segments.push(RequestSegment::items(req.items[cursor..].to_vec(), false));
     }
     segments
 }
@@ -3485,7 +3523,12 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
 pub fn conversation_to_chat_messages(items: Vec<ConversationItem>) -> Vec<ChatRequestMessage> {
     let ids = agent_message_call_ids(&items, None);
     let skill_ids = skill_load_call_ids(&items, None);
-    conversation_to_chat_messages_with_reasoning(items, false, &ids, &skill_ids)
+    conversation_to_chat_messages_with_reasoning(
+        image_projection_request_items(items),
+        false,
+        &ids,
+        &skill_ids,
+    )
 }
 
 fn conversation_to_chat_messages_with_reasoning(
@@ -6954,6 +6997,152 @@ mod tests {
                 serde_json::to_value(rs::CreateResponse::from(request)).unwrap()
             }
             ApiBackend::Messages => serde_json::to_value(build_messages_request(request)).unwrap(),
+        }
+    }
+
+    #[test]
+    fn image_projection_redactors_do_not_manufacture_assistant_speech() {
+        let mut call = ConversationItem::assistant_tool_calls(vec![ToolCall {
+            id: "image_call".into(),
+            name: "read_file".into(),
+            arguments: r#"{"path":"/private/image.png"}"#.into(),
+        }]);
+        assert!(redact_projected_image_tool_call(&mut call, "image_call"));
+        let ConversationItem::Assistant(assistant) = call else {
+            unreachable!()
+        };
+        assert!(assistant.content.is_empty());
+        assert_eq!(assistant.tool_calls[0].arguments.as_ref(), "{}");
+        let mut carrier = ConversationItem::Reasoning(synthesized_reasoning_item("private source"));
+        assert!(redact_projected_image_response_carrier(&mut carrier));
+        assert!(carrier.text_content().is_empty());
+    }
+
+    #[test]
+    fn image_projection_history_is_silent_on_all_wire_backends() {
+        for marker in IMAGE_PROJECTION_PLACEHOLDERS {
+            let mut call = ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: "image_call".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            }]);
+            let ConversationItem::Assistant(assistant) = &mut call else {
+                unreachable!()
+            };
+            assistant.content = marker.into();
+            let items = vec![
+                ConversationItem::user("inspect"),
+                ConversationItem::assistant(marker),
+                call,
+                ConversationItem::tool_result("image_call", "described image"),
+                ConversationItem::assistant(""),
+            ];
+            let original = serde_json::to_value(&items).unwrap();
+            let direct =
+                serde_json::to_value(conversation_to_chat_messages(items.clone())).unwrap();
+            assert!(
+                !direct.to_string().contains(marker),
+                "direct Chat compaction path"
+            );
+            assert_wire_tool_pairs(&direct, &["image_call"]);
+            for portable in [false, true] {
+                let mut request = ConversationRequest::from_items(items.clone());
+                if portable {
+                    request.native_continuation = Some(NativeContinuationProjection {
+                        portable_prefix_len: items.len(),
+                        spans: Vec::new(),
+                        portable_reasoning_backend: None,
+                    });
+                }
+                for backend in [
+                    ApiBackend::ChatCompletions,
+                    ApiBackend::Responses,
+                    ApiBackend::Messages,
+                ] {
+                    let segments = request_segments(&request, backend.clone());
+                    assert!(segments.iter().all(|segment| match segment {
+                        RequestSegment::Items { items, .. } => items.iter().all(|item| !matches!(item,
+                            ConversationItem::Assistant(a) if a.content.is_empty() && a.tool_calls.is_empty())),
+                        _ => false,
+                    }), "empty carrier leaked into request segments");
+                    let wire = portable_wire(&request, backend);
+                    assert!(!wire.to_string().contains(marker));
+                    assert_wire_tool_pairs(&wire, &["image_call"]);
+                }
+                assert_eq!(serde_json::to_value(&request.items).unwrap(), original);
+            }
+        }
+    }
+
+    #[test]
+    fn image_projection_filter_preserves_user_tool_and_explanatory_text() {
+        for marker in IMAGE_PROJECTION_PLACEHOLDERS {
+            let explanation = format!("The marker is {marker} and is internal.");
+            let request = ConversationRequest::from_items(vec![
+                ConversationItem::user(marker),
+                ConversationItem::assistant_tool_calls(vec![ToolCall {
+                    id: "call".into(),
+                    name: "read_file".into(),
+                    arguments: "{}".into(),
+                }]),
+                ConversationItem::tool_result("call", marker),
+                ConversationItem::assistant(&explanation),
+                ConversationItem::assistant(format!(" {marker}")),
+            ]);
+            for backend in [
+                ApiBackend::ChatCompletions,
+                ApiBackend::Responses,
+                ApiBackend::Messages,
+            ] {
+                let wire = portable_wire(&request, backend);
+                assert_eq!(wire.to_string().matches(marker).count(), 4);
+                assert!(wire.to_string().contains(&explanation));
+                assert_wire_tool_pairs(&wire, &["call"]);
+            }
+        }
+    }
+
+    #[test]
+    fn image_projection_marker_in_native_span_uses_portable_fallback() {
+        for backend in [
+            ApiBackend::ChatCompletions,
+            ApiBackend::Responses,
+            ApiBackend::Messages,
+        ] {
+            let mut call = ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: "native_call".into(),
+                name: "read_file".into(),
+                arguments: "{}".into(),
+            }]);
+            let ConversationItem::Assistant(assistant) = &mut call else {
+                unreachable!()
+            };
+            assistant.content = IMAGE_PROJECTION_PLACEHOLDERS[0].into();
+            let request = ConversationRequest {
+                items: vec![
+                    ConversationItem::user("inspect"),
+                    call,
+                    ConversationItem::tool_result("native_call", "image description"),
+                ],
+                native_continuation: Some(NativeContinuationProjection {
+                    portable_prefix_len: 1,
+                    spans: vec![NativeContinuationSpan {
+                        start: 1,
+                        end: 2,
+                        fragment: native_tool_fragment(backend.clone(), "native_call"),
+                    }],
+                    portable_reasoning_backend: None,
+                }),
+                ..ConversationRequest::default()
+            };
+            assert!(
+                request_segments(&request, backend.clone())
+                    .iter()
+                    .all(|segment| matches!(segment, RequestSegment::Items { .. }))
+            );
+            let wire = portable_wire(&request, backend);
+            assert!(!wire.to_string().contains(IMAGE_PROJECTION_PLACEHOLDERS[0]));
+            assert_wire_tool_pairs(&wire, &["native_call"]);
         }
     }
 
@@ -11196,10 +11385,7 @@ mod tests {
         let ConversationItem::Assistant(assistant) = &req.items[0] else {
             panic!("expected assistant");
         };
-        assert_eq!(
-            assistant.content.as_ref(),
-            "[Image-associated assistant text projected to durable text.]"
-        );
+        assert!(assistant.content.is_empty());
         assert!(
             !assistant.tool_calls[0]
                 .arguments
@@ -11219,7 +11405,7 @@ mod tests {
     }
 
     #[test]
-    fn image_response_carriers_are_ordered_and_replaced_with_generic_text() {
+    fn image_response_carriers_are_ordered_and_replaced_with_silent_slots() {
         let mut items = vec![
             ConversationItem::user("boundary"),
             ConversationItem::Reasoning(synthesized_reasoning_item(
@@ -11243,10 +11429,7 @@ mod tests {
             let ConversationItem::Assistant(shadow) = &items[index] else {
                 panic!("carrier must become protocol-neutral assistant text");
             };
-            assert_eq!(
-                shadow.content.as_ref(),
-                "[Image-associated response carrier projected to durable text.]"
-            );
+            assert!(shadow.content.is_empty());
             assert!(shadow.tool_calls.is_empty());
         }
 

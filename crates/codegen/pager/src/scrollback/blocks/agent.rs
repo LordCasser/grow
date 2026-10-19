@@ -18,6 +18,13 @@ use crate::appearance::AppearanceConfig;
 #[derive(Debug, Clone)]
 pub struct AgentMessageBlock {
     content: MarkdownContent,
+    /// A possible leading internal image-projection marker, withheld until the
+    /// stream either diverges from every marker or finishes.
+    pending_image_projection_prefix: Option<String>,
+    /// Prefix filtering only applies until the first non-marker byte arrives.
+    filter_image_projection_prefix: bool,
+    /// An exact internal marker is retained as an empty, non-rendering entry.
+    hidden_image_projection_placeholder: Option<&'static str>,
     /// Cached image references extracted from the markdown source.
     image_refs: Vec<crate::prompt_images::ScrollbackImageRef>,
     /// Detected ` ```mermaid ` diagrams + render skeleton, populated at
@@ -28,12 +35,19 @@ pub struct AgentMessageBlock {
 impl AgentMessageBlock {
     /// Create a new agent message block with complete text.
     pub fn new(text: impl Into<String>) -> Self {
-        let text = text.into();
+        let mut text = text.into();
+        let hidden_image_projection_placeholder = Self::image_projection_placeholder(&text);
+        if hidden_image_projection_placeholder.is_some() {
+            text.clear();
+        }
         let image_refs = crate::prompt_images::extract_image_refs(&text);
         let content = MarkdownContent::new(text);
         let mermaid = content.mermaid_content();
         Self {
             content,
+            pending_image_projection_prefix: None,
+            filter_image_projection_prefix: false,
+            hidden_image_projection_placeholder,
             image_refs,
             mermaid,
         }
@@ -43,6 +57,9 @@ impl AgentMessageBlock {
     pub fn streaming() -> Self {
         Self {
             content: MarkdownContent::streaming(),
+            pending_image_projection_prefix: None,
+            filter_image_projection_prefix: true,
+            hidden_image_projection_placeholder: None,
             image_refs: Vec::new(),
             mermaid: MermaidContent::default(),
         }
@@ -50,12 +67,82 @@ impl AgentMessageBlock {
 
     /// Push a streaming chunk of markdown text.
     pub fn push_chunk(&mut self, chunk: &str) {
-        self.content.push_chunk(chunk);
+        self.push_filtered_chunk(chunk, false);
     }
 
     /// Push a chunk without rendering immediately.
     pub fn push_chunk_deferred(&mut self, chunk: &str) {
-        self.content.push_chunk_deferred(chunk);
+        self.push_filtered_chunk(chunk, true);
+    }
+
+    fn push_filtered_chunk(&mut self, chunk: &str, deferred: bool) {
+        if chunk.is_empty() {
+            return;
+        }
+        // Some child/replay paths finalize blocks before late chunks arrive.
+        // With a suffix this is ordinary text, so restore the complete body.
+        if let Some(marker) = self.hidden_image_projection_placeholder.take() {
+            self.push_content_chunk(marker, deferred);
+        }
+        if !self.filter_image_projection_prefix {
+            self.push_content_chunk(chunk, deferred);
+            return;
+        }
+        let Some(pending) = self.pending_image_projection_prefix.take() else {
+            if Self::could_be_image_projection_prefix(chunk) {
+                self.pending_image_projection_prefix = Some(chunk.to_owned());
+            } else {
+                self.filter_image_projection_prefix = false;
+                self.push_content_chunk(chunk, deferred);
+            }
+            return;
+        };
+
+        let max_len = Self::max_image_projection_placeholder_len();
+        if chunk.len() > max_len.saturating_sub(pending.len()) {
+            self.filter_image_projection_prefix = false;
+            self.push_content_chunk(&pending, deferred);
+            self.push_content_chunk(chunk, deferred);
+            return;
+        }
+
+        let mut candidate = pending;
+        candidate.push_str(chunk);
+        if Self::could_be_image_projection_prefix(&candidate) {
+            self.pending_image_projection_prefix = Some(candidate);
+        } else {
+            self.filter_image_projection_prefix = false;
+            self.push_content_chunk(&candidate, deferred);
+        }
+    }
+
+    fn push_content_chunk(&mut self, chunk: &str, deferred: bool) {
+        if deferred {
+            self.content.push_chunk_deferred(chunk);
+        } else {
+            self.content.push_chunk(chunk);
+        }
+    }
+
+    fn max_image_projection_placeholder_len() -> usize {
+        sampling_types::conversation::IMAGE_PROJECTION_PLACEHOLDERS
+            .iter()
+            .map(|placeholder| placeholder.len())
+            .max()
+            .unwrap_or(0)
+    }
+
+    fn image_projection_placeholder(text: &str) -> Option<&'static str> {
+        sampling_types::conversation::IMAGE_PROJECTION_PLACEHOLDERS
+            .into_iter()
+            .find(|placeholder| *placeholder == text)
+    }
+
+    fn could_be_image_projection_prefix(text: &str) -> bool {
+        text.len() <= Self::max_image_projection_placeholder_len()
+            && sampling_types::conversation::IMAGE_PROJECTION_PLACEHOLDERS
+                .iter()
+                .any(|placeholder| placeholder.starts_with(text))
     }
 
     /// Get the source markdown text.
@@ -65,11 +152,19 @@ impl AgentMessageBlock {
 
     /// Whether the source markdown is empty (zero-alloc, unlike `text()`).
     pub fn is_empty(&self) -> bool {
-        self.content.is_empty()
+        self.content.is_empty() && self.pending_image_projection_prefix.is_none()
     }
 
     /// Finish streaming and do a full re-render for safety.
     pub fn finish(&mut self) {
+        if let Some(pending) = self.pending_image_projection_prefix.take() {
+            if let Some(marker) = Self::image_projection_placeholder(&pending) {
+                self.hidden_image_projection_placeholder = Some(marker);
+            } else {
+                self.content.push_chunk_deferred(&pending);
+            }
+        }
+        self.filter_image_projection_prefix = false;
         self.content.finish();
         let text = self.content.text();
         self.image_refs = crate::prompt_images::extract_image_refs(&text);
@@ -163,6 +258,9 @@ impl AgentMessageBlock {
 
 impl BlockContent for AgentMessageBlock {
     fn output(&self, ctx: &BlockContext) -> BlockOutput {
+        if self.hidden_image_projection_placeholder.is_some() {
+            return BlockOutput::new();
+        }
         // Common path: no diagrams (or raw mode) → plain markdown, no affordance
         // machinery and no extra output rebuild.
         if ctx.raw || self.mermaid.is_empty() {
@@ -260,6 +358,116 @@ mod tests {
             block.copy_text(false),
             block.content().rendered_plain_text()
         );
+    }
+
+    #[test]
+    fn exact_image_projection_placeholders_are_hidden_at_every_chunk_boundary() {
+        for placeholder in sampling_types::conversation::IMAGE_PROJECTION_PLACEHOLDERS {
+            assert!(AgentMessageBlock::new(placeholder).is_empty());
+            for split in 0..=placeholder.len() {
+                let mut block = AgentMessageBlock::streaming();
+                block.push_chunk(&placeholder[..split]);
+                block.push_chunk(&placeholder[split..]);
+                assert!(
+                    !block.is_empty(),
+                    "possible marker remains buffered until finish: {placeholder:?} split at {split}"
+                );
+                block.finish();
+                assert!(block.is_empty(), "{placeholder:?} split at {split}");
+                assert_eq!(block.text(), "");
+                assert_eq!(block.copy_text(true), "");
+                assert_eq!(block.copy_text(false), "");
+                assert!(block.output(&ctx(80, false)).lines.is_empty());
+                assert!(block.output(&ctx(80, true)).lines.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn deferred_streaming_hides_exact_image_projection_placeholder() {
+        let placeholder = sampling_types::conversation::IMAGE_PROJECTION_PLACEHOLDERS[1];
+        let mut block = AgentMessageBlock::streaming();
+        block.push_chunk_deferred(&placeholder[..9]);
+        block.push_chunk_deferred(&placeholder[9..]);
+        assert!(!block.is_empty());
+        block.finish();
+        assert!(block.is_empty());
+        assert_eq!(block.text(), "");
+    }
+
+    #[test]
+    fn image_projection_prefix_divergence_and_incomplete_finish_are_preserved() {
+        let placeholder = sampling_types::conversation::IMAGE_PROJECTION_PLACEHOLDERS[0];
+
+        let mut divergent = AgentMessageBlock::streaming();
+        divergent.push_chunk(&placeholder[..5]);
+        assert!(!divergent.is_empty());
+        divergent.push_chunk("ordinary text");
+        assert_eq!(
+            divergent.text(),
+            format!("{}ordinary text", &placeholder[..5])
+        );
+        divergent.finish();
+        assert_eq!(
+            divergent.copy_text(true),
+            format!("{}ordinary text", &placeholder[..5])
+        );
+
+        let mut incomplete = AgentMessageBlock::streaming();
+        incomplete.push_chunk(&placeholder[..placeholder.len() - 1]);
+        assert!(!incomplete.is_empty());
+        assert_eq!(incomplete.text(), "");
+        incomplete.finish();
+        assert_eq!(incomplete.text(), &placeholder[..placeholder.len() - 1]);
+        assert!(!incomplete.is_empty());
+    }
+
+    #[test]
+    fn image_projection_placeholder_inside_explanation_is_preserved() {
+        let placeholder = sampling_types::conversation::IMAGE_PROJECTION_PLACEHOLDERS[1];
+        let explanation =
+            format!("The internal marker is {placeholder} and should remain visible.");
+        let block = AgentMessageBlock::new(&explanation);
+        assert_eq!(block.text(), explanation);
+
+        let mut streamed = AgentMessageBlock::streaming();
+        streamed.push_chunk(placeholder);
+        streamed.push_chunk(" This suffix makes it an explanation.");
+        assert_eq!(
+            streamed.text(),
+            format!("{placeholder} This suffix makes it an explanation.")
+        );
+        streamed.finish();
+        assert_eq!(
+            streamed.copy_text(true),
+            format!("{placeholder} This suffix makes it an explanation.")
+        );
+    }
+
+    #[test]
+    fn image_projection_hidden_body_is_restored_for_late_explanatory_chunks() {
+        for marker in sampling_types::conversation::IMAGE_PROJECTION_PLACEHOLDERS {
+            for deferred in [false, true] {
+                for constructed in [false, true] {
+                    let mut block = if constructed {
+                        AgentMessageBlock::new(marker)
+                    } else {
+                        let mut block = AgentMessageBlock::streaming();
+                        block.push_chunk(marker);
+                        block.finish();
+                        block
+                    };
+                    block.finish(); // completion is idempotent
+                    assert!(block.output(&ctx(120, true)).lines.is_empty());
+                    block.push_filtered_chunk(" Explanation.", deferred);
+                    block.finish();
+                    assert_eq!(block.text(), format!("{marker} Explanation."));
+                    assert_eq!(block.copy_text(true), block.text());
+                    assert!(!block.output(&ctx(120, true)).lines.is_empty());
+                    assert!(!block.output(&ctx(120, false)).lines.is_empty());
+                }
+            }
+        }
     }
 
     #[test]

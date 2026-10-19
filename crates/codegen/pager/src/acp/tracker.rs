@@ -3912,6 +3912,43 @@ mod tests {
         assert_eq!(tracker.pending_tools.len(), 0);
     }
     #[test]
+    fn image_projection_marker_is_hidden_through_live_and_replay_tracker() {
+        for marker in sampling_types::conversation::IMAGE_PROJECTION_PLACEHOLDERS {
+            for is_replay in [false, true] {
+                let mut sb = ScrollbackState::new();
+                let mut tracker = AcpUpdateTracker::new();
+                let mut metadata = meta();
+                metadata.is_replay = is_replay;
+                for chunk in [&marker[..12], &marker[12..]] {
+                    tracker.handle_update(agent_chunk(chunk), &metadata, &mut sb);
+                    let id = tracker.current_agent_msg.unwrap();
+                    let RenderBlock::AgentMessage(block) = &sb.get_by_id(id).unwrap().block else {
+                        panic!("assistant block")
+                    };
+                    assert!(
+                        block.text().is_empty(),
+                        "no prefix flashes into the visible body"
+                    );
+                }
+                let id = tracker.current_agent_msg.unwrap();
+                // The child path can finalize blocks without clearing the tracker.
+                sb.finish_all_running();
+                let RenderBlock::AgentMessage(block) = &sb.get_by_id(id).unwrap().block else {
+                    unreachable!()
+                };
+                assert!(block.is_empty());
+                assert_eq!(block.copy_text(true), "");
+                tracker.handle_update(agent_chunk(" Explanation."), &metadata, &mut sb);
+                tracker.finish_turn(&mut sb);
+                let RenderBlock::AgentMessage(block) = &sb.get_by_id(id).unwrap().block else {
+                    unreachable!()
+                };
+                assert_eq!(block.text(), format!("{marker} Explanation."));
+            }
+        }
+    }
+
+    #[test]
     fn agent_msg_resets_after_tool() {
         let mut sb = ScrollbackState::new();
         let mut tracker = AcpUpdateTracker::new();
