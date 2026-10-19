@@ -39,4 +39,8 @@
 
 ## 本轮集成结果
 
-归档校验、维护检查、提交标识和 MCP 文件保全结果待本轮操作完成后补入。
+- 实现、回归、四项归档及主规范提交为 `174e6cac`（`fix: harden session suspension and archive exit regressions`），已从 `dc7c02d8` 快进合入本地 main；合入后工作区和索引均干净。后续集成记录提交仅修改本归档中的文档，不改变已验证源码。
+- 本轮最初对 main 的 34 个 tracked 改动与 17 个 untracked 文件保存了逐文件 SHA256 快照。复核期间，另一项操作将其中 49 个 MCP 源码/文档文件提交至独立分支 `codex/mcp-policy-sdk-identity` 的 `5b375b07`。逐文件核对这 49 个文件与原快照完全相同；backlog 原措辞保留在既有 stash `29671011`，额外 Python cache 的原件也在快照中。本轮没有恢复或删除这些独立工作。
+- main 不包含 `5b375b07`，MCP 专属源码、extension-runtime 主规范和两个 MCP archive 均未进入本次提交。共享 run_loop.rs 中只有当前挂起契约所需的有限活动准入修复；未带入 SDK 类型、client_source 或新工具策略实现。MCP 分支 HEAD 及既有 stash 在合入前后保持不变。
+- 合入 main 后再次通过 pinned 格式、严格主规范/活动项 16 项、archive 625 项及 107 份 Markdown 的 583 个相对目标/329 个锚点检查，均无失败。记录补充没有改动运行时源码。
+- 本轮仅提交并合入本地 main，未推送、打 tag、安装或发布。正式发布前仍须完成上列版本/notes、同 SHA 托管门禁和 release-dist 产物验收。
