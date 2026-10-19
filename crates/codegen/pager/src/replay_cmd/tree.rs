@@ -58,6 +58,7 @@ struct Replay {
     last_notice: Option<String>,
     notice_frontier_ms: f64,
     total_events: usize,
+    quit_armed_at: Option<Instant>,
 }
 
 fn activity_marker(event: &shell::session::storage::transcript::TranscriptEvent) -> bool {
@@ -310,6 +311,7 @@ impl Replay {
             last_notice: None,
             notice_frontier_ms: 0.0,
             total_events,
+            quit_armed_at: None,
         }
     }
 
@@ -621,9 +623,22 @@ impl Replay {
         if matches!(&event, Event::Key(key) if key.kind == KeyEventKind::Release) {
             return false;
         }
-        if matches!(&event, Event::Key(key) if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL))
-        {
-            return true;
+        if let Event::Key(key) = &event {
+            if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                let confirmed = self.quit_armed_at.is_some_and(|armed| {
+                    now.saturating_duration_since(armed) < crate::app::root::PendingAction::TTL
+                });
+                self.quit_armed_at = (!confirmed).then_some(now);
+                if !confirmed {
+                    self.last_notice =
+                        Some("Press Ctrl+D again within one second to exit replay".into());
+                }
+                return confirmed;
+            }
+            self.quit_armed_at = None;
+            if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
+                return false;
+            }
         }
         if matches!(&event, Event::Key(key) if key.code == KeyCode::F(8)) {
             self.clock.pause_or_resume(now);
@@ -1194,7 +1209,7 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_c_exits_read_only_replay_locally() {
+    fn ctrl_c_never_exits_and_ctrl_d_confirms_read_only_replay_exit() {
         let start = Instant::now();
         let mut replay = Replay::new(
             vec![(
@@ -1205,10 +1220,14 @@ mod tests {
             start,
         );
 
-        assert!(replay.handle(
-            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL,)),
-            start,
-        ));
+        let ctrl_c = Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let ctrl_d = Event::Key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert!(!replay.handle(ctrl_c.clone(), start));
+        assert!(!replay.handle(ctrl_d.clone(), start));
+        assert!(!replay.handle(ctrl_c, start));
+        assert!(!replay.handle(ctrl_d.clone(), start));
+        assert!(!replay.handle(ctrl_d.clone(), start + Duration::from_secs(2)));
+        assert!(replay.handle(ctrl_d, start + Duration::from_millis(2200)));
     }
 
     #[test]

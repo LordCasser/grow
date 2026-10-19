@@ -19,7 +19,9 @@ fn image_tool_result() -> ToolRunResult {
     }
 }
 
-async fn run_image_result(actor: &SessionActor) -> sampling_types::conversation::ToolResultItem {
+pub(super) async fn run_image_result(
+    actor: &SessionActor,
+) -> sampling_types::conversation::ToolResultItem {
     actor
         .chat_state_handle
         .push_assistant_response(ConversationItem::assistant_tool_calls(vec![
@@ -51,7 +53,7 @@ async fn run_image_result(actor: &SessionActor) -> sampling_types::conversation:
 
 async fn mark_current_model_as_text_only(actor: &SessionActor) {
     actor
-        .record_unsupported_model_image_input(actor.current_catalog_model_id())
+        .record_unsupported_model_image_input(actor.current_model_image_input_key().await.unwrap())
         .await
         .unwrap();
 }
@@ -60,6 +62,54 @@ async fn test_actor() -> std::sync::Arc<SessionActor> {
     let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
     let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
     std::sync::Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await)
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn image_input_rejection_cache_tracks_runtime_changes_and_aliases() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let actor = test_actor().await;
+            let original = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            mark_current_model_as_text_only(&actor).await;
+            let route = actor.model_route.snapshot();
+            actor.model_route.replace(
+                crate::agent::models::ModelId::new("same-runtime-alias"),
+                route.sampling_config,
+            );
+            assert!(
+                actor.unsupported_current_model_for_images().await.is_some(),
+                "another alias of the rejected transport must share its rejection"
+            );
+            for variant in 0..4 {
+                let mut changed = original.clone();
+                match variant {
+                    0 => changed.base_url.push_str("/different-deployment"),
+                    1 => {
+                        changed.api_backend =
+                            if original.api_backend == sampling_types::ApiBackend::Messages {
+                                sampling_types::ApiBackend::Responses
+                            } else {
+                                sampling_types::ApiBackend::Messages
+                            }
+                    }
+                    2 => {
+                        changed
+                            .query_params
+                            .insert("deployment".into(), "vision".into());
+                    }
+                    3 => changed.model.push_str("-vision"),
+                    _ => unreachable!(),
+                }
+                actor.chat_state_handle.replace_sampling_route(changed);
+                assert!(
+                    actor.unsupported_current_model_for_images().await.is_none(),
+                    "a changed transport must remain optimistic (variant {variant})"
+                );
+            }
+            actor.chat_state_handle.replace_sampling_route(original);
+            assert!(actor.unsupported_current_model_for_images().await.is_some());
+        })
+        .await;
 }
 
 #[tokio::test(flavor = "current_thread")]

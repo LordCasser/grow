@@ -74,7 +74,7 @@ type CompactionGeneration =
 struct PreparedCompaction {
     target: chat_state::SurfaceRange,
     authority: Vec<chat_state::SurfaceId>,
-    model_key: (String, ApiBackend, u64),
+    model_key: (sampling_types::ModelImageInputKey, u64),
     generation: CompactionGeneration,
 }
 
@@ -98,7 +98,7 @@ pub(crate) struct BackgroundCompaction {
     background: Arc<std::sync::atomic::AtomicBool>,
     authority: Vec<chat_state::SurfaceId>,
     target: chat_state::SurfaceRange,
-    model_key: (String, ApiBackend, u64),
+    model_key: (sampling_types::ModelImageInputKey, u64),
     worker: tokio::task::JoinHandle<Result<GeneratedCompaction, acp::Error>>,
 }
 
@@ -880,17 +880,18 @@ impl SessionActor {
     ) -> Result<(), acp::Error> {
         let mut image_recovery_attempted = false;
         loop {
-            let attempted_model = self.current_catalog_model_id();
+            let attempted_key = self.current_model_image_input_key().await;
             let result = self
                 .run_compact_transaction(user_context.clone(), trigger)
                 .await;
             if !image_recovery_attempted
-                && attempted_model == self.current_catalog_model_id()
+                && let Some(attempted_key) = attempted_key
+                && Some(&attempted_key) == self.current_model_image_input_key().await.as_ref()
                 && result
                     .as_ref()
                     .is_err_and(is_compact_image_input_unsupported)
             {
-                if !self.recover_compaction_image_input().await? {
+                if !self.recover_compaction_image_input(&attempted_key).await? {
                     return result;
                 }
                 image_recovery_attempted = true;
@@ -900,13 +901,12 @@ impl SessionActor {
         }
     }
 
-    async fn recover_compaction_image_input(&self) -> Result<bool, acp::Error> {
-        let key = self.current_model_image_input_key().await.ok_or_else(|| {
-            acp::Error::internal_error()
-                .data("compaction image rejection had no model capability identity")
-        })?;
+    async fn recover_compaction_image_input(
+        &self,
+        key: &sampling_types::ModelImageInputKey,
+    ) -> Result<bool, acp::Error> {
         let first_rejection = self
-            .record_unsupported_model_image_input(self.current_catalog_model_id())
+            .record_unsupported_model_image_input(key.clone())
             .await
             .map_err(|error| {
                 crate::session::commands::fatal_turn_boundary_error(
@@ -915,7 +915,7 @@ impl SessionActor {
                 )
             })?;
         let projected = self
-            .project_conversation_images_for_text_model(&key)
+            .project_conversation_images_for_text_model(key)
             .await
             .map_err(|error| {
                 if matches!(
@@ -1102,14 +1102,6 @@ impl SessionActor {
             model_id.clone(),
             user_context.is_some(),
         );
-        let model_key = (
-            model_id.clone(),
-            sampling_config
-                .as_ref()
-                .map(|config| config.api_backend.clone())
-                .unwrap_or(ApiBackend::Messages),
-            context_window,
-        );
         let compact_source = trigger_str;
         self.dispatch_observe_hook(
             ::hooks::event::HookEventName::PreCompact,
@@ -1178,6 +1170,15 @@ impl SessionActor {
                 .filter(|name| !name.is_empty() && !name.contains("by_kind"))
         };
         let sampling_config = self.reconstruct_full_config().await;
+        let model_key = (
+            sampling_types::model_image_input_key_from_parts(
+                &sampling_config.model,
+                &sampling_config.api_backend,
+                &sampling_config.base_url,
+                &sampling_config.query_params,
+            ),
+            context_window,
+        );
         let output_limit = compaction_output_limit(&sampling_config);
         let input_budget = context_window
             .saturating_sub(u64::from(output_limit))
@@ -1191,7 +1192,7 @@ impl SessionActor {
             user_context.as_deref(),
         ));
         let source_budget = input_budget.saturating_sub(overhead);
-        if self.model_image_input_is_unsupported(&model_id).await {
+        if self.model_image_input_is_unsupported(&model_key.0).await {
             sampling_types::conversation::select_image_descriptions(&mut source_surface).map_err(
                 |error| {
                     acp::Error::internal_error().data(Self::image_projection_failure_message(
@@ -2346,8 +2347,7 @@ impl SessionActor {
             .await
             .map(|config| {
                 (
-                    self.current_catalog_model_id(),
-                    config.api_backend,
+                    sampling_types::model_image_input_key(&config),
                     config.context_window.get(),
                 )
             });
@@ -2490,7 +2490,9 @@ impl SessionActor {
             && self
                 .background_compaction_source_is_current(&pending)
                 .await?
-            && self.recover_compaction_image_input().await?
+            && self
+                .recover_compaction_image_input(&pending.model_key.0)
+                .await?
         {
             // ImageShadows invalidate the old target, so the existing recovery
             // legitimately opens a new transaction against the projected input.
@@ -3161,7 +3163,10 @@ mod cancelled_compaction_owner_tests {
                     end: surface_id,
                     shadowed: vec![surface_id],
                 },
-                model_key: ("model".into(), ApiBackend::Messages, 1),
+                model_key: (
+                    sampling_types::ModelImageInputKey::new("model", "messages", "endpoint"),
+                    1,
+                ),
                 worker,
             }));
 
@@ -3220,7 +3225,10 @@ mod cancelled_compaction_owner_tests {
                     end: surface_id,
                     shadowed: vec![surface_id],
                 },
-                model_key: ("model".into(), ApiBackend::Messages, 1),
+                model_key: (
+                    sampling_types::ModelImageInputKey::new("model", "messages", "endpoint"),
+                    1,
+                ),
                 worker,
             }));
 
@@ -3340,6 +3348,93 @@ mod context_recall_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn background_image_compaction_rejects_changed_transport_before_recovery() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _notifications) =
+                    crate::session::actor::tests::support::build_actor().await;
+                actor
+                    .chat_state_handle
+                    .push_user_message(ConversationItem::user("image source"));
+                let materialized = actor
+                    .chat_state_handle
+                    .materialize_timeline(actor.session_id_string())
+                    .await
+                    .unwrap();
+                let original = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                let pending = BackgroundCompaction {
+                    id: "frozen-image-compaction".into(),
+                    source_items: materialized.surface_ids.len(),
+                    started: std::time::Instant::now(),
+                    cancel: Default::default(),
+                    background: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                    authority: materialized
+                        .active_control_contexts
+                        .values()
+                        .map(|context| context.surface_id)
+                        .collect(),
+                    target: chat_state::SurfaceRange {
+                        start: *materialized.surface_ids.first().unwrap(),
+                        end: *materialized.surface_ids.last().unwrap(),
+                        shadowed: materialized.surface_ids,
+                    },
+                    model_key: (
+                        sampling_types::model_image_input_key(&original),
+                        original.context_window.get(),
+                    ),
+                    worker: tokio::task::spawn_local(std::future::pending()),
+                };
+                assert!(
+                    actor
+                        .background_compaction_source_is_current(&pending)
+                        .await
+                        .unwrap()
+                );
+                let route = actor.model_route.snapshot();
+                actor.model_route.replace(
+                    crate::agent::models::ModelId::new("same-runtime-alias"),
+                    route.sampling_config,
+                );
+                assert!(
+                    actor
+                        .background_compaction_source_is_current(&pending)
+                        .await
+                        .unwrap()
+                );
+                for variant in 0..4 {
+                    let mut changed = original.clone();
+                    match variant {
+                        0 => changed.base_url.push_str("/new-endpoint"),
+                        1 => {
+                            changed
+                                .query_params
+                                .insert("deployment".into(), "other".into());
+                        }
+                        2 => {
+                            changed.api_backend = if original.api_backend == ApiBackend::Messages {
+                                ApiBackend::Responses
+                            } else {
+                                ApiBackend::Messages
+                            }
+                        }
+                        3 => changed.model.push_str("-new"),
+                        _ => unreachable!(),
+                    }
+                    actor.chat_state_handle.replace_sampling_route(changed);
+                    assert!(
+                        !actor
+                            .background_compaction_source_is_current(&pending)
+                            .await
+                            .unwrap(),
+                        "a stale rejection must not mark the new transport (variant {variant})"
+                    );
+                }
+                pending.worker.abort();
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn goal_settlement_stays_unique_when_background_cancellation_fails() {
         tokio::task::LocalSet::new()
             .run_until(async {
@@ -3400,7 +3495,10 @@ mod context_recall_tests {
                         end: anchor,
                         shadowed: vec![anchor],
                     },
-                    model_key: ("test-model".into(), ApiBackend::Messages, 100_000),
+                    model_key: (
+                        actor.current_model_image_input_key().await.unwrap(),
+                        100_000,
+                    ),
                     worker,
                 });
                 let attempt = actor

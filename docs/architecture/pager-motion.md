@@ -71,7 +71,7 @@ Goal stage 与 subagent wait 都是显式 demand，不依赖 foreground Running 
 一次性领取所有已完成 snapshot。Tracing 已有独立 channel arm，同样不借任何 clock。
 Inline-media loader 限制为进程内两个 worker、每个 AgentView 两个 pending path，并将输入与
 准备后的单图字节限制为 16 MiB；行为要求记录在
-[当前 change](../../openspec/changes/bound-inline-media-loader/specs/client-surfaces/spec.md)。
+[归档契约](../../openspec/changes/archive/2026-09-24-bound-inline-media-loader/specs/client-surfaces/spec.md)。
 这个 edge 会合并 burst，但不充当 frame clock，也不经过 `ui_state_deadline`。modal image
 viewer 继续通过 Effect/TaskResult 回送，并用 overlay owner id 丢弃关闭或替换后的迟到
 结果。

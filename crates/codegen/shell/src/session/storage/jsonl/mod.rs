@@ -924,6 +924,11 @@ impl JsonlStorageAdapter {
         source: chat_state::SurfaceId,
         prompt: &str,
     ) -> io::Result<Option<(String, chat_state::TimelineRangeRef)>> {
+        if source_revision > parent.surface_revision()
+            || !parent.branch_transcript_with_ids().0.contains(&source)
+        {
+            return Ok(None);
+        }
         let candidates = parent
             .events()
             .iter()
@@ -993,9 +998,13 @@ impl JsonlStorageAdapter {
             };
             let manifest = &attempt.assembly_manifest;
             let source_event = source.event.get();
+            // Source IDs are immutable and the neutral prompt must match. A
+            // later input can advance the Surface without changing this image.
             let source_is_proven = manifest.strategy == "image-group"
                 && manifest.strategy_version == 1
-                && manifest.source_revision == Some(source_revision)
+                && manifest
+                    .source_revision
+                    .is_some_and(|revision| revision <= source_revision)
                 && manifest.context_surface_ids.contains(&source)
                 && manifest.selected_surface_ids.contains(&source)
                 && attempt.input_refs.iter().any(|range| {

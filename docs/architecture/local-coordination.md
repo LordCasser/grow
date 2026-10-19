@@ -30,7 +30,7 @@ Agent 销毁时也向仍驻留的主会话和活跃子会话 actor 发送既有 
 
 ## 工具和状态
 
-`list_active_sessions` 仍只列 primary Session。`ask_session` 新增可选 `inquiry_id`：新询问省略，只有重接同一请求时才传原 ID。`get_inquiry({ inquiry_id })` 查询调用 Session 自己的请求，不允许跨来源读取。
+`list_active_sessions` 仍只列 primary Session。`ask_session` 的可选 `inquiry_id` 在新询问时省略，重接同一请求时传原 ID。模型工具入口将缺失、null、空或纯空白 ID 视为未提供；非空 ID 原样严格校验，外部协调协议和 `get_inquiry` 不接受显式空 ID。`get_inquiry({ inquiry_id })` 查询调用 Session 自己的请求，不允许跨来源读取。
 
 `get` 的 phase 为 `discovering | receiving | queued | awaiting_approval | running | reconnecting | finished`，不是消息阅读回执。终态保留 `answered | rejected | cancelled | unavailable | timed_out | failed`。错误对象包含 `code`、`message`、`retryable` 和可选 `retryAfterMs`，区分 `busy`、`not_found`、`permission_denied`、`transport_error` 等情况。
 
@@ -40,9 +40,9 @@ Agent 销毁时也向仍驻留的主会话和活跃子会话 actor 发送既有 
 
 `UiNotice` 从已提交的询问事实生成，`updates.jsonl` 只是可丢失的显示投影；写入投影失败会记录诊断，不会把已提交的回答改判为审计失败。来源的开始/结束 notice 不额外推送系统通知，重放时也不生成显示行；`list_active_sessions`、`ask_session` 使用普通 ACP 工具调用的等待、完成和展开路径，双击展开工具返回值或错误。
 
-来源还需要完整的 ACP 结果转换：`ListActiveSessions`、`CoordinationInquiry`、`CoordinationInquiryState` 都输出带 `content` 和 `rawOutput` 的 `ToolCallUpdate`。询问失败时状态为 `Failed`，结果查询成功则仍是 `Completed`，即使查询出来的是一个失败的 inquiry。漏掉这个转换时，模型能读到工具结果，但 TUI 只能看到没有正文的占位工具，不能靠修复双击事件解决。
+来源已通过完整的 ACP 结果转换：`ListActiveSessions`、`CoordinationInquiry`、`CoordinationInquiryState` 都输出带 `content` 和 `rawOutput` 的 `ToolCallUpdate`。询问失败时状态为 `Failed`，结果查询成功则仍是 `Completed`，即使查询出来的是一个失败的 inquiry。此前漏掉转换会让模型读到结果而 TUI 只看到空占位；该问题已在结果转换层修复。
 
-接收侧按 `(sourcePeerId, InquiryId)` 把开始、审批、结束事件投影到同一条工具样式记录，与运行时的去重范围一致。显示投影只按接收、审批、终态的顺序前进：迟到的开始不能抹去审批详情，终态也不能被重放或旧通知重启；同 ID 的不同来源独立更新。来源身份和结果以 Timeline 为准，并投影到 `UiNotice.details` 的结构化 JSON 中，TUI 再生成可读正文，不从标题猜测身份。跨 Session 协调以 `session <sourceSessionId>` 标识参与方，例如开始是 `Answering session <sourceSessionId>`，成功后原位变成 `Answered session <sourceSessionId>`；直接委派 audit 持久保存 `direction`（`parent_to_child | child_to_parent | peer`）。父 Agent 收到子 Agent 询问时，用 coordinator 核定的子任务名标识参与方，例如 `Answering subagent <taskName>`；子 Agent 收到父 Agent 询问时，显示 `Answering parent agent`，自身任务名保留在详情。任务描述为空时使用子 Agent ID。失败、拒绝、取消和超时复用同一参与方标识。展开后保留来源、工作目录、subagent 任务名（如有）、问题和回答/错误。这个显示行不进入主 turn 的工具 tracker，也不接收主 turn 的工具 hook，所以主 turn 结束不能顺带结束 sideband 的展示。重载时不重复插入同一个 inquiry，旧开始事件不能覆盖终态；只有历史开始记录时，不把它当作仍在线执行的证明。
+接收侧按 `(sourceSessionId, InquiryId)` 把开始、审批、结束事件投影到同一条工具样式记录，与运行时的持久去重范围一致；peer/incarnation 只用于连接认证、租约和归因，不替代来源 session 身份。契约见 [询问身份与恢复](../../openspec/specs/local-coordination/spec.md#requirement-inquiry-identity-and-replay-are-durable-across-session-recovery)。显示投影只按接收、审批、终态的顺序前进：迟到的开始不能抹去审批详情，终态也不能被重放或旧通知重启；同 ID 的不同来源独立更新。来源身份和结果以 Timeline 为准，并投影到 `UiNotice.details` 的结构化 JSON 中，TUI 再生成可读正文，不从标题猜测身份。跨 Session 协调以 `session <sourceSessionId>` 标识参与方，例如开始是 `Answering session <sourceSessionId>`，成功后原位变成 `Answered session <sourceSessionId>`；直接委派 audit 持久保存 `direction`（`parent_to_child | child_to_parent | peer`）。父 Agent 收到子 Agent 询问时，用 coordinator 核定的子任务名标识参与方，例如 `Answering subagent <taskName>`；子 Agent 收到父 Agent 询问时，显示 `Answering parent agent`，自身任务名保留在详情。任务描述为空时使用子 Agent ID。失败、拒绝、取消和超时复用同一参与方标识。展开后保留来源、工作目录、subagent 任务名（如有）、问题和回答/错误。这个显示行不进入主 turn 的工具 tracker，也不接收主 turn 的工具 hook，所以主 turn 结束不能顺带结束 sideband 的展示。重载时不重复插入同一个 inquiry，旧开始事件不能覆盖终态；只有历史开始记录时，不把它当作仍在线执行的证明。
 
 Minimal 模式的原生终端历史只能追加，不能修改已经打印的行。因此询问接收侧保留一条可更新记录，默认显示标题和最多两行问题预览；Received 和 Approved 阶段都留在 live region，只有 typed Terminal 阶段才能提交到原生历史，不能用“主 Agent 已空闲”推断它完成。完成后只打印 `Answered` 一次。
 
@@ -66,7 +66,7 @@ Coordination capability、私有 IPC 和 peer manifest schema 现在为 **2**，
 
 Provider 在请求投影中将一个 canonical AgentMessage 展开为完整的 `receive_agent_message` 调用/结果对。该名称不注册可执行工具，也不计入模型主动工具次数；稳定 Surface/input_ref 仍指向单个消费事实。发送者自己的正文已在原 send 参数中，不追加重复入站消息。意见回复是新消息，ACK 不自动生成回复。忙碌目标在安全步骤消费；停止后的目标保留 pending 回复，不能借通知越过暂停或恢复关闭任务。
 
-TUI 固定文案使用英文，正文保留原语言。来源工具行保留原 tool-call ID，接收询问按 `(sourcePeerId, inquiryId)` 原位更新，入站消息沿用 `parent-message:<receipt ID>` 去重。标题只展示动作、参与方与短状态；默认问题两行，回答后问题一行/答案两行，消息两行。问题、答案、错误和消息分别渲染 Markdown，元数据独立于正文。详情复用 BlockViewer 的搜索、选择、复制和 wrap；`r` 查看原文，`D` 查看协议数据，不新增常驻路由解释或每行按钮。
+TUI 固定文案使用英文，正文保留原语言。来源工具行保留原 tool-call ID，接收询问按 `(sourceSessionId, inquiryId)` 原位更新，入站消息沿用 `parent-message:<receipt ID>` 去重。标题只展示动作、参与方与短状态；默认问题两行，回答后问题一行/答案两行，消息两行。问题、答案、错误和消息分别渲染 Markdown，元数据独立于正文。详情复用 BlockViewer 的搜索、选择、复制和 wrap；`r` 查看原文，`D` 查看协议数据，不新增常驻路由解释或每行按钮。
 
 Minimal 的 inquiry 保持 live，直到自身终态才提交原生历史；immutable message 只打印一次。UI notice 均从 durable receipt 派生，不推进模型消费，不触发第二次 Notification hook。冷恢复从已验证 Timeline 和正文 artifact 重建；正文缺失显示 `Message unavailable`，不从旧包装文字猜内容。旧结果没有 receipt ID 时不伪造，旧字符串错误保守展示 `Unconfirmed`。
 

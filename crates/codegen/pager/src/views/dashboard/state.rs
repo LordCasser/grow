@@ -2739,12 +2739,9 @@ impl DashboardState {
             ));
         }
 
-        // Ctrl+C / Ctrl+D must reach the app-global quit handler (the
-        // double-press-to-quit fallback fires only when the view returns
-        // `Unchanged`). Returning `Unchanged` here bubbles them up cleanly
-        // instead of letting them leak into — and be swallowed by — the
-        // reply widget (whose Ctrl+C would clear the draft instead).
-        if key!('c', CONTROL).matches(key) || key!('d', CONTROL).matches(key) {
+        // The global Quit key is handled by the app. Ctrl+C remains local
+        // to this reply widget so it can clear a draft without closing Grow.
+        if key!('d', CONTROL).matches(key) {
             return Some(InputOutcome::Unchanged);
         }
 
@@ -6666,19 +6663,19 @@ mod tests {
         assert!(state.peek_reply.text().is_empty());
     }
 
-    /// Ctrl+C / Ctrl+D bubble up as `Unchanged` so the app-global
-    /// quit handler fires — they are not typed into the reply or
-    /// swallowed by the peek.
+    /// Ctrl+C clears a reply locally; Ctrl+D bubbles to confirmed global Quit.
     #[test]
-    fn peek_ctrl_c_d_bubble_to_global_quit() {
+    fn peek_ctrl_c_clears_reply_and_ctrl_d_bubbles_to_global_quit() {
         let mut effects: Vec<crate::app::actions::Effect> = Vec::new();
         let mut state = state_with_open_peek();
         let reg = crate::actions::ActionRegistry::defaults();
+        state.peek_reply.set_text("reply draft");
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(matches!(
             state.handle_key(&ctrl_c, &reg, &mut effects),
-            InputOutcome::Unchanged
+            InputOutcome::Changed
         ));
+        assert!(state.peek_reply.text().is_empty());
         let ctrl_d = KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL);
         assert!(matches!(
             state.handle_key(&ctrl_d, &reg, &mut effects),

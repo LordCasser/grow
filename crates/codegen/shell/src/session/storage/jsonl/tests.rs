@@ -2219,6 +2219,23 @@ async fn completed_image_sideband_is_recoverable_before_parent_projection() {
         opened.directory(), &info.id.to_string(), source_revision + 1, &queries,
     ).unwrap().iter().all(Option::is_none));
 
+    // Appending unrelated context must not discard a neutral transcription of
+    // the same immutable source. A revision absent from the ledger stays invalid.
+    let mut follow_up = ConversationItem::user("continue");
+    follow_up.set_prompt_index(1);
+    let appended = timeline.record(chat_state::TimelineEventKind::Messages(chat_state::MessageEvent {
+        cause: chat_state::MessageCause::User,
+        items: vec![follow_up], surface: chat_state::SurfaceOp::Append,
+        response_admission: None,
+    })).unwrap();
+    adapter.append_timeline_event_durable(&info, &appended).await.unwrap();
+    let recovered_after_append = JsonlStorageAdapter::recover_completed_image_descriptions_from_directory(
+        opened.directory(), &info.id.to_string(), timeline.surface_revision(), &queries,
+    ).unwrap();
+    assert_eq!(recovered_after_append[0].as_ref().unwrap().0, "visible error dialog");
+    assert!(recovered_after_append[1].is_none());
+    assert!(recovered_after_append[2].is_none());
+
     // A later completed transcription for the same source wins by spawn order.
     let newer_id = uuid::Uuid::now_v7().to_string();
     timeline.record(chat_state::TimelineEventKind::Sideband(chat_state::SidebandSpawnEvent {
@@ -2242,6 +2259,56 @@ async fn completed_image_sideband_is_recoverable_before_parent_projection() {
     ).unwrap();
     assert_eq!(newer[0].as_ref().unwrap().0, "newer description");
     assert_eq!(newer[0].as_ref().unwrap().1.timeline_id, newer_id);
+
+    // A more recent candidate with a future revision or without Completed End
+    // cannot supersede the last valid transcription.
+    for completed in [true, false] {
+        let invalid_id = uuid::Uuid::now_v7().to_string();
+        let spawn = timeline.record(chat_state::TimelineEventKind::Sideband(chat_state::SidebandSpawnEvent {
+            sideband_id: invalid_id.clone(), purpose: chat_state::SidebandPurpose::ImageDescription,
+            source_refs: vec![chat_state::TimelineRangeRef {timeline_id: info.id.to_string(), first_seq: source.event.get(), last_seq: source.event.get()}],
+        })).unwrap();
+        adapter.append_timeline_event_durable(&info, &spawn).await.unwrap();
+        for mut event in sideband.events().iter().take(if completed {4} else {3}).cloned() {
+            event.sideband_id = invalid_id.clone();
+            match &mut event.kind {
+                chat_state::SidebandEventKind::Request(request) => request.initiator_ref = format!("t:{}/sideband:{invalid_id}", info.id),
+                chat_state::SidebandEventKind::Attempt(attempt) => attempt.assembly_manifest.source_revision = Some(timeline.surface_revision() + u64::from(completed)),
+                chat_state::SidebandEventKind::Result(result) => result.raw_output = "must not be reused".into(),
+                _ => {},
+            }
+            adapter.append_sideband_event_durable(&info, &event).await.unwrap();
+        }
+        let recovered = JsonlStorageAdapter::recover_completed_image_descriptions_from_directory(
+            opened.directory(), &info.id.to_string(), timeline.surface_revision(), &queries,
+        ).unwrap();
+        assert_eq!(recovered[0].as_ref().unwrap().0, "newer description");
+    }
+
+    // Rewind coordinates come from a local Turn, not from inherited seed users.
+    let started = timeline.record(chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started {
+
+        prompt_id: "fixture-prompt".into(),
+        id: chat_state::TurnId(1), input_ids: Vec::new(),
+        identity: chat_state::TurnIdentity {
+            origin: "test".into(), turn_kind: "internal".into(), goal_id: None,
+            goal_definition_revision: None, stage_id: None,
+        },
+        model_id: "test-model".into(), input_message_count: 0, prompt_index: 0,
+        prompt_text: "screenshot".into(), input_kind: chat_state::TurnInputKind::Prompt, redirect_kind: None,
+    })).unwrap();
+    adapter.append_timeline_event_durable(&info, &started).await.unwrap();
+    let previous_ids = timeline.surface_ids().to_vec();
+    let rewound = timeline.record(chat_state::TimelineEventKind::Messages(chat_state::MessageEvent {
+        cause: chat_state::MessageCause::Rewind, items: timeline.rewind_surface(0).unwrap(),
+        surface: chat_state::SurfaceOp::Replace {
+            start: previous_ids[0], end: *previous_ids.last().unwrap(), shadowed: previous_ids,
+        }, response_admission: None,
+    })).unwrap();
+    adapter.append_timeline_event_durable(&info, &rewound).await.unwrap();
+    assert!(JsonlStorageAdapter::recover_completed_image_descriptions_from_directory(
+        opened.directory(), &info.id.to_string(), timeline.surface_revision(), &queries,
+    ).unwrap().iter().all(Option::is_none), "a source discarded by rewind is not reusable");
 
     // An unrelated purpose must still participate in full integrity checking.
     let unrelated_id = uuid::Uuid::now_v7().to_string();

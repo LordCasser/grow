@@ -113,39 +113,43 @@ impl SessionActor {
 
     pub(in crate::session::actor) async fn model_image_input_is_unsupported(
         &self,
-        key: &str,
+        key: &sampling_types::ModelImageInputKey,
     ) -> bool {
         let bridge = self.agent.borrow().tool_bridge().clone();
         let resources = bridge.shared_resources().await;
         let resources = resources.lock().await;
         resources
             .get::<tools::types::resources::State<tools::types::resources::ModelImageInputState>>()
-            .is_some_and(|state| state.is_unsupported(key))
+            .is_some_and(|state| state.is_unsupported(&key.storage_key()))
     }
 
     pub(in crate::session::actor) async fn record_unsupported_model_image_input(
         &self,
-        key: String,
+        key: sampling_types::ModelImageInputKey,
     ) -> std::io::Result<bool> {
         let bridge = self.agent.borrow().tool_bridge().clone();
         bridge
-            .mark_model_image_input_unsupported_and_flush(key)
+            .mark_model_image_input_unsupported_and_flush(key.storage_key())
             .await
     }
 
     pub(in crate::session::actor) async fn unsupported_current_model_for_images(
         &self,
     ) -> Option<String> {
-        let key = self.current_catalog_model_id();
+        let key = self.current_model_image_input_key().await?;
         self.model_image_input_is_unsupported(&key)
             .await
-            .then_some(key)
+            .then(|| self.current_catalog_model_id())
     }
 
     async fn resolve_image_description_route(
         &self,
         rejected_key: &sampling_types::ModelImageInputKey,
-    ) -> Option<(sampler::SamplingClient, String, String)> {
+    ) -> Option<(
+        sampler::SamplingClient,
+        String,
+        sampling_types::ModelImageInputKey,
+    )> {
         let configured_model = self.image_description_model.read().clone()?;
         let mut sampler_config = match self.resolve_aux_sampler_config(&configured_model).await {
             Some(config) => config,
@@ -171,10 +175,7 @@ impl SessionActor {
             );
             return None;
         }
-        if self
-            .model_image_input_is_unsupported(&configured_model)
-            .await
-        {
+        if self.model_image_input_is_unsupported(&auxiliary_key).await {
             tracing::info!(
                 model = auxiliary_key.model(),
                 "skipping known text-only image description runtime"
@@ -189,7 +190,7 @@ impl SessionActor {
                 return None;
             }
         };
-        Some((client, model, configured_model))
+        Some((client, model, auxiliary_key))
     }
 
     pub(in crate::session::actor) fn image_projection_failure_message(
@@ -249,13 +250,9 @@ impl SessionActor {
         let mut shadows = Vec::with_capacity(groups.len());
         let deadline = tokio::time::Instant::now() + IMAGE_RECOVERY_TIMEOUT;
 
-        if let Some((client, model, auxiliary_key)) =
-            self.resolve_image_description_route(rejected_key).await
+        // A durable neutral description remains usable even when no current
+        // auxiliary route is available; only cache misses need a provider.
         {
-            self.send_grow_notification(GrowSessionUpdate::ImageProcessing {
-                message: "当前模型不支持多模态，调用视觉辅助LLM处理中...".into(),
-            })
-            .await;
             let prepared = groups.iter().map(|group| {
                 let source_kind = match group.source {
                     ConversationImageSource::User => "User",
@@ -313,6 +310,20 @@ impl SessionActor {
                     }
                 }
             }
+            let auxiliary_route = if prepared
+                .iter()
+                .any(|(_, _, key, _)| self.image_describe_cache.get(key).is_none())
+            {
+                self.resolve_image_description_route(rejected_key).await
+            } else {
+                None
+            };
+            if auxiliary_route.is_some() {
+                self.send_grow_notification(GrowSessionUpdate::ImageProcessing {
+                    message: "当前模型不支持多模态，调用视觉辅助LLM处理中...".into(),
+                })
+                .await;
+            }
             for (group, source, cache_key, prompt_text) in prepared {
                 if deadline <= tokio::time::Instant::now() {
                     tracing::warn!(
@@ -335,6 +346,9 @@ impl SessionActor {
                     });
                     continue;
                 }
+                let Some((client, model, auxiliary_key)) = auxiliary_route.as_ref() else {
+                    continue;
+                };
                 let source_ref = chat_state::TimelineRangeRef {
                     timeline_id: materialized.source_ref.timeline_id.clone(),
                     first_seq: source.event.get(),
@@ -674,10 +688,7 @@ impl SessionActor {
         let Some(key) = self.current_model_image_input_key().await else {
             return Ok(chat_state::ImageProjectionReport::default());
         };
-        if !self
-            .model_image_input_is_unsupported(&self.current_catalog_model_id())
-            .await
-        {
+        if !self.model_image_input_is_unsupported(&key).await {
             return Ok(chat_state::ImageProjectionReport::default());
         }
         self.project_conversation_images_for_text_model(&key)
@@ -1693,10 +1704,11 @@ impl SessionActor {
             return Ok(SamplerFailureRecovery::GoalSpendingStopped);
         }
         if is_image_input_unsupported(&error, request_image_count)
-            && let Some((model_id, key)) = request_image_input_key
+            && let Some((_model_id, key)) = request_image_input_key
         {
             let model = key.model().to_string();
-            let first_rejection = match self.record_unsupported_model_image_input(model_id).await {
+            let first_rejection = match self.record_unsupported_model_image_input(key.clone()).await
+            {
                 Ok(first_rejection) => first_rejection,
                 Err(persist_error) => {
                     let message = format!(
@@ -2684,6 +2696,99 @@ mod image_input_rejection_tests {
             left, text,
             "different routed deployments must not share state"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn auxiliary_image_rejection_follows_resolved_route_and_blocks_recursion() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, _) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, _) = tokio::sync::mpsc::unbounded_channel();
+                let actor = crate::session::actor::tests::support::create_test_actor(
+                    0,
+                    256_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+                let primary = actor.current_model_image_input_key().await.unwrap();
+                let entry = |url: &str, backend: sampling_types::ApiBackend| {
+                    let mut info = crate::agent::config::ModelInfo::baseline("vision-model");
+                    info.base_url = url.to_owned();
+                    info.api_backend = backend;
+                    crate::agent::config::ModelEntry {
+                        info,
+                        api_key: Some("test-key".into()),
+                        env_key: None,
+                        auth_provider: None,
+                    }
+                };
+                actor.models_manager.insert_test_entry(
+                    "vision",
+                    entry(
+                        "https://old-vision.example/v1",
+                        sampling_types::ApiBackend::Messages,
+                    ),
+                );
+                *actor.image_description_model.write() = Some("vision".into());
+                let (_, _, rejected_aux) = actor
+                    .resolve_image_description_route(&primary)
+                    .await
+                    .unwrap();
+                actor
+                    .record_unsupported_model_image_input(rejected_aux)
+                    .await
+                    .unwrap();
+                assert!(
+                    actor
+                        .resolve_image_description_route(&primary)
+                        .await
+                        .is_none()
+                );
+                actor.models_manager.insert_test_entry(
+                    "vision",
+                    entry(
+                        "https://new-vision.example/v1",
+                        sampling_types::ApiBackend::Responses,
+                    ),
+                );
+                let (client, model, _) = actor
+                    .resolve_image_description_route(&primary)
+                    .await
+                    .expect("the same alias with a new endpoint/backend must be tried");
+                assert_eq!(client.api_backend(), sampling_types::ApiBackend::Responses);
+                assert_eq!(model, "vision-model");
+                actor.models_manager.insert_test_entry(
+                    "vision-copy",
+                    entry(
+                        "https://old-vision.example/v1",
+                        sampling_types::ApiBackend::Messages,
+                    ),
+                );
+                *actor.image_description_model.write() = Some("vision-copy".into());
+                assert!(
+                    actor
+                        .resolve_image_description_route(&primary)
+                        .await
+                        .is_none(),
+                    "a different alias must not retry the already rejected auxiliary transport"
+                );
+                let cfg = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                let mut same = entry(&cfg.base_url, cfg.api_backend);
+                same.info.model = cfg.model;
+                same.info.query_params = cfg.query_params;
+                actor.models_manager.insert_test_entry("primary-copy", same);
+                *actor.image_description_model.write() = Some("primary-copy".into());
+                assert!(
+                    actor
+                        .resolve_image_description_route(&primary)
+                        .await
+                        .is_none(),
+                    "an auxiliary alias of the primary transport must not recurse"
+                );
+            })
+            .await;
     }
 }
 

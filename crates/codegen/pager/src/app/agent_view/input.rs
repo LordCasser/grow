@@ -1538,18 +1538,12 @@ impl AgentView {
     pub(super) fn handle_agent_action(&mut self, action_id: ActionId) -> InputOutcome {
         match action_id {
             ActionId::CancelTurn => {
-                if self.session.state.is_turn_running() || self.session.state.is_compact_running() {
+                if self.session.state.is_turn_running()
+                    || self.session.state.is_compact_running()
+                    || self.session.state.is_cancelling()
+                {
                     self.cancel_trigger_hint = Some(crate::app::actions::CancelTrigger::CtrlC);
                     return InputOutcome::Action(Action::CancelTurn);
-                }
-                if self.session.state.is_cancelling() {
-                    return InputOutcome::Action(Action::Quit);
-                }
-                if crate::app::minimal_mode_active()
-                    && self.session.state.is_idle()
-                    && self.prompt.text().is_empty()
-                {
-                    return InputOutcome::Action(Action::Quit);
                 }
                 InputOutcome::Unchanged
             }

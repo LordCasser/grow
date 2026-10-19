@@ -2503,8 +2503,10 @@ pub(crate) fn validate_sideband_ledgers(
                             .assembly_manifest
                             .context_surface_ids
                             .contains(&shadow.source)
-                        && attempt.assembly_manifest.source_revision
-                            == Some(projection.source_revision)
+                        && attempt
+                            .assembly_manifest
+                            .source_revision
+                            .is_some_and(|revision| revision <= projection.source_revision)
                         && attempt.input_refs.iter().any(|source| {
                             source.first_seq <= shadow.source.event.get()
                                 && shadow.source.event.get() <= source.last_seq

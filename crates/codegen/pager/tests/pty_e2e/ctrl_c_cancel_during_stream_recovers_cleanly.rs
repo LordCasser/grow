@@ -14,6 +14,10 @@ use super::common::*;
 #[ignore]
 async fn ctrl_c_cancel_during_stream_recovers_cleanly() {
     let content = ContentController::start().await.expect("start content");
+    git2::Repository::init(content.home()).expect("initialize isolated project");
+    content
+        .seed_llm_config()
+        .expect("seed isolated mock provider");
     // A long, paced response keeps the turn visibly streaming while Ctrl+C is
     // pressed (the mock otherwise dumps all SSE events instantly and the
     // turn completes before the cancel lands).
@@ -26,7 +30,7 @@ async fn ctrl_c_cancel_during_stream_recovers_cleanly() {
 
     let binary = pager_binary().expect("resolve pager binary");
     let mut harness =
-        PtyHarness::spawn_with_content(&binary, DEFAULT_ROWS, DEFAULT_COLS, &content, &[])
+        PtyHarness::spawn_with_content(&binary, DEFAULT_ROWS, DEFAULT_COLS, &content, &["--trust"])
             .expect("spawn pager");
 
     harness

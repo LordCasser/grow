@@ -2439,7 +2439,7 @@ Pager SHALL let the user edit or remove a still-pending queued message while Goa
 - **THEN** Pager keeps the editing draft and shows a failure; it does not silently return to normal composer mode or send the old text as the edit result.
 
 #### Scenario: Turn-stop shortcut remains distinct
-- **WHEN** the user invokes the global Ctrl+C exit gesture without selecting a queued item action
+- **WHEN** the user confirms the global Quit gesture with two Ctrl+D presses within the confirmation window without selecting a queued item action
 - **THEN** Pager requests session-tree suspension, preserves admitted queued messages, and does not infer queue withdrawal or a Goal/turn cancellation; explicit Stop Turn/Stop Goal actions remain separate.
 
 ### Requirement: Minimal frames render the selected Agent view
@@ -3158,7 +3158,7 @@ trajectory SHALL 为页面绑定的 session 提供完整对话导出下载，内
 - **THEN** replay 报告来源错误，不新建会话、不恢复执行、不展示无提示的部分成功历史。
 
 #### Scenario: Quit or cancel key is pressed
-- **WHEN** 用户在根页面且无局部搜索/选区/详情/帮助时按 q 或 Esc，或在任意播放视图按 Ctrl-C
+- **WHEN** 用户在根页面且无局部搜索/选区/详情/帮助时按 q 或 Esc，或在任意播放视图于一秒内连续两次按 Ctrl-D
 - **THEN** 只退出播放器并恢复终端，不发送 session cancel 或修改被查看 session；查询编辑中的 q 是字符，Esc 先退出编辑；非编辑搜索结果/纯选区、详情/帮助和子页的 Esc/q 按层级返回。
 
 证据与实施入口：`cli/src/main.rs`、`pager/src/app/cli.rs`、`pager/src/replay_cmd.rs`；复用前序 `export-session-transcript-tree` reader。路径均相对 `crates/codegen/`。
@@ -3438,7 +3438,7 @@ Replay SHALL 复用普通会话被动浏览组件，支持鼠标与键盘选择�
 
 #### Scenario: Local input owns its keys
 - **WHEN** 用户在搜索或详情内输入字符、空格、q 或加减号
-- **THEN** 优先遵循当前局部控件行为，不触发播放快捷键；F8 可控制播放，Ctrl-C 只退出播放器。
+- **THEN** 优先遵循当前局部控件行为，不触发播放快捷键；F8 可控制播放，Ctrl-C 不退出；Ctrl-D 需要同键连续两次确认后只退出播放器。
 
 #### Scenario: Close nested inspection
 - **WHEN** 用户在搜索编辑/选区、详情/帮助或子 agent 页面按 Esc
@@ -3838,32 +3838,6 @@ Before publishing a durable Workflow, Goal, Control, or CurrentMode display row,
 - **WHEN** a current-format history contains Workflow or Control rows but predates projection expectation facts
 - **THEN** the reader does not infer missing expectations or reconstruct absent rows; unsupported older Timeline formats follow schema-version rejection
 
-### Requirement: Ctrl C requests bounded session tree suspension
-
-执行会话界面的全局 Ctrl+C SHALL 请求整树快速挂起并在成功后退出，第一次按键不得先取消 turn、暂停 Goal 或清除已接纳队列；重复按键 SHALL 合并到同一请求，不变为强退。挂起等待默认 SHALL 使用总计五秒的绝对期限，取消、保存、ACK 核对和退出准备共享该期限；期限只约束调用方等待，不证明操作或 I/O 已结束。挂起失败或超时 SHALL 展示未确认及可重试/显式强退选择，不显示保存成功、不无限等待。显式任务取消与紧急强退 SHALL 保持可区分入口。
-
-#### Scenario: Running root receives Ctrl C
-- **WHEN** root 正在执行且有活跃 child，用户触发全局 Ctrl+C
-- **THEN** 显示正在挂起，发起同一次树级挂起，在持久边界和 writer 退出确认后正常恢复终端并退出。
-
-#### Scenario: Repeated Ctrl C while acknowledgments are pending
-- **WHEN** 用户在保存期间再次触发 Ctrl+C
-- **THEN** 不重复挂起、不重置期限、不先取消任务，也不调用强制进程退出。
-
-#### Scenario: Suspension cannot finish within the deadline
-- **WHEN** 任一所需确认在五秒期限内无法完成
-- **THEN** 交互界面恢复可响应并显示挂起未完成；若用户明确强退，仅保留已提交证据并说明本次不能保证完整恢复，不记录 Suspended 成功。
-
-#### Scenario: A child view or multiple roots are open
-- **WHEN** 用户从 child view 请求退出，或退出将销毁本进程拥有的多个 root
-- **THEN** child 请求归属其 root；将被该退出销毁的每棵树分别完成挂起，不能只保存当前可见节点；不控制其他 owner 的独立会话。
-
-#### Scenario: Local UI and readonly views
-- **WHEN** Ctrl+C 被局部复制等既有局部操作消费，或用户处于只读 replay、无 session 的 Welcome
-- **THEN** 沿局部操作或只读退出语义处理，不新增执行；进入执行会话的全局退出路径后不得再走 CancelTurn。
-
-目标入口：`crates/codegen/pager/src/app/root/{mod,event_loop}.rs`、`root/dispatch/router.rs`、`app/signal_handler.rs`、`acp/spawn.rs`。
-
 ### Requirement: Resume displays and restores suspended work
 
 执行型 resume SHALL 自动恢复所选挂起 root 的任务树，显示恢复中、已运行或具体受阻原因。挂起的 child SHALL 显示为挂起而非取消；操作中断与 Agent 任务状态 SHALL 分别展示。普通历史浏览 SHALL 不启动 child、provider 或工具。恢复提示 SHALL 不冒充新的用户任务、授权或重复完成通知。
@@ -3996,3 +3970,41 @@ Before publishing a durable Workflow, Goal, Control, or CurrentMode display row,
 - **THEN** 展示当时加载结果，不新增“当前持续生效”的技能状态承诺。
 
 证据入口：`crates/codegen/pager/src/scrollback/blocks/tool/read.rs`、`crates/codegen/tools/src/implementations/skills/types.rs` 的 skill_name_from_path，以及现有 normal/minimal/headless 更新管线。
+
+### Requirement: Confirmed quit requests bounded session tree suspension
+
+Ctrl+C SHALL retain its existing composer/local-control behavior and cancel the current turn through the explicit cancellation path. It SHALL NOT request Quit, arm exit confirmation, suspend the tree, or escalate repeated cancellation into exit. At idle it SHALL remain local or a no-op. The default half-page-down shortcut SHALL be uppercase D so it does not conflict with Quit. The default global Quit shortcut SHALL be Ctrl+D, confirmed by a second press of the same shortcut within the existing one-second PendingAction window. The first press SHALL preserve drafts, admitted queues, current turn and Goal state without starting suspension. Expiry or another key SHALL clear the pending confirmation. Welcome, normal/minimal execution views and Dashboard SHALL use this same default confirmation; local scroll/input widgets SHALL NOT consume the registered global Quit key.
+
+Confirmed Quit SHALL request suspension of every session tree owned by the exiting process and exit only after the required durable boundaries and writer retirement. A child view SHALL resolve to its canonical root. Suspension SHALL retain the existing shared five-second absolute deadline, unconfirmed/retry/explicit-force UI, ownership and command interruption rules. Repeated Quit input while an exit operation exists SHALL coalesce without another request, deadline reset or force quit. Cancel and emergency force quit SHALL remain distinct actions. Read-only surfaces SHALL not start execution.
+
+#### Scenario: Ctrl C preserves composer behavior
+- **WHEN** the composer has a draft and the user presses Ctrl+C
+- **THEN** its existing clear/local behavior runs without exit confirmation or a suspension request; subsequent Ctrl+C can cancel a running turn once the composer no longer consumes it.
+
+#### Scenario: Ctrl C cancels or retries cancellation
+- **WHEN** a turn is running or already cancelling and the composer does not consume Ctrl+C
+- **THEN** Pager requests or retries cancellation; repeated Ctrl+C never produces Quit or tree suspension.
+
+#### Scenario: Ctrl C at idle
+- **WHEN** an execution view is idle, including minimal mode, or Welcome/Dashboard receives Ctrl+C
+- **THEN** local input/view behavior may run but the application does not exit or arm Quit.
+
+#### Scenario: First and second default Quit press
+- **WHEN** Ctrl+D is pressed once and then again within one second
+- **THEN** the first press only arms confirmation while preserving work and drafts; the second enters the existing tree suspension and exit path once.
+
+#### Scenario: Confirmation expires or is interrupted
+- **WHEN** the second Ctrl+D occurs after expiry, or another key including Ctrl+C intervenes
+- **THEN** the prior arm cannot confirm exit; a fresh pair is required.
+
+#### Scenario: Repeated Quit while persistence is pending
+- **WHEN** the confirmed exit is waiting for persistence and another Quit key arrives
+- **THEN** the same request and deadline remain, with no additional cancellation or forced process exit.
+
+#### Scenario: Suspension remains unconfirmed
+- **WHEN** the five-second caller deadline expires or a required confirmation fails
+- **THEN** Pager reports unconfirmed and offers retry or explicit force quit without reporting successful suspension; repeated Ctrl+D does not select force quit.
+
+#### Scenario: Nested and multiple roots
+- **WHEN** a confirmed quit starts from a child view or owns multiple root trees
+- **THEN** each owned root is suspended with its descendants; another owner's independent sessions are unaffected, and local transcript/selection behavior cannot replace global Quit confirmation.

@@ -25,11 +25,37 @@ async fn actor_with_sampler_and_persistence(
     mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
     ImageProjectionPersistence,
 ) {
+    actor_with_sampler_and_storage(server, image_description_model, None).await
+}
+
+async fn actor_with_sampler_and_storage(
+    server: &MockInferenceServer,
+    image_description_model: Option<&str>,
+    storage: Option<crate::session::storage::jsonl::JsonlStorageAdapter>,
+) -> (
+    std::sync::Arc<SessionActor>,
+    mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+    ImageProjectionPersistence,
+) {
     let (gateway_tx, gateway_rx) = mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
     let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+    let sideband_storage = storage.clone();
     tokio::task::spawn_local(async move {
         while let Some(message) = persistence_rx.recv().await {
-            if let PersistenceMsg::SidebandDurablyAndAck { respond_to, .. } = message {
+            if let PersistenceMsg::SidebandDurablyAndAck { event, respond_to } = message {
+                if let Some(storage) = &sideband_storage {
+                    use crate::session::storage::StorageAdapter as _;
+                    storage
+                        .append_sideband_event_durable(
+                            &SessionInfo {
+                                id: acp::SessionId::new("test-actor"),
+                                cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+                            },
+                            &event,
+                        )
+                        .await
+                        .unwrap();
+                }
                 let _ = respond_to.send(Ok(()));
             }
         }
@@ -43,6 +69,60 @@ async fn actor_with_sampler_and_persistence(
             persistence_tx,
         )
         .await;
+    let downstream = actor.notifications.persistence_tx.clone();
+    let (sideband_tx, mut sideband_rx) = mpsc::unbounded_channel();
+    actor.notifications.persistence_tx = sideband_tx;
+    let sideband_gate = image_projection_persistence.clone();
+    tokio::task::spawn_local(async move {
+        while let Some(message) = sideband_rx.recv().await {
+            let message = match message {
+                PersistenceMsg::SidebandDurablyAndAck { event, respond_to }
+                    if matches!(event.kind, chat_state::SidebandEventKind::Attempt(_)) =>
+                {
+                    let (forward_reply, forward_ack) = tokio::sync::oneshot::channel();
+                    downstream
+                        .send(PersistenceMsg::SidebandDurablyAndAck {
+                            event,
+                            respond_to: forward_reply,
+                        })
+                        .unwrap();
+                    let result = forward_ack.await.unwrap();
+                    if let Some(reply) = sideband_gate.delay_sideband_ack(respond_to) {
+                        let _ = reply.send(result);
+                    }
+                    continue;
+                }
+                other => other,
+            };
+            let _ = downstream.send(message);
+        }
+    });
+    if let Some(storage) = storage {
+        use crate::session::storage::StorageAdapter as _;
+        let sampling_config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+        let loaded = storage
+            .load_session_without_updates(&actor.session_info)
+            .await
+            .unwrap();
+        image_projection_persistence
+            .persist_to_storage(storage.clone(), actor.session_info.clone());
+        let (chat_event_tx, _) = mpsc::unbounded_channel();
+        actor.chat_state_handle = chat_state::ChatStateActor::spawn_from_timeline(
+            loaded.timeline.events().to_vec(),
+            sampling_config,
+            Box::new(image_projection_persistence.clone()),
+            chat_event_tx,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+        actor.events = crate::session::events::EventTracker::new(actor.chat_state_handle.clone());
+        actor.session_directory = storage
+            .open_session(&actor.session_info)
+            .unwrap()
+            .directory_handle();
+        actor.session_dir = actor.session_directory.display_path().to_path_buf();
+    }
     if let Some(mut config) = actor.chat_state_handle.get_sampling_config().await {
         config.base_url = server.url();
         config.api_backend = sampling_types::ApiBackend::Messages;
@@ -97,7 +177,7 @@ async fn actor_with_sampler_and_persistence(
     actor.goal_usage_window =
         crate::session::actor::goal_support::GoalUsageWindow::new(goal_usage_tx.clone(), None);
     let actor = std::sync::Arc::new(actor);
-    let usage_actor = actor.clone();
+    let usage_actor = std::sync::Arc::downgrade(&actor);
     tokio::task::spawn_local(async move {
         let _keepalive = goal_usage_tx;
         while let Some(command) = goal_usage_rx.recv().await {
@@ -108,16 +188,22 @@ async fn actor_with_sampler_and_persistence(
             else {
                 panic!("unexpected Goal accounting command in image recovery test");
             };
+            let Some(usage_actor) = usage_actor.upgrade() else {
+                break;
+            };
             let result = usage_actor
                 .settle_claimed_goal_usage_attempt(&attempt_id)
                 .await;
             let _ = respond_to.send(result);
         }
     });
-    let drainer = actor.clone();
+    let drainer = std::sync::Arc::downgrade(&actor);
     tokio::task::spawn_local(async move {
         let mut sampler_event_rx = sampler_event_rx;
         while let Some(event) = sampler_event_rx.recv().await {
+            let Some(drainer) = drainer.upgrade() else {
+                break;
+            };
             drainer.handle_sampling_event(event).await;
         }
     });
@@ -873,9 +959,17 @@ fn active_goal_image_400_uses_auxiliary_description_then_retries_without_images(
             );
             let original_id = actor.current_catalog_model_id();
             let config = actor.model_route.snapshot().sampling_config;
+            let original_sampling = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            let mut other_sampling = original_sampling.clone();
+            other_sampling.model = "other-model".into();
+            actor
+                .chat_state_handle
+                .replace_sampling_route(other_sampling);
+            let mut other_config = config.clone();
+            other_config.model = "other-model".into();
             actor.model_route.replace(
                 crate::agent::models::ModelId::new("other-provider/test-model"),
-                config.clone(),
+                other_config,
             );
             assert!(actor.unsupported_current_model_for_images().await.is_none());
             let unknown = actor
@@ -896,7 +990,9 @@ fn active_goal_image_400_uses_auxiliary_description_then_retries_without_images(
                 "another provider first receives the original image"
             );
             actor
-                .record_unsupported_model_image_input(actor.current_catalog_model_id())
+                .record_unsupported_model_image_input(
+                    actor.current_model_image_input_key().await.unwrap(),
+                )
                 .await
                 .unwrap();
             assert_eq!(
@@ -925,6 +1021,9 @@ fn active_goal_image_400_uses_auxiliary_description_then_retries_without_images(
                 crate::agent::models::ModelId::new(original_id.clone()),
                 config,
             );
+            actor
+                .chat_state_handle
+                .replace_sampling_route(original_sampling);
             assert_eq!(
                 actor.unsupported_current_model_for_images().await,
                 Some(original_id)
@@ -1351,6 +1450,516 @@ fn mixed_description_and_removal_groups_commit_as_one_projection() {
                     "已生成 1 张图片的文字描述；1 张图片无法生成描述，已从当前会话中删除。"
                         .to_owned()
                 ]
+            );
+        }));
+    });
+}
+
+#[test]
+fn read_file_image_fallback_uses_refreshed_auxiliary_and_waits_for_projection_ack() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            for known_primary in [false, true] {
+                let primary = MockInferenceServer::start().await.unwrap();
+                let auxiliary = MockInferenceServer::start().await.unwrap();
+                if !known_primary {
+                    primary.enqueue_response("/v1/messages", multimodal_capability_rejection());
+                }
+                primary.enqueue_response("/v1/messages", messages_text_turn("continued", "test-model"));
+                let description = "The screenshot shows a blue dialog with code E73.";
+                auxiliary.enqueue_response("/v1/responses", ScriptedResponse::sse(vec![SseEvent::data(json!({
+                    "type": "response.completed", "sequence_number": 0,
+                    "response": {
+                        "id": "resp_image", "object": "response", "created_at": 0,
+                        "model": "vision-v2", "status": "completed",
+                        "output": [{"type": "message", "id": "msg_image", "role": "assistant",
+                            "status": "completed", "content": [{"type": "output_text", "text": description, "annotations": []}]}],
+                        "usage": {"input_tokens": 10, "input_tokens_details": {"cached_tokens": 0},
+                            "output_tokens": 5, "output_tokens_details": {"reasoning_tokens": 0}, "total_tokens": 15}
+                    }
+                }).to_string())]));
+                let (actor, _gateway_rx, persistence) = actor_with_sampler_and_persistence(&primary, Some("vision")).await;
+                let mut info = crate::agent::config::ModelInfo::baseline("vision-v2");
+                info.base_url = auxiliary.url();
+                info.api_backend = sampling_types::ApiBackend::Responses;
+                actor.models_manager.insert_test_entry("vision", crate::agent::config::ModelEntry {
+                    info, api_key: Some("test-key".into()), env_key: None, auth_provider: None,
+                });
+                if known_primary {
+                    actor.record_unsupported_model_image_input(actor.current_model_image_input_key().await.unwrap()).await.unwrap();
+                }
+                let original = super::read_file_image_description_tests::run_image_result(&actor).await;
+                assert_eq!(original.images.len(), 1);
+                persistence.hold_projection_acknowledgement();
+                let prompt_actor = actor.clone();
+                let prompt = tokio::task::spawn_local(async move {
+                    admit_inline_query(&prompt_actor, "read-image-ack", "Continue from the image.".into()).await;
+                });
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while persistence.attempted_projections().is_empty() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                }).await.expect("auxiliary result must reach the projection commit");
+                assert!(!prompt.is_finished());
+                assert_eq!(primary.requests().len(), usize::from(!known_primary), "no image request or retry before durable projection ACK");
+                let aux_requests = auxiliary.requests();
+                assert_eq!(aux_requests.len(), 1);
+                assert_eq!(aux_requests[0].path, "/v1/responses");
+                assert_eq!(aux_requests[0].body.as_ref().unwrap()["model"], "vision-v2");
+                assert_eq!(count_wire_images(aux_requests[0].body.as_ref().unwrap()), 1);
+                persistence.release_projection_acknowledgement();
+                tokio::time::timeout(std::time::Duration::from_secs(5), prompt).await.unwrap().unwrap();
+                let requests = primary.requests();
+                assert_eq!(requests.len(), if known_primary { 1 } else { 2 });
+                if !known_primary {
+                    assert_eq!(count_wire_images(requests[0].body.as_ref().unwrap()), 1);
+                }
+                let repaired = requests.last().unwrap().body.as_ref().unwrap();
+                assert_eq!(count_wire_images(repaired), 0);
+                assert!(repaired.to_string().contains(description));
+                assert!(persistence.attempted_projections().iter().all(|(_, ack)| *ack));
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                assert!(events.iter().filter_map(|event| event.messages()).any(|messages| {
+                    messages.items.iter().any(|item| matches!(item,
+                        ConversationItem::ToolResult(result) if result.tool_call_id == "read-image-1" && result.images.len() == 1))
+                }), "raw tool image must remain in Timeline");
+            }
+        }));
+    });
+}
+
+#[cfg(unix)]
+fn ocr_fixture(body: &str) -> tempfile::TempDir {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let program = dir.path().join("tesseract");
+    std::fs::write(
+        &program,
+        format!(
+            "#!/bin/sh\n/bin/cat > '{}'\n{body}\n",
+            dir.path().join("input").display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(program, std::fs::Permissions::from_mode(0o700)).unwrap();
+    dir
+}
+
+async fn wait_for_image_projection(persistence: &ImageProjectionPersistence) {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while persistence.attempted_projections().is_empty() {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("image fallback must reach projection persistence");
+}
+
+#[cfg(unix)]
+#[test]
+fn image_fallback_ocr_success_empty_and_failure_complete_the_durable_request_chain() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            for outcome in ["printf 'OCR dialog E81\\n'", "exit 0", "exit 1"] {
+                let fixture = ocr_fixture(outcome);
+                let server = MockInferenceServer::start().await.unwrap();
+                server.enqueue_response("/v1/messages", multimodal_capability_rejection());
+                server.enqueue_response("/v1/messages", ScriptedResponse::json(400, json!({
+                    "error": {"type": "invalid_request_error", "message": "auxiliary unavailable for this request"}
+                })));
+                server.enqueue_response("/v1/messages", messages_text_turn("continued", "test-model"));
+                let (actor, _gateway, persistence) = actor_with_sampler_and_persistence(&server, Some("vision")).await;
+                super::read_file_image_description_tests::run_image_result(&actor).await;
+                persistence.hold_projection_acknowledgement();
+                let turn_actor = actor.clone();
+                let turn = tokio::task::spawn_local(crate::session::image_describe::TEST_LOCAL_OCR_PROGRAM.scope(
+                    fixture.path().join("tesseract"), async move {
+                        admit_inline_query(&turn_actor, "ocr-fallback", "Continue.".into()).await;
+                    },
+                ));
+                wait_for_image_projection(&persistence).await;
+                assert!(std::fs::read(fixture.path().join("input")).unwrap().starts_with(b"\x89PNG\r\n\x1a\n"), "the OCR process must consume the original PNG");
+                assert_eq!(server.requests().len(), 2, "no primary retry before OCR projection ACK");
+                assert!(!turn.is_finished());
+                persistence.release_projection_acknowledgement();
+                tokio::time::timeout(std::time::Duration::from_secs(5), turn).await.unwrap().unwrap();
+                let requests = server.requests();
+                assert_eq!(requests.len(), 3);
+                assert_eq!(requests[1].body.as_ref().unwrap()["model"], "vision-model");
+                assert_eq!(count_wire_images(requests[0].body.as_ref().unwrap()), 1);
+                assert_eq!(count_wire_images(requests[1].body.as_ref().unwrap()), 1);
+                let repaired = requests[2].body.as_ref().unwrap();
+                assert_eq!(count_wire_images(repaired), 0);
+                let projections = persistence.attempted_projections();
+                let chat_state::TimelineEventKind::ImageProjection(projection) = &projections[0].0.kind else { panic!("projection"); };
+                if outcome.starts_with("printf") {
+                    assert!(matches!(projection.shadows[0].provenance, chat_state::ImageShadowSource::LocalOcr { .. }));
+                    assert!(repaired.to_string().contains("OCR dialog E81"));
+                    assert_eq!(sampling_types::conversation::conversation_image_groups(&persistence.durable_surface()).len(), 1);
+                } else {
+                    assert!(matches!(projection.shadows[0].provenance, chat_state::ImageShadowSource::UnsupportedModel));
+                    assert!(repaired.to_string().contains(sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT));
+                    assert!(sampling_types::conversation::conversation_image_groups(&persistence.durable_surface()).is_empty());
+                }
+                assert_eq!(sealed_image_groups(&actor.chat_state_handle.timeline_events().await.unwrap()), 1);
+            }
+        }));
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn cancelling_image_fallback_before_or_during_auxiliary_stops_later_work() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            use test_support::{InferenceEndpoint, InferenceRequestMatcher};
+            for phase in ["primary", "preparation", "auxiliary"] {
+                crate::session::image_describe::TEST_LOCAL_OCR_CALLS.with(|calls| calls.set(0));
+                let primary = MockInferenceServer::start().await.unwrap();
+                let auxiliary = MockInferenceServer::start().await.unwrap();
+                let mut blocked = if phase == "auxiliary" {
+                    primary.enqueue_response("/v1/messages", multimodal_capability_rejection());
+                    Some(auxiliary.expect_response_blocked(
+                        "first image description",
+                        InferenceRequestMatcher::auxiliary(InferenceEndpoint::Messages),
+                        messages_text_turn("first image", "vision-model"),
+                    ))
+                } else if phase == "primary" {
+                    Some(primary.expect_response_blocked(
+                        "primary image rejection",
+                        InferenceRequestMatcher::auxiliary(InferenceEndpoint::Messages),
+                        multimodal_capability_rejection(),
+                    ))
+                } else {
+                    primary.enqueue_response("/v1/messages", multimodal_capability_rejection());
+                    None
+                };
+                let (actor, _gateway, persistence) =
+                    actor_with_sampler_and_persistence(&primary, Some("vision")).await;
+                if phase == "preparation" {
+                    persistence.hold_next_sideband_attempt();
+                }
+                let mut info = crate::agent::config::ModelInfo::baseline("vision-model");
+                info.base_url = auxiliary.url();
+                info.api_backend = sampling_types::ApiBackend::Messages;
+                actor.models_manager.insert_test_entry(
+                    "vision",
+                    crate::agent::config::ModelEntry {
+                        info,
+                        api_key: Some("test-key".into()),
+                        env_key: None,
+                        auth_provider: None,
+                    },
+                );
+                for label in ["first", "second"] {
+                    actor
+                        .chat_state_handle
+                        .push_user_message(ConversationItem::user_with_parts(vec![
+                            sampling_types::ContentPart::Text { text: label.into() },
+                            sampling_types::ContentPart::Image {
+                                url: inline_data_uri(&test_image_content()).into(),
+                                description: None,
+                            },
+                        ]));
+                }
+                let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+                let (completion_tx, _completion_rx) = mpsc::unbounded_channel();
+                let task = AgentTask::new_prompt(
+                    actor.clone(),
+                    "cancel-image-fallback".into(),
+                    admit_test_human_input(&actor, "cancel-image-fallback").await,
+                    crate::session::PromptOrigin::User,
+                    None,
+                    Vec::new(),
+                    crate::session::TurnKind::User,
+                    vec![acp::ContentBlock::Text(acp::TextContent::new("Continue."))],
+                    tool_types::BehaviorId::Normal,
+                    None,
+                    None,
+                    false,
+                    None,
+                    Some(start_rx),
+                    None,
+                    completion_tx,
+                    None,
+                );
+                let producer = task.handle.clone();
+                actor.state.lock().await.foreground = ForegroundState::RegularTurn(task);
+                start_tx.send(()).unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    if let Some(blocked) = &mut blocked {
+                        blocked.wait_received().await;
+                    } else {
+                        while !persistence.sideband_ack_is_pending() {
+                            tokio::task::yield_now().await;
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    actor.cancel_running_task(false, false, false, Some("esc".into())),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    while !producer.is_finished() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .expect("Stop must abort the actual foreground producer");
+                if let Some(blocked) = blocked {
+                    blocked.release();
+                }
+                persistence.release_sideband_ack();
+                // Also release the server response and drain cleanup: cancellation must not
+                // merely postpone a second group's request until the first response returns.
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                assert_eq!(primary.requests().len(), 1);
+                assert_eq!(
+                    auxiliary.requests().len(),
+                    usize::from(phase == "auxiliary")
+                );
+                crate::session::image_describe::TEST_LOCAL_OCR_CALLS
+                    .with(|calls| assert_eq!(calls.get(), 0));
+                assert!(persistence.attempted_projections().is_empty());
+                let conversation = actor.chat_state_handle.get_conversation().await;
+                assert_eq!(
+                    sampling_types::conversation::conversation_image_groups(&conversation).len(),
+                    2
+                );
+            }
+        }));
+    });
+}
+
+#[test]
+fn image_fallback_cold_restore_reuses_completed_description_before_projection() {
+    assert_image_fallback_cold_restore(false, false, true);
+}
+
+#[test]
+fn image_fallback_cold_restore_reuses_acknowledged_projection() {
+    assert_image_fallback_cold_restore(true, false, true);
+}
+
+#[cfg(unix)]
+#[test]
+fn image_fallback_cold_restore_reuses_acknowledged_ocr_projection() {
+    assert_image_fallback_cold_restore(true, true, true);
+}
+
+#[test]
+fn image_fallback_cold_restore_reuses_description_without_auxiliary_route() {
+    assert_image_fallback_cold_restore(false, false, false);
+}
+
+fn assert_image_fallback_cold_restore(
+    already_projected: bool,
+    from_ocr: bool,
+    with_auxiliary: bool,
+) {
+    run_with_session_stack(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            use crate::session::storage::StorageAdapter as _;
+            let root = tempfile::tempdir().unwrap();
+            let storage = crate::session::storage::jsonl::JsonlStorageAdapter::with_root(root.path().to_path_buf());
+            let info = SessionInfo { id: acp::SessionId::new("test-actor"), cwd: std::env::temp_dir().to_string_lossy().into_owned() };
+            storage.init_session(&info, crate::agent::models::ModelId::new("test-model")).await.unwrap();
+            let seed = chat_state::Timeline::from_seed(vec![ConversationItem::system("test system prompt")]).unwrap();
+            for event in seed.events() { storage.append_timeline_event_durable(&info, event).await.unwrap(); }
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response("/v1/messages", multimodal_capability_rejection());
+            server.enqueue_response("/v1/messages", if from_ocr {
+                ScriptedResponse::json(400, json!({"error": {"type": "invalid_request_error", "message": "auxiliary unavailable"}}))
+            } else {
+                messages_text_turn("Durable screenshot description E91.", "vision-model")
+            });
+            server.enqueue_response("/v1/messages", messages_text_turn("continued", "test-model"));
+            if already_projected { server.enqueue_response("/v1/messages", messages_text_turn("resumed", "test-model")); }
+            let (actor, _gateway, persistence) = actor_with_sampler_and_storage(&server, Some("vision"), Some(storage.clone())).await;
+            super::read_file_image_description_tests::run_image_result(&actor).await;
+            if !already_projected { persistence.hold_projection_acknowledgement(); }
+            let turn_actor = actor.clone();
+            #[cfg(unix)]
+            let ocr = from_ocr.then(|| ocr_fixture("printf 'Durable screenshot description E91.\\n'"));
+            let turn = tokio::task::spawn_local(async move {
+                let prompt = admit_inline_query(&turn_actor, "before-crash", "Inspect the image.".into());
+                #[cfg(unix)]
+                if let Some(ocr) = ocr {
+                    crate::session::image_describe::TEST_LOCAL_OCR_PROGRAM.scope(ocr.path().join("tesseract"), prompt).await;
+                    return;
+                }
+                prompt.await;
+            });
+            if already_projected {
+                tokio::time::timeout(std::time::Duration::from_secs(5), turn).await.unwrap().unwrap();
+            } else {
+                wait_for_image_projection(&persistence).await;
+                turn.abort();
+                assert!(turn.await.unwrap_err().is_cancelled());
+            }
+            // Wait for the real Sideband ledger, not the test channel's observed ACK.
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if storage.open_session(&info).unwrap().validated_timeline(&info.id.to_string()).is_ok_and(|validated| {
+                        validated.sidebands.values().any(|events| events.last().is_some_and(|event| matches!(&event.kind,
+                            chat_state::SidebandEventKind::End(end) if from_ocr || end.outcome == chat_state::SidebandOutcome::Completed)))
+                    }) { break; }
+                    tokio::task::yield_now().await;
+                }
+            }).await.unwrap();
+            let resources_persistence = tools::persistence::ResourcesPersistence::local(root.path().join("resources_state.json")).unwrap();
+            let bridge = actor.agent.borrow().tool_bridge().clone();
+            let resources = bridge.shared_resources().await;
+            let serialized = resources.lock().await.serialize();
+            resources_persistence.save_and_flush(serialized).await.unwrap();
+            let previous_actor = std::sync::Arc::downgrade(&actor);
+            drop(actor);
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                while previous_actor.upgrade().is_some() { tokio::task::yield_now().await; }
+            }).await.expect("the original actor and its cache must be dropped");
+            let before = server.requests().len();
+            let (restored, _gateway, restored_persistence) = actor_with_sampler_and_storage(&server, with_auxiliary.then_some("vision"), Some(storage.clone())).await;
+            let bridge = restored.agent.borrow().tool_bridge().clone();
+            let resources = bridge.shared_resources().await;
+            assert!(resources_persistence.load(&mut *resources.lock().await));
+            assert!(restored.unsupported_current_model_for_images().await.is_some());
+            admit_inline_query(&restored, "after-crash", "Continue from the stored image.".into()).await;
+            let requests = server.requests();
+            assert_eq!(requests.len(), before + 1, "cold recovery must reuse the completed Sideband without another auxiliary request");
+            assert_eq!(requests.iter().filter(|request| request.body.as_ref().unwrap()["model"] == "vision-model").count(), 1);
+            let resumed = requests.last().unwrap().body.as_ref().unwrap();
+            assert_eq!(count_wire_images(resumed), 0);
+            assert!(resumed.to_string().contains("Durable screenshot description E91."));
+            assert_eq!(restored_persistence.attempted_projections().len(), usize::from(!already_projected));
+            let loaded = storage.load_session_without_updates(&info).await.unwrap();
+            assert_eq!(sealed_image_groups(loaded.timeline.events()), 1);
+            if !already_projected {
+                let validated = storage.open_session(&info).unwrap().validated_timeline(&info.id.to_string()).unwrap();
+                let (id, mut events) = validated.sidebands.into_iter().find(|(_, events)| matches!(
+                    &events[0].kind, chat_state::SidebandEventKind::Request(request)
+                        if request.purpose == chat_state::SidebandPurpose::ImageDescription
+                )).unwrap();
+                for event in &mut events {
+                    if let chat_state::SidebandEventKind::Attempt(attempt) = &mut event.kind {
+                        attempt.assembly_manifest.source_revision = Some(loaded.timeline.surface_revision() + 1);
+                    }
+                }
+                crate::session::storage::write_jsonl_atomic(
+                    &restored.session_dir.join(crate::session::storage::SIDEBANDS_DIR).join(id).join(crate::session::storage::TIMELINE_FILE), &events,
+                ).unwrap();
+                assert!(storage.load_session_without_updates(&info).await.is_err(), "future revision provenance must fail persisted projection validation");
+            }
+        }));
+    });
+}
+
+#[cfg(unix)]
+#[test]
+fn cancelling_image_fallback_during_ocr_reaps_process_without_resubmission() {
+    run_with_session_stack(|| {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            crate::session::image_describe::TEST_LOCAL_OCR_CALLS.with(|calls| calls.set(0));
+            let fixture = ocr_fixture("printf '%s' \"$$\" > \"${0%/*}/pid\"\nexec /bin/sleep 60");
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response("/v1/messages", multimodal_capability_rejection());
+            server.enqueue_response("/v1/messages", ScriptedResponse::json(400, json!({
+                "error": {"type": "invalid_request_error", "message": "auxiliary unavailable"}
+            })));
+            let (actor, _gateway, persistence) =
+                actor_with_sampler_and_persistence(&server, Some("vision")).await;
+            super::read_file_image_description_tests::run_image_result(&actor).await;
+            let turn_actor = actor.clone();
+            let turn = tokio::task::spawn_local(
+                crate::session::image_describe::TEST_LOCAL_OCR_PROGRAM.scope(
+                    fixture.path().join("tesseract"),
+                    async move {
+                        admit_inline_query(&turn_actor, "cancel-ocr", "Continue.".into()).await;
+                    },
+                ),
+            );
+            let pid = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if let Ok(value) = std::fs::read_to_string(fixture.path().join("pid"))
+                        && let Ok(pid) = value.parse::<u32>()
+                    {
+                        break pid;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("OCR child must be running before cancellation");
+            {
+                let mut state = actor.state.lock().await;
+                let ForegroundState::RegularTurn(task) = &mut state.foreground else {
+                    panic!("live OCR owner");
+                };
+                // This direct handle_prompt fixture normally uses a sleeper owner.
+                // Stop must abort the actual producer; join it below as well.
+                task.handle.abort();
+                task.handle = turn.abort_handle();
+            }
+            actor
+                .cancel_running_task(false, false, false, Some("esc".into()))
+                .await
+                .unwrap();
+            assert!(turn.await.unwrap_err().is_cancelled());
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    if !tokio::process::Command::new("kill")
+                        .args(["-0", &pid.to_string()])
+                        .output()
+                        .await
+                        .unwrap()
+                        .status
+                        .success()
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("cancelling fallback must terminate and reap its OCR process");
+            assert_eq!(server.requests().len(), 2);
+            assert_eq!(
+                server.requests()[1].body.as_ref().unwrap()["model"],
+                "vision-model"
+            );
+            crate::session::image_describe::TEST_LOCAL_OCR_CALLS
+                .with(|calls| assert_eq!(calls.get(), 1));
+            assert!(persistence.attempted_projections().is_empty());
+            assert_eq!(
+                sampling_types::conversation::conversation_image_groups(
+                    &actor.chat_state_handle.get_conversation().await
+                )
+                .len(),
+                1
             );
         }));
     });

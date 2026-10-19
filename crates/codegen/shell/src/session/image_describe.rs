@@ -984,17 +984,34 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static TEST_LOCAL_OCR_PROGRAM: PathBuf;
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(crate) static TEST_LOCAL_OCR_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Local fallback is bounded and never resolves remote URLs or invokes a shell.
 pub(crate) async fn describe_images_with_local_ocr(
     urls: &[std::sync::Arc<str>],
     deadline: tokio::time::Instant,
 ) -> Result<String, String> {
+    #[cfg(test)]
+    TEST_LOCAL_OCR_CALLS.with(|calls| calls.set(calls.get() + 1));
+    let program = PathBuf::from("tesseract");
+    #[cfg(test)]
+    let program = TEST_LOCAL_OCR_PROGRAM
+        .try_with(Clone::clone)
+        .unwrap_or(program);
     let mut descriptions = Vec::with_capacity(urls.len());
     for (index, url) in urls.iter().enumerate() {
         let bytes = decode_ocr_image(url)?;
         let text = tokio::time::timeout_at(
             deadline.min(tokio::time::Instant::now() + std::time::Duration::from_secs(30)),
-            run_local_ocr(Path::new("tesseract"), bytes),
+            run_local_ocr(&program, bytes),
         )
         .await
         .map_err(|_| "local OCR timed out".to_owned())??;

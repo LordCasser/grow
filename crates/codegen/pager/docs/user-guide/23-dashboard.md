@@ -96,8 +96,10 @@ The dispatch input uses the same prompt chrome as the agent view. Press
 | `Ctrl+X` | Cancel a running turn, or press twice within 2s to permanently delete |
 | Hover + click `[✗]` | Permanently delete an idle/done row (click again to confirm) |
 | `Shift+↑` / `Shift+↓` | Reorder pinned rows |
-| `Esc` | Step back one level: cancel search → close peek (clear reply draft, then unselect) → clear filter → **unfocus the dispatch input** (so `↑`/`↓`, `j`/`k` navigate the list) → unselect row (→ `[+ New Agent]`) → exit dashboard. Esc never clears your typed dispatch draft — use `Ctrl+U` / `Ctrl+C` for that |
+| `Esc` | Step back one level: cancel search → close peek (clear reply draft, then unselect) → clear filter → **unfocus the dispatch input** (so `↑`/`↓`, `j`/`k` navigate the list) → unselect row (→ `[+ New Agent]`) → exit dashboard. Esc never clears your typed dispatch draft — use `Ctrl+U` for that |
 | `Ctrl+\` | Return to the dashboard from the details view, or exit dashboard |
+| `Ctrl+C` | Clear the dispatch composer or operate the focused local control; never exits the application |
+| `Ctrl+D` | Global Quit shortcut; press twice within one second to suspend managed session trees and exit |
 
 When grouping by state, each group has a **section title** (e.g. `Working`,
 `Idle`) with a `▸`/`▾` disclosure marker. Section titles are part of the
@@ -122,8 +124,7 @@ underlying session (returning to the dashboard with a "Session closed"
 toast).
 
 `Ctrl+X` in the details view is state-dependent. While a **turn is
-running** it cancels the turn — the same behaviour as `Ctrl+C`,
-including the keep-subagents prompt — and never touches the session
+running** it cancels the turn, including the keep-subagents prompt — and never touches the session
 itself, so mashing it to stop a turn can't close anything. In any
 other state — **idle**, a slash command in flight (commands can't
 be cancelled yet), or a cancel still pending — `Ctrl+X` arms a

@@ -207,11 +207,7 @@ pub(super) fn default_actions(screen_mode: crate::app::ScreenMode) -> Vec<Action
             id: ActionId::HalfPageDown,
             label: "half page down",
             description: "Scroll down half page",
-            default_key: if in_vscode {
-                key!('D')
-            } else {
-                key!('d', CONTROL)
-            },
+            default_key: key!('D'),
             alt_keys: vec![],
             category: Category::ConversationNav,
             context: When::ScrollbackFocused,
@@ -482,7 +478,7 @@ pub(super) fn default_actions(screen_mode: crate::app::ScreenMode) -> Vec<Action
         ActionDef {
             id: ActionId::CancelTurn,
             label: "cancel",
-            description: "Suspend and quit",
+            description: "Cancel current turn",
             default_key: key!('c', CONTROL),
             alt_keys: vec![],
             category: Category::GettingStarted,
@@ -491,7 +487,7 @@ pub(super) fn default_actions(screen_mode: crate::app::ScreenMode) -> Vec<Action
             hint_key_display: None,
             requires_confirmation: false,
             long_help: Some(
-                "Requests a durable suspension of the session tree, then exits the application.\nCtrl+C keeps composer drafts and does not cancel the turn. Repeated Ctrl+C joins the same request.\nIf suspension is unconfirmed, choose retry or explicitly force quit. Use Esc or the Stop Turn control to cancel only the active turn.",
+                "Keeps the composer's local clear/selection behavior and cancels the current turn when the composer does not consume it.\nRepeated Ctrl+C retries cancellation; it never quits or suspends the session tree.\nPress Ctrl+D twice to suspend the session tree and exit.",
             ),
         },
         // ── Panes (agent-level — toggle side panes) ─────────────────
@@ -672,15 +668,11 @@ pub(super) fn default_actions(screen_mode: crate::app::ScreenMode) -> Vec<Action
             id: ActionId::Quit,
             label: "quit",
             description: "Quit",
-            default_key: if in_vscode {
-                key!('d', CONTROL)
-            } else {
-                key!('q', CONTROL)
-            },
+            default_key: key!('d', CONTROL),
             alt_keys: if in_vscode {
                 vec![]
             } else {
-                vec![key!('d', CONTROL)]
+                vec![key!('q', CONTROL)]
             },
             category: Category::GettingStarted,
             context: When::Always,
@@ -688,7 +680,7 @@ pub(super) fn default_actions(screen_mode: crate::app::ScreenMode) -> Vec<Action
             hint_key_display: None,
             requires_confirmation: true,
             long_help: Some(
-                "Exits the app. Requires confirmation: press twice in quick succession;\na lone press is treated as a stray key and ignored.\nBound to Ctrl+Q, with Ctrl+D as an alias (Ctrl+D is primary in VS Code's terminal).",
+                "Press Ctrl+D twice within one second to suspend owned session trees and exit.\nThe first press preserves drafts and running work. Repeated Quit during suspension joins the same request.\nIf saving is unconfirmed, choose retry or explicitly force quit. Ctrl+Q remains an alias outside VS Code.",
             ),
         },
         ActionDef {

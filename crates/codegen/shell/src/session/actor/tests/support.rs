@@ -471,15 +471,94 @@ pub(crate) async fn install_test_planning_resources(
 #[cfg(test)]
 #[derive(Clone, Default)]
 pub(crate) struct ImageProjectionPersistence {
+    storage: std::sync::Arc<
+        std::sync::Mutex<
+            Option<(
+                crate::session::storage::jsonl::JsonlStorageAdapter,
+                SessionInfo,
+            )>,
+        >,
+    >,
     fail: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    hold: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    hold_sideband: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    pending_sideband_ack:
+        std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<std::io::Result<()>>>>>,
+    pending_ack:
+        std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<std::io::Result<()>>>>>,
     committed: std::sync::Arc<std::sync::Mutex<Vec<(chat_state::TimelineEvent, bool)>>>,
 }
 
 #[cfg(test)]
 impl ImageProjectionPersistence {
+    pub(crate) fn persist_to_storage(
+        &self,
+        storage: crate::session::storage::jsonl::JsonlStorageAdapter,
+        info: SessionInfo,
+    ) {
+        *self.storage.lock().unwrap() = Some((storage, info));
+    }
+
     /// Reject every later `ImageProjection` commit with a permanent I/O error.
     pub(crate) fn fail_projection_commits(&self) {
         self.fail.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn hold_next_sideband_attempt(&self) {
+        self.hold_sideband
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn delay_sideband_ack(
+        &self,
+        reply: tokio::sync::oneshot::Sender<std::io::Result<()>>,
+    ) -> Option<tokio::sync::oneshot::Sender<std::io::Result<()>>> {
+        if self
+            .hold_sideband
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            *self.pending_sideband_ack.lock().unwrap() = Some(reply);
+            None
+        } else {
+            Some(reply)
+        }
+    }
+
+    pub(crate) fn sideband_ack_is_pending(&self) -> bool {
+        self.pending_sideband_ack.lock().unwrap().is_some()
+    }
+
+    pub(crate) fn release_sideband_ack(&self) {
+        if let Some(reply) = self.pending_sideband_ack.lock().unwrap().take() {
+            let _ = reply.send(Ok(()));
+        }
+    }
+
+    pub(crate) fn hold_projection_acknowledgement(&self) {
+        self.hold.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    pub(crate) fn release_projection_acknowledgement(&self) {
+        let reply = self
+            .pending_ack
+            .lock()
+            .unwrap()
+            .take()
+            .expect("held projection ACK");
+        let mut events = self.committed.lock().unwrap();
+        let (_, acknowledged) = events
+            .iter_mut()
+            .rev()
+            .find(|(event, _)| {
+                matches!(
+                    event.kind,
+                    chat_state::TimelineEventKind::ImageProjection(_)
+                )
+            })
+            .expect("held projection event");
+        *acknowledged = true;
+        self.hold.store(false, std::sync::atomic::Ordering::SeqCst);
+        let _ = reply.send(Ok(()));
     }
 
     /// Image projections the actor tried to persist, with their acknowledge
@@ -527,6 +606,17 @@ impl chat_state::TimelinePersistence for ImageProjectionPersistence {
             event.kind,
             chat_state::TimelineEventKind::ImageProjection(_)
         ) && self.fail.load(std::sync::atomic::Ordering::SeqCst);
+        let held = !failed
+            && matches!(
+                event.kind,
+                chat_state::TimelineEventKind::ImageProjection(_)
+            )
+            && self.hold.load(std::sync::atomic::Ordering::SeqCst);
+        if held {
+            *self.pending_ack.lock().unwrap() = Some(reply);
+            self.committed.lock().unwrap().push((event.clone(), false));
+            return receiver;
+        }
         self.committed
             .lock()
             .expect("image projection log must not be poisoned")
@@ -539,7 +629,17 @@ impl chat_state::TimelinePersistence for ImageProjectionPersistence {
         } else {
             Ok(())
         };
-        let _ = reply.send(result);
+        if result.is_ok()
+            && let Some((storage, info)) = self.storage.lock().unwrap().clone()
+        {
+            let event = event.clone();
+            tokio::spawn(async move {
+                use crate::session::storage::StorageAdapter as _;
+                let _ = reply.send(storage.append_timeline_event_durable(&info, &event).await);
+            });
+        } else {
+            let _ = reply.send(result);
+        }
         receiver
     }
 

@@ -384,7 +384,7 @@ fn repeated_behavior_selection_reissues_the_same_target() {
 }
 
 #[test]
-fn behavior_switch_confirmation_captures_keys_before_global_and_minimal_shortcuts() {
+fn behavior_switch_confirmation_keeps_local_keys_but_allows_confirmed_quit() {
     use crate::app::root::InputOutcome;
     use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use tools::types::BehaviorId;
@@ -399,7 +399,7 @@ fn behavior_switch_confirmation_captures_keys_before_global_and_minimal_shortcut
                 BehaviorId::Normal,
             ),
             (
-                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::CONTROL),
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
                 BehaviorId::Plan,
             ),
             (
@@ -439,6 +439,34 @@ fn behavior_switch_confirmation_captures_keys_before_global_and_minimal_shortcut
             assert_eq!(agent.session.behavior_mode, BehaviorId::Plan);
             assert!(agent.behavior_switch_target.is_none());
             assert!(app.pending_action.is_none());
+        }
+        for code in ['d', 'q'] {
+            let mut app = test_app_with_agent();
+            app.screen_mode = screen_mode;
+            let key = KeyEvent::new(KeyCode::Char(code), KeyModifiers::CONTROL);
+            if app.registry.lookup(&key, crate::actions::When::Always)
+                != Some(crate::actions::ActionId::Quit)
+            {
+                continue; // Ctrl+Q is not registered in VS Code.
+            }
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.session.behavior_mode = BehaviorId::Plan;
+            agent.session.plan_mode_active = true;
+            agent.prompt.set_text("unsent draft");
+            agent.show_behavior_switch_warning(BehaviorId::Normal, 8_000);
+            assert!(matches!(
+                app.handle_input(&Event::Key(key)),
+                InputOutcome::Changed
+            ));
+            assert!(app.pending_action.is_some());
+            let agent = &app.agents[&AgentId(0)];
+            assert_eq!(agent.prompt.text(), "unsent draft");
+            assert_eq!(agent.session.behavior_mode, BehaviorId::Plan);
+            assert!(agent.behavior_switch_target.is_some());
+            assert!(matches!(
+                app.handle_input(&Event::Key(key)),
+                InputOutcome::Action(Action::Quit)
+            ));
         }
     }
 }

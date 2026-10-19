@@ -75,19 +75,33 @@ Auxiliary image-description provider polling SHALL use an absolute deadline no l
 - **THEN** provider polling is bounded by the earlier of that deadline and its per-call timeout
 
 ### Requirement: Image description recovery batches durable lookups
-A recovery pass SHALL reuse one validated durable-history load for its uncached image-description queries. It SHALL preserve exact source revision, Surface identity, prompt and completed-result provenance checks, including integrity validation of other Sidebands required by the parent Timeline. It SHALL NOT retain the full loaded history across auxiliary provider requests.
+
+A recovery pass SHALL reuse one validated durable-history load for its uncached image-description queries. It SHALL preserve the validated historical source revision, exact source Surface identity, prompt and completed-result provenance checks, including integrity validation of other Sidebands required by the parent Timeline. A matching neutral description from an earlier revision MAY be reused when its same immutable image source remains in the current branch; unrelated appends SHALL NOT invalidate it. A queried revision beyond the durable parent or a description from a later revision SHALL NOT be accepted. The new ImageProjection SHALL still bind the exact current source revision and image fingerprint. The pass SHALL NOT retain the full loaded history across auxiliary provider requests.
 
 #### Scenario: Several groups need durable reuse
+
 - **WHEN** a recovery pass has multiple uncached image groups
 - **THEN** their durable lookups share one history load and each query receives only its own matching completed result
 
 #### Scenario: Historical Sideband integrity fails
+
 - **WHEN** required Sideband validation fails during batch lookup
 - **THEN** no result is accepted from that failed snapshot and existing description failure or provider fallback handling applies
 
 #### Scenario: Every group is cached
+
 - **WHEN** all group descriptions are available in the session cache
 - **THEN** the pass performs no durable-description history load
+
+#### Scenario: A new input follows a completed transcription
+
+- **WHEN** a new input advances the Surface revision while the same immutable image source and neutral prompt remain selected
+- **THEN** recovery reuses the older completed description and creates its projection against the current exact revision without another auxiliary call
+
+#### Scenario: Future revision or different provenance
+
+- **WHEN** a lookup uses a revision newer than the durable parent, a candidate describes a later revision, or source identity, selected branch, prompt or completed result does not match
+- **THEN** that candidate is not accepted as a reusable description
 
 ### Requirement: Proxy thinking signatures recover without losing portable history
 Messages thinking starts MAY omit an initial signature. A subsequent signature delta SHALL supply it normally. A response containing unsigned thinking SHALL retain visible facts but SHALL NOT retain provider-native continuation.
@@ -834,6 +848,86 @@ The decoder SHALL continue to reject negative, string, floating-point, and out-o
 
 - **WHEN** an HTTP Chat SSE response reports `finish_reason: tool_calls` and its usage tail contains nullable optional details with valid required totals
 - **THEN** the response completes and trusted usage is settled through the existing accounting path without changing retry behavior
+
+### Requirement: Negative image capability follows the resolved transport
+
+Grow SHALL scope a confirmed negative image-input capability to the resolved transport identity consisting of the actual provider-facing model, API backend, endpoint and query route, as represented by `ModelImageInputKey`. Catalog aliases SHALL NOT determine whether a transport has previously rejected images. A different alias resolving to the same transport SHALL share its negative capability; any change to model, backend, endpoint or query route SHALL produce an independent capability state. Primary sampling, configured visual auxiliary sampling and compaction SHALL use the same identity rule. A configured auxiliary resolving to the same transport already known to reject the primary image request SHALL NOT be invoked recursively. User-visible model labels SHALL continue to use their catalog identity.
+
+This capability state SHALL only affect whether the exact resolved transport is treated as previously known to reject images. An unmarked transport SHALL receive original image content on its first request. After an explicit rejection, the existing visual auxiliary, local OCR, durable `ImageProjection` acknowledgement and request reconstruction flow SHALL remain in force. Descriptions keyed to the same source and image group MAY be reused after the auxiliary transport changes.
+
+#### Scenario: Same alias resolves to a changed transport
+
+- **WHEN** a catalog alias previously received an explicit image rejection but now resolves to a different model, backend, endpoint or query route
+- **THEN** the new transport has no inherited negative image capability and its first request may include the retained original image
+
+#### Scenario: Different aliases resolve to the same rejected transport
+
+- **WHEN** one alias receives an explicit image rejection and another alias resolves to the same model, backend, endpoint and query route
+- **THEN** the second alias observes the same negative capability and uses the existing marked-model image representation without repeating the rejected image request
+
+#### Scenario: Auxiliary alias resolves to the rejected primary transport
+
+- **WHEN** the configured auxiliary alias resolves to the exact transport that rejected the primary image request
+- **THEN** Grow skips the auxiliary call to that runtime and continues through the existing OCR/removal projection flow without recursive retry
+
+#### Scenario: Auxiliary alias resolves to a different transport
+
+- **WHEN** a configured auxiliary alias retains its name but resolves to a transport whose model, backend, endpoint or query route differs from the rejected primary transport
+- **THEN** Grow treats it as an independent runtime and may invoke it through the newly resolved route
+
+#### Scenario: Primary or auxiliary runtime rejects image input
+
+- **WHEN** a primary or configured auxiliary transport explicitly rejects an image-bearing request
+- **THEN** Grow records the rejection under that request's resolved transport identity, and later lookup by any alias uses the same identity rule
+
+#### Scenario: Compaction checks a model's image capability
+
+- **WHEN** compaction evaluates whether an image-bearing request can use its resolved primary transport
+- **THEN** it consults the same transport-bound negative capability state used by normal sampling
+
+#### Scenario: A pending image compaction outlives its transport route
+
+- **WHEN** the model, backend, endpoint or query route changes while an image-bearing compaction request is pending
+- **THEN** its old rejection does not mark or recover the new transport; an alias-only change to the same transport does not invalidate its identity
+
+### Requirement: Image fallback respects cancellation and cold recovery
+
+Image fallback SHALL stop new auxiliary/primary provider requests and new OCR processes when its owning foreground turn is cancelled. Completed neutral image descriptions with valid durable source provenance SHALL be reused by a fresh actor after recovery, including a crash after the completed description but before its image projection. Cancellation SHALL NOT be treated as ordinary auxiliary failure that authorizes later fallback work or a lossy projection. Existing OCR output validation, original media retention and projection acknowledgement rules SHALL remain in force.
+
+#### Scenario: Auxiliary preparation is cancelled
+
+- **WHEN** the owning turn is cancelled before its auxiliary provider request crosses admission
+- **THEN** no auxiliary HTTP request, OCR process, image projection or primary resubmission is started for that cancelled recovery
+
+#### Scenario: First image group is cancelled during auxiliary work
+
+- **WHEN** a turn with multiple unresolved image groups is cancelled while its first auxiliary request is active
+- **THEN** that work is cancelled and no later group's auxiliary request, OCR fallback or primary resubmission begins
+
+#### Scenario: OCR produces valid text
+
+- **WHEN** the configured auxiliary fails and local OCR produces nonempty valid text
+- **THEN** a durable OCR projection retains the original image and its text, and the marked primary retries with text only after acknowledgement
+
+#### Scenario: OCR cannot produce text
+
+- **WHEN** the configured auxiliary fails and local OCR is empty or fails
+- **THEN** the existing durable unsupported-image removal is acknowledged before a text-only primary retry, while immutable original evidence remains
+
+#### Scenario: Recover after description completion before projection
+
+- **WHEN** a fresh actor restores a validated Timeline and completed image-description Sideband after a crash before ImageProjection
+- **THEN** it reuses the matching neutral description, installs a valid projection and sends a text-only primary request without another auxiliary request
+
+#### Scenario: Recover a completed description without a current auxiliary route
+
+- **WHEN** a valid completed neutral description exists but the auxiliary route is absent or cannot be used after recovery
+- **THEN** its reuse is evaluated independently of that route and does not fall through to OCR or removal merely because new auxiliary work is unavailable
+
+#### Scenario: Recover an already described image
+
+- **WHEN** a fresh actor restores an image with an acknowledged description or OCR projection and its marked primary continues
+- **THEN** the existing description is reused without auxiliary work and the primary request retains the textual representation
 
 ### Requirement: Suspension settles the current attempt before saving continuation
 

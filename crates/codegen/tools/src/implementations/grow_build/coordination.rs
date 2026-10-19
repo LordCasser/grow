@@ -220,7 +220,7 @@ impl tool_runtime::Tool for ListActiveSessionsTool {
 #[serde(deny_unknown_fields)]
 pub struct AskSessionInput {
     #[schemars(
-        description = "Omit for a new inquiry. Supply an existing InquiryId only to resume the identical request; never generate one yourself."
+        description = "Omit, pass null, or pass a blank string for a new inquiry; the runtime generates its ID. Supply an existing InquiryId only to resume the identical request; never generate one yourself."
     )]
     #[serde(default)]
     pub inquiry_id: Option<String>,
@@ -356,7 +356,7 @@ impl tool_runtime::Tool for AskSessionTool {
             });
         let result = backend
             .ask_session(
-                input.inquiry_id,
+                input.inquiry_id.filter(|id| !id.trim().is_empty()),
                 input.target_session_id,
                 input.question,
                 progress,

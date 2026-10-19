@@ -6,7 +6,7 @@ use super::common::*;
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored"]
-async fn ctrl_c_suspends_running_root_and_continue_resumes_without_replay() {
+async fn ctrl_d_suspends_running_root_and_continue_resumes_without_replay() {
     let content = ContentController::start()
         .await
         .expect("start mock content");
@@ -67,7 +67,7 @@ async fn ctrl_c_suspends_running_root_and_continue_resumes_without_replay() {
         )
     });
     first
-        .inject_keys(b"\x03")
+        .inject_keys(b"\x04\x04")
         .expect("suspend during the running root command");
     let exit = first
         .wait_for_exit_and_drain(Duration::from_secs(15), Duration::from_secs(1))
@@ -234,7 +234,7 @@ async fn ctrl_c_suspends_running_root_and_continue_resumes_without_replay() {
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored"]
-async fn ctrl_c_cold_resume_keeps_the_original_explicit_skill_snapshot() {
+async fn ctrl_d_cold_resume_keeps_the_original_explicit_skill_snapshot() {
     skill_snapshot_survives_suspend_and_surface_replay(false).await;
 }
 
@@ -367,7 +367,7 @@ async fn skill_snapshot_survives_suspend_and_surface_replay(minimal: bool) {
     );
 
     first
-        .inject_keys(b"\x03")
+        .inject_keys(b"\x04\x04")
         .expect("suspend during the running command");
     let exit = first
         .wait_for_exit_and_drain(Duration::from_secs(15), Duration::from_secs(1))
@@ -469,7 +469,7 @@ async fn skill_snapshot_survives_suspend_and_surface_replay(minimal: bool) {
     assert_eq!(runs.lines().filter(|line| *line == "started").count(), 1);
     assert_eq!(runs.lines().filter(|line| *line == "finished").count(), 0);
     resumed
-        .inject_keys(b"\x03")
+        .inject_keys(b"\x04\x04")
         .expect("suspend completed Skill session");
     assert_eq!(
         resumed
@@ -591,7 +591,7 @@ fn committed_user_skill(contents: &str) -> (String, String) {
                 skill.get("prepared_body")?.as_str()?.to_owned(),
             ))
         })
-        .expect("one committed explicit user Skill item");
+        .unwrap_or_else(|| panic!("one committed explicit user Skill item; Timeline:\n{contents}"));
     skill
 }
 

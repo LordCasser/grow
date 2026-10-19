@@ -293,7 +293,7 @@ Windows 的 staging capability 只在 namespace commit 期间保留 `DELETE`。�
 
 永久 `TurnStarted` 或 `TurnEnded` 持久化失败会先 unwind 本地 usage、file-state、idle hook 与 subagent scope，然后关闭整个 shell session writer epoch。该错误不会降级为普通模型 turn error，也不会 admission 下一 turn；恢复器先闭合 incomplete turn，再重新开放 Goal 或普通输入。
 
-同一 writer epoch 内的 foreground owner 若意外 unwind，shell 先关闭仍 open 的 request/tool/compaction，再追加 `StepEnded` 与 `TurnEnded(error)`；该终止链与 Ctrl+C/Stop 使用同一 EventTracker 顺序。若 durable `TurnEnded` 已经存在，不能再生成一个替代终态或不同的 UI completion，writer 必须 fail closed。进程级中断无法由已死亡的 actor 写入，下一次加载通过 `recovery` 事件和同样的子项到父项顺序补齐。
+同一 writer epoch 内的 foreground owner 若意外 unwind，shell 先关闭仍 open 的 request/tool/compaction，再追加 `StepEnded` 与 `TurnEnded(error)`；该终止链与 Esc/Stop 使用同一 EventTracker 顺序。若 durable `TurnEnded` 已经存在，不能再生成一个替代终态或不同的 UI completion，writer 必须 fail closed。进程级中断无法由已死亡的 actor 写入，下一次加载通过 `recovery` 事件和同样的子项到父项顺序补齐。
 
 普通模型工具调用只走 typed `tool/call -> tool/result` 单轨：执行前等待 call 落盘，结果消息先进入同一 actor 队列，随后等待 result 终态 ACK；actor 顺序保证该 ACK 同时是结果消息的持久化屏障。shell 不再生产第二套 `ToolStarted/ToolCompleted` observation，也不把 stream/phase 伪装成生命周期。
 

@@ -2,39 +2,41 @@
 #[allow(unused_imports)]
 use crate::common::*;
 
-/// Minimal mode has no shortcuts bar, so the double-press quit confirmation must
-/// surface under the prompt instead: a first Ctrl+C on an empty, idle prompt
-/// arms the quit confirmation and shows "press Ctrl+c again to quit", and a
-/// second Ctrl+C within the window exits. (Ctrl+Q / Ctrl+D arm the same way; the
-/// hint is rendered by `minimal::live::render_exit_hint`.)
+/// Ctrl+C stays local at idle. Ctrl+D arms a visible one-second confirmation
+/// in minimal mode; the second press requests suspension and exits normally.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore]
-async fn minimal_ctrl_c_arms_and_quits() {
+async fn minimal_ctrl_d_confirms_and_quits() {
     let content = ContentController::start().await.expect("start content");
     git2::Repository::init(content.home()).expect("initialize isolated project");
     content.seed_llm_config().expect("seed mock LLM config");
     let mut harness = spawn_minimal(&content);
     wait_minimal_ready(&mut harness);
 
-    // First Ctrl+C (CSI legacy ETX). Arms quit + shows the hint under the prompt.
-    harness.inject_keys(b"\x03").expect("inject Ctrl+C");
+    harness
+        .inject_keys(b"\x03\x03")
+        .expect("Ctrl+C must stay local");
+    harness.update(Duration::from_millis(100));
+    assert!(!harness.screen_contents().contains("again to quit"));
+
+    harness.inject_keys(b"\x04").expect("arm Ctrl+D quit");
     harness
         .wait_for_text("again to quit", Duration::from_secs(5))
         .unwrap_or_else(|e| {
             panic!(
-                "quit-confirmation hint expected after first Ctrl+C: {e}\nscreen:\n{}",
+                "quit-confirmation hint expected after first Ctrl+D: {e}\nscreen:\n{}",
                 harness.screen_contents()
             )
         });
 
-    // Second Ctrl+C within the confirm window exits the process.
-    harness.inject_keys(b"\x03").expect("inject Ctrl+C again");
+    // Second Ctrl+D within the confirm window exits the process.
+    harness.inject_keys(b"\x04").expect("confirm Ctrl+D quit");
     let exit = harness
         .wait_exit_code(Duration::from_secs(5))
         .expect("wait for minimal pager exit");
     assert!(
         matches!(exit, PtyExitPoll::Exited(_) | PtyExitPoll::PendingStatus),
-        "second Ctrl+C should quit minimal, got {exit:?}\nscreen:\n{}",
+        "second Ctrl+D should quit minimal, got {exit:?}\nscreen:\n{}",
         harness.screen_contents()
     );
 }

@@ -1433,6 +1433,7 @@ async fn ensure_plugin_registry_lazily_populates_snapshot() {
         "repeat call must keep the populated snapshot"
     );
 }
+mod coordination_tool;
 mod mcp_catalog;
 #[cfg(unix)]
 mod process_scope_reclaim;

@@ -43,7 +43,8 @@ Move through conversation entries in the scrollback pane.
 | `PageUp` | | Scroll up one page (selection moves to the top of the viewport) |
 | `PageDown` | | Scroll down one page (selection moves to the bottom of the viewport) |
 | `Ctrl+U` | | Scroll up half page |
-| `Ctrl+D` (`Shift+D` in VSCode) | | Scroll down half page |
+| `D` | | Scroll down half page |
+| `Ctrl+D` | | Global Quit shortcut; press twice within one second to confirm |
 
 `PageUp` and `PageDown` also scroll the conversation while the ordinary prompt
 is focused, without moving focus or changing the draft. An active prompt
@@ -112,7 +113,7 @@ Switch between the prompt input and scrollback pane.
 
 **Steal-Esc (runs before mid-turn cancel / swallow and clear / rewind):** overlays, modals, slash/file/completion dropdowns, history search, scrollback search, text selection, link highlight, and **Bash / Remember mode exit** when the prompt is empty (Esc leaves `!` / `#` mode and returns to the normal prompt — even while a turn is running).
 
-**Esc vs Ctrl+C:** Esc keeps its cancel / clear / rewind behavior above. On an execution session, Ctrl+C requests suspension of the session tree and exits; it preserves the composer draft and does not cancel the turn or pause the Goal. Repeated Ctrl+C joins the first request. If the result is unconfirmed, the screen offers `r` to retry and `f` to force quit with a warning that recovery may be incomplete. Use Esc or the Stop Turn control when you mean to cancel the active turn. A read-only replay keeps its local exit behavior. See the [session-tree suspension contract](../../../../../openspec/changes/archive/2026-10-19-suspend-session-tree/specs/client-surfaces/spec.md#requirement-ctrl-c-requests-bounded-session-tree-suspension) for the exact boundary.
+**Esc vs Ctrl+C:** Esc keeps its cancel / clear / rewind behavior above. Ctrl+C keeps its composer and focused local-control behavior; when used to cancel a turn, it cancels only that turn. While cancellation is pending, another Ctrl+C retries cancellation. Ctrl+C never arms quit confirmation, exits, suspends the session tree, or escalates a repeated cancel. Idle, Welcome, Dashboard, and read-only replay states do not treat Ctrl+C as quit. See the [confirmed quit contract](../../../../../openspec/specs/client-surfaces/spec.md#requirement-confirmed-quit-requests-bounded-session-tree-suspension).
 
 ---
 
@@ -124,7 +125,7 @@ Actions that affect the agent session, available from the agent screen.
 |-----|---------|--------|
 | `Ctrl+P` | Agent screen | Open the command palette |
 | `?` (Shift+/) | Agent screen | Open the command palette (alt binding) |
-| `Ctrl+C` | Execution session | Suspend the session tree, then exit; drafts are preserved |
+| `Ctrl+C` | Agent screen | Clear the composer or operate the focused local control; cancel the current turn when used as a cancel shortcut |
 | `Ctrl+M` | Prompt focused | Toggle multiline input mode |
 | `Ctrl+S` | Agent screen | Open the session picker (resume a previous session) |
 | `Ctrl+;` (alt: `Ctrl+'`) | Agent screen | Toggle the prompt queue pane (when non-empty). **Local macOS** VS Code family only: primary **`Ctrl+4`** (`;` / `'` still alts). SSH and non-Mac keep **`Ctrl+;`** / **`Ctrl+'`**. |
@@ -215,9 +216,9 @@ Actions available from any screen.
 |-----|---------|--------|-------------|
 | `Ctrl+N` | | Create a new session (optionally in a git worktree) | Yes (double-press within 1000ms) |
 | `Ctrl+\` | | Open or toggle the [Agent Dashboard](23-dashboard.md) | No |
-| `Ctrl+Q` | `Ctrl+D` | Quit the application through the same session-tree suspension flow | Yes; Welcome exits immediately |
+| `Ctrl+D` | `Ctrl+Q` | Quit after a second press within one second; execution views suspend their session trees, read-only replay exits its local player | Yes; applies on Welcome, execution views, Dashboard, and read-only replay |
 
-**VS Code family terminal** (VS Code, Cursor, Windsurf, Zed integrated terminals): `Ctrl+Q` is captured by the host, so Grow makes **`Ctrl+D` the sole quit key** (`Ctrl+Q` is not bound). Half-page-down is rebound to bare **`Shift+D`**. Mid-turn interject uses **`Ctrl+L`** (no alternates) because `Ctrl+Enter` / `Ctrl+I` do not reliably reach the PTY; extensions are opened via `/plugins` instead of `Ctrl+L`.
+**VS Code family terminal** (VS Code, Cursor, Windsurf, Zed integrated terminals): `Ctrl+D` is the default Quit key; `Ctrl+Q` remains an alias where the host passes it through. Half-page-down uses uppercase **`D`** on all terminals. Custom bindings can reassign either action. Mid-turn interject uses **`Ctrl+L`** (no alternates) because `Ctrl+Enter` / `Ctrl+I` do not reliably reach the PTY; extensions are opened via `/plugins` instead of `Ctrl+L`.
 
 Normal quit and the first controlled OS quit signal use the same suspension request and five-second deadline. An unconfirmed result leaves the application open. Retry creates a new request identity for the same suspension operation; force quit is only available as an explicit action from the unconfirmed screen.
 
@@ -225,7 +226,7 @@ Normal quit and the first controlled OS quit signal use the same suspension requ
 
 ### Destructive Action Confirmation
 
-Actions marked with "Yes" in the confirmation column require a double-press within 1000ms. Press the key once to see a confirmation prompt, then press again to confirm. This prevents accidental session loss. The one exception is **Quit on the welcome screen**, where there is no session to lose — the first press quits immediately.
+Actions marked with "Yes" in the confirmation column require a double-press within 1000ms. For Quit, the first press leaves drafts and active work untouched; the second same-key press requests session-tree suspension from execution views, or exits the local player from read-only replay. Further Quit input while suspension is pending joins that operation and never force-quits.
 
 ---
 
@@ -238,7 +239,7 @@ Bindings that only fire on the welcome screen (before any agent session is open)
 | `Ctrl+S` | Resume session (open the session picker) |
 | `Ctrl+W` | Open the New Worktree dialog (only inside a git repository) |
 
-`Ctrl+W` is only active on the welcome screen. `Ctrl+S` opens the session picker on both the welcome screen and inside an Agent session (where it opens as a modal overlay, same as `/resume`). `Ctrl+Q` is the global Quit binding documented above.
+`Ctrl+W` is only active on the welcome screen. `Ctrl+S` opens the session picker on both the welcome screen and inside an Agent session (where it opens as a modal overlay, same as `/resume`). `Ctrl+D` is the global Quit binding documented above; `Ctrl+Q` is an alias when the terminal passes it through.
 
 ---
 
@@ -306,7 +307,7 @@ The TUI supports mouse interaction:
 
 ```
 Navigation:       Up/Down (prev/next entry)  Shift+Left/Right (prev/next turn)
-Scrolling:        Ctrl+J/K (line)  PgUp/PgDn (page)  Ctrl+U/D (half page)
+Scrolling:        Ctrl+J/K (line)  PgUp/PgDn (page)  Ctrl+U / D (half page)
 Focus prompt:     Space or any letter key (auto-focuses and types)
 ```
 
@@ -314,7 +315,7 @@ Focus prompt:     Space or any letter key (auto-focuses and types)
 
 ```
 Navigation:       j/k (up/down)  H/L (prev/next turn)  K/J (prev/next response)  g/G (top/bottom)
-Scrolling:        Ctrl+J/K (line)  Ctrl+U/D (half page; D=Shift+D in VSCode)  PgUp/PgDn (page)
+Scrolling:        Ctrl+J/K (line)  Ctrl+U / D (half page)  PgUp/PgDn (page)
 Folding:          h/l (collapse/expand)  e (toggle)  E (all)
 Content:          y (copy)  Y (copy cmd)  Enter (fullscreen)
 View:             r (raw markdown)  Ctrl+E (thinking)
@@ -368,5 +369,5 @@ Cancel:           Esc (or Stop Turn)
 Permission:       Ctrl+X, then P
 Behavior:         Ctrl+X, then B
 New session:      Ctrl+N (press again, then choose normal/worktree)
-Quit:             Ctrl+Q (or Ctrl+D in VSCode)
+Quit:             Ctrl+D twice within 1 second (Ctrl+Q alias where available)
 ```

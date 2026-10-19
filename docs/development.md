@@ -14,7 +14,7 @@ HTTP 200 的 SSE `event:error` 要连同事件名核对；平铺的 `code/messag
 是 provider 错误事实，普通事件缺少 `type` 则仍是协议错误。内容检查拒绝不自动重试，
 限流和过载仍须通过统一 attempt 安全与预算门槛。契约见
 [named stream error](../openspec/specs/model-sampling/spec.md#requirement-named-provider-stream-errors-retain-their-error-facts)。
-切换模型后的图片恢复沿用共享能力拒绝分类器：含图片的 HTTP 400 若明确声明 `messages.content.type 参数非法，取值范围 ['text']`，与英文 text-only 声明一样触发现有视觉辅助、OCR 和持久化图片投影；投影确认后才重建请求。分类器同时供 sampler 的拒绝用量结算与 Shell 恢复使用，不能只在一侧加入特例；其他类型列表或一般参数错误保持原路径。见 [图片能力拒绝与恢复](../openspec/specs/model-sampling/spec.md#requirement-session-image-descriptions-retain-original-media)。
+切换模型后的图片恢复沿用共享能力拒绝分类器：含图片的 HTTP 400 若明确声明 `messages.content.type 参数非法，取值范围 ['text']`，与英文 text-only 声明一样触发现有视觉辅助、OCR 和持久化图片投影；投影确认后才重建请求。冷恢复先从已校验的 completed Sideband 复用同一原始图片的中性描述，辅助配置不可用也不跳过复用；无关输入引起的全局修订变化不使描述失效，但来源、prompt、完成证据及新投影的当前修订/指纹仍须验证，未来修订不接受。取消会关闭原 foreground 的派发资格并终止生产任务，不能以普通辅助失败继续 OCR、后续图片组或主请求。拒绝记录使用实际请求的 model、backend、endpoint/query 身份；catalog 别名相同但请求路由变化时重新尝试，不同别名指向同一请求路由时共享拒绝记录。辅助视觉模型每次按当前配置解析，并避免向已拒绝图片的同一运行时递归请求。分类器同时供 sampler 的拒绝用量结算与 Shell 恢复使用，不能只在一侧加入特例；其他类型列表或一般参数错误保持原路径。见 [图片能力拒绝与恢复](../openspec/specs/model-sampling/spec.md#requirement-session-image-descriptions-retain-original-media)。
 Chat usage 尾帧的 audio、reasoning、prediction 明细可缺失或为 `null`，wire 类型保留为未知；显式零仍保留。可信总量和缓存字段照常归一化、结算，reasoning 未知时沿现有内部统计边界记为零。必需总量为空或明细类型非法仍拒绝整帧，不能靠跳过错误恢复。见 [可空 Chat 明细](../openspec/specs/model-sampling/spec.md#requirement-chat-usage-accepts-null-optional-token-details)。
 当前 `GROW_MAX_RETRIES` / `max_retries` 沿用字段名，表示同一未接纳模型步骤的
 总 attempt 上限，包含初次调用；0 仅允许初次调用。session 默认上限为 5，
@@ -165,6 +165,8 @@ Windows 协调清单用句柄级原子替换保留已有读者；独立会话加
 
 询问按 source session 与 inquiry ID 建立稳定身份，source/target Timeline 约束重试、恢复、响应关联和取消；见 [询问身份与恢复契约](../openspec/specs/local-coordination/spec.md#requirement-inquiry-identity-and-replay-are-durable-across-session-recovery)。
 
+模型 `ask_session` 的空白 inquiry_id 会按未提供处理并生成新 ID，非空值与外部协议 ID 继续严格校验；详见 [询问身份契约](../openspec/specs/local-coordination/spec.md#requirement-inquiry-scoped-operations)。
+
 跨会话协调与 Windows 存储还应检查对应 `.github/workflows/` 的平台回归。OpenSpec CI 只做文档格式与归档完成状态检查，语义由场景、源码、测试和 review 共同核对。
 
 用量状态栏由 `ChatStateEvent::SessionUsageUpdated` 投影到账本变化时的 transient `SessionInfoUpdate.meta["grow/sessionUsage"]`，复用 `PromptUsage`，不增加周期查询或模型输入。主模型 attempt、子 Agent 终态结算、session incomplete 与冷恢复边界写入 Timeline；新 actor 按结算身份恢复 lifetime aggregate，resident reconnect 不新增分段。Pager 按累计值替换、丢弃倒退及历史 replay；normal 状态栏只显示 lifetime 总体，`/usage` 另外按 Initial run、Resume #N 展示分段。计费窗口和点击行为见 [会话用量契约](../openspec/specs/client-surfaces/spec.md#requirement-ordinary-agent-status-shows-session-usage)。
@@ -179,7 +181,7 @@ Pager 的 cancel notification 没有响应体；`TurnCancelling` 因此在短窗
 
 ### Runtime 状态与恢复诊断
 
-正常退出和更新重启经 `grow/session/suspend_for_exit` 请求一个五秒共享期限的树挂起；UI 只有收到确认才退出，失败保留原操作供重试。排查恢复先核对 root 的 `TreeSuspended`、各节点 checkpoint、命令结算与物理 writer 退役，再检查 `RestorePrepared` / `Resumed` / `ExecutionReleased`。不要把 sampler 的部分输出、调用方超时或新的 actor 实例当作执行资格；中断或未知命令先核对其记录，不能自动重放。行为见 [session-timeline](../openspec/specs/session-timeline/spec.md)，验证见 [挂起记录](../openspec/changes/archive/2026-10-19-suspend-session-tree/verification.md)。
+正常退出由默认全局 `Ctrl+D` 在一秒内连续按两次确认，再经 `grow/session/suspend_for_exit` 请求一个五秒共享期限的树挂起；首次按键不改变草稿、队列、当前回合或 Goal，UI 只有收到挂起确认才退出。挂起期间重复退出键合并到原操作，不强退。`Ctrl+C` 保留 composer 清理、局部控件操作和当前回合取消；取消中的重复 `Ctrl+C` 只重试取消，不关联退出。更新重启仍走同一树挂起屏障。排查恢复先核对 root 的 `TreeSuspended`、各节点 checkpoint、命令结算与物理 writer 退役，再检查 `RestorePrepared` / `Resumed` / `ExecutionReleased`。不要把 sampler 的部分输出、调用方超时或新的 actor 实例当作执行资格；中断或未知命令先核对其记录，不能自动重放。行为见 [session-timeline](../openspec/specs/session-timeline/spec.md) 与 [已确认退出契约](../openspec/specs/client-surfaces/spec.md#requirement-confirmed-quit-requests-bounded-session-tree-suspension)，验证见 [挂起记录](../openspec/changes/archive/2026-10-19-suspend-session-tree/verification.md)。
 
 任务计划通过 SessionActor 的 `PlanningControl` 串行更新，检查 `Planning.previous` 和具体 source/result 引用。父项有效非完成修改要求 child 自行重规划，Consumed 不等于 Handled；普通完成和 Goal 还需核对必需交付的验收/解除记录。Plan 延期审阅使用独立 retained candidate 和不可变 decision identity；重试同一决定时 action、feedback 和候选都必须相同。契约见 [task-planning](../openspec/specs/task-planning/spec.md) 与 [behavior-goal](../openspec/specs/behavior-goal/spec.md)，实现记录见 [局部计划](../openspec/changes/archive/2026-10-19-evolve-task-planning/verification.md) 和 [Plan 审阅](../openspec/changes/archive/2026-10-19-retain-plan-for-later-review/verification.md)。
 
@@ -219,9 +221,9 @@ Dashboard 的路径粘贴共用 `insert_dropped_paths`，保留图片和普通�
 
 异步文件 URL 和原始剪贴板文本是两个独立来源。分类未命中时，通过 `ClipboardPasteSource::file_url_text_on_miss` 判断是否需要保留 URL 文本；仅在成功探测且没有原始非空文本时使用。见 [异步 URL 回退契约](../openspec/specs/client-surfaces/spec.md#requirement-deferred-file-urls-survive-classification-miss)。
 
-macOS `pbpaste -Prefer txt` 与图片 AppleScript 使用有界进程运行器：5 秒执行期限、stdout/stderr 各1 MiB，并回收所属进程组。图片 AppleScript 子进程继承单文件 50,000,000 字节 `RLIMIT_FSIZE`；图片写入私有临时文件后，Grow 最多读取 50,000,001 字节并拒绝超限结果。子进程文件限制不约束 helper/AppKit RSS、多个文件的合计用量或图片解码内存。简单图片粘贴会增加约 0.5–0.9 秒子进程与文件往返延迟。AppKit 在 Grow 内只用于读取 `changeCount`/`types` 元数据。见 [剪贴板图片读取契约](../openspec/specs/client-surfaces/spec.md#requirement-macos-clipboard-encoded-images-have-a-read-budget)、[子进程生命周期契约](../openspec/specs/client-surfaces/spec.md#requirement-clipboard-image-scripts-have-bounded-process-lifetimes) 与 [transfer file 写入预算](../openspec/changes/bound-macos-clipboard-transfer-file/specs/client-surfaces/spec.md)。
+macOS `pbpaste -Prefer txt` 与图片 AppleScript 使用有界进程运行器：5 秒执行期限、stdout/stderr 各1 MiB，并回收所属进程组。图片 AppleScript 子进程继承单文件 50,000,000 字节 `RLIMIT_FSIZE`；图片写入私有临时文件后，Grow 最多读取 50,000,001 字节并拒绝超限结果。子进程文件限制不约束 helper/AppKit RSS、多个文件的合计用量或图片解码内存。简单图片粘贴会增加约 0.5–0.9 秒子进程与文件往返延迟。AppKit 在 Grow 内只用于读取 `changeCount`/`types` 元数据。见 [剪贴板图片读取契约](../openspec/specs/client-surfaces/spec.md#requirement-macos-clipboard-encoded-images-have-a-read-budget)、[子进程生命周期契约](../openspec/specs/client-surfaces/spec.md#requirement-clipboard-image-scripts-have-bounded-process-lifetimes) 与 [transfer file 写入预算](../openspec/changes/archive/2026-09-24-bound-macos-clipboard-transfer-file/specs/client-surfaces/spec.md)。
 
-Kitty 非 PNG 转换在调用 sips 或 Rust 解码前检查源像素预算，见 [转换像素契约](../openspec/specs/client-surfaces/spec.md#requirement-kitty-image-conversion-bounds-source-pixels)。编码数据大小、源像素数、转换进程生命周期和终端直接解码是不同的资源边界。Grow 构造的 Kitty/iTerm2 图片上传 escape buffer 另有 100,000,000 字节序列化上限，见 [终端图片输出预算 change](../openspec/changes/bound-terminal-image-escape-output/specs/client-surfaces/spec.md)；它不限制终端进程解码或缓存图像的内存。
+Kitty 非 PNG 转换在调用 sips 或 Rust 解码前检查源像素预算，见 [转换像素契约](../openspec/specs/client-surfaces/spec.md#requirement-kitty-image-conversion-bounds-source-pixels)。编码数据大小、源像素数、转换进程生命周期和终端直接解码是不同的资源边界。Grow 构造的 Kitty/iTerm2 图片上传 escape buffer 另有 100,000,000 字节序列化上限，见 [终端图片输出预算 change](../openspec/changes/archive/2026-09-24-bound-terminal-image-escape-output/specs/client-surfaces/spec.md)；它不限制终端进程解码或缓存图像的内存。
 
 sips 源文件和结果文件由单个私有临时目录持有，错误出口也通过目录所有权回收，见 [转换临时文件契约](../openspec/specs/client-surfaces/spec.md#requirement-sips-conversion-owns-private-temporary-files)。不要恢复为共享临时根目录中的手工命名文件和分散清理。
 

@@ -190,7 +190,7 @@ impl Browser {
         self.help_previous_picker = self.workflow_picker.take();
         self.help_open = true;
         let help = format!(
-            "{status}\n\nRead-only replay. F8 pauses from any view. Space pauses in the transcript; +/- changes speed. ] advances to the next saved record. Tab selects an entry; Enter opens its details or subagent. / searches the already visible transcript. Esc/q closes one layer or returns to the parent; Ctrl-C exits. End follows the latest content. Recorded links and tools are never executed."
+            "{status}\n\nRead-only replay. F8 pauses from any view. Space pauses in the transcript; +/- changes speed. ] advances to the next saved record. Tab selects an entry; Enter opens its details or subagent. / searches the already visible transcript. Esc/q closes one layer or returns to the parent; Press Ctrl+D twice within one second to exit; Ctrl+C never exits. End follows the latest content. Recorded links and tools are never executed."
         );
         self.viewer = Some(BlockViewerPane::for_plain_text("Replay help", &help));
     }

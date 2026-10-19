@@ -6,7 +6,7 @@ use super::common::*;
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "PTY e2e; run the owning pty_e2e_* Cargo test with --ignored"]
-async fn ctrl_c_suspends_and_cold_resumes_root_child_grandchild_tree() {
+async fn ctrl_d_suspends_and_cold_resumes_root_child_grandchild_tree() {
     run_nested_tree_recovery(false, false).await;
 }
 
@@ -244,8 +244,8 @@ async fn run_nested_tree_recovery(partial_leaf_release: bool, concurrent_resume:
     );
 
     first
-        .inject_keys(b"\x03")
-        .expect("suspend the root and its nested child tree with one Ctrl+C");
+        .inject_keys(b"\x04\x04")
+        .expect("suspend the root and its nested child tree with two confirmed Ctrl+D presses");
     let exit = first
         .wait_for_exit_and_drain(Duration::from_secs(15), Duration::from_secs(1))
         .unwrap_or_else(|error| {

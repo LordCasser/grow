@@ -17,7 +17,9 @@ the current turn and send the queued message right away.
 - **`Esc`** — cancel a running turn immediately (your draft is kept).
 - **`Esc Esc`** while idle — clear the prompt; with an empty prompt, open
   the rewind picker instead. Cleared something by accident? `Ctrl+Z` undoes.
-- **`Ctrl+Q`** — quit (`Ctrl+D` in VS Code-family terminals), press twice.
+- **`Ctrl+C`** — clear the input locally or cancel the current turn; never quit.
+- **`Ctrl+D`** — press twice within one second to suspend the session tree
+  and quit. `Ctrl+Q` is an alias outside VS Code-family terminals.
 
 The **shortcuts bar** at the bottom always shows the keys relevant to what
 you're doing right now — when in doubt, look down.
