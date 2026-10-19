@@ -2418,6 +2418,7 @@ impl AgentSession {
             .token
     }
 
+    #[cfg(test)]
     pub(crate) fn prompt_status_query_matches(&self, prompt_id: &str) -> bool {
         self.prompt_status_query_matches_for(Some(prompt_id))
     }
@@ -2444,6 +2445,7 @@ impl AgentSession {
         generation
     }
 
+    #[cfg(test)]
     pub(crate) fn prompt_status_query_matches_generation(
         &self,
         prompt_id: &str,
