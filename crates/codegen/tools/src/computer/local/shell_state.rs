@@ -667,10 +667,10 @@ pub async fn write_snapshot_to_pipe(snapshot: &str, fd: OwnedFd) -> std::io::Res
 ///
 /// If a background process inherits fd 4, the pipe never closes and the reader
 /// hangs. The timeout (5s close timeout) prevents this from
-/// blocking the actor loop forever. On timeout, returns whatever was read so far
-/// (which is typically empty, so marker validation will fail and prior state is kept).
+/// blocking the actor loop forever. On timeout, returns an empty dump so marker
+/// validation fails and the prior state is kept.
 pub async fn read_dump_from_pipe(fd: OwnedFd) -> std::io::Result<String> {
-    // Read until either of the END markers appears, *not* until EOF.
+    // Read until either complete END marker line appears, *not* until EOF.
     //
     // When the user's command backgrounds a subprocess (`cmd &`), the bg
     // shell inherits fd 4 (the dump pipe's write-end) and keeps it open
@@ -694,6 +694,8 @@ pub async fn read_dump_from_pipe(fd: OwnedFd) -> std::io::Result<String> {
             std::mem::forget(fd);
             let mut buf = String::new();
             let mut chunk = [0u8; 4096];
+            let bash_end = format!("\n{BASH_STATE_END_MARKER}\n");
+            let zsh_end = format!("\n{ZSH_STATE_END_MARKER}\n");
             loop {
                 let n = file.read(&mut chunk)?;
                 if n == 0 {
@@ -702,9 +704,9 @@ pub async fn read_dump_from_pipe(fd: OwnedFd) -> std::io::Result<String> {
                     break;
                 }
                 buf.push_str(&String::from_utf8_lossy(&chunk[..n]));
-                // Either marker suffices; we accept whichever shell the
-                // child happens to be (bash vs zsh).
-                if buf.contains(BASH_STATE_END_MARKER) || buf.contains(ZSH_STATE_END_MARKER) {
+                // A marker without its final newline is still incomplete.
+                // Check only the fixed suffix, not the growing full snapshot.
+                if buf.ends_with(&bash_end) || buf.ends_with(&zsh_end) {
                     break;
                 }
             }
@@ -732,6 +734,38 @@ pub async fn read_dump_from_pipe(fd: OwnedFd) -> std::io::Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn dump_reader_waits_for_terminator_newline_without_waiting_for_eof() {
+        use std::io::Write;
+
+        for shell in [ShellKind::Bash, ShellKind::Zsh] {
+            let (read, write) = os_pipe().unwrap();
+            let mut writer = std::fs::File::from(write);
+            write!(
+                writer,
+                "{}\n/tmp\n{}",
+                shell.start_marker(),
+                shell.end_marker()
+            )
+            .unwrap();
+            let mut reader = tokio::spawn(read_dump_from_pipe(read));
+            assert!(
+                tokio::time::timeout(Duration::from_millis(100), &mut reader)
+                    .await
+                    .is_err(),
+                "reader must not finish before the terminator newline for {shell:?}"
+            );
+            writer.write_all(b"\n").unwrap();
+            let dump = tokio::time::timeout(Duration::from_secs(1), reader)
+                .await
+                .expect("complete marker must finish while the writer is still open")
+                .unwrap()
+                .unwrap();
+            assert!(parse_dump(shell, &dump).is_some());
+            drop(writer);
+        }
+    }
 
     #[test]
     fn shell_env_overrides_marks_agent_terminal() {
@@ -978,6 +1012,7 @@ mod tests {
     async fn run_command(state: &mut ShellState, command: &str) -> (i32, String, String) {
         use command_fds::CommandFdExt;
 
+        let started = std::time::Instant::now();
         let prep = state
             .prepare_command(
                 command,
@@ -1009,7 +1044,16 @@ mod tests {
         let output = child.wait_with_output().await.unwrap();
         write_handle.await.unwrap().unwrap();
         let dump = read_handle.await.unwrap().unwrap();
-        state.update_from_dump(&dump);
+        assert!(
+            state.update_from_dump(&dump),
+            "invalid state dump: bytes={}, complete_start={}, complete_end={}, elapsed={:?}, code={:?}, stderr={:?}",
+            dump.len(),
+            dump.starts_with(&format!("{}\n", state.shell.start_marker())),
+            dump.ends_with(&format!("{}\n", state.shell.end_marker())),
+            started.elapsed(),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr),
+        );
 
         let code = output.status.code().unwrap_or(-1);
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();

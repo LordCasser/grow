@@ -26,3 +26,7 @@ Pinned Rust 1.93.1 `cargo build --locked -p cli --bin grow` passed after the fin
 This local candidate is ready for committed-source CI. Main and official release gates must still pass on the immutable final source before publication; no prior-source successful job is substituted.
 
 Final preparation validation: 16 current/change items and 639 archived changes passed.
+
+## First committed candidate
+
+8a5685a45d9e7b2695b5d82c6ef4e7cdc7f1e4e6 was pushed to main. OpenSpec 39272597030 and Windows storage 39272597278 passed. Core 39272597347 reached 2424 tools tests passed, one failed, seven ignored: the original allexport test passed, but the new large-function fixture did not receive a valid first dump. No tag was created. The separate complete-shell-dump-terminators change adds a deterministic real-pipe newline regression, fixes premature marker completion and cumulative scans, and strengthens invalid-dump diagnostics. Its local final shell-state suite passes 29 tests; corrected-source hosted evidence follows rather than reusing the earlier candidate's green jobs.
