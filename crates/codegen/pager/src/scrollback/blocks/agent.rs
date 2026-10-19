@@ -1,5 +1,7 @@
 //! AgentMessageBlock - displays agent responses with markdown.
 
+use shell::sampling::conversation::IMAGE_PROJECTION_PLACEHOLDERS;
+
 use crate::scrollback::block::BlockContent;
 use crate::scrollback::types::{AccentStyle, BlockContext, BlockOutput};
 
@@ -125,7 +127,7 @@ impl AgentMessageBlock {
     }
 
     fn max_image_projection_placeholder_len() -> usize {
-        sampling_types::conversation::IMAGE_PROJECTION_PLACEHOLDERS
+        IMAGE_PROJECTION_PLACEHOLDERS
             .iter()
             .map(|placeholder| placeholder.len())
             .max()
@@ -133,14 +135,14 @@ impl AgentMessageBlock {
     }
 
     fn image_projection_placeholder(text: &str) -> Option<&'static str> {
-        sampling_types::conversation::IMAGE_PROJECTION_PLACEHOLDERS
+        IMAGE_PROJECTION_PLACEHOLDERS
             .into_iter()
             .find(|placeholder| *placeholder == text)
     }
 
     fn could_be_image_projection_prefix(text: &str) -> bool {
         text.len() <= Self::max_image_projection_placeholder_len()
-            && sampling_types::conversation::IMAGE_PROJECTION_PLACEHOLDERS
+            && IMAGE_PROJECTION_PLACEHOLDERS
                 .iter()
                 .any(|placeholder| placeholder.starts_with(text))
     }
@@ -362,7 +364,7 @@ mod tests {
 
     #[test]
     fn exact_image_projection_placeholders_are_hidden_at_every_chunk_boundary() {
-        for placeholder in sampling_types::conversation::IMAGE_PROJECTION_PLACEHOLDERS {
+        for placeholder in IMAGE_PROJECTION_PLACEHOLDERS {
             assert!(AgentMessageBlock::new(placeholder).is_empty());
             for split in 0..=placeholder.len() {
                 let mut block = AgentMessageBlock::streaming();
@@ -385,7 +387,7 @@ mod tests {
 
     #[test]
     fn deferred_streaming_hides_exact_image_projection_placeholder() {
-        let placeholder = sampling_types::conversation::IMAGE_PROJECTION_PLACEHOLDERS[1];
+        let placeholder = IMAGE_PROJECTION_PLACEHOLDERS[1];
         let mut block = AgentMessageBlock::streaming();
         block.push_chunk_deferred(&placeholder[..9]);
         block.push_chunk_deferred(&placeholder[9..]);
@@ -397,7 +399,7 @@ mod tests {
 
     #[test]
     fn image_projection_prefix_divergence_and_incomplete_finish_are_preserved() {
-        let placeholder = sampling_types::conversation::IMAGE_PROJECTION_PLACEHOLDERS[0];
+        let placeholder = IMAGE_PROJECTION_PLACEHOLDERS[0];
 
         let mut divergent = AgentMessageBlock::streaming();
         divergent.push_chunk(&placeholder[..5]);
@@ -424,7 +426,7 @@ mod tests {
 
     #[test]
     fn image_projection_placeholder_inside_explanation_is_preserved() {
-        let placeholder = sampling_types::conversation::IMAGE_PROJECTION_PLACEHOLDERS[1];
+        let placeholder = IMAGE_PROJECTION_PLACEHOLDERS[1];
         let explanation =
             format!("The internal marker is {placeholder} and should remain visible.");
         let block = AgentMessageBlock::new(&explanation);
@@ -446,7 +448,7 @@ mod tests {
 
     #[test]
     fn image_projection_hidden_body_is_restored_for_late_explanatory_chunks() {
-        for marker in sampling_types::conversation::IMAGE_PROJECTION_PLACEHOLDERS {
+        for marker in IMAGE_PROJECTION_PLACEHOLDERS {
             for deferred in [false, true] {
                 for constructed in [false, true] {
                     let mut block = if constructed {

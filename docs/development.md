@@ -156,6 +156,8 @@ cargo test --locked --lib -p chat-state -p sampling-types -p sampler -p memory -
 cargo build --locked -p cli --bin grow
 ```
 
+发布前分别执行默认 `cargo check --locked -p cli --bin grow` 和 `cargo check --locked --workspace --all-targets`，同时核对编译诊断与 build-script/linker stderr。库测试及 all-targets 会启用 dev-dependencies，不能替代默认生产构建；仅在测试图中可见的类型引用可能让测试通过而 CLI 无法编译。现有 core 门禁保留独立的默认 CLI build。
+
 PR 的 `core-regression` 在构建 `grow` 后串行运行工作流列出的 Pager PTY、挂起和计划恢复回归，包括 minimal、设置、滚动选择、队列取消、真实 `less` transcript 恢复和 leader 多客户端共享会话。它们仍以 `#[ignore]` 保持普通本地 Cargo 套件轻量；CI 显式提供 `PAGER_BINARY` 并仅选择已登记的场景。采样失败后继续的真实 ACP 回归另外使用同次构建的 `GROW_BINARY` 和精确测试 runner。完成历史 replay 的多客户端用例在附加 viewer 前等待第一轮 `turn_completed` 持久化记录；另一用例在首轮仍流式输出时附加 viewer，验证 resident reconnect 不会把运行中的 turn 当作冷恢复中断。单项可按工作流中的完整 target/name 运行：
 
 ```sh
