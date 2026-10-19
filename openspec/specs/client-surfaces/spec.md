@@ -4054,3 +4054,120 @@ Plan 完成后，客户端 SHALL 保留顶部已完成状态入口，详情 SHAL
 #### Scenario: Other Plan control results
 - **WHEN** 提交、修订或取消成功，或者完成输入非法
 - **THEN** 显示真实审批、取消或错误消息；失败不修改原 Plan，不生成 unavailable 占位。
+
+### Requirement: Transcript tree export syncs files portably
+
+CLI transcript tree export and trajectory archive preparation SHALL sync each completed transcript file before reporting successful preparation. CLI tree publication SHALL sync the target parent after the no-replace rename. Directory-entry syncing SHALL be attempted only on platforms where the standard filesystem API supports opening directories; errors from attempted directory syncs SHALL fail the operation. Unsupported directory opening on other platforms SHALL NOT prevent export. File creation, write, sync, archive creation, and publication errors SHALL remain failures and SHALL NOT be treated as successful output.
+
+#### Scenario: Windows prepares a transcript tree
+- **WHEN** a valid parent and child transcript tree is generated on Windows
+- **THEN** each transcript file is fully written and synced, directory traversal does not attempt to open a directory as a regular file, and the export or archive can complete.
+
+#### Scenario: Unix directory sync fails
+- **WHEN** syncing a transcript directory on a platform that supports directory handles returns an error
+- **THEN** tree preparation fails and the caller does not publish or return a successful archive.
+
+#### Scenario: Transcript file sync fails
+- **WHEN** a transcript file cannot be written or synced on any platform
+- **THEN** tree preparation fails and the incomplete output is not published or returned as a successful archive.
+
+#### Scenario: Publication parent sync fails after rename
+- **WHEN** the no-replace rename succeeds but syncing its parent directory fails
+- **THEN** CLI export returns an error without success feedback; the already published complete tree may remain at the target and is not removed.
+
+#### Scenario: HTTP archive response completes or is abandoned
+- **WHEN** the trajectory download response reaches end-of-stream or its client drops the response before consuming the full archive
+- **THEN** the handler releases the temporary archive in either case, while a fully consumed response contains the complete valid archive.
+
+### Requirement: Image recovery is one visible operation row
+When a text-only model requires image recovery, the client SHALL render the recovery lifecycle as one ordinary operation row with a stable operation identity, not as a NOTICE or a fabricated model tool call. The row SHALL show a running indicator while the configured vision model is called, update in place when local OCR begins, and reach a clear English terminal state for success, partial success, failure, or cancellation. Repeated updates and session replay SHALL update or reconstruct that same row. A terminal row SHALL not retain a running indicator.
+
+#### Scenario: Vision recovery succeeds
+- **WHEN** the configured vision model converts one image
+- **THEN** the running row settles in place to `Converted 1 image`.
+
+#### Scenario: OCR follows vision recovery
+- **WHEN** vision recovery fails or is unavailable and local OCR starts
+- **THEN** the existing row changes to show OCR progress and then settles to the final result, without adding a second progress row.
+
+#### Scenario: Recovery is partial or fails
+- **WHEN** only some image groups are converted, or no recovery source succeeds
+- **THEN** the same row reports the converted and unconverted counts, or a clear failure state, in English.
+
+#### Scenario: Recovery is cancelled or replayed
+- **WHEN** the owning operation is cancelled or its persisted lifecycle is replayed
+- **THEN** the row reaches a terminal state when the owning turn is terminal, while a genuinely active reconnect remains running; replay never creates duplicate rows for updates sharing the operation identity.
+
+#### Scenario: Offline snapshot ends during recovery
+- **WHEN** an offline transcript snapshot ends without a terminal event for a running recovery operation
+- **THEN** the read-only projection stops its running indicator and labels the row `Image recovery incomplete at snapshot`, without changing persisted history or claiming that the operation failed or was cancelled.
+
+#### Scenario: Driver RPC wins the terminal race
+- **WHEN** the driver's prompt response arrives before the durable turn notification
+- **THEN** the shared exact-prompt terminal boundary settles that prompt's operation once; a stale terminal for another prompt has no effect.
+
+#### Scenario: Resident reconnect restores an active conversion
+- **WHEN** reconnect finishes with an authoritative active foreground prompt
+- **THEN** only that prompt's unfinished conversion remains animated after generic replay cleanup; older unfinished rows stop, and a failed reload labels unresolved conversion status unavailable.
+
+### Requirement: Unchanged Agent and Sampling selections do not claim a switch
+
+Pager SHALL show an applied success notice for an Agent or Sampling selection only when applying it changes the effective selection. Agent no-op comparison SHALL continue to use the fully built runtime-equivalent profile and role prompt. Sampling model identity SHALL use the provider-qualified `ModelId`; reasoning effort is a separate selection attribute, and changing effort SHALL count as a real Sampling change even when the provider/model identity is unchanged. An unchanged selection SHALL still retain its authoritative terminal receipt, but it SHALL NOT synthesize a switch notice during terminal receipt repair or replay. While a control is Pending or Applying, the compact progress status SHALL omit a transition label when its current and desired targets are equal, without changing control admission or lifecycle state.
+
+#### Scenario: The active Agent is selected again
+
+- **WHEN** a requested Agent builds to a profile runtime-equivalent to the active Agent, including its role prompt
+- **THEN** the control receives its normal applied receipt without an “Agent switched” success notice
+
+#### Scenario: The active provider/model and effort are selected again
+
+- **WHEN** a requested Sampling target has the active provider-qualified model ID and effective reasoning effort
+- **THEN** the control receives its normal applied receipt without a “Sampling switched” success notice
+
+#### Scenario: Effort changes on the active provider/model
+
+- **WHEN** the provider-qualified model ID is unchanged but the requested reasoning effort differs
+- **THEN** the change remains an applied Sampling change and retains its success notice
+
+#### Scenario: An unchanged target is pending or applying
+
+- **WHEN** a Pending or Applying control projection has equal current and desired targets
+- **THEN** the compact progress status omits a transition label while the control remains in its normal lifecycle
+
+#### Scenario: Same Agent identity has a changed profile
+
+- **WHEN** the requested Agent has the same selector identity but its built profile is not runtime-equivalent to the active profile
+- **THEN** the Agent runtime is replaced and the applied success notice remains visible
+
+#### Scenario: A no-op receipt needs repair
+
+- **WHEN** an applied no-op terminal projection is retried or repaired after its durable receipt was recorded
+- **THEN** the receipt is restored without synthesizing a switch notice
+
+### Requirement: Received agent messages use communication tool rows
+
+Pager SHALL project an agent message receipt with valid structured identity as an ordinary communication tool row in the receiving Session. The row SHALL use the durable receipt ID for deduplication, show `Message from <source>` or `Reply from <source>` from structured facts, and display `Received` as its terminal status. A durable receipt SHALL NOT be shown as processing, consumed, read, executed, or completed work. The row SHALL preserve the complete message body and inspectable receipt/source/reply metadata. Notices without valid structured message identity SHALL remain finite notices.
+
+#### Scenario: A parent message is durably received
+- **WHEN** the receiving Session projects a valid parent-message receipt
+- **THEN** its history contains one `Message from <source>` tool-style row with `Received` status, the original message body and inspectable receipt data; the row does not claim the child consumed or acted on the message.
+
+#### Scenario: A reply is durably received
+- **WHEN** a Session projects a valid agent-reply receipt with a structured `reply_to`
+- **THEN** its history contains one `Reply from <source>` tool-style row with `Received` status and preserves the reply reference and original body in details.
+
+#### Scenario: Duplicate delivery or replay uses a different transport event ID
+- **WHEN** the same receipt is projected live, on replay, or after reconnect with different transport event IDs
+- **THEN** the durable receipt identity keeps one row, and a previously committed Minimal receipt is not printed again.
+
+#### Scenario: Receipt belongs to a child Session
+- **WHEN** a child Session receives a valid message while another view is selected
+- **THEN** the row belongs to that child's history without switching the selected view or entering the parent's history.
+
+#### Scenario: A received row does not suppress the child's first transcript replay
+- **WHEN** a child view contains only a user prompt and a valid receipt before its remaining updates have been replayed
+- **THEN** replay restores the remaining child history after the receipt without duplicating it; an ordinary tool row still suppresses replay when history is already present.
+
+#### Scenario: Message body is unavailable or notice identity is invalid
+- **WHEN** a valid receipt has no recoverable body, or a notice lacks valid structured receipt identity
+- **THEN** the valid receipt row retains its identity and shows `Message unavailable`; the invalid notice remains a bounded finite notice and does not enter a running-row lifecycle.

@@ -1,0 +1,7 @@
+# Design
+
+The actor already reports whether a Sampling application changed the provider-qualified `ModelId` or effective reasoning effort, and whether an Agent application replaced the active runtime profile. Carry that result into terminal notice projection instead of deriving a success sentence only from the requested target. Keep existing admission and preparation behavior so the Agent decision still includes the fully built role prompt and runtime profile.
+
+An unchanged successful control still commits and publishes its durable terminal receipt, but its `message` is absent. Failures continue to carry an error notice. A changed Sampling selection—including an effort-only change on the same provider/model—continues to carry the success notice. Agent identity for display and receipt remains `selector_identity`; unchanged Agent detection continues to compare the fully built profile and role prompt, while a changed definition under the same selector continues through the existing rebuild path. In the compact progress projection, if `current` exactly equals `desired`, omit the transition label for both Pending and Applying phases; keep the underlying pending state and response lifecycle unchanged.
+
+Receipt repair reuses the terminal's stored message as-is. It must not synthesize a success sentence when the stored terminal intentionally has no message, since that would turn a repeated selection into a false switch notice after a reconnect.

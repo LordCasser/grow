@@ -12,6 +12,7 @@ enum PendingControlSettlement {
             Result<crate::session::DesiredStateOutcome<crate::agent::models::ModelId>, acp::Error>,
         >,
         result: Result<crate::agent::models::ModelId, acp::Error>,
+        changed: bool,
         intent: Option<crate::session::ControlIntent>,
     },
     Agent {
@@ -69,6 +70,18 @@ impl PendingControlSettlement {
             }
             Self::Agent { result, .. } => result.as_ref().map(|_| ()).map_err(ToString::to_string),
         }
+    }
+
+    fn terminal_message(
+        &self,
+        target: &crate::extensions::notification::ControlTarget,
+    ) -> Option<String> {
+        let result = self.terminal_result();
+        let changed = match self {
+            Self::Sampling { changed, .. } => *changed,
+            Self::Agent { result, .. } => result.as_ref().is_ok_and(|changed| *changed),
+        };
+        SessionActor::selection_terminal_message(target, &result, changed)
     }
 
     fn settle(self, terminal_append: Result<(), crate::session::persistence::DurableAppendError>) {
@@ -182,10 +195,7 @@ impl SessionActor {
         if terminal.ui_terminal_durable {
             return Ok(());
         }
-        let message = terminal.message.clone().or_else(|| {
-            (terminal.phase == crate::extensions::notification::ControlPhase::Applied)
-                .then(|| Self::control_terminal_message(&terminal.target, &Ok(())))
-        });
+        let message = terminal.message.clone();
         let update = GrowSessionUpdate::ControlStateUpdate(
             crate::extensions::notification::ControlStateUpdate {
                 epoch: self.control_epoch.clone(),
@@ -235,6 +245,18 @@ impl SessionActor {
         match result {
             Ok(()) => label,
             Err(error) => format!("{label} failed: {error}"),
+        }
+    }
+
+    fn selection_terminal_message(
+        target: &crate::extensions::notification::ControlTarget,
+        result: &Result<(), String>,
+        changed: bool,
+    ) -> Option<String> {
+        if result.is_ok() && !changed {
+            None
+        } else {
+            Some(Self::control_terminal_message(target, result))
         }
     }
 
@@ -1507,7 +1529,7 @@ impl SessionActor {
                 } else {
                     crate::extensions::notification::ControlPhase::Rejected
                 };
-                let message = Some(Self::control_terminal_message(&projection.target, &result));
+                let message = settlement.terminal_message(&projection.target);
                 let (domain, intent) = settlement.control_intent();
                 // The Timeline transition and live route are authoritative at
                 // this point. Publish that terminal fact before releasing the
@@ -1538,7 +1560,7 @@ impl SessionActor {
                 } else {
                     crate::extensions::notification::ControlPhase::Rejected
                 };
-                let message = Some(Self::control_terminal_message(&projection.target, &result));
+                let message = settlement.terminal_message(&projection.target);
                 let terminal_append = self
                     .publish_control_projection(projection, phase, message.clone(), true)
                     .await;
@@ -1678,6 +1700,7 @@ impl SessionActor {
                     Some(PendingControlSettlement::Sampling {
                         respond_to: pending.respond_to,
                         result: result.map(|(model_id, _)| model_id),
+                        changed,
                         intent: pending.intent,
                     }),
                     fatal,
@@ -1936,7 +1959,7 @@ impl SessionActor {
                 } else {
                     crate::extensions::notification::ControlPhase::Rejected
                 };
-                let message = Some(Self::control_terminal_message(&projection.target, &result));
+                let message = settlement.terminal_message(&projection.target);
                 let (domain, intent) = settlement.control_intent();
                 self.state.lock().await.mark_control_intent_terminal(
                     domain,
@@ -1961,7 +1984,7 @@ impl SessionActor {
                 } else {
                     crate::extensions::notification::ControlPhase::Rejected
                 };
-                let message = Some(Self::control_terminal_message(&projection.target, &result));
+                let message = settlement.terminal_message(&projection.target);
                 let terminal_append = self
                     .publish_control_projection(projection, phase, message.clone(), true)
                     .await;
@@ -2386,6 +2409,52 @@ mod tests {
     use super::*;
     use crate::session::events::Event;
 
+    #[test]
+    fn unchanged_selection_has_no_success_notice_but_effort_changes_do() {
+        use crate::extensions::notification::ControlTarget;
+
+        let sampling = ControlTarget::Sampling {
+            model_id: "provider/model".into(),
+            reasoning_effort: Some("high".into()),
+        };
+        assert_eq!(
+            SessionActor::selection_terminal_message(&sampling, &Ok(()), false),
+            None,
+            "reselecting the current provider/model and effort is a no-op"
+        );
+        assert_eq!(
+            SessionActor::selection_terminal_message(&sampling, &Ok(()), true).as_deref(),
+            Some("Sampling switched to provider/model (high)"),
+            "a changed effort remains visible even when the model identity is unchanged"
+        );
+
+        let agent = ControlTarget::Agent {
+            agent_name: "coder".into(),
+        };
+        assert_eq!(
+            SessionActor::selection_terminal_message(&agent, &Ok(()), false),
+            None,
+            "an already-applied Agent profile is a no-op"
+        );
+        assert_eq!(
+            SessionActor::selection_terminal_message(&agent, &Ok(()), true).as_deref(),
+            Some("Agent switched to coder"),
+            "a real Agent runtime replacement remains visible"
+        );
+    }
+
+    #[test]
+    fn failed_selection_keeps_its_terminal_error_notice() {
+        let target = crate::extensions::notification::ControlTarget::Agent {
+            agent_name: "coder".into(),
+        };
+        assert_eq!(
+            SessionActor::selection_terminal_message(&target, &Err("unavailable".into()), false)
+                .as_deref(),
+            Some("Agent switched to coder failed: unavailable")
+        );
+    }
+
     #[tokio::test]
     async fn internal_control_transition_does_not_publish_ui_feedback() {
         tokio::task::LocalSet::new()
@@ -2471,6 +2540,219 @@ mod tests {
                     sampling_snapshot.desired.is_none(),
                     "internal restoration must not leak into reconnect pending state"
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn same_agent_selector_with_changed_profile_still_rebuilds() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, mut gateway_rx) = super::super::tests::support::build_actor().await;
+                while gateway_rx.try_recv().is_ok() {}
+                let current = actor.agent.borrow().definition().clone();
+                let selector = current.selector_identity();
+                let mut changed = current;
+                changed.prompt_body = Some("same selector, updated profile sentinel".into());
+                assert_eq!(changed.selector_identity(), selector);
+                let intent = crate::session::ControlIntent {
+                    client_id: "changed-agent-profile".into(),
+                    generation: 1,
+                    sequence: 1,
+                };
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                actor.admit_agent_selection(changed, Some(intent), tx).await;
+                assert_eq!(
+                    rx.await.unwrap().unwrap(),
+                    crate::session::DesiredStateOutcome::Applied(())
+                );
+                assert!(
+                    actor.agent.borrow().role_prompt().is_some_and(
+                        |prompt| prompt.contains("same selector, updated profile sentinel")
+                    ),
+                    "changed profile data must go through the normal Agent preparation path"
+                );
+
+                let updates = std::iter::from_fn(|| gateway_rx.try_recv().ok())
+                    .filter_map(|message| {
+                        let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
+                            return None;
+                        };
+                        (args.request.method.as_ref() == "grow/session_notification")
+                            .then(|| {
+                                serde_json::from_str::<
+                                    crate::extensions::notification::SessionNotification,
+                                >(args.request.params.get())
+                                .ok()
+                            })
+                            .flatten()
+                    })
+                    .filter_map(|notification| match notification.update {
+                        crate::extensions::notification::SessionUpdate::ControlStateUpdate(
+                            update,
+                        ) if update.domain
+                            == crate::extensions::notification::ControlDomain::Agent =>
+                        {
+                            Some(update)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert!(updates.iter().any(|update| {
+                    update.phase == crate::extensions::notification::ControlPhase::Pending
+                }));
+                let expected_message = format!("Agent switched to {selector}");
+                assert!(updates.iter().any(|update| {
+                    update.phase == crate::extensions::notification::ControlPhase::Applied
+                        && update.message.as_deref() == Some(expected_message.as_str())
+                }));
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn selecting_current_agent_uses_normal_receipt_without_switch_notice() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, mut gateway_rx) = super::super::tests::support::build_actor().await;
+                while gateway_rx.try_recv().is_ok() {}
+                let mut definition = actor.agent.borrow().definition().clone();
+                definition.name = "stable-reselect".into();
+                definition.prompt_body = Some("stable reselect profile".into());
+                let (setup_tx, setup_rx) = tokio::sync::oneshot::channel();
+                actor
+                    .admit_agent_selection(definition, None, setup_tx)
+                    .await;
+                setup_rx.await.unwrap().unwrap();
+                while gateway_rx.try_recv().is_ok() {}
+                let definition = actor.agent.borrow().definition().clone();
+                let selector = definition.selector_identity();
+                let intent = crate::session::ControlIntent {
+                    client_id: "same-agent-selection".into(),
+                    generation: 2,
+                    sequence: 1,
+                };
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                actor
+                    .admit_agent_selection(definition, Some(intent), tx)
+                    .await;
+                assert_eq!(
+                    rx.await.unwrap().unwrap(),
+                    crate::session::DesiredStateOutcome::Applied(())
+                );
+                let updates = std::iter::from_fn(|| gateway_rx.try_recv().ok())
+                    .filter_map(|message| {
+                        let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
+                            return None;
+                        };
+                        (args.request.method.as_ref() == "grow/session_notification")
+                            .then(|| {
+                                serde_json::from_str::<
+                                    crate::extensions::notification::SessionNotification,
+                                >(args.request.params.get())
+                                .ok()
+                            })
+                            .flatten()
+                    })
+                    .filter_map(|notification| match notification.update {
+                        crate::extensions::notification::SessionUpdate::ControlStateUpdate(
+                            update,
+                        ) if update.domain
+                            == crate::extensions::notification::ControlDomain::Agent =>
+                        {
+                            Some(update)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert!(updates.iter().any(|update| {
+                    update.phase == crate::extensions::notification::ControlPhase::Pending
+                }));
+                assert!(updates.iter().any(|update| {
+                    update.phase == crate::extensions::notification::ControlPhase::Applied
+                        && update.message.is_none()
+                }));
+                assert!(updates.iter().all(|update| update.message.is_none()));
+                let terminal = updates
+                    .iter()
+                    .find(|update| {
+                        update.phase == crate::extensions::notification::ControlPhase::Applied
+                    })
+                    .expect("durable no-op terminal projection");
+                assert_eq!(terminal.current, terminal.desired.clone().unwrap());
+                assert_eq!(
+                    selector,
+                    actor.agent.borrow().definition().selector_identity()
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn selecting_current_sampling_target_uses_normal_receipt_without_switch_notice() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, mut gateway_rx) = super::super::tests::support::build_actor().await;
+                while gateway_rx.try_recv().is_ok() {}
+                let active = actor.model_route.snapshot();
+                let intent = crate::session::ControlIntent {
+                    client_id: "same-sampling-selection".into(),
+                    generation: 2,
+                    sequence: 1,
+                };
+                let route = SessionActor::selection_route_for_test(
+                    active.model_id.clone(),
+                    active.sampling_config,
+                    85,
+                );
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                actor
+                    .admit_session_model_selection(route, None, Some(intent), tx)
+                    .await;
+                assert_eq!(
+                    rx.await.unwrap().unwrap(),
+                    crate::session::DesiredStateOutcome::Applied(active.model_id)
+                );
+                let updates = std::iter::from_fn(|| gateway_rx.try_recv().ok())
+                    .filter_map(|message| {
+                        let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
+                            return None;
+                        };
+                        (args.request.method.as_ref() == "grow/session_notification")
+                            .then(|| {
+                                serde_json::from_str::<
+                                    crate::extensions::notification::SessionNotification,
+                                >(args.request.params.get())
+                                .ok()
+                            })
+                            .flatten()
+                    })
+                    .filter_map(|notification| match notification.update {
+                        crate::extensions::notification::SessionUpdate::ControlStateUpdate(
+                            update,
+                        ) if update.domain
+                            == crate::extensions::notification::ControlDomain::Sampling =>
+                        {
+                            Some(update)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                assert!(updates.iter().any(|update| {
+                    update.phase == crate::extensions::notification::ControlPhase::Pending
+                }));
+                assert!(updates.iter().any(|update| {
+                    update.phase == crate::extensions::notification::ControlPhase::Applied
+                        && update.message.is_none()
+                }));
+                assert!(updates.iter().all(|update| update.message.is_none()));
+                let terminal = updates
+                    .iter()
+                    .find(|update| {
+                        update.phase == crate::extensions::notification::ControlPhase::Applied
+                    })
+                    .expect("durable no-op terminal projection");
+                assert_eq!(terminal.current, terminal.desired.clone().unwrap());
             })
             .await;
     }

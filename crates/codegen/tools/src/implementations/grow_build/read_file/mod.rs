@@ -45,6 +45,7 @@ static READ_FILE_CAPABILITIES: LazyLock<tool_protocol::ToolCapabilities> =
 pub(crate) const DESCRIPTION_FULL: &str = r#"Read a file.
 
 Usage:
+- To use a skill, call load_skill by its catalog name; reading SKILL.md is only file inspection. If skill loading is disabled or denied, report that it cannot be loaded and do not try Read, Shell, or another copy to bypass it.
 - The ${{ params.read.target_file }} parameter can be a relative path in the workspace or an absolute path
 - By default, it reads up to {max_lines_read} lines starting from the beginning of the file
 - Line numbers (1-based) appear as anchors in the format LINE_NUMBER→LINE_CONTENT on the first returned line and on every 10th line of the file; the lines in between show content only. Count from the nearest anchor when referring to a specific line
@@ -119,37 +120,7 @@ fn resolve_read_start_line(file_content: &str, offset: Option<i64>) -> usize {
 fn stored_read_offset(offset: Option<i64>) -> Option<usize> {
     offset.filter(|&o| o >= 0).map(|o| o as usize)
 }
-/// Files read in full (no line/token cap): any file named exactly `SKILL.md`,
-/// plus any Markdown file with a `skills` path component so docs a `SKILL.md`
-/// references are never silently truncated. `.`/`..` are folded lexically
-/// (symlinks are not resolved). Intentionally broader than
-/// skill discovery's dir check — matches any `skills` segment
-/// (plugin/bundled/user roots), and matches it exactly (not case-folded) so
-/// near-misses like `skills-cursor` do not qualify.
-fn is_skill_markdown(path: &std::path::Path) -> bool {
-    if path.file_name().is_some_and(|n| n == "SKILL.md") {
-        return true;
-    }
-    let is_md = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
-    if !is_md {
-        return false;
-    }
-    use std::path::Component;
-    let mut stack: Vec<&std::ffi::OsStr> = Vec::new();
-    for comp in path.components() {
-        match comp {
-            Component::CurDir | Component::RootDir | Component::Prefix(_) => {}
-            Component::ParentDir => {
-                stack.pop();
-            }
-            Component::Normal(c) => stack.push(c),
-        }
-    }
-    stack.into_iter().any(|c| c == "skills")
-}
+
 /// Result of extracting model-facing and raw file content.
 pub struct ExtractedContent {
     /// Line numbers with → separator (no padding).
@@ -276,7 +247,6 @@ pub(crate) async fn run_read_file(
         hints_enabled = res.get::<PathNotFoundHints>().is_some_and(|h| h.0);
     }
     let joined_path = resolve_model_path(&cwd, display_cwd.as_deref(), &input.path);
-    let is_skill_markdown = is_skill_markdown(&joined_path);
     let (path, _unicode_note) = match crate::util::fs::try_canonicalize(&joined_path).await {
         Ok(p) => (p, None),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -448,14 +418,8 @@ pub(crate) async fn run_read_file(
             .map(|t| t.0.max_lines_read())
             .unwrap_or_else(|| TruncationConfig::default().max_lines_read())
     };
-    let (effective_offset, effective_limit) = if is_skill_markdown {
-        (None, None)
-    } else {
-        (
-            input.offset,
-            Some(input.limit.unwrap_or(usize::MAX).min(max_lines)),
-        )
-    };
+    let effective_offset = input.offset;
+    let effective_limit = Some(input.limit.unwrap_or(usize::MAX).min(max_lines));
     let mut extracted = extract_file_content_lines(
         &file_content,
         effective_offset,
@@ -464,7 +428,7 @@ pub(crate) async fn run_read_file(
     );
     extracted.extracted_images.extend(document_images);
     let token_count = crate::util::truncate::estimate_tokens(&extracted.content);
-    if !is_skill_markdown && token_count > MAX_NUM_TOKENS {
+    if token_count > MAX_NUM_TOKENS {
         let (grep_name, execute_name);
         {
             let res = resources.lock().await;
@@ -512,11 +476,7 @@ pub(crate) async fn run_read_file(
         };
         return Ok(ReadFileOutput::FileTooLarge(msg));
     }
-    let (stored_offset, stored_limit) = if is_skill_markdown {
-        (None, None)
-    } else {
-        (stored_read_offset(input.offset), input.limit)
-    };
+    let (stored_offset, stored_limit) = (stored_read_offset(input.offset), input.limit);
     if let Some(flag) = streamable_out {
         *flag = true;
     }
@@ -1610,7 +1570,7 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
         );
     }
     #[tokio::test]
-    async fn skill_file_ignores_offset_and_limit() {
+    async fn skill_file_inspection_honors_offset_and_limit() {
         let tmp = TempDir::new().unwrap();
         let skill_dir = tmp.path().join(".grow/skills/commit");
         std::fs::create_dir_all(&skill_dir).unwrap();
@@ -1633,24 +1593,15 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             .unwrap();
         match result {
             ReadFileOutput::FileContent(fc) => {
-                assert!(
-                    fc.content.contains("line1"),
-                    "missing line1: {}",
-                    fc.content
-                );
-                assert!(
-                    fc.content.contains("line5"),
-                    "missing line5: {}",
-                    fc.content
-                );
-                assert_eq!(fc.offset, None);
-                assert_eq!(fc.limit, None);
+                assert_eq!(fc.raw_output, "line3\n");
+                assert_eq!(fc.offset, Some(3));
+                assert_eq!(fc.limit, Some(1));
             }
             other => panic!("Expected FileContent, got {:?}", other),
         }
     }
     #[tokio::test]
-    async fn skill_file_skips_token_limit() {
+    async fn skill_file_inspection_respects_token_limit() {
         let tmp = TempDir::new().unwrap();
         let line = "x".repeat(200);
         let big_content = std::iter::repeat_n(line.as_str(), 1100)
@@ -1676,13 +1627,13 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             .await
             .unwrap();
         assert!(
-            matches!(result, ReadFileOutput::FileContent(_)),
-            "SKILL.md should not be truncated, got {:?}",
+            matches!(result, ReadFileOutput::FileTooLarge(_)),
+            "SKILL.md inspection must honor normal token limits, got {:?}",
             std::mem::discriminant(&result),
         );
     }
     #[tokio::test]
-    async fn md_in_skills_dir_ignores_model_offset_and_limit() {
+    async fn skill_reference_inspection_honors_offset_and_limit() {
         let tmp = TempDir::new().unwrap();
         let skill_dir = tmp.path().join(".grow/skills/my-skill");
         std::fs::create_dir_all(&skill_dir).unwrap();
@@ -1705,18 +1656,9 @@ pub fn verify(req: &HttpRequest) -> Result<Claims, Error> {
             .unwrap();
         match result {
             ReadFileOutput::FileContent(fc) => {
-                assert!(
-                    fc.content.contains("line1"),
-                    "missing line1: {}",
-                    fc.content
-                );
-                assert!(
-                    fc.content.contains("line1200"),
-                    "missing line1200: {}",
-                    fc.content
-                );
-                assert_eq!(fc.offset, None);
-                assert_eq!(fc.limit, None);
+                assert_eq!(fc.raw_output, "line3\n");
+                assert_eq!(fc.offset, Some(3));
+                assert_eq!(fc.limit, Some(1));
             }
             other => panic!("Expected FileContent, got {:?}", other),
         }

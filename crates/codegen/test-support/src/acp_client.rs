@@ -184,6 +184,15 @@ impl GrowStdioClient {
 
     /// Initialize and authenticate (picks `api_key` auth method).
     pub async fn initialize(&self) -> acp::InitializeResponse {
+        self.initialize_with_attempt_lifecycle(false).await
+    }
+
+    /// Negotiate whether this test client can discard a failed attempt's
+    /// provisional output. Keep the default client append-only.
+    pub async fn initialize_with_attempt_lifecycle(
+        &self,
+        sampling_attempt_lifecycle: bool,
+    ) -> acp::InitializeResponse {
         let init_resp = self
             .conn
             .initialize(
@@ -201,6 +210,7 @@ impl GrowStdioClient {
                                 "skipProjectLayout": true
                             },
                             "clientType": "test-client",
+                            "samplingAttemptLifecycle": sampling_attempt_lifecycle,
                             "clientVersion": "0.0.0-test"
                         })
                         .as_object()

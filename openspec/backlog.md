@@ -1,6 +1,6 @@
 # 未解决边界
 
-已解决事项的设计、验证与归档记录见 [changes/archive/](changes/archive/)。用户于 2026-10-19 授权逐项结合代码核查、立项和修复；本轮确认结果与验证状态见 [backlog audit](changes/archive/2026-10-19-prepare-v2-4-0/backlog-audit.md)。确认缺陷已分别修复、验证和归档；下面只保留明确暂缓的产品方向，以及依赖真实负载证据的优化假设。用户再次确认本轮只修已确认缺陷，以下三项保持暂缓。原记录中的“后续/本次不改”描述的是登记时范围。
+已解决事项的设计、验证与归档记录见 [changes/archive/](changes/archive/)。用户于 2026-10-19 授权逐项结合代码核查、立项和修复；本轮确认结果与验证状态见 [backlog audit](changes/archive/2026-10-19-prepare-v2-4-0/backlog-audit.md)。确认缺陷已分别修复、验证和归档；下面保留明确暂缓的产品方向、依赖真实负载证据的优化假设，以及随后审计发现且需独立处理的架构债务。用户再次确认本轮只修已确认缺陷，以下三项保持暂缓。原记录中的“后续/本次不改”描述的是登记时范围。
 
 - **Remote Control / Agent Host 跨设备使用（暂缓、未排期）**：用户认可从其他设备连接和操作已有 Grow 会话的方向，但当前不实施、不设日期，不纳入 MCP 多轮或保留计划提案。本次不展开远端控制架构，也不因此引入统一 Dock、Memory 或其他大型功能。未来明确启动时另建 change，重新界定身份、权限、执行 owner、断线和恢复边界；本条不构成实现授权。决策见 [2026-10-11 上游主题评审](changes/archive/2026-10-18-record-upstream-review-2bdd1d6/review.md)。
 
@@ -10,3 +10,5 @@
 ## 待独立核对
 
 - **同步 compaction 的 TODO 展示清理**：`pager/src/app/acp_handler/session_notification.rs` 在 `AutoCompactCompleted { async_compact: false }` 时直接清空前端 TODO，而当前局部计划由 Timeline 持有。需独立核对同步压缩后的计划再投影及恢复顺序，确认是否存在暂时或持续丢失任务入口；本次 Plan 顶部入口及 Agent 切换修复不扩展到压缩路径。
+
+- **工具运行时错误被后续 Step 错误遮蔽（已确认，待独立立项）**：本轮 resource 模型管线回归曾触发 Timeline 参数校验拒绝；`shell/src/session/actor/turn/mod.rs` 的 `execute_tool_calls_result` 匹配把 `Err` 落到 `_ => false` 后尝试下一 Step，最终报告 Step/Turn 边界失败而遮蔽最初错误。resource 参数校验已在 strengthen-skill-loading 修正，正常路径与权限拒绝继续通过现有生命周期；通用工具运行时错误的 fail-stop、未完成 Tool/Step 的 durable 收尾及原始错误保留须另立最小 change，不顺带重写当前回合状态机。验收需注入 tool admission/result publication/terminal ACK 失败，断言不发下一模型请求，并检查冷恢复没有伪造完成或丢失原始错误。

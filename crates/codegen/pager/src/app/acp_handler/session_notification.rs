@@ -99,7 +99,9 @@ pub(crate) fn project_ui_notice(
     event_id: Option<String>,
     is_replay: bool,
 ) -> bool {
-    use crate::scrollback::blocks::tool::{CoordinationPhase, CoordinationRow, OtherToolCallBlock};
+    use crate::scrollback::blocks::tool::{
+        CoordinationPhase, CoordinationRow, OtherToolCallBlock, ToolCallBlock,
+    };
     use shell::extensions::notification::AgentMessageNotice;
     if notice.category == shell::extensions::notification::UiNoticeCategory::Coordination {
         if let Some(data) = AgentMessageNotice::from_notice(&notice) {
@@ -108,11 +110,7 @@ pub(crate) fn project_ui_notice(
             // eventId. Replays may carry a different cache eventId, so the
             // Timeline receipt is the only identity shared by both paths.
             let stable_event_id = format!("parent-message:{receipt_id}");
-            let mut render_block = ui_notice_block(notice, Some(stable_event_id));
-            let RenderBlock::Notice(block) = &mut render_block else {
-                unreachable!()
-            };
-            block.text = if data.reply_to.is_some() {
+            let title = if data.reply_to.is_some() {
                 format!("Reply from {}", data.source_session_id)
             } else {
                 format!("Message from {}", data.source_session_id)
@@ -123,16 +121,16 @@ pub(crate) fn project_ui_notice(
             } else {
                 body.push(CommunicationSectionKind::Error, "Message unavailable");
             }
-            block.details = None;
-            block.set_communication_body(body);
-            block.set_communication_data(
-                serde_json::to_string_pretty(&serde_json::json!({
-                    "receipt_id": receipt_id,
-                    "notice": data,
-                }))
-                .unwrap_or_else(|_| "{}".into()),
-            );
-            scrollback.push_block(render_block);
+            let data = serde_json::to_string_pretty(&serde_json::json!({
+                "receipt_id": receipt_id,
+                "notice": data,
+            }))
+            .unwrap_or_else(|_| "{}".into());
+            let block = OtherToolCallBlock::new(title, "Received")
+                .with_communication_body(body)
+                .with_communication_data(data)
+                .with_immutable_event_id(stable_event_id);
+            scrollback.push_block(RenderBlock::ToolCall(ToolCallBlock::Other(block)));
             return true;
         }
         match notice.subject.as_deref() {
@@ -781,6 +779,11 @@ fn handle_session_notification_inner(
             state,
             &mut agent.scrollback,
         ),
+        GrowSessionUpdate::ImageRecoveryOperation {
+            operation_id,
+            prompt_id,
+            state,
+        } => apply_image_recovery_operation(operation_id, prompt_id, state, &mut agent.scrollback),
         GrowSessionUpdate::RetryState(ref retry) => {
             let stale = !meta.is_replay
                 && meta.prompt_id.as_deref().is_some_and(|pid| {
@@ -881,6 +884,16 @@ fn handle_session_notification_inner(
             ..
         } => {
             if agent.session.loading_replay {
+                let terminal_message = if matches!(stop_reason.as_str(), "cancelled" | "canceled") {
+                    "Image recovery cancelled"
+                } else {
+                    "Image recovery interrupted"
+                };
+                settle_unfinished_image_recovery(
+                    &mut agent.scrollback,
+                    Some(&prompt_id),
+                    terminal_message,
+                );
                 agent.scrollback.seal_subagent_permission_group();
                 agent.session.replayed_terminal_prompts.insert(prompt_id);
                 false
@@ -1635,6 +1648,126 @@ fn handle_session_notification_inner(
         return app.apply_terminal_outcome(outcome, parent_id, is_active);
     }
     (changed || control_resolved) && is_active
+}
+
+fn apply_image_recovery_operation(
+    operation_id: String,
+    prompt_id: Option<String>,
+    state: shell::extensions::notification::ImageRecoveryOperationState,
+    scrollback: &mut crate::scrollback::state::ScrollbackState,
+) -> bool {
+    use shell::extensions::notification::ImageRecoveryOperationState as State;
+    let (message, running, failed) = match state {
+        State::Started { message } | State::Vision { message } | State::Ocr { message } => {
+            (message, true, false)
+        }
+        State::Completed { message } => (message, false, false),
+        State::Failed { message } => (message, false, true),
+    };
+    let existing = (0..scrollback.len()).find_map(|index| {
+        let entry = scrollback.get(index)?;
+        match &entry.block {
+            crate::scrollback::block::RenderBlock::ImageRecovery(block)
+                if block.operation_id == operation_id =>
+            {
+                Some(entry.id)
+            }
+            _ => None,
+        }
+    });
+    let entry_id = if let Some(id) = existing {
+        let Some(entry) = scrollback.get_by_id_mut(id) else {
+            return false;
+        };
+        let Some(block) = entry.block.as_image_recovery_mut() else {
+            return false;
+        };
+        // A replay duplicate or delayed progress notification must not reopen
+        // a row that already received a terminal state.
+        if !block.running && running {
+            return false;
+        }
+        block.message = message;
+        block.prompt_id = prompt_id;
+        block.running = running;
+        block.failed = failed;
+        entry.invalidate_cache();
+        id
+    } else {
+        scrollback.push_block(crate::scrollback::block::RenderBlock::image_recovery(
+            operation_id,
+            prompt_id,
+            message,
+            running,
+            failed,
+        ))
+    };
+    scrollback.set_entry_running(entry_id, running);
+    true
+}
+
+pub(crate) fn settle_unfinished_image_recovery(
+    scrollback: &mut crate::scrollback::state::ScrollbackState,
+    prompt_id: Option<&str>,
+    message: &str,
+) {
+    settle_image_recovery_matching(scrollback, message, |block| {
+        prompt_id.is_none_or(|prompt| block.prompt_id.as_deref() == Some(prompt))
+    });
+}
+
+pub(crate) fn settle_stale_image_recovery(
+    scrollback: &mut crate::scrollback::state::ScrollbackState,
+    preserve_prompt_id: Option<&str>,
+    message: &str,
+) {
+    settle_image_recovery_matching(scrollback, message, |block| {
+        preserve_prompt_id.is_none_or(|prompt| block.prompt_id.as_deref() != Some(prompt))
+    });
+    // Reconnect cleanup clears the generic running index. Restore only the
+    // operation whose owner the authoritative foreground snapshot preserved.
+    if let Some(prompt) = preserve_prompt_id {
+        let ids = scrollback
+            .iter_entries()
+            .filter_map(|(id, entry)| {
+                matches!(&entry.block, RenderBlock::ImageRecovery(block)
+                if block.running && block.prompt_id.as_deref() == Some(prompt))
+                .then_some(id)
+            })
+            .collect::<Vec<_>>();
+        for id in ids {
+            scrollback.set_entry_running(id, true);
+        }
+    }
+}
+
+fn settle_image_recovery_matching(
+    scrollback: &mut crate::scrollback::state::ScrollbackState,
+    message: &str,
+    matches: impl Fn(&crate::scrollback::blocks::ImageRecoveryBlock) -> bool,
+) {
+    let ids = (0..scrollback.len())
+        .filter_map(|index| {
+            let entry = scrollback.get(index)?;
+            matches!(
+                &entry.block,
+                crate::scrollback::block::RenderBlock::ImageRecovery(block)
+                    if block.running && matches(block)
+            )
+            .then_some(entry.id)
+        })
+        .collect::<Vec<_>>();
+    for id in ids {
+        if let Some(entry) = scrollback.get_by_id_mut(id) {
+            if let Some(block) = entry.block.as_image_recovery_mut() {
+                block.message = message.to_owned();
+                block.running = false;
+                block.failed = true;
+                entry.invalidate_cache();
+            }
+        }
+        scrollback.set_entry_running(id, false);
+    }
 }
 /// Handle an Grow session notification that targets a child (subagent) session.
 ///

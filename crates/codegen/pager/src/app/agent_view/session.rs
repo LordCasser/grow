@@ -821,6 +821,20 @@ impl AgentView {
         running_prompt_id: Option<String>,
     ) -> bool {
         let finalized = self.finish_session_reload(generation, ok);
+        if finalized {
+            let preserve = running_prompt_id
+                .as_deref()
+                .filter(|pid| ok && self.should_adopt_running_prompt(pid));
+            crate::app::acp_handler::settle_stale_image_recovery(
+                &mut self.scrollback,
+                preserve,
+                if ok {
+                    "Image recovery interrupted"
+                } else {
+                    "Image recovery status unavailable"
+                },
+            );
+        }
         if finalized
             && let Some(pid) = running_prompt_id.as_deref()
             && self.should_adopt_running_prompt(pid)

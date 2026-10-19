@@ -1,0 +1,5 @@
+- [x] Carry effective-change information into Agent and Sampling terminal notice projection.
+- [x] Keep no-op receipts durable and prevent repair from inventing a success notice.
+- [x] Add focused tests for Agent no-op, Sampling no-op, effort-only change, and same-name changed Agent behavior.
+- [x] Validate the change against the OpenSpec contract.
+- [x] Run focused Rust tests for the actor admission and terminal projection paths.

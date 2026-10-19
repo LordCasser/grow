@@ -442,44 +442,27 @@ impl SkillManager {
     /// A bare name is used when unique; collisions require the existing
     /// scope/plugin-qualified skill identity.
     pub fn model_callable_skills(&self) -> Vec<(String, SkillInfo)> {
-        let skills: Vec<_> = self
-            .slash_skills()
-            .into_iter()
-            .filter(|skill| skill.enabled && !skill.disable_model_invocation)
-            .collect();
+        let skills = self.slash_skills();
         callable_names(&skills)
             .into_iter()
+            .filter(|(_, skill)| skill.enabled && !skill.disable_model_invocation)
             .map(|(name, skill)| (name, skill.clone()))
             .collect()
     }
 
-    /// Resolve the exact invocation identity for a user or model source.
-    /// Qualification and duplicate rejection are shared across both paths;
-    /// each path applies only its own invocation eligibility flag.
+    /// Resolve identity before checking eligibility. Filtering first could
+    /// silently give a disabled name to a different enabled source.
     pub fn resolve_skill(&self, name: &str, user_invocation: bool) -> Result<SkillInfo, String> {
-        let skills: Vec<_> = self
-            .slash_skills()
-            .into_iter()
-            .filter(|skill| {
-                skill.enabled
-                    && if user_invocation {
-                        skill.user_invocable
-                    } else {
-                        !skill.disable_model_invocation
-                    }
-            })
-            .collect();
-        let mut matches = callable_names(&skills)
-            .into_iter()
-            .filter(|(callable_name, _)| callable_name == name);
-        let skill = matches
-            .next()
-            .map(|(_, skill)| skill)
-            .ok_or_else(|| format!("No enabled, callable skill matches the exact name '{name}'"))?;
-        if matches.next().is_some() {
-            return Err(format!(
-                "Skill name '{name}' is ambiguous; use a unique qualified name"
-            ));
+        let skills = self.slash_skills();
+        let skill = resolve_catalog_skill(&skills, name)?;
+        if !skill.enabled {
+            return Err(skill_unavailable(name, "disabled by configuration"));
+        }
+        if user_invocation && !skill.user_invocable {
+            return Err(skill_unavailable(name, "not user-invocable"));
+        }
+        if !user_invocation && skill.disable_model_invocation {
+            return Err(skill_unavailable(name, "not model-invocable"));
         }
         Ok(skill.clone())
     }
@@ -563,7 +546,34 @@ impl SkillManager {
     }
 }
 
-/// Produce callable names for an already-filtered invocation directory.
+/// Resolve an exact bare or qualified catalog identity without changing policy.
+/// Initialization uses this same resolver before checking its own eligibility.
+pub fn resolve_catalog_skill<'a>(
+    skills: &'a [SkillInfo],
+    name: &str,
+) -> Result<&'a SkillInfo, String> {
+    let mut matches = skills
+        .iter()
+        .filter(|skill| skill.name == name || format_skill_name(skill) == name);
+    let skill = matches
+        .next()
+        .ok_or_else(|| skill_unavailable(name, "not found in the current catalog"))?;
+    if matches.next().is_some() {
+        return Err(skill_unavailable(
+            name,
+            "ambiguous; select an explicit qualified catalog name",
+        ));
+    }
+    Ok(skill)
+}
+
+pub fn skill_unavailable(name: &str, reason: &str) -> String {
+    format!(
+        "Skill '{name}' cannot be loaded: {reason}. Report this limitation; do not bypass it using file reads, shell commands, or another copy."
+    )
+}
+
+/// Produce stable callable names before eligibility filtering.
 /// Ambiguous bare names require the canonical scope/plugin qualification.
 pub(super) fn callable_names(skills: &[SkillInfo]) -> Vec<(String, &SkillInfo)> {
     skills
@@ -1225,6 +1235,33 @@ mod tests {
     }
 
     #[test]
+    fn disabled_identity_is_not_reassigned_to_enabled_plugin() {
+        let mut disabled = make_skill("guide", "/native/guide/SKILL.md");
+        disabled.enabled = false;
+        let mut plugin = make_skill("guide", "/plugin/guide/SKILL.md");
+        plugin.plugin_name = Some("review".into());
+        plugin.has_user_specified_description = true;
+        let mut manager = SkillManager::new();
+        manager.seed(None, None, vec![disabled, plugin], None, None);
+        assert!(
+            manager
+                .resolve_skill("guide", false)
+                .unwrap_err()
+                .contains("ambiguous")
+        );
+        assert!(
+            manager
+                .resolve_skill("local:guide", false)
+                .unwrap_err()
+                .contains("disabled by configuration")
+        );
+        assert!(manager.resolve_skill("review:guide", false).is_ok());
+        let listing = manager.model_callable_skills();
+        assert_eq!(listing.len(), 1);
+        assert_eq!(listing[0].0, "review:guide");
+    }
+
+    #[test]
     fn invocation_resolution_requires_exact_unique_names_and_source_eligibility() {
         let mut user_skill = make_skill("guide", "/user/guide/SKILL.md");
         user_skill.scope = crate::implementations::skills::types::SkillScope::User;
@@ -1359,7 +1396,7 @@ mod tests {
     // ── Display-path rewriting tests ─────────────────────────────
 
     #[test]
-    fn display_cwd_rewrites_announcement_paths() {
+    fn listing_omits_both_real_and_display_paths() {
         let mut mgr = SkillManager::new();
         mgr.seed(
             Some("/overlay/worktree".into()),
@@ -1373,14 +1410,15 @@ mod tests {
         );
         let r = mgr.take_pending_reconciliation().unwrap();
         let text = r.effects.system_reminder.unwrap();
-        // Display path must use the display cwd.
-        assert!(text.contains("/home/user/project"));
+        // Names are sufficient; installation paths do not belong in discovery.
+        assert!(text.contains("`deploy`"));
+        assert!(!text.contains("/home/user/project"));
         // Real overlay path must NOT appear in announcement.
         assert!(!text.contains("/overlay/worktree"));
     }
 
     #[test]
-    fn no_display_cwd_shows_real_paths() {
+    fn listing_without_display_cwd_omits_installation_paths() {
         let mut mgr = SkillManager::new();
         mgr.seed(
             Some("/real/path".into()),
@@ -1394,7 +1432,8 @@ mod tests {
         );
         let r = mgr.take_pending_reconciliation().unwrap();
         let text = r.effects.system_reminder.unwrap();
-        assert!(text.contains("/real/path"));
+        assert!(text.contains("`deploy`"));
+        assert!(!text.contains("/real/path"));
     }
 
     // ── /clear + startup visibility tests ─────────────────────────
@@ -1541,7 +1580,7 @@ mod tests {
         let r = mgr.take_pending_reconciliation().unwrap();
         let text = r.effects.system_reminder.unwrap();
         assert!(
-            text.contains("Absolute path:"),
+            text.contains("- `commit`:"),
             "default format should produce markdown: {text}"
         );
         assert!(

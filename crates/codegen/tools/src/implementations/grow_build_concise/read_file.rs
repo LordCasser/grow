@@ -6,6 +6,7 @@ const DESCRIPTION_CONCISE: &str = r#"Reads a file from the computer's filesystem
 It is okay to read a file that does not exist; an error will be returned.
 
 Usage:
+- To use a skill, call load_skill by its catalog name; reading SKILL.md is only file inspection. If skill loading is disabled or denied, report that it cannot be loaded and do not try Read, Shell, or another copy to bypass it.
 - You can optionally specify ${{ params.read.offset }} and ${{ params.read.limit }} (especially handy for long files).
 - Lines in the output are numbered starting at 1, using following format: LINE_NUMBER→LINE_CONTENT.
 - Office, OpenDocument, RTF, EPUB, CSV, and PDF text is converted to Markdown; PDF raster images are extracted for OCR or multimodal analysis without rendering pages.

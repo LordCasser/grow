@@ -84,6 +84,7 @@ Anchors are valid only for the file state at read time — after any edit,
 use the fresh anchors returned by ${{ tools.by_kind.edit }} or re-read the file.${%- endif %}
 
 Usage:
+- To use a skill, call load_skill by its catalog name; reading SKILL.md is only file inspection. If skill loading is disabled or denied, report that it cannot be loaded and do not try Read, Shell, or another copy to bypass it.
 - The ${{ params.read.target_file }} parameter accepts either a relative path in the workspace or an absolute path
 - By default reads up to {max_lines_read} lines from the beginning
 - Optionally specify ${{ params.read.offset }} and ${{ params.read.limit }} for large files

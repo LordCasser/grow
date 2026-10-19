@@ -572,7 +572,7 @@ impl<'a> EffectiveCommandCatalog<'a> {
             .collect();
         let mut bare_counts: HashMap<&str, usize> = HashMap::new();
         let mut qualified_counts: HashMap<String, usize> = HashMap::new();
-        for skill in &candidates {
+        for skill in skills {
             *bare_counts.entry(skill.name.as_str()).or_default() += 1;
             *qualified_counts
                 .entry(format_skill_name(skill))

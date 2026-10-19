@@ -221,7 +221,7 @@ fn extract_command_args(text: &str) -> Option<&str> {
 }
 
 /// Escape XML attribute special characters. Keep skill bodies unchanged.
-fn escape_xml(s: &str) -> String {
+pub fn escape_xml(s: &str) -> String {
     s.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")

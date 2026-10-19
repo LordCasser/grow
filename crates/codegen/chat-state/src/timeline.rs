@@ -4885,8 +4885,9 @@ impl Timeline {
             .collect::<Vec<_>>();
         current_calls.len() == 1
             && admitted_calls.len() == 1
-            && valid_model_skill_call(current_calls[0], skill)
-            && valid_model_skill_call(&admitted_calls[0], skill)
+            && model_skill_call_arguments(current_calls[0], skill).is_some_and(|current| {
+                model_skill_call_arguments(&admitted_calls[0], skill).as_ref() == Some(&current)
+            })
     }
 
     fn unconsumed_skill_load_indices(&self) -> BTreeSet<usize> {
@@ -6769,23 +6770,30 @@ fn valid_consumed_skill_loads(
     true
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 struct ModelLoadSkillArguments {
     name: String,
     #[serde(default)]
     args: String,
+    #[serde(default)]
+    resource: Option<String>,
 }
 
-fn valid_model_skill_call(
+fn model_skill_call_arguments(
     call: &sampling_types::ToolCall,
     skill: &sampling_types::SkillLoadItem,
-) -> bool {
+) -> Option<ModelLoadSkillArguments> {
     if call.name != sampling_types::LOAD_SKILL_TOOL_NAME {
-        return false;
+        return None;
     }
     serde_json::from_str::<ModelLoadSkillArguments>(&call.arguments)
-        .is_ok_and(|arguments| arguments.name == skill.skill_name && arguments.args == skill.args)
+        .ok()
+        .filter(|arguments| {
+            arguments.name == skill.skill_name
+                && arguments.args == skill.args
+                && (arguments.resource.is_none() || arguments.args.is_empty())
+        })
 }
 
 fn valid_compaction_replacement(items: &[ConversationItem]) -> bool {
@@ -16233,6 +16241,79 @@ mod tests {
         assert!(matches!(
             timeline.surface().last(),
             Some(ConversationItem::SkillLoad(_))
+        ));
+
+        let mut resource_skill = skill.clone();
+        resource_skill.args.clear();
+        resource_skill.prepared_body = "literal resource body".into();
+        for (arguments, accepted) in [
+            (
+                serde_json::json!({"name":"review","resource":"references/api.md"}),
+                true,
+            ),
+            (
+                serde_json::json!({"name":"review","resource":"references/api.md","args":"mixed"}),
+                false,
+            ),
+            (serde_json::json!({"name":"review","resource":17}), false),
+            (
+                serde_json::json!({"name":"review","resource":"references/api.md","unexpected":true}),
+                false,
+            ),
+        ] {
+            let mut resource_timeline = timeline_for(arguments.to_string());
+            let event = TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::SkillLoadModel,
+                items: vec![
+                    ConversationItem::tool_result(
+                        resource_skill.call_id.clone(),
+                        sampling_types::skill_load_result_content(&resource_skill),
+                    ),
+                    ConversationItem::SkillLoad(resource_skill.clone()),
+                ],
+                surface: SurfaceOp::Append,
+                response_admission: None,
+            });
+            assert_eq!(
+                resource_timeline.record(event).is_ok(),
+                accepted,
+                "{arguments}"
+            );
+            if accepted {
+                let restored = Timeline::from_events(resource_timeline.events().to_vec());
+                assert!(restored.is_ok(), "resource facts must survive cold replay");
+            }
+        }
+
+        let mut altered_resource = timeline_for(
+            serde_json::json!({"name":"review","resource":"references/api.md"}).to_string(),
+        );
+        for item in &mut altered_resource.surface {
+            if let ConversationItem::Assistant(assistant) = item {
+                for call in &mut assistant.tool_calls {
+                    if call.id.as_ref() == "load-call" {
+                        call.arguments =
+                            serde_json::json!({"name":"review","resource":"references/other.md"})
+                                .to_string()
+                                .into();
+                    }
+                }
+            }
+        }
+        assert!(matches!(
+            altered_resource.prepare(TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::SkillLoadModel,
+                items: vec![
+                    ConversationItem::tool_result(
+                        resource_skill.call_id.clone(),
+                        sampling_types::skill_load_result_content(&resource_skill),
+                    ),
+                    ConversationItem::SkillLoad(resource_skill)
+                ],
+                surface: SurfaceOp::Append,
+                response_admission: None,
+            })),
+            Err(TimelineError::InvalidModelSkillLoad)
         ));
 
         let bad_args = serde_json::json!({ "name": "review", "args": "different" }).to_string();

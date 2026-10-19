@@ -76,7 +76,136 @@ fn is_primary_session_kind(kind: Option<&str>) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_primary_session_kind;
+    use super::{build_transcript_archive, is_primary_session_kind};
+    use std::path::Path;
+
+    use acp_transport::protocol as acp;
+    use chat_state::{SubagentEvent, SubagentSeedEvent, Timeline, TimelineEventKind};
+    use sampling_types::ModelImageInputKey;
+
+    fn write_fixture_session(
+        grow_home: &Path,
+        id: &str,
+        timeline: &Timeline,
+        parent: Option<&str>,
+        message: &str,
+    ) {
+        let cwd = "/a/different/worktree";
+        let directory = grow_home
+            .join("sessions")
+            .join(shell::util::grow_home::encode_cwd_dirname(cwd))
+            .join(id);
+        std::fs::create_dir_all(&directory).unwrap();
+        let info = shell::session::info::Info {
+            id: acp::SessionId::new(id.to_owned()),
+            cwd: cwd.into(),
+        };
+        let mut summary = shell::session::persistence::Summary::new(
+            &info,
+            shell::agent::models::ModelId::new("model"),
+        )
+        .unwrap();
+        if let Some(parent) = parent {
+            summary.parent_session_id = Some(parent.into());
+            summary.session_kind = Some("subagent".into());
+        }
+        std::fs::write(
+            directory.join("summary.json"),
+            serde_json::to_vec(&summary).unwrap(),
+        )
+        .unwrap();
+        let timeline_json = timeline
+            .events()
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n");
+        std::fs::write(
+            directory.join("timeline.jsonl"),
+            format!("{timeline_json}\n"),
+        )
+        .unwrap();
+        let notification = acp::SessionNotification::new(
+            acp::SessionId::new(id.to_owned()),
+            acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
+                acp::TextContent::new(message),
+            ))),
+        );
+        let mut update = serde_json::to_value(shell::session::storage::SessionUpdate::Acp(
+            Box::new(notification),
+        ))
+        .unwrap();
+        update["timestamp"] = serde_json::json!(1_700_000_000);
+        std::fs::write(
+            directory.join("updates.jsonl"),
+            format!("{}\n", serde_json::to_string(&update).unwrap()),
+        )
+        .unwrap();
+    }
+
+    fn write_parent_child_fixture(grow_home: &Path) {
+        let mut parent = Timeline::default();
+        let spawn = chat_state::SubagentSpawnEvent {
+            subagent_id: "agent-child".into(),
+            child_session_id: "child-session".into(),
+            origin_tool_call_id: None,
+            security_parent_session_id: "root-session".into(),
+            parent_step_id: None,
+            subagent_type: "explore".into(),
+            description: "inspect".into(),
+            prompt: "inspect".into(),
+            execution_recipe: serde_json::json!({}),
+            context_source: chat_state::SubagentContextSource::New,
+            source_ref: None,
+            context_normalized: false,
+            resumed_from: None,
+            parent_prompt_id: None,
+            capability_mode: None,
+            permission_mode: None,
+            effective_permission_mode: None,
+            workflow_run_id: None,
+            goal_id: None,
+            goal_definition_revision: None,
+            surface_completion: true,
+            child_cwd: "/a/different/worktree".into(),
+            worktree_path: None,
+            effective_model_id: "model".into(),
+            model_transport_key: ModelImageInputKey::new("model", "responses", "test"),
+            reasoning_effort: None,
+        };
+        parent
+            .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+                spawn.clone(),
+            )))
+            .unwrap();
+        let spawn_seq = parent.events().last().unwrap().seq.get();
+        let mut child = Timeline::default();
+        child
+            .record(TimelineEventKind::SubagentSeed(SubagentSeedEvent {
+                parent_timeline_id: "root-session".into(),
+                parent_spawn_seq: spawn_seq,
+                subagent_id: spawn.subagent_id,
+                security_parent_session_id: "root-session".into(),
+                context_source: spawn.context_source,
+                source_ref: None,
+                normalized: false,
+            }))
+            .unwrap();
+        write_fixture_session(
+            grow_home,
+            "root-session",
+            &parent,
+            None,
+            "parent-only-answer",
+        );
+        write_fixture_session(
+            grow_home,
+            "child-session",
+            &child,
+            Some("root-session"),
+            "child-only-answer",
+        );
+    }
 
     #[test]
     fn implicit_trajectory_never_selects_a_subagent_session() {
@@ -86,5 +215,74 @@ mod tests {
         assert!(!is_primary_session_kind(Some("subagent")));
         assert!(!is_primary_session_kind(Some("subagent_fork")));
         assert!(!is_primary_session_kind(Some("subagent_workflow")));
+    }
+
+    #[tokio::test]
+    async fn transcript_download_http_uses_production_export_archive() {
+        let test_name = concat!(
+            module_path!(),
+            "::transcript_download_http_uses_production_export_archive"
+        );
+        if crate::test_util::run_with_isolated_grow_home(test_name) {
+            return;
+        }
+
+        let grow_home = shell::util::grow_home::grow_home();
+        write_parent_child_fixture(&grow_home);
+
+        let (url_tx, url_rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            shell::session::trajectory::serve(
+                "root-session",
+                "127.0.0.1:0".parse().unwrap(),
+                move |_session_id, url| {
+                    let _ = url_tx.send(url.to_owned());
+                },
+                build_transcript_archive,
+            )
+            .await
+            .unwrap();
+        });
+        let url = tokio::time::timeout(std::time::Duration::from_secs(5), url_rx)
+            .await
+            .expect("trajectory server should become ready")
+            .unwrap();
+        diagnostics::tls::install_ring_provider_once();
+        let client = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(10))
+            .build()
+            .unwrap();
+        let response = client
+            .get(format!("{url}api/transcript"))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            response.headers()[reqwest::header::CONTENT_TYPE],
+            "application/gzip"
+        );
+        let archive_bytes = response.bytes().await.unwrap();
+        server.abort();
+        assert!(server.await.unwrap_err().is_cancelled());
+
+        let unpacked = tempfile::tempdir().unwrap();
+        tar::Archive::new(flate2::read::GzDecoder::new(archive_bytes.as_ref()))
+            .unpack(unpacked.path())
+            .unwrap();
+        let parent =
+            std::fs::read_to_string(unpacked.path().join("root-session/transcript.md")).unwrap();
+        let child = std::fs::read_to_string(
+            unpacked
+                .path()
+                .join("root-session/subagents/child-session/transcript.md"),
+        )
+        .unwrap();
+        assert!(parent.contains("parent-only-answer"));
+        assert!(parent.contains("subagents/child-session/transcript.md"));
+        assert!(!parent.contains("child-only-answer"));
+        assert!(child.contains("child-only-answer"));
+        assert!(!child.contains("parent-only-answer"));
     }
 }

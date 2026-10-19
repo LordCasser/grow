@@ -238,6 +238,17 @@ impl AgentView {
         let event = terminal_marker_event(&meta, elapsed_opt, elapsed);
         let notification = terminal_notification(&meta, elapsed_opt);
 
+        // Either the driver's RPC or the durable notification can win. Close
+        // image activity at their shared exact-prompt boundary, not on one rail.
+        crate::app::acp_handler::settle_unfinished_image_recovery(
+            &mut self.scrollback,
+            ending_prompt_id.as_deref(),
+            if meta.was_cancelling {
+                "Image recovery cancelled"
+            } else {
+                "Image recovery interrupted"
+            },
+        );
         self.session.finish_turn(&mut self.scrollback);
         self.push_turn_terminal_marker(event, ending_prompt_id.as_deref());
         self.scrollback.seal_subagent_permission_group();

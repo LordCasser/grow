@@ -148,7 +148,7 @@ fn to_system_reminder_inner(
     // Available skills (startup + dynamically discovered, from SkillManager).
     // Reuse the standard listing renderer so the post-compaction listing matches
     // the startup `<system-reminder>` (no hard-coded tool name, includes
-    // `Use when:` triggers and `Absolute path:`).
+    // `Use when:` triggers, name-only loading, and no installation paths).
     if let Some(listing) =
         tools::types::skill_discovery_tracker::format_compaction_skill_listing(skills)
     {

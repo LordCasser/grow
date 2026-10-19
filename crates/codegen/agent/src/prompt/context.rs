@@ -474,9 +474,10 @@ mod tests {
     }
     // Budget the assembled foundation, audience (including capability
     // authority and coordination guidance), standard and session extensions.
+    // Reserve 512 additional bytes for Mandatory Core's write-location guidance.
     // Authored roles are covered by the discovery/composition test below.
-    const CHILD_GUIDANCE_BUDGET_BYTES: usize = 8 * 1024;
-    const READ_ONLY_GUIDANCE_BUDGET_BYTES: usize = 7680;
+    const CHILD_GUIDANCE_BUDGET_BYTES: usize = 8 * 1024 + 512;
+    const READ_ONLY_GUIDANCE_BUDGET_BYTES: usize = 7680 + 512;
 
     #[test]
     fn child_rendered_template_is_compact() {

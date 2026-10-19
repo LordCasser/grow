@@ -471,23 +471,30 @@ impl ScrollbackState {
             "append_entries_from requires a fresh_continuation sibling (shared id space)"
         );
         self.merge_coordination_rows_from_tail(&mut tail);
-        // Transient receipt snapshots may repeat durable notices already in
-        // the pre-reload transcript. Preserve the original row and native
-        // commit state when joining the cursor tail, just as push_block does.
-        let repeated_notices = tail
+        // Cursor-tail replay may repeat notices or a parent-message receipt
+        // already present in the pre-reload transcript. Preserve the original
+        // row and native commit state when joining the tail, just as push_block does.
+        let repeated_events = tail
             .entries
             .iter()
             .filter_map(|(id, entry)| {
-                let RenderBlock::Notice(notice) = &entry.block else {
-                    return None;
-                };
-                let original = self
-                    .immutable_event_entries
-                    .get(notice.event_id.as_deref()?)?;
+                let event_id = match &entry.block {
+                    RenderBlock::Notice(notice) => notice.event_id.as_deref(),
+                    RenderBlock::ToolCall(ToolCallBlock::Other(block))
+                        if block.immutable_event_id().is_some_and(|event_id| {
+                            event_id.starts_with("parent-message:")
+                                && block.communication_body().is_some()
+                        }) =>
+                    {
+                        block.immutable_event_id()
+                    }
+                    _ => None,
+                }?;
+                let original = self.immutable_event_entries.get(event_id)?;
                 Some((*id, *original))
             })
             .collect::<Vec<_>>();
-        for (tail_id, original_id) in repeated_notices {
+        for (tail_id, original_id) in repeated_events {
             if tail.is_committed(tail_id) {
                 self.minimal_commit.mark_committed(original_id);
             }
@@ -1410,10 +1417,7 @@ impl ScrollbackState {
         let committed_receipts = old_entries
             .iter()
             .filter_map(|entry| {
-                let RenderBlock::Notice(notice) = &entry.block else {
-                    return None;
-                };
-                let id = notice.event_id.as_deref()?;
+                let id = entry.block.immutable_event_id()?;
                 (id.starts_with("parent-message:")
                     && previous.minimal_commit.is_committed(entry.id)
                     && self.immutable_event_entries.contains_key(id))
@@ -2369,15 +2373,17 @@ mod tests {
 
     #[test]
     fn parent_message_minimal_reloads_preserve_native_commit_and_new_receipts() {
-        use crate::scrollback::blocks::{NoticeCategory, NoticeTone};
+        use crate::scrollback::blocks::communication::{
+            CommunicationBody, CommunicationSectionKind,
+        };
+        use crate::scrollback::blocks::tool::{OtherToolCallBlock, ToolCallBlock};
         let receipt = |id: &str| {
-            RenderBlock::terminal_notice(
-                format!("parent-message:{id}"),
-                NoticeTone::Info,
-                NoticeCategory::Coordination,
-                "Received message from parent agent",
-                Some(format!("Message: {id}")),
-            )
+            let body = CommunicationBody::new()
+                .with_section(CommunicationSectionKind::Message, format!("Message: {id}"));
+            let block = OtherToolCallBlock::new("Message from parent", "Received")
+                .with_communication_body(body)
+                .with_immutable_event_id(format!("parent-message:{id}"));
+            RenderBlock::ToolCall(ToolCallBlock::Other(block))
         };
         let mut original = ScrollbackState::new();
         let first = original.push_block(receipt("one"));
@@ -2417,6 +2423,24 @@ mod tests {
             );
         }
         assert!(!recovered.is_committed(new_receipt));
+
+        // A process can hold the earlier Notice projection while a full
+        // reload rebuilds the same durable receipt using tool-row chrome.
+        use crate::scrollback::blocks::{NoticeCategory, NoticeTone};
+        let mut prior = ScrollbackState::new();
+        let old = prior.push_block(RenderBlock::terminal_notice(
+            "parent-message:converted",
+            NoticeTone::Info,
+            NoticeCategory::Coordination,
+            "Message from parent",
+            Some("body".into()),
+        ));
+        prior.mark_committed(0);
+        let mut converted = ScrollbackState::new();
+        let current = converted.push_block(receipt("converted"));
+        converted.reconcile_minimal_native_frontier_from(&prior);
+        assert!(prior.is_committed(old));
+        assert!(converted.is_committed(current));
     }
 
     #[test]

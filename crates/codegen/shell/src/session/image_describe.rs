@@ -7,25 +7,18 @@ use parking_lot::Mutex;
 use sampling_types::conversation::{ContentPart, ConversationItem, UserItem};
 use std::collections::{BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
-/// Character cap on source text supplied to the neutral transcription model.
-pub const SOURCE_CONTEXT_CAP: usize = 12_000;
-/// Render the system/user prompt text shown to the image-description
+/// The visual auxiliary receives a fixed task prompt with only the image
+/// group's attachments. Source message text remains local Sideband provenance.
+pub const DEFAULT_DESCRIBE_PROMPT: &str = "Transcribe the attached image into a neutral, standalone textual description for a model that cannot see images. Preserve all visible text exactly where practical and in its original language, along with structure, spatial relationships, UI state, diagrams, tables, code, errors, and other concrete details. Do not translate, tailor the description to a presumed task, or infer from conversation context.";
+/// Render the fixed English prompt shown to the image-description
 /// model. The actual image bytes/URLs are attached as separate content
 /// parts by the caller.
 ///
-/// This prompt is deliberately task-independent. The resulting text becomes
-/// an irreversible Timeline Surface fact and may survive rewind, fork, model
-/// changes, and compaction; using a later query would leak future branch
-/// context into an earlier image.
-pub fn build_describe_prompt(source_context: &str) -> String {
-    [
-        "Transcribe the attached image into a neutral, standalone textual description for a model that cannot see images. Preserve all visible text exactly where practical, structure, spatial relationships, UI state, diagrams, tables, code, errors, and other concrete details. Do not tailor the description to a presumed task or infer from conversation context.".to_owned(),
-        format!(
-        "<image_source>\n{}\n</image_source>",
-        scrub_envelope_body(source_context)
-        ),
-    ]
-    .join(" ")
+/// This prompt is deliberately task-independent. Its result may become a
+/// durable Timeline Surface fact and survive rewind, fork, model changes, and
+/// compaction, so it must not include later branch context.
+pub fn build_describe_prompt() -> String {
+    DEFAULT_DESCRIBE_PROMPT.to_owned()
 }
 /// Sanitize a **single-line** string before interpolating it into a
 /// structured envelope.
@@ -91,11 +84,11 @@ pub fn render_image_description_block(description: &str) -> String {
         "<image>This is an image, but instead of showing it, you are given a description of it.\n\n<image_description>\n{description}\n</image_description>\nDon't mention to the user that you only have a description of the image.</image>",
     )
 }
-/// Stable fingerprint of the source-local neutral transcription prompt.
-pub fn describe_prompt_fingerprint(source_context: &str) -> String {
+/// Stable fingerprint of the fixed neutral transcription prompt.
+pub fn describe_prompt_fingerprint() -> String {
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"neutral-image-transcription-v1\nsource:");
-    hasher.update(source_context.as_bytes());
+    hasher.update(b"neutral-image-transcription-v2\nprompt:");
+    hasher.update(DEFAULT_DESCRIBE_PROMPT.as_bytes());
     hasher.finalize().to_hex().to_string()
 }
 fn content_fingerprint_urls(image_urls: &[std::sync::Arc<str>]) -> String {
@@ -107,7 +100,7 @@ fn content_fingerprint_urls(image_urls: &[std::sync::Arc<str>]) -> String {
     hasher.finalize().to_hex().to_string()
 }
 /// Session-scoped cache for auxiliary image outputs: keyed by source/group,
-/// image content, and describe-prompt fingerprint.
+/// image content, and the fixed describe-prompt fingerprint.
 #[derive(Debug, Default)]
 pub struct ImageDescribeCache {
     inner: Mutex<HashMap<(u64, String, String, String), CachedImageDescription>>,
@@ -127,12 +120,11 @@ impl ImageDescribeCache {
     pub fn key_for_urls(
         &self,
         image_urls: &[std::sync::Arc<str>],
-        source_context: &str,
         group_key: &str,
         source_revision: u64,
     ) -> (u64, String, String, String) {
         let content_fp = content_fingerprint_urls(image_urls);
-        let prompt_fp = describe_prompt_fingerprint(source_context);
+        let prompt_fp = describe_prompt_fingerprint();
         (source_revision, group_key.to_owned(), content_fp, prompt_fp)
     }
 
@@ -486,12 +478,11 @@ impl std::error::Error for DescribeError {}
 /// timeout, validation, Sideband persistence, and caching.
 pub fn build_describe_request(
     model: &str,
-    prompt_text: String,
     image_urls: &[std::sync::Arc<str>],
 ) -> ConversationRequest {
     let mut user_item = ConversationItem::User(UserItem {
         content: vec![ContentPart::Text {
-            text: std::sync::Arc::<str>::from(prompt_text),
+            text: std::sync::Arc::<str>::from(DEFAULT_DESCRIBE_PROMPT),
         }],
         synthetic_reason: None,
         permission_evidence: None,
@@ -645,13 +636,14 @@ mod tests {
         assert_eq!(assets.count(), 1);
     }
     #[test]
-    fn describe_prompt_is_source_local_and_task_independent() {
-        let prompt = build_describe_prompt("Image file: /workspace/error.png");
-        assert!(prompt.contains("<image_source>"));
-        assert!(prompt.contains("/workspace/error.png"));
+    fn describe_prompt_is_fixed_and_preserves_source_language() {
+        let prompt = build_describe_prompt();
+        assert_eq!(prompt, DEFAULT_DESCRIBE_PROMPT);
         assert!(prompt.contains("neutral, standalone textual description"));
-        assert!(!prompt.contains("<user_query>"));
-        assert!(!prompt.contains("conversation_history"));
+        assert!(prompt.contains("in its original language"));
+        assert!(prompt.contains("Do not translate"));
+        assert!(!prompt.contains("<image_source>"));
+        assert!(!prompt.contains("/workspace/error.png"));
     }
     #[test]
     fn describe_request_and_cache_cover_all_pdf_page_images() {
@@ -660,8 +652,7 @@ mod tests {
             std::sync::Arc::<str>::from("data:image/png;base64,AQID"),
             std::sync::Arc::<str>::from("data:image/jpeg;base64,BAUG"),
         ];
-        let prompt = build_describe_prompt("Rendered PDF pages 2 and 3");
-        let request = build_describe_request("vision-model", prompt, &image_urls);
+        let request = build_describe_request("vision-model", &image_urls);
         assert!(request.temperature.is_none());
         assert!(request.max_output_tokens.is_none());
         let ConversationItem::User(user) = &request.items[0] else {
@@ -675,14 +666,9 @@ mod tests {
             2
         );
         assert!(
-            matches!(&user.content[0], ContentPart::Text { text } if text.contains("PDF pages 2 and 3"))
+            matches!(&user.content[0], ContentPart::Text { text } if text.as_ref() == DEFAULT_DESCRIBE_PROMPT)
         );
-        let key = cache.key_for_urls(
-            &image_urls,
-            "Rendered PDF pages 2 and 3",
-            "event-2-item-0",
-            7,
-        );
+        let key = cache.key_for_urls(&image_urls, "event-2-item-0", 7);
         assert!(cache.get(&key).is_none());
         let result_ref = chat_state::TimelineRangeRef {
             timeline_id: "00000000-0000-0000-0000-000000000001".into(),
@@ -697,13 +683,10 @@ mod tests {
         let cached = cache.get(&key).unwrap();
         assert_eq!(cached.description, "Pages contain scanned invoices.");
         assert_eq!(cached.result_ref, result_ref);
-        let next_revision = cache.key_for_urls(
-            &image_urls,
-            "Rendered PDF pages 2 and 3",
-            "event-2-item-0",
-            8,
-        );
+        let next_revision = cache.key_for_urls(&image_urls, "event-2-item-0", 8);
         assert!(cache.get(&next_revision).is_none());
+        let same_source_different_context = cache.key_for_urls(&image_urls, "event-2-item-0", 7);
+        assert_eq!(same_source_different_context, key);
     }
     #[test]
     fn description_block_format_is_stable() {

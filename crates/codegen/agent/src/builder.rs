@@ -557,25 +557,17 @@ impl AgentBuilder {
         } else {
             vec![]
         };
-        let preloaded_skill_paths: std::collections::HashSet<String> = if !definition
-            .skills
-            .is_empty()
-        {
+        if !definition.skills.is_empty() {
             let preloaded =
                 crate::prompt::skills::resolve_preloaded_skills(&definition.skills, &skill_info)
-                    .await;
-            let paths = preloaded.iter().map(|s| s.path.clone()).collect();
-            if !preloaded.is_empty() {
-                let injection = crate::prompt::skills::format_skills_for_injection(&preloaded);
-                if !injection.is_empty() {
-                    definition.prompt_body =
-                        Some(injection + &definition.prompt_body.unwrap_or_default());
-                }
+                    .await
+                    .map_err(AgentBuildError::InvalidConfig)?;
+            let injection = crate::prompt::skills::format_skills_for_injection(&preloaded);
+            if !injection.is_empty() {
+                definition.prompt_body =
+                    Some(injection + &definition.prompt_body.unwrap_or_default());
             }
-            paths
-        } else {
-            std::collections::HashSet::new()
-        };
+        }
         let tool_bridge_builder = ToolBridge::get_builder();
         let state_path = self.resources_persistence.state_path().to_path_buf();
         let mut tool_config = definition.tool_config.clone();
@@ -867,15 +859,9 @@ impl AgentBuilder {
             tool_bridge
                 .seed_agents_md(initial_paths, git_root.clone(), gitignore)
                 .await;
-            let listing_skills = if preloaded_skill_paths.is_empty() {
-                skill_info.clone()
-            } else {
-                skill_info
-                    .iter()
-                    .filter(|s| !preloaded_skill_paths.contains(&s.path))
-                    .cloned()
-                    .collect()
-            };
+            // Preloading affects context, not catalog identity. References must
+            // remain accessible through the same name-based loader.
+            let listing_skills = skill_info.clone();
             let skill_discovery_cwd = if definition.discover_skills {
                 Some(self.working_directory.clone())
             } else {

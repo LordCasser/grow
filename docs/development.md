@@ -20,6 +20,8 @@ Chat usage 尾帧的 audio、reasoning、prediction 明细可缺失或为 `null`
 总 attempt 上限，包含初次调用；0 仅允许初次调用。session 默认上限为 5，
 独立 sampler 默认值为 15。共享期限取首次 idle timeout × 总上限，后续修复
 不会延长；精确预算或不可撤销输出可能更早关闭恢复。
+自动恢复耗尽后，失败 Turn 通过正常终态结算释放前台；同一 resident session 的后续用户输入建立新 Turn 和新的逻辑采样额度，有效历史与已结算消费继续保留。子任务输出 grant 按 attempt 的真实用量扣减，已知消费不能仅因采样失败变为未知或耗尽；未知用量、结算失败及真实额度耗尽仍关闭该子任务的准入。Goal 内部失败会暂停自动续跑；暂停或预算受限后，普通“继续”仍可发起 Goal 外的用户回合，但不会重启 Goal、追加它的消费或清除原有用量问题。使用既有 `/goal restart` 激活，预算耗尽或精确用量不明仍须按原控制流程解决。见 [失败后继续的验收契约](../openspec/specs/model-sampling/spec.md) 与 [Goal 恢复边界](../openspec/specs/behavior-goal/spec.md)。
+真实跨层回归先构建本次 `grow`，再设置 `GROW_BINARY` 指向该产物，运行 `cargo test --locked -p shell --test test_session_protocol_recovery -- --ignored --test-threads=1`；覆盖三个协议的重试耗尽、同 actor 手动继续及 Goal 恢复。核心 library 回归中的 `sampling_failure_recovery_tests` 使用生产 session run loop，受控延迟失败 Turn 的持久化 ACK 后发送新输入，核对队列排序与子任务 grant；该夹具模拟写入确认，实际磁盘持久化由前述真实二进制回归覆盖。
 模型切换后的 thinking 400 需核对错误要求的是 Chat Completions `reasoning_content` 还是 Responses `reasoning_text`。明确回传拒绝通过 typed backend 事实交给 ChatState，只有匹配的当前路由可确认启用一次；请求证据的 `portable_reasoning_backend` 记录这一选择。Chat 将紧邻 assistant 的可见 reasoning 编码回传，无文本时传空字符串；Responses 仍仅回放完整工具往返前的 reasoning。原生签名、加密内容不从历史重建，同路由 reset 保留已学习规则，真实路由替换清除规则。契约见 [portable reasoning 恢复](../openspec/specs/model-sampling/spec.md#requirement-provider-required-portable-reasoning-recovery-is-bounded)。
 实现导航见 [采样恢复边界](architecture/session-robustness-repair.md)，
 行为以 [model-sampling](../openspec/specs/model-sampling/spec.md) 为准。
@@ -140,13 +142,15 @@ Plan 完成时先保全原始报告，再将完成引用与退出 Normal 一起�
 
 按受影响 crate 缩小检查范围；下列命令是项目现有 CI/README 的入口，不意味着每次纯文档修改都运行全部测试。
 
+先核对 `cargo --version` 和 `rustc --version` 与 `rust-toolchain.toml` 一致。该文件由 rustup 代理读取；若 Homebrew 的 Cargo/Rust 位于 PATH 前面，需要把 rustup 代理目录（通常是 `~/.cargo/bin`）置于前面并重新核对版本，避免本地验证与发布工具链不同。
+
 ```sh
 cargo check --locked -p cli
 cargo test --locked --lib -p chat-state -p sampling-types -p sampler -p memory -p workflow -p shell -p pager -p pager-minimal -- --test-threads=4
 cargo build --locked -p cli --bin grow
 ```
 
-PR 的 `core-regression` 在构建 `grow` 后串行运行 20 个指定 Pager PTY 回归，包括 minimal、设置、滚动选择、队列取消、真实 `less` transcript 恢复和 leader 多客户端共享会话。它们仍以 `#[ignore]` 保持普通本地 Cargo 套件轻量；CI 显式提供 `PAGER_BINARY` 并仅选择已登记的场景。完成历史 replay 的多客户端用例在附加 viewer 前等待第一轮 `turn_completed` 持久化记录；另一用例在首轮仍流式输出时附加 viewer，验证 resident reconnect 不会把运行中的 turn 当作冷恢复中断。单项可按工作流中的完整 target/name 运行：
+PR 的 `core-regression` 在构建 `grow` 后串行运行工作流列出的 Pager PTY、挂起和计划恢复回归，包括 minimal、设置、滚动选择、队列取消、真实 `less` transcript 恢复和 leader 多客户端共享会话。它们仍以 `#[ignore]` 保持普通本地 Cargo 套件轻量；CI 显式提供 `PAGER_BINARY` 并仅选择已登记的场景。采样失败后继续的真实 ACP 回归另外使用同次构建的 `GROW_BINARY` 和精确测试 runner。完成历史 replay 的多客户端用例在附加 viewer 前等待第一轮 `turn_completed` 持久化记录；另一用例在首轮仍流式输出时附加 viewer，验证 resident reconnect 不会把运行中的 turn 当作冷恢复中断。单项可按工作流中的完整 target/name 运行：
 
 ```sh
 PAGER_BINARY="$PWD/target/debug/grow" cargo test --locked -p pager --test pty_e2e_minimal 'minimal::minimal_thinking_is_visually_distinct_from_output::minimal_thinking_is_visually_distinct_from_output' -- --ignored --exact --test-threads=1
@@ -327,6 +331,12 @@ MCP 工具的模型路径把 `structuredContent` 与 text/resource 描述投成�
 
 显式技能加载统一使用已注册的 `load_skill(name, args)`：用户选中的技能由 Runtime 直接派发同一工具，模型调用走普通工具准入；初始化 `skills:` 仍保留预加载角色，普通 `read_file(SKILL.md)` 仍是文件读取。正文准备复用 `tools/src/implementations/skills/skill.rs` 的严格 UTF-8 读取、链接处理与单次字面替换；输出先做 checked-length 预检，单项及同一用户组均受 1 MiB 上限约束，参数后缀也计入，取消会在准备期间检查。用户组在一个 `Input::Consumed` 中原子发布原文和有序 `SkillLoadUser`，不会把正文拼回原 prompt；模型路径以一个配对 `ToolResult` 和 `SkillLoadModel` 发布。提交 ACK 未确认时结果属于未知状态：不能宣称 Loaded、继续依赖正文或按新身份重跑；必须按稳定身份向权威 Timeline 对账。首次关联请求获得 accepted response 前，Timeline 保护完整正文；首次 accepted response 消费这项保护，显式 TurnEnd 会结算仍未消费的正文。Runtime 挂起保留原 Turn，不等于 TurnEnd，也不解除正文保护。实现契约见 [extension-runtime](../openspec/specs/extension-runtime/spec.md) 与 [input-admission](../openspec/specs/input-admission/spec.md)，验收证据见 [unify-skill-loading](../openspec/changes/archive/2026-10-19-unify-skill-loading/verification.md)。
 
+Skill discovery 在 Agent 构建时生成唯一 `SkillManager` 目录，模型目录只展示名称及简短描述，不提供安装路径或提前加载完整正文。使用技能必须调用 `load_skill(name, args)`；必要时再调用 `load_skill(name, resource="references/api.md")` 读取一个包内 UTF-8 资源，resource 不与 args 混用、不替换模板、不执行脚本。资源经过实际文件路径的授权、1 MiB 上限、取消和既有 durable SkillLoad 发布；加载后的资料保持原文与来源身份。名称先解析再判定资格，禁用、缺失或不可调用明确返回无法加载，不通过同名条目、Read、Shell 或另一副本绕过。Agent 的 `skills:` 初始化依赖无法满足时明确构建失败，已预加载技能仍保留目录身份以读取后续资料。普通文件编辑与审阅仍不等于技能激活。契约见 [按需资源加载](../openspec/specs/extension-runtime/spec.md#requirement-skill-resources-load-progressively-through-the-same-tool) 与 [初始化依赖](../openspec/specs/configuration-rules/spec.md#requirement-agent-skill-preloading-respects-disabled-entries)。
+
+视觉辅助请求只有图片和固定英文识图 prompt，不带图片所在消息的文字、当前任务、Skill 或会话历史；Sideband 来源引用只用于本地证据与恢复。新 prompt 的缓存身份与已完成 Sideband 恢复一致，不复用旧 prompt 的结果。识图与 OCR 结果保留原语言。只有存在待处理图片时才创建普通操作行；视觉调用、OCR、转换数量或失败在同一行更新，固定文案使用英语。该行绑定 prompt，复用回合终态的身份校验；活跃重连保留动效，离线截点缺少终态时标记 incomplete。见 [视觉辅助契约](../openspec/specs/model-sampling/spec.md) 与 [图片操作行](../openspec/specs/client-surfaces/spec.md#requirement-image-recovery-is-one-visible-operation-row)。
+
+发布门禁通过 reusable workflow 接收 release validate 得到的完整 commit SHA，checkout 后核对，core、三平台协调/导出、Windows storage、OpenSpec 任一失败、跳过或取消均阻止发布。精确测试使用 `scripts/run_exact_cargo_test.py`，先确认唯一名称，再确认该测试实际通过且无 ignored，防止重命名后 0 test 假通过；本地运行示例：`python3 scripts/run_exact_cargo_test.py --package pager --lib trajectory_cmd::tests::transcript_download_http_uses_production_export_archive`。见 [发布门禁](../openspec/specs/development-workflow/spec.md#requirement-release-regression-gates-are-bound-to-the-published-source)。
+
 `search_replace` 在明确 NotFound 后通过本地文件系统的独占创建提交完整新文件；既有文件的普通替换和空文件更新使用读取字节条件提交，并以目标文件 advisory lock 串行化 Grow 写者。ACP 文件系统缺少条件写入能力时明确失败；不遵守 advisory lock 的外部写者仍可能在比较与写入间竞争。见[编辑创建契约](../openspec/specs/tool-authorization/spec.md#requirement-search-replace-creation-requires-confirmed-absence)和[既有文件提交契约](../openspec/specs/tool-authorization/spec.md#requirement-local-search-replace-commits-compare-the-source-bytes)。
 
 技能 add/remove 在修改配置前验证请求 cwd 可读取；缺失路径保留锚定后的 `..`，不能据已删除符号链接反推旧目标。remove 无匹配项会明确报告未匹配，可用添加时返回的规范路径移除已保存项。路径身份契约见[配置规则](../openspec/specs/configuration-rules/spec.md#requirement-skill-management-compares-resolved-path-aliases)。
@@ -375,6 +385,8 @@ JSONL full/light observation 仅从已验证 Timeline 派生内存 title/model�
 Pager 的 `/config-agents` 先打开可关闭的 Loading 弹窗，再以单许可后台 worker 扫描 Agent 定义。五秒期限覆盖等待和扫描；超时只结束 UI 等待，阻塞线程退出前仍占用许可。扫描结果以弹窗加载 token 对账，关闭重开或外部编辑器刷新后，旧结果不能覆盖当前目录；成功切换启用状态只更新已写入的行。见 [Agents 弹窗发现契约](../openspec/specs/client-surfaces/spec.md#requirement-agent-configuration-modal-discovery-does-not-block-the-event-path)。
 
 PromptWidget 创建和 `/agent` picker 打开时只装载静态内建 Agent，普通会话的项目、用户与插件 Agent 由同一 Pager 发现许可和五秒期限的后台任务补齐。结果核对可见 Agent、session binding 与 picker 请求；Workflow child 始终使用 Run 冻结快照，直接输入 `/agent <name>` 仍由 Shell 最终判定。见 [Agent 切换发现契约](../openspec/specs/client-surfaces/spec.md#requirement-switch-agent-discovery-does-not-block-pager-input)。
+
+重复选择当前 Agent 或相同 provider/model/effort 仍完成正常控制回执，但不显示 Switching 或成功切换提示；相同 Agent 名称对应的有效配置改变、effort 改变以及失败仍按真实结果显示。见 [未改变选择的展示契约](../openspec/specs/client-surfaces/spec.md)。
 
 Messages 在单次请求内为中性工具 ID 建立映射，预留已有合法和 native ID，并同步编码调用与结果。原生 continuation 的 ID/签名保持，Timeline 不改写，见 [工具身份编码契约](../openspec/specs/model-sampling/spec.md#requirement-messages-tool-identity-encoding-preserves-distinct-exchanges)。64 字节是 Grow 的中性 ID 编码预算。
 

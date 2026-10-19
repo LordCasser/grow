@@ -1,22 +1,12 @@
 name: Local agent coordination
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - ".github/workflows/local-coordination.yml"
-      - "scripts/test_local_coordination.py"
-      - "crates/codegen/shell/src/coordination/**"
-      - "crates/codegen/shell/src/local_ipc/**"
-      - "crates/codegen/shell/src/**/coordination.rs"
-      - "crates/codegen/shell/src/agent/mvp_agent/tests.rs"
-      - "crates/codegen/shell/src/agent/mvp_agent/tests/coordination_tool.rs"
-      - "crates/codegen/shell/src/session/storage/**"
-      - "crates/codegen/shell/src/session/acp_conversion.rs"
-      - "crates/codegen/tools/src/implementations/grow_build/coordination.rs"
-      - "crates/codegen/pager/src/**"
-      - "crates/codegen/pager-minimal/src/**"
-      - "Cargo.lock"
+  workflow_call:
+    inputs:
+      commit:
+        description: Immutable commit to test
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       process_only:
@@ -25,25 +15,29 @@ on:
         default: false
   pull_request:
     paths:
-      - ".github/workflows/local-coordination.yml"
-      - "scripts/test_local_coordination.py"
-      - "crates/codegen/shell/src/coordination/**"
-      - "crates/codegen/shell/src/local_ipc/**"
-      - "crates/codegen/shell/src/**/coordination.rs"
-      - "crates/codegen/shell/src/agent/mvp_agent/tests.rs"
-      - "crates/codegen/shell/src/agent/mvp_agent/tests/coordination_tool.rs"
-      - "crates/codegen/shell/src/session/storage/**"
-      - "crates/codegen/shell/src/session/acp_conversion.rs"
-      - "crates/codegen/tools/src/implementations/grow_build/coordination.rs"
-      - "crates/codegen/pager/src/**"
-      - "crates/codegen/pager-minimal/src/**"
+      - ".github/workflows/**"
+      - "Cargo.toml"
       - "Cargo.lock"
+      - ".cargo/**"
+      - "rust-toolchain.toml"
+      - "crates/**"
+      - "scripts/**"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - ".cargo/**"
+      - "rust-toolchain.toml"
+      - "crates/**"
+      - "scripts/**"
 
 permissions:
   contents: read
 
 concurrency:
-  group: local-coordination-${{ github.ref }}
+  group: local-coordination-${{ github.workflow }}-${{ inputs.commit || github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -61,14 +55,32 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: "0"
       CARGO_PROFILE_DEV_SPLIT_DEBUGINFO: "off"
       CARGO_PROFILE_TEST_SPLIT_DEBUGINFO: "off"
+      EXPECTED_COMMIT: ${{ inputs.commit || github.sha }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+      - name: Verify immutable source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "expected a full immutable commit SHA, found: $EXPECTED_COMMIT" >&2
+            exit 1
+          }
+          actual="$(git rev-parse HEAD)"
+          [[ "$actual" == "$EXPECTED_COMMIT" ]] || {
+            echo "checked out $actual but expected $EXPECTED_COMMIT" >&2
+            exit 1
+          }
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.93.1"
       - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
+      - name: Test the exact Cargo regression runner
+        run: python -m unittest discover -s scripts/tests
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: local-coordination
@@ -81,6 +93,14 @@ jobs:
         run: cargo test --locked -p pager --lib coordination -- --nocapture
       - if: ${{ !inputs.process_only }}
         run: cargo test --locked -p pager-minimal --lib coordination -- --nocapture
+      - if: ${{ !inputs.process_only }}
+        name: Run cross-platform production transcript export tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/run_exact_cargo_test.py --package pager --lib export_cmd::tests::tree_export_keeps_parent_and_child_conversations_separate
+          python scripts/run_exact_cargo_test.py --package pager --lib export_cmd::tests::directory_sync_skips_only_unsupported_directory_handles
+          python scripts/run_exact_cargo_test.py --package pager --lib trajectory_cmd::tests::transcript_download_http_uses_production_export_archive
       - name: Build coordination CLI
         shell: bash
         run: |

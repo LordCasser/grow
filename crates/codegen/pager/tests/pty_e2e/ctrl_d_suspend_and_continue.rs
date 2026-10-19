@@ -91,7 +91,7 @@ async fn ctrl_d_suspends_running_root_and_continue_resumes_without_replay() {
         .is_some(),
         "confirmed suspension must terminate the command process tree (pid {command_pid})"
     );
-    let session_path = session_dir(&content, &mut first);
+    let session_path = session_dir_with_prompt(&content, USER_PROMPT);
     let timeline_path = session_path.join("timeline.jsonl");
     let before = std::fs::read_to_string(&timeline_path).expect("read suspended Timeline");
     assert_eq!(
@@ -347,7 +347,7 @@ async fn skill_snapshot_survives_suspend_and_surface_replay(minimal: bool) {
             .any(|request| request.to_string().contains(ORIGINAL_BODY)),
         "the first accepted provider request must contain the prepared original Skill: {initial_requests:#?}"
     );
-    let session_path = session_dir(&content, &mut first);
+    let session_path = session_dir_with_prompt(&content, USER_PROMPT);
     let timeline_path = session_path.join("timeline.jsonl");
     let before = std::fs::read_to_string(&timeline_path).expect("read pre-suspension Timeline");
     let (skill_call_id, skill_body) = committed_user_skill(&before);
@@ -394,11 +394,14 @@ async fn skill_snapshot_survives_suspend_and_surface_replay(minimal: bool) {
     // The cold process sees a different on-disk catalog. Recovery must keep
     // using the already committed Skill item and input identity.
     write_skill(UPDATED_BODY);
+    let resume_log = project.path().join("resume-debug.log");
     let mut resume_args = vec![
         "--continue",
         "--permission-mode",
         "always-approve",
         "--trust",
+        "--debug-file",
+        resume_log.to_str().expect("UTF-8 fixture path"),
     ];
     if minimal {
         resume_args.push("--minimal");
@@ -419,9 +422,10 @@ async fn skill_snapshot_survives_suspend_and_surface_replay(minimal: bool) {
         .wait_for_text("SKILL_RESUMED_RESULT", RESUME_TIMEOUT)
         .unwrap_or_else(|_| {
             panic!(
-                "the original Turn did not resume; screen:\n{}\nrequests:\n{}",
+                "the original Turn did not resume; screen:\n{}\nrequests:\n{}\nresume log:\n{}",
                 resumed.screen_contents(),
-                dump_non_system_messages(&content.request_bodies())
+                dump_non_system_messages(&content.request_bodies()),
+                std::fs::read_to_string(&resume_log).unwrap_or_default(),
             )
         });
 
@@ -447,7 +451,7 @@ async fn skill_snapshot_survives_suspend_and_surface_replay(minimal: bool) {
             .filter(|contents| turn_has_ended(contents, &started_turn_ids(&before)[0]))
     })
     .expect("resume should end the original Turn");
-    assert_eq!(session_path, session_dir(&content, &mut resumed));
+    assert_eq!(session_path, session_dir_with_prompt(&content, USER_PROMPT));
     let initial_turns = started_turn_ids(&before);
     assert_eq!(started_turn_ids(&after), initial_turns);
     assert_eq!(started_prompt_count(&after, USER_PROMPT), 1);
@@ -568,6 +572,34 @@ async fn skill_snapshot_survives_suspend_and_surface_replay(minimal: bool) {
             .count(),
         1
     );
+}
+
+// Startup can persist an empty Session before the view dispatches its input.
+// Directory order is not the identity of the Session whose Turn we suspend.
+fn session_dir_with_prompt(content: &ContentController, prompt: &str) -> PathBuf {
+    let sessions = content.home().join(".grow/sessions");
+    let mut matches = Vec::new();
+    for cwd in std::fs::read_dir(&sessions)
+        .expect("sessions directory")
+        .flatten()
+    {
+        let Ok(entries) = std::fs::read_dir(cwd.path()) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if std::fs::read_to_string(entry.path().join("timeline.jsonl"))
+                .is_ok_and(|timeline| started_prompt_count(&timeline, prompt) == 1)
+            {
+                matches.push(entry.path());
+            }
+        }
+    }
+    assert_eq!(
+        matches.len(),
+        1,
+        "expected one durable Turn for {prompt:?}: {matches:?}"
+    );
+    matches.pop().unwrap()
 }
 
 fn committed_user_skill(contents: &str) -> (String, String) {

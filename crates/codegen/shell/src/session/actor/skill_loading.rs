@@ -257,6 +257,7 @@ impl SessionActor {
                     // separately in the frozen selection.
                     name: reference.callable_name,
                     args: reference.args,
+                    resource: None,
                 };
                 let call_id = format!(
                     "skill-{}",
@@ -276,6 +277,7 @@ impl SessionActor {
                 let selection = SkillLoadSelection {
                     skill: selected,
                     user_invocation: true,
+                    resource_path: None,
                 };
                 let preflight = USER_SKILL_SELECTION
                     .scope(selection, async {

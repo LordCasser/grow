@@ -217,27 +217,27 @@ Grow SHALL retain original image information as immutable Timeline evidence. Sam
 
 ### Requirement: Visual auxiliary and local OCR fallback
 
-For explicitly unsupported image input, Grow SHALL use an available configured visual auxiliary model to describe images and show `当前模型不支持多模态，调用视觉辅助LLM处理中...`. If the auxiliary model is absent or fails, Grow SHALL show `视觉辅助模型未配置或者调用失败，使用OCR处理中...` and attempt local OCR. A successful description or OCR result SHALL be retained and reused for marked models. Every still-unresolved image group SHALL instead receive a typed unsupported-model projection whose exact replacement is `当前模型不支持多模态，图片已经被删除`. Description, OCR and removal shadows for one Surface revision SHALL commit atomically before the primary request is rebuilt.
+For explicitly unsupported image input, Grow SHALL send an available configured visual auxiliary model only the images in the image group and the fixed English default prompt: `Transcribe the attached image into a neutral, standalone textual description for a model that cannot see images. Preserve all visible text exactly where practical and in its original language, along with structure, spatial relationships, UI state, diagrams, tables, code, errors, and other concrete details. Do not translate, tailor the description to a presumed task, or infer from conversation context.` The request SHALL NOT include conversation history, tool or Skill context, or source message text. Grow SHALL retain the source Surface reference as local Sideband provenance and use the fixed prompt identity for cache and durable-result matching. Image recovery progress and outcome SHALL use one stable operation row as specified by `client-surfaces`; the row SHALL report vision, OCR, completion, partial completion and failure in English rather than emitting a recovery NOTICE. If the auxiliary model is absent or fails, Grow SHALL attempt local OCR. Successful OCR and visual descriptions SHALL preserve recognized/source language without translation and be retained and reused for marked models. Every still-unresolved image group SHALL receive a typed unsupported-model projection with the existing canonical replacement `当前模型不支持多模态，图片已经被删除`; projection failure SHALL preserve the original image evidence and settle the operation row with an English failure state. Description, OCR and removal shadows for one Surface revision SHALL commit atomically before the primary request is rebuilt. Mixed and removal-only outcomes SHALL report their counts in the same English operation row.
 
 #### Scenario: Auxiliary description succeeds
 
 - **WHEN** a configured visual auxiliary model produces a nonempty description
-- **THEN** Grow retains that description and retries the primary request with text after the projection ACK.
+- **THEN** its provider request contains only the group's images and the fixed English prompt, with no conversation history, tools, Skills or source message text; Grow retains the description in its original language and retries the primary request after the projection ACK.
 
 #### Scenario: Auxiliary unavailable
 
 - **WHEN** the visual auxiliary route is unconfigured or fails
-- **THEN** Grow displays the OCR status and attempts local OCR, retaining a successful nonempty result in the description field.
+- **THEN** the same operation row changes to English OCR progress and Grow attempts local OCR; a successful result is retained in its original language without translation.
 
 #### Scenario: Both fallbacks fail
 
 - **WHEN** neither visual description nor local OCR can provide text for an image group after the primary model explicitly rejects images
-- **THEN** Grow durably replaces that group in the current Surface with one `当前模型不支持多模态，图片已经被删除`, removes its raw image parts and retries the primary request without those images.
+- **THEN** Grow durably replaces that group in the current Surface with one existing canonical `当前模型不支持多模态，图片已经被删除`, removes its raw image parts and retries the primary request without those images, while the same operation row reports the outcome in English.
 
 #### Scenario: Mixed fallback outcomes
 
 - **WHEN** one rejected request contains groups that are described successfully and groups that remain unresolved
-- **THEN** one exact-revision projection atomically attaches descriptions to the successful groups and removes only the unresolved groups, without emitting repeated per-image projection notices.
+- **THEN** one exact-revision projection atomically attaches descriptions to successful groups and removes only unresolved groups, without repeated per-image notices, and the same operation row reports the partial outcome in English.
 
 #### Scenario: Image fallback fails without damaging the session
 
@@ -247,7 +247,12 @@ For explicitly unsupported image input, Grow SHALL use an available configured v
 #### Scenario: Image projection cannot be committed
 
 - **WHEN** projection validation, durable write or acknowledgement fails
-- **THEN** Grow does not resubmit an in-memory-only lossy request, reports a typed projection failure, and preserves the original Timeline evidence for exact retry or explicit recovery.
+- **THEN** Grow does not resubmit an in-memory-only lossy request, settles the same operation row with an English failure state, and preserves the original Timeline evidence for exact retry or explicit recovery.
+
+#### Scenario: Reuse completed description after unrelated context changes
+
+- **WHEN** the same immutable image source is selected after unrelated messages, tool results or Skill context have changed, or after recovery
+- **THEN** Grow matches the completed result using the fixed prompt identity and exact source/image provenance, reuses it without sending that contextual text to the auxiliary provider, and binds a new projection to the current exact source revision.
 
 ### Requirement: Malformed completed tool arguments recover without execution
 
@@ -1004,3 +1009,39 @@ Loaded SHALL 表示完整准备正文已获上下文发布确认，不等于后�
 - **THEN** 组关联沿来源关系跟随当前项，继续保护技能正文全文；若随后终止，撤下当前用户项及其技能结果，不因原 ID 被替换而留下失败输入。
 
 证据入口：`crates/codegen/shell/src/session/actor/prompt_build.rs` 的 LARGE_PROMPT_THRESHOLD / SKILL_INLINE_BUDGET 与现有 context admission/compaction 路径。本条不更改文件读取的 1 MiB 上限。
+
+### Requirement: Manual continuation survives exhausted provider generation
+
+After a provider generation failure exhausts automatic recovery, a live session SHALL settle the failed Step and Turn and release foreground ownership through the ordinary completion path. A later admitted user prompt SHALL start a new Turn in that same resident session with a fresh logical sampling budget, without restarting Grow or replacing the actor. Valid prior history and all durable spending SHALL remain authoritative; rejected candidate calls and native continuation SHALL NOT enter the next request.
+
+#### Scenario: Three malformed completed responses followed by manual continuation
+- **WHEN** retractable delivery and the existing budgets permit three attempts, Chat Completions, Responses or Messages returns three complete identity-valid candidates containing invalid tool-argument JSON, automatic recovery stops, and the provider later returns valid output after the user submits `继续`
+- **THEN** the same resident actor completes the new Turn, no rejected tool call executes, and all four actual attempts are accounted once with distinct request-local recovery ownership.
+
+#### Scenario: User input arrives while the failed Turn settles
+- **WHEN** a user prompt is admitted while the failed Turn is committing its terminal or releasing foreground ownership
+- **THEN** normal input ordering promotes it only after the predecessor's durable terminal, without a lost input, duplicate terminal or manual Idle reset.
+
+#### Scenario: Protocol JSON is malformed
+- **WHEN** a provider response fails deterministic protocol JSON parsing and the user sends a later prompt after the provider recovers
+- **THEN** the same session can admit the new Turn, while the malformed protocol response retains its existing automatic-retry classification.
+
+### Requirement: Sampling failure preserves settled child output grants
+
+A child output grant SHALL be charged by confirmed attempt usage. A sampling failure alone SHALL NOT mark accurately settled spending incomplete or exhaust an otherwise available grant. Unknown consumption, failed usage settlement and actual exhaustion SHALL continue to close provider admission. A new user Turn SHALL NOT replenish the grant or erase prior spending.
+
+#### Scenario: Known malformed generation leaves output capacity
+- **WHEN** a budgeted child exhausts malformed-generation retries, every attempt has confirmed output usage, and grant capacity remains
+- **THEN** its usage remains complete and exact, and any subsequently admitted work is limited to the remaining grant.
+
+#### Scenario: Known output exhausts the grant
+- **WHEN** rejected attempts consume the child's remaining output grant
+- **THEN** no further provider attempt is admitted, including after new user input, and consumption is not falsely classified as unknown merely because sampling failed.
+
+#### Scenario: Failed attempt has unknown usage
+- **WHEN** a child's failed attempt has no trustworthy output usage or its usage cannot be confirmed
+- **THEN** its grant remains incomplete and closed, and manual continuation cannot bypass the gate.
+
+#### Scenario: Sampler terminal cannot be confirmed
+- **WHEN** the ordered sampler terminal does not reach the session's stream-drained acknowledgement barrier
+- **THEN** the child grant closes conservatively as incomplete, even if earlier attempt usage was known, and new user input does not reopen it or overwrite existing usage ledger facts.

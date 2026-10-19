@@ -445,3 +445,23 @@ ResetState SHALL 在 actor 中先撤销旧请求并清空内存权限域，随�
 - **THEN** 门控按现有 on_failure 和取消策略结算，Post Hook 在对应工具终态确认后观察；不改写调用参数或正文，已结算或结果不明的 Hook 不因恢复重跑。
 
 证据入口：`crates/codegen/shell/src/session/actor/tool/preparation.rs` 的工具门控与 Hook、`crates/codegen/tools/src/implementations/grow_build/read_file/mod.rs` 的运行时文件访问，以及主规范现有 capability ceiling 契约。
+
+### Requirement: System guidance bounds discretionary filesystem writes
+
+The shared Mandatory Core SHALL instruct Agents to keep file creation and writes within the currently opened project directories, including the active worktree, by default, and to use /tmp or the platform's system temporary directory for disposable artifacts. It SHALL permit writing elsewhere only when the user explicitly requests that destination or the task clearly requires writing there, with external writes limited to necessary files. Convenience, an absolute path, or available filesystem access alone SHALL NOT be presented as sufficient justification. This guidance SHALL preserve existing permission and action-safety requirements and SHALL NOT introduce a blanket confirmation requirement or claim runtime filesystem isolation.
+
+#### Scenario: Ordinary edits and disposable artifacts
+- **WHEN** an Agent prepares ordinary task edits or temporary scripts without a required external destination
+- **THEN** the shared system guidance directs task files to the current project/worktree and disposable artifacts to /tmp or the platform system temporary directory.
+
+#### Scenario: Explicit or necessary external destination
+- **WHEN** the user requests an output outside those directories or the task clearly requires an external configuration or installation write
+- **THEN** the guidance allows the necessary files at that destination subject to existing authorization rules, without imposing an extra confirmation solely because of location.
+
+#### Scenario: Available access is not task necessity
+- **WHEN** a home directory, unrelated repository, or global configuration path is writable but the task does not require writing there and the user has not requested it
+- **THEN** the guidance directs the Agent to avoid that write; an absolute path or convenience does not create an exception.
+
+#### Scenario: Primary and delegated Agents use the same default
+- **WHEN** Grow constructs a system head for a primary or subagent audience, including an Agent using full prompt composition
+- **THEN** the same write-location guidance is present in Mandatory Core and is not removed by the authored role.

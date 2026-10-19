@@ -1884,10 +1884,10 @@ impl SessionActor {
                     Ok(SamplerTurnOutcome::Response(r, latency, request_id)) => {
                         (r, latency, request_id)
                     }
-                    Err(error) => {
-                        self.tool_context.fail_task_output_usage_closed();
-                        return Err(error);
-                    }
+                    // The accounted sampler settles every admitted attempt.
+                    // Its usage sink closes grants for unknown usage or a
+                    // failed ledger write; a generation error alone does not.
+                    Err(error) => return Err(error),
                     Ok(SamplerTurnOutcome::GoalSpendingStopped) => {
                         let snapshot = self
                             .finalize_turn_bookkeeping(

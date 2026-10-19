@@ -214,11 +214,6 @@ impl ToolContext {
             budget.record_reported_output(output_tokens);
         }
     }
-    pub(crate) fn fail_task_output_usage_closed(&self) {
-        if let Some(budget) = self.task_output_token_budget.as_ref() {
-            budget.mark_incomplete_and_exhaust();
-        }
-    }
     pub fn new(
         cwd: AbsPathBuf,
         gateway: Option<GatewaySender>,

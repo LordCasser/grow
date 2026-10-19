@@ -674,6 +674,16 @@ pub enum SamplingAttemptState {
     Accepted,
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "state")]
+pub enum ImageRecoveryOperationState {
+    Started { message: String },
+    Vision { message: String },
+    Ocr { message: String },
+    Completed { message: String },
+    Failed { message: String },
+}
+
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "sessionUpdate", deny_unknown_fields)]
 pub enum SessionUpdate {
@@ -682,6 +692,13 @@ pub enum SessionUpdate {
         request_id: String,
         attempt: u32,
         state: SamplingAttemptState,
+    },
+    /// Repeated updates with one operation ID refine the same client row.
+    ImageRecoveryOperation {
+        operation_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt_id: Option<String>,
+        state: ImageRecoveryOperationState,
     },
     /// Durable UI-only terminal fact from a Shell command or lifecycle.
     UiNotice(UiNotice),

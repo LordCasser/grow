@@ -403,6 +403,11 @@ fn subagent_child_needs_replay(child_view: &crate::app::agent_view::AgentView) -
         match &entry.block {
             crate::scrollback::block::RenderBlock::UserPrompt(_)
             | crate::scrollback::block::RenderBlock::Notice(_) => {}
+            crate::scrollback::block::RenderBlock::ToolCall(
+                crate::scrollback::blocks::ToolCallBlock::Other(block),
+            ) if block.immutable_event_id().is_some_and(|id| {
+                id.starts_with("parent-message:") && block.communication_body().is_some()
+            }) => {}
             _ => return false,
         }
     }
@@ -625,6 +630,8 @@ mod tests {
     use crate::app::agent_view::AgentView;
     use crate::app::session::{AgentId, AgentSession};
     use crate::scrollback::block::RenderBlock;
+    use crate::scrollback::blocks::communication::{CommunicationBody, CommunicationSectionKind};
+    use crate::scrollback::blocks::{OtherToolCallBlock, ToolCallBlock};
     use crate::scrollback::state::ScrollbackState;
     use agent_client_protocol::schema::v1 as acp;
     use std::path::PathBuf;
@@ -713,9 +720,31 @@ mod tests {
         assert!(subagent_child_needs_replay(&view));
     }
     #[test]
+    fn subagent_child_needs_replay_allows_a_parent_receipt_row() {
+        let mut view = make_min_child_view();
+        crate::app::acp_handler::apply_ui_notice(
+            &mut view,
+            parent_message_notice("receipt-replay", Some("guidance")),
+            None,
+            false,
+        );
+        assert!(subagent_child_needs_replay(&view));
+    }
+    #[test]
     fn subagent_child_needs_replay_false_when_tool_call_present() {
         let mut view = make_min_child_view();
         seed_tool_call(&mut view);
+        assert!(!subagent_child_needs_replay(&view));
+    }
+    #[test]
+    fn subagent_child_needs_replay_rejects_outgoing_communication_rows() {
+        let mut view = make_min_child_view();
+        let body = CommunicationBody::new()
+            .with_section(CommunicationSectionKind::Message, "outgoing guidance");
+        let row = OtherToolCallBlock::new("send_subagent_message → child", "Received")
+            .with_communication_body(body);
+        view.scrollback
+            .push_block(RenderBlock::ToolCall(ToolCallBlock::Other(row)));
         assert!(!subagent_child_needs_replay(&view));
     }
     #[test]
@@ -922,12 +951,23 @@ mod tests {
             1,
             "Timeline receipt is projected once"
         );
-        let RenderBlock::Notice(notice) = &child.scrollback.entry(0).unwrap().block else {
-            panic!("expected Timeline parent receipt notice");
+        let RenderBlock::ToolCall(ToolCallBlock::Other(row)) =
+            &child.scrollback.entry(0).unwrap().block
+        else {
+            panic!("expected Timeline parent receipt tool row");
         };
         let stable_id = format!("parent-message:{receipt_id}");
-        assert_eq!(notice.event_id.as_deref(), Some(stable_id.as_str()));
-        assert!(notice.detail_text().contains("timeline body"));
+        assert_eq!(row.immutable_event_id(), Some(stable_id.as_str()));
+        assert_eq!(row.name, "Message from parent-session");
+        assert_eq!(row.summary, "Received");
+        assert_eq!(
+            row.communication_body().unwrap().raw_text(),
+            "timeline body"
+        );
+        let data: serde_json::Value =
+            serde_json::from_str(row.communication_data().unwrap()).unwrap();
+        assert_eq!(data["receipt_id"], receipt_id);
+        assert_eq!(data["notice"]["sourceSessionId"], "parent-session");
         set_replay_grow_home_for_tests(None);
     }
 
@@ -969,6 +1009,20 @@ mod tests {
         assert!(
             child.scrollback.len() >= 2,
             "ACP replay must follow the notice"
+        );
+        let RenderBlock::ToolCall(ToolCallBlock::Other(receipt)) =
+            &child.scrollback.entry(0).unwrap().block
+        else {
+            panic!("the received message remains the first child row");
+        };
+        assert_eq!(
+            receipt.immutable_event_id(),
+            Some("parent-message:live-receipt")
+        );
+        assert_eq!(receipt.name, "Message from parent-session");
+        assert_eq!(
+            receipt.communication_body().unwrap().raw_text(),
+            "live body"
         );
         assert!(matches!(
             child.scrollback.entry(1).unwrap().block,
@@ -1012,11 +1066,15 @@ mod tests {
             1,
             "reopen must not duplicate the receipt"
         );
-        let RenderBlock::Notice(notice) = &child.scrollback.entry(0).unwrap().block else {
-            panic!("expected parent receipt notice");
+        let RenderBlock::ToolCall(ToolCallBlock::Other(row)) =
+            &child.scrollback.entry(0).unwrap().block
+        else {
+            panic!("expected parent receipt tool row");
         };
         let stable_id = format!("parent-message:{receipt_id}");
-        assert_eq!(notice.event_id.as_deref(), Some(stable_id.as_str()));
+        assert_eq!(row.immutable_event_id(), Some(stable_id.as_str()));
+        assert_eq!(row.name, "Message from parent-session");
+        assert_eq!(row.communication_body().unwrap().raw_text(), "same body");
         set_replay_grow_home_for_tests(None);
     }
 

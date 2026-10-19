@@ -787,51 +787,22 @@ pub(crate) fn format_skills_for_injection(skills: &[SkillInfo]) -> String {
 pub(crate) async fn resolve_preloaded_skills(
     names: &[String],
     discovered: &[SkillInfo],
-) -> Vec<SkillInfo> {
+) -> Result<Vec<SkillInfo>, String> {
+    use tools::types::skill_discovery_tracker::{resolve_catalog_skill, skill_unavailable};
     let mut result = Vec::new();
-
     for name in names {
-        // Find matching skill (case-insensitive name match, also try qualified name)
-        let skill = discovered.iter().find(|s| {
-            s.name.eq_ignore_ascii_case(name)
-                || tools::implementations::skills::skill::format_skill_name(s)
-                    .eq_ignore_ascii_case(name)
-        });
-
-        let Some(skill) = skill else {
-            tracing::warn!(
-                skill_name = %name,
-                "Skill declared in agent definition not found in discovered skills"
-            );
-            continue;
-        };
-
+        let skill = resolve_catalog_skill(discovered, name)?;
         if !skill.enabled {
-            tracing::debug!(skill_name = %name, "Skipping disabled skill declared in agent definition");
-            continue;
+            return Err(skill_unavailable(name, "disabled by configuration"));
         }
-
-        // A caller may provide a frozen catalog (for example a Workflow Run).
-        // `load_skill_content` treats an existing body as authoritative and
-        // only consults disk for ordinary live-discovery entries.
-        match tools::implementations::skills::skill::load_skill_content(skill).await {
-            Ok(body) => {
-                let mut loaded = skill.clone();
-                loaded.body = Some(body);
-                result.push(loaded);
-            }
-            Err(e) => {
-                tracing::warn!(
-                    skill_name = %name,
-                    path = %skill.path,
-                    error = %e,
-                    "Failed to load skill body for preloading"
-                );
-            }
-        }
+        let body = tools::implementations::skills::skill::load_skill_content(skill)
+            .await
+            .map_err(|error| skill_unavailable(name, &error))?;
+        let mut loaded = skill.clone();
+        loaded.body = Some(body);
+        result.push(loaded);
     }
-
-    result
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -863,22 +834,29 @@ mod tests {
             body: Some("ALLOWED BODY".into()),
             ..Default::default()
         };
-        let loaded = resolve_preloaded_skills(
-            &[
-                "blocked".into(),
-                "demo:plugin-blocked".into(),
-                "allowed".into(),
-            ],
-            &[disabled, plugin, fallback, enabled],
-        )
-        .await;
-        assert_eq!(
-            loaded
-                .iter()
-                .map(|skill| skill.name.as_str())
-                .collect::<Vec<_>>(),
-            vec!["allowed"]
+        let discovered = vec![disabled, plugin, fallback, enabled];
+        for name in ["local:blocked", "demo:plugin-blocked"] {
+            let error = resolve_preloaded_skills(&[name.into()], &discovered)
+                .await
+                .unwrap_err();
+            assert!(error.contains("disabled by configuration"), "{error}");
+            assert!(error.contains("do not bypass"));
+        }
+        assert!(
+            resolve_preloaded_skills(&["blocked".into()], &discovered)
+                .await
+                .unwrap_err()
+                .contains("ambiguous")
         );
+        assert!(
+            resolve_preloaded_skills(&["missing".into()], &discovered)
+                .await
+                .unwrap_err()
+                .contains("not found")
+        );
+        let loaded = resolve_preloaded_skills(&["allowed".into()], &discovered)
+            .await
+            .unwrap();
         let prompt = format_skills_for_injection(&loaded);
         assert!(prompt.contains("ALLOWED BODY"));
         assert!(!prompt.contains("DISABLED BODY"));
@@ -893,7 +871,9 @@ mod tests {
             body: Some(String::new()),
             ..Default::default()
         };
-        let loaded = resolve_preloaded_skills(&["empty".into()], &[skill]).await;
+        let loaded = resolve_preloaded_skills(&["empty".into()], &[skill])
+            .await
+            .unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].body.as_deref(), Some(""));
     }

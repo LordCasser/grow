@@ -38,6 +38,77 @@ fn running_driver(prompt_id: &str) -> AgentView {
 }
 
 #[test]
+fn image_recovery_reconnect_preserves_only_the_adopted_foreground() {
+    for active in [true, false] {
+        let mut agent = running_driver("p2");
+        let mut ids = Vec::new();
+        for pid in ["p1", "p2"] {
+            let id = agent.scrollback.push_block(RenderBlock::image_recovery(
+                format!("image-{pid}"),
+                Some(pid.into()),
+                "Calling the configured vision model…",
+                true,
+                false,
+            ));
+            agent.scrollback.set_entry_running(id, true);
+            ids.push(id);
+        }
+        agent.begin_session_reload(1);
+        assert!(agent.finalize_reload_and_maybe_adopt(1, true, active.then(|| "p2".into())));
+        for (index, id) in ids.iter().enumerate() {
+            let entry = agent.scrollback.get_by_id(*id).unwrap();
+            let RenderBlock::ImageRecovery(block) = &entry.block else {
+                panic!("expected recovery row")
+            };
+            assert_eq!(block.running, active && index == 1);
+            assert_eq!(entry.is_running, active && index == 1);
+        }
+        assert_eq!(agent.scrollback.has_running_entries(), active);
+    }
+}
+
+#[test]
+fn image_recovery_settles_on_either_terminal_rail_but_not_a_stale_prompt() {
+    for durable_first in [true, false] {
+        let mut agent = running_driver("p2");
+        let id = agent.scrollback.push_block(RenderBlock::image_recovery(
+            "image-op",
+            Some("p2".into()),
+            "Calling the configured vision model…",
+            true,
+            false,
+        ));
+        agent.scrollback.set_entry_running(id, true);
+        let stale = agent.finalize_turn_from_durable_terminal("p1", Some("cancelled"), None);
+        assert!(matches!(stale.apply, TerminalApply::Ignored));
+        assert!(agent.scrollback.has_running_entries());
+        let outcome = if durable_first {
+            agent.finalize_turn_from_durable_terminal("p2", Some("cancelled"), None)
+        } else {
+            agent.finalize_prompt_terminal(
+                Some("p2"),
+                TerminalMeta {
+                    pr_ok: false,
+                    failed_error: None,
+                    was_cancelling: true,
+                    bash_turn: false,
+                    skip_error_marker: false,
+                    accepts_submitting: true,
+                },
+            )
+        };
+        assert!(matches!(outcome.apply, TerminalApply::ViewerFinalized));
+        assert!(!agent.scrollback.has_running_entries());
+        let RenderBlock::ImageRecovery(block) = &agent.scrollback.get_by_id(id).unwrap().block
+        else {
+            panic!("image operation row must remain visible");
+        };
+        assert!(!block.running);
+        assert_eq!(block.message, "Image recovery cancelled");
+    }
+}
+
+#[test]
 fn durable_terminal_immediately_finalizes_driver() {
     let mut agent = running_driver("p1");
     let outcome = agent.finalize_turn_from_durable_terminal("p1", Some("end_turn"), None);

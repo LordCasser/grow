@@ -818,6 +818,13 @@ impl SessionActor {
             let user_invocation = user_selection.is_some();
             match bridge.resolve_skill(&input.name, user_invocation).await {
                 Ok(skill) => {
+                    let resource_path = match tools::implementations::grow_build::load_skill::resolve_skill_resource(&skill, input.resource.as_deref()).await {
+                        Ok(path) => path,
+                        Err(error) => {
+                            self.handle_tool_not_executed(&call.id, &tool_call_id, error.to_string()).await?;
+                            return Ok(ToolPreflight::resolved(ToolLoop::Continue));
+                        }
+                    };
                     if let Some(frozen) = user_selection {
                         if skill.path != frozen.skill.path
                             || skill.plugin_name != frozen.skill.plugin_name
@@ -839,6 +846,7 @@ impl SessionActor {
                             tools::implementations::grow_build::load_skill::SkillLoadSelection {
                                 skill,
                                 user_invocation: false,
+                                resource_path,
                             },
                         )
                     }
@@ -856,8 +864,14 @@ impl SessionActor {
             || AccessKind::from_tool_call(&call.function.name, &tool_input),
             |selected| {
                 AccessKind::Read(
-                    (selected.skill.body.is_none() && !selected.skill.path.contains("://"))
-                        .then(|| selected.skill.path.clone()),
+                    selected
+                        .resource_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned())
+                        .or_else(|| {
+                            (selected.skill.body.is_none() && !selected.skill.path.contains("://"))
+                                .then(|| selected.skill.path.clone())
+                        }),
                 )
             },
         );

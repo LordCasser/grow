@@ -44,6 +44,9 @@ pub struct OtherToolCallBlock {
     pub elapsed_ms: Option<i64>,
     /// Present only on the receiving side's passive inquiry presentation.
     pub coordination: Option<CoordinationRow>,
+    /// Stable identity for an immutable communication receipt projected with
+    /// tool-row chrome rather than as a notice.
+    immutable_event_id: Option<String>,
     /// Bounded, readable input preview for an outgoing communication tool.
     /// The complete message/question remains in `output` for expansion and
     /// copy, while this field keeps the collapsed row useful at a glance.
@@ -108,6 +111,7 @@ impl OtherToolCallBlock {
             started_at: None,
             elapsed_ms: None,
             coordination: None,
+            immutable_event_id: None,
             communication_preview: None,
             communication_body: None,
             communication_data: None,
@@ -152,6 +156,15 @@ impl OtherToolCallBlock {
             self.communication_data = Some(data);
         }
         self
+    }
+
+    pub(crate) fn with_immutable_event_id(mut self, event_id: impl Into<String>) -> Self {
+        self.immutable_event_id = Some(event_id.into());
+        self
+    }
+
+    pub(crate) fn immutable_event_id(&self) -> Option<&str> {
+        self.immutable_event_id.as_deref()
     }
 
     pub(crate) fn communication_body(&self) -> Option<&CommunicationBody> {

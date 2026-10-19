@@ -44,7 +44,7 @@ pub(super) const DEFAULT_SKILL_TOOL_NAME: &str = "load_skill";
 
 fn listing_header(tool_name: &str) -> String {
     format!(
-        "The following skills are available. Use `{tool_name}` with a skill name and optional args to load one:\n\n"
+        "The following skills are indexed by Grow. Use `{tool_name}` with the exact name (not a path) and optional args to load the main instructions. Load referenced text only when needed with the same name and a relative `resource`, without args. Do not use Read or Shell to activate a skill. If loading is unavailable or denied, report that the skill cannot be loaded; do not bypass the restriction through other paths, tools, or copies.\n\n"
     )
 }
 
@@ -61,7 +61,6 @@ struct SkillEntry<'a> {
     name: String,
     description: &'a str,
     when_to_use: Option<&'a str>,
-    display_path: String,
 }
 
 impl<'a> SkillEntry<'a> {
@@ -86,15 +85,9 @@ impl<'a> SkillEntry<'a> {
         let desc = truncate_str_with_marker(func_desc, desc_budget);
         if let Some(wtu) = self.when_to_use {
             let wtu = truncate_str_with_marker(strip_leading_trigger_prefix(wtu), wtu_budget);
-            format!(
-                "- `{}`: {}\n  Use when: {}\n  Absolute path: {}",
-                self.name, desc, wtu, self.display_path
-            )
+            format!("- `{}`: {}\n  Use when: {}", self.name, desc, wtu)
         } else {
-            format!(
-                "- `{}`: {}\n  Absolute path: {}",
-                self.name, desc, self.display_path
-            )
+            format!("- `{}`: {}", self.name, desc)
         }
     }
 
@@ -125,13 +118,11 @@ impl<'a> SkillEntry<'a> {
 
     /// Byte length of the fixed overhead (name, path, Use when label) excluding content.
     fn overhead(&self) -> usize {
-        // "- " + name + ": " + "\n  Absolute path: " + path + "\n"
+        // "- `" + name + "`: " + "\n"
         let base = "- ".len()
             + self.name.len()
             + 2 // Backticks around the advertised callable name.
             + ": ".len()
-            + "\n  Absolute path: ".len()
-            + self.display_path.len()
             + "\n".len();
         if self.when_to_use.is_some() {
             base + "  Use when: ".len() + "\n".len()
@@ -216,38 +207,10 @@ impl<'a> SkillListing<'a> {
         }
         let remaining = self.0.len() - included;
         if remaining > 0 {
-            let dirs = collect_source_dirs(&self.0[included..]);
-            listing.push_str(&format!(
-                "\n... and {remaining} more skills in {}",
-                dirs.join(", ")
-            ));
+            listing.push_str(&format!("\n... and {remaining} more indexed skills"));
         }
         listing
     }
-}
-
-/// Extract the skill source directory from a SKILL.md display path.
-///
-/// `"/path/.grow/skills/my-skill/SKILL.md"` -> `"/path/.grow/skills/"`
-fn skill_source_dir(display_path: &str) -> Option<&str> {
-    let p = std::path::Path::new(display_path);
-    // SKILL.md -> skill-name dir -> skills dir
-    let dir = p.parent()?.parent()?;
-    dir.to_str()
-}
-
-/// Collect unique source directories from a slice of entries.
-fn collect_source_dirs<'a>(entries: &'a [SkillEntry<'a>]) -> Vec<&'a str> {
-    let mut seen = HashSet::new();
-    let mut dirs = Vec::new();
-    for e in entries {
-        if let Some(d) = skill_source_dir(&e.display_path)
-            && seen.insert(d)
-        {
-            dirs.push(d);
-        }
-    }
-    dirs
 }
 
 /// Split a description at the first recognized trigger prefix.
@@ -322,8 +285,8 @@ fn strip_leading_trigger_prefix(wtu: &str) -> &str {
 fn build_skill_entry<'a>(
     s: &'a SkillInfo,
     callable_name: String,
-    real_prefix: Option<&str>,
-    display_prefix: Option<&str>,
+    _real_prefix: Option<&str>,
+    _display_prefix: Option<&str>,
     extract_triggers: bool,
 ) -> SkillEntry<'a> {
     let wtu = if let Some(ref wtu) = s.when_to_use {
@@ -337,10 +300,6 @@ fn build_skill_entry<'a>(
         name: callable_name,
         description: &s.description,
         when_to_use: wtu,
-        display_path: match (real_prefix, display_prefix) {
-            (Some(real), Some(display)) => s.path.replace(real, display),
-            _ => s.path.clone(),
-        },
     }
 }
 
@@ -357,15 +316,15 @@ pub(super) fn format_announcement(
     skill_tool_name: &str,
 ) -> Option<String> {
     let budget = listing_budget_chars.unwrap_or(DEFAULT_CHAR_BUDGET);
-    let callable_skills: Vec<_> = skills
-        .iter()
-        .filter(|skill| skill.enabled && !skill.disable_model_invocation)
-        .cloned()
-        .collect();
     let listing = SkillListing(
-        callable_names(&callable_skills)
+        callable_names(skills)
             .into_iter()
-            .filter(|(_, skill)| is_listable(skill) && announced.insert(skill.dedup_key()))
+            .filter(|(_, skill)| {
+                skill.enabled
+                    && !skill.disable_model_invocation
+                    && is_listable(skill)
+                    && announced.insert(skill.dedup_key())
+            })
             .map(|(callable_name, skill)| {
                 build_skill_entry(&skill, callable_name, real_prefix, display_prefix, true)
             })
@@ -378,7 +337,7 @@ pub(super) fn format_announcement(
 ///
 /// Reuses [`format_announcement`] so the post-compaction listing matches the
 /// startup `<system-reminder>` byte-for-byte (standard header, `Use when:`
-/// triggers, `Absolute path:`) instead of a hand-rolled divergent format.
+/// triggers) instead of a hand-rolled divergent format.
 /// Lists every enabled, model-invocable skill with no carried-over dedup state.
 pub fn format_compaction_skill_listing(skills: &[SkillInfo]) -> Option<String> {
     let mut announced = HashSet::new();
@@ -547,7 +506,6 @@ mod tests {
                 name: "s".into(),
                 description: desc,
                 when_to_use: wtu,
-                display_path: "/p/SKILL.md".to_owned(),
             }
         }
         fn split(e: &SkillEntry, total: usize) -> (usize, usize) {
@@ -658,7 +616,7 @@ mod tests {
         let text = announce(&skills, 8_000).unwrap();
         assert!(text.contains("commit"));
         assert!(text.contains("Commit staged changes"));
-        assert!(text.contains("Absolute path: /skills/commit/SKILL.md"));
+        assert!(!text.contains("/skills/commit"));
         assert!(text.starts_with(&listing_header(DEFAULT_SKILL_TOOL_NAME)));
     }
 
@@ -765,11 +723,12 @@ mod tests {
         let skills: Vec<SkillInfo> = (0..50)
             .map(|i| skill(&format!("skill-{i}"), &"Y".repeat(300)))
             .collect();
-        let text = announce(&skills, 400).unwrap();
+        let budget = listing_header(DEFAULT_SKILL_TOOL_NAME).len() + 400;
+        let text = announce(&skills, budget).unwrap();
         // No descriptions or paths -- names only.
         assert!(!text.contains(": Y"));
         assert!(!text.contains("Absolute path:"));
-        assert!(text.len() <= 500); // 400 + slack for overflow line
+        assert!(text.len() <= budget + 100); // slack for overflow line
     }
 
     #[test]
@@ -781,8 +740,8 @@ mod tests {
         let text = announce(&skills, 200).unwrap();
         assert!(text.contains("... and"), "expected overflow indicator");
         assert!(
-            text.contains("in /skills"),
-            "overflow should reference skill source dir: {text}"
+            text.contains("more indexed skills"),
+            "overflow should avoid installation paths: {text}"
         );
     }
 
@@ -1022,8 +981,8 @@ mod tests {
             "Use when: line: {text}"
         );
         assert!(
-            text.contains("  Absolute path: "),
-            "Absolute path line: {text}"
+            !text.contains("  Absolute path: "),
+            "installation path leaked: {text}"
         );
     }
 
@@ -1044,13 +1003,11 @@ mod tests {
             name: "s".into(),
             description: "desc",
             when_to_use: None,
-            display_path: "/p/SKILL.md".to_owned(),
         };
         let with = SkillEntry {
             name: "s".into(),
             description: "desc",
             when_to_use: Some("trigger"),
-            display_path: "/p/SKILL.md".to_owned(),
         };
         let diff = with.overhead() - without.overhead();
         assert_eq!(diff, "  Use when: ".len() + "\n".len());

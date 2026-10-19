@@ -1,14 +1,22 @@
 name: Core regression
 
 on:
+  workflow_call:
+    inputs:
+      commit:
+        description: Immutable commit to test
+        required: true
+        type: string
   workflow_dispatch:
   pull_request:
+  push:
+    branches: [main]
 
 permissions:
   contents: read
 
 concurrency:
-  group: core-regression-${{ github.ref }}
+  group: core-regression-${{ github.workflow }}-${{ inputs.commit || github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -24,11 +32,29 @@ jobs:
       CARGO_PROFILE_DEV_SPLIT_DEBUGINFO: "off"
       CARGO_PROFILE_TEST_SPLIT_DEBUGINFO: "off"
       RUST_MIN_STACK: "16777216"
+      EXPECTED_COMMIT: ${{ inputs.commit || github.sha }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+      - name: Verify immutable source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "expected a full immutable commit SHA, found: $EXPECTED_COMMIT" >&2
+            exit 1
+          }
+          actual="$(git rev-parse HEAD)"
+          [[ "$actual" == "$EXPECTED_COMMIT" ]] || {
+            echo "checked out $actual but expected $EXPECTED_COMMIT" >&2
+            exit 1
+          }
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.93.1"
+      - name: Test the exact Cargo runner and release contract
+        run: python3 -m unittest discover -s scripts/tests
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: core-regression
@@ -56,10 +82,18 @@ jobs:
         run: >-
           cargo test --locked --lib
           -p chat-state -p sampling-types -p sampler -p memory -p workflow
-          -p shell -p pager -p pager-minimal
+          -p shell -p pager -p pager-minimal -p agent -p tools -p tool-types
           -- --test-threads=4
       - name: Build the application entry point
         run: cargo build --locked -p cli --bin grow
+      - name: Verify live session recovery after sampling failure
+        env:
+          GROW_BINARY: ${{ github.workspace }}/target/debug/grow
+        run: |
+          set -euo pipefail
+          python3 scripts/run_exact_cargo_test.py --package shell --test test_session_protocol_recovery --ignored protocol_failure_preserves_session_across_continue_switch_and_process_restart
+          python3 scripts/run_exact_cargo_test.py --package shell --test test_session_protocol_recovery --ignored malformed_wire_json_allows_manual_continuation_in_the_same_resident_session
+          python3 scripts/run_exact_cargo_test.py --package shell --test test_session_protocol_recovery --ignored goal_sampling_failure_requires_explicit_restart_and_preserves_budget_gates
       - name: Install interactive pager for transcript restoration regression
         run: |
           sudo apt-get update
@@ -69,28 +103,30 @@ jobs:
           PAGER_BINARY: ${{ github.workspace }}/target/debug/grow
         run: |
           set -euo pipefail
-          while read -r target test_name; do
-            echo "Running ${target}::${test_name}"
-            cargo test --locked -p pager --test "$target" "$test_name" -- --ignored --exact --test-threads=1
-          done <<'CASES'
-          pty_e2e_minimal minimal::minimal_thinking_is_visually_distinct_from_output::minimal_thinking_is_visually_distinct_from_output
-          pty_e2e_minimal minimal::minimal_transcript_opens_in_pager::minimal_transcript_opens_in_pager
-          pty_e2e_minimal minimal::minimal_parked_plan_commits_to_scrollback::minimal_parked_plan_commits_to_scrollback
-          pty_e2e_minimal minimal::minimal_parked_plan_survives_quit::minimal_parked_plan_survives_quit
-          pty_e2e_minimal minimal::minimal_new_session_keeps_history_and_resets::minimal_new_session_keeps_history_and_resets
-          pty_e2e_minimal minimal::minimal_resize_preserves_committed_scrollback::minimal_resize_preserves_committed_scrollback
-          pty_e2e_minimal minimal::minimal_esc_cancels_running_turn::minimal_esc_cancels_running_turn
-          pty_e2e_minimal minimal::minimal_ctrl_c_arms_and_quits::minimal_ctrl_c_arms_and_quits
-          pty_e2e_minimal minimal::minimal_transcript_pager_restore_no_artifacts::minimal_transcript_pager_restore_no_artifacts
-          pty_e2e_config_ui show_thinking_blocks_toggle_hides_existing_pty::show_thinking_blocks_toggle_hides_existing_pty
-          pty_e2e_config_ui verb_group_fold_expand_collapse_pty::verb_group_fold_expand_collapse_pty
-          pty_e2e_scroll_selection resize_preserves_scroll_position::resize_preserves_scroll_position
-          pty_e2e_scroll_selection read_tool_header_selection_copies_path_only_pty::read_tool_header_selection_copies_path_only_pty
-          pty_e2e_queue queued_bash_promotion_renders_output_pty::queued_bash_promotion_renders_output_pty
-          pty_e2e_queue send_now_tip_after_mid_turn_queue::send_now_tip_after_mid_turn_queue
-          pty_e2e_queue esc_cancels_running_turn_from_prompt_preserves_draft::esc_cancels_running_turn_from_prompt_preserves_draft
-          pty_e2e_queue esc_cancels_running_turn_from_scrollback::esc_cancels_running_turn_from_scrollback
-          leader_pty_e2e leader_two_clients_shared_session::leader_two_clients_shared_session
-          leader_pty_e2e leader_n_clients_shared_session::leader_n_clients_shared_session
-          leader_pty_e2e leader_attach_during_active_turn::leader_attach_during_active_turn
-          CASES
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_minimal --ignored minimal::minimal_thinking_is_visually_distinct_from_output::minimal_thinking_is_visually_distinct_from_output
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_minimal --ignored minimal::minimal_transcript_opens_in_pager::minimal_transcript_opens_in_pager
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_minimal --ignored minimal::minimal_parked_plan_commits_to_scrollback::minimal_parked_plan_commits_to_scrollback
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_minimal --ignored minimal::minimal_parked_plan_survives_quit::minimal_parked_plan_survives_quit
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_minimal --ignored minimal::minimal_new_session_keeps_history_and_resets::minimal_new_session_keeps_history_and_resets
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_minimal --ignored minimal::minimal_resize_preserves_committed_scrollback::minimal_resize_preserves_committed_scrollback
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_minimal --ignored minimal::minimal_esc_cancels_running_turn::minimal_esc_cancels_running_turn
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_minimal --ignored minimal::minimal_ctrl_d_confirms_and_quits::minimal_ctrl_d_confirms_and_quits
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_minimal --ignored minimal::minimal_transcript_pager_restore_no_artifacts::minimal_transcript_pager_restore_no_artifacts
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_config_ui --ignored show_thinking_blocks_toggle_hides_existing_pty::show_thinking_blocks_toggle_hides_existing_pty
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_config_ui --ignored verb_group_fold_expand_collapse_pty::verb_group_fold_expand_collapse_pty
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_scroll_selection --ignored resize_preserves_scroll_position::resize_preserves_scroll_position
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_scroll_selection --ignored read_tool_header_selection_copies_path_only_pty::read_tool_header_selection_copies_path_only_pty
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_queue --ignored queued_bash_promotion_renders_output_pty::queued_bash_promotion_renders_output_pty
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_queue --ignored send_now_tip_after_mid_turn_queue::send_now_tip_after_mid_turn_queue
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_queue --ignored esc_cancels_running_turn_from_prompt_preserves_draft::esc_cancels_running_turn_from_prompt_preserves_draft
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_queue --ignored esc_cancels_running_turn_from_scrollback::esc_cancels_running_turn_from_scrollback
+          python3 scripts/run_exact_cargo_test.py --package pager --test leader_pty_e2e --ignored leader_two_clients_shared_session::leader_two_clients_shared_session
+          python3 scripts/run_exact_cargo_test.py --package pager --test leader_pty_e2e --ignored leader_n_clients_shared_session::leader_n_clients_shared_session
+          python3 scripts/run_exact_cargo_test.py --package pager --test leader_pty_e2e --ignored leader_attach_during_active_turn::leader_attach_during_active_turn
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored suspend_nested_task_tree::ctrl_d_suspends_and_cold_resumes_root_child_grandchild_tree
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored ctrl_d_suspend_and_continue::ctrl_d_cold_resume_keeps_the_original_explicit_skill_snapshot
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored ctrl_d_suspend_and_continue::minimal_cold_resume_keeps_the_original_explicit_skill_snapshot
+          python3 scripts/run_exact_cargo_test.py --package pager-pty-harness --test plan_approval_resume plan_approval_restored_after_resume
+          python3 scripts/run_exact_cargo_test.py --package pager-pty-harness --test plan_approval_resume deferred_plan_reviewed_after_resume
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored suspend_nested_task_tree::cold_resume_after_partial_leaf_release_does_not_replay_checkpoint
+          python3 scripts/run_exact_cargo_test.py --package pager --test pty_e2e_persistence --ignored suspend_nested_task_tree::concurrent_cold_resume_claims_one_root_without_replaying_tree_work

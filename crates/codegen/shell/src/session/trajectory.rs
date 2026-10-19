@@ -3549,7 +3549,24 @@ mod tests {
         let export: TranscriptArchiveFactory = Arc::new(move |session_id| {
             assert_eq!(session_id, "canonical-session");
             let mut archive = tempfile::NamedTempFile::new_in(&archive_dir)?;
-            archive.write_all(b"transcript archive")?;
+            let encoder = flate2::write::GzEncoder::new(
+                archive.as_file_mut(),
+                flate2::Compression::default(),
+            );
+            let mut tar = tar::Builder::new(encoder);
+            let contents = b"HTTP transcript body";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(contents.len() as u64);
+            header.set_mode(0o600);
+            header.set_cksum();
+            tar.append_data(
+                &mut header,
+                "canonical-session/transcript.md",
+                &contents[..],
+            )?;
+            let encoder = tar.into_inner()?;
+            encoder.finish()?;
+            archive.as_file().sync_all()?;
             *captured_path.lock().unwrap() = Some(archive.path().to_path_buf());
             Ok(archive)
         });
@@ -3620,9 +3637,16 @@ mod tests {
             transcript.headers()[header::CONTENT_DISPOSITION],
             "attachment; filename=\"canonical-session.tar.gz\""
         );
-        assert_eq!(
+        let unpacked = tempfile::tempdir().unwrap();
+        tar::Archive::new(flate2::read::GzDecoder::new(
             transcript.bytes().await.unwrap().as_ref(),
-            b"transcript archive"
+        ))
+        .unpack(unpacked.path())
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(unpacked.path().join("canonical-session/transcript.md"))
+                .unwrap(),
+            "HTTP transcript body"
         );
         assert!(!archive_path.lock().unwrap().as_ref().unwrap().exists());
         let wrong_token = client

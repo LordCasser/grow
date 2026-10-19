@@ -206,15 +206,6 @@ impl NoticeBlock {
         self.communication_preview = preview.filter(|preview| !preview.is_empty());
     }
 
-    pub(crate) fn set_communication_body(&mut self, body: CommunicationBody) {
-        self.communication_body = (!body.is_empty()).then_some(body);
-    }
-
-    pub(crate) fn set_communication_data(&mut self, data: impl Into<String>) {
-        let data = data.into();
-        self.communication_data = (!data.is_empty()).then_some(data);
-    }
-
     pub(crate) fn communication_body(&self) -> Option<&CommunicationBody> {
         self.communication_body.as_ref()
     }

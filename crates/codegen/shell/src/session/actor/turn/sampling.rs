@@ -198,26 +198,39 @@ impl SessionActor {
     ) -> String {
         match error {
             chat_state::TimelineWriteError::ImageDescriptionUnavailable(_) =>
-                "当前模型不支持多模态，图片描述生成失败。原图和会话历史已保留，可切换模型或自行 rewind。".into(),
-            _ => format!("failed to persist text-only image projection: {error}; sampling was not resumed"),
+                "The current model does not support images. Image description failed; the original images and session history were preserved. You can switch models or rewind.".into(),
+            _ => format!("Image projection could not be saved: {error}. Sampling was not resumed."),
         }
     }
 
-    /// One aggregated notice for an acknowledged projection. Described groups
-    /// keep their image for other routes; removed groups are gone from the
-    /// current Surface while the original payload stays in the Timeline.
-    fn image_recovery_notification(report: chat_state::ImageProjectionReport) -> Option<String> {
+    /// One operation-row result for an acknowledged projection. Described
+    /// groups keep their image for other routes; removed groups are gone from
+    /// the current Surface while the original payload stays in the Timeline.
+    fn image_recovery_notification(report: chat_state::ImageProjectionReport) -> (String, bool) {
         match (report.described_images, report.removed_images) {
-            (0, 0) => None,
-            (described, 0) => Some(format!(
-                "已生成 {described} 张图片的文字描述；当前模型使用描述发送，原图保留供其他模型尝试。"
-            )),
-            (0, removed) => Some(format!(
-                "当前模型不支持多模态，{removed} 张图片无法生成文字描述，已从当前会话中删除；原图仍保留在会话历史记录中。"
-            )),
-            (described, removed) => Some(format!(
-                "已生成 {described} 张图片的文字描述；{removed} 张图片无法生成描述，已从当前会话中删除。"
-            )),
+            (0, 0) => ("No images needed recovery".to_owned(), false),
+            (described, 0) => (
+                format!(
+                    "Converted {described} image{}",
+                    if described == 1 { "" } else { "s" }
+                ),
+                false,
+            ),
+            (0, removed) => (
+                format!(
+                    "Could not convert {removed} image{}",
+                    if removed == 1 { "" } else { "s" }
+                ),
+                true,
+            ),
+            (described, removed) => (
+                format!(
+                    "Converted {described} image{}; {removed} image{} could not be converted",
+                    if described == 1 { "" } else { "s" },
+                    if removed == 1 { "" } else { "s" },
+                ),
+                true,
+            ),
         }
     }
 
@@ -226,8 +239,11 @@ impl SessionActor {
     async fn project_conversation_images_for_text_model_once(
         &self,
         rejected_key: &sampling_types::ModelImageInputKey,
+        operation_id: &str,
+        prompt_id: Option<&str>,
+        operation_started: &mut bool,
     ) -> Result<chat_state::ImageProjectionReport, chat_state::TimelineWriteError> {
-        use sampling_types::conversation::{ConversationImageSource, conversation_image_groups};
+        use sampling_types::conversation::conversation_image_groups;
 
         let materialized = self
             .chat_state_handle
@@ -247,44 +263,49 @@ impl SessionActor {
         if groups.is_empty() {
             return Ok(chat_state::ImageProjectionReport::default());
         }
+        if !*operation_started {
+            self.send_grow_notification(GrowSessionUpdate::ImageRecoveryOperation {
+                operation_id: operation_id.to_owned(),
+                prompt_id: prompt_id.map(str::to_owned),
+                state: crate::extensions::notification::ImageRecoveryOperationState::Started {
+                    message: "Preparing image recovery…".into(),
+                },
+            })
+            .await;
+            *operation_started = true;
+        }
         let mut shadows = Vec::with_capacity(groups.len());
         let deadline = tokio::time::Instant::now() + IMAGE_RECOVERY_TIMEOUT;
 
         // A durable neutral description remains usable even when no current
         // auxiliary route is available; only cache misses need a provider.
         {
-            let prepared = groups.iter().map(|group| {
-                let source_kind = match group.source {
-                    ConversationImageSource::User => "User",
-                    ConversationImageSource::ToolResult => "ToolResult",
-                };
-                let source_text = tools::util::truncate::truncate_middle(
-                    group.source_text.as_ref(),
-                    crate::session::image_describe::SOURCE_CONTEXT_CAP,
-                );
-                let source_context = format!(
-                    "{source_kind} message with {} image attachment(s), in attachment order. Existing message text:\n{source_text}",
-                    group.image_count(),
-                );
-                let source = materialized.transcript_ids[group.item_index];
-                let source_key = format!("{}:{}", source.event.get(), source.item);
-                let cache_key = self.image_describe_cache.key_for_urls(
-                    &group.image_urls,
-                    &source_context,
-                    &source_key,
-                    materialized.surface_revision,
-                );
-                let prompt_text = crate::session::image_describe::build_describe_prompt(&source_context);
-                (group, source, cache_key, prompt_text)
-            }).collect::<Vec<_>>();
+            let prepared = groups
+                .iter()
+                .map(|group| {
+                    let source = materialized.transcript_ids[group.item_index];
+                    let source_key = format!("{}:{}", source.event.get(), source.item);
+                    let cache_key = self.image_describe_cache.key_for_urls(
+                        &group.image_urls,
+                        &source_key,
+                        materialized.surface_revision,
+                    );
+                    (group, source, cache_key)
+                })
+                .collect::<Vec<_>>();
             let uncached = prepared
                 .iter()
-                .filter(|(_, _, key, _)| self.image_describe_cache.get(key).is_none())
+                .filter(|(_, _, key)| self.image_describe_cache.get(key).is_none())
                 .collect::<Vec<_>>();
             if !uncached.is_empty() {
                 let queries = uncached
                     .iter()
-                    .map(|(_, source, _, prompt)| (*source, prompt.clone()))
+                    .map(|(_, source, _)| {
+                        (
+                            *source,
+                            crate::session::image_describe::build_describe_prompt(),
+                        )
+                    })
                     .collect();
                 match crate::session::image_describe::recover_completed_descriptions(
                     self.session_directory.clone(),
@@ -295,7 +316,7 @@ impl SessionActor {
                 .await
                 {
                     Ok(recovered) => {
-                        for ((_, _, key, _), result) in uncached.into_iter().zip(recovered) {
+                        for ((_, _, key), result) in uncached.into_iter().zip(recovered) {
                             if let Some(result) = result {
                                 self.image_describe_cache.insert(
                                     key.clone(),
@@ -312,19 +333,23 @@ impl SessionActor {
             }
             let auxiliary_route = if prepared
                 .iter()
-                .any(|(_, _, key, _)| self.image_describe_cache.get(key).is_none())
+                .any(|(_, _, key)| self.image_describe_cache.get(key).is_none())
             {
                 self.resolve_image_description_route(rejected_key).await
             } else {
                 None
             };
             if auxiliary_route.is_some() {
-                self.send_grow_notification(GrowSessionUpdate::ImageProcessing {
-                    message: "当前模型不支持多模态，调用视觉辅助LLM处理中...".into(),
+                self.send_grow_notification(GrowSessionUpdate::ImageRecoveryOperation {
+                    operation_id: operation_id.to_owned(),
+                    prompt_id: prompt_id.map(str::to_owned),
+                    state: crate::extensions::notification::ImageRecoveryOperationState::Vision {
+                        message: "Calling the configured vision model…".into(),
+                    },
                 })
                 .await;
             }
-            for (group, source, cache_key, prompt_text) in prepared {
+            for (group, source, cache_key) in prepared {
                 if deadline <= tokio::time::Instant::now() {
                     tracing::warn!(
                         timeout_secs = IMAGE_RECOVERY_TIMEOUT.as_secs(),
@@ -356,13 +381,12 @@ impl SessionActor {
                 };
                 let request = crate::session::image_describe::build_describe_request(
                     &model,
-                    prompt_text.clone(),
                     &group.image_urls,
                 );
                 let mut sideband = match self
                     .begin_sideband(
                         chat_state::SidebandPurpose::ImageDescription,
-                        prompt_text,
+                        crate::session::image_describe::build_describe_prompt(),
                         SidebandSource::Frozen(vec![source_ref.clone()]),
                         chat_state::SidebandBudgetPolicy::for_request(&request, 1),
                         chat_state::SidebandRoute {
@@ -545,8 +569,12 @@ impl SessionActor {
             })
             .collect::<Vec<_>>();
         if !missing.is_empty() {
-            self.send_grow_notification(GrowSessionUpdate::ImageProcessing {
-                message: "视觉辅助模型未配置或者调用失败，使用OCR处理中...".into(),
+            self.send_grow_notification(GrowSessionUpdate::ImageRecoveryOperation {
+                operation_id: operation_id.to_owned(),
+                prompt_id: prompt_id.map(str::to_owned),
+                state: crate::extensions::notification::ImageRecoveryOperationState::Ocr {
+                    message: "Trying local OCR…".into(),
+                },
             })
             .await;
             for group in missing {
@@ -650,12 +678,6 @@ impl SessionActor {
                 tool_calls,
             })
             .await?;
-        if let Some(message) = Self::image_recovery_notification(report) {
-            self.send_grow_notification(GrowSessionUpdate::ImageProjected {
-                notes: vec![message],
-            })
-            .await;
-        }
         Ok(report)
     }
 
@@ -663,9 +685,17 @@ impl SessionActor {
         &self,
         rejected_key: &sampling_types::ModelImageInputKey,
     ) -> Result<chat_state::ImageProjectionReport, chat_state::TimelineWriteError> {
+        let operation_id = uuid::Uuid::now_v7().simple().to_string();
+        let prompt_id = self.current_prompt_id.lock().ok().and_then(|id| id.clone());
+        let mut operation_started = false;
         for attempt in 0..3 {
             match self
-                .project_conversation_images_for_text_model_once(rejected_key)
+                .project_conversation_images_for_text_model_once(
+                    rejected_key,
+                    &operation_id,
+                    prompt_id.as_deref(),
+                    &mut operation_started,
+                )
                 .await
             {
                 Err(chat_state::TimelineWriteError::SurfaceChanged { .. }) if attempt < 2 => {
@@ -674,7 +704,36 @@ impl SessionActor {
                         "image projection source changed; rebuilding from the new Surface"
                     );
                 }
-                result => return result,
+                Ok(report) => {
+                    if !operation_started {
+                        return Ok(report);
+                    }
+                    let (message, partial_failure) = Self::image_recovery_notification(report);
+                    self.send_grow_notification(GrowSessionUpdate::ImageRecoveryOperation {
+                        operation_id,
+                        prompt_id,
+                        state: if partial_failure {
+                            crate::extensions::notification::ImageRecoveryOperationState::Failed { message }
+                        } else {
+                            crate::extensions::notification::ImageRecoveryOperationState::Completed { message }
+                        },
+                    }).await;
+                    return Ok(report);
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "image projection failed");
+                    if operation_started {
+                        self.send_grow_notification(GrowSessionUpdate::ImageRecoveryOperation {
+                            operation_id,
+                            prompt_id,
+                            state: crate::extensions::notification::ImageRecoveryOperationState::Failed {
+                                message: "Image recovery failed".into(),
+                            },
+                        })
+                        .await;
+                    }
+                    return Err(error);
+                }
             }
         }
         unreachable!("bounded image projection loop always returns")
@@ -1740,13 +1799,6 @@ impl SessionActor {
             {
                 let message = Self::image_projection_failure_message(&projection_error);
                 self.log_terminal_failure("image_projection_failed", error.status_code, &message);
-                self.send_grow_notification(GrowSessionUpdate::RetryState(
-                    crate::extensions::notification::RetryState::Failed {
-                        error_type: "image_projection_failed".to_owned(),
-                        message: message.clone(),
-                    },
-                ))
-                .await;
                 return Err(acp::Error::internal_error().data(message));
             }
             return Ok(SamplerFailureRecovery::ImageInputUnsupportedAndResubmit);
@@ -2119,6 +2171,11 @@ impl SessionActor {
             tokio::time::timeout(std::time::Duration::from_secs(5), stream_drained_rx).await;
         if !matches!(stream_drained, Ok(Ok(()))) {
             self.turn_stream_drained.lock().take();
+            // Without the ordered terminal we cannot confirm that every
+            // admitted attempt reached its usage settlement frontier.
+            if let Some(budget) = &self.tool_context.task_output_token_budget {
+                budget.mark_incomplete_and_exhaust();
+            }
             self.events.request_failed(
                 &request_id_str,
                 "stream_drain_timeout",

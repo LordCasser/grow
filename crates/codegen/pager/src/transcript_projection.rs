@@ -14,7 +14,8 @@ use crate::scrollback::blocks::{
 use crate::scrollback::entry::EntryId;
 use crate::scrollback::state::ScrollbackState;
 use shell::extensions::notification::{
-    HookRunStatusDto, RetryState, SessionUpdate as GrowUpdate, UiNoticeTone,
+    HookRunStatusDto, ImageRecoveryOperationState, RetryState, SessionUpdate as GrowUpdate,
+    UiNoticeTone,
 };
 use shell::session::storage::SessionUpdate;
 use shell::session::storage::transcript::TranscriptEvent;
@@ -37,6 +38,7 @@ pub struct TranscriptProjection {
     user_messages: HashSet<String>,
     current_prompt: Option<String>,
     terminal_prompts: HashSet<String>,
+    image_recovery_operations: HashMap<String, EntryId>,
 }
 
 impl Default for TranscriptProjection {
@@ -66,11 +68,91 @@ impl Default for TranscriptProjection {
             user_messages: HashSet::new(),
             current_prompt: None,
             terminal_prompts: HashSet::new(),
+            image_recovery_operations: HashMap::new(),
         }
     }
 }
 
 impl TranscriptProjection {
+    fn upsert_image_recovery_operation(
+        &mut self,
+        operation_id: String,
+        prompt_id: Option<String>,
+        state: ImageRecoveryOperationState,
+    ) {
+        use ImageRecoveryOperationState as State;
+        let (message, running, failed) = match state {
+            State::Started { message } | State::Vision { message } | State::Ocr { message } => {
+                (message, true, false)
+            }
+            State::Completed { message } => (message, false, false),
+            State::Failed { message } => (message, false, true),
+        };
+        let id = if let Some(id) = self.image_recovery_operations.get(&operation_id).copied() {
+            let Some(entry) = self.scrollback.get_by_id_mut(id) else {
+                self.image_recovery_operations.remove(&operation_id);
+                return;
+            };
+            let Some(block) = entry.block.as_image_recovery_mut() else {
+                self.image_recovery_operations.remove(&operation_id);
+                return;
+            };
+            if !block.running && running {
+                return;
+            }
+            block.message = message;
+            block.prompt_id = prompt_id;
+            block.running = running;
+            block.failed = failed;
+            entry.invalidate_cache();
+            id
+        } else {
+            self.scrollback.push_block(RenderBlock::image_recovery(
+                operation_id.clone(),
+                prompt_id,
+                message,
+                running,
+                failed,
+            ))
+        };
+        self.image_recovery_operations.insert(operation_id, id);
+        self.scrollback.set_entry_running(id, running);
+    }
+
+    fn settle_image_recovery_operations(&mut self, prompt_id: Option<&str>, message: &str) {
+        for id in self
+            .image_recovery_operations
+            .values()
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            let mut settled = false;
+            if let Some(entry) = self.scrollback.get_by_id_mut(id) {
+                if let Some(block) = entry.block.as_image_recovery_mut() {
+                    if block.running
+                        && prompt_id.is_none_or(|prompt| block.prompt_id.as_deref() == Some(prompt))
+                    {
+                        block.message = message.to_owned();
+                        block.running = false;
+                        block.failed = true;
+                        entry.invalidate_cache();
+                        settled = true;
+                    }
+                }
+            }
+            if settled {
+                self.scrollback.set_entry_running(id, false);
+            }
+        }
+    }
+
+    /// Stop live animation at the end of an offline transcript snapshot. The
+    /// source event remains historical; only this read-only projection is
+    /// annotated as incomplete at its captured boundary.
+    pub fn finish_snapshot(&mut self) {
+        self.settle_image_recovery_operations(None, "Image recovery incomplete at snapshot");
+    }
+
     pub fn behavior_label(&self) -> Option<String> {
         self.behavior.as_ref().map(|(mode, phase)| {
             format!(
@@ -794,6 +876,14 @@ impl TranscriptProjection {
                     .as_ref()
                     .is_none_or(|current| *current == prompt_id)
                 {
+                    self.settle_image_recovery_operations(
+                        Some(&prompt_id),
+                        if matches!(stop_reason.as_str(), "cancelled" | "canceled") {
+                            "Image recovery cancelled"
+                        } else {
+                            "Image recovery interrupted"
+                        },
+                    );
                     self.tracker.finish_transcript_turn(&mut self.scrollback);
                     self.scrollback.seal_subagent_permission_group();
                     self.current_prompt = None;
@@ -869,6 +959,13 @@ impl TranscriptProjection {
             }
             GrowUpdate::ImageProcessing { message } => {
                 self.scrollback.push_block(RenderBlock::notice(message));
+            }
+            GrowUpdate::ImageRecoveryOperation {
+                operation_id,
+                prompt_id,
+                state,
+            } => {
+                self.upsert_image_recovery_operation(operation_id, prompt_id, state);
             }
             GrowUpdate::ImageCompressed { images, message } if images.is_empty() => {
                 self.scrollback.push_block(RenderBlock::notice(message));

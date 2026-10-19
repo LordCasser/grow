@@ -14,10 +14,10 @@ use crate::prompt_images::{InlineMediaInfo, ScrollbackImageRef};
 use super::blocks::mermaid_content::DiagramAffordance;
 use super::blocks::{
     AgentMessageBlock, BgTaskBlock, BtwBlock, ContextInfoBlock, EditToolCallBlock,
-    ExecuteToolCallBlock, LineRange, ListDirToolCallBlock, NoticeBlock, NoticeCategory, NoticeTone,
-    OtherToolCallBlock, ReadToolCallBlock, SearchFileMatch, SearchToolCallBlock, SessionEvent,
-    SessionEventBlock, SubagentBlock, SubagentBlockKind, SubagentPermissionBlock, ThinkingBlock,
-    ToolCallBlock, UserPromptBlock, WorkflowBlock,
+    ExecuteToolCallBlock, ImageRecoveryBlock, LineRange, ListDirToolCallBlock, NoticeBlock,
+    NoticeCategory, NoticeTone, OtherToolCallBlock, ReadToolCallBlock, SearchFileMatch,
+    SearchToolCallBlock, SessionEvent, SessionEventBlock, SubagentBlock, SubagentBlockKind,
+    SubagentPermissionBlock, ThinkingBlock, ToolCallBlock, UserPromptBlock, WorkflowBlock,
 };
 use super::types::{
     AccentStyle, BlockBackground, BlockContext, BlockOutput, DisplayMode, RenderedBlockOutput,
@@ -378,6 +378,8 @@ pub enum RenderBlock {
     Notice(NoticeBlock),
     /// Session-level event (typed: turn completed, cancelled, failed, etc.).
     SessionEvent(SessionEventBlock),
+    /// Mutable lifecycle row for image recovery; never a model tool call.
+    ImageRecovery(ImageRecoveryBlock),
     /// Background task (always collapsed, animated bullet while running).
     BgTask(BgTaskBlock),
     /// Subagent lifecycle (started / completed / failed).
@@ -402,6 +404,7 @@ macro_rules! delegate_block {
             RenderBlock::Thinking(b) => b.$method($($arg),*),
             RenderBlock::Notice(b) => b.$method($($arg),*),
             RenderBlock::SessionEvent(b) => b.$method($($arg),*),
+            RenderBlock::ImageRecovery(b) => b.$method($($arg),*),
             RenderBlock::BgTask(b) => b.$method($($arg),*),
             RenderBlock::Subagent(b) => b.$method($($arg),*),
             RenderBlock::SubagentPermission(b) => b.$method($($arg),*),
@@ -460,6 +463,7 @@ impl RenderBlock {
     pub(crate) fn immutable_event_id(&self) -> Option<&str> {
         match self {
             Self::Notice(block) => block.event_id.as_deref(),
+            Self::ToolCall(ToolCallBlock::Other(block)) => block.immutable_event_id(),
             Self::Subagent(block) => block.event_id.as_deref(),
             Self::SessionEvent(block) => block.event_id.as_deref(),
             _ => None,
@@ -512,6 +516,12 @@ impl RenderBlock {
             (Self::AgentMessage(left), Self::AgentMessage(right)) => left.text() == right.text(),
             (Self::Thinking(left), Self::Thinking(right)) => left.text() == right.text(),
             (Self::ToolCall(left), Self::ToolCall(right)) => {
+                if let (ToolCallBlock::Other(left), ToolCallBlock::Other(right)) = (left, right)
+                    && let (Some(left_id), Some(right_id)) =
+                        (left.immutable_event_id(), right.immutable_event_id())
+                {
+                    return left_id == right_id;
+                }
                 tool_replay_kind(left) == tool_replay_kind(right)
                     && left.searchable_text() == right.searchable_text()
             }
@@ -523,6 +533,9 @@ impl RenderBlock {
                     return left_id == right_id;
                 }
                 format!("{left:?}") == format!("{right:?}")
+            }
+            (Self::ImageRecovery(left), Self::ImageRecovery(right)) => {
+                left.operation_id == right.operation_id
             }
             (Self::BgTask(left), Self::BgTask(right)) => {
                 format!("{left:?}") == format!("{right:?}")
@@ -913,6 +926,29 @@ impl RenderBlock {
         RenderBlock::SessionEvent(block)
     }
 
+    pub fn image_recovery(
+        operation_id: impl Into<String>,
+        prompt_id: Option<String>,
+        message: impl Into<String>,
+        running: bool,
+        failed: bool,
+    ) -> Self {
+        RenderBlock::ImageRecovery(ImageRecoveryBlock {
+            operation_id: operation_id.into(),
+            prompt_id,
+            message: message.into(),
+            running,
+            failed,
+        })
+    }
+
+    pub fn as_image_recovery_mut(&mut self) -> Option<&mut ImageRecoveryBlock> {
+        match self {
+            RenderBlock::ImageRecovery(block) => Some(block),
+            _ => None,
+        }
+    }
+
     /// Create a "Task started" background task block.
     pub fn bg_task(command: impl Into<String>, task_id: impl Into<String>) -> Self {
         RenderBlock::BgTask(BgTaskBlock::started(command, task_id))
@@ -1109,6 +1145,13 @@ impl RenderBlock {
                 }
             }
             RenderBlock::Thinking(_) => Some(theme.accent_thinking),
+            RenderBlock::ImageRecovery(block) => Some(if block.running {
+                theme.accent_running
+            } else if block.failed {
+                theme.accent_error
+            } else {
+                theme.accent_success
+            }),
             RenderBlock::BgTask(block) => {
                 if block.is_running() {
                     Some(theme.accent_running)
@@ -1272,6 +1315,7 @@ impl RenderBlock {
                 b.communication_body().map(|body| body.raw_text()),
             ]),
             RenderBlock::SessionEvent(b) => join_searchable([Some(b.event.message())]),
+            RenderBlock::ImageRecovery(b) => join_searchable([Some(b.message.clone())]),
             RenderBlock::BgTask(b) => {
                 join_searchable([Some(b.command.clone()), b.description.clone()])
             }

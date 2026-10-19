@@ -45,6 +45,8 @@ mod routing;
 mod session_notification;
 pub(crate) use session_notification::apply_ui_notice;
 pub(crate) use session_notification::project_ui_notice;
+pub(crate) use session_notification::settle_stale_image_recovery;
+pub(crate) use session_notification::settle_unfinished_image_recovery;
 mod settings;
 mod subagent_activity;
 

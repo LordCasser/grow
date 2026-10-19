@@ -320,6 +320,9 @@ impl Player {
                 self.projection.apply(item.event);
             }
         }
+        if self.is_finished() {
+            self.projection.finish_snapshot();
+        }
         delivered
     }
 
@@ -501,6 +504,38 @@ mod tests {
             timestamp_ms: at_ms,
             simulated_source: false,
         }
+    }
+
+    #[test]
+    fn playback_eof_stops_unfinished_image_recovery_animation() {
+        use shell::extensions::notification::ImageRecoveryOperationState as State;
+        let start = Instant::now();
+        let mut player = Player::new(
+            vec![grow_event(
+                GrowUpdate::ImageRecoveryOperation {
+                    operation_id: "image-op-eof".into(),
+                    prompt_id: Some("prompt-1".into()),
+                    state: State::Vision {
+                        message: "Calling the configured vision model…".into(),
+                    },
+                },
+                Some(0),
+            )],
+            1.0,
+            start,
+        );
+
+        player.tick(start + Duration::from_millis(1));
+
+        assert!(player.is_finished());
+        assert!(!player.projection.scrollback.has_running_entries());
+        let crate::scrollback::RenderBlock::ImageRecovery(block) =
+            &player.projection.scrollback.get(0).unwrap().block
+        else {
+            panic!("expected image recovery operation row");
+        };
+        assert_eq!(block.message, "Image recovery incomplete at snapshot");
+        assert!(!block.running);
     }
 
     fn visible_text(player: &Player) -> String {

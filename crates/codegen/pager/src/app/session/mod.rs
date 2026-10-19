@@ -2182,6 +2182,9 @@ impl AgentSession {
                 return None;
             }
             let target = slot.desired.as_ref()?;
+            if &slot.current == target {
+                return None;
+            }
             let text = match (&slot.current, target) {
                 (
                     ControlTarget::Sampling {
@@ -3986,6 +3989,85 @@ mod tests {
         ));
         assert_eq!(s.control_status(100).as_deref(), Some("effort high→max"));
         assert_eq!(s.control_status(5).as_deref(), Some("1 change pending"));
+    }
+
+    #[test]
+    fn shell_control_status_hides_unchanged_pending_targets() {
+        use shell::extensions::notification::{
+            ControlDomain, ControlPhase, ControlStateUpdate, ControlTarget,
+        };
+
+        let mut agent_session = test_session();
+        assert!(agent_session.apply_shell_control_state(
+            ControlStateUpdate {
+                epoch: "epoch-a".into(),
+                domain: ControlDomain::Agent,
+                revision: 1,
+                intent: None,
+                snapshot: true,
+                receipt_only: false,
+                phase: ControlPhase::Pending,
+                current: ControlTarget::Agent {
+                    agent_name: "builder".into(),
+                },
+                desired: Some(ControlTarget::Agent {
+                    agent_name: "builder".into(),
+                }),
+                message: None,
+            },
+            false,
+        ));
+        assert_eq!(agent_session.control_status(100), None);
+        agent_session
+            .shell_controls
+            .agent
+            .as_mut()
+            .expect("pending Agent projection")
+            .phase = ControlPhase::Applying;
+        agent_session
+            .shell_controls
+            .agent
+            .as_mut()
+            .expect("applying Agent projection")
+            .phase_since = Instant::now() - Duration::from_millis(301);
+        assert_eq!(agent_session.control_status(100), None);
+
+        let mut sampling_session = test_session();
+        assert!(sampling_session.apply_shell_control_state(
+            ControlStateUpdate {
+                epoch: "epoch-a".into(),
+                domain: ControlDomain::Sampling,
+                revision: 1,
+                intent: None,
+                snapshot: true,
+                receipt_only: false,
+                phase: ControlPhase::Pending,
+                current: ControlTarget::Sampling {
+                    model_id: "provider/model".into(),
+                    reasoning_effort: Some("high".into()),
+                },
+                desired: Some(ControlTarget::Sampling {
+                    model_id: "provider/model".into(),
+                    reasoning_effort: Some("high".into()),
+                }),
+                message: None,
+            },
+            false,
+        ));
+        assert_eq!(sampling_session.control_status(100), None);
+        sampling_session
+            .shell_controls
+            .sampling
+            .as_mut()
+            .expect("pending Sampling projection")
+            .phase = ControlPhase::Applying;
+        sampling_session
+            .shell_controls
+            .sampling
+            .as_mut()
+            .expect("applying Sampling projection")
+            .phase_since = Instant::now() - Duration::from_millis(301);
+        assert_eq!(sampling_session.control_status(100), None);
     }
 
     #[test]

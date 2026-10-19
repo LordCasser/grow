@@ -583,6 +583,15 @@ pub(in crate::app::root::dispatch) fn handle_session_loaded(
         }
         agent.session.loading_replay = false;
         agent.session.replay_live_cursor_seen = false;
+        let preserve_recovery_prompt_id = foreground
+            .as_ref()
+            .map(|snapshot| snapshot.prompt_id.as_str())
+            .filter(|prompt_id| agent.should_adopt_running_prompt(prompt_id));
+        crate::app::acp_handler::settle_stale_image_recovery(
+            &mut agent.scrollback,
+            preserve_recovery_prompt_id,
+            "Image recovery interrupted",
+        );
         agent.session.finish_turn(&mut agent.scrollback);
         agent.mark_turn_finished();
         if let Some(m) = new_models {

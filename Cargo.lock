@@ -6454,6 +6454,7 @@ dependencies = [
  "ratatui-inline",
  "ratatui-textarea",
  "regex",
+ "reqwest",
  "same-file",
  "sampling-types",
  "sandbox",

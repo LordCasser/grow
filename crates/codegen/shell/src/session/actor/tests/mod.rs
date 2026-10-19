@@ -31,6 +31,7 @@ mod rewind_cross_compaction_tests;
 mod rewind_synthetic_turn_tests;
 mod runtime_suspended_waiter_tests;
 mod sampling_attempt_delivery_tests;
+mod sampling_failure_recovery_tests;
 mod session_thread_tests;
 mod skill_loading_tests;
 mod stop_cancelled_tests;

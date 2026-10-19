@@ -162,7 +162,7 @@ async fn assert_plan_resume(defer_before_exit: bool) -> Result<()> {
     // The shell writes its runtime checkpoint and Control state as part of the
     // normal exit path, whether approval is live or the Plan is retained.
     first
-        .inject_keys(b"\x03")
+        .inject_keys(b"\x04\x04")
         .context("suspend pager with pending plan approval")?;
     let exit = first
         .wait_for_exit_and_drain(Duration::from_secs(15), Duration::from_secs(1))

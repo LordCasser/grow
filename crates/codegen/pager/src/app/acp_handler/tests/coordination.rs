@@ -787,29 +787,80 @@ fn parent_message_live_and_replay_share_receipt_identity() {
 
     let agent = &app.agents[&AgentId(0)];
     assert_eq!(agent.scrollback.len(), 1);
-    let RenderBlock::Notice(notice) = &agent.scrollback.entry(0).unwrap().block else {
-        panic!("expected parent message NoticeBlock");
-    };
-    assert_eq!(notice.event_id.as_deref(), Some("parent-message:receipt-1"));
+    assert!(!agent.scrollback.has_running_entries());
+    let row = tool_row(&app, 0);
+    assert_eq!(row.immutable_event_id(), Some("parent-message:receipt-1"));
+    assert_eq!(row.name, "Message from parent-session");
+    assert_eq!(row.summary, "Received");
     assert_eq!(
-        notice
+        row
             .communication_body()
             .expect("typed parent-message body")
             .raw_text(),
         "first line\nsecond line\nthird line"
     );
     let data: serde_json::Value = serde_json::from_str(
-        notice
+        row
             .communication_data()
             .expect("typed parent-message metadata"),
     )
     .unwrap();
     assert_eq!(data["receipt_id"], "receipt-1");
-    assert!(notice.details.is_none());
+    assert_eq!(data["notice"]["interrupt"], true);
 }
 
 #[test]
-fn parent_message_full_and_cursor_reload_keep_one_finite_notice() {
+fn received_agent_reply_uses_reply_row_and_preserves_reply_reference() {
+    let mut app = make_app_with_agent("parent-session");
+    let GrowSessionUpdate::UiNotice(mut update) =
+        parent_message_notice("reply-receipt", Some("The test passed"))
+    else {
+        unreachable!()
+    };
+    let mut notice = AgentMessageNotice::from_notice(&update).unwrap();
+    notice.source_session_id = "child-session".into();
+    notice.reply_to = Some(sampling_types::AgentMessageRef {
+        source_session_id: "parent-session".into(),
+        message_id: "parent-message-4".into(),
+    });
+    update.details = Some(serde_json::to_string(&notice).unwrap());
+    assert!(handle(
+        make_ext_session_notification("parent-session", GrowSessionUpdate::UiNotice(update)),
+        &mut app,
+    ));
+
+    let row = tool_row(&app, 0);
+    assert_eq!(row.name, "Reply from child-session");
+    assert_eq!(row.summary, "Received");
+    assert_eq!(row.immutable_event_id(), Some("parent-message:reply-receipt"));
+    let data: serde_json::Value = serde_json::from_str(row.communication_data().unwrap()).unwrap();
+    assert_eq!(data["notice"]["replyTo"]["source_session_id"], "parent-session");
+    assert_eq!(data["notice"]["replyTo"]["message_id"], "parent-message-4");
+}
+
+#[test]
+fn malformed_agent_message_identity_remains_a_finite_notice() {
+    let mut app = make_app_with_agent("child");
+    let GrowSessionUpdate::UiNotice(mut update) =
+        parent_message_notice("receipt-invalid", Some("do not infer identity"))
+    else {
+        unreachable!()
+    };
+    update.details = Some("not structured identity".into());
+    assert!(handle(
+        make_ext_session_notification("child", GrowSessionUpdate::UiNotice(update)),
+        &mut app,
+    ));
+    assert_eq!(app.agents[&AgentId(0)].scrollback.len(), 1);
+    assert!(matches!(
+        &app.agents[&AgentId(0)].scrollback.entry(0).unwrap().block,
+        RenderBlock::Notice(notice) if notice.text.contains("Parent guidance received")
+    ));
+    assert!(!app.agents[&AgentId(0)].scrollback.has_running_entries());
+}
+
+#[test]
+fn parent_message_full_and_cursor_reload_keep_one_received_tool_row() {
     for full_replay in [false, true] {
         let mut app = make_app_with_agent("child");
         let update = parent_message_notice("receipt-reload", Some("Keep the original interface"));
@@ -832,9 +883,16 @@ fn parent_message_full_and_cursor_reload_keep_one_finite_notice() {
         assert!(agent.finalize_reload_and_maybe_adopt(43, true, None));
         assert_eq!(agent.scrollback.len(), 1);
         assert!(!agent.scrollback.has_running_entries());
-        assert!(
-            matches!(&agent.scrollback.entry(0).unwrap().block, RenderBlock::Notice(notice)
-            if notice.event_id.as_deref() == Some("parent-message:receipt-reload"))
+        let row = match &agent.scrollback.entry(0).unwrap().block {
+            RenderBlock::ToolCall(ToolCallBlock::Other(block)) => block,
+            other => panic!("expected message tool row, got {other:?}"),
+        };
+        assert_eq!(row.immutable_event_id(), Some("parent-message:receipt-reload"));
+        assert_eq!(row.name, "Message from parent-session");
+        assert_eq!(row.summary, "Received");
+        assert_eq!(
+            row.communication_body().unwrap().raw_text(),
+            "Keep the original interface"
         );
         assert!(agent.session.tracker.activity().is_none());
     }
@@ -868,9 +926,9 @@ fn parent_message_routes_to_nested_child_without_switching_view() {
     let child = &root.subagent_views["grandchild-session"];
     assert!(root.active_subagent.is_none());
     assert!((0..child.scrollback.len()).any(|index| matches!(&child.scrollback.entry(index).unwrap().block,
-        RenderBlock::Notice(notice) if notice.event_id.as_deref() == Some("parent-message:nested-receipt"))));
+        RenderBlock::ToolCall(ToolCallBlock::Other(block)) if block.immutable_event_id() == Some("parent-message:nested-receipt"))));
     assert!(!(0..root.scrollback.len()).any(|index| matches!(&root.scrollback.entry(index).unwrap().block,
-        RenderBlock::Notice(notice) if notice.event_id.as_deref() == Some("parent-message:nested-receipt"))));
+        RenderBlock::ToolCall(ToolCallBlock::Other(block)) if block.immutable_event_id() == Some("parent-message:nested-receipt"))));
 }
 
 #[test]
@@ -885,19 +943,20 @@ fn parent_message_routes_to_existing_child_view_and_handles_missing_body() {
     assert_eq!(parent.scrollback.len(), 0);
     let child = parent.subagent_views.get("child").expect("child view");
     assert_eq!(child.scrollback.len(), 1);
-    let RenderBlock::Notice(notice) = &child.scrollback.entry(0).unwrap().block else {
-        panic!("expected missing-body NoticeBlock");
+    let row = match &child.scrollback.entry(0).unwrap().block {
+        RenderBlock::ToolCall(ToolCallBlock::Other(block)) => block,
+        other => panic!("expected missing-body message row, got {other:?}"),
     };
-    assert_eq!(notice.event_id.as_deref(), Some("parent-message:receipt-2"));
+    assert_eq!(row.immutable_event_id(), Some("parent-message:receipt-2"));
     assert_eq!(
-        notice
+        row
             .communication_body()
             .expect("typed missing-body body")
             .raw_text(),
         "Message unavailable"
     );
     let data: serde_json::Value = serde_json::from_str(
-        notice
+        row
             .communication_data()
             .expect("typed missing-body metadata"),
     )

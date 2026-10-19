@@ -94,6 +94,123 @@ fn turn_completed(prompt_id: &str, stop_reason: &str) -> TranscriptEvent {
     })
 }
 
+#[test]
+fn image_recovery_updates_reuse_one_row_and_terminalize_during_replay() {
+    use shell::extensions::notification::ImageRecoveryOperationState as State;
+    let mut projection = TranscriptProjection::default();
+    let operation_id = "image-op-1".to_owned();
+    for state in [
+        State::Started {
+            message: "Preparing image recovery…".into(),
+        },
+        State::Vision {
+            message: "Calling the configured vision model…".into(),
+        },
+        State::Ocr {
+            message: "Trying local OCR…".into(),
+        },
+        State::Completed {
+            message: "Converted 1 image".into(),
+        },
+    ] {
+        projection.apply(grow_event(GrowUpdate::ImageRecoveryOperation {
+            operation_id: operation_id.clone(),
+            prompt_id: Some("prompt-1".into()),
+            state,
+        }));
+    }
+    assert_eq!(projection.scrollback.len(), 1);
+    let crate::scrollback::block::RenderBlock::ImageRecovery(block) =
+        &projection.scrollback.get(0).unwrap().block
+    else {
+        panic!("expected image recovery operation row");
+    };
+    assert!(!block.running);
+    assert_eq!(block.message, "Converted 1 image");
+
+    projection.apply(grow_event(GrowUpdate::ImageRecoveryOperation {
+        operation_id: "interrupted-op".into(),
+        prompt_id: Some("prompt-1".into()),
+        state: State::Vision {
+            message: "Calling the configured vision model…".into(),
+        },
+    }));
+    projection.apply(grow_event(GrowUpdate::ImageRecoveryOperation {
+        operation_id: "new-prompt-op".into(),
+        prompt_id: Some("prompt-2".into()),
+        state: State::Vision {
+            message: "Calling the configured vision model…".into(),
+        },
+    }));
+    projection.apply(turn_completed("prompt-1", "cancelled"));
+    {
+        let image_rows = projection
+            .scrollback
+            .iter_entries()
+            .filter_map(|(_, entry)| match &entry.block {
+                crate::scrollback::block::RenderBlock::ImageRecovery(block) => Some(block),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(image_rows.len(), 3, "terminal marker is a separate row");
+        let interrupted = image_rows
+            .iter()
+            .find(|block| block.operation_id == "interrupted-op")
+            .unwrap();
+        assert!(!interrupted.running);
+        assert_eq!(interrupted.message, "Image recovery cancelled");
+        let new_prompt = image_rows
+            .iter()
+            .find(|block| block.operation_id == "new-prompt-op")
+            .unwrap();
+        assert!(
+            new_prompt.running,
+            "late terminal for prompt-1 must not settle prompt-2"
+        );
+        assert!(projection.scrollback.has_running_entries());
+    }
+    projection.apply(turn_completed("prompt-2", "cancelled"));
+    let new_prompt_block = projection
+        .scrollback
+        .iter_entries()
+        .find_map(|(_, entry)| match &entry.block {
+            crate::scrollback::block::RenderBlock::ImageRecovery(block)
+                if block.operation_id == "new-prompt-op" =>
+            {
+                Some(block)
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(!new_prompt_block.running);
+    assert!(!projection.scrollback.has_running_entries());
+}
+
+#[test]
+fn unfinished_image_recovery_is_static_at_offline_snapshot_eof() {
+    use shell::extensions::notification::ImageRecoveryOperationState as State;
+    let mut projection = TranscriptProjection::default();
+    projection.apply(grow_event(GrowUpdate::ImageRecoveryOperation {
+        operation_id: "image-op-snapshot".into(),
+        prompt_id: Some("prompt-1".into()),
+        state: State::Vision {
+            message: "Calling the configured vision model…".into(),
+        },
+    }));
+    assert!(projection.scrollback.has_running_entries());
+
+    projection.finish_snapshot();
+
+    let crate::scrollback::block::RenderBlock::ImageRecovery(block) =
+        &projection.scrollback.get(0).unwrap().block
+    else {
+        panic!("expected image recovery operation row");
+    };
+    assert_eq!(block.message, "Image recovery incomplete at snapshot");
+    assert!(!block.running);
+    assert!(!projection.scrollback.has_running_entries());
+}
+
 fn execute_entries(
     projection: &TranscriptProjection,
 ) -> Vec<(

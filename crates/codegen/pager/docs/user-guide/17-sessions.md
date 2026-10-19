@@ -311,6 +311,8 @@ The trajectory debugger also has a **Download conversation** action. It download
 
 Each export captures fixed ledger frontiers. A session may keep appending while the captured transcript is read; later records and unfinished final lines are excluded. Missing required sources, corrupt committed records, or inconsistent cross-session links fail the export. The capture is not an atomic transaction across all agents; retry after the writer settles if a required causal link is not yet available.
 
+Transcript files are synced before an export is completed. Unix also syncs the containing directories, including the destination parent after publication; other platforms skip directory-handle operations when the standard filesystem API does not support them. Errors from file writes, file syncs, and supported directory syncs still fail the export. A parent-sync error after publication can leave the complete tree at the target while reporting failure. See the [portable transcript sync contract](../../../../../openspec/specs/client-surfaces/spec.md#requirement-transcript-tree-export-syncs-files-portably).
+
 The [client-surfaces contract](../../../../../openspec/specs/client-surfaces/spec.md#requirement-cli-export-writes-a-session-transcript-directory-tree) defines the verified delegation tree and publication rules.
 
 ### Replay a session

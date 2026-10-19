@@ -74,6 +74,7 @@ async fn configured_actor_with_skills_and_commit_fault(
         hook_decision,
         commit_fault,
         None,
+        None,
     )
     .await
     .0
@@ -85,6 +86,7 @@ async fn configured_actor_with_skills_commit_fault_and_hook_gate(
     hook_decision: Option<&'static str>,
     commit_fault: Option<SkillCommitAckFault>,
     hook_gate: Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>,
+    permission_decision: Option<acp::PermissionOptionKind>,
 ) -> (
     (Arc<SessionActor>, Option<Arc<SkillCommitAckProbe>>),
     Option<Arc<tokio::sync::Notify>>,
@@ -98,6 +100,23 @@ async fn configured_actor_with_skills_commit_fault_and_hook_gate(
             match message {
                 acp_transport::AcpClientMessage::SessionNotification(notification) => {
                     let _ = notification.response_tx.send(Ok(()));
+                }
+                acp_transport::AcpClientMessage::RequestPermission(request) => {
+                    let kind = permission_decision
+                        .as_ref()
+                        .expect("unexpected permission request");
+                    let selected = request
+                        .request
+                        .options
+                        .iter()
+                        .find(|option| &option.kind == kind)
+                        .expect("requested permission option is available");
+                    let response = acp::RequestPermissionResponse::new(
+                        acp::RequestPermissionOutcome::Selected(
+                            acp::SelectedPermissionOutcome::new(selected.option_id.clone()),
+                        ),
+                    );
+                    let _ = request.response_tx.send(Ok(response));
                 }
                 acp_transport::AcpClientMessage::ExtMethod(request) => {
                     if let Some((reached, release)) = &hook_gate {
@@ -130,7 +149,7 @@ async fn configured_actor_with_skills_commit_fault_and_hook_gate(
                 0,
                 256_000,
                 85,
-                gateway_tx,
+                gateway_tx.clone(),
                 persistence_tx,
                 fault,
             )
@@ -138,10 +157,36 @@ async fn configured_actor_with_skills_commit_fault_and_hook_gate(
             (actor, Some(injected))
         }
         None => (
-            create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await,
+            create_test_actor(0, 256_000, 85, gateway_tx.clone(), persistence_tx).await,
             None,
         ),
     };
+    if permission_decision.is_some() {
+        use workspace::permission::types::{
+            PatternMode, PermissionConfig, PermissionRule, RuleAction, ToolFilter,
+        };
+        let config = PermissionConfig::new(vec![PermissionRule {
+            action: RuleAction::Ask,
+            tool: ToolFilter::Read,
+            pattern: Some("**/reference.md".into()),
+            pattern_mode: PatternMode::Glob,
+        }]);
+        let (permissions, mut events) = workspace::permission::spawn_permission_manager(
+            actor.session_info.id.clone(),
+            acp_transport::AcpAgentGatewaySender::new(gateway_tx),
+            actor.tool_context.cwd.clone(),
+            workspace::permission::ClientType::GrowPager,
+            std::time::Duration::from_secs(5),
+            Some(config),
+            vec![],
+            vec![],
+            ::diagnostics::enums::PermissionMode::Ask,
+            None,
+            false,
+        );
+        actor.permissions = permissions;
+        tokio::task::spawn_local(async move { while events.recv().await.is_some() {} });
+    }
     let tool_config = tools::registry::types::ToolConfig::for_tool::<
         tools::implementations::grow_build::LoadSkillTool,
     >();
@@ -1109,6 +1154,7 @@ async fn cancelling_while_pretool_hook_is_pending_keeps_skill_group_unpublished(
                 Some("allow"),
                 None,
                 Some((hook_reached.clone(), release_hook.clone())),
+                None,
             )
             .await;
             install_load_skill_hook(&actor, &[::hooks::event::HookEventName::PreToolUse]);
@@ -1553,11 +1599,40 @@ async fn unconfirmed_user_skill_group_stops_before_provider_without_partial_publ
 
 #[tokio::test(flavor = "current_thread")]
 async fn model_load_skill_pipeline_publishes_one_result_and_one_skill_item() {
+    assert_model_skill_load_pipeline(false, true, true).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn model_skill_resource_pipeline_commits_only_requested_literal_resource() {
+    assert_model_skill_load_pipeline(true, true, true).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn model_disabled_skill_pipeline_reports_failure_without_publishing_guidance() {
+    assert_model_skill_load_pipeline(false, false, true).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn model_skill_resource_permission_denial_publishes_no_guidance() {
+    assert_model_skill_load_pipeline(true, true, false).await;
+}
+
+async fn assert_model_skill_load_pipeline(resource: bool, enabled: bool, permit_resource: bool) {
     tokio::task::LocalSet::new()
         .run_until(async {
             let server = MockInferenceServer::start()
                 .await
                 .expect("mock inference server");
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("SKILL.md");
+            std::fs::write(&path, BODY).unwrap();
+            let literal_resource = "---\nreference: true\n---\nRESOURCE_GUIDANCE_ONLY $ARGUMENTS";
+            std::fs::write(dir.path().join("reference.md"), literal_resource).unwrap();
+            let (arguments, expected_args, expected_body) = if resource {
+                (r#"{"name":"review","resource":"reference.md"}"#, "", format!("<skill_resource name=\"review\" resource=\"reference.md\">\n{literal_resource}\n</skill_resource>"))
+            } else {
+                (r#"{"name":"review","args":"focus"}"#, "focus", prepared_body("focus"))
+            };
             server.enqueue_response(
                 "/v1/responses",
                 ScriptedResponse::sse(
@@ -1565,7 +1640,7 @@ async fn model_load_skill_pipeline_publishes_one_result_and_one_skill_item() {
                         "load review guidance",
                         "model-skill-call",
                         "load_skill",
-                        r#"{"name":"review","args":"focus"}"#,
+                        arguments,
                         "test",
                     ),
                 ),
@@ -1580,8 +1655,12 @@ async fn model_load_skill_pipeline_publishes_one_result_and_one_skill_item() {
                     }),
                 ),
             );
-            let actor =
-                configured_actor(&server, review_skill("/skills/review/SKILL.md", BODY)).await;
+            let mut selected = review_skill(path.to_str().unwrap(), BODY);
+            selected.enabled = enabled;
+            let ((actor, _), _) = configured_actor_with_skills_commit_fault_and_hook_gate(
+                &server, vec![selected], None, None, None,
+                resource.then_some(if permit_resource { acp::PermissionOptionKind::AllowOnce } else { acp::PermissionOptionKind::RejectOnce }),
+            ).await;
             let prompt_id = "model-skill-prompt";
             let input_id = actor
                 .admit_human_input(
@@ -1613,6 +1692,20 @@ async fn model_load_skill_pipeline_publishes_one_result_and_one_skill_item() {
                     None,
                 )
                 .await;
+            if resource && !permit_resource {
+                assert!(result.is_ok(), "permission rejection ends the turn cleanly: {result:?}");
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                assert!(!events.iter().any(|event| matches!(&event.kind,
+                    chat_state::TimelineEventKind::Messages(messages)
+                        if messages.cause == chat_state::MessageCause::SkillLoadModel)));
+                assert_eq!(server.request_bodies().len(), 1, "primary permission rejection must not resample");
+                let surface = actor.chat_state_handle.get_conversation().await;
+                assert!(surface.iter().any(|item| item.text_content().contains("rejected") || item.text_content().contains("denied")));
+                assert!(surface.iter().all(|item| !item.text_content().contains(literal_resource)));
+                assert!(format!("{events:?}").contains("Rejected"), "a durable permission rejection is required");
+                actor.handle_completion(prompt_id.into(), result).await;
+                return;
+            }
             let error = match result.as_ref() {
                 Err(error) => error,
                 Ok(_) => {
@@ -1629,8 +1722,25 @@ async fn model_load_skill_pipeline_publishes_one_result_and_one_skill_item() {
                 "expected the scripted HTTP 400 error, got result={result:#?}; surface={surface_at_failure:#?}"
             );
 
-            let expected_body = prepared_body("focus");
             let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            if !enabled || !permit_resource {
+                assert!(!events.iter().any(|event| matches!(&event.kind,
+                    chat_state::TimelineEventKind::Messages(messages)
+                        if messages.cause == chat_state::MessageCause::SkillLoadModel)));
+                let requests = server.request_bodies();
+                assert_eq!(requests.len(), 2);
+                let followup = requests[1].to_string();
+                if !enabled {
+                    assert!(followup.contains("disabled by configuration"), "{followup}");
+                    assert!(followup.contains("do not bypass"), "{followup}");
+                } else {
+                    assert!(followup.contains("denied") || followup.contains("rejected"), "{followup}");
+                    assert!(!followup.contains(literal_resource));
+                }
+                assert!(!followup.contains(BODY));
+                actor.handle_completion(prompt_id.into(), result).await;
+                return;
+            }
             let published_events = events
                 .iter()
                 .filter_map(|event| match &event.kind {
@@ -1655,7 +1765,7 @@ async fn model_load_skill_pipeline_publishes_one_result_and_one_skill_item() {
                     if skill.call_id == "model-skill-call"
                         && skill.source == sampling_types::SkillLoadSource::Model
                         && skill.skill_name == "review"
-                        && skill.args == "focus"
+                        && skill.args == expected_args
                         && skill.prepared_body.as_ref() == expected_body.as_str()
             ));
             let requests = server.request_bodies();

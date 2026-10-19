@@ -340,6 +340,36 @@ jobs:
             exit 1
           fi
 
+  # Each regression/spec gate checks out and verifies validate.outputs.commit.
+  # The release cannot rely on independent latest-main workflow results.
+  core-regressions:
+    name: Core regressions on release commit
+    needs: validate
+    uses: ./.github/workflows/core-regression.yml
+    with:
+      commit: ${{ needs.validate.outputs.commit }}
+
+  native-coordination-regressions:
+    name: Native coordination and export regressions on release commit
+    needs: validate
+    uses: ./.github/workflows/local-coordination.yml
+    with:
+      commit: ${{ needs.validate.outputs.commit }}
+
+  windows-storage-regressions:
+    name: Windows storage regressions on release commit
+    needs: validate
+    uses: ./.github/workflows/windows-session-storage.yml
+    with:
+      commit: ${{ needs.validate.outputs.commit }}
+
+  openspec-validation:
+    name: OpenSpec validation on release commit
+    needs: validate
+    uses: ./.github/workflows/openspec.yml
+    with:
+      commit: ${{ needs.validate.outputs.commit }}
+
   # One call of build-one.yml per selected platform. The matrix comes from
   # the select job output; an empty selection expands to zero combinations
   # and this job is skipped.
@@ -372,9 +402,23 @@ jobs:
     name: Publish release assets
     needs:
       - validate
+      - select
       - build
       - dispatch-guard
-    if: ${{ inputs.publish }}
+      - core-regressions
+      - native-coordination-regressions
+      - windows-storage-regressions
+      - openspec-validation
+    if: >-
+      ${{ !cancelled() && inputs.publish &&
+          needs.validate.result == 'success' &&
+          needs.select.result == 'success' &&
+          needs.build.result == 'success' &&
+          needs.dispatch-guard.result == 'success' &&
+          needs.core-regressions.result == 'success' &&
+          needs.native-coordination-regressions.result == 'success' &&
+          needs.windows-storage-regressions.result == 'success' &&
+          needs.openspec-validation.result == 'success' }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6

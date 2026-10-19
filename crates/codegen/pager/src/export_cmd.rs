@@ -90,6 +90,12 @@ pub fn run(args: ExportArgs) -> Result<()> {
             target.display()
         )
     })?;
+    sync_directory(parent).with_context(|| {
+        format!(
+            "Export was published to {}, but its parent directory could not be synced",
+            target.display()
+        )
+    })?;
     eprintln!(
         "Exported {} agent transcript(s) to {}",
         nodes.len(),
@@ -160,6 +166,7 @@ fn write_tree(root: &Path, snapshot: &mut TranscriptSnapshot) -> Result<()> {
         for event in session.events {
             projection.apply(event);
         }
+        projection.finish_snapshot();
         let entries =
             (0..projection.scrollback.len()).filter_map(|index| projection.scrollback.entry(index));
         let body = render_entries_to_full_markdown(entries, &node.children);
@@ -215,7 +222,19 @@ fn sync_tree(path: &Path) -> Result<()> {
             sync_tree(&entry.path())?;
         }
     }
-    std::fs::File::open(path)?.sync_all()?;
+    sync_directory(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> std::io::Result<()> {
+    std::fs::File::open(path)?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> std::io::Result<()> {
+    // std does not support opening directories as files on Windows. File
+    // contents are still synced by `write_private_file` before this pass.
     Ok(())
 }
 
@@ -403,13 +422,16 @@ mod tests {
 
     #[test]
     fn tree_export_keeps_parent_and_child_conversations_separate() {
-        let home = tempfile::tempdir().unwrap();
+        let home = tempfile::Builder::new()
+            .prefix("grow-导出-")
+            .tempdir()
+            .unwrap();
         let mut parent = Timeline::default();
         let spawn = chat_state::SubagentSpawnEvent {
             subagent_id: "agent-child".into(),
-            child_session_id: "child".into(),
+            child_session_id: "子会话".into(),
             origin_tool_call_id: None,
-            security_parent_session_id: "root".into(),
+            security_parent_session_id: "根会话".into(),
             parent_step_id: None,
             subagent_type: "explore".into(),
             description: "inspect".into(),
@@ -442,37 +464,37 @@ mod tests {
         let mut child = Timeline::default();
         child
             .record(TimelineEventKind::SubagentSeed(SubagentSeedEvent {
-                parent_timeline_id: "root".into(),
+                parent_timeline_id: "根会话".into(),
                 parent_spawn_seq: spawn_seq,
                 subagent_id: spawn.subagent_id,
-                security_parent_session_id: "root".into(),
+                security_parent_session_id: "根会话".into(),
                 context_source: spawn.context_source,
                 source_ref: None,
                 normalized: false,
             }))
             .unwrap();
-        write_fixture_session(home.path(), "root", &parent, None, "parent-only-answer");
+        write_fixture_session(home.path(), "根会话", &parent, None, "parent-only-answer");
         write_fixture_session(
             home.path(),
-            "child",
+            "子会话",
             &child,
-            Some("root"),
+            Some("根会话"),
             "child-only-answer",
         );
 
-        let mut snapshot = capture_tree_at("root", home.path()).unwrap();
+        let mut snapshot = capture_tree_at("根会话", home.path()).unwrap();
         let output = tempfile::tempdir().unwrap();
         write_tree(output.path(), &mut snapshot).unwrap();
         let parent_doc = std::fs::read_to_string(output.path().join("transcript.md")).unwrap();
         let child_doc =
-            std::fs::read_to_string(output.path().join("subagents/child/transcript.md")).unwrap();
+            std::fs::read_to_string(output.path().join("subagents/子会话/transcript.md")).unwrap();
         assert!(parent_doc.contains("parent-only-answer"));
-        assert!(parent_doc.contains("subagents/child/transcript.md"));
+        assert!(parent_doc.contains("subagents/子会话/transcript.md"));
         assert!(!parent_doc.contains("child-only-answer"));
         assert!(child_doc.contains("child-only-answer"));
         assert!(!child_doc.contains("parent-only-answer"));
 
-        let download_tree = temporary_tree_at("root", home.path()).unwrap();
+        let download_tree = temporary_tree_at("根会话", home.path()).unwrap();
         assert_eq!(download_tree.agents, 2);
         assert_eq!(
             std::fs::read_to_string(download_tree.directory.path().join("transcript.md")).unwrap(),
@@ -483,7 +505,7 @@ mod tests {
                 download_tree
                     .directory
                     .path()
-                    .join("subagents/child/transcript.md")
+                    .join("subagents/子会话/transcript.md")
             )
             .unwrap(),
             child_doc
@@ -494,14 +516,29 @@ mod tests {
             .unpack(unpacked.path())
             .unwrap();
         assert_eq!(
-            std::fs::read_to_string(unpacked.path().join("root/transcript.md")).unwrap(),
+            std::fs::read_to_string(unpacked.path().join("根会话/transcript.md")).unwrap(),
             parent_doc
         );
         assert_eq!(
-            std::fs::read_to_string(unpacked.path().join("root/subagents/child/transcript.md"))
-                .unwrap(),
+            std::fs::read_to_string(
+                unpacked
+                    .path()
+                    .join("根会话/subagents/子会话/transcript.md"),
+            )
+            .unwrap(),
             child_doc
         );
+    }
+
+    #[test]
+    fn directory_sync_skips_only_unsupported_directory_handles() {
+        let directory = tempfile::tempdir().unwrap();
+        sync_directory(directory.path()).unwrap();
+        let missing = directory.path().join("missing");
+        #[cfg(unix)]
+        assert!(sync_directory(&missing).is_err());
+        #[cfg(not(unix))]
+        assert!(sync_directory(&missing).is_ok());
     }
 
     #[test]

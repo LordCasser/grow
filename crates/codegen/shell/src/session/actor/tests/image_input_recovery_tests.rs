@@ -398,10 +398,7 @@ fn explicit_multimodal_400_removes_images_and_resubmits_text_only() {
                     if text.as_ref() == sampling_types::conversation::UNSUPPORTED_IMAGE_REPLACEMENT
             )));
             assert!(
-                actor
-                    .unsupported_current_model_for_images()
-                    .await
-                    .is_some(),
+                actor.unsupported_current_model_for_images().await.is_some(),
                 "the capability pair must be marked text-only"
             );
 
@@ -421,13 +418,7 @@ fn explicit_multimodal_400_removes_images_and_resubmits_text_only() {
             let drained = drain_notifications(&mut gateway_rx);
             assert!(drained.retry_failures.is_empty());
             assert_eq!(drained.image_projected_updates, 1);
-            assert_eq!(
-                drained.notes,
-                vec![
-                    "当前模型不支持多模态，1 张图片无法生成文字描述，已从当前会话中删除；原图仍保留在会话历史记录中。"
-                        .to_owned()
-                ]
-            );
+            assert_eq!(drained.notes, vec!["Could not convert 1 image".to_owned()]);
 
             release_settled_foreground(&actor).await;
             install_test_foreground(&actor, "image-400-removal-follow-up").await;
@@ -457,7 +448,11 @@ fn explicit_multimodal_400_removes_images_and_resubmits_text_only() {
                 .into_iter()
                 .filter(|request| request.path == "/v1/messages")
                 .collect();
-            assert_eq!(requests.len(), 3, "the follow-up turn must not retry images");
+            assert_eq!(
+                requests.len(),
+                3,
+                "the follow-up turn must not retry images"
+            );
             assert_eq!(count_wire_images(requests[2].body.as_ref().unwrap()), 0);
         }));
     });
@@ -550,6 +545,11 @@ fn assert_chat_tool_image_fallback(image_precedes_route_selection: bool) {
             let drained = drain_notifications(&mut gateway_rx);
             assert!(drained.retry_failures.is_empty());
             assert_eq!(drained.image_projected_updates, 1);
+            assert!(drained.image_processing_messages.is_empty());
+            assert!(!drained.image_recovery_operation_ids.is_empty());
+            assert!(drained.image_recovery_operation_ids.iter().all(|id|
+                id == &drained.image_recovery_operation_ids[0]
+            ));
         }));
     });
 }
@@ -558,6 +558,9 @@ fn assert_chat_tool_image_fallback(image_precedes_route_selection: bool) {
 #[derive(Default)]
 struct DrainedNotifications {
     image_projected_updates: usize,
+    image_recovery_operation_ids: Vec<String>,
+    image_recovery_progress: Vec<String>,
+    image_processing_messages: Vec<String>,
     image_compressed_updates: usize,
     compressed_messages: Vec<String>,
     image_dropped_updates: usize,
@@ -591,6 +594,9 @@ fn drain_notifications(
         let notification: crate::extensions::notification::SessionNotification =
             serde_json::from_str(args.request.params.get()).unwrap();
         match notification.update {
+            GrowSessionUpdate::ImageProcessing { message } => {
+                drained.image_processing_messages.push(message);
+            }
             GrowSessionUpdate::ImageCompressed { message, .. } => {
                 drained.image_compressed_updates += 1;
                 drained.compressed_messages.push(message);
@@ -602,6 +608,37 @@ fn drain_notifications(
             GrowSessionUpdate::ImageProjected { notes } => {
                 drained.image_projected_updates += 1;
                 drained.notes.extend(notes);
+            }
+            GrowSessionUpdate::ImageRecoveryOperation {
+                operation_id,
+                state,
+                ..
+            } => {
+                use crate::extensions::notification::ImageRecoveryOperationState as State;
+                drained.image_recovery_operation_ids.push(operation_id);
+                match state {
+                    State::Started { message }
+                    | State::Vision { message }
+                    | State::Ocr { message } => {
+                        drained.image_recovery_progress.push(message);
+                    }
+                    State::Completed { message } => {
+                        drained.image_projected_updates += 1;
+                        drained.notes.push(message);
+                    }
+                    State::Failed { message } => {
+                        // A removal projection is committed successfully even
+                        // when image conversion failed; a transaction failure
+                        // must not be counted as a projected update.
+                        if message.starts_with("Could not convert ")
+                            || message.contains(" image could not be converted")
+                            || message.contains(" images could not be converted")
+                        {
+                            drained.image_projected_updates += 1;
+                            drained.notes.push(message);
+                        }
+                    }
+                }
             }
             GrowSessionUpdate::RetryState(
                 crate::extensions::notification::RetryState::Failed { message, .. },
@@ -930,6 +967,12 @@ fn active_goal_image_400_uses_auxiliary_description_then_retries_without_images(
             assert!(count_wire_images(requests[0].body.as_ref().unwrap()) > 0);
             assert!(count_wire_images(requests[1].body.as_ref().unwrap()) > 0);
             assert_eq!(requests[1].body.as_ref().unwrap()["model"], "vision-model");
+            let auxiliary_body_text = requests[1].body.as_ref().unwrap().to_string();
+            assert!(
+                auxiliary_body_text
+                    .contains(crate::session::image_describe::DEFAULT_DESCRIBE_PROMPT)
+            );
+            assert!(!auxiliary_body_text.contains("diagnose this screenshot"));
             assert_eq!(count_wire_images(requests[2].body.as_ref().unwrap()), 0);
             assert!(
                 requests[2]
@@ -1044,11 +1087,19 @@ fn active_goal_image_400_uses_auxiliary_description_then_retries_without_images(
             assert!(!goal.usage_incomplete);
 
             let drained = drain_notifications(&mut gateway_rx);
+            assert!(drained.image_processing_messages.is_empty());
+            assert!(drained.image_recovery_operation_ids.len() >= 3);
+            assert!(
+                drained
+                    .image_recovery_operation_ids
+                    .iter()
+                    .all(|id| id == &drained.image_recovery_operation_ids[0])
+            );
             assert!(
                 drained
                     .notes
                     .iter()
-                    .any(|note| note.contains("已生成 1 张图片的文字描述"))
+                    .any(|note| note.contains("Converted 1 image"))
             );
             assert!(drained.retry_failures.is_empty());
         }));
@@ -1119,10 +1170,7 @@ fn auxiliary_image_400_installs_a_durable_removal_projection() {
                 .collect();
             assert_eq!(requests.len(), 3, "primary, auxiliary, resubmit");
             assert!(count_wire_images(requests[0].body.as_ref().unwrap()) > 0);
-            assert_eq!(
-                requests[1].body.as_ref().unwrap()["model"],
-                "vision-model"
-            );
+            assert_eq!(requests[1].body.as_ref().unwrap()["model"], "vision-model");
             assert_eq!(count_wire_images(requests[2].body.as_ref().unwrap()), 0);
             assert!(
                 requests[2]
@@ -1155,10 +1203,7 @@ fn auxiliary_image_400_installs_a_durable_removal_projection() {
                 .count();
             assert_eq!(replacements, 1, "one canonical replacement per image group");
             assert!(
-                actor
-                    .unsupported_current_model_for_images()
-                    .await
-                    .is_some(),
+                actor.unsupported_current_model_for_images().await.is_some(),
                 "the primary pair must stay marked text-only"
             );
 
@@ -1183,13 +1228,14 @@ fn auxiliary_image_400_installs_a_durable_removal_projection() {
             let drained = drain_notifications(&mut gateway_rx);
             assert!(drained.retry_failures.is_empty());
             assert_eq!(drained.image_projected_updates, 1);
-            assert_eq!(
-                drained.notes,
-                vec![
-                    "当前模型不支持多模态，1 张图片无法生成文字描述，已从当前会话中删除；原图仍保留在会话历史记录中。"
-                        .to_owned()
-                ]
+            assert!(drained.image_processing_messages.is_empty());
+            assert!(
+                drained
+                    .image_recovery_operation_ids
+                    .iter()
+                    .all(|id| id == &drained.image_recovery_operation_ids[0])
             );
+            assert_eq!(drained.notes, vec!["Could not convert 1 image".to_owned()]);
         }));
     });
 }
@@ -1444,12 +1490,15 @@ fn mixed_description_and_removal_groups_commit_as_one_projection() {
             let drained = drain_notifications(&mut gateway_rx);
             assert!(drained.retry_failures.is_empty());
             assert_eq!(drained.image_projected_updates, 1);
+            assert!(
+                drained
+                    .image_recovery_operation_ids
+                    .iter()
+                    .all(|id| id == &drained.image_recovery_operation_ids[0])
+            );
             assert_eq!(
                 drained.notes,
-                vec![
-                    "已生成 1 张图片的文字描述；1 张图片无法生成描述，已从当前会话中删除。"
-                        .to_owned()
-                ]
+                vec!["Converted 1 image; 1 image could not be converted".to_owned()]
             );
         }));
     });
@@ -1492,6 +1541,14 @@ fn read_file_image_fallback_uses_refreshed_auxiliary_and_waits_for_projection_ac
                 if known_primary {
                     actor.record_unsupported_model_image_input(actor.current_model_image_input_key().await.unwrap()).await.unwrap();
                 }
+                let history_marker = "LONG_HISTORY_SENTINEL";
+                let skill_body_marker = "SKILL_BODY_SENTINEL";
+                actor.chat_state_handle.push_user_message(ConversationItem::user(
+                    format!(
+                        "{history_marker} {skill_body_marker} {}",
+                        "historical context ".repeat(1_000)
+                    ),
+                ));
                 let original = super::read_file_image_description_tests::run_image_result(&actor).await;
                 assert_eq!(original.images.len(), 1);
                 persistence.hold_projection_acknowledgement();
@@ -1511,6 +1568,15 @@ fn read_file_image_fallback_uses_refreshed_auxiliary_and_waits_for_projection_ac
                 assert_eq!(aux_requests[0].path, "/v1/responses");
                 assert_eq!(aux_requests[0].body.as_ref().unwrap()["model"], "vision-v2");
                 assert_eq!(count_wire_images(aux_requests[0].body.as_ref().unwrap()), 1);
+                let auxiliary_body = aux_requests[0].body.as_ref().unwrap();
+                let auxiliary_body_text = auxiliary_body.to_string();
+                assert!(auxiliary_body_text.contains(crate::session::image_describe::DEFAULT_DESCRIBE_PROMPT));
+                assert!(!auxiliary_body_text.contains(history_marker));
+                assert!(!auxiliary_body_text.contains(skill_body_marker));
+                assert!(!auxiliary_body_text.contains("/workspace/image.png"));
+                assert!(!auxiliary_body_text.contains("[image inline]"));
+                assert!(!auxiliary_body_text.contains("read_file"));
+                assert!(auxiliary_body.get("tools").is_none(), "visual sideband has no tool or Skill manifest");
                 persistence.release_projection_acknowledgement();
                 tokio::time::timeout(std::time::Duration::from_secs(5), prompt).await.unwrap().unwrap();
                 let requests = primary.requests();
@@ -1568,7 +1634,7 @@ fn image_fallback_ocr_success_empty_and_failure_complete_the_durable_request_cha
             .build()
             .unwrap();
         runtime.block_on(tokio::task::LocalSet::new().run_until(async {
-            for outcome in ["printf 'OCR dialog E81\\n'", "exit 0", "exit 1"] {
+            for outcome in ["printf '错误代码 E81\\n'", "exit 0", "exit 1"] {
                 let fixture = ocr_fixture(outcome);
                 let server = MockInferenceServer::start().await.unwrap();
                 server.enqueue_response("/v1/messages", multimodal_capability_rejection());
@@ -1576,7 +1642,7 @@ fn image_fallback_ocr_success_empty_and_failure_complete_the_durable_request_cha
                     "error": {"type": "invalid_request_error", "message": "auxiliary unavailable for this request"}
                 })));
                 server.enqueue_response("/v1/messages", messages_text_turn("continued", "test-model"));
-                let (actor, _gateway, persistence) = actor_with_sampler_and_persistence(&server, Some("vision")).await;
+                let (actor, mut gateway, persistence) = actor_with_sampler_and_persistence(&server, Some("vision")).await;
                 super::read_file_image_description_tests::run_image_result(&actor).await;
                 persistence.hold_projection_acknowledgement();
                 let turn_actor = actor.clone();
@@ -1602,7 +1668,7 @@ fn image_fallback_ocr_success_empty_and_failure_complete_the_durable_request_cha
                 let chat_state::TimelineEventKind::ImageProjection(projection) = &projections[0].0.kind else { panic!("projection"); };
                 if outcome.starts_with("printf") {
                     assert!(matches!(projection.shadows[0].provenance, chat_state::ImageShadowSource::LocalOcr { .. }));
-                    assert!(repaired.to_string().contains("OCR dialog E81"));
+                    assert!(repaired.to_string().contains("错误代码 E81"));
                     assert_eq!(sampling_types::conversation::conversation_image_groups(&persistence.durable_surface()).len(), 1);
                 } else {
                     assert!(matches!(projection.shadows[0].provenance, chat_state::ImageShadowSource::UnsupportedModel));
@@ -1610,6 +1676,17 @@ fn image_fallback_ocr_success_empty_and_failure_complete_the_durable_request_cha
                     assert!(sampling_types::conversation::conversation_image_groups(&persistence.durable_surface()).is_empty());
                 }
                 assert_eq!(sealed_image_groups(&actor.chat_state_handle.timeline_events().await.unwrap()), 1);
+                let drained = drain_notifications(&mut gateway);
+                assert!(drained.image_processing_messages.is_empty());
+                assert_eq!(drained.image_recovery_progress, vec![
+                    "Preparing image recovery…",
+                    "Calling the configured vision model…",
+                    "Trying local OCR…",
+                ]);
+                assert!(drained.image_recovery_operation_ids.len() >= 4);
+                assert!(drained.image_recovery_operation_ids.iter().all(|id|
+                    id == &drained.image_recovery_operation_ids[0]
+                ));
             }
         }));
     });
@@ -1750,29 +1827,35 @@ fn cancelling_image_fallback_before_or_during_auxiliary_stops_later_work() {
 
 #[test]
 fn image_fallback_cold_restore_reuses_completed_description_before_projection() {
-    assert_image_fallback_cold_restore(false, false, true);
+    assert_image_fallback_cold_restore(false, false, true, false);
 }
 
 #[test]
 fn image_fallback_cold_restore_reuses_acknowledged_projection() {
-    assert_image_fallback_cold_restore(true, false, true);
+    assert_image_fallback_cold_restore(true, false, true, false);
 }
 
 #[cfg(unix)]
 #[test]
 fn image_fallback_cold_restore_reuses_acknowledged_ocr_projection() {
-    assert_image_fallback_cold_restore(true, true, true);
+    assert_image_fallback_cold_restore(true, true, true, false);
 }
 
 #[test]
 fn image_fallback_cold_restore_reuses_description_without_auxiliary_route() {
-    assert_image_fallback_cold_restore(false, false, false);
+    assert_image_fallback_cold_restore(false, false, false, false);
+}
+
+#[test]
+fn image_fallback_cold_restore_retries_completed_legacy_prompt() {
+    assert_image_fallback_cold_restore(false, false, true, true);
 }
 
 fn assert_image_fallback_cold_restore(
     already_projected: bool,
     from_ocr: bool,
     with_auxiliary: bool,
+    legacy_prompt: bool,
 ) {
     run_with_session_stack(move || {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1794,8 +1877,16 @@ fn assert_image_fallback_cold_restore(
             } else {
                 messages_text_turn("Durable screenshot description E91.", "vision-model")
             });
-            server.enqueue_response("/v1/messages", messages_text_turn("continued", "test-model"));
+            // A held projection ACK prevents the original foreground retry.
+            // In the legacy case its next request is the regenerated Sideband.
+            if already_projected || !legacy_prompt {
+                server.enqueue_response("/v1/messages", messages_text_turn("continued", "test-model"));
+            }
             if already_projected { server.enqueue_response("/v1/messages", messages_text_turn("resumed", "test-model")); }
+            if legacy_prompt {
+                server.enqueue_response("/v1/messages", messages_text_turn("regenerated under the fixed prompt", "vision-model"));
+                server.enqueue_response("/v1/messages", messages_text_turn("resumed after regeneration", "test-model"));
+            }
             let (actor, _gateway, persistence) = actor_with_sampler_and_storage(&server, Some("vision"), Some(storage.clone())).await;
             super::read_file_image_description_tests::run_image_result(&actor).await;
             if !already_projected { persistence.hold_projection_acknowledgement(); }
@@ -1828,6 +1919,28 @@ fn assert_image_fallback_cold_restore(
                     tokio::task::yield_now().await;
                 }
             }).await.unwrap();
+            if legacy_prompt {
+                // A completed v1 Sideband used to include source text in its
+                // prompt. It must not satisfy the fixed-prompt lookup after
+                // cold restore; recovery should run the auxiliary again.
+                let validated = storage.open_session(&info).unwrap().validated_timeline(&info.id.to_string()).unwrap();
+                let (id, mut events) = validated.sidebands.into_iter().find(|(_, events)| matches!(
+                    &events[0].kind, chat_state::SidebandEventKind::Request(request)
+                        if request.purpose == chat_state::SidebandPurpose::ImageDescription
+                )).unwrap();
+                let request = events.iter_mut().find_map(|event| match &mut event.kind {
+                    chat_state::SidebandEventKind::Request(request) => Some(request),
+                    _ => None,
+                }).unwrap();
+                request.prompt = format!(
+                    "Transcribe the attached image into a neutral, standalone textual description for a model that cannot see images. Preserve all visible text exactly where practical, structure, spatial relationships, UI state, diagrams, tables, code, errors, and other concrete details. Do not tailor the description to a presumed task or infer from conversation context. <image_source>ToolResult message with 1 image attachment(s), in attachment order. Existing message text:\n[image inline]\n</image_source>"
+                );
+                assert_ne!(request.prompt, crate::session::image_describe::DEFAULT_DESCRIBE_PROMPT);
+                crate::session::storage::write_jsonl_atomic(
+                    &storage.open_session(&info).unwrap().directory_handle().display_path().join(crate::session::storage::SIDEBANDS_DIR).join(id).join(crate::session::storage::TIMELINE_FILE),
+                    &events,
+                ).unwrap();
+            }
             let resources_persistence = tools::persistence::ResourcesPersistence::local(root.path().join("resources_state.json")).unwrap();
             let bridge = actor.agent.borrow().tool_bridge().clone();
             let resources = bridge.shared_resources().await;
@@ -1846,20 +1959,40 @@ fn assert_image_fallback_cold_restore(
             assert!(restored.unsupported_current_model_for_images().await.is_some());
             admit_inline_query(&restored, "after-crash", "Continue from the stored image.".into()).await;
             let requests = server.requests();
-            assert_eq!(requests.len(), before + 1, "cold recovery must reuse the completed Sideband without another auxiliary request");
-            assert_eq!(requests.iter().filter(|request| request.body.as_ref().unwrap()["model"] == "vision-model").count(), 1);
+            assert_eq!(
+                requests.len(),
+                before + if legacy_prompt { 2 } else { 1 },
+                "{}",
+                if legacy_prompt {
+                    "a completed legacy-prompt Sideband must be rejected and regenerated"
+                } else {
+                    "cold recovery must reuse the completed Sideband without another auxiliary request"
+                }
+            );
+            assert_eq!(
+                requests.iter().filter(|request| request.body.as_ref().unwrap()["model"] == "vision-model").count(),
+                if legacy_prompt { 2 } else { 1 },
+                "only a matching fixed-prompt Sideband can be reused"
+            );
             let resumed = requests.last().unwrap().body.as_ref().unwrap();
             assert_eq!(count_wire_images(resumed), 0);
-            assert!(resumed.to_string().contains("Durable screenshot description E91."));
+            assert!(resumed.to_string().contains(if legacy_prompt {
+                "regenerated under the fixed prompt"
+            } else {
+                "Durable screenshot description E91."
+            }));
             assert_eq!(restored_persistence.attempted_projections().len(), usize::from(!already_projected));
             let loaded = storage.load_session_without_updates(&info).await.unwrap();
             assert_eq!(sealed_image_groups(loaded.timeline.events()), 1);
             if !already_projected {
                 let validated = storage.open_session(&info).unwrap().validated_timeline(&info.id.to_string()).unwrap();
-                let (id, mut events) = validated.sidebands.into_iter().find(|(_, events)| matches!(
-                    &events[0].kind, chat_state::SidebandEventKind::Request(request)
-                        if request.purpose == chat_state::SidebandPurpose::ImageDescription
-                )).unwrap();
+                let (id, mut events) = validated.sidebands.into_iter().find(|(id, _)| {
+                    loaded.timeline.events().iter().any(|event| {
+                        let chat_state::TimelineEventKind::ImageProjection(projection) = &event.kind else { return false; };
+                        projection.shadows.iter().any(|shadow| matches!(&shadow.provenance,
+                            chat_state::ImageShadowSource::Description { result_ref } if &result_ref.timeline_id == id))
+                    })
+                }).expect("the Sideband actually referenced by the committed projection");
                 for event in &mut events {
                     if let chat_state::SidebandEventKind::Attempt(attempt) = &mut event.kind {
                         attempt.assembly_manifest.source_revision = Some(loaded.timeline.surface_revision() + 1);

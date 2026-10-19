@@ -228,6 +228,9 @@ pub fn render_blocks_to_full_markdown<'a>(
             RenderBlock::ContextInfo(info) => {
                 section(&mut out, "Context", &format!("Model: {}", info.model));
             }
+            RenderBlock::ImageRecovery(operation) => {
+                section(&mut out, "Image recovery", &operation.message);
+            }
         }
     }
     out.trim_end().to_owned()

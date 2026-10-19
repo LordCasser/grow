@@ -1,10 +1,29 @@
 name: Windows session storage
 
 on:
+  workflow_call:
+    inputs:
+      commit:
+        description: Immutable commit to test
+        required: true
+        type: string
   workflow_dispatch:
   pull_request:
     paths:
       - ".github/workflows/windows-session-storage.yml"
+      - "scripts/run_exact_cargo_test.py"
+      - "scripts/tests/**"
+      - "crates/codegen/shell/src/session/storage/**"
+      - "crates/codegen/shell/src/session/persistence.rs"
+      - "crates/codegen/shell/src/session/input_inbox.rs"
+      - "crates/codegen/chat-state/**"
+      - "Cargo.lock"
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/windows-session-storage.yml"
+      - "scripts/run_exact_cargo_test.py"
+      - "scripts/tests/**"
       - "crates/codegen/shell/src/session/storage/**"
       - "crates/codegen/shell/src/session/persistence.rs"
       - "crates/codegen/shell/src/session/input_inbox.rs"
@@ -15,7 +34,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: windows-session-storage-${{ github.ref }}
+  group: windows-session-storage-${{ github.workflow }}-${{ inputs.commit || github.sha }}
   cancel-in-progress: true
 
 jobs:
@@ -26,12 +45,33 @@ jobs:
     env:
       CARGO_INCREMENTAL: "0"
       RUST_MIN_STACK: "16777216"
+      EXPECTED_COMMIT: ${{ inputs.commit || github.sha }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+
+      - name: Verify immutable source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "expected a full immutable commit SHA, found: $EXPECTED_COMMIT" >&2
+            exit 1
+          }
+          actual="$(git rev-parse HEAD)"
+          [[ "$actual" == "$EXPECTED_COMMIT" ]] || {
+            echo "checked out $actual but expected $EXPECTED_COMMIT" >&2
+            exit 1
+          }
 
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.93.1"
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -39,19 +79,15 @@ jobs:
           cache-on-failure: true
 
       - name: Exercise the complete session creation boundary
-        shell: pwsh
+        shell: bash
         run: |
-          $tests = @(
-            "session::storage::jsonl::tests::session_creation_round_trip_commits_and_reopens_the_timeline",
-            "session::storage::jsonl::tests::long_windows_cwds_roundtrip_under_long_storage_root",
-            "session::storage::jsonl::tests::scan_opened_sessions_skips_non_sessions_and_invalid_summaries",
-            "session::storage::tests::contained_no_replace_rename_preserves_both_existing_entities",
-            "session::storage::tests::pinned_child_capability_publishes_without_reopening_source",
-            "session::input_inbox::tests::long_profile_payload_round_trip_preserves_immutable_artifacts",
-            "session::storage::tests::publication_preserves_exact_names_across_buffer_alignments",
-            "coordination::manifest::tests::windows_long_home_supports_private_manifests_and_replacement"
-          )
-          foreach ($test in $tests) {
-            cargo test --locked -p shell --lib $test -- --exact --nocapture
-            if ($LASTEXITCODE -ne 0) { throw "Storage regression failed: $test" }
-          }
+          set -euo pipefail
+          python -m unittest discover -s scripts/tests
+          python scripts/run_exact_cargo_test.py --package shell --lib session::storage::jsonl::tests::session_creation_round_trip_commits_and_reopens_the_timeline
+          python scripts/run_exact_cargo_test.py --package shell --lib session::storage::jsonl::tests::long_windows_cwds_roundtrip_under_long_storage_root
+          python scripts/run_exact_cargo_test.py --package shell --lib session::storage::jsonl::tests::scan_opened_sessions_skips_non_sessions_and_invalid_summaries
+          python scripts/run_exact_cargo_test.py --package shell --lib session::storage::tests::contained_no_replace_rename_preserves_both_existing_entities
+          python scripts/run_exact_cargo_test.py --package shell --lib session::storage::tests::pinned_child_capability_publishes_without_reopening_source
+          python scripts/run_exact_cargo_test.py --package shell --lib session::input_inbox::tests::long_profile_payload_round_trip_preserves_immutable_artifacts
+          python scripts/run_exact_cargo_test.py --package shell --lib session::storage::tests::publication_preserves_exact_names_across_buffer_alignments
+          python scripts/run_exact_cargo_test.py --package shell --lib coordination::manifest::tests::windows_long_home_supports_private_manifests_and_replacement

@@ -1,6 +1,12 @@
 name: OpenSpec
 
 on:
+  workflow_call:
+    inputs:
+      commit:
+        description: Immutable commit to validate
+        required: true
+        type: string
   pull_request:
   push:
     branches: [main]
@@ -9,12 +15,33 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: openspec-${{ github.workflow }}-${{ inputs.commit || github.sha }}
+  cancel-in-progress: true
+
 jobs:
   validate:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
+    env:
+      EXPECTED_COMMIT: ${{ inputs.commit || github.sha }}
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.commit || github.sha }}
+      - name: Verify immutable source commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_COMMIT" =~ ^[0-9a-f]{40}$ ]] || {
+            echo "expected a full immutable commit SHA, found: $EXPECTED_COMMIT" >&2
+            exit 1
+          }
+          actual="$(git rev-parse HEAD)"
+          [[ "$actual" == "$EXPECTED_COMMIT" ]] || {
+            echo "checked out $actual but expected $EXPECTED_COMMIT" >&2
+            exit 1
+          }
       - uses: actions/setup-node@v4
         with:
           node-version: '22'

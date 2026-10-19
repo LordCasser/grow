@@ -163,6 +163,7 @@ tokio = { workspace = true, features = ["test-util"] }
 # Enable the render crate's test-only helpers for the pager's test build.
 pager-render = { path = "../pager-render", features = ["test-support"] }
 shell = { workspace = true, features = ["test-support"] }
+reqwest = { workspace = true }
 sampling-types = { path = "../sampling-types" }
 pretty_assertions = { workspace = true }
 insta = { workspace = true }

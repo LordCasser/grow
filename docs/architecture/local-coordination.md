@@ -66,7 +66,7 @@ Coordination capability、私有 IPC 和 peer manifest schema 现在为 **2**，
 
 Provider 在请求投影中将一个 canonical AgentMessage 展开为完整的 `receive_agent_message` 调用/结果对。该名称不注册可执行工具，也不计入模型主动工具次数；稳定 Surface/input_ref 仍指向单个消费事实。发送者自己的正文已在原 send 参数中，不追加重复入站消息。意见回复是新消息，ACK 不自动生成回复。忙碌目标在安全步骤消费；停止后的目标保留 pending 回复，不能借通知越过暂停或恢复关闭任务。
 
-TUI 固定文案使用英文，正文保留原语言。来源工具行保留原 tool-call ID，接收询问按 `(sourceSessionId, inquiryId)` 原位更新，入站消息沿用 `parent-message:<receipt ID>` 去重。标题只展示动作、参与方与短状态；默认问题两行，回答后问题一行/答案两行，消息两行。问题、答案、错误和消息分别渲染 Markdown，元数据独立于正文。详情复用 BlockViewer 的搜索、选择、复制和 wrap；`r` 查看原文，`D` 查看协议数据，不新增常驻路由解释或每行按钮。
+TUI 固定文案使用英文，正文保留原语言。来源工具行保留原 tool-call ID，接收询问按 `(sourceSessionId, inquiryId)` 原位更新；有效入站消息和回复使用 `parent-message:<receipt ID>` 作为不可变通信工具行身份，分别显示 `Message from <source>` / `Reply from <source>` 与终态 `Received`。该状态只表示 durable receipt，不表示消费或执行；见 [接收通信行契约](../../openspec/specs/client-surfaces/spec.md)。默认问题两行，回答后问题一行/答案两行，消息两行。问题、答案、错误和消息分别渲染 Markdown，元数据独立于正文。详情复用 BlockViewer 的搜索、选择、复制和 wrap；`r` 查看原文，`D` 查看协议数据，不新增常驻路由解释或每行按钮。
 
 Minimal 的 inquiry 保持 live，直到自身终态才提交原生历史；immutable message 只打印一次。UI notice 均从 durable receipt 派生，不推进模型消费，不触发第二次 Notification hook。冷恢复从已验证 Timeline 和正文 artifact 重建；正文缺失显示 `Message unavailable`，不从旧包装文字猜内容。旧结果没有 receipt ID 时不伪造，旧字符串错误保守展示 `Unconfirmed`。
 
