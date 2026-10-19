@@ -4592,6 +4592,16 @@ mod usage_status_tests {
             agent.hit_badge.rect.is_some(),
             "leaving Plan cannot erase execution TODOs"
         );
+        agent.session.plan_completed = true;
+        let completed = draw(&mut agent, 120);
+        let hit = agent
+            .hit_plan_button
+            .rect
+            .expect("completed Plan remains inspectable after Behavior exit");
+        let label: String = (hit.x..hit.right())
+            .map(|x| completed[(x, hit.y)].symbol())
+            .collect();
+        assert_eq!(label, "[Plan: Complete]");
     }
 
     #[test]

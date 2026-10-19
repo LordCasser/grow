@@ -5266,6 +5266,7 @@ impl JsonlStorageAdapter {
                         // A fork carries the historical projection, not the
                         // parent's ability to decide an old submission.
                         control.behavior.retained_plan = None;
+                        control.behavior.completed_plan = None;
                         control.behavior.last_plan_submission_id = 0;
                         control.behavior.plan_submission_id = None;
                     }

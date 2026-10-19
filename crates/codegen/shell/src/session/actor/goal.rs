@@ -27,9 +27,83 @@ pub(super) fn goal_view_from_snapshot(
     }
 }
 
+fn selected_behavior_preserving_completed_plan(
+    selected: tool_types::BehaviorId,
+    previous: &crate::session::behavior::BehaviorSnapshot,
+) -> crate::session::behavior::BehaviorSnapshot {
+    let mut next = crate::session::behavior::BehaviorSnapshot::selected(selected);
+    if let Some(completed) = &previous.completed_plan {
+        next.completed_plan = Some(completed.clone());
+        next.last_plan_submission_id = previous.last_plan_submission_id;
+    }
+    next
+}
+
 #[cfg(test)]
 mod goal_admission_tests {
     use super::*;
+
+    async fn seed_completed_plan(actor: &SessionActor) -> crate::session::behavior::CompletedPlan {
+        let snapshot = {
+            let mut behavior = actor.behavior.lock();
+            behavior.select_behavior(tool_types::BehaviorId::Plan);
+            behavior.record_plan_artifact("# Completed plan");
+            assert!(behavior.submit_initial_plan());
+            assert!(behavior.approve_submitted_plan());
+            assert!(behavior.complete_plan(blake3::hash(b"original report").to_hex().to_string()));
+            behavior.snapshot()
+        };
+        let completed = snapshot.completed_plan.clone().unwrap();
+        actor
+            .persist_control_snapshot_durably(snapshot, None)
+            .await
+            .unwrap();
+        completed
+    }
+
+    async fn assert_completed_plan_is_durable_and_restorable(
+        actor: &SessionActor,
+        expected: &crate::session::behavior::CompletedPlan,
+    ) {
+        let events = actor.chat_state_handle.timeline_events().await.unwrap();
+        let persisted =
+            crate::session::control::SessionControlSnapshot::latest_from_timeline(&events)
+                .unwrap()
+                .unwrap();
+        let current = actor.behavior.lock().snapshot();
+        assert_eq!(persisted.behavior.completed_plan.as_ref(), Some(expected));
+        assert_eq!(persisted.behavior, current);
+        assert_eq!(
+            crate::session::behavior::BehaviorCoordinator::from_snapshot(persisted.behavior)
+                .snapshot(),
+            current,
+            "restoring the latest Control snapshot must reproduce memory"
+        );
+    }
+
+    async fn goal_enabled_actor() -> (
+        std::sync::Arc<SessionActor>,
+        tokio::sync::mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+    ) {
+        use tools::implementations::grow_build::{
+            CreateGoalTool, GetGoalTool, UpdateGoalTool, todo::TodoWriteTool,
+        };
+        use tools::registry::types::ToolConfig;
+
+        let (mut actor, gateway_rx) = crate::session::actor::tests::support::build_actor().await;
+        std::sync::Arc::get_mut(&mut actor)
+            .expect("fixture has one actor owner")
+            .goal_enabled = true;
+        *actor.agent.borrow_mut() =
+            crate::session::actor::tests::support::test_agent_with_tools(vec![
+                ToolConfig::for_tool::<CreateGoalTool>(),
+                ToolConfig::for_tool::<GetGoalTool>(),
+                ToolConfig::for_tool::<UpdateGoalTool>(),
+                ToolConfig::for_tool::<TodoWriteTool>(),
+            ])
+            .await;
+        (actor, gateway_rx)
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn active_goal_edit_rebinds_context_and_tool_authority_at_the_next_step() {
@@ -417,6 +491,88 @@ mod goal_admission_tests {
                     actor.goal_tracker.lock().status(),
                     Some(crate::session::goal_tracker::GoalStatus::Active)
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn automatic_goal_activation_preserves_completed_plan_control_state() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = goal_enabled_actor().await;
+                let completed = seed_completed_plan(&actor).await;
+                actor
+                    .initialize_goal_runtime("continue after the completed Plan", None)
+                    .await
+                    .expect("automatic Goal creation and activation");
+
+                assert_eq!(
+                    actor.behavior.lock().behavior(),
+                    tool_types::BehaviorId::Goal
+                );
+                assert_completed_plan_is_durable_and_restorable(&actor, &completed).await;
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn goal_definition_reactivation_preserves_completed_plan_control_state() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = goal_enabled_actor().await;
+                let completed = seed_completed_plan(&actor).await;
+                actor
+                    .goal_tracker
+                    .lock()
+                    .create_goal(
+                        "goal-reactivation".into(),
+                        "previous objective".into(),
+                        None,
+                        "2026-10-19T00:00:00Z".into(),
+                    )
+                    .unwrap();
+                assert!(actor.goal_tracker.lock().complete());
+                let goal = actor.goal_tracker.lock().snapshot().cloned();
+                let behavior = actor.behavior.lock().snapshot();
+                actor
+                    .persist_control_snapshot_durably(behavior, goal)
+                    .await
+                    .unwrap();
+                crate::session::actor::tests::support::begin_test_active_causal_turn(&actor).await;
+
+                assert_eq!(
+                    actor
+                        .admit_goal_definition_control(
+                            "goal-reactivation".into(),
+                            PendingGoalDefinitionMutation::Edit {
+                                objective: "reactivated objective".into(),
+                                token_budget: None,
+                            },
+                        )
+                        .await
+                        .unwrap(),
+                    None
+                );
+                let boundary = actor
+                    .end_step_control_boundary("continued")
+                    .await
+                    .expect("Goal definition step boundary");
+                assert_eq!(
+                    actor
+                        .apply_pending_controls_at_step_boundary(boundary)
+                        .await,
+                    (false, false, true)
+                );
+
+                assert_eq!(
+                    actor.behavior.lock().behavior(),
+                    tool_types::BehaviorId::Goal
+                );
+                assert_eq!(
+                    actor.goal_tracker.lock().snapshot().unwrap().objective,
+                    "reactivated objective"
+                );
+                assert_completed_plan_is_durable_and_restorable(&actor, &completed).await;
             })
             .await;
     }
@@ -1049,12 +1205,12 @@ impl SessionActor {
             .cloned()
             .expect("Goal activation requires an active Goal snapshot");
         let context = self.goal_definition_context(&next);
+        let behavior = selected_behavior_preserving_completed_plan(
+            BehaviorId::Goal,
+            &self.behavior.lock().snapshot(),
+        );
         if let Err(error) = self
-            .persist_behavior_and_goal_transition_durably(
-                crate::session::behavior::BehaviorSnapshot::selected(BehaviorId::Goal),
-                next,
-                context,
-            )
+            .persist_behavior_and_goal_transition_durably(behavior, next, context)
             .await
         {
             self.restore_goal_snapshot(previous);
@@ -1179,18 +1335,19 @@ impl SessionActor {
 
         let persisted = if next_behavior != previous_behavior && next_behavior == BehaviorId::Goal {
             let context = self.goal_definition_context(&next);
-            self.persist_behavior_and_goal_transition_durably(
-                crate::session::behavior::BehaviorSnapshot::selected(next_behavior),
-                next.clone(),
-                context,
-            )
-            .await
+            let behavior = selected_behavior_preserving_completed_plan(
+                next_behavior,
+                &previous_behavior_snapshot,
+            );
+            self.persist_behavior_and_goal_transition_durably(behavior, next.clone(), context)
+                .await
         } else if next_behavior != previous_behavior {
-            self.persist_behavior_transition_durably(
-                crate::session::behavior::BehaviorSnapshot::selected(next_behavior),
-                Some(next.clone()),
-            )
-            .await
+            let behavior = selected_behavior_preserving_completed_plan(
+                next_behavior,
+                &previous_behavior_snapshot,
+            );
+            self.persist_behavior_transition_durably(behavior, Some(next.clone()))
+                .await
         } else if next.status == GoalStatus::Active
             && next.definition_revision != previous.definition_revision
         {

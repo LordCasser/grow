@@ -12,4 +12,7 @@ or deletion behavior must change, stop modifying the workspace and call
 `${{ tools.by_kind.plan_control }}` with `action="amend"` and the complete
 replacement plan before continuing. Do not launch a Workflow while Plan
 behavior is active. When every approved step and its verification are complete, call
-`${{ tools.by_kind.plan_control }}` with `action="complete"` and return to Normal.
+`${{ tools.by_kind.plan_control }}` with `action="complete"` and the complete
+original `report`. The report is saved in the Plan details Result report tab.
+After the tool succeeds and returns to Normal, give the user a brief normal
+reply summarizing the outcome and verification; do not repeat the full report.

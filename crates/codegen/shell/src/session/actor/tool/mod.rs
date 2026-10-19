@@ -566,7 +566,13 @@ impl SessionActor {
                 .is_ok_and(|tool_result| !tool_result.output.is_error())
                 && let Some(expected) = prepared.plan_exit_on_success.as_ref()
             {
-                let commit = self.finish_plan_to_default_if(expected).await;
+                let report =
+                    (prepared.parsed_args["action"].as_str() == Some("complete")).then(|| {
+                        prepared.parsed_args["report"]
+                            .as_str()
+                            .expect("validated completion report")
+                    });
+                let commit = self.finish_plan_to_default_if(expected, report).await;
                 if !matches!(commit, Ok(true)) {
                     let message = match commit {
                         Ok(false) => "Plan changed before the completed control could be committed"
@@ -1133,24 +1139,40 @@ impl SessionActor {
     async fn finish_plan_to_default_if(
         &self,
         expected: &crate::session::behavior::BehaviorSnapshot,
+        completion_report: Option<&str>,
     ) -> Result<bool, String> {
-        let previous_behavior = self.behavior.lock().snapshot();
-        let finished = {
-            let mut behavior = self.behavior.lock();
-            if behavior.snapshot() != *expected {
-                false
-            } else {
-                behavior.finish_plan()
-            }
+        let boundary = self.step_control_gate.lock().await;
+        if !self.state.lock().await.execution_open() {
+            return Err("session is shutting down".into());
+        }
+        let transaction = self.goal_transaction_gate.lock().await;
+        let previous = self.behavior.lock().snapshot();
+        if previous != *expected {
+            return Ok(false);
+        }
+        let report_hash = completion_report
+            .map(|report| {
+                crate::session::behavior::write_plan_artifact(&self.session_directory, report)
+            })
+            .transpose()
+            .map_err(|error| format!("Plan completion report was not saved: {error}"))?;
+        let mut next = crate::session::behavior::BehaviorCoordinator::from_snapshot(previous);
+        let finished = match report_hash {
+            Some(hash) => next.complete_plan(hash),
+            None => next.finish_plan(),
         };
         if !finished {
             return Ok(false);
         }
-        self.commit_behavior_mutation_or_restore(previous_behavior)
-            .await?;
-        if self.behavior.lock().behavior() != tool_types::BehaviorId::Normal {
-            return Ok(false);
-        }
+        let goal = self.goal_tracker.lock().snapshot().cloned();
+        self.persist_behavior_transition_durably(next.snapshot(), goal)
+            .await
+            .map_err(|error| format!("Plan completion was not persisted: {error}"))?;
+        // Canonical readers must see the completed reference only after its
+        // Control snapshot is durable, serialized with manual selections.
+        *self.behavior.lock() = next;
+        drop(transaction);
+        drop(boundary);
         self.enqueue_current_mode_update(acp::SessionModeId::new(
             tools::types::BehaviorId::Normal.as_id(),
         ));
@@ -1195,7 +1217,7 @@ impl SessionActor {
         tracing::warn!(
             "plan_control restore: submitted artifact is unavailable; normalizing Plan to Normal"
         );
-        let _ = self.finish_plan_to_default_if(&snapshot).await?;
+        let _ = self.finish_plan_to_default_if(&snapshot, None).await?;
         Ok(false)
     }
 
@@ -2125,6 +2147,278 @@ mod plan_approval_helper_tests {
 #[cfg(test)]
 mod plan_finish_projection_tests {
     use agent_client_protocol::schema::v1 as acp;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn completed_plan_clears_only_after_successful_manual_behavior_selection() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                for target in ["normal", "ask"] {
+                    let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                    let (actor, _events) =
+                        crate::session::actor::tests::support::create_test_actor_ex(
+                            0,
+                            256_000,
+                            85,
+                            gateway_tx,
+                            persistence_tx,
+                        )
+                        .await;
+                    {
+                        let mut behavior = actor.behavior.lock();
+                        behavior.select_behavior(tool_types::BehaviorId::Plan);
+                        behavior.record_plan_artifact("# Approved plan");
+                        assert!(behavior.submit_initial_plan());
+                        assert!(behavior.approve_submitted_plan());
+                    }
+                    let actor = std::sync::Arc::new(actor);
+                    let before = actor.behavior.lock().snapshot();
+                    let boundary = actor.step_control_gate.lock().await;
+                    let owner = actor.clone();
+                    let expected = before.clone();
+                    let completion = tokio::task::spawn_local(async move {
+                        owner
+                            .finish_plan_to_default_if(&expected, Some(" original report\n"))
+                            .await
+                    });
+                    tokio::task::yield_now().await;
+                    assert_eq!(
+                        actor.behavior.lock().snapshot(),
+                        before,
+                        "completion cannot publish ahead of the shared control boundary"
+                    );
+                    drop(boundary);
+                    assert!(completion.await.unwrap().unwrap());
+                    let completed = actor.behavior.lock().snapshot();
+                    assert!(completed.completed_plan.is_some());
+                    assert!(matches!(
+                        actor
+                            .request_behavior_change(acp::SessionModeId::new("not-a-behavior"))
+                            .await
+                            .unwrap(),
+                        crate::session::behavior::BehaviorChangeOutcome::Rejected { .. }
+                    ));
+                    assert_eq!(actor.behavior.lock().snapshot(), completed);
+                    let outcome = actor
+                        .request_behavior_change(acp::SessionModeId::new(target))
+                        .await
+                        .unwrap();
+                    assert!(
+                        matches!(
+                            outcome,
+                            crate::session::behavior::BehaviorChangeOutcome::Applied
+                        ),
+                        "{target}: {outcome:?}"
+                    );
+                    assert!(actor.behavior.lock().snapshot().completed_plan.is_none());
+                    let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                    let persisted =
+                        crate::session::control::SessionControlSnapshot::latest_from_timeline(
+                            &events,
+                        )
+                        .unwrap()
+                        .unwrap();
+                    assert!(persisted.behavior.completed_plan.is_none());
+                    assert_eq!(persisted.behavior.behavior().as_id(), target);
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plan_completion_storage_and_control_failures_preserve_execution() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (actor, mut events) =
+                    crate::session::actor::tests::support::create_test_actor_ex(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await;
+                {
+                    let mut behavior = actor.behavior.lock();
+                    behavior.select_behavior(tool_types::BehaviorId::Plan);
+                    behavior.record_plan_artifact("# Approved plan");
+                    assert!(behavior.submit_initial_plan());
+                    assert!(behavior.approve_submitted_plan());
+                }
+                let before = actor.behavior.lock().snapshot();
+                let oversized =
+                    "x".repeat(crate::session::behavior::MAX_PLAN_ARTIFACT_BYTES as usize + 1);
+                assert!(
+                    actor
+                        .finish_plan_to_default_if(&before, Some(&oversized))
+                        .await
+                        .is_err()
+                );
+                assert_eq!(actor.behavior.lock().snapshot(), before);
+                actor.state.lock().await.termination =
+                    crate::session::actor::TerminationState::Graceful;
+                assert!(
+                    actor
+                        .finish_plan_to_default_if(&before, Some("Valid report"))
+                        .await
+                        .is_err()
+                );
+                assert_eq!(actor.behavior.lock().snapshot(), before);
+                while let Ok(event) = events.try_recv() {
+                    if let crate::session::replay_events::SessionEvent::Notification(
+                        crate::session::replay_events::SessionNotification::Acp(notification),
+                    ) = event
+                        && let acp::SessionUpdate::CurrentModeUpdate(update) = notification.update
+                    {
+                        assert_ne!(
+                            update
+                                .meta
+                                .as_ref()
+                                .and_then(|meta| meta.get("grow/planCompleted")),
+                            Some(&serde_json::Value::Bool(true))
+                        );
+                    }
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn plan_control_results_preserve_lifecycle_messages() {
+        tokio::task::LocalSet::new()
+                .run_until(async {
+                    use crate::session::actor::tests::support::{
+                        begin_test_active_causal_turn, create_test_actor_ex, test_agent_with_plan_tools,
+                    };
+                    use tools::implementations::grow_build::plan_control::PlanApprovalExtRequest;
+
+                    let approved_message = "The plan was approved and is now the frozen execution contract.";
+                    let cancelled_message = "The Plan was cancelled and the session returned to Normal.";
+                    for (input, executing, expected_message, success) in [
+                        (serde_json::json!({"action": "complete", "report": "  ## 完成报告\n\n已实现并验证。  "}), true,
+                            "The approved Plan is complete. The full report is available in Plan details.", true),
+                        (serde_json::json!({"action": "cancel"}), true, cancelled_message, true),
+                        (serde_json::json!({"action": "cancel"}), false, cancelled_message, true),
+                        (serde_json::json!({"action": "complete"}), true, "a non-empty `report` is required", false),
+                        (serde_json::json!({"action": "submit", "plan": "# Initial plan"}), false, approved_message, true),
+                        (serde_json::json!({"action": "amend", "plan": "# Replacement plan"}), true, approved_message, true),
+                    ] {
+                        let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                        let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                        let (actor, mut events) = create_test_actor_ex(
+                            0, 256_000, 85, gateway_tx, persistence_tx,
+                        ).await;
+                        *actor.agent.borrow_mut() = test_agent_with_plan_tools().await;
+                        {
+                            let mut behavior = actor.behavior.lock();
+                            assert!(behavior.select_behavior(tool_types::BehaviorId::Plan));
+                            if executing {
+                                behavior.record_plan_artifact("# Approved plan");
+                                assert!(behavior.submit_initial_plan());
+                                assert!(behavior.approve_submitted_plan());
+                            }
+                        }
+                        if executing {
+                            crate::session::behavior::write_plan_artifact(&actor.session_directory, "# Approved plan").unwrap();
+                        }
+                        let before = actor.behavior.lock().snapshot();
+                        tokio::task::spawn_local(async move {
+                            while let Some(message) = gateway_rx.recv().await {
+                                if let acp_transport::AcpClientMessage::ExtMethod(args) = message
+                                    && args.request.method.as_ref() == "grow/plan_approval"
+                                {
+                                    let request: PlanApprovalExtRequest =
+                                        serde_json::from_str(args.request.params.get()).unwrap();
+                                    let response = serde_json::value::to_raw_value(&serde_json::json!({
+                                        "outcome": "approved",
+                                        "submissionId": request.submission_id,
+                                        "decisionId": "approve-projection-test",
+                                    })).unwrap();
+                                    let _ = args.response_tx.send(Ok(
+                                        acp_transport::protocol::ExtResponse::new(response.into()),
+                                    ));
+                                }
+                            }
+                        });
+                        begin_test_active_causal_turn(&actor).await;
+                        let arguments = input.to_string();
+                        let call_id = "plan-result-projection";
+                        actor.chat_state_handle.push_assistant_response(
+                            crate::sampling::ConversationItem::assistant_tool_calls(vec![
+                                crate::sampling::ToolCall {
+                                    id: call_id.into(), name: "plan_control".into(),
+                                    arguments: arguments.as_str().into(),
+                                },
+                            ]),
+                        );
+                        let outcome = actor.execute_tool_calls(vec![crate::sampling::types::ToolCallResponse {
+                            id: call_id.into(), kind: "function".into(),
+                            function: crate::sampling::types::ToolCallFunction::new("plan_control", arguments),
+                        }]).await.unwrap();
+                        let is_submission = matches!(input["action"].as_str(), Some("submit" | "amend"));
+                        let resamples = is_submission || input["action"] == "complete";
+                        assert!(matches!((&outcome, success, resamples),
+                            (super::ToolLoop::Control(super::ControlDisposition::ResampleStep), true, true)
+                            | (super::ToolLoop::Control(super::ControlDisposition::EndTurn), true, false)
+                            | (super::ToolLoop::Continue, false, _)), "{input}: {outcome:?}");
+                        if success {
+                            assert_eq!(actor.behavior.lock().is_plan(), is_submission);
+                        } else {
+                            assert_eq!(actor.behavior.lock().snapshot(), before);
+                        }
+                        let mut terminals = Vec::new();
+                        while let Ok(event) = events.try_recv() {
+                            if let crate::session::replay_events::SessionEvent::Notification(
+                                crate::session::replay_events::SessionNotification::Acp(notification),
+                            ) = event
+                                && let acp::SessionUpdate::ToolCallUpdate(update) = notification.update
+                                && update.tool_call_id.0.as_ref() == call_id
+                                && matches!(update.fields.status, Some(acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed))
+                            {
+                                terminals.push(update);
+                            }
+                        }
+                        assert_eq!(terminals.len(), 1, "{input}");
+                        let terminal = &terminals[0];
+                        assert_eq!(terminal.fields.status, Some(if success {
+                            acp::ToolCallStatus::Completed
+                        } else { acp::ToolCallStatus::Failed }));
+                        let text = terminal.fields.content.as_ref().unwrap().iter().filter_map(|item| {
+                            if let acp::ToolCallContent::Content(acp::Content {
+                                content: acp::ContentBlock::Text(text), ..
+                            }) = item { Some(text.text.as_str()) } else { None }
+                        }).collect::<Vec<_>>().join("\n");
+                        assert!(text.contains(expected_message), "{input}: {text}");
+                        assert!(!text.contains("artifact:plan:"), "{input}: {text}");
+                        if success {
+                            assert_eq!(text, expected_message);
+                            assert_eq!(terminal.fields.raw_output.as_ref().unwrap()["message"], expected_message);
+                        }
+                        let materialized = actor.chat_state_handle.materialize_timeline(actor.session_id_string()).await.unwrap();
+                        let results: Vec<_> = materialized.surface.iter().filter_map(|item| {
+                            if let crate::sampling::ConversationItem::ToolResult(result) = item
+                                && result.tool_call_id == call_id
+                            { Some(result) } else { None }
+                        }).collect();
+                        assert_eq!(results.len(), 1);
+                        assert!(results[0].content.contains(expected_message));
+                        if success && input["action"] == "complete" {
+                            let completed = actor.behavior.lock().snapshot().completed_plan.unwrap();
+                            let original = crate::session::behavior::read_plan_artifact(&actor.session_directory, &completed.report_hash).unwrap();
+                            assert_eq!(original, input["report"].as_str().unwrap());
+                            assert!(!text.contains("## 完成报告"));
+                            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                            let persisted = crate::session::control::SessionControlSnapshot::latest_from_timeline(&events).unwrap().unwrap();
+                            assert_eq!(persisted.behavior.completed_plan.as_ref(), Some(&completed));
+                            let restored = crate::session::behavior::BehaviorCoordinator::from_snapshot(persisted.behavior);
+                            assert_eq!(restored.snapshot().completed_plan.as_ref(), Some(&completed));
+                        }
+                    }
+                })
+                .await;
+    }
 
     #[tokio::test]
     async fn finishing_plan_refreshes_available_commands_with_normal_behavior() {

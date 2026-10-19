@@ -45,6 +45,7 @@ fn retained_plan_review_key_reaches_bound_dispatch_during_behavior_confirmation(
                     artifact_revision: 3,
                     artifact_hash: blake3::hash(content.as_bytes()).to_hex().to_string(),
                     plan_content: content,
+                    completion_report: None,
                 },
             )
             .unwrap();

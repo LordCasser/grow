@@ -26,6 +26,7 @@ pub(crate) struct PlanArtifactPreview {
     pub artifact_revision: u64,
     pub artifact_hash: String,
     pub plan_content: String,
+    pub completion_report: Option<String>,
 }
 
 impl PlanArtifactPreview {
@@ -65,7 +66,7 @@ fn append_draft_text(text: &mut String, cursor: &mut usize, addition: &str) {
 
 impl AgentView {
     /// Whether the current line viewer is showing a plan preview.
-    pub(super) fn is_plan_viewer(&self) -> bool {
+    pub(crate) fn is_plan_viewer(&self) -> bool {
         self.line_viewer.as_ref().is_some_and(|v| {
             v.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview
         })
@@ -76,7 +77,8 @@ impl AgentView {
     /// check used by the plan-approval path so the prompt/footer
     /// behaves identically across both modes.
     pub(super) fn is_casual_commenting(&self) -> bool {
-        self.plan_approval_view.is_none()
+        !self.session.plan_completed
+            && self.plan_approval_view.is_none()
             && self.is_plan_viewer()
             && self.casual_commenting_range.is_some()
     }
@@ -99,7 +101,8 @@ impl AgentView {
         &self,
         appearance: &crate::appearance::AppearanceConfig,
     ) -> bool {
-        self.session.plan_mode_active
+        self.session.plan_completed
+            || self.session.plan_mode_active
             || ((appearance.show_plan_chip
                 || self
                     .plan_artifact_preview
@@ -109,6 +112,9 @@ impl AgentView {
     }
 
     pub(super) fn plan_status_label(&self) -> &'static str {
+        if self.session.plan_completed {
+            return "[Plan: Complete]";
+        }
         if !self.session.plan_mode_active {
             return "[Plan]";
         }
@@ -150,6 +156,19 @@ impl AgentView {
             .map(|preview| preview.plan_content.clone())
             .filter(|content| !content.trim().is_empty())
     }
+    fn completion_report_for_preview(&self) -> Option<String> {
+        let session_id = self.session.session_id.as_ref()?.0.as_ref();
+        self.plan_artifact_preview
+            .as_ref()
+            .filter(|preview| {
+                preview.session_id == session_id
+                    && preview.binding_epoch == self.session_binding_epoch
+                    && preview.artifact_revision > 0
+                    && preview.artifact_hash.len() == 64
+            })
+            .and_then(|preview| preview.completion_report.clone())
+            .filter(|report| !report.trim().is_empty())
+    }
     /// Open the plan preview when content exists.
     pub(crate) fn show_plan_preview_if_available(&mut self) {
         if self.plan_preview_available() {
@@ -158,12 +177,29 @@ impl AgentView {
     }
     /// Show the plan in the line viewer overlay or a "no plan" toast.
     pub fn show_plan_preview(&mut self) {
-        let body = self.plan_body_for_preview();
+        let (body, tab) = if self.session.plan_completed {
+            if let Some(report) = self.completion_report_for_preview() {
+                (
+                    Some(report),
+                    crate::views::file_search::line_viewer::PlanViewerTab::ResultReport,
+                )
+            } else {
+                (
+                    self.plan_body_for_preview(),
+                    crate::views::file_search::line_viewer::PlanViewerTab::Plan,
+                )
+            }
+        } else {
+            (
+                self.plan_body_for_preview(),
+                crate::views::file_search::line_viewer::PlanViewerTab::Plan,
+            )
+        };
         let Some(content) = body else {
             self.show_toast("No plan written yet.");
             return;
         };
-        self.open_plan_preview_content(content);
+        self.open_plan_preview_content(content, tab);
     }
 
     pub(crate) fn resolve_plan_preview(
@@ -194,6 +230,22 @@ impl AgentView {
         {
             return Err("Plan artifact identity or content is invalid");
         }
+        if response
+            .completion_report
+            .as_ref()
+            .is_some_and(|report| report.trim().is_empty())
+        {
+            return Err("Plan completion report is blank");
+        }
+        if response.completion_report.is_some() && response.retained {
+            return Err("Plan completion report cannot belong to a retained review candidate");
+        }
+        if response.completion_report.is_some() && !self.session.plan_completed {
+            return Err("Waiting for completed Plan status; reopen details after it updates");
+        }
+        if response.completion_report.is_some() && self.session.plan_mode_active {
+            return Err("Plan completion report cannot belong to an active Plan");
+        }
         let preview = PlanArtifactPreview {
             session_id: response.session_id,
             binding_epoch: self.session_binding_epoch,
@@ -202,9 +254,27 @@ impl AgentView {
             artifact_revision: response.artifact_revision,
             artifact_hash: response.artifact_hash,
             plan_content: response.plan_content,
+            completion_report: response.completion_report,
+        };
+        let initial_tab = if self.session.plan_completed
+            && preview
+                .completion_report
+                .as_ref()
+                .is_some_and(|report| !report.trim().is_empty())
+        {
+            crate::views::file_search::line_viewer::PlanViewerTab::ResultReport
+        } else {
+            crate::views::file_search::line_viewer::PlanViewerTab::Plan
         };
         self.plan_artifact_preview = Some(preview.clone());
-        self.open_plan_preview_content(preview.plan_content);
+        let content = match initial_tab {
+            crate::views::file_search::line_viewer::PlanViewerTab::Plan => preview.plan_content,
+            crate::views::file_search::line_viewer::PlanViewerTab::ResultReport => preview
+                .completion_report
+                .clone()
+                .expect("result report tab requires report content"),
+        };
+        self.open_plan_preview_content(content, initial_tab);
         if let Some(viewer) = self.line_viewer.as_mut() {
             viewer.title_override =
                 Some(format!("plan.md · revision {}", preview.artifact_revision));
@@ -212,7 +282,11 @@ impl AgentView {
         Ok(())
     }
 
-    fn open_plan_preview_content(&mut self, content: String) {
+    fn open_plan_preview_content(
+        &mut self,
+        content: String,
+        active_tab: crate::views::file_search::line_viewer::PlanViewerTab,
+    ) {
         let Some(mut viewer) = LineViewerState::open_markdown_content("plan.md", content, None)
         else {
             self.show_toast("Plan preview is unavailable.");
@@ -223,20 +297,27 @@ impl AgentView {
         viewer.fullscreen = true;
         {
             let plan = viewer.plan_mut();
-            plan.show_action_buttons = self.plan_approval_view.is_none();
-            plan.feedback_active = self.plan_approval_view.is_some();
-            plan.show_review_button = self.plan_approval_view.is_none()
+            let completed = self.session.plan_completed;
+            plan.active_tab = active_tab;
+            plan.has_result_report = completed && self.completion_report_for_preview().is_some();
+            plan.completed_read_only = completed;
+            plan.show_action_buttons = !completed && self.plan_approval_view.is_none();
+            plan.feedback_active = !completed && self.plan_approval_view.is_some();
+            plan.show_review_button = !completed
+                && self.plan_approval_view.is_none()
                 && self
                     .plan_artifact_preview
                     .as_ref()
                     .is_some_and(|preview| preview.retained);
             plan.decision_pending = self.pending_plan_approval_decision.is_some();
         }
-        if let Some(ref pav) = self.plan_approval_view
+        if !self.session.plan_completed
+            && let Some(ref pav) = self.plan_approval_view
             && !pav.comments.is_empty()
         {
             viewer.rebuild_with_comments(&pav.comments);
-        } else if self.plan_approval_view.is_none()
+        } else if !self.session.plan_completed
+            && self.plan_approval_view.is_none()
             && !self.plan_comments.is_empty()
             && self
                 .plan_comments_artifact
@@ -252,10 +333,95 @@ impl AgentView {
                 })
         {
             viewer.rebuild_with_comments(&self.plan_comments);
-        } else if !self.plan_comments.is_empty() {
+        } else if !self.session.plan_completed && !self.plan_comments.is_empty() {
             self.show_toast("Saved comments belong to an earlier plan revision.");
         }
         self.line_viewer = Some(viewer);
+    }
+
+    pub(super) fn is_completed_plan_viewer(&self) -> bool {
+        self.session.plan_completed
+            && self.is_plan_viewer()
+            && self
+                .line_viewer
+                .as_ref()
+                .and_then(LineViewerState::plan_ref)
+                .is_some_and(|plan| plan.completed_read_only)
+    }
+
+    pub(super) fn switch_completed_plan_tab(
+        &mut self,
+        tab: crate::views::file_search::line_viewer::PlanViewerTab,
+    ) -> bool {
+        if !self.is_completed_plan_viewer() {
+            return false;
+        }
+        let content = match tab {
+            crate::views::file_search::line_viewer::PlanViewerTab::Plan => {
+                self.plan_body_for_preview()
+            }
+            crate::views::file_search::line_viewer::PlanViewerTab::ResultReport => {
+                self.completion_report_for_preview()
+            }
+        };
+        let Some(content) = content else {
+            return false;
+        };
+        let Some(viewer) = self.line_viewer.as_mut() else {
+            return false;
+        };
+        if viewer.plan_ref().is_some_and(|plan| plan.active_tab == tab) {
+            return true;
+        }
+        viewer.replace_markdown_content(content);
+        viewer.plan_mut().active_tab = tab;
+        true
+    }
+
+    pub(crate) fn clear_completed_plan_details(&mut self) {
+        let close_viewer = self.is_completed_plan_viewer();
+        self.plan_artifact_preview = None;
+        if close_viewer {
+            self.cancel_line_viewer();
+        } else {
+            self.plan_preview_request_id = self.plan_preview_request_id.wrapping_add(1);
+        }
+    }
+
+    pub(crate) fn activate_completed_plan_details(&mut self) {
+        if !self.is_plan_viewer() {
+            return;
+        }
+        let Some(preview) = self.plan_artifact_preview.as_ref() else {
+            return;
+        };
+        let Some(session_id) = self.session.session_id.as_ref() else {
+            return;
+        };
+        if preview.session_id != session_id.0.as_ref()
+            || preview.binding_epoch != self.session_binding_epoch
+        {
+            return;
+        }
+        let report = self.completion_report_for_preview();
+        let has_report = report.is_some();
+        let tab = if has_report {
+            crate::views::file_search::line_viewer::PlanViewerTab::ResultReport
+        } else {
+            crate::views::file_search::line_viewer::PlanViewerTab::Plan
+        };
+        let content = report.unwrap_or_else(|| preview.plan_content.clone());
+        let Some(viewer) = self.line_viewer.as_mut() else {
+            return;
+        };
+        viewer.replace_markdown_content(content);
+        let plan = viewer.plan_mut();
+        plan.active_tab = tab;
+        plan.has_result_report = has_report;
+        plan.completed_read_only = true;
+        plan.show_action_buttons = false;
+        plan.feedback_active = false;
+        plan.show_review_button = false;
     }
     /// Test fixture: drive the agent into casual-commenting state
     /// (line viewer open in plan-preview mode + `casual_commenting_range`
@@ -413,6 +579,7 @@ impl AgentView {
             artifact_revision: pav.artifact_revision,
             artifact_hash: pav.artifact_hash.clone(),
             plan_content: pav.plan_content.clone(),
+            completion_report: None,
         };
         let comments_match = self.plan_comments.is_empty()
             || self
@@ -456,6 +623,7 @@ impl AgentView {
             artifact_revision,
             artifact_hash: artifact_hash.clone(),
             plan_content: pav.plan_content.clone(),
+            completion_report: None,
         });
         self.pending_plan_approval_decision = Some(PendingPlanApprovalDecision {
             session_id,
@@ -1008,6 +1176,120 @@ mod plan_chip_tests {
             ScrollbackState::new(),
         )
     }
+    fn install_completed_preview(agent: &mut AgentView) {
+        let plan = "# Approved Plan\n\n- Verify the change";
+        agent.session.session_id = Some(acp_transport::protocol::SessionId::new("plan-session"));
+        agent.session.plan_completed = true;
+        agent
+            .resolve_plan_preview(
+                tools::implementations::grow_build::plan_control::PlanArtifactQueryResponse {
+                    session_id: "plan-session".into(),
+                    submission_id: 4,
+                    retained: false,
+                    artifact_revision: 2,
+                    artifact_hash: blake3::hash(plan.as_bytes()).to_hex().to_string(),
+                    plan_content: plan.into(),
+                    completion_report: Some("# Result report\n\nAll checks passed.".into()),
+                },
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn completed_plan_status_remains_visible_after_behavior_exit() {
+        let mut agent = make_agent();
+        agent.session.plan_completed = true;
+        assert!(agent.should_show_plan_chip(&AppearanceConfig::default()));
+        assert_eq!(agent.plan_status_label(), "[Plan: Complete]");
+    }
+
+    #[test]
+    fn completed_plan_viewer_switches_read_only_tabs_by_keyboard_and_mouse() {
+        use crate::views::file_search::line_viewer::{
+            LineViewerState, PlanViewerTab, render_line_viewer,
+        };
+        use crossterm::event::{
+            KeyCode, KeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+        };
+        use ratatui::buffer::Buffer;
+        use ratatui::layout::Rect;
+
+        let mut agent = make_agent();
+        install_completed_preview(&mut agent);
+        let viewer = agent.line_viewer.as_ref().unwrap();
+        assert!(!viewer.show_footer(), "completed details are read-only");
+        assert_eq!(
+            viewer.markdown_content_for_feedback().as_deref(),
+            Some("# Result report\n\nAll checks passed.")
+        );
+
+        agent.handle_line_viewer_key(&KeyEvent::new(KeyCode::BackTab, KeyModifiers::NONE));
+        assert_eq!(
+            agent
+                .line_viewer
+                .as_ref()
+                .and_then(LineViewerState::plan_ref)
+                .unwrap()
+                .active_tab,
+            PlanViewerTab::Plan
+        );
+        assert_eq!(
+            agent
+                .line_viewer
+                .as_ref()
+                .unwrap()
+                .markdown_content_for_feedback()
+                .as_deref(),
+            Some("# Approved Plan\n\n- Verify the change")
+        );
+
+        agent.handle_line_viewer_key(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(
+            agent
+                .line_viewer
+                .as_ref()
+                .unwrap()
+                .markdown_content_for_feedback()
+                .as_deref(),
+            Some("# Result report\n\nAll checks passed.")
+        );
+
+        let area = Rect::new(0, 0, 100, 30);
+        let mut buffer = Buffer::empty(area);
+        render_line_viewer(
+            &mut buffer,
+            area,
+            agent.line_viewer.as_mut().unwrap(),
+            std::path::Path::new("/tmp"),
+            &crate::theme::Theme::current(),
+            0,
+        );
+        let plan_tab = agent
+            .line_viewer
+            .as_ref()
+            .unwrap()
+            .plan_ref()
+            .unwrap()
+            .tab_rects[0]
+            .unwrap();
+        agent.handle_line_viewer_mouse(&MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: plan_tab.x,
+            row: plan_tab.y,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(
+            agent
+                .line_viewer
+                .as_ref()
+                .unwrap()
+                .markdown_content_for_feedback()
+                .as_deref(),
+            Some("# Approved Plan\n\n- Verify the change")
+        );
+        assert!(agent.plan_comments.is_empty());
+        assert!(agent.casual_commenting_range.is_none());
+    }
     #[test]
     fn canonical_preview_cache_is_bound_to_its_session_and_revision() {
         let mut agent = make_agent();
@@ -1020,6 +1302,7 @@ mod plan_chip_tests {
             artifact_revision: 2,
             artifact_hash: blake3::hash(b"# immutable plan").to_hex().to_string(),
             plan_content: "# immutable plan".into(),
+            completion_report: None,
         });
         assert_eq!(
             agent.plan_body_for_preview().as_deref(),
@@ -1040,6 +1323,7 @@ mod plan_chip_tests {
                 artifact_revision: 3,
                 artifact_hash: "0".repeat(64),
                 plan_content: "# immutable plan".into(),
+                completion_report: None,
             };
         assert!(agent.resolve_plan_preview(response).is_err());
         assert!(agent.line_viewer.is_none());
@@ -1053,6 +1337,7 @@ mod plan_chip_tests {
                 artifact_revision: 3,
                 artifact_hash: blake3::hash(content.as_bytes()).to_hex().to_string(),
                 plan_content: content,
+                completion_report: None,
             };
         agent.resolve_plan_preview(response).unwrap();
         assert_eq!(
@@ -1064,6 +1349,27 @@ mod plan_chip_tests {
                 .as_deref(),
             Some("plan.md · revision 3")
         );
+    }
+    #[test]
+    fn completion_report_is_rejected_while_plan_behavior_is_active() {
+        let mut agent = make_agent();
+        agent.session.session_id = Some(acp_transport::protocol::SessionId::new("plan-session"));
+        agent.session.plan_mode_active = true;
+        let plan = "# Plan";
+        let response =
+            tools::implementations::grow_build::plan_control::PlanArtifactQueryResponse {
+                session_id: "plan-session".into(),
+                submission_id: 4,
+                retained: false,
+                artifact_revision: 2,
+                artifact_hash: blake3::hash(plan.as_bytes()).to_hex().to_string(),
+                plan_content: plan.into(),
+                completion_report: Some("# Report".into()),
+            };
+
+        assert!(agent.resolve_plan_preview(response).is_err());
+        assert!(agent.plan_artifact_preview.is_none());
+        assert!(agent.line_viewer.is_none());
     }
     #[test]
     fn starting_comments_for_a_new_submission_preserves_prior_notes_in_the_draft() {
@@ -1079,6 +1385,7 @@ mod plan_chip_tests {
             artifact_revision: 4,
             artifact_hash: hash.clone(),
             plan_content: content.into(),
+            completion_report: None,
         });
         agent.plan_comments_artifact = Some(PlanArtifactPreview {
             session_id: "plan-session".into(),
@@ -1088,6 +1395,7 @@ mod plan_chip_tests {
             artifact_revision: 4,
             artifact_hash: hash,
             plan_content: content.into(),
+            completion_report: None,
         });
         agent.plan_comments.push(PlanComment {
             id: 0,
@@ -1494,6 +1802,7 @@ mod plan_approval_enter_tests {
             artifact_revision: 5,
             artifact_hash: hash,
             plan_content: old_content.into(),
+            completion_report: None,
         });
         agent.plan_comments.push(PlanComment {
             id: 3,

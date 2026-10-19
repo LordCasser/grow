@@ -810,7 +810,8 @@ impl AgentView {
             let plan_prompt_focused = self
                 .plan_approval_view
                 .as_ref()
-                .is_some_and(|p| p.focus != PlanApprovalFocus::Preview);
+                .is_some_and(|p| p.focus != PlanApprovalFocus::Preview)
+                && !self.is_completed_plan_viewer();
             let casual_commenting = self.is_casual_commenting();
             if !plan_prompt_focused && !casual_commenting {
                 return match ev {
@@ -1968,6 +1969,7 @@ mod retained_plan_shortcut_tests {
                     artifact_revision: 1,
                     artifact_hash: blake3::hash(content.as_bytes()).to_hex().to_string(),
                     plan_content: content,
+                    completion_report: None,
                 },
             )
             .unwrap();

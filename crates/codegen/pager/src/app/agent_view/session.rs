@@ -109,6 +109,10 @@ impl AgentView {
         session_id: agent_client_protocol::schema::v1::SessionId,
     ) {
         if self.session.session_id.as_ref() != Some(&session_id) {
+            if self.session.plan_completed {
+                self.clear_completed_plan_details();
+                self.session.plan_completed = false;
+            }
             self.close_rewind_for_binding_change();
             if let Some(effect) = self.release_server_queue_edit_on_close() {
                 self.pending_queue_release = Some(effect);
@@ -1948,6 +1952,18 @@ mod resolve_turn_activity_tests {
 #[cfg(test)]
 mod status_window_tests {
     use super::super::test_agent_view;
+    #[test]
+    fn completed_plan_does_not_cross_a_session_binding() {
+        let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));
+        agent.session.plan_completed = true;
+        agent.plan_preview_request_id = 7;
+        agent.bind_session_id(agent_client_protocol::schema::v1::SessionId::new("s1"));
+        assert!(agent.session.plan_completed);
+        assert_eq!(agent.plan_preview_request_id, 7);
+        agent.bind_session_id(agent_client_protocol::schema::v1::SessionId::new("s2"));
+        assert!(!agent.session.plan_completed);
+        assert_ne!(agent.plan_preview_request_id, 7);
+    }
     #[test]
     fn start_turn_boundary_enters_turn_running() {
         let mut agent = test_agent_view(Some("s1"), std::path::PathBuf::from("/tmp"));

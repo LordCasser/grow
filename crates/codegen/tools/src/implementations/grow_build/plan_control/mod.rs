@@ -87,7 +87,7 @@ impl crate::types::tool_metadata::ToolMetadata for PlanControlTool {
     }
 
     fn description_template(&self) -> &str {
-        r#"Control the active Plan lifecycle. Use action=`submit` with the complete initial plan to request approval; action=`amend` with a complete replacement plan when execution must materially deviate; action=`complete` only after every approved step and verification has finished, with `report` containing the final user-facing result; or action=`cancel` to abandon the Plan. `plan` is required only for submit/amend. `report` is required only for complete. Approval is always explicit and execution remains blocked until the user approves."#
+        r#"Control the active Plan lifecycle. Use action=`submit` with the complete initial plan to request approval; action=`amend` with a complete replacement plan when execution must materially deviate; action=`complete` only after every approved step and verification has finished, with `report` containing the complete original result report; or action=`cancel` to abandon the Plan. `plan` is required only for submit/amend. `report` is required only for complete and is saved in the Plan details Result report tab. After completion succeeds, reply normally with a brief summary of the outcome and verification. Approval is always explicit and execution remains blocked until the user approves."#
     }
 
     fn isolates_batch_preflight(&self) -> bool {
@@ -131,16 +131,7 @@ impl tool_runtime::Tool for PlanControlTool {
                 "The plan was approved and is now the frozen execution contract."
             }
             PlanControlAction::Complete => {
-                return Ok(PlanControlOutput {
-                    message: format!(
-                        "The approved Plan is complete.\n\n{}",
-                        input
-                            .report
-                            .as_deref()
-                            .expect("validated complete report")
-                            .trim()
-                    ),
-                });
+                "The approved Plan is complete. The full report is available in Plan details."
             }
             PlanControlAction::Cancel => {
                 "The Plan was cancelled and the session returned to Normal."
@@ -210,7 +201,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn complete_returns_the_final_report_verbatim_after_trimming() {
+    async fn complete_acknowledges_the_report_saved_in_details() {
         let output = tool_runtime::Tool::run(
             &PlanControlTool,
             tool_runtime::ToolCallContext::default(),
@@ -224,7 +215,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             output.message,
-            "The approved Plan is complete.\n\nImplemented and verified."
+            "The approved Plan is complete. The full report is available in Plan details."
         );
     }
 }

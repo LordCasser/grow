@@ -28,6 +28,8 @@ pub struct PlanArtifactQueryResponse {
     pub artifact_revision: u64,
     pub artifact_hash: String,
     pub plan_content: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_report: Option<String>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]

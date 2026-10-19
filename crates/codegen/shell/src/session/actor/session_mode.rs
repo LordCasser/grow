@@ -1214,21 +1214,29 @@ impl SessionActor {
             return BehaviorApplication::disposition(Ok(decision.outcome));
         }
 
+        let clear_completed_plan = authority
+            != crate::session::behavior::BehaviorRequestAuthority::GoalLifecycle
+            && self.behavior.lock().snapshot().completed_plan.is_some();
         if !decision.effects.is_empty() {
             let persisted_goal = self.goal_tracker.lock().snapshot().cloned();
+            let mut next_behavior = crate::session::behavior::BehaviorSnapshot::selected(mode);
+            if !clear_completed_plan {
+                let previous = self.behavior.lock().snapshot();
+                if previous.completed_plan.is_some() {
+                    next_behavior.completed_plan = previous.completed_plan;
+                    next_behavior.last_plan_submission_id = previous.last_plan_submission_id;
+                }
+            }
             let persisted = if let Some(intent) = control_intent {
                 self.persist_behavior_transition_for_control_durably(
-                    crate::session::behavior::BehaviorSnapshot::selected(mode),
+                    next_behavior,
                     persisted_goal,
                     intent.clone(),
                 )
                 .await
             } else {
-                self.persist_behavior_transition_durably(
-                    crate::session::behavior::BehaviorSnapshot::selected(mode),
-                    persisted_goal,
-                )
-                .await
+                self.persist_behavior_transition_durably(next_behavior, persisted_goal)
+                    .await
             };
             if let Err(error) = persisted {
                 let message = format!(
@@ -1252,7 +1260,10 @@ impl SessionActor {
                 ));
             }
         } else if let Some(intent) = control_intent {
-            let (behavior, goal) = self.capture_control_authorities();
+            let (mut behavior, goal) = self.capture_control_authorities();
+            if clear_completed_plan {
+                behavior.completed_plan = None;
+            }
             if let Err(error) = self
                 .persist_applied_control_receipt_durably(
                     behavior,
@@ -1272,11 +1283,25 @@ impl SessionActor {
                     ),
                 ));
             }
+        } else if clear_completed_plan {
+            let (mut behavior, goal) = self.capture_control_authorities();
+            behavior.completed_plan = None;
+            if let Err(error) = self.persist_control_snapshot_durably(behavior, goal).await {
+                return BehaviorApplication::disposition(Err(
+                    crate::session::commands::fatal_turn_boundary_error(
+                        "Behavior control",
+                        format!("Completed Plan dismissal was not persisted: {error}"),
+                    ),
+                ));
+            }
         }
 
         // Publish the new ownership identity before either admission lock is
         // released. The next foreground therefore captures exactly the
         // Behavior whose Control context is already durable in Surface.
+        if clear_completed_plan {
+            self.behavior.lock().clear_completed_plan();
+        }
         if let Some(target) = decision.effects.iter().find_map(|effect| match effect {
             BehaviorEffect::Select(target) => Some(*target),
             _ => None,

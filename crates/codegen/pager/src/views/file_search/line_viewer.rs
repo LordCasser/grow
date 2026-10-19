@@ -543,6 +543,10 @@ pub enum LineViewerKind {
 
 #[derive(Default)]
 pub struct PlanViewerExtras {
+    pub active_tab: PlanViewerTab,
+    pub tab_rects: [Option<Rect>; 2],
+    pub has_result_report: bool,
+    pub completed_read_only: bool,
     pub send_button_area: Option<Rect>,
     pub send_hovered: bool,
     pub later_button_area: Option<Rect>,
@@ -566,6 +570,13 @@ pub struct PlanViewerExtras {
     pub gutter_drag_end: Option<usize>,
     pub gutter_hovered_line: Option<usize>,
     pub active_commenting_range: Option<std::ops::Range<usize>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PlanViewerTab {
+    #[default]
+    Plan,
+    ResultReport,
 }
 
 /// Double-click detection threshold in milliseconds.
@@ -834,7 +845,32 @@ impl LineViewerState {
     pub fn show_footer(&self) -> bool {
         self.plan
             .as_ref()
-            .is_some_and(|p| p.feedback_active || p.show_action_buttons)
+            .is_some_and(|p| !p.completed_read_only && (p.feedback_active || p.show_action_buttons))
+    }
+
+    /// Replace the markdown document while retaining Plan viewer chrome.
+    /// Switching tabs starts each document at its top with a fresh selection.
+    pub fn replace_markdown_content(&mut self, content: String) {
+        self.markdown_content = Some(content);
+        self.source_lines.clear();
+        self.lines.clear();
+        self.last_table_width = None;
+        self.last_comments.clear();
+        self.initial_scroll_range = None;
+        self.list_state = ListPaneState::new_with_config(
+            WrapMode::Wrap,
+            false,
+            ListPaneConfig {
+                follow_enabled: false,
+                wrap_toggle_enabled: false,
+                search_enabled: true,
+                copy_enabled: true,
+                show_selection_when_unfocused: true,
+                visual_select_enabled: true,
+                filter_enabled: false,
+                goto_line_enabled: true,
+            },
+        );
     }
 
     pub fn source_line_at_screen_row(&self, row: u16, content_area: Rect) -> Option<usize> {
@@ -1245,7 +1281,11 @@ pub fn render_line_viewer(
     // Plan modes (both review and casual) reserve 2 extra rows inside
     // the frame for the divider + action-button footer, so they need
     // a slightly taller minimum than ordinary file previews.
-    let min_height: u16 = if viewer.show_footer() { 7 } else { 5 };
+    let has_result_tabs = viewer.plan_ref().is_some_and(|plan| plan.has_result_report);
+    if let Some(plan) = viewer.plan.as_mut() {
+        plan.tab_rects = [None, None];
+    }
+    let min_height: u16 = 5 + u16::from(viewer.show_footer()) * 2 + u16::from(has_result_tabs);
     if popup_area.width < 10 || popup_area.height < min_height {
         viewer.last_popup_area = None;
         viewer.last_modal_area = None;
@@ -1281,11 +1321,12 @@ pub fn render_line_viewer(
     // (the selection can hide behind the footer; Ctrl-D/Ctrl-U jump
     // too far; initial-scroll-to-range centering is mis-sized).
     let footer_rows: u16 = if viewer.show_footer() { 2 } else { 0 };
+    let tab_rows: u16 = u16::from(has_result_tabs);
     let content_area = Rect {
         x: inner.x,
-        y: inner.y,
+        y: inner.y + tab_rows,
         width: inner.width,
-        height: inner.height.saturating_sub(footer_rows),
+        height: inner.height.saturating_sub(footer_rows + tab_rows),
     };
 
     // 4. Prepare layout (resolves selection index for title + rendering).
@@ -1339,6 +1380,45 @@ pub fn render_line_viewer(
             &title,
             title_width.min(max_title_width),
         );
+    }
+
+    // Completed Plans expose the immutable Plan and completion report as
+    // sibling tabs. Keep this in the existing viewer chrome so list/search
+    // behavior remains identical on either document.
+    if has_result_tabs && inner.width > 4 {
+        let labels = ["Plan", "Result report"];
+        let mut x = inner.x + 2;
+        for (idx, label) in labels.iter().enumerate() {
+            let active = viewer.plan_ref().is_some_and(|plan| {
+                matches!(
+                    (idx, plan.active_tab),
+                    (0, PlanViewerTab::Plan) | (1, PlanViewerTab::ResultReport)
+                )
+            });
+            let style = if active {
+                Style::default()
+                    .fg(theme.accent_plan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.gray)
+            };
+            let width = label.len().min((inner.right().saturating_sub(x)) as usize) as u16;
+            if width == 0 {
+                break;
+            }
+            buf.set_string(
+                x,
+                inner.y,
+                &label[..crate::render::line_utils::byte_offset_at_width(label, width as usize)],
+                style,
+            );
+            if let Some(plan) = viewer.plan.as_mut() {
+                plan.tab_rects[idx] = Some(Rect::new(x, inner.y, width, 1));
+            }
+            x = x.saturating_add(width + 3);
+        }
+    } else if let Some(plan) = viewer.plan.as_mut() {
+        plan.tab_rects = [None, None];
     }
 
     // 6. Action buttons on the top border, right-aligned.

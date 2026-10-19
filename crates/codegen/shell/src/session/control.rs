@@ -144,6 +144,12 @@ impl SessionControlSnapshot {
                 "session control Behavior contains cross-runtime state",
             ));
         }
+        if !self.behavior.completed_plan_is_valid() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "session control completed Plan result is invalid",
+            ));
+        }
         if !self.behavior.retained_plan_is_valid() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,

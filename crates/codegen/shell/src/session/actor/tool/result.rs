@@ -344,27 +344,6 @@ impl SessionActor {
                 self.signals_handle()
                     .record_tool_success(requested_tool_name);
             }
-            if matches!(
-                &result.output,
-                tools::types::output::ToolOutput::PlanControl(_)
-            ) {
-                let plan_ref = self
-                    .behavior
-                    .lock()
-                    .plan_artifact_ref()
-                    .unwrap_or_else(|| "artifact:plan:unavailable".to_string());
-                if let Some(ref mut content) = tool_update.fields.content {
-                    for item in content.iter_mut() {
-                        if let acp::ToolCallContent::Content(acp::Content {
-                            content: acp::ContentBlock::Text(t),
-                            ..
-                        }) = item
-                        {
-                            t.text = format!("Plan artifact: {plan_ref}");
-                        }
-                    }
-                }
-            }
             tool_update.tool_call_id = tool_call_id.clone();
             self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
                 .await;

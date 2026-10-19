@@ -1053,6 +1053,9 @@ pub struct AgentSession {
     /// Whether the confirmed Behavior is Plan. Derived only from
     /// `CurrentModeUpdate`; tool titles never change it.
     pub(crate) plan_mode_active: bool,
+    /// Whether the most recent Plan completed and remains inspectable until
+    /// the user successfully selects another Behavior.
+    pub(crate) plan_completed: bool,
     /// Confirmed user-facing Behavior. Permission policy is tracked separately.
     pub(crate) behavior_mode: tools::types::BehaviorId,
     /// Current phase reported by the plan-mode runtime, when one is active.
@@ -1345,6 +1348,7 @@ impl AgentSession {
             user_model_preference: None,
             deferred_model_switch: None,
             plan_mode_active: false,
+            plan_completed: false,
             behavior_mode: tools::types::BehaviorId::Normal,
             plan_phase: None,
             deferred_session_mode: None,

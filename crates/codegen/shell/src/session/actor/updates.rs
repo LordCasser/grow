@@ -321,19 +321,24 @@ impl SessionActor {
         current_mode_id: acp::SessionModeId,
         behavior_change: Option<serde_json::Value>,
     ) {
-        let behavior_name = match self.behavior.lock().behavior() {
+        let behavior = self.behavior.lock();
+        let plan_phase = behavior.plan_phase_label();
+        let plan_completed = behavior.snapshot().completed_plan.is_some();
+        let behavior_name = match behavior.behavior() {
             tool_types::BehaviorId::Normal => "normal",
             tool_types::BehaviorId::Clarify => "clarify",
             tool_types::BehaviorId::Plan => "plan",
             tool_types::BehaviorId::Workflow => "workflow",
             tool_types::BehaviorId::Goal => "goal",
         };
+        drop(behavior);
         let control_revision = self
             .control_revision
             .load(std::sync::atomic::Ordering::Acquire);
         let mut behavior_meta = serde_json::json!({
             "grow/behavior": behavior_name,
-            "grow/planPhase": self.behavior.lock().plan_phase_label(),
+            "grow/planPhase": plan_phase,
+            "grow/planCompleted": plan_completed,
             "grow/behaviorChange": behavior_change,
             "grow/displayProjectionSource": format!("behavior:{behavior_name}"),
             "grow/displayProjectionRevision": control_revision,

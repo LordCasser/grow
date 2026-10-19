@@ -60,6 +60,14 @@ change them. Switching Agents preserves the session's TODO list and its tool.
 See [Plan status and details](../../../../../openspec/specs/client-surfaces/spec.md#requirement-active-plan-has-an-inspectable-top-status-entry)
 and [planning across Agent replacement](../../../../../openspec/specs/task-planning/spec.md#requirement-agent-replacement-preserves-session-planning-access).
 
+When Plan completes, the main conversation gets a brief normal summary, while
+the complete original report is saved in the **Result report** tab of Plan
+details. The **Plan** tab keeps the approved plan. Click either tab, or use
+`Tab` / `Shift+Tab`, to switch between them. Completed details are read-only.
+The **`[Plan: Complete]`** entry remains available after reconnecting until your
+next successful manual Behavior selection, including selecting Normal again.
+See [completed Plan details](../../../../../openspec/specs/client-surfaces/spec.md#requirement-completed-plan-details-separate-the-full-report-from-the-summary).
+
 ---
 
 ## The Plan Artifact

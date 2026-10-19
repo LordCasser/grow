@@ -136,6 +136,8 @@ Minimal 新会话欢迎卡在 root Agent 绑定 session ID 后才提交，因为
 
 Agent 激活必须将新的 ToolBridge 绑定到原 SessionActor 的 Planning runtime，并从 Timeline 恢复局部计划投影。启动 hydration 与 Agent 替换共用该绑定；替换本身不提交新计划或重复发布 ACP plan。Plan 顶部阶段入口依赖 Behavior 投影，点击沿 canonical artifact 查询显示完整计划；TODO 徽标及面板独立保留。契约见 [Agent 替换与 TODO](../openspec/specs/task-planning/spec.md#requirement-agent-replacement-preserves-session-planning-access) 和 [Plan 顶部详情](../openspec/specs/client-surfaces/spec.md#requirement-active-plan-has-an-inspectable-top-status-entry)。
 
+Plan 完成时先保全原始报告，再将完成引用与退出 Normal 一起提交到 Control；提交确认后才发布完成标记并继续正常采样生成简短总结。canonical 查询同时读取计划与报告，Pager 用独立 Tab 展示；完成入口只在下一次成功手动选择 Behavior 时清除，同模式选择也适用。恢复和自动 Goal 控制保留该引用，fork 不继承完成展示。契约见 [完成结果持久化](../openspec/specs/behavior-goal/spec.md#requirement-plan-completion-retains-an-inspectable-durable-result) 与 [完成详情和总结](../openspec/specs/client-surfaces/spec.md#requirement-completed-plan-details-separate-the-full-report-from-the-summary)。
+
 按受影响 crate 缩小检查范围；下列命令是项目现有 CI/README 的入口，不意味着每次纯文档修改都运行全部测试。
 
 ```sh

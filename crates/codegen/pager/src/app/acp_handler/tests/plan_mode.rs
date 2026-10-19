@@ -22,6 +22,7 @@
                 artifact_revision: 2,
                 artifact_hash: hash,
                 plan_content: body.into(),
+                completion_report: None,
             }).unwrap();
             agent.plan_comments_artifact = agent.plan_artifact_preview.clone();
             agent.plan_comments.push(PlanComment {
@@ -408,6 +409,189 @@
             "CurrentModeUpdate must always signal refresh"
         );
         assert!(agent.session.plan_mode_active);
+    }
+
+    fn plan_completion_update(mode: &str, completed: bool, change_status: &str) -> acp::SessionUpdate {
+        acp::SessionUpdate::CurrentModeUpdate(
+            acp::CurrentModeUpdate::new(acp::SessionModeId::new(mode)).meta(
+                serde_json::json!({
+                    "grow/planCompleted": completed,
+                    "grow/behaviorChange": {
+                        "status": change_status,
+                        "source": "normal",
+                        "target": mode,
+                    }
+                })
+                .as_object()
+                .cloned()
+                .unwrap(),
+            ),
+        )
+    }
+
+    #[test]
+    fn entering_a_new_plan_retires_pending_reads_without_dropping_cached_preview() {
+        use tools::implementations::grow_build::plan_control::PlanArtifactQueryResponse;
+
+        let mut agent = make_agent(Some("s1"));
+        let content = "# Previous active plan";
+        agent
+            .resolve_plan_preview(PlanArtifactQueryResponse {
+                session_id: "s1".into(),
+                submission_id: 3,
+                retained: false,
+                artifact_revision: 2,
+                artifact_hash: blake3::hash(content.as_bytes()).to_hex().to_string(),
+                plan_content: content.into(),
+                completion_report: None,
+            })
+            .unwrap();
+        let old_request_id = agent.plan_preview_request_id;
+
+        assert!(detect_plan_mode_change(
+            &plan_completion_update("plan", false, "applied"),
+            &mut agent,
+        ));
+
+        assert_ne!(agent.plan_preview_request_id, old_request_id);
+        assert_eq!(
+            agent
+                .plan_artifact_preview
+                .as_ref()
+                .map(|preview| preview.plan_content.as_str()),
+            Some(content),
+            "entering a new Plan must preserve an existing active preview"
+        );
+    }
+
+    #[test]
+    fn completed_plan_stays_inspectable_until_a_behavior_change_applies() {
+        use tools::implementations::grow_build::plan_control::PlanArtifactQueryResponse;
+
+        let mut agent = make_agent(Some("s1"));
+        let completion = plan_completion_update("normal", true, "applied");
+        assert!(detect_plan_mode_change(&completion, &mut agent));
+        assert!(agent.session.plan_completed);
+
+        let plan = "# Plan";
+        agent
+            .resolve_plan_preview(PlanArtifactQueryResponse {
+                session_id: "s1".into(),
+                submission_id: 5,
+                retained: false,
+                artifact_revision: 2,
+                artifact_hash: blake3::hash(plan.as_bytes()).to_hex().to_string(),
+                plan_content: plan.into(),
+                completion_report: Some("# Original report\n\nAll checks passed.".into()),
+            })
+            .unwrap();
+        assert!(agent
+            .line_viewer
+            .as_ref()
+            .and_then(crate::views::file_search::line_viewer::LineViewerState::plan_ref)
+            .is_some_and(|plan| plan.completed_read_only));
+
+        let waiting = plan_completion_update("normal", true, "confirmation_required");
+        assert!(detect_plan_mode_change(&waiting, &mut agent));
+        assert!(agent.session.plan_completed);
+        assert!(agent.plan_artifact_preview.is_some());
+        assert!(agent.line_viewer.is_some());
+
+        let request_id = agent.plan_preview_request_id;
+        let applied_same_mode = plan_completion_update("normal", false, "applied");
+        assert!(detect_plan_mode_change(&applied_same_mode, &mut agent));
+        assert!(!agent.session.plan_completed);
+        assert!(agent.plan_artifact_preview.is_none());
+        assert!(agent.line_viewer.is_none());
+        assert_ne!(agent.plan_preview_request_id, request_id);
+    }
+
+    #[test]
+    fn completion_projection_upgrades_an_already_open_plan_preview() {
+        use tools::implementations::grow_build::plan_control::PlanArtifactQueryResponse;
+
+        let mut agent = make_agent(Some("s1"));
+        let plan = "# Plan";
+        let response = |completion_report| PlanArtifactQueryResponse {
+                session_id: "s1".into(),
+                submission_id: 5,
+                retained: false,
+                artifact_revision: 2,
+                artifact_hash: blake3::hash(plan.as_bytes()).to_hex().to_string(),
+                plan_content: plan.into(),
+                completion_report,
+            };
+        agent.resolve_plan_preview(response(None)).unwrap();
+        assert!(agent.resolve_plan_preview(response(Some("# Original report".into()))).is_err());
+        assert_eq!(
+            agent
+                .line_viewer
+                .as_ref()
+                .unwrap()
+                .markdown_content_for_feedback()
+                .as_deref(),
+            Some(plan)
+        );
+
+        assert!(detect_plan_mode_change(
+            &plan_completion_update("normal", true, "applied"),
+            &mut agent,
+        ));
+        assert!(!agent.line_viewer.as_ref().unwrap().show_footer());
+        agent.resolve_plan_preview(response(Some("# Original report".into()))).unwrap();
+        let viewer = agent.line_viewer.as_ref().unwrap();
+        assert!(!viewer.show_footer());
+        assert_eq!(
+            viewer.markdown_content_for_feedback().as_deref(),
+            Some("# Original report")
+        );
+        assert!(viewer
+            .plan_ref()
+            .is_some_and(|plan| plan.has_result_report && plan.completed_read_only));
+    }
+
+    #[test]
+    fn completion_projection_refreshes_an_open_plan_detail_once() {
+        use tools::implementations::grow_build::plan_control::PlanArtifactQueryResponse;
+
+        let mut app = make_app_with_agent("s1");
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.behavior_mode = tools::types::BehaviorId::Plan;
+        agent.session.plan_mode_active = true;
+        let plan = "# Active Plan";
+        agent
+            .resolve_plan_preview(PlanArtifactQueryResponse {
+                session_id: "s1".into(),
+                submission_id: 6,
+                retained: false,
+                artifact_revision: 2,
+                artifact_hash: blake3::hash(plan.as_bytes()).to_hex().to_string(),
+                plan_content: plan.into(),
+                completion_report: None,
+            })
+            .unwrap();
+        let stale_request_id = 31;
+        agent.plan_preview_request_id = stale_request_id;
+        let binding_epoch = agent.session_binding_epoch;
+
+        assert!(handle(
+            mode_update_message("s1", plan_completion_update("normal", true, "applied")),
+            &mut app,
+        ));
+
+        assert!(matches!(
+            app.pending_effects.as_slice(),
+            [Effect::QueryPlanArtifact {
+                agent_id: AgentId(0),
+                session_id,
+                binding_epoch: actual_binding_epoch,
+                request_id,
+            }] if session_id.0.as_ref() == "s1"
+                && *actual_binding_epoch == binding_epoch
+                && *request_id != stale_request_id
+        ));
+        assert!(app.agents[&AgentId(0)].session.plan_completed);
+        assert!(app.agents[&AgentId(0)].line_viewer.is_some());
     }
 
     /// The `grow/behaviorChange` meta of a `CurrentModeUpdate` mirrors the

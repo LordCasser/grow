@@ -262,6 +262,7 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                     let mut settings_modal_refresh_needed = false;
                     let mut workflows_modal_refresh = false;
                     let mut behavior_drain = None;
+                    let mut completed_plan_query = None;
 
                     // Extract Plan updates before passing to tracker (tracker skips them).
                     let mutated = if dedup_drop {
@@ -436,8 +437,32 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
                             agent.flush_pending_follow_ups(notif_pid);
                         }
                         // Detect plan mode transitions from tool call completions.
+                        let was_plan_completed = agent.session.plan_completed;
+                        let completed_plan_details_open = agent.is_plan_viewer();
+                        let completion_report_missing = agent
+                            .plan_artifact_preview
+                            .as_ref()
+                            .is_none_or(|preview| preview.completion_report.is_none());
                         settings_modal_refresh_needed |=
                             detect_plan_mode_change(&notif.request.update, agent);
+                        if !meta.is_replay
+                            && !was_plan_completed
+                            && agent.session.plan_completed
+                            && completed_plan_details_open
+                            && completion_report_missing
+                            && let Some(session_id) = agent.session.session_id.clone()
+                        {
+                            // Invalidate any read that was started before the
+                            // completion projection, then fetch the canonical
+                            // report once for the detail view already on screen.
+                            agent.plan_preview_request_id =
+                                agent.plan_preview_request_id.wrapping_add(1);
+                            completed_plan_query = Some((
+                                session_id,
+                                agent.session_binding_epoch,
+                                agent.plan_preview_request_id,
+                            ));
+                        }
                         settings_modal_refresh_needed |= matches!(
                             &notif.request.update,
                             acp::SessionUpdate::AvailableCommandsUpdate(_)
@@ -603,6 +628,15 @@ pub(crate) fn handle(msg: AcpClientMessage, app: &mut AppView) -> bool {
 
                         !meta.is_replay && !agent.session.loading_replay
                     };
+
+                    if let Some((session_id, binding_epoch, request_id)) = completed_plan_query {
+                        app.pending_effects.push(Effect::QueryPlanArtifact {
+                            agent_id: id,
+                            session_id,
+                            binding_epoch,
+                            request_id,
+                        });
+                    }
 
                     if let Some(drain) = behavior_drain {
                         crate::app::root::dispatch::note_peek_page_flip(

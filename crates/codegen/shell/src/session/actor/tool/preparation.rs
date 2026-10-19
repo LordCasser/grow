@@ -1755,12 +1755,10 @@ impl SessionActor {
             ToolInput::PlanControl(input) => {
                 use tools::implementations::grow_build::plan_control::PlanControlAction;
                 Some(match input.action {
-                    PlanControlAction::Submit | PlanControlAction::Amend => {
-                        ControlDisposition::ResampleStep
-                    }
-                    PlanControlAction::Complete | PlanControlAction::Cancel => {
-                        ControlDisposition::EndTurn
-                    }
+                    PlanControlAction::Submit
+                    | PlanControlAction::Amend
+                    | PlanControlAction::Complete => ControlDisposition::ResampleStep,
+                    PlanControlAction::Cancel => ControlDisposition::EndTurn,
                 })
             }
             // Preserve the existing Goal lifecycle fence explicitly. Goal may

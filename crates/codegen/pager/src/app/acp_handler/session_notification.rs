@@ -2243,6 +2243,28 @@ pub(super) fn detect_plan_mode_change(update: &acp::SessionUpdate, agent: &mut A
         .and_then(|meta| meta.get("grow/planPhase"))
         .and_then(|phase| phase.as_str())
         .map(str::to_owned);
+    if let Some(completed) = cmu
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("grow/planCompleted"))
+        .and_then(serde_json::Value::as_bool)
+    {
+        let was_completed = agent.session.plan_completed;
+        if was_completed && !completed {
+            agent.clear_completed_plan_details();
+        }
+        agent.session.plan_completed = completed;
+        if !was_completed && completed {
+            agent.activate_completed_plan_details();
+        }
+        // A newly selected Plan can supersede a canonical artifact read that
+        // was started while the previous behavior was active. Retire only the
+        // pending read identity; an already cached active-Plan preview remains
+        // useful until the new artifact is resolved.
+        if !completed && !was_completed && previous != mode && mode.is_plan() {
+            agent.plan_preview_request_id = agent.plan_preview_request_id.wrapping_add(1);
+        }
+    }
     if let Some(change) = cmu
         .meta
         .as_ref()

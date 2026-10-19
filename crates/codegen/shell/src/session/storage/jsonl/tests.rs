@@ -4662,6 +4662,30 @@ async fn fork_drops_parent_control_projection_receipts() {
 }
 
 #[tokio::test]
+async fn forked_completed_plan_keeps_history_without_inheriting_the_status_entry() {
+    let tmp = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());
+    let source = Info { id: acp::SessionId::new("completed-source"), cwd: "/src".into() };
+    let target = Info { id: acp::SessionId::new("completed-fork"), cwd: "/tgt".into() };
+    adapter.init_session(&source, default_model_id()).await.unwrap();
+    append_timeline_seed(&adapter, &source, vec![ConversationItem::system("source system")]).await;
+    let mut behavior = crate::session::behavior::BehaviorCoordinator::new();
+    behavior.select_behavior(tool_types::BehaviorId::Plan);
+    behavior.record_plan_artifact("# Approved plan");
+    assert!(behavior.submit_initial_plan());
+    assert!(behavior.approve_submitted_plan());
+    assert!(behavior.complete_plan(blake3::hash(b"Original report").to_hex().to_string()));
+    append_control_snapshot(&adapter, &source,
+        &crate::session::control::SessionControlSnapshot::new(8, "grow", behavior.snapshot(), None)).await;
+    adapter.copy_session_data(&source, &target, CopySessionOptions::default()).await.unwrap();
+    let restored = adapter.load_session_without_updates(&source).await.unwrap().control_snapshot.unwrap();
+    assert!(restored.behavior.completed_plan.is_some());
+    let forked = adapter.load_session_without_updates(&target).await.unwrap().control_snapshot.unwrap();
+    assert!(forked.behavior.completed_plan.is_none());
+    assert_eq!(forked.behavior.behavior(), tool_types::BehaviorId::Normal);
+}
+
+#[tokio::test]
 async fn forked_control_snapshot_drops_plan_runtime_without_its_artifact() {
     let tmp = TempDir::new().unwrap();
     let adapter = JsonlStorageAdapter::with_root(tmp.path().to_path_buf());

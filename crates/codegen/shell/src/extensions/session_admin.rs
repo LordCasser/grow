@@ -149,6 +149,16 @@ async fn handle_plan_decision_status(agent: &MvpAgent, args: &acp::ExtRequest) -
 fn plan_preview_reference(
     snapshot: &crate::session::behavior::BehaviorSnapshot,
 ) -> Option<(u64, u64, String, bool)> {
+    if snapshot.behavior() != tool_types::BehaviorId::Plan
+        && let Some(completed) = &snapshot.completed_plan
+    {
+        return Some((
+            completed.submission_id,
+            completed.artifact_revision,
+            completed.artifact_hash.clone(),
+            false,
+        ));
+    }
     if let Some(candidate) = snapshot.retained_plan.as_ref().filter(|candidate| {
         matches!(
             candidate.status,
@@ -194,13 +204,27 @@ async fn handle_plan_artifact_query(agent: &MvpAgent, args: &acp::ExtRequest) ->
         acp::Error::invalid_params().data("session has no current Plan candidate")
     })?;
     let (submission_id, revision, hash, retained) = reference;
+    let completed = snapshot.completed_plan;
     let behavior = handle.behavior.clone();
     let session_directory = handle.session_directory.clone();
     let response = bounded_shared_read(move || {
         let content = crate::session::behavior::read_plan_artifact(&session_directory, &hash)?;
+        let completion_report = completed
+            .as_ref()
+            .filter(|completed| {
+                completed.submission_id == submission_id && completed.artifact_hash == hash
+            })
+            .map(|completed| {
+                crate::session::behavior::read_plan_artifact(
+                    &session_directory,
+                    &completed.report_hash,
+                )
+            })
+            .transpose()?;
         let current = behavior.lock().snapshot();
         if plan_preview_reference(&current)
             != Some((submission_id, revision, hash.clone(), retained))
+            || current.completed_plan != completed
         {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
@@ -214,6 +238,7 @@ async fn handle_plan_artifact_query(agent: &MvpAgent, args: &acp::ExtRequest) ->
             artifact_revision: revision,
             artifact_hash: hash,
             plan_content: content,
+            completion_report,
         })
     })
     .await
@@ -1130,6 +1155,20 @@ mod tests {
     use crate::session::storage::StorageAdapter as _;
     use tempfile::TempDir;
     use tools::implementations::grow_build::task::types::SubagentSnapshotStatus;
+
+    #[test]
+    fn completed_plan_preview_resolves_until_the_result_is_cleared() {
+        let mut behavior = crate::session::behavior::BehaviorCoordinator::new();
+        behavior.select_behavior(tool_types::BehaviorId::Plan);
+        behavior.record_plan_artifact("# approved");
+        assert!(behavior.submit_initial_plan());
+        assert!(behavior.approve_submitted_plan());
+        let before = plan_preview_reference(&behavior.snapshot()).unwrap();
+        assert!(behavior.complete_plan(blake3::hash(b"report").to_hex().to_string()));
+        assert_eq!(plan_preview_reference(&behavior.snapshot()), Some(before));
+        behavior.clear_completed_plan();
+        assert!(plan_preview_reference(&behavior.snapshot()).is_none());
+    }
 
     #[cfg(unix)]
     #[test]

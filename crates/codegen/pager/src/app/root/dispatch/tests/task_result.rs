@@ -52,6 +52,7 @@ fn plan_details_load_full_artifact_without_cached_body_and_preserve_todos() {
                 artifact_revision: 3,
                 artifact_hash: blake3::hash(content.as_bytes()).to_hex().to_string(),
                 plan_content: content.into(),
+                completion_report: None,
             }),
         },
         &mut app,
@@ -114,6 +115,7 @@ fn closed_plan_preview_rejects_late_reads_after_close_reopen_and_rebind() {
         artifact_revision: revision,
         artifact_hash: blake3::hash(content.as_bytes()).to_hex().to_string(),
         plan_content: content.into(),
+        completion_report: None,
     };
     app.agents
         .get_mut(&id)
@@ -185,6 +187,63 @@ fn closed_plan_preview_rejects_late_reads_after_close_reopen_and_rebind() {
         assert_eq!(current.artifact_revision, 2);
         assert_eq!(current.plan_content, "updated plan");
     }
+}
+
+#[test]
+fn completed_plan_clear_retires_a_pending_preview_response() {
+    use tools::implementations::grow_build::plan_control::PlanArtifactQueryResponse;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let session_id = app.agents[&id].session.session_id.clone().unwrap();
+    let response_session_id = session_id.0.to_string();
+    let binding_epoch = app.agents[&id].session_binding_epoch;
+    let plan = "# completed plan";
+    {
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.plan_completed = true;
+        agent
+            .resolve_plan_preview(PlanArtifactQueryResponse {
+                session_id: session_id.0.to_string(),
+                submission_id: 3,
+                retained: false,
+                artifact_revision: 2,
+                artifact_hash: blake3::hash(plan.as_bytes()).to_hex().to_string(),
+                plan_content: plan.into(),
+                completion_report: Some("# completed report".into()),
+            })
+            .unwrap();
+    }
+
+    let pending = dispatch(Action::ShowPlan, &mut app);
+    let [Effect::QueryPlanArtifact { request_id, .. }] = pending.as_slice() else {
+        panic!("expected pending completed-plan query: {pending:?}");
+    };
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .clear_completed_plan_details();
+
+    dispatch_task_result(
+        TaskResult::PlanArtifactResolved {
+            agent_id: id,
+            session_id: session_id.clone(),
+            binding_epoch,
+            request_id: *request_id,
+            result: Ok(PlanArtifactQueryResponse {
+                session_id: response_session_id,
+                submission_id: 3,
+                retained: false,
+                artifact_revision: 2,
+                artifact_hash: blake3::hash(plan.as_bytes()).to_hex().to_string(),
+                plan_content: plan.into(),
+                completion_report: Some("# completed report".into()),
+            }),
+        },
+        &mut app,
+    );
+    assert!(app.agents[&id].plan_artifact_preview.is_none());
+    assert!(app.agents[&id].line_viewer.is_none());
 }
 
 #[test]

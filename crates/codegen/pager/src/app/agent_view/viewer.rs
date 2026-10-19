@@ -99,6 +99,74 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
+        let shift_tab = (key.code == KeyCode::BackTab
+            && (key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT))
+            || (key.code == KeyCode::Tab && key.modifiers == KeyModifiers::SHIFT);
+        let plain_tab = key.code == KeyCode::Tab && key.modifiers.is_empty();
+        let completed_plan_has_report = self.is_completed_plan_viewer()
+            && self
+                .line_viewer
+                .as_ref()
+                .and_then(LineViewerState::plan_ref)
+                .is_some_and(|plan| plan.has_result_report);
+        if completed_plan_has_report && (plain_tab || shift_tab) {
+            let current = self
+                .line_viewer
+                .as_ref()
+                .and_then(LineViewerState::plan_ref)
+                .map(|plan| plan.active_tab);
+            let next = match current {
+                Some(crate::views::file_search::line_viewer::PlanViewerTab::Plan) => {
+                    crate::views::file_search::line_viewer::PlanViewerTab::ResultReport
+                }
+                Some(crate::views::file_search::line_viewer::PlanViewerTab::ResultReport) => {
+                    crate::views::file_search::line_viewer::PlanViewerTab::Plan
+                }
+                None => crate::views::file_search::line_viewer::PlanViewerTab::Plan,
+            };
+            self.switch_completed_plan_tab(next);
+            return InputOutcome::Changed;
+        }
+
+        if self.is_completed_plan_viewer() {
+            if key!('f', CONTROL).matches(key) {
+                if let Some(viewer) = self.line_viewer.as_mut() {
+                    viewer.fullscreen = !viewer.fullscreen;
+                }
+                return InputOutcome::Changed;
+            }
+            if key!('y').matches(key) {
+                if let Some(content) = self
+                    .line_viewer
+                    .as_ref()
+                    .and_then(LineViewerState::markdown_content_for_feedback)
+                {
+                    self.copy_to_clipboard(&content);
+                }
+                return InputOutcome::Changed;
+            }
+            if key!(Esc).matches(key)
+                && let Some(viewer) = self.line_viewer.as_mut()
+            {
+                if viewer.list_state.visual_mode {
+                    viewer.list_state.exit_visual_mode();
+                    return InputOutcome::Changed;
+                }
+                if viewer.list_state.matcher().is_some() {
+                    viewer.list_state.handle_key_event(key, &viewer.lines);
+                    return InputOutcome::Changed;
+                }
+            }
+            if key!(Esc).matches(key) || key!('q').matches(key) || key!('c', CONTROL).matches(key) {
+                self.cancel_line_viewer();
+                return InputOutcome::Changed;
+            }
+            if let Some(viewer) = self.line_viewer.as_mut() {
+                viewer.list_state.handle_key_event(key, &viewer.lines);
+            }
+            return InputOutcome::Changed;
+        }
+
         let decision_pending = self
             .plan_approval_view
             .as_ref()
@@ -441,6 +509,27 @@ impl AgentView {
     ) -> InputOutcome {
         use crossterm::event::{MouseButton, MouseEventKind};
 
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            let tab = self.line_viewer.as_ref().and_then(|viewer| {
+                let plan = viewer.plan_ref()?;
+                plan.tab_rects.iter().enumerate().find_map(|(idx, rect)| {
+                    rect.filter(|rect| rect.contains((mouse.column, mouse.row).into()))
+                        .map(|_| match idx {
+                            0 => crate::views::file_search::line_viewer::PlanViewerTab::Plan,
+                            _ => {
+                                crate::views::file_search::line_viewer::PlanViewerTab::ResultReport
+                            }
+                        })
+                })
+            });
+            if let Some(tab) = tab {
+                if self.is_completed_plan_viewer() {
+                    self.switch_completed_plan_tab(tab);
+                    return InputOutcome::Changed;
+                }
+            }
+        }
+
         let Some(ref mut viewer) = self.line_viewer else {
             return InputOutcome::Changed;
         };
@@ -468,6 +557,9 @@ impl AgentView {
         // the line_viewer is mutably borrowed below.
         let is_plan_preview =
             viewer.kind == crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
+        let completed_read_only = viewer
+            .plan_ref()
+            .is_some_and(|plan| plan.completed_read_only);
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -480,6 +572,26 @@ impl AgentView {
                 if fs_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if let Some(ref mut v) = self.line_viewer {
                         v.fullscreen = !v.fullscreen;
+                    }
+                    return InputOutcome::Changed;
+                }
+                if completed_read_only {
+                    if modal_area
+                        .is_none_or(|area| !area.contains((mouse.column, mouse.row).into()))
+                    {
+                        self.cancel_line_viewer();
+                        return InputOutcome::Changed;
+                    }
+                    if let Some(area) = popup_area
+                        && area.contains((mouse.column, mouse.row).into())
+                    {
+                        viewer.list_state.handle_mouse_event(
+                            mouse.kind,
+                            mouse.column,
+                            mouse.row,
+                            area,
+                            &viewer.lines,
+                        );
                     }
                     return InputOutcome::Changed;
                 }

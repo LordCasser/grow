@@ -165,6 +165,16 @@ pub struct RetainedPlanCandidate {
     pub decisions: Vec<RetainedPlanDecision>,
 }
 
+/// Read-only result of a completed execution, independent of live Behavior.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CompletedPlan {
+    pub submission_id: PlanSubmissionId,
+    pub artifact_revision: u64,
+    pub artifact_hash: String,
+    pub report_hash: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetainedPlanDecisionOutcome {
     Applied(RetainedPlanStatus),
@@ -221,6 +231,7 @@ pub struct BehaviorCoordinator {
     plan: PlanRuntime,
     last_plan_submission_id: PlanSubmissionId,
     retained_plan: Option<RetainedPlanCandidate>,
+    completed_plan: Option<CompletedPlan>,
     pending_switch: Option<PendingBehaviorSwitch>,
 }
 
@@ -243,6 +254,8 @@ pub struct BehaviorSnapshot {
     pub plan_submission_id: Option<PlanSubmissionId>,
     pub last_plan_submission_id: PlanSubmissionId,
     pub retained_plan: Option<RetainedPlanCandidate>,
+    #[serde(default)]
+    pub completed_plan: Option<CompletedPlan>,
 }
 
 impl BehaviorSnapshot {
@@ -267,6 +280,7 @@ impl BehaviorSnapshot {
             plan_submission_id: None,
             last_plan_submission_id: 0,
             retained_plan: None,
+            completed_plan: None,
         }
     }
 
@@ -290,6 +304,17 @@ impl BehaviorSnapshot {
                 && self.plan_artifact_hash.is_none()
                 && self.last_plan_handoff.is_none()
                 && self.plan_submission_id.is_none())
+    }
+
+    pub fn completed_plan_is_valid(&self) -> bool {
+        self.completed_plan.as_ref().is_none_or(|completed| {
+            completed.submission_id > 0
+                && completed.submission_id <= self.last_plan_submission_id
+                && completed.artifact_revision > 0
+                && [&completed.artifact_hash, &completed.report_hash]
+                    .into_iter()
+                    .all(|hash| is_blake3_hash(hash))
+        })
     }
 
     pub fn retained_plan_is_valid(&self) -> bool {
@@ -432,6 +457,7 @@ impl BehaviorCoordinator {
             plan: PlanRuntime::default(),
             last_plan_submission_id: 0,
             retained_plan: None,
+            completed_plan: None,
             pending_switch: None,
         }
     }
@@ -456,6 +482,7 @@ impl BehaviorCoordinator {
             },
             last_plan_submission_id: snapshot.last_plan_submission_id,
             retained_plan: snapshot.retained_plan,
+            completed_plan: snapshot.completed_plan,
             pending_switch: None,
         }
     }
@@ -470,6 +497,7 @@ impl BehaviorCoordinator {
             plan_submission_id: self.plan.submission_id,
             last_plan_submission_id: self.last_plan_submission_id,
             retained_plan: self.retained_plan.clone(),
+            completed_plan: self.completed_plan.clone(),
         }
     }
 
@@ -1139,6 +1167,30 @@ impl BehaviorCoordinator {
         true
     }
 
+    pub fn complete_plan(&mut self, report_hash: String) -> bool {
+        if self.state() != BehaviorState::Plan(PlanPhase::Executing) {
+            return false;
+        }
+        let (Some(submission_id), Some(artifact_hash)) =
+            (self.plan.submission_id, self.plan.artifact_hash.clone())
+        else {
+            return false;
+        };
+        let completed = CompletedPlan {
+            submission_id,
+            artifact_revision: self.plan.artifact_revision,
+            artifact_hash,
+            report_hash,
+        };
+        self.finish_plan();
+        self.completed_plan = Some(completed);
+        true
+    }
+
+    pub fn clear_completed_plan(&mut self) {
+        self.completed_plan = None;
+    }
+
     pub fn set_approval_pending(&mut self, pending: bool) {
         self.plan.approval_pending = pending;
     }
@@ -1279,13 +1331,6 @@ impl BehaviorCoordinator {
 
     pub fn last_plan_handoff(&self) -> Option<&PlanDecisionHandoff> {
         self.plan.last_handoff.as_ref()
-    }
-
-    pub fn plan_artifact_ref(&self) -> Option<String> {
-        self.plan
-            .artifact_hash
-            .as_deref()
-            .map(|hash| format!("artifact:plan:blake3:{hash}"))
     }
 
     pub fn plan_artifact_is_valid(&self, markdown: &str) -> bool {
@@ -1662,6 +1707,7 @@ mod tests {
             plan_submission_id: Some(1),
             last_plan_submission_id: 1,
             retained_plan: None,
+            completed_plan: None,
         };
         assert!(!snapshot.runtime_fields_match_selection());
     }

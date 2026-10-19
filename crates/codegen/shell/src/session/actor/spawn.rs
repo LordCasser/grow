@@ -2934,6 +2934,17 @@ pub(crate) async fn spawn_session_actor(
         .hydrate_local_plan()
         .await
         .map_err(|error| agent::AgentBuildError::IoError(std::io::Error::other(error)))?;
+    let completed_mode = {
+        let behavior = session.behavior.lock();
+        behavior
+            .snapshot()
+            .completed_plan
+            .is_some()
+            .then(|| behavior.behavior())
+    };
+    if let Some(mode) = completed_mode {
+        session.enqueue_current_mode_update(acp::SessionModeId::new(mode.as_id()));
+    }
     // The primary may be in Ask while globally configured subagents use Auto;
     // the wiring method resolves both cases and keeps the classifier on the
     // primary model/config rather than the child's model.

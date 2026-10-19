@@ -981,6 +981,13 @@ fn restore_control_snapshot(
             && update
                 .meta
                 .as_ref()
+                .and_then(|meta| meta.get("grow/planCompleted"))
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false)
+                == control.behavior.completed_plan.is_some()
+            && update
+                .meta
+                .as_ref()
                 .and_then(|meta| meta.get("grow/planPhase"))
                 .and_then(serde_json::Value::as_str)
                 == phase
@@ -1001,7 +1008,7 @@ fn restore_control_snapshot(
     budget.add_events(3)?;
     let session_id = facts.opened.summary().info.id.clone();
     let mode_update = acp::CurrentModeUpdate::new(acp::SessionModeId::new(mode)).meta(
-        serde_json::json!({"grow/planPhase": phase})
+        serde_json::json!({"grow/planPhase": phase, "grow/planCompleted": control.behavior.completed_plan.is_some()})
             .as_object()
             .cloned(),
     );
