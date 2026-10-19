@@ -6083,7 +6083,12 @@ async fn coordination_observer_preserves_live_sideband_and_new_writer_recovers_o
     lagging.title = None;
     lagging.title_source = None;
     lagging.title_event_seq = None;
-    adapter.write_summary_sync(&info, &lagging).unwrap();
+    adapter.bound_session_directory(&info).unwrap().write_atomic(
+        std::ffi::OsStr::new(crate::session::storage::SUMMARY_FILE),
+        &crate::session::storage::serialize_summary(&lagging).unwrap(),
+        false,
+        true,
+    ).unwrap();
     let summary_path = adapter.session_dir(&info).join("summary.json");
     let summary_before = std::fs::read(&summary_path).unwrap();
     let path = adapter.sideband_timeline_file(&info, &id).unwrap();

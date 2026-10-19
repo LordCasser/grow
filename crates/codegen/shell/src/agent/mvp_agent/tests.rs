@@ -612,13 +612,14 @@ fn make_test_handle_with_receiver(
     crate::session::SessionHandle,
     tokio::sync::mpsc::UnboundedReceiver<crate::session::SessionCommand>,
 ) {
+    let cwd = std::env::temp_dir();
     let (cmd_tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
     let (hunk_event_tx, _hunk_event_rx) = tokio::sync::mpsc::unbounded_channel();
     let hunk_cancel = tokio_util::sync::CancellationToken::new();
     let hunk_tracker_handle = hunk_tracker::HunkTrackerActor::spawn(
         "test".to_string(),
-        std::path::PathBuf::from("/tmp"),
+        cwd.clone(),
         hunk_event_tx,
         hunk_tracker::TrackingMode::AllDirty,
         hunk_cancel,
@@ -650,7 +651,7 @@ fn make_test_handle_with_receiver(
         pending_interactions: crate::session::pending_interaction::PendingInteractions::new(),
         info: crate::session::info::Info {
             id: acp::SessionId::new("test"),
-            cwd: "/tmp".to_string(),
+            cwd: cwd.to_string_lossy().into_owned(),
         },
         max_turns: None,
         permission_prompt_timeout: std::time::Duration::from_secs(
@@ -664,10 +665,8 @@ fn make_test_handle_with_receiver(
         initial_client_mcp_servers: vec![],
         display_cwd: None,
         tool_context: crate::tools::ToolContext::new_local_context(
-            paths::AbsPathBuf::new(std::path::PathBuf::from("/tmp")).unwrap(),
-            std::sync::Arc::new(workspace::file_system::LocalFs::new(
-                std::path::PathBuf::from("/tmp"),
-            )),
+            paths::AbsPathBuf::new(cwd.clone()).unwrap(),
+            std::sync::Arc::new(workspace::file_system::LocalFs::new(cwd)),
             std::sync::Arc::new(crate::terminal::LocalTerminalRunner),
         ),
         model_route: crate::session::handle::SessionModelRoute::new(
