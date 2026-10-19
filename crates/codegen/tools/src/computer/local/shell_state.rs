@@ -74,6 +74,12 @@ fn sudo_alias_injection() -> String {
 /// functions, and aliases as base64-encoded replayable shell snippets.
 const DUMP_BASH_STATE_SCRIPT: &str = r##"
 dump_bash_state() {
+  # Preserve the user's flag, but never auto-export serializer temporaries:
+  # a large function body would otherwise exceed exec's environment limits.
+  case $- in
+    *a*) builtin set +a; local +x __grow_dump_allexport='set -o allexport' ;;
+    *) local +x __grow_dump_allexport='set +o allexport' ;;
+  esac
   set -euo pipefail
   if ! command -v base64 >/dev/null 2>&1; then
     echo "Error: base64 command is required" >&2
@@ -85,8 +91,8 @@ dump_bash_state() {
   }
 
   _emit_encoded() {
-    local content="$1"
-    local var_name="$2"
+    local +x content="$1"
+    local +x var_name="$2"
     if [[ -n "$content" ]]; then
       builtin printf 'grow_snap_%s=$(command base64 -d <<'"'"'GROW_SNAP_EOF_%s'"'"'\n' "$var_name" "$var_name"
       command base64 <<<"$content" | command tr -d '\n'
@@ -100,27 +106,30 @@ dump_bash_state() {
 
   _emit "$PWD"
 
-  local env_vars
+  local +x env_vars
   env_vars=$(builtin export -p 2>/dev/null | command grep -viE '_proxy=|GROW_SANDBOX|GROW_AGENT=|SUDO_ASKPASS|GROW_ASKPASS|ELECTRON_RUN_AS_NODE|SSH_AUTH_SOCK|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|WAYLAND_DISPLAY|GPG_TTY' || true)
   _emit_encoded "$env_vars" "ENV_VARS_B64"
 
   # errexit/pipefail here are this function's own `set -euo pipefail` (set is
   # shell-global in bash); replaying them would abort later user commands.
-  local posix_opts
-  posix_opts=$(builtin shopt -po 2>/dev/null | command grep -vE '^set [-+]o (nounset|errexit|pipefail)$' || true)
+  local +x posix_opts
+  posix_opts=$(builtin shopt -po 2>/dev/null | command grep -vE '^set [-+]o (allexport|nounset|errexit|pipefail)$' || true)
   _emit_encoded "$posix_opts" "POSIX_OPTS_B64"
 
-  local bash_opts
+  local +x bash_opts
   bash_opts=$(builtin shopt -p 2>/dev/null || true)
   _emit_encoded "$bash_opts" "BASH_OPTS_B64"
 
-  local all_functions
+  local +x all_functions
   all_functions=$(builtin declare -f 2>/dev/null || true)
   _emit_encoded "$all_functions" "FUNCTIONS_B64"
 
-  local aliases
+  local +x aliases
   aliases=$(builtin alias -p 2>/dev/null || true)
   _emit_encoded "$aliases" "ALIASES_B64"
+
+  # Keep the POSIX/shopt ordering, but defer allexport until payloads are done.
+  _emit "$__grow_dump_allexport"
 
   _emit "# end of bash state dump"
   _emit "__GROW_BASH_STATE_END__"
@@ -811,6 +820,15 @@ mod tests {
         std::path::Path::new(ShellKind::Bash.binary_path()).exists()
     }
 
+    /// Returns true iff the resolved Bash exposes the `inherit_errexit` option.
+    fn bash_supports_inherit_errexit() -> bool {
+        std::process::Command::new(ShellKind::Bash.binary_path())
+            .args(["--noprofile", "--norc", "-c", "shopt -p inherit_errexit"])
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).contains("inherit_errexit"))
+            .unwrap_or(false)
+    }
+
     /// Returns true iff a usable zsh binary exists at the resolved path.
     /// Mirrors [`bash_available`] so zsh integration tests skip (rather than
     /// fail) on systems without zsh installed.
@@ -1209,6 +1227,127 @@ mod tests {
             stdout.contains("ENV_CLEAN") && !stdout.contains("LEAKED_TO_ENV"),
             "temp var must not be exported to child processes under allexport, got: {stdout:?}"
         );
+    }
+
+    /// A large function arrives in the initial snapshot over fd 3, then must
+    /// survive the dump over fd 4 and repeated replay even while allexport is
+    /// active. The same roundtrip with allexport disabled protects that branch.
+    #[tokio::test]
+    async fn test_large_function_snapshot_roundtrips_with_allexport_bash() {
+        if !bash_available() {
+            return;
+        }
+
+        let cwd = std::env::current_dir().unwrap();
+        let function_body = "x".repeat(1_200_000);
+
+        for allexport in [false, true] {
+            // `env_vars` exercises a name declared before `export -p`; that
+            // same-name local shadows it in the current capture design, so
+            // preservation assertions below target payload locals captured afterward.
+            let initial_snapshot = format!(
+                "grow_large() {{ : '{function_body}'; printf 'LARGE_FUNCTION_OK\\n'; }}\n\
+                 export all_functions=all_functions_sentinel content=content_sentinel env_vars=env_vars_sentinel\n\
+                 export GROW_SHELL_STATE_TEST_USER_SENTINEL=preserved\n{}",
+                if allexport {
+                    "set -o allexport\n"
+                } else {
+                    "set +o allexport\n"
+                }
+            );
+            let mut state = ShellState {
+                cwd: cwd.clone(),
+                snapshot: initial_snapshot,
+                shell: ShellKind::Bash,
+            };
+
+            for replay in 1..=2 {
+                let (code, stdout, stderr) = run_command(
+                    &mut state,
+                    "printf 'ALLEXPORT='; case $- in *a*) printf 'on\\n' ;; *) printf 'off\\n' ;; esac; grow_large; declare -p GROW_SHELL_STATE_TEST_USER_SENTINEL all_functions content; declare -f grow_large | wc -c",
+                )
+                .await;
+                assert_eq!(
+                    code, 0,
+                    "large-function replay {replay} with allexport={allexport} failed; stdout={stdout:?}, stderr={stderr:?}"
+                );
+                assert!(
+                    stdout.contains("LARGE_FUNCTION_OK"),
+                    "function should remain callable on replay {replay}, stdout={stdout:?}, stderr={stderr:?}"
+                );
+                assert!(
+                    stdout.contains("declare -x GROW_SHELL_STATE_TEST_USER_SENTINEL=\"preserved\""),
+                    "user export should remain exported on replay {replay}, stdout={stdout:?}, stderr={stderr:?}"
+                );
+                for (name, value) in [
+                    ("all_functions", "all_functions_sentinel"),
+                    ("content", "content_sentinel"),
+                ] {
+                    assert!(
+                        stdout.contains(&format!("declare -x {name}=\"{value}\"")),
+                        "pre-existing exported {name} should remain unchanged on replay {replay}, stdout={stdout:?}, stderr={stderr:?}"
+                    );
+                }
+                let expected_flag = if allexport {
+                    "ALLEXPORT=on"
+                } else {
+                    "ALLEXPORT=off"
+                };
+                assert!(
+                    stdout.contains(expected_flag),
+                    "original allexport state should remain {expected_flag} on replay {replay}, stdout={stdout:?}, stderr={stderr:?}"
+                );
+                let definition_size = stdout
+                    .lines()
+                    .find_map(|line| line.trim().parse::<usize>().ok())
+                    .expect("declare -f should report the restored function size");
+                assert!(
+                    definition_size > 1_200_000,
+                    "restored function should retain its large literal on replay {replay}, got {definition_size} bytes"
+                );
+                assert!(
+                    state.snapshot.contains("grow_snap_FUNCTIONS_B64"),
+                    "fd 4 dump should update the snapshot with a function-bearing state after replay {replay}"
+                );
+            }
+        }
+    }
+
+    /// POSIX mode can imply shopt values; replay the captured shopt state
+    /// after POSIX mode so an explicit disabled value remains disabled.
+    #[tokio::test]
+    async fn test_posix_mode_preserves_disabled_inherit_errexit_bash() {
+        // Bash before 4.4 lacks this shopt; skip only this option-specific case.
+        if !bash_available() || !bash_supports_inherit_errexit() {
+            return;
+        }
+
+        let cwd = std::env::current_dir().unwrap();
+        let mut state = ShellState {
+            cwd,
+            snapshot: "set -o posix\nshopt -u inherit_errexit\n".to_string(),
+            shell: ShellKind::Bash,
+        };
+
+        for replay in 1..=2 {
+            let (code, stdout, stderr) = run_command(
+                &mut state,
+                "if [[ -o posix ]]; then printf 'POSIX=on\\n'; else printf 'POSIX=off\\n'; fi; if shopt -q inherit_errexit; then printf 'INHERIT_ERREXIT=on\\n'; else printf 'INHERIT_ERREXIT=off\\n'; fi",
+            )
+            .await;
+            assert_eq!(
+                code, 0,
+                "POSIX option replay {replay} failed; stdout={stdout:?}, stderr={stderr:?}"
+            );
+            assert!(
+                stdout.contains("POSIX=on"),
+                "POSIX mode should remain on replay {replay}, stdout={stdout:?}, stderr={stderr:?}"
+            );
+            assert!(
+                stdout.contains("INHERIT_ERREXIT=off"),
+                "explicitly disabled inherit_errexit should remain off on replay {replay}, stdout={stdout:?}, stderr={stderr:?}"
+            );
+        }
     }
 
     /// Same as the bash variant: zsh's `source`/`.` also inherits the caller's

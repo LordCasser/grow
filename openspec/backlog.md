@@ -7,6 +7,8 @@
 - **Provider 缓存策略与 native epoch 的关系**：[理论 review](changes/archive/2026-09-28-evaluate-provider-cache-affinity/results.md) 只能确认当前 key、breakpoint 与 retention 的本地机制及各官方契约，不能证明统一调整会改善多 provider 的成本与延迟。若要优化，先确认具体 provider/model/deployment、字段透传与负载，再按该 route 的真实证据另开最小行为 change；不预建通用 cache policy registry。
 - **Recap 与主请求缓存的关系**：recap 使用独立 key 且没有主请求 tools，已修正把本地 wire 形状表述成远端复用的注释和测试名。真实共享前缀与收益仍未验证；保留 Sideband tool-free 契约，不能为缓存假设增加工具定义。
 
+- **持久 Bash 的快照局部名称遮蔽用户导出变量**：`dump_bash_state` 在 `export -p` 前声明 `env_vars`，会遮蔽同名用户全局变量；这是既有捕获边界，独立于本轮修复的 allexport 大载荷启动失败。本轮保留范围并记录，未来另建最小 change 处理捕获命名与用户值保留，不能把修复说明理解为任意同名变量都可无损恢复。证据见 [Bash 导出隔离验证](changes/archive/2026-10-19-isolate-shell-snapshot-export-state/verification.md)。
+
 ## 本轮已解决
 
 | 问题 | 归档与验证 |

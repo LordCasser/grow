@@ -14,3 +14,7 @@
 - `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts/tests -p test_release_regression_contract.py`: 9 passed.
 - `openspec validate --all --strict --no-interactive`: 18 passed, 0 failed; `git diff --check` passed.
 - Cargo and hosted CI were not run. The cause of exit 126 remains unknown pending the next Linux gate's stderr.
+
+## Subsequent hosted diagnostic
+
+Run [39268899482](https://github.com/LordCasser/grow/actions/runs/39268899482) on 1886dd76 confirmed all sixteen grep regressions pass with the explicit prerequisite. The tools suite reached 2422 passed, one failed, seven ignored. The remaining Bash failure now reports `base64`/`tr: Argument list too long`; its independent behavior fix and large-state regression are documented in [isolate-shell-snapshot-export-state](../2026-10-19-isolate-shell-snapshot-export-state/verification.md). This does not turn that failed diagnostic run into a successful release gate.
