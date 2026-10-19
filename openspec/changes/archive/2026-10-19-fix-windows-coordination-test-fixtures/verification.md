@@ -20,4 +20,16 @@
 
 ## 远端验证与归档
 
-本机结果不代替 Windows 原生运行。提交后将由相关 main push 的协调 CI 验证三平台库测试与真实进程脚本，完成后再记录结果并归档。
+[main push 协调 CI 39200121968](https://github.com/LordCasser/grow/actions/runs/39200121968) 在 commit `ea598d1ecb120d6316a6a5b78ad9a89ce37df11a` 三个 job 全部 success，完整日志 `/tmp/grow-windows-fixtures-native-ci-final.log`。每个平台的真实进程步骤均为 success，逐一核对 10 个 PASS 场景。
+
+| Runner | Shell IPC | Shell coordination | Pager coordination | Minimal coordination | 真实进程场景 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| ubuntu-24.04 | 7 | 58 | 45 | 4 | 10 |
+| windows-2025 | 13 | 58 | 45 | 4 | 10 |
+| macos-15 | 7 | 58 | 45 | 4 | 10 |
+
+表中均为 passed，所有测试组 0 failed；不把这些 filter 数量当作三平台完整 Shell/Pager 包总量。Windows 夹具和生产真实进程路径已在原生 runner 验证，不以本机结果代替。
+
+只读对抗性复核确认：路径值始终用于同一个 helper cwd/LocalFs/ToolContext；Summary 夹具使用现有 writer 能力，保留活 writer 及所有原断言，未改变产品共享权限。本次仅测试和 workflow 路径维护，无行为 delta。
+
+归档在固定 `ea598d1e` 的干净 worktree 完成，独立于根工作区的并行 MCP 修改。归档前 active strict **17/0**、archived **609/0**；归档后 `openspec validate --all --strict --no-interactive` 为 **16 passed / 0 failed**，`openspec validate --archived --no-interactive` 为 **610 passed / 0 failed**。

@@ -5,5 +5,5 @@
 
 ## 2. Validation and record
 
-- [ ] 2.1 记录 Windows 失败与本机验证、完成 fmt/diff/OpenSpec strict 与 archive 校验后归档。
-- [ ] 2.2 提交并在 main push 协调 CI 验证 Windows 原生测试及真实进程脚本；记录远端结果。
+- [x] 2.1 记录 Windows 失败与本机验证、完成 fmt/diff/OpenSpec strict 与 archive 校验后归档。
+- [x] 2.2 提交并在 main push 协调 CI 验证 Windows 原生测试及真实进程脚本；记录远端结果。
