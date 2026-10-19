@@ -47,6 +47,19 @@ Permission is selected independently through `Ctrl+X P` or `/permission`;
 
 After a plan exists, run **`/view-plan`** to reopen its saved preview.
 
+The top status bar shows **`[Plan: Drafting]`**, **`[Plan: Review]`**,
+**`[Plan: Executing]`**, or **`[Plan: Amending]`** while Plan is active.
+Click it to open the complete plan in the plan detail view. The entry remains
+available after approval and after reconnecting, even before the plan body has
+been loaded into the UI. Before the first submission, opening it reports that
+no plan artifact is available yet.
+
+The **TODO progress badge and task list remain separate** in Plan mode. They
+track actual execution steps; opening the Plan details does not replace or
+change them. Switching Agents preserves the session's TODO list and its tool.
+See [Plan status and details](../../../../../openspec/specs/client-surfaces/spec.md#requirement-active-plan-has-an-inspectable-top-status-entry)
+and [planning across Agent replacement](../../../../../openspec/specs/task-planning/spec.md#requirement-agent-replacement-preserves-session-planning-access).
+
 ---
 
 ## The Plan Artifact

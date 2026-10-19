@@ -415,19 +415,8 @@ impl SessionActor {
         Ok(receipt)
     }
     pub(crate) async fn hydrate_local_plan(&self) -> Result<(), String> {
-        let snapshot = self.chat_state_handle.planning_state().await?;
-        let plan = snapshot.as_ref().map(|snapshot| snapshot.plan.clone());
-        let todo = plan.as_ref().map_or_else(
-            tools::implementations::grow_build::todo::TodoState::default,
-            tools::implementations::grow_build::todo::project_todo_state,
-        );
         let bridge = self.agent.borrow().tool_bridge().clone();
-        bridge
-            .update_resource(LocalPlanProjection(plan.clone()))
-            .await;
-        bridge
-            .update_resource(tools::types::resources::State(todo))
-            .await;
+        let plan = self.bind_local_planning_runtime(&bridge).await?;
         self.send_update(
             acp::SessionUpdate::Plan(
                 crate::session::acp_conversion::acp_plan_update_from_local_plan(plan.as_ref()),
@@ -436,6 +425,34 @@ impl SessionActor {
         )
         .await;
         Ok(())
+    }
+
+    /// Bind each harness to the session owner and its committed plan before
+    /// activation. Replacing an Agent is not a plan commit or a UI update.
+    pub(super) async fn bind_local_planning_runtime(
+        &self,
+        bridge: &tools::bridge::ToolBridge,
+    ) -> Result<Option<LocalPlan>, String> {
+        let snapshot = self.chat_state_handle.planning_state().await?;
+        let plan = snapshot.as_ref().map(|snapshot| snapshot.plan.clone());
+        let todo = plan.as_ref().map_or_else(
+            tools::implementations::grow_build::todo::TodoState::default,
+            tools::implementations::grow_build::todo::project_todo_state,
+        );
+        bridge
+            .update_resource(
+                tools::implementations::grow_build::todo::runtime::PlanningRuntimeHandle(
+                    self.planning_command_tx.clone(),
+                ),
+            )
+            .await;
+        bridge
+            .update_resource(LocalPlanProjection(plan.clone()))
+            .await;
+        bridge
+            .update_resource(tools::types::resources::State(todo))
+            .await;
+        Ok(plan)
     }
 
     async fn commit_local_plan(

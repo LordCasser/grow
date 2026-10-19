@@ -2173,6 +2173,13 @@ impl SessionActor {
             return Ok(false);
         }
         let candidate_bridge = new_agent.tool_bridge().clone();
+        self.bind_local_planning_runtime(&candidate_bridge)
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!(
+                    "rebuilt Agent planning runtime could not be prepared: {error}"
+                ))
+            })?;
         // Agent construction may have started before a same-boundary Sampling
         // revision committed. Rebind model-derived tool limits at activation
         // so the new harness cannot retain the previous context window.
@@ -3681,6 +3688,102 @@ mod tests {
                     actor.agent.borrow().definition().selector_identity(),
                     original
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn agent_switch_preserves_planning_runtime_and_committed_todos() {
+        use super::super::tests::support::{
+            create_test_actor_ex, install_test_foreground, start_test_planning_driver,
+        };
+        use tools::implementations::grow_build::task::types::CurrentPromptIdResource;
+        use tools::implementations::grow_build::todo::{LocalPlanProjection, TodoState};
+
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                tokio::spawn(async move { while persistence_rx.recv().await.is_some() {} });
+                let (mut actor, mut events) =
+                    create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                let (planning_tx, planning_rx) = tokio::sync::mpsc::unbounded_channel();
+                actor.planning_command_tx = planning_tx;
+                let actor = std::sync::Arc::new(actor);
+                start_test_planning_driver(&actor, planning_rx);
+                for (index, name) in ["planner", "implementer"].into_iter().enumerate() {
+                    let before = actor.chat_state_handle.planning_state().await.unwrap();
+                    let mut definition = agent::AgentDefinition::default_grow_build();
+                    definition.name = name.into();
+                    let (responds_to, response) = tokio::sync::oneshot::channel();
+                    actor.admit_agent_selection(definition, None, responds_to).await;
+                    response.await.unwrap().unwrap();
+                    let bridge = actor.agent.borrow().tool_bridge().clone();
+                    let projection = bridge
+                        .read_resource::<LocalPlanProjection>()
+                        .await
+                        .expect("the new harness must hydrate its local plan");
+                    assert_eq!(
+                        serde_json::to_value(&projection.0).unwrap(),
+                        serde_json::to_value(before.as_ref().map(|s| &s.plan)).unwrap()
+                    );
+                    assert_eq!(
+                        actor.chat_state_handle.planning_state().await.unwrap().map(|s| s.seq),
+                        before.as_ref().map(|s| s.seq),
+                        "Agent replacement must not commit a new plan"
+                    );
+                    let todos = bridge
+                        .read_resource::<tools::types::resources::State<TodoState>>()
+                        .await
+                        .expect("legacy Todo consumers must see the same plan");
+                    assert_eq!(todos.0.todo_items().count(), if index == 0 { 0 } else { 2 });
+
+                    // Same session Plan, no installed test-only Planning handle.
+                    actor.behavior.lock().select_behavior(tool_types::BehaviorId::Plan);
+                    install_test_foreground(&actor, "plan-work").await;
+                    bridge.update_resource(CurrentPromptIdResource("plan-work".into())).await;
+                    let input = if index == 0 {
+                        serde_json::json!({"todos": [
+                            {"id":"investigate", "content":"inspect the implementation", "status":"completed"},
+                            {"id":"verify", "content":"verify the fix", "status":"in_progress"}
+                        ]})
+                    } else {
+                        serde_json::json!({"todos": [{"id":"verify", "status":"completed"}]})
+                    };
+                    tokio::time::timeout(
+                        Duration::from_secs(2),
+                        bridge.call("todo_write", input, &format!("todo-{index}")),
+                    )
+                    .await
+                    .expect("the original session owner must acknowledge planning")
+                    .expect("TODO must work after Agent replacement");
+                    let committed = actor.chat_state_handle.planning_state().await.unwrap().unwrap();
+                    assert_eq!(committed.plan.scope_id, "work:plan-work");
+                    assert_eq!(committed.plan.steps.len(), 2);
+                    assert_eq!(committed.plan.steps[0].id, "investigate");
+                    assert_eq!(committed.plan.steps[0].status, tool_types::PlanStepStatus::Completed);
+                    assert_eq!(
+                        committed.plan.steps[1].status,
+                        if index == 0 { tool_types::PlanStepStatus::InProgress } else { tool_types::PlanStepStatus::Completed }
+                    );
+                    actor.state.lock().await.foreground = ForegroundState::Idle;
+                    let error = bridge.call("todo_write", serde_json::json!({"todos": []}), "stale-todo")
+                        .await.expect_err("binding a runtime must not bypass foreground admission");
+                    assert!(error.to_string().contains("no longer belongs to an admitted turn"));
+                }
+                let mut plans = Vec::new();
+                while let Ok(event) = events.try_recv() {
+                    if let crate::session::replay_events::SessionEvent::Notification(
+                        crate::session::replay_events::SessionNotification::Acp(notification),
+                    ) = event
+                        && let acp::SessionUpdate::Plan(plan) = notification.update
+                    {
+                        plans.push(plan);
+                    }
+                }
+                assert_eq!(plans.len(), 2, "one ACP plan per write, none for Agent replacement");
+                assert_eq!(plans[1].entries.len(), 2);
+                assert!(plans[1].entries.iter().all(|entry| entry.status == acp::PlanEntryStatus::Completed));
             })
             .await;
     }

@@ -6,3 +6,7 @@
 
 - **Provider 缓存策略与 native epoch 的关系**：[理论 review](changes/archive/2026-09-28-evaluate-provider-cache-affinity/results.md) 只能确认当前 key、breakpoint 与 retention 的本地机制及各官方契约，不能证明统一调整会改善多 provider 的成本与延迟。若要优化，先确认具体 provider/model/deployment、字段透传与负载，再按该 route 的真实证据另开最小行为 change；不预建通用 cache policy registry。
 - **Recap 与主请求缓存的关系**：recap 使用独立 key 且没有主请求 tools，已修正把本地 wire 形状表述成远端复用的注释和测试名。真实共享前缀与收益仍未验证；保留 Sideband tool-free 契约，不能为缓存假设增加工具定义。
+
+## 待独立核对
+
+- **同步 compaction 的 TODO 展示清理**：`pager/src/app/acp_handler/session_notification.rs` 在 `AutoCompactCompleted { async_compact: false }` 时直接清空前端 TODO，而当前局部计划由 Timeline 持有。需独立核对同步压缩后的计划再投影及恢复顺序，确认是否存在暂时或持续丢失任务入口；本次 Plan 顶部入口及 Agent 切换修复不扩展到压缩路径。

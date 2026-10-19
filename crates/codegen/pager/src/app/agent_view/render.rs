@@ -1326,9 +1326,14 @@ impl AgentView {
         if self.should_show_plan_chip(&appearance) {
             let mut plan_style = Style::default().fg(theme.accent_plan).bg(theme.bg_base);
             if self.hit_plan_button.hovered {
-                plan_style = plan_style.add_modifier(ratatui::style::Modifier::BOLD);
+                plan_style = plan_style.add_modifier(
+                    ratatui::style::Modifier::BOLD | ratatui::style::Modifier::UNDERLINED,
+                );
             }
-            status.push("plan", Line::from(Span::styled("plan", plan_style)));
+            status.push(
+                "plan",
+                Line::from(Span::styled(self.plan_status_label(), plan_style)),
+            );
         }
         if let Some(ref goal) = self.session.goal_state {
             let active_subagent_tokens: u64 = self
@@ -4504,7 +4509,7 @@ mod usage_status_tests {
         }
     }
 
-    fn draw(agent: &mut super::AgentView, width: u16) {
+    fn draw(agent: &mut super::AgentView, width: u16) -> Buffer {
         let area = Rect::new(0, 0, width, 40);
         let mut buf = Buffer::empty(area);
         let mut scratch = ScratchBuffer::new();
@@ -4520,6 +4525,72 @@ mod usage_status_tests {
             false,
             &mut Vec::new(),
             super::AppRenderParams::default(),
+        );
+        buf
+    }
+
+    #[test]
+    fn plan_status_without_cached_body_opens_details_and_keeps_todos_separate() {
+        let mut agent = make_agent();
+        agent.session.session_id = Some(agent_client_protocol::schema::v1::SessionId::new(
+            "plan-session",
+        ));
+        agent.session.plan_mode_active = true;
+        assert!(agent.plan_artifact_preview.is_none());
+        assert!(agent.plan_approval_view.is_none());
+        for (phase, label) in [
+            ("drafting", "[Plan: Drafting]"),
+            ("awaiting_approval", "[Plan: Review]"),
+            ("executing", "[Plan: Executing]"),
+            ("amending", "[Plan: Amending]"),
+        ] {
+            agent.session.plan_phase = Some(phase.into());
+            let buf = draw(&mut agent, 120);
+            let hit = agent
+                .hit_plan_button
+                .rect
+                .expect("active Plan must remain discoverable");
+            let text: String = (hit.x..hit.right())
+                .map(|x| buf[(x, hit.y)].symbol())
+                .collect();
+            assert_eq!(text, label);
+            let click = MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: hit.x,
+                row: hit.y,
+                modifiers: KeyModifiers::empty(),
+            };
+            assert!(matches!(
+                agent.handle_mouse(&click, &mut Vec::new()),
+                InputOutcome::Action(Action::ShowPlan)
+            ));
+        }
+        agent.todo.update_todos(vec![shell::tools::todo::TodoItem {
+            content: "verify implementation".into(),
+            status: shell::tools::todo::TodoStatus::InProgress,
+            priority: shell::tools::todo::TodoPriority::Medium,
+            meta: None,
+        }]);
+        draw(&mut agent, 120);
+        let todo_hit = agent.hit_badge.rect.expect("TODO keeps its own top entry");
+        assert!(agent.hit_plan_button.rect.is_some());
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: todo_hit.x,
+            row: todo_hit.y,
+            modifiers: KeyModifiers::empty(),
+        };
+        assert!(matches!(
+            agent.handle_mouse(&click, &mut Vec::new()),
+            InputOutcome::Changed
+        ));
+        assert!(agent.todo.overlay.focused);
+        agent.session.plan_mode_active = false;
+        draw(&mut agent, 120);
+        assert!(agent.hit_plan_button.rect.is_none());
+        assert!(
+            agent.hit_badge.rect.is_some(),
+            "leaving Plan cannot erase execution TODOs"
         );
     }
 

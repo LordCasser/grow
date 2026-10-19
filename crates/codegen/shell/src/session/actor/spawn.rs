@@ -2931,16 +2931,6 @@ pub(crate) async fn spawn_session_actor(
     }
     session.inject_deny_read_globs().await;
     session
-        .agent
-        .borrow()
-        .tool_bridge()
-        .update_resource(
-            tools::implementations::grow_build::todo::runtime::PlanningRuntimeHandle(
-                session.planning_command_tx.clone(),
-            ),
-        )
-        .await;
-    session
         .hydrate_local_plan()
         .await
         .map_err(|error| agent::AgentBuildError::IoError(std::io::Error::other(error)))?;

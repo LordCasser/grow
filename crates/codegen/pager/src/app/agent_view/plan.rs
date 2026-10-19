@@ -91,22 +91,33 @@ impl AgentView {
     fn plan_preview_available(&self) -> bool {
         self.plan_body_for_preview().is_some()
     }
-    /// Whether the "plan" status-bar chip should be rendered.
+    /// Whether the Plan status-bar entry should be rendered.
     ///
-    /// Visible while plan mode is active, or always when the user has set
-    /// `show_plan_chip = true` in `pager.toml`. Hidden by default once the
-    /// user exits plan mode.
+    /// Active Plan state remains inspectable before a body is cached. Outside
+    /// Plan, retained/configured previews still require a valid cached body.
     pub(super) fn should_show_plan_chip(
         &self,
         appearance: &crate::appearance::AppearanceConfig,
     ) -> bool {
-        (self.session.plan_mode_active
-            || appearance.show_plan_chip
-            || self
-                .plan_artifact_preview
-                .as_ref()
-                .is_some_and(|preview| preview.retained))
-            && self.plan_preview_available()
+        self.session.plan_mode_active
+            || ((appearance.show_plan_chip
+                || self
+                    .plan_artifact_preview
+                    .as_ref()
+                    .is_some_and(|preview| preview.retained))
+                && self.plan_preview_available())
+    }
+
+    pub(super) fn plan_status_label(&self) -> &'static str {
+        if !self.session.plan_mode_active {
+            return "[Plan]";
+        }
+        match self.session.plan_phase.as_deref() {
+            Some("awaiting_approval") => "[Plan: Review]",
+            Some("executing") => "[Plan: Executing]",
+            Some("amending") => "[Plan: Amending]",
+            _ => "[Plan: Drafting]",
+        }
     }
     fn inline_plan_content(&self) -> Option<&str> {
         self.plan_approval_view
@@ -1115,7 +1126,7 @@ mod plan_chip_tests {
         let mut agent = make_agent();
         agent.session.plan_mode_active = true;
         let appearance = AppearanceConfig::default();
-        assert!(!agent.should_show_plan_chip(&appearance));
+        assert!(agent.should_show_plan_chip(&appearance));
     }
     #[test]
     fn plan_chip_visible_when_config_overrides() {

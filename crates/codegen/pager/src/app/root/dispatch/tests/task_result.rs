@@ -8,6 +8,98 @@ use super::*;
 use shell::session::unified_list::ListScope;
 
 #[test]
+fn plan_details_load_full_artifact_without_cached_body_and_preserve_todos() {
+    use shell::tools::todo::{TodoItem, TodoPriority, TodoStatus};
+    use tools::implementations::grow_build::plan_control::PlanArtifactQueryResponse;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let agent = app.agents.get_mut(&id).unwrap();
+    agent.session.plan_mode_active = true;
+    agent.session.plan_phase = Some("executing".into());
+    agent.todo.update_todos(vec![TodoItem {
+        content: "verify the approved work".into(),
+        priority: TodoPriority::Medium,
+        status: TodoStatus::InProgress,
+        meta: None,
+    }]);
+    assert!(agent.plan_artifact_preview.is_none());
+    assert!(agent.plan_approval_view.is_none());
+
+    let pending = dispatch(Action::ShowPlan, &mut app);
+    let [
+        Effect::QueryPlanArtifact {
+            session_id,
+            binding_epoch,
+            request_id,
+            ..
+        },
+    ] = pending.as_slice()
+    else {
+        panic!("Plan details must query the canonical artifact: {pending:?}");
+    };
+    let content = "# Approved plan\n\n## Implementation\n\nPreserve the session owner.\n\n## Verification\n\nCheck real tool dispatch.";
+    let effects = dispatch_task_result(
+        TaskResult::PlanArtifactResolved {
+            agent_id: id,
+            session_id: session_id.clone(),
+            binding_epoch: *binding_epoch,
+            request_id: *request_id,
+            result: Ok(PlanArtifactQueryResponse {
+                session_id: session_id.0.to_string(),
+                submission_id: 7,
+                retained: false,
+                artifact_revision: 3,
+                artifact_hash: blake3::hash(content.as_bytes()).to_hex().to_string(),
+                plan_content: content.into(),
+            }),
+        },
+        &mut app,
+    );
+    assert!(
+        effects.is_empty(),
+        "viewing cannot submit approval or start execution"
+    );
+    let agent = app.agents.get_mut(&id).unwrap();
+    assert!(agent.line_viewer.is_some());
+    assert_eq!(
+        agent.plan_artifact_preview.as_ref().unwrap().plan_content,
+        content
+    );
+    assert_eq!(agent.todo.counts().in_progress, 1);
+    agent.cancel_line_viewer();
+    assert_eq!(agent.todo.counts().in_progress, 1);
+
+    let pending = dispatch(Action::ShowPlan, &mut app);
+    let [
+        Effect::QueryPlanArtifact {
+            session_id,
+            binding_epoch,
+            request_id,
+            ..
+        },
+    ] = pending.as_slice()
+    else {
+        panic!("each open must use the current artifact identity");
+    };
+    dispatch_task_result(
+        TaskResult::PlanArtifactResolved {
+            agent_id: id,
+            session_id: session_id.clone(),
+            binding_epoch: *binding_epoch,
+            request_id: *request_id,
+            result: Err("no plan artifact is available".into()),
+        },
+        &mut app,
+    );
+    assert!(
+        app.agents[&id].line_viewer.is_none(),
+        "a failed query must not open a stale body"
+    );
+    assert_eq!(app.agents[&id].todo.counts().in_progress, 1);
+}
+
+#[test]
 fn closed_plan_preview_rejects_late_reads_after_close_reopen_and_rebind() {
     use tools::implementations::grow_build::plan_control::PlanArtifactQueryResponse;
 

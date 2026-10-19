@@ -134,6 +134,8 @@ Minimal 新会话欢迎卡在 root Agent 绑定 session ID 后才提交，因为
 
 ## Rust 验证入口
 
+Agent 激活必须将新的 ToolBridge 绑定到原 SessionActor 的 Planning runtime，并从 Timeline 恢复局部计划投影。启动 hydration 与 Agent 替换共用该绑定；替换本身不提交新计划或重复发布 ACP plan。Plan 顶部阶段入口依赖 Behavior 投影，点击沿 canonical artifact 查询显示完整计划；TODO 徽标及面板独立保留。契约见 [Agent 替换与 TODO](../openspec/specs/task-planning/spec.md#requirement-agent-replacement-preserves-session-planning-access) 和 [Plan 顶部详情](../openspec/specs/client-surfaces/spec.md#requirement-active-plan-has-an-inspectable-top-status-entry)。
+
 按受影响 crate 缩小检查范围；下列命令是项目现有 CI/README 的入口，不意味着每次纯文档修改都运行全部测试。
 
 ```sh
