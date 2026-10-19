@@ -35,7 +35,7 @@ Grow stores each session in its own directory, grouped by working directory. It 
   artifacts/              # immutable content-addressed artifacts referenced by Timeline facts
 ```
 
-`summary.json` is a rebuildable index entry. It records the model, timestamps, lineage, and the latest canonical title projection; it owns neither conversation content nor title identity. `timeline.jsonl` is the parent causal ledger used to recover model context and lifecycle state. Auxiliary model work lives only in its linked Sideband ledger. `updates.jsonl` is a client replay/display stream and never participates in model-context recovery. `prompts/` contains immutable blobs referenced from Timeline by `artifact:prompt:blake3:<hash>`; local paths are materialized only in the outgoing model request. A fork validates and copies only the blobs referenced by its selected Surface, while state export/import transfers the exact referenced blob set. `resources_state.json` belongs to the tool runtime (Todo, scheduler, citation counters, and similar transactional state); it is not a second conversation history and is never copied into a fork.
+`summary.json` is a rebuildable index entry. It records the model, timestamps, lineage, and the latest canonical title projection; it owns neither conversation content nor title identity. `timeline.jsonl` is the parent causal ledger used to recover model context and lifecycle state. Auxiliary model work lives only in its linked Sideband ledger. `updates.jsonl` is a client replay/display stream and never participates in model-context recovery. `prompts/` contains immutable blobs referenced from Timeline by `artifact:prompt:blake3:<hash>`; local paths are materialized only in the outgoing model request. A fork validates and copies only the blobs referenced by its selected Surface, while state export/import transfers the exact referenced blob set. `resources_state.json` belongs to tool-runtime resources such as scheduler state and citation counters; it is not a second conversation history and is never copied into a fork. The current local TODO plan, links, waits, and review obligations are owned by the session Timeline. The Todo resource and ACP plan updates are projections of that committed plan, including after resume.
 
 A subagent has its own session directory with its own `summary.json`, `timeline.jsonl`, Sidebands, prompt blobs, and artifacts. The parent Timeline stores only spawn/end facts and an exact reference to the child result; the child Timeline stores its seed-source and terminal result. Session state export/import operates on one session entity at a time, so archiving a full delegation tree requires exporting each referenced child identity as well. A parent can be imported before a child, but resume and other dereferencing operations remain unavailable until the child is present and the causal link validates.
 
@@ -55,13 +55,23 @@ This clears the current context and begins a new conversation.
 
 ### Exit
 
-End the session and quit Grow:
+Request session-tree suspension and quit Grow:
 
 ```
 /quit
 ```
 
+In the TUI, the default keyboard gesture is `Ctrl+D` twice within one second. The first press only arms confirmation; the second requests suspension of every session tree owned by this process. `Ctrl+C` keeps its input-clearing and current-turn cancellation behavior and never exits. If suspension cannot be confirmed, Grow offers retry or explicit force quit; repeated exit keys do not force it.
+
 To leave the current session but stay in Grow, use `/home` to return to the welcome screen.
+
+### Suspension and recovery
+
+A confirmed exit or update restart preserves the original session and child identities, admitted input, TODO/wait relationships, Turn limits, Goal state, and Workflow Run bindings. Resume validates the checkpoint, workspace, routes, and ownership before restoring the unfinished tree. It does not turn a stopped Goal back on or skip a user, permission, or Workflow business wait.
+
+Suspension is a durable execution boundary, not a copy of process memory. In-flight model transport and external commands may be interrupted. Their recorded output and outcome remain available; unknown side effects require inspection and commands are not automatically replayed. A forced exit or crash without a valid checkpoint cannot promise the same continuation.
+
+The [session-tree contract](../../../../../openspec/specs/session-timeline/spec.md#requirement-suspended-trees-resume-the-original-identities-automatically) defines recovery, and the [exit contract](../../../../../openspec/specs/client-surfaces/spec.md#requirement-confirmed-quit-requests-bounded-session-tree-suspension) defines confirmation and failure handling.
 
 ### Delete the current session
 

@@ -200,7 +200,7 @@ In `/multiline` mode, `Shift+Enter` (or `Alt+Enter`) sends while plain `Enter` i
 
 Steering is a soft interruption: it targets the current turn identity and preserves its lifecycle. Queue with plain `Enter` when the note should wait for the next turn boundary.
 
-> **WezTerm**: These modified Enter keys need `enable_kitty_keyboard = true` in your WezTerm config. Full steps and a one-line workaround are in the [terminal support guide](21-terminal-support.md#problem-ctrlenter-doesnt-interject-in-wezterm).
+> **WezTerm**: These modified Enter keys need `enable_kitty_keyboard = true` in your WezTerm config. Full steps and a one-line workaround are in the [terminal support guide](21-terminal-support.md#ctrlenter-does-not-interject-in-wezterm).
 
 > **Windows (non–VS Code family)**: Some consoles drop the `Ctrl` modifier on `Ctrl+Enter` (it can collapse to bare `Enter` or `Ctrl+J`). Use `Ctrl+I` as the alt — letter-key Ctrl chords are stable everywhere. On VS Code family, use **`Ctrl+L`**.
 

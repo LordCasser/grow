@@ -1,6 +1,6 @@
 # MCP Servers
 
-MCP (Model Context Protocol) servers extend Grow with external tool integrations. They let Grow interact with any service that implements the MCP standard.
+MCP (Model Context Protocol) servers extend Grow with external tool integrations. They let Grow discover and call tools from compatible MCP services. MCP multi-round Form/URL interaction is deferred in 2.4.0; ordinary tool connectivity does not imply support for that flow.
 
 ---
 
@@ -297,6 +297,14 @@ If a child lists `search_tool` / `use_tool` but returns an empty catalog, check 
 2. The agent’s `mcpInheritance` is not `none` or a filter that excludes the server
 3. Plugin agents cannot declare their own `mcpServers` in frontmatter — they only see parent-connected servers
 4. The `search_tool` result's `access` field is `call_bound`; a missing result is outside the live inherited catalog
+
+---
+
+## Live configuration and uncertain results
+
+Applicable trusted configuration changes refresh the live server catalog, disabled-tool filters, timeout policy, and metadata without restarting the session. Project refresh follows the session's actual working directory and configured project watching. An already-admitted call keeps its original deadline; later policy changes apply to new calls. Child sessions retain their inherited capability ceiling.
+
+If a tool call loses its transport or times out, its external effects may already have occurred. Grow reports that uncertainty and does not automatically resend the original call. Connection recovery may prepare a later independent invocation; inspect the service's state before deciding to repeat work. See the [MCP recovery contract](../../../../../openspec/specs/extension-runtime/spec.md#requirement-uncertain-mcp-tool-calls-are-never-automatically-replayed).
 
 ---
 

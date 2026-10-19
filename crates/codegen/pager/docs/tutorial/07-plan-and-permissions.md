@@ -1,15 +1,16 @@
 # Plan Mode & Permissions
 
-Grow asks before doing anything risky — and can plan before it codes.
+Grow can ask for approval before a tool call and plan before implementation.
 
 ## Permissions
 
-When Grow wants to run a risky command or edit a file, it pauses and asks:
+When a tool call requires interactive approval, Grow pauses and asks:
 allow once, always allow that kind of action, or deny.
 
-Reading is always free: file reads, searches, and safe read-only commands
-(`ls`, `git status`, `grep`, …) never prompt. Chained commands are
-checked piece by piece — `ls && rm -rf tmp` still prompts for the `rm`.
+File reads, searches, and recognized read-only commands (`ls`, `git status`,
+`grep`, …) normally run without prompting. Explicit ask/deny rules and Hooks
+still apply. Chained commands are checked piece by piece, so a safe first
+segment does not approve a later destructive command.
 
 Trust the session? `/always-approve` selects that policy directly; `Ctrl+X`,
 then `P` opens the Permission picker.
@@ -28,6 +29,9 @@ codebase read-only, designs an approach, and presents a plan you approve
 
 When the plan is ready: `a` approves, `c` comments on a specific line,
 `s` requests changes — Grow iterates until you're happy, then implements.
+Use `l` in the approval preview to keep the plan for later without approving;
+reopen it with `/view-plan` and press `r` to request review. Closing the preview
+with `Esc` only collapses it and leaves the approval pending.
 
 A good habit: Plan for "agree on the whole approach first", Clarify when
 missing details should stay with you, and Workflow for autonomous dynamic

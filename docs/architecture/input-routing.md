@@ -55,7 +55,7 @@ payload 必须先以 content-addressed immutable JSON 发布，Timeline 再提�
 
 Shell 已接纳的 shared queue 行仍属于同一用户 FIFO。Pager 请求编辑时携带队列 id、版本和一次编辑身份，等 Shell 在 `step_control_gate` 内确认 hold 后才将行文本放入 composer；held 队首不能合并、提升，也不能让后项、notification 或 Goal continuation 越过。保存通过同一控制 request 完成新的 durable input admission、原位置替换及 hold 解除；失败保持旧输入、hold 和编辑稿。撤回先 durably dismiss，再从 FIFO 移除。`grow/queue/changed` 是各客户端共享投影，操作成败只由控制 request 的回执决定。Leader 为控制 request 注入真实连接身份，断线后释放该连接的临时 hold。
 
-Steering 的模型消息与展示消息使用不同文本：Timeline 保留给 LLM 的 interjection 包装及 skill expansion，`updates.jsonl` 只保存清理图片路径后的用户原文和独立图片块。实时与 resume 展示不得改用模型包装；用户自己输入的标签仍是原文，不通过标签解析反推展示内容。契约见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md)。
+Steering 的模型消息与展示消息使用不同投影：Timeline 保留用户原文、给 LLM 的 interjection 包装及独立的 Skill 加载事实，技能正文不拼回原用户消息；`updates.jsonl` 展示清理图片路径后的用户原文和独立图片块。实时与 resume 展示不得改用模型包装；用户自己输入的标签仍是原文，不通过标签解析反推展示内容。契约见 [client-surfaces](../../openspec/specs/client-surfaces/spec.md)。
 
 A successful Goal control that invalidates the running context (set/edit/enter/pause/clear) ends that exact foreground turn through normal cancellation. Read-only or non-invalidating controls (status/restart/budget), and rejected mutations, leave it running.
 
@@ -105,7 +105,7 @@ An Active Goal selects the visible Goal Behavior but does not own the foreground
 
 Goal continuation is an internal regular turn started by the idle hook, not a queue item or hidden control prompt. See [goal-continuation.md](./goal-continuation.md).
 
-Goal does not persist a plan or task graph. Each continuation audits the full objective, then uses ordinary `todo_write` and `task` execution context for the next small slice. Goal detail renders only the durable objective, lifecycle status, usage, elapsed time, and status message; Pager never persists its display cache or navigation state.
+GoalState does not own a separate plan or task graph. The SessionActor persists the local `todo_write` plan, delegation links, waits, and reviews in Timeline planning facts. Each continuation audits the full objective and selects the next ready slice; valid waits for all current work suppress idle/model polling until a dependency event arrives. See [task-planning](../../openspec/specs/task-planning/spec.md). Goal detail renders only the durable objective, lifecycle status, usage, elapsed time, and status message; Pager never persists its display cache or navigation state.
 
 Turn failure ownership follows the same structured-origin rule. A provider or
 tool-definition error in a user turn remains that user's terminal and cannot
@@ -132,11 +132,14 @@ idle admission. If no queued user/manual work claims the slot, an Active Goal
 is woken immediately; Stop Turn Only cannot leave it dormant until the next
 unrelated user message.
 
-Image-input capability recovery uses the session's canonical provider/model ID in
-`resources_state.json`. Unknown pairs send original images. Only an explicit
-unsupported-image response marks a pair; size, decoding, policy and unrelated
-request failures do not teach capability. Transport `ModelImageInputKey` remains
-separate provenance for the rejected request and Workflow routing.
+Image-input capability recovery persists a `ModelImageInputKey` in
+`resources_state.json`, derived from the actual provider-facing model, API backend,
+endpoint and query route. Aliases for the same transport share a rejection; a
+changed route gets independent state. Unknown runtimes send original images.
+Only an explicit unsupported-image response teaches capability; size, decoding,
+policy and unrelated failures do not. Primary requests, visual auxiliaries and
+compaction use the same identity, and a visual auxiliary resolving to the rejected
+runtime is skipped rather than called recursively.
 
 Grow retains each image URL/data URI together with its optional description.
 After rejection, an available configured visual auxiliary model describes each
@@ -158,15 +161,15 @@ resubmits from an in-memory-only request copy. The removed group's original
 payload stays in the immutable Timeline evidence and is not resurrected by
 resume, model switch or compaction.
 
-Request assembly chooses descriptions for marked pairs before byte budgeting and
-native continuation reconciliation. Compaction uses the same choice. A new pair
-tries original images first; returning to a marked pair reuses descriptions.
+Request assembly chooses descriptions for marked runtime identities before byte
+budgeting and native continuation reconciliation. Compaction uses the same choice.
+A new runtime tries original images first; returning to a marked runtime reuses descriptions.
 Already described groups do not invoke the auxiliary model again. Image-body
 budgeting and normal compaction still apply independently. See the authoritative
 [model sampling contract](../../openspec/specs/model-sampling/spec.md) and
 [Timeline contract](../../openspec/specs/session-timeline/spec.md).
 
-An Active Goal reload restores the v9 objective, definition revision, lifecycle status, budget, settled usage, and elapsed time from the same Timeline Control snapshot as Behavior, then re-arms idle continuation. Goal owns no persisted plan, board, planner phase, or stage lease. Older Goal architectures and invalid v9 snapshots are rejected without migration instead of reviving a second lifecycle model.
+An Active Goal reload restores the v10 objective, definition revision, lifecycle status, budget, settled usage, and elapsed time from the same Timeline Control snapshot as Behavior, then rechecks readiness before idle continuation. GoalState owns no separate plan, board, planner phase, or stage lease; local planning facts remain under the SessionActor. Older Goal architectures and invalid v10 snapshots are rejected without migration instead of reviving a second lifecycle model.
 
 后台终端任务在接纳时冻结 Goal ID 与 definition revision；本地和 ACP 客户端后端均将二者一起保留到任务快照及完成通知，通知桥不为缺失版本号填默认值。见 [behavior-goal](../../openspec/specs/behavior-goal/spec.md)。
 

@@ -80,7 +80,7 @@ Every continuation directive requires this order:
 4. Track that slice with ordinary `todo_write` state and use `task` for bounded delegation or an independent check.
 5. Verify the slice, then leave the Goal Active for the next idle continuation unless the full objective is complete or a genuine impasse exists.
 
-Todo and task state is short-lived execution context. It is not copied into GoalState, cannot narrow the objective, and finishing it does not complete the Goal.
+The SessionActor owns the durable local TODO plan, links, waits, and deliverable reviews in Timeline planning facts. They are not copied into GoalState, cannot narrow the objective, and finishing the list does not complete the Goal. Readiness gates both idle rescheduling and model admission: when all current work has valid dependency waits, the Active Goal waits for events without accumulating blocked turns; another independent ready step can proceed. User controls, suspension, permissions, and budgets remain authoritative. See [task-planning](../../openspec/specs/task-planning/spec.md) and [Goal readiness](../../openspec/specs/behavior-goal/spec.md#requirement-goal-continuation-respects-explicit-readiness).
 
 The full continuation directive is a durable Timeline message. Provider and compaction request assembly expand only the newest directive matching the active `goal_id + definition_revision`; every older Goal directive is projected as a small shadow in the same user-message position. This keeps turn/tool chronology intact, prevents old objectives and completion audits from remaining simultaneously active or leaking back through a summary, and leaves the canonical Timeline untouched for debugging. Paused, completed, cleared, and superseded Goal directives are all shadowed.
 

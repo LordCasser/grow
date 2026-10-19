@@ -136,7 +136,7 @@ Grow asks where to save the skill:
 - **Project** (`<repo_root>/.grow/skills/<name>/`) -- available only in this repository and shareable with teammates through version control. Grow recommends this scope inside a git repository.
 - **User** (`~/.grow/skills/<name>/`) -- available across all your projects.
 
-To distribute a skill to a whole team or organization, package it in a plugin and publish it through a marketplace. See [Create your own marketplace](09-plugins.md#create-your-own-marketplace) and [Distribute across an organization](09-plugins.md#distribute-across-an-organization).
+To distribute a skill to a whole team or organization, package it in a plugin and publish it through a marketplace. See [Create your own marketplace](09-plugins.md#create-your-own-marketplace) and [Check and share it](09-plugins.md#check-and-share-it).
 
 The new skill appears in the slash menu within a few seconds, because Grow reloads skills when files change on disk.
 
@@ -153,7 +153,7 @@ Each skill is a slash command named after the skill. Run one by typing its name:
 /review-pr           # Runs the "review-pr" skill
 ```
 
-Running a skill loads its instructions into the conversation and directs the model to follow them. To pass arguments, type them after the name:
+An explicit slash invocation makes the runtime call the registered `load_skill` operation before dependent model work; it does not ask the model whether to load the selected skill. The original prompt and the complete skill group are committed together, with the body stored as a separate context contribution. Failed or unconfirmed publication does not allow sampling with a partially loaded group. To pass arguments, type them after the name:
 
 ```
 /commit fix the build
@@ -172,9 +172,17 @@ When a skill's name collides with another skill or a built-in command, Grow adve
 
 ### Automatic Invocation
 
-Grow can invoke a skill on its own when it recognizes a relevant task. Grow matches your prompt against the skill's `description` and `when-to-use` fields, so write both to describe the triggering situation.
+The model can choose `load_skill(name, args)` when the advertised `description` and `when-to-use` match the task. It uses the same loading operation as the user path, but its own eligibility and normal tool permissions apply. Reading `SKILL.md` through a file tool is an ordinary read, not an explicit load.
 
 For example, if a skill's description says "Use when the user wants to commit changes," then saying "commit my changes" can trigger that skill automatically. To require an explicit slash command and prevent automatic invocation, set `disable-model-invocation: true` in the frontmatter.
+
+---
+
+### Loaded snapshots and recovery
+
+A confirmed load records the selected source, arguments, call identity, and exact body snapshot. Recovery and history viewing use that snapshot rather than rereading an edited file or rerunning Hooks. A valid session suspension preserves it; an abnormal restart without that checkpoint withdraws content that the terminated execution had not consumed. Repeating the same slash command intentionally creates a new input and a new load.
+
+See [skill loading](../../../../../openspec/specs/extension-runtime/spec.md#requirement-explicit-skill-loading-shares-one-runtime-operation) and [snapshot recovery](../../../../../openspec/specs/session-timeline/spec.md#requirement-skill-history-replay-is-observational).
 
 ---
 

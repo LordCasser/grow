@@ -139,7 +139,7 @@ Goal 保存一个可编辑、可暂停和可恢复的长期目标。常用命令
 /goal clear
 ```
 
-目标处于 Active 且会话空闲时，Grow 会继续推进它；用户输入和待处理通知优先。Paused、Blocked、BudgetLimited、Complete 状态会停止自动续跑。
+目标处于 Active、会话空闲且有可推进工作时，Grow 会继续推进它；用户输入和待处理通知优先。所有当前工作都在结构化等待时，Grow 等待依赖事件而不重复调用模型。Paused、Blocked、BudgetLimited、Complete 状态会停止自动续跑。局部 TODO 与父子任务弱关联见 [Subagents](crates/codegen/pager/docs/user-guide/16-subagents.md#local-todos-and-delegated-work)。
 
 ## 核心技术
 

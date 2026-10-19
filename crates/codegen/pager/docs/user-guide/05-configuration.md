@@ -382,7 +382,7 @@ To pin the model a subagent uses, set its entry under `[subagents.models]`. `per
 
 ### Goal Behavior and workflow engine
 
-Goal is exposed when `create_goal`, `get_goal`, `update_goal`, and `todo_write` are registered. Goal has no separate planner, verifier, blackboard, or summarizer configuration. An active Goal continues whenever the session becomes idle; each continuation audits the entire objective before either completing it or choosing the next short-lived task/todo slice. Paused, blocked, budget-limited, and complete Goals are durable stopped state and do not keep Goal Behavior selected.
+Goal is exposed when `create_goal`, `get_goal`, `update_goal`, and `todo_write` are registered. Goal has no separate planner, verifier, blackboard, or summarizer configuration. An active Goal continues when the session is idle and work is ready; structured waits for all current work suspend model polling until a dependency changes. Each continuation audits the entire objective before either completing it or choosing the next slice tracked by the session-owned durable TODO plan. Paused, blocked, budget-limited, and complete Goals are durable stopped state and do not keep Goal Behavior selected.
 
 The workflow engine powers the Workflow Workspace, named `.grow/workflows/*.rhai` and `~/.grow/workflows/*.rhai` Definitions, and immutable Runs. It is **on by default**. Disable it with config, environment, or remote settings; Workflow then disappears from the Behavior picker.
 

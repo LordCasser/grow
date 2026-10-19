@@ -51,7 +51,7 @@ After a plan exists, run **`/view-plan`** to reopen its saved preview.
 
 ## The Plan Artifact
 
-The complete plan is passed to `plan_control`. Before approval opens, Grow atomically persists the candidate at `plan.md`. Approval freezes the exact accepted version at `approved_plan.md` in the same session directory. Execution reminders inject that frozen artifact as a contract; later material changes require `action="amend"` and another approval.
+The complete plan is passed to `plan_control`. Before approval opens, Grow persists an immutable body at `artifacts/plan/<blake3-hash>.md` inside the session directory and commits its submission identity, revision, and hash. Approval binds that exact candidate; execution reminders use the approved snapshot as a contract. Later material changes require `action="amend"` and another approval.
 
 This artifact belongs to the session control plane. It is not exposed as a model-editable workspace target and does not grant the Agent arbitrary file-write access.
 
@@ -81,7 +81,8 @@ Scroll the plan with the arrow keys or `j`/`k`. The action bar shows these short
 | `s`      | Request changes. Focus moves to the prompt so you can type revision notes; press `Enter` to send them. |
 | `c`      | Comment on the selected line or line range.                                                          |
 | `y`      | Copy the full plan to the clipboard.                                                                 |
-| `q`      | Quit plan -- abandon the plan without approving and turn plan mode off.                              |
+| `l`      | Keep the candidate for later review without approving or starting implementation.                    |
+| `q`      | Abandon the plan without approving and turn plan mode off.                                           |
 
 Press `Tab` to move focus between the plan preview and the prompt.
 
@@ -97,7 +98,13 @@ Press `Tab` to switch between the preview and the prompt. When you send feedback
 
 ### Leaving the Approval View
 
-Press `Esc` to return focus from the prompt to the plan preview. To dismiss the approval without approving or sending feedback, press `q` to quit the plan. Quitting abandons the proposed plan and turns plan mode off.
+Press `Esc` to return focus from the prompt to the plan preview. In the preview, `Esc` first clears transient search or selection, then collapses the page; the close button also only collapses it. Neither action approves, abandons, or defers the plan, and the approval remains pending.
+
+Press `l` in the approval preview to keep the candidate for later. Once that decision is durably confirmed, Grow releases the approval wait without starting implementation. Run `/view-plan` to read it again, then press `r` in the retained preview to request a new review. Viewing alone never approves it. If another Behavior owns the session, its admission rules still apply; the saved plan does not take over automatically. Press `q` in the approval preview only when you intend to abandon it.
+
+If a decision is shown as unconfirmed, use `r` to check its status rather than submitting another decision. Approval and comments remain bound to the reviewed session and submission. If the candidate changes, review the new one; old comments remain unsent drafts rather than being applied to a different plan.
+
+See the [retained-plan contract](../../../../../openspec/specs/behavior-goal/spec.md#requirement-retained-plans-remain-under-the-existing-session-owner).
 
 ---
 
@@ -115,7 +122,7 @@ The user-facing Plan protocol has these phases:
 
 Transitions:
 
-`submit` moves Drafting to AwaitingApproval. Approval moves to Executing. `amend` moves Executing to Amending and approval returns to Executing with a new frozen version. `complete` and `cancel` return to Normal. Plan state and the outstanding approval survive process restarts.
+`submit` moves Drafting to AwaitingApproval. Approval moves to Executing. `amend` moves Executing to Amending and approval returns to Executing with a new frozen version. `complete` and `cancel` return to Normal. Plan state and the outstanding approval survive process restarts. A retained candidate has its own review status; deferring it does not add a new execution phase or grant mutation permission. Copying plan history to another session does not copy approval: the target needs a new submission and review. State import rejects a source that still carries a reviewable or unresolved Plan execution relationship; closed history remains importable.
 
 ---
 

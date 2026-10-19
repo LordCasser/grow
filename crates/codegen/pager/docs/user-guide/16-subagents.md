@@ -41,7 +41,7 @@ When the parent calls `spawn_subagent`, Grow:
 
 Successful non-empty output is stored once as an immutable content-addressed artifact. There is no parallel metadata or output-file lifecycle.
 
-After restart, Grow reconstructs child rows and terminal state from the parent and child Timeline facts. A broken link, missing child, or mismatched terminal metrics fails closed instead of selecting another transcript heuristically.
+After restart, Grow reconstructs child rows and terminal state from the parent and child Timeline facts. After a confirmed session-tree suspension, resuming the root also restores its unfinished descendants under their original identities and limits. This differs from `resume_from`, which creates a new child from a terminal lifecycle. A broken link, missing child, or mismatched checkpoint fails closed instead of selecting another transcript heuristically. See [session suspension](17-sessions.md#suspension-and-recovery).
 
 ---
 
@@ -92,11 +92,13 @@ Project and user definitions can add new types or intentionally shadow a built-i
 | `prompt` | Complete delegated task. |
 | `description` | Short task label. |
 | `subagent_type` | Agent definition; defaults to `general-purpose`. |
-| `background` | Return immediately with a child ID. |
+| `run_in_background` | Return immediately with a child ID (defaults to true). |
 | `capability_mode` | Initial grant: `read-only`, `read-write`, `execute`, or `all`. |
 | `isolation` | `none` or an isolated git `worktree`. |
 | `resume_from` | Continue a completed child by ID. |
 | `cwd` | Child working directory; mutually exclusive with worktree isolation. |
+| `parent_step_id` | Optional weak link to one TODO in the direct parent's current work scope. |
+| `required_deliverable` | Require explicit parent review of the linked result; requires `parent_step_id`. |
 
 Retrieve a background result with `get_command_or_subagent_output`.
 
@@ -105,6 +107,20 @@ Retrieve a background result with `get_command_or_subagent_output`.
 `resume_from` creates a new child from a completed canonical lifecycle. It inherits the source transcript and model, while re-rendering the current Agent definition, system prompt, and tool runtime. In-memory permits and transport incarnations are never copied.
 
 The source must belong to the current parent session and use the same Agent type.
+
+---
+
+## Local TODOs and delegated work
+
+Each session owns its durable local TODO plan. A child can split its work into its own steps; a parent-step link does not copy the parent's list or let the parent overwrite the child's list. Several children may support one parent step, and simple tasks need no TODO or Goal.
+
+An actual change to a linked parent item's content, requirements, priority, non-completion status, removal, or cancellation requests child-owned replanning. Completion alone, identical writes, sorting, and receipt updates do not trigger it. The child evaluates the change at a safe boundary, keeps still-applicable completed work, and updates only affected steps or confirms that no change is needed. Receiving the message is not the same as finishing that evaluation. A parent edit does not restart the child, replay its prompt, kill a running command, or revive a terminal child. Immediate cancellation uses the existing explicit task control. Changes reach a grandchild only through an actual edit to the child's own linked step.
+
+The Agent can register structured waits for real task, command, question, or permission identities with any/all wake conditions. A yielded child remains unfinished and continues under the same owner and limits when the dependency changes; prose such as “waiting for tests” alone does not register a wait. Failed or interrupted dependencies wake a decision, not a claim of success.
+
+For a required deliverable, child completion, delivery, and parent acceptance are separate. The parent reviews the actual result and validation or explicitly releases the obligation with a reason. Marking a TODO complete does not accept the result or merge a worktree. An older result may still satisfy revised requirements after explicit review.
+
+These rules apply to ordinary tasks and Goal work; local TODOs do not approve a Plan, change permissions, or create a Goal. See the [task-planning contract](../../../../../openspec/specs/task-planning/spec.md).
 
 ---
 

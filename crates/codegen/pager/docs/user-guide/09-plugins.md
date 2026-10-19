@@ -251,7 +251,7 @@ Marketplaces distribute Grow content: skills, commands, agents, hooks, and MCP s
 
 **A plugin's hooks or MCP servers don't run.** They stay inactive until the plugin is trusted. Reinstall with `--trust`, or place the plugin under `~/.grow/plugins/` (auto-trusted). See [Trust and security](#trust-and-security).
 
-**A skill or MCP server from a marketplace is missing.** Refresh the source with `grow plugin marketplace update`, confirm the plugin is installed and enabled, and, if your organization restricts sources, check that the marketplace is still allowed (see [Distribute across an organization](#distribute-across-an-organization)). Some MCP servers require a sign-in and will not appear until you authenticate.
+**A skill or MCP server from a marketplace is missing.** Refresh the source with `grow plugin marketplace update`, confirm the plugin is installed and enabled, and, if your organization restricts sources, check that the marketplace is still allowed (see [Trust and security](#trust-and-security)). Some MCP servers require a sign-in and will not appear until you authenticate.
 
 **An install is refused as unpinned.** Your deployment requires pinned commits. Install an exact commit (`owner/repo@<sha>`), or use a marketplace whose `plugin-index.json` publishes `sha` values. See [Require pinned versions](#require-pinned-versions).
 
