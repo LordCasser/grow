@@ -79,6 +79,7 @@ impl WorkflowRunStatus {
 
     pub(crate) fn from_timeline(status: chat_state::WorkflowExecutionStatus) -> Self {
         match status {
+            chat_state::WorkflowExecutionStatus::Suspended => Self::Active,
             chat_state::WorkflowExecutionStatus::UserPaused => Self::UserPaused,
             chat_state::WorkflowExecutionStatus::BackOffPaused => Self::BackOffPaused,
             chat_state::WorkflowExecutionStatus::NoProgressPaused => Self::NoProgressPaused,
@@ -1118,6 +1119,9 @@ pub struct WorkflowRunState {
     /// the durable run state because Timeline resume boundaries validate it
     /// across process restarts.
     pub execution_epoch: u64,
+    /// Physical execution stopped at the session checkpoint. Business status
+    /// and the original child roster remain authoritative and unchanged.
+    pub execution_suspended: bool,
     pub runtime_route: WorkflowRuntimeRoute,
     pub name: String,
     pub objective: String,
@@ -1151,7 +1155,7 @@ impl WorkflowRunState {
     /// against Timeline at the per-Run restore boundary.
     pub(crate) fn validate_restored_projection(&self) -> Result<(), &'static str> {
         self.runtime_route.validate()?;
-        if self.status == WorkflowRunStatus::Active {
+        if self.status == WorkflowRunStatus::Active && !self.execution_suspended {
             return Err(
                 "Workflow restore received an active manifest instead of a Timeline-reconciled projection",
             );
@@ -1199,6 +1203,7 @@ impl WorkflowRunState {
         turn_handoff: WorkflowTurnHandoff,
         message: Option<String>,
         execution_was_open: bool,
+        execution_suspended: bool,
     ) -> bool {
         let message = message.map(capped_pause_message);
         let turn_handoff = if execution_was_open {
@@ -1211,10 +1216,12 @@ impl WorkflowRunState {
             && self.turn_handoff == turn_handoff
             && self.pause_message == message
             && !execution_was_open
+            && self.execution_suspended == execution_suspended
         {
             return false;
         }
         self.execution_epoch = execution_epoch;
+        self.execution_suspended = execution_suspended;
         self.status = status;
         self.turn_handoff = turn_handoff;
         self.pause_message = message.clone();
@@ -1242,6 +1249,22 @@ struct TrackedRun {
 }
 
 impl WorkflowTracker {
+    pub(crate) fn suspend_execution(&mut self, run_id: &str) -> Option<WorkflowRunState> {
+        let run = self.run_mut(run_id)?;
+        if run.state.status.is_terminal() {
+            return None;
+        }
+        if let Some(started) = run.active_since.take() {
+            run.state.elapsed_ms_floor = run
+                .state
+                .elapsed_ms_floor
+                .saturating_add(started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64);
+        }
+        run.state.execution_suspended = true;
+        run.state.advance_revision();
+        Some(run.state.clone())
+    }
+
     pub fn start_run(
         &mut self,
         run_id: String,
@@ -1278,6 +1301,7 @@ impl WorkflowTracker {
             save_prompt: false,
             revision: 0,
             execution_epoch: 0,
+            execution_suspended: false,
             runtime_route,
             name,
             objective,
@@ -1344,7 +1368,7 @@ impl WorkflowTracker {
         new_agent_budget: Option<u64>,
     ) -> Option<WorkflowRunState> {
         let run = self.run_mut(run_id)?;
-        if !run.state.status.is_resumable() {
+        if !run.state.status.is_resumable() && !run.state.execution_suspended {
             return None;
         }
         let candidate_budget = match new_agent_budget {
@@ -1364,8 +1388,9 @@ impl WorkflowTracker {
         run.state.turn_handoff = WorkflowTurnHandoff::None;
         run.state.pause_message = None;
         run.state.result_summary = None;
+        let was_suspended = std::mem::take(&mut run.state.execution_suspended);
         for agent in &mut run.state.agents {
-            if agent.state == "running" {
+            if agent.state == "running" && !was_suspended {
                 agent.state = "cancelled".to_string();
             }
         }
@@ -1374,6 +1399,30 @@ impl WorkflowTracker {
         run.state.execution_epoch = run.state.execution_epoch.saturating_add(1);
         let state = run.state.clone();
         Some(state)
+    }
+
+    /// Close a previously suspended runtime attempt as an explicit,
+    /// user-resumable infrastructure pause. The caller commits the matching
+    /// Timeline Resumed/Ended pair before opening any Workflow executor.
+    pub(crate) fn pause_released_suspended_for_recovery(
+        &mut self,
+        run_id: &str,
+        execution_epoch: u64,
+        message: String,
+    ) -> Option<WorkflowRunState> {
+        let run = self.run_mut(run_id)?;
+        if run.state.status != WorkflowRunStatus::Active || !run.state.execution_suspended {
+            return None;
+        }
+        run.state.execution_epoch = execution_epoch;
+        run.state.status = WorkflowRunStatus::InfraPaused;
+        run.state.execution_suspended = false;
+        run.state.turn_handoff = WorkflowTurnHandoff::None;
+        run.state.pause_message = Some(capped_pause_message(message));
+        run.state.result_summary = None;
+        run.active_since = None;
+        run.state.advance_revision();
+        Some(run.state.clone())
     }
 
     pub fn set_max_concurrency(
@@ -1460,6 +1509,16 @@ impl WorkflowTracker {
                 row.label
             };
         };
+        if let Some(existing) = run
+            .state
+            .agents
+            .iter()
+            .find(|existing| existing.agent_id == row.agent_id)
+        {
+            // Deterministic journal replay rebinds the same logical child.
+            // It must not append a second roster row or erase settled usage.
+            return existing.label.clone();
+        }
         if row.phase.is_none() {
             row.phase = run.state.current_phase.clone();
         }
@@ -1676,7 +1735,7 @@ impl WorkflowTracker {
             .map(|mut state| {
                 let mut cancelled_ghost = false;
                 for agent in &mut state.agents {
-                    if agent.state == "running" {
+                    if agent.state == "running" && !state.execution_suspended {
                         agent.state = "cancelled".to_string();
                         cancelled_ghost = true;
                     }
@@ -2503,6 +2562,77 @@ mod tests {
     fn snapshot_restore_rejects_active_without_timeline_reconciliation() {
         let (t, _) = tracker_with_run();
         assert!(WorkflowTracker::from_snapshot(t.snapshot()).is_err());
+    }
+
+    #[test]
+    fn suspension_preserves_active_workflow_identity_and_freezes_elapsed_time() {
+        let (mut tracker, run_id) = tracker_with_run();
+        tracker.agent_started(
+            &run_id,
+            WorkflowAgentRow {
+                agent_id: "child".into(),
+                label: "worker".into(),
+                phase: Some("build".into()),
+                model: Some("model".into()),
+                state: "running".into(),
+                tokens_used: 17,
+                duration_ms: 23,
+            },
+        );
+        {
+            let run = tracker.run_mut(&run_id).unwrap();
+            run.state.execution_epoch = 4;
+            run.state.elapsed_ms_floor = 100;
+            run.active_since = Some(Instant::now() - std::time::Duration::from_millis(20));
+        }
+        let before = tracker.get(&run_id).unwrap().clone();
+
+        let suspended = tracker.suspend_execution(&run_id).unwrap();
+
+        assert_eq!(suspended.status, WorkflowRunStatus::Active);
+        assert_eq!(suspended.agent_budget, before.agent_budget);
+        assert_eq!(suspended.agents_used, before.agents_used);
+        assert_eq!(suspended.execution_epoch, before.execution_epoch);
+        assert_eq!(suspended.agents, before.agents);
+        assert!(suspended.execution_suspended);
+        assert!(tracker.runs[0].active_since.is_none());
+        let frozen_elapsed = tracker.elapsed_ms(&run_id);
+        assert_eq!(frozen_elapsed, suspended.elapsed_ms_floor);
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert_eq!(tracker.elapsed_ms(&run_id), frozen_elapsed);
+    }
+
+    #[test]
+    fn suspended_business_pause_survives_snapshot_restore() {
+        let (mut tracker, run_id) = tracker_with_run();
+        tracker.agent_started(
+            &run_id,
+            WorkflowAgentRow {
+                agent_id: "child".into(),
+                label: "worker".into(),
+                phase: None,
+                model: None,
+                state: "running".into(),
+                tokens_used: 0,
+                duration_ms: 0,
+            },
+        );
+        tracker.pause_user(&run_id, Some("waiting for approval".into()));
+        let paused = tracker.suspend_execution(&run_id).unwrap();
+        assert_eq!(paused.status, WorkflowRunStatus::UserPaused);
+        assert_eq!(
+            paused.pause_message.as_deref(),
+            Some("waiting for approval")
+        );
+        assert!(paused.execution_suspended);
+
+        let restored = WorkflowTracker::from_snapshot(tracker.snapshot()).unwrap();
+        let run = restored.get(&run_id).unwrap();
+        assert_eq!(run.status, WorkflowRunStatus::UserPaused);
+        assert_eq!(run.pause_message.as_deref(), Some("waiting for approval"));
+        assert!(run.execution_suspended);
+        assert_eq!(run.agents[0].state, "running");
+        assert!(restored.get(&run_id).unwrap().status != WorkflowRunStatus::Active);
     }
 
     #[test]

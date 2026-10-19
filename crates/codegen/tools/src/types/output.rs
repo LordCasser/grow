@@ -1558,6 +1558,7 @@ mod tests {
             turns: 2,
             duration_ms: 3000,
             worktree_path: None,
+            planning_summary: None,
         });
         let rendered = output.to_prompt_format();
         assert!(
@@ -1591,6 +1592,7 @@ mod tests {
             turns: 1,
             duration_ms: 2000,
             worktree_path: Some("/tmp/grow-worktree/wt-agent".into()),
+            planning_summary: None,
         });
         let rendered = output.to_prompt_format();
         assert!(

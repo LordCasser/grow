@@ -8,19 +8,9 @@
 use acp_transport::protocol as acp;
 use std::collections::HashMap;
 
-fn normalize_url(url: &str) -> String {
-    url.trim_end_matches('/').to_string()
-}
-
-/// Dedup key for the merge map: normalized URL for Http/Sse, name for Stdio.
+/// A server name is its identity within a session, independent of transport or URL.
 fn mcp_server_key(s: &acp::McpServer) -> String {
-    match s {
-        acp::McpServer::Http(acp::McpServerHttp { url, .. })
-        | acp::McpServer::Sse(acp::McpServerSse { url, .. }) => normalize_url(url),
-        acp::McpServer::Stdio(acp::McpServerStdio { name, .. }) => name.clone(),
-        // TODO(acp-0.10): `McpServer` is #[non_exhaustive].
-        _ => String::new(),
-    }
+    mcp_server_name(s).to_string()
 }
 
 pub(crate) fn mcp_server_name(s: &acp::McpServer) -> &str {
@@ -545,5 +535,117 @@ enabled = false
             }
             other => panic!("expected Http server, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn client_same_name_different_url_wins_disk_server() {
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(cwd.path().join(".grow")).unwrap();
+        std::fs::write(
+            cwd.path().join(".grow/config.toml"),
+            "[mcp_servers.identity-shared]\nurl = \"https://disk.example/mcp\"\n",
+        )
+        .unwrap();
+        crate::agent::folder_trust::record_for_test(cwd.path(), true);
+        let client = vec![acp::McpServer::Http(
+            acp::McpServerHttp::new(
+                "identity-shared".to_string(),
+                "https://client.example/mcp".to_string(),
+            )
+            .headers(vec![]),
+        )];
+
+        let merged: Vec<_> = merge_mcp_servers(client, cwd.path(), None)
+            .into_iter()
+            .filter(|server| mcp_server_name(server).starts_with("identity-"))
+            .collect();
+        assert_eq!(merged.len(), 1);
+        match &merged[0] {
+            acp::McpServer::Http(acp::McpServerHttp { name, url, .. }) => {
+                assert_eq!(name, "identity-shared");
+                assert_eq!(url, "https://client.example/mcp");
+            }
+            other => panic!("expected client Http server, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn same_url_with_different_names_keeps_both_servers() {
+        let cwd = empty_cwd();
+        let url = "https://identity-shared.example/mcp";
+        let client = ["identity-first", "identity-second"]
+            .into_iter()
+            .map(|name| {
+                acp::McpServer::Http(
+                    acp::McpServerHttp::new(name.to_string(), url.to_string()).headers(vec![]),
+                )
+            })
+            .collect();
+
+        let merged: Vec<_> = merge_mcp_servers(client, cwd.path(), None)
+            .into_iter()
+            .filter(|server| mcp_server_name(server).starts_with("identity-"))
+            .collect();
+        let mut names: Vec<_> = merged
+            .iter()
+            .map(|server| mcp_server_name(server))
+            .collect();
+        names.sort_unstable();
+        assert_eq!(names, ["identity-first", "identity-second"]);
+    }
+
+    #[test]
+    fn same_name_across_http_and_stdio_has_one_catalog_entry() {
+        let cwd = empty_cwd();
+        std::fs::create_dir_all(cwd.path().join(".grow")).unwrap();
+        std::fs::write(
+            cwd.path().join(".grow/config.toml"),
+            "[mcp_servers.identity-shared]\nurl = \"https://disk.example/mcp\"\n",
+        )
+        .unwrap();
+        crate::agent::folder_trust::record_for_test(cwd.path(), true);
+        let client = vec![acp::McpServer::Stdio(acp::McpServerStdio::new(
+            "identity-shared".to_string(),
+            std::path::PathBuf::from("server"),
+        ))];
+        let merged: Vec<_> = merge_mcp_servers(client, cwd.path(), None)
+            .into_iter()
+            .filter(|server| mcp_server_name(server) == "identity-shared")
+            .collect();
+        assert_eq!(merged.len(), 1);
+        assert!(matches!(merged[0], acp::McpServer::Stdio(_)));
+    }
+
+    #[test]
+    fn repeated_reload_with_same_name_catalog_is_stable() {
+        let cwd = empty_cwd();
+        let client = vec![
+            acp::McpServer::Http(
+                acp::McpServerHttp::new(
+                    "identity-second".to_string(),
+                    "https://identity-shared.example/mcp".to_string(),
+                )
+                .headers(vec![]),
+            ),
+            acp::McpServer::Http(
+                acp::McpServerHttp::new(
+                    "identity-first".to_string(),
+                    "https://identity-shared.example/mcp".to_string(),
+                )
+                .headers(vec![]),
+            ),
+        ];
+
+        let first = merge_mcp_servers(client.clone(), cwd.path(), None);
+        let second = merge_mcp_servers(client, cwd.path(), None);
+        assert_eq!(format!("{first:?}"), format!("{second:?}"));
+        assert_eq!(
+            first
+                .iter()
+                .map(mcp_server_name)
+                .filter(|name| name.starts_with("identity-"))
+                .collect::<Vec<_>>(),
+            ["identity-first", "identity-second"]
+        );
     }
 }

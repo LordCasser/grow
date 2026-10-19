@@ -196,21 +196,19 @@ impl MvpAgent {
     pub async fn flush_all_sessions(&self, grace: std::time::Duration) {
         self.activity.flush_all_sessions(grace).await;
     }
-    /// Install the channel that fans new session cwds into the leader's
-    /// `ConfigFileWatcher::watch_path`. Called once after
-    /// the watcher is constructed in `agent/app.rs`. In simple /
-    /// non-leader mode the channel is never wired and
-    /// `notify_session_cwd_for_watch` is a no-op.
+    /// Install the channel that fans new session cwds into the runtime's
+    /// `ConfigFileWatcher::watch_path`, before accepting sessions. Both leader
+    /// and in-process runtimes wire it when project watching is enabled.
     pub fn set_config_watcher_path_tx(
         &mut self,
         tx: tokio::sync::mpsc::UnboundedSender<std::path::PathBuf>,
     ) {
         self.config_watcher_path_tx = Some(tx);
     }
-    /// Best-effort fan-out of a new session's `cwd` to the leader's
+    /// Best-effort fan-out of a new session's `cwd` to the runtime's
     /// `ConfigFileWatcher` for dynamic non-recursive registration
     /// No-op if the channel was never installed
-    /// (`set_config_watcher_path_tx` was not called — simple mode,
+    /// (`set_config_watcher_path_tx` was not called — watching disabled,
     /// tests) or if the receiver has been dropped. Watcher errors are
     /// logged inside the spawned task and do NOT propagate here.
     pub(crate) fn notify_session_cwd_for_watch(&self, cwd: &std::path::Path) {
@@ -585,6 +583,7 @@ impl MvpAgent {
             workspace_ops: RefCell::new(None),
             session_live_state: RefCell::new(HashMap::new()),
             supervisor_started: std::cell::Cell::new(false),
+            exit_suspend: RefCell::new(None),
             owned_local_tasks: RefCell::new(Vec::new()),
             #[cfg(test)]
             roster_delta_spy: RefCell::new(Vec::new()),
@@ -809,10 +808,6 @@ impl MvpAgent {
         &self,
         session_id: &acp::SessionId,
     ) -> Option<crate::session::SessionHandle> {
-        let existing = self.sessions.borrow().get(session_id).cloned();
-        if existing.is_some() {
-            return existing;
-        }
         self.wait_for_in_flight_session_load(session_id).await;
         self.sessions.borrow().get(session_id).cloned()
     }
@@ -825,9 +820,6 @@ impl MvpAgent {
         &self,
         session_id: &acp::SessionId,
     ) -> Option<crate::session::SessionHandle> {
-        if let Some(handle) = self.control_session_handle(session_id) {
-            return Some(handle);
-        }
         self.wait_for_in_flight_session_load(session_id).await;
         self.control_session_handle(session_id)
     }
@@ -880,9 +872,6 @@ impl MvpAgent {
         );
         let deadline = tokio::time::Instant::now() + LOAD_WAIT_TIMEOUT;
         loop {
-            if self.sessions.borrow().contains_key(session_id) {
-                return;
-            }
             let rx = self
                 .loading_sessions
                 .borrow()

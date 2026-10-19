@@ -73,6 +73,113 @@ fn matching_uncertain_prompt_id(agent: &AgentView, text: &str) -> Option<String>
         .flatten()
 }
 
+fn frozen_skill_retry(
+    agent: &AgentView,
+    text: &str,
+) -> Option<crate::slash::command::CommandResult> {
+    let selection = if uncertain_submission_matches(agent, text) {
+        agent
+            .session
+            .in_flight_prompt
+            .as_ref()?
+            .frozen_skill_selection
+            .as_ref()
+    } else {
+        agent.session.staged_skill_selection.as_ref()
+    }?;
+    let token = text
+        .trim_start()
+        .strip_prefix('/')?
+        .split_whitespace()
+        .next()?;
+    if token != selection.name {
+        return None;
+    }
+    let mut block = acp::TextContent::new(text.to_owned());
+    block.meta = Some(
+        [(
+            "grow/skillSelection".into(),
+            serde_json::json!({
+                "name": selection.name,
+                "path": selection.path,
+                "plugin_name": selection.plugin_name,
+            }),
+        )]
+        .into_iter()
+        .collect(),
+    );
+    Some(crate::slash::command::CommandResult::InjectSkill {
+        display_text: text.to_owned(),
+        prompt_blocks: vec![acp::ContentBlock::Text(block)],
+        display_as_skill: true,
+        scheduled_task_preview: None,
+    })
+}
+
+#[cfg(test)]
+mod frozen_skill_retry_tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_retry_reuses_the_original_selected_source() {
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        let agent = app.agents.values_mut().next().unwrap();
+        let text = "/local:review inspect";
+        let selection = crate::app::session::FrozenSkillSelection {
+            name: "local:review".into(),
+            path: "/repo/.grow/skills/review-v1/SKILL.md".into(),
+            plugin_name: None,
+        };
+        agent.prompt.set_text(text);
+        agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
+            prompt_id: Some("retry-original-id".into()),
+            admission_resolved: None,
+            expected_turn_id: None,
+            frozen_skill_selection: Some(selection.clone()),
+            text: text.into(),
+            images: Vec::new(),
+            scrollback_entry: crate::scrollback::EntryId::new(0),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+
+        let Some(crate::slash::command::CommandResult::InjectSkill { prompt_blocks, .. }) =
+            frozen_skill_retry(agent, text)
+        else {
+            panic!("unchanged frozen skill input should bypass current catalog lookup");
+        };
+        let acp::ContentBlock::Text(block) = &prompt_blocks[0] else {
+            panic!("frozen selected source must remain on the text block");
+        };
+        assert_eq!(
+            block
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("grow/skillSelection")),
+            Some(&serde_json::json!({
+                "name": selection.name,
+                "path": selection.path,
+                "plugin_name": null
+            }))
+        );
+        assert_eq!(block.text, text);
+    }
+
+    #[test]
+    fn staged_selection_does_not_apply_after_command_name_changes() {
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        let agent = app.agents.values_mut().next().unwrap();
+        agent.session.staged_skill_selection = Some(crate::app::session::FrozenSkillSelection {
+            name: "local:review".into(),
+            path: "/repo/.grow/skills/review/SKILL.md".into(),
+            plugin_name: None,
+        });
+
+        assert!(frozen_skill_retry(agent, "/local:review edited args").is_some());
+        assert!(frozen_skill_retry(agent, "/local:other edited args").is_none());
+    }
+}
+
 /// Enqueue a prompt and try to drain immediately.
 ///
 /// The prompt is always pushed to the queue first. If the agent is idle
@@ -503,6 +610,23 @@ pub(super) fn dispatch_send_prompt_inner(
 
     let trimmed = text.trim();
 
+    if agent
+        .session
+        .staged_skill_selection
+        .as_ref()
+        .is_some_and(|selection| {
+            trimmed
+                .strip_prefix('/')
+                .and_then(|command| command.split_whitespace().next())
+                != Some(selection.name.as_str())
+        })
+    {
+        // Editing a recovered staged draft to a different command releases its
+        // frozen source. The replacement input will resolve through the
+        // current command registry and receive a new prompt identity.
+        agent.session.staged_skill_selection = None;
+    }
+
     if uncertain_submission_matches(agent, &text)
         && let Some(inflight) = agent.session.in_flight_prompt.as_ref()
     {
@@ -548,7 +672,9 @@ pub(super) fn dispatch_send_prompt_inner(
         // the committed model. In particular `/model B` followed immediately
         // by `/effort high` must become `B + high`, never `old-model + high`.
         let control_intent_models = agent.session.models_for_control_intent();
-        let exec_result = {
+        let exec_result = if let Some(result) = frozen_skill_retry(agent, &text) {
+            result
+        } else {
             let mut ctx = CommandExecCtx {
                 models: &control_intent_models,
                 session_id: agent.session.session_id.as_ref(),
@@ -728,11 +854,14 @@ pub(super) fn dispatch_send_prompt_inner(
                 // invocation: display_as_skill owns styling (no ranges).
                 let id = agent.session.next_queue_id;
                 agent.session.next_queue_id += 1;
+                let prompt_id = matching_uncertain_prompt_id(agent, &display_text);
+                agent.session.staged_skill_selection = None;
                 agent
                     .session
                     .pending_prompts
                     .push_back(crate::app::session::QueuedPrompt {
                         wire_blocks: Some(prompt_blocks),
+                        prompt_id,
                         display_as_skill,
                         ..crate::app::session::QueuedPrompt::plain(
                             id,
@@ -906,6 +1035,7 @@ pub(super) fn dispatch_send_prompt_inner(
             agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
                 prompt_id: Some(prompt_id.clone()),
                 admission_resolved: None,
+                frozen_skill_selection: None,
                 expected_turn_id: None,
                 text: text.clone(),
                 images: Vec::new(),

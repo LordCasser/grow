@@ -202,6 +202,87 @@ impl SessionActor {
             );
         }
     }
+    /// Refresh independent call policy and locally reconcile disabled tools.
+    /// No remote discovery is needed, and an unchanged endpoint is retained.
+    pub(super) async fn refresh_mcp_auxiliary_policy(&self) {
+        let cwd = std::path::Path::new(&self.session_info.cwd);
+        let disabled = crate::util::config::get_all_mcp_disabled_tools(cwd);
+        let bridge = self.agent.borrow().tool_bridge().clone();
+        let mut state = self.mcp_state.lock().await;
+        for (name, client) in &state.owned_clients {
+            crate::session::mcp_servers::refresh_client_policy(
+                client,
+                cwd,
+                state.meta_config_map.get(name),
+            );
+        }
+        if state.disabled_tools == disabled {
+            return;
+        }
+        let changed_servers: std::collections::HashSet<_> = state
+            .disabled_tools
+            .keys()
+            .chain(disabled.keys())
+            .filter(|name| state.disabled_tools.get(*name) != disabled.get(*name))
+            .cloned()
+            .collect();
+        state.disabled_tools = disabled;
+        for def in bridge.tool_definitions().await {
+            let Some((_, server, tool)) =
+                ::mcp::servers::parse_mcp_qualified_name(&def.function.name)
+            else {
+                continue;
+            };
+            if !state.is_tool_disabled(server, tool) {
+                continue;
+            }
+            if let Some(reg) = crate::session::mcp_servers::McpTool::new(
+                tool.to_owned(),
+                def.function.description.clone().unwrap_or_default(),
+                server.to_owned(),
+                Arc::clone(&self.mcp_state),
+                def.function.parameters.clone(),
+                state.mcp_tool_meta.get(&def.function.name).cloned(),
+            )
+            .into_registration()
+            {
+                state
+                    .disabled_tool_registrations
+                    .insert(reg.name.clone(), reg);
+            }
+            bridge.unregister_tool_by_name(&def.function.name);
+        }
+        let enabled: Vec<_> = state
+            .disabled_tool_registrations
+            .keys()
+            .filter(|qualified| {
+                ::mcp::servers::parse_mcp_qualified_name(qualified)
+                    .is_some_and(|(_, server, tool)| !state.is_tool_disabled(server, tool))
+            })
+            .cloned()
+            .collect();
+        let mut ui_tools = std::collections::HashMap::new();
+        for name in enabled {
+            if let Some(reg) = state.disabled_tool_registrations.remove(&name) {
+                let (_, server, _) =
+                    ::mcp::servers::parse_mcp_qualified_name(&name).expect("validated MCP name");
+                self.register_mcp_tool(server, reg, &mut state, &mut ui_tools)
+                    .await;
+            }
+        }
+        drop(state);
+        self.refresh_mcp_snapshot_and_schedule_reminder().await;
+        let snapshot = crate::extensions::mcp::build_mcp_status(&self.mcp_state, &bridge).await;
+        self.emit_mcp_catalog_updates(
+            snapshot
+                .clients
+                .into_iter()
+                .filter(|client| changed_servers.contains(&client.name))
+                .map(|client| (client.name, client.tools))
+                .collect(),
+        );
+    }
+
     /// Emit canonical per-server catalog deltas with the complete tool list.
     pub(super) fn emit_mcp_catalog_updates(
         &self,
@@ -501,8 +582,8 @@ impl SessionActor {
             .map_err(|error| error.to_string().into())
     }
 
-    /// Unregister `server`'s tools from the bridge after stdio restart
-    /// exhaustion, so the model stops calling a now-absent client.
+    /// Retire a server's bridge and search entries before replacement, removal,
+    /// or restart exhaustion. Bridge reconstruction must not revive them.
     pub(crate) fn unregister_server_tools(&self, server: &str) {
         let prefix = format!("{}{}", server, workspace_types::MCP_TOOL_NAME_DELIMITER);
         let removed = self
@@ -510,12 +591,116 @@ impl SessionActor {
             .borrow()
             .tool_bridge()
             .unregister_tools_by_prefix(&prefix);
+        // A bridge rebuild uses this snapshot. Prune it in the same local
+        // transition so it cannot restore retired tool definitions while a
+        // replacement handshake is still pending.
+        {
+            let mut snapshot = self.mcp.tool_metadata_snapshot.lock().unwrap();
+            snapshot.tools.retain(|tool| tool.server_name != server);
+            snapshot.servers.retain(|entry| entry.name != server);
+        }
+        self.mcp
+            .reminder_dirty
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         if removed > 0 {
             tracing::info!(
                 server = %server,
                 tools_removed = removed,
-                "unregistered tools for MCP server after auto-restart exhaustion",
+                "retired MCP server tools",
             );
+        }
+    }
+    /// Reconcile the current connection's complete catalog after a list-change
+    /// notification or transport recovery. Discovery never holds the pool lock.
+    pub(crate) async fn refresh_mcp_server_tools(
+        &self,
+        server: &str,
+        episode: ::mcp::servers::McpClientEpisode,
+    ) {
+        let client = {
+            let state = self.mcp_state.lock().await;
+            if !state.accepts_client_event(server, episode) {
+                return;
+            }
+            let Some(client) = state.get_client(server) else {
+                return;
+            };
+            Arc::clone(client)
+        };
+        let timeout = std::time::Duration::from_secs(
+            client
+                .startup_timeout_sec()
+                .saturating_mul(2)
+                .saturating_add(5),
+        );
+        let result = tokio::time::timeout(
+            timeout,
+            client.get_tool_registrations(Arc::clone(&self.mcp_state)),
+        )
+        .await;
+        let mut state = self.mcp_state.lock().await;
+        if !state.accepts_client_event(server, episode)
+            || !state
+                .get_client(server)
+                .is_some_and(|current| Arc::ptr_eq(current, &client))
+        {
+            return;
+        }
+        let registrations = match result {
+            Ok(Ok(registrations)) => registrations,
+            Ok(Err(error)) => {
+                tracing::warn!(server, %error, "failed to refresh MCP tool catalog");
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(server, %error, "MCP tool catalog refresh timed out");
+                return;
+            }
+        };
+        self.unregister_server_tools(server);
+        let prefix = format!("{}{}", server, workspace_types::MCP_TOOL_NAME_DELIMITER);
+        state
+            .mcp_tool_meta
+            .retain(|name, _| !name.starts_with(&prefix));
+        state
+            .disabled_tool_registrations
+            .retain(|name, _| !name.starts_with(&prefix));
+        state.clear_init_failed(server);
+        let mut ui_tools = std::collections::HashMap::new();
+        // Include an empty catalog too: the server may have removed its last tool.
+        ui_tools.insert(server.to_owned(), Vec::new());
+        let mut app_tools = std::collections::HashMap::new();
+        for reg in registrations {
+            let name = reg
+                .name
+                .strip_prefix(&prefix)
+                .unwrap_or(&reg.name)
+                .to_owned();
+            ui_tools
+                .get_mut(server)
+                .unwrap()
+                .push(crate::extensions::mcp::McpToolEntry {
+                    name: name.clone(),
+                    display_name: None,
+                    description: Some(reg.description.clone()),
+                    meta: reg.meta.clone(),
+                    enabled: !state.is_tool_disabled(server, &name),
+                });
+            // register_mcp_tool also collects app-specific metadata; the full
+            // list above is the canonical UI catalog for this refresh.
+            self.register_mcp_tool(server, reg, &mut state, &mut app_tools)
+                .await;
+        }
+        drop(state);
+        self.refresh_mcp_snapshot_and_schedule_reminder().await;
+        // Config updates can run while snapshot refresh waits for its lock.
+        if self
+            .mcp_state
+            .lock()
+            .await
+            .accepts_client_event(server, episode)
+        {
+            self.emit_mcp_catalog_updates(ui_tools);
         }
     }
     /// Re-run [`crate::session::mcp_servers::start_mcp_server`]
@@ -544,11 +729,10 @@ impl SessionActor {
     /// matching the post-handshake state produced by
     /// [`Self::ensure_mcp_tools_initialized`] for a fresh server.
     ///
-    /// Tools that were previously registered against this server
-    /// remain in `ToolBridge` and resolve transparently through
-    /// `McpTool::mcp_state` — there's no per-tool re-registration
-    /// step. `tools/list_changed` notifications from the respawned
-    /// server flow through the normal dispatcher path.
+    /// Existing tools resolve through `McpTool::mcp_state` while recovery
+    /// settles. After installation, the current client episode requests full
+    /// catalog discovery through the dispatcher, replacing tool definitions
+    /// and the search snapshot with the respawned server's catalog.
     ///
     /// ## Event identity binding
     ///
@@ -628,6 +812,11 @@ impl SessionActor {
                 return Err(crate::session::mcp_restart::RecoveryError::Superseded);
             }
             initialized.map_err(|error| error.to_string())?;
+            crate::session::mcp_servers::refresh_client_policy(
+                &arc_client,
+                std::path::Path::new(&self.session_info.cwd),
+                mcp_state.meta_config_map.get(server),
+            );
             mcp_state.bind_client_events(&arc_client);
             mcp_state
                 .owned_clients
@@ -914,7 +1103,8 @@ impl SessionActor {
             .iter()
             .map(|c| (mcp_server_name(c).to_string(), mcp_target_str(c)))
             .collect();
-        let scope_cwd = std::path::Path::new(self.session_info.cwd.as_str());
+        let policy_cwd = std::path::PathBuf::from(&self.session_info.cwd);
+        let scope_cwd = policy_cwd.as_path();
         let server_scope_map: std::collections::HashMap<String, &'static str> = mcp_server_configs
             .iter()
             .map(|c| {
@@ -1222,6 +1412,13 @@ impl SessionActor {
                     .map(|c| c.server_name().to_string())
                     .collect();
                 for c in mcp_clients {
+                    // A policy-only reload can happen while this handshake waits.
+                    // Reconcile before publishing the previously unowned client.
+                    crate::session::mcp_servers::refresh_client_policy(
+                        &c,
+                        &policy_cwd,
+                        mcp_state.meta_config_map.get(c.server_name()),
+                    );
                     let arc = std::sync::Arc::new(c);
                     let _ = arc
                         .arm_liveness_watcher(::mcp::liveness::DEFAULT_POLL_INTERVAL)

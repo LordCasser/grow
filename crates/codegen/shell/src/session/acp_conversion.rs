@@ -548,6 +548,20 @@ pub fn acp_plan_update(output: &ToolOutput) -> Option<acp::Plan> {
     }
 }
 
+/// Project the committed session plan through the same Todo success shape used
+/// by `todo_write`, so live and resumed sessions share one ACP representation.
+pub fn acp_plan_update_from_local_plan(
+    plan: Option<&tool_types::planning::LocalPlan>,
+) -> acp::Plan {
+    let Some(plan) = plan else {
+        return acp::Plan::new(Vec::new());
+    };
+    let output = ToolOutput::Todo(tools::types::output::TodoWriteOutput::TodosUpdated(
+        tools::implementations::grow_build::todo::todo_write_success(plan),
+    ));
+    acp_plan_update(&output).expect("Todo success always maps to an ACP Plan")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -756,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn test_turn_end_plan_cleanup_preserves_semantics_and_priority() {
+    fn unfinished_plan_entries_preserve_semantics_and_priority() {
         use crate::tools::todo::plan_entry_from_todo_item;
         use tools::implementations::grow_build::todo::{TodoItem, TodoPriority, TodoStatus};
 
@@ -775,24 +789,17 @@ mod tests {
                 meta: None,
             },
             TodoItem {
-                content: "Stale spinner".to_string(),
+                content: "Still in progress".to_string(),
                 priority: TodoPriority::High,
                 status: TodoStatus::InProgress,
                 meta: None,
             },
         ];
 
-        // Build plan entries using the canonical helper, then override
-        // in_progress → completed (same logic as emit_turn_end_plan_cleanup).
+        // A model turn ending does not complete unfinished work.
         let entries: Vec<acp::PlanEntry> = items
             .iter()
-            .map(|item| {
-                let mut entry = plan_entry_from_todo_item(item.clone());
-                if item.status == TodoStatus::InProgress {
-                    entry.status = acp::PlanEntryStatus::Completed;
-                }
-                entry
-            })
+            .map(|item| plan_entry_from_todo_item(item.clone()))
             .collect();
 
         // Completed item: unchanged, medium priority preserved
@@ -805,8 +812,8 @@ mod tests {
         assert_eq!(entries[1].priority, acp::PlanEntryPriority::Low);
         assert_eq!(entries[1].meta.as_ref().unwrap()["cancelled"], true);
 
-        // In-progress item: overridden to Completed, HIGH priority preserved
-        assert_eq!(entries[2].status, acp::PlanEntryStatus::Completed);
+        // In-progress work remains unfinished, with HIGH priority preserved.
+        assert_eq!(entries[2].status, acp::PlanEntryStatus::InProgress);
         assert_eq!(entries[2].priority, acp::PlanEntryPriority::High);
         // No cancelled marker (it was in_progress, not cancelled)
         assert!(entries[2].meta.is_none());
@@ -858,6 +865,32 @@ mod tests {
             file_matches: vec![],
         });
         assert!(acp_plan_update(&output).is_none());
+    }
+
+    #[test]
+    fn committed_local_plan_uses_the_todo_success_projection() {
+        let mut plan = tool_types::planning::LocalPlan::new("session-1", "work:prompt-1");
+        plan.update_steps(
+            tool_types::planning::PlanUpdateMode::Replace,
+            vec![tool_types::planning::PlanStep {
+                id: "step-1".into(),
+                content: "Review the required result".into(),
+                status: tool_types::planning::PlanStepStatus::InProgress,
+                priority: tool_types::planning::PlanPriority::Normal,
+                requirements: None,
+                removed: false,
+            }],
+        )
+        .unwrap();
+
+        let projected = acp_plan_update_from_local_plan(Some(&plan));
+        assert_eq!(projected.entries.len(), 1);
+        assert_eq!(projected.entries[0].content, "Review the required result");
+        assert_eq!(
+            projected.entries[0].status,
+            acp::PlanEntryStatus::InProgress
+        );
+        assert!(acp_plan_update_from_local_plan(None).entries.is_empty());
     }
 
     #[test]

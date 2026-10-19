@@ -174,7 +174,7 @@ pub(super) fn project_call_access(
     }
 }
 
-pub(super) fn hash_canonical_json(value: &serde_json::Value) -> String {
+pub(in crate::session::actor) fn hash_canonical_json(value: &serde_json::Value) -> String {
     fn write(value: &serde_json::Value, out: &mut String) {
         match value {
             serde_json::Value::Null

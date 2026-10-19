@@ -1,0 +1,3 @@
+# Design
+
+Use the same per-run high-water guard as ordinary live Workflow updates and the offline transcript projection: a positive revision is accepted only when it is greater than the last accepted positive revision, regardless of status. Keep the existing compatibility rule that a revisionless clear may apply even after a positive revision; revisionless non-clear snapshots remain rejected after a positive revision, and the clear tombstone continues rejecting revisionless resurrection. Rejected clears must not mutate revisions, tombstones, run rows, or scrollback blocks. Run identity and history remain scoped by `run_id`.

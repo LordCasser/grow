@@ -439,26 +439,32 @@ fn is_search_index_contention(error: &io::Error) -> bool {
 /// rest to `debug`. Resets its budget whenever the search cache is healed, so a
 /// fresh cache starts logging loudly again instead of staying silent forever.
 struct HealAwareLogCounter {
-    count: AtomicU64,
-    epoch_seen: AtomicU64,
+    per_index: std::sync::Mutex<HashMap<PathBuf, (u64, u64)>>,
     cap: u64,
 }
 
 impl HealAwareLogCounter {
-    const fn new(cap: u64) -> Self {
+    fn new(cap: u64) -> Self {
         Self {
-            count: AtomicU64::new(0),
-            epoch_seen: AtomicU64::new(0),
+            per_index: std::sync::Mutex::new(HashMap::new()),
             cap,
         }
     }
 
-    fn should_warn(&self, kind: &str) -> bool {
-        let epoch = search_recovery::current_epoch();
-        if self.epoch_seen.swap(epoch, Ordering::Relaxed) != epoch {
-            self.count.store(0, Ordering::Relaxed);
+    fn should_warn(&self, db_path: &Path, kind: &str) -> bool {
+        let identity = search_recovery::cache_identity(db_path);
+        let epoch = search_recovery::current_epoch(&identity);
+        let mut per_index = self
+            .per_index
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (seen_epoch, count) = per_index.entry(identity).or_default();
+        if *seen_epoch != epoch {
+            *seen_epoch = epoch;
+            *count = 0;
         }
-        let n = self.count.fetch_add(1, Ordering::Relaxed);
+        let n = *count;
+        *count = count.saturating_add(1);
         if n < self.cap {
             return true;
         }
@@ -469,20 +475,22 @@ impl HealAwareLogCounter {
     }
 }
 
-static INDEX_FAIL_LOG: HealAwareLogCounter = HealAwareLogCounter::new(8);
-static BOOTSTRAP_TIMEOUT_LOG: HealAwareLogCounter = HealAwareLogCounter::new(8);
+static INDEX_FAIL_LOG: LazyLock<HealAwareLogCounter> =
+    LazyLock::new(|| HealAwareLogCounter::new(8));
+static BOOTSTRAP_TIMEOUT_LOG: LazyLock<HealAwareLogCounter> =
+    LazyLock::new(|| HealAwareLogCounter::new(8));
 
-fn log_session_index_failure(session_id: &str, error: &io::Error, message: &str) {
-    if INDEX_FAIL_LOG.should_warn("index failures") {
+fn log_session_index_failure(root_dir: &Path, session_id: &str, error: &io::Error, message: &str) {
+    if INDEX_FAIL_LOG.should_warn(&search_db_path_in(root_dir), "index failures") {
         tracing::warn!(error = %error, session_id = %session_id, "{message}");
     } else {
         tracing::debug!(error = %error, session_id = %session_id, "{message}");
     }
 }
 
-fn log_bootstrap_timeout(session_id: &str, timeout_secs: u64) {
+fn log_bootstrap_timeout(root_dir: &Path, session_id: &str, timeout_secs: u64) {
     let msg = "session indexing timed out during bootstrap";
-    if BOOTSTRAP_TIMEOUT_LOG.should_warn("bootstrap timeouts") {
+    if BOOTSTRAP_TIMEOUT_LOG.should_warn(&search_db_path_in(root_dir), "bootstrap timeouts") {
         tracing::warn!(session_id = %session_id, timeout_secs, "{msg}");
     } else {
         tracing::debug!(session_id = %session_id, timeout_secs, "{msg}");
@@ -531,7 +539,8 @@ pub async fn execute_search(
 
     SEARCH_INDEX_MANAGER.bootstrap_once(root_dir.to_path_buf());
 
-    let epoch = search_recovery::CacheEpoch::now();
+    let db_path = search_db_path(root_dir);
+    let epoch = search_recovery::CacheEpoch::now(&db_path);
     let deadline = tokio::time::Instant::now() + BOOTSTRAP_WAIT_TIMEOUT;
     while SEARCH_INDEX_MANAGER
         .progress
@@ -543,7 +552,6 @@ pub async fn execute_search(
         }
         tokio::time::sleep(BOOTSTRAP_POLL_INTERVAL).await;
     }
-    let db_path = search_db_path(root_dir);
     let cwd = req.cwd.clone();
     let limit = req.limit;
     let offset = req.offset;
@@ -983,6 +991,7 @@ async fn flush_ready(
                 pending.insert(key.clone(), Instant::now() + SEARCH_INDEX_CONTENTION_RETRY);
             }
             log_session_index_failure(
+                root_dir,
                 &key.session_id,
                 &e,
                 "failed upserting session in search index",
@@ -1089,7 +1098,8 @@ async fn reindex_all(
     claim_token: &ClaimToken,
     claim_lost: Arc<AtomicBool>,
 ) -> io::Result<BootstrapOutcome> {
-    let epoch = search_recovery::CacheEpoch::now();
+    let bootstrap_db_path = search_db_path(root_dir);
+    let epoch = search_recovery::CacheEpoch::now(&bootstrap_db_path);
     let progress = &SEARCH_INDEX_MANAGER.progress;
 
     // Reset progress counters (bootstrapping flag already set by bootstrap_once)
@@ -1133,6 +1143,7 @@ async fn reindex_all(
         let timeline_reader = storage.open_timeline_reader(&summary.info)?;
         let progress = progress_arc.clone();
         let root = root_owned.clone();
+        let log_root = root.clone();
         let claim_lost = Arc::clone(&claim_lost);
         let timeout_dur = BOOTSTRAP_PER_SESSION_TIMEOUT;
         let max_file_size = BOOTSTRAP_MAX_FILE_SIZE;
@@ -1168,6 +1179,7 @@ async fn reindex_all(
                 .await;
                 if let Err(e) = title_only.map_err(io::Error::other).and_then(|r| r) {
                     log_session_index_failure(
+                        &log_root,
                         &session_id,
                         &e,
                         "failed to write title-only index row for large session",
@@ -1233,6 +1245,7 @@ async fn reindex_all(
                 },
                 Ok(Err(e)) => {
                     log_session_index_failure(
+                        &log_root,
                         &session_id,
                         &e,
                         "failed to index session for search",
@@ -1243,7 +1256,7 @@ async fn reindex_all(
                 Err(_) => {
                     // Timeout expired — the spawn_blocking task continues to
                     // completion but the pipeline moves on to the next session.
-                    log_bootstrap_timeout(&session_id, timeout_dur.as_secs());
+                    log_bootstrap_timeout(&log_root, &session_id, timeout_dur.as_secs());
                     progress.skipped.fetch_add(1, Ordering::Relaxed);
                     return Err(io::Error::new(
                         io::ErrorKind::TimedOut,
@@ -1398,6 +1411,19 @@ fn timeline_indexable_content(timeline: &Timeline) -> String {
                 if tool_calls < TOOL_SEARCH_CALL_LIMIT {
                     tool_calls += 1;
                     push_search_text(&mut tools, &item.text_summary(), TOOL_SEARCH_LIMIT);
+                }
+            }
+            ConversationItem::SkillLoad(item) => {
+                if tool_calls < TOOL_SEARCH_CALL_LIMIT {
+                    tool_calls += 1;
+                    push_search_text(
+                        &mut tools,
+                        &format!(
+                            "skill_name={} args={}\n{}",
+                            item.skill_name, item.args, item.prepared_body
+                        ),
+                        TOOL_SEARCH_LIMIT,
+                    );
                 }
             }
             ConversationItem::System(_)
@@ -1625,6 +1651,7 @@ mod tests {
         timeline
             .record(chat_state::TimelineEventKind::Turn(
                 chat_state::TurnEvent::Started {
+                    prompt_id: "fixture-prompt".into(),
                     id: turn,
                     input_ids: Vec::new(),
                     identity: chat_state::TurnIdentity {

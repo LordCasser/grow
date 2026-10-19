@@ -15,6 +15,7 @@ pub(crate) struct WorkflowNotifySender {
     budget: sampler::PreviewEventBudget,
     preview: std::sync::Arc<parking_lot::Mutex<Option<(String, u32, bool)>>>,
     store: WorkflowRunStore,
+    chat_state: chat_state::ChatStateHandle,
 }
 
 impl WorkflowNotifySender {
@@ -25,6 +26,7 @@ impl WorkflowNotifySender {
         budget: sampler::PreviewEventBudget,
         preview: std::sync::Arc<parking_lot::Mutex<Option<(String, u32, bool)>>>,
         store: WorkflowRunStore,
+        chat_state: chat_state::ChatStateHandle,
     ) -> Self {
         Self {
             session_id,
@@ -33,17 +35,24 @@ impl WorkflowNotifySender {
             budget,
             preview,
             store,
+            chat_state,
         }
     }
 
-    pub(crate) fn emit(&self, state: &WorkflowRunState, elapsed_ms: u64, active_agents: u32) {
+    pub(crate) async fn emit(&self, state: &WorkflowRunState, elapsed_ms: u64, active_agents: u32) {
         if let Err(error) = self.store.persist(state) {
             tracing::warn!(run_id = %state.run_id, %error, "failed to queue workflow manifest");
         }
         self.dispatch(
             build_workflow_updated(state, elapsed_ms, active_agents),
             true,
-        );
+            Some((
+                chat_state::DisplayProjectionKind::WorkflowUpdated,
+                state.run_id.clone(),
+                state.revision,
+            )),
+        )
+        .await;
     }
 
     pub(crate) fn emit_ephemeral(
@@ -55,13 +64,10 @@ impl WorkflowNotifySender {
         if let Err(error) = self.store.persist(state) {
             tracing::warn!(run_id = %state.run_id, %error, "failed to queue workflow manifest");
         }
-        self.dispatch(
-            build_workflow_updated(state, elapsed_ms, active_agents),
-            false,
-        );
+        self.dispatch_ephemeral(build_workflow_updated(state, elapsed_ms, active_agents));
     }
 
-    pub(crate) fn broadcast(
+    pub(crate) async fn broadcast(
         &self,
         state: &WorkflowRunState,
         elapsed_ms: u64,
@@ -71,10 +77,23 @@ impl WorkflowNotifySender {
         self.dispatch(
             build_workflow_updated(state, elapsed_ms, active_agents),
             persist_update,
-        );
+            persist_update.then(|| {
+                (
+                    chat_state::DisplayProjectionKind::WorkflowUpdated,
+                    state.run_id.clone(),
+                    state.revision,
+                )
+            }),
+        )
+        .await;
     }
 
-    fn dispatch(&self, update: GrowSessionUpdate, persist: bool) {
+    async fn dispatch(
+        &self,
+        update: GrowSessionUpdate,
+        persist: bool,
+        projection: Option<(chat_state::DisplayProjectionKind, String, u64)>,
+    ) {
         let mut meta = None;
         crate::util::event_id::ensure_event_id_meta(&self.session_id.0, &mut meta);
         let notification = GrowSessionNotification {
@@ -82,14 +101,52 @@ impl WorkflowNotifySender {
             update,
             meta: meta.map(serde_json::Value::Object),
         };
+        let Some(prepared) = crate::session::notifications::prepare_auxiliary_grow(
+            &self.persistence_tx,
+            &self.budget,
+            &self.preview,
+            notification.clone(),
+            persist,
+        ) else {
+            return;
+        };
+        if let Some((kind, source_id, source_revision)) = projection
+            && let Err(error) =
+                crate::session::notifications::record_display_projection_expectation(
+                    &self.chat_state,
+                    &notification,
+                    kind,
+                    source_id,
+                    source_revision,
+                )
+                .await
+        {
+            tracing::error!(%error, "Workflow display projection expectation was not committed; suppressing publication");
+            return;
+        }
+        crate::session::notifications::publish_prepared_auxiliary_grow(
+            &self.gateway,
+            &self.persistence_tx,
+            "grow/session_notification",
+            prepared,
+        );
+    }
+
+    fn dispatch_ephemeral(&self, update: GrowSessionUpdate) {
+        let mut meta = None;
+        crate::util::event_id::ensure_event_id_meta(&self.session_id.0, &mut meta);
         crate::session::notifications::dispatch_auxiliary_grow(
             &self.gateway,
             &self.persistence_tx,
             &self.budget,
             &self.preview,
             "grow/session_notification",
-            notification,
-            persist,
+            GrowSessionNotification {
+                session_id: self.session_id.clone(),
+                update,
+                meta: meta.map(serde_json::Value::Object),
+            },
+            false,
         );
     }
 }
@@ -268,5 +325,116 @@ mod tests {
             }
             _ => panic!("expected WorkflowUpdated"),
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ephemeral_and_coalesced_updates_do_not_create_projection_expectations() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let cancellation = tokio_util::sync::CancellationToken::new();
+                let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
+                let chat_state = chat_state::ChatStateActor::spawn(
+                    vec![sampling_types::ConversationItem::system(
+                        "test system prompt",
+                    )],
+                    sampling_types::SamplingConfig {
+                        base_url: "http://localhost".to_string(),
+                        model: "test".to_string(),
+                        output_limit: None,
+                        temperature: None,
+                        top_p: None,
+                        api_backend: Default::default(),
+                        extra_headers: Default::default(),
+                        query_params: Default::default(),
+                        env_http_headers: Default::default(),
+                        context_window: std::num::NonZeroU64::new(256_000)
+                            .expect("nonzero test context window"),
+                        reasoning_effort: None,
+                        stream_tool_calls: None,
+                    },
+                    Box::new(chat_state::NullTimelinePersistence),
+                    chat_event_tx,
+                    cancellation.clone(),
+                );
+                chat_state
+                    .get_sampling_config()
+                    .await
+                    .expect("chat-state bootstrap must be acknowledged");
+
+                let (gateway_tx, mut gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let gateway = acp_transport::AcpAgentGatewaySender::new(gateway_tx);
+                let (persistence_tx, mut persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let store = WorkflowRunStore::new(None, persistence_tx.clone());
+                store
+                    .register("wf_ephemeral", "()", &serde_json::json!({}))
+                    .expect("test source registration needs no session directory");
+                let budget = sampler::PreviewEventBudget::default();
+                let sender = WorkflowNotifySender::new(
+                    agent_client_protocol::schema::v1::SessionId::new("workflow-cache-test"),
+                    gateway,
+                    persistence_tx,
+                    budget.clone(),
+                    std::sync::Arc::new(parking_lot::Mutex::new(None)),
+                    store,
+                    chat_state.clone(),
+                );
+                let mut tracker = WorkflowTracker::default();
+                tracker.start_run(
+                    "wf_ephemeral".into(),
+                    "test workflow".into(),
+                    "exercise non-durable UI updates".into(),
+                    vec![workflow::PhaseMeta {
+                        title: "Run".into(),
+                        detail: None,
+                    }],
+                    None,
+                    None,
+                    crate::session::workflow::tracker::test_runtime_route(),
+                );
+                let state = tracker.get("wf_ephemeral").unwrap();
+
+                sender.emit_ephemeral(&state, 1, 0);
+                sender.broadcast(&state, 2, 0, false).await;
+
+                for _ in 0..2 {
+                    let message =
+                        tokio::time::timeout(std::time::Duration::from_secs(2), gateway_rx.recv())
+                            .await
+                            .expect("Workflow UI update must be sent")
+                            .expect("gateway remains open");
+                    let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
+                        panic!("expected a Grow session notification: {message:?}");
+                    };
+                    assert_eq!(args.request.method.as_ref(), "grow/session_notification");
+                    let _ = args.response_tx.send(Ok(()));
+                }
+
+                // A durable update rejected before it can reserve publication
+                // capacity must not leave a phantom cache expectation either.
+                let _all_credits =
+                    tokio::time::timeout(std::time::Duration::from_secs(2), budget.acquire(4096))
+                        .await
+                        .expect("completed preview sends release their reservations")
+                        .expect("preview budget remains open");
+                sender.broadcast(&state, 3, 0, true).await;
+                assert!(gateway_rx.try_recv().is_err());
+
+                let timeline = chat_state
+                    .timeline_events()
+                    .await
+                    .expect("Timeline remains available");
+                assert!(!timeline.iter().any(|event| matches!(
+                    &event.kind,
+                    chat_state::TimelineEventKind::DisplayProjectionExpected(_)
+                )));
+                while let Ok(message) = persistence_rx.try_recv() {
+                    assert!(
+                        !matches!(message, PersistenceMsg::AuxiliaryGrow { .. }),
+                        "ephemeral/coalesced updates must not enter the display cache"
+                    );
+                }
+                cancellation.cancel();
+            })
+            .await;
     }
 }

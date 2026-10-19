@@ -1442,7 +1442,7 @@ impl AgentView {
                 .plan_approval_view
                 .take()
                 .expect("plan_approval_view is Some (just checked)");
-            pav.send_stale_cancel();
+            pav.close_stale_waiter();
             self.plan_next_comment_id = pav.next_comment_id;
             self.prompt.restore(pav.stashed_prompt);
             self.line_viewer = None;
@@ -1490,14 +1490,20 @@ impl AgentView {
         debug_assert!(qv.local_kind.is_none());
 
         self.session.turn_paused_duration += qv.opened_at.elapsed();
-        let partial_answers = qv.build_partial_answers();
+        let (partial_answers, annotations) = qv.build_partial_answers();
         let (response, diagnostic_action) = match action {
             PlanQuestionAction::ChatAboutThis => (
-                AskUserQuestionExtResponse::ChatAboutThis { partial_answers },
+                AskUserQuestionExtResponse::ChatAboutThis {
+                    partial_answers,
+                    annotations,
+                },
                 "interview_chat",
             ),
             PlanQuestionAction::SkipInterview => (
-                AskUserQuestionExtResponse::SkipInterview { partial_answers },
+                AskUserQuestionExtResponse::SkipInterview {
+                    partial_answers,
+                    annotations,
+                },
                 "interview_skip",
             ),
         };
@@ -1764,18 +1770,36 @@ mod question_plan_action_tests {
     fn enter_on_chat_about_this_sends_partial_answers() {
         let mut agent = make_agent();
         let mut rx = open_plan_question(&mut agent);
-        agent.question_view.as_mut().unwrap().select_option(0, 1);
+        {
+            let qv = agent.question_view.as_mut().unwrap();
+            qv.select_option(0, 1);
+            qv.per_question_freeform[0] = "Keep the request path stable".into();
+            qv.per_question_freeform_selected[0] = true;
+        }
+
+        agent
+            .prompt
+            .set_text_preserving("Keep the request path stable");
 
         let _ = agent.handle_question_key(&KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         let outcome = agent.handle_question_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(outcome, InputOutcome::Changed));
         match receive_response(&mut rx) {
-            AskUserQuestionExtResponse::ChatAboutThis { partial_answers } => {
+            AskUserQuestionExtResponse::ChatAboutThis {
+                partial_answers,
+                annotations,
+            } => {
                 assert_eq!(
                     partial_answers
                         .get("Which implementation?")
                         .map(String::as_str),
                     Some("Extensible")
+                );
+                assert_eq!(
+                    annotations
+                        .and_then(|annotations| annotations.get("Which implementation?").cloned())
+                        .and_then(|annotation| annotation.notes),
+                    Some("Keep the request path stable".into())
                 );
             }
             other => panic!("expected ChatAboutThis, got {other:?}"),
@@ -1806,12 +1830,21 @@ mod question_plan_action_tests {
         let outcome = agent.handle_question_key(&KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(matches!(outcome, InputOutcome::Changed));
         match receive_response(&mut rx) {
-            AskUserQuestionExtResponse::SkipInterview { partial_answers } => {
+            AskUserQuestionExtResponse::SkipInterview {
+                partial_answers,
+                annotations,
+            } => {
                 assert_eq!(
                     partial_answers
                         .get("Which implementation?")
                         .map(String::as_str),
                     Some("Other")
+                );
+                assert_eq!(
+                    annotations
+                        .and_then(|annotations| annotations.get("Which implementation?").cloned())
+                        .and_then(|annotation| annotation.notes),
+                    Some("Keep the public API small".into())
                 );
             }
             other => panic!("expected SkipInterview, got {other:?}"),

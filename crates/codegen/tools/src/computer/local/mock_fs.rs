@@ -62,6 +62,24 @@ impl AsyncFileSystem for MockFs {
         })
     }
 
+    async fn read_file_bounded(
+        &self,
+        path: &Path,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ComputerError> {
+        self.files
+            .read()
+            .await
+            .get(path)
+            .map(|bytes| bytes[..bytes.len().min(max_bytes.saturating_add(1))].to_vec())
+            .ok_or_else(|| {
+                ComputerError::IOError(
+                    format!("File not found: {}", path.display()),
+                    Some(std::io::ErrorKind::NotFound),
+                )
+            })
+    }
+
     async fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), ComputerError> {
         self.files
             .write()

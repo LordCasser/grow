@@ -52,6 +52,20 @@ impl From<std::io::Error> for ComputerError {
 pub trait AsyncFileSystem: Send + Sync {
     async fn read_file(&self, path: &Path) -> Result<Vec<u8>, ComputerError>;
 
+    /// Read at most `max_bytes + 1` bytes, allowing callers to detect an
+    /// oversized source without materializing the full file. Adapters that
+    /// cannot enforce a byte bound must fail closed.
+    async fn read_file_bounded(
+        &self,
+        _path: &Path,
+        _max_bytes: usize,
+    ) -> Result<Vec<u8>, ComputerError> {
+        Err(ComputerError::io_with_kind(
+            "bounded file reads are not supported by this filesystem",
+            std::io::ErrorKind::Unsupported,
+        ))
+    }
+
     async fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), ComputerError>;
 
     /// Update an existing file only if it still contains the bytes the caller read.
@@ -257,6 +271,16 @@ pub struct TaskSnapshot {
     pub is_backgrounded: bool,
 }
 
+/// A terminal command's durable-in-memory state at a confirmed suspension
+/// boundary. `interrupted` is true only when this suspension operation asked
+/// the process to stop, including a retry after a prior partial batch.
+#[derive(Debug, Clone)]
+pub struct CommandSuspensionEvidence {
+    pub tool_call_id: String,
+    pub snapshot: TaskSnapshot,
+    pub interrupted: bool,
+}
+
 impl TaskSnapshot {
     /// Calculate duration in seconds.
     /// If task is still running, returns time since start.
@@ -326,6 +350,21 @@ pub trait TerminalBackend: Send + Sync {
     /// Used on a shared terminal backend so a subagent's cancel doesn't
     /// kill the parent's foreground commands.
     async fn kill_foreground_commands_by_owner(&self, _owner_session_id: &str) {}
+
+    /// Stop and reap every command owned by `owner_session_id`, returning
+    /// snapshots only after child wait confirms their process state. The
+    /// absolute deadline applies to the complete batch. Backends without a
+    /// confirmed suspension protocol fail closed.
+    async fn suspend_owned_commands(
+        &self,
+        _owner_session_id: &str,
+        _deadline: tokio::time::Instant,
+    ) -> Result<Vec<CommandSuspensionEvidence>, ComputerError> {
+        Err(ComputerError::io_with_kind(
+            "confirmed terminal command suspension is not supported by this backend",
+            std::io::ErrorKind::Unsupported,
+        ))
+    }
 
     /// Kill all running background tasks.
     /// Used during subagent teardown to clean up orphaned processes.

@@ -32,9 +32,9 @@ use super::types::{
 };
 
 pub use super::coordinator_state::{
-    ChildCompletion, ChildControl, ChildReporter, ChildRunOutput, ChildRunRequest, ChildRunner,
-    CompletionDisposition, CoordinatorConfig, LocalBoxFuture, MAX_COMPLETED_ENTRIES, SendBoxFuture,
-    StartedChild, SubagentProgress,
+    ChildCheckpoint, ChildCompletion, ChildControl, ChildReporter, ChildRunOutcome, ChildRunOutput,
+    ChildRunRequest, ChildRunner, CompletionDisposition, CoordinatorConfig, LocalBoxFuture,
+    MAX_COMPLETED_ENTRIES, SendBoxFuture, StartedChild, SubagentProgress,
 };
 
 /// Channel-owned subagent lifecycle actor.
@@ -46,7 +46,11 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     config: CoordinatorConfig,
     pending: HashMap<String, PendingChild>,
     active: HashMap<String, ActiveChild<R::Control>>,
+    frozen_roots: HashMap<String, String>,
+    suspended: HashMap<String, SuspendedChild<R::CompletionData>>,
+    restored_trees: HashMap<String, RestoredTreeState>,
     completed: HashMap<String, CompletedChild>,
+    retiring: HashMap<String, RetiringChild<R::CompletionData>>,
     completed_order: VecDeque<String>,
     finalizations: HashMap<String, PendingFinalization<R::CompletionData>>,
     reconciliations: FuturesUnordered<
@@ -75,6 +79,29 @@ pub struct SubagentCoordinator<R: ChildRunner> {
     >,
     output_read_requests: HashMap<String, OutputReadRequest>,
     output_read_permits: Arc<tokio::sync::Semaphore>,
+}
+
+struct SuspendedChild<D> {
+    request: SubagentRequest,
+    immediate_parent_session_id: String,
+    checkpoint: ChildCheckpoint,
+    started_at_epoch_ms: u64,
+    duration_ms: u64,
+    spawn_reply: Option<oneshot::Sender<SubagentResult>>,
+    handle_only: bool,
+    waiters: Vec<BlockingWaiter>,
+    _completion_data: D,
+}
+
+struct RetiringChild<D> {
+    request: SubagentRequest,
+    completion_data: D,
+}
+
+struct RestoredTreeState {
+    operation_id: String,
+    pending: HashSet<String>,
+    blocked: HashSet<String>,
 }
 
 struct PendingFinalization<D> {
@@ -188,7 +215,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             config,
             pending: HashMap::new(),
             active: HashMap::new(),
+            frozen_roots: HashMap::new(),
+            suspended: HashMap::new(),
+            restored_trees: HashMap::new(),
             completed: HashMap::new(),
+            retiring: HashMap::new(),
             completed_order: VecDeque::new(),
             finalizations: HashMap::new(),
             reconciliations: FuturesUnordered::new(),
@@ -216,6 +247,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 && self.reconciliations.is_empty()
                 && self.validations.is_empty()
                 && self.output_reads.is_empty()
+                && self.retiring.is_empty()
             {
                 break;
             }
@@ -226,14 +258,35 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 Some(event) = self.internal_rx.recv() => self.handle_internal(event),
                 Some((id, output)) = self.runs.next(), if !self.runs.is_empty() => {
                     match output {
-                        Ok(output) => self.finish_child(&id, output),
+                        Ok(ChildRunOutcome::Finished(output)) => self.finish_child(&id, output),
+                        Ok(ChildRunOutcome::Suspended { checkpoint, completion_data }) => {
+                            if let Some(expected) = self
+                                .pending_restore_checkpoint(&id)
+                                .or_else(|| self.blocked_restore_checkpoint(&id))
+                            {
+                                self.block_restored_child(
+                                    &id,
+                                    expected,
+                                    "adopted child suspended before confirming startup".into(),
+                                    completion_data,
+                                );
+                            } else {
+                                self.suspend_child(&id, checkpoint, completion_data);
+                            }
+                        }
+                        Ok(ChildRunOutcome::RestoreBlocked { checkpoint, error, completion_data }) => {
+                            self.block_restored_child(&id, checkpoint, error, completion_data);
+                        }
                         Err(_) => self.finish_panicked_child(&id),
                     }
                 }
                 Some((id, output)) = self.reconciliations.next(), if !self.reconciliations.is_empty() => {
                     self.finish_reconciliation(&id, output);
                 }
-                _ = recovery_tick.tick(), if !self.finalizations.is_empty() => self.advance_finalizations(),
+                _ = recovery_tick.tick(), if !self.finalizations.is_empty() || !self.retiring.is_empty() => {
+                    self.advance_finalizations();
+                    self.sweep_retiring();
+                },
                 Some((respond_to, outcome)) = self.validations.next(), if !self.validations.is_empty() => {
                     let _ = respond_to.send(outcome);
                 }
@@ -264,6 +317,98 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
 
     fn handle_command(&mut self, command: SubagentEvent) {
         match command {
+            SubagentEvent::FreezeAdmission {
+                root_session_id,
+                operation_id,
+                respond_to,
+            } => {
+                if root_session_id.trim().is_empty()
+                    || operation_id.trim().is_empty()
+                    || self
+                        .frozen_roots
+                        .get(&root_session_id)
+                        .is_some_and(|current| current != &operation_id)
+                {
+                    let _ = respond_to.send(Err("conflicting suspension owner".into()));
+                    return;
+                }
+                self.frozen_roots
+                    .insert(root_session_id.clone(), operation_id);
+                let mut nodes = Vec::new();
+                let mut failure = None;
+                for child in self
+                    .active
+                    .values()
+                    .filter(|child| child.request.parent_session_id == root_session_id)
+                {
+                    if let Err(error) = child.control.freeze_admission() {
+                        failure = Some(error);
+                    }
+                    nodes.push(super::types::FrozenChildRef {
+                        task_id: child.request.id.clone(),
+                        session_id: child.child_session_id.clone(),
+                        security_parent_session_id: child.immediate_parent_session_id.clone(),
+                        origin_tool_call_id: child.request.origin_tool_call_id.clone(),
+                        initializing: false,
+                    });
+                }
+                for child in self
+                    .pending
+                    .values()
+                    .filter(|child| child.request.parent_session_id == root_session_id)
+                {
+                    nodes.push(super::types::FrozenChildRef {
+                        task_id: child.request.id.clone(),
+                        session_id: child.request.id.clone(),
+                        security_parent_session_id: child.immediate_parent_session_id.clone(),
+                        origin_tool_call_id: child.request.origin_tool_call_id.clone(),
+                        initializing: true,
+                    });
+                }
+                for child in self
+                    .suspended
+                    .values()
+                    .filter(|child| child.request.parent_session_id == root_session_id)
+                {
+                    nodes.push(super::types::FrozenChildRef {
+                        task_id: child.request.id.clone(),
+                        session_id: child.checkpoint.session_id.clone(),
+                        security_parent_session_id: child.immediate_parent_session_id.clone(),
+                        origin_tool_call_id: child.request.origin_tool_call_id.clone(),
+                        initializing: false,
+                    });
+                }
+                let _ = respond_to.send(failure.map_or(Ok(nodes), Err));
+            }
+            SubagentEvent::AdoptSuspended {
+                request,
+                security_parent_session_id,
+                checkpoint,
+                respond_to,
+            } => self.adopt_suspended(
+                *request,
+                &security_parent_session_id,
+                checkpoint,
+                respond_to,
+            ),
+            SubagentEvent::ReleaseRestoredTree {
+                root_session_id,
+                operation_id,
+                respond_to,
+            } => {
+                let result = self.release_restored_tree(&root_session_id, &operation_id);
+                let _ = respond_to.send(result);
+            }
+            SubagentEvent::CheckSuspendedRetirement {
+                root_session_id,
+                operation_id,
+                task_ids,
+                respond_to,
+            } => {
+                let result =
+                    self.check_suspended_retirement(&root_session_id, &operation_id, &task_ids);
+                let _ = respond_to.send(result);
+            }
             SubagentEvent::Interact(mut request) => {
                 let route = self.interaction_route(&request);
                 match route {
@@ -312,6 +457,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         let id = request.id.clone();
                         let _ = command.result_tx.send(SubagentResult {
                             success: false,
+                            not_dispatched: true,
                             cancelled: true,
                             error: Some("parent subagent is being torn down".to_owned()),
                             subagent_id: id.clone(),
@@ -322,7 +468,9 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     }
                     security_parent = Some(spawner_security_context);
                     request.parent_session_id = root_parent;
-                    request.surface_completion = false;
+                    if spawner_owner.is_workflow() {
+                        request.surface_completion = false;
+                    }
                     // Nested children keep workflow lineage after reparent so
                     // ParentSession Stop does not kill in-flight workflow work.
                     if !request.owner.is_workflow()
@@ -338,11 +486,21 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     let id = request.id.clone();
                     let _ = command.result_tx.send(SubagentResult {
                         success: false,
+                        not_dispatched: true,
                         cancelled: true,
                         error: Some("parent prompt is cancelled".to_owned()),
                         subagent_id: id.clone(),
                         child_session_id: id,
                         ..Default::default()
+                    });
+                    return;
+                }
+                if self.frozen_roots.contains_key(&request.parent_session_id) {
+                    let id = request.id.clone();
+                    let _ = command.result_tx.send(SubagentResult {
+                        not_dispatched: true,
+                        error: Some("session execution admission is suspended; this call was not dispatched".into()),
+                        subagent_id: id.clone(), child_session_id: id, ..Default::default()
                     });
                     return;
                 }
@@ -358,6 +516,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     let id = request.id.clone();
                     let _ = command.result_tx.send(SubagentResult {
                         success: false,
+                        not_dispatched: true,
                         cancelled: true,
                         error: Some("parent session is stopped".to_owned()),
                         subagent_id: id.clone(),
@@ -369,6 +528,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 let id = request.id.clone();
                 if self.pending.contains_key(&id)
                     || self.active.contains_key(&id)
+                    || self.suspended.contains_key(&id)
                     || self.completed.contains_key(&id)
                 {
                     let _ = command.result_tx.send(SubagentResult {
@@ -384,6 +544,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     >= MAX_FINALIZATIONS
                 {
                     let _ = command.result_tx.send(SubagentResult {
+                        not_dispatched: true,
                         error: Some("subagent recovery capacity exhausted; resolve pending finalizations before spawning".into()),
                         subagent_id: request.id.clone(), child_session_id: request.id.clone(),
                         ..Default::default()
@@ -406,6 +567,8 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         foreground_deadline,
                         handle_only,
                         explicitly_killed: false,
+                        restore: None,
+                        adoption_reply: None,
                     },
                 );
                 self.running_count_changed();
@@ -421,6 +584,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                             security_parent_session_id: immediate_parent_session_id,
                             security_parent,
                             cancellation,
+                            restore: None,
                             reporter,
                         }))
                         .catch_unwind(),
@@ -731,6 +895,416 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
     }
 
+    fn check_suspended_retirement(
+        &mut self,
+        root_session_id: &str,
+        operation_id: &str,
+        task_ids: &[String],
+    ) -> Result<bool, String> {
+        if root_session_id.trim().is_empty()
+            || operation_id.trim().is_empty()
+            || self.frozen_roots.get(root_session_id).map(String::as_str) != Some(operation_id)
+        {
+            return Err("suspension owner is unknown or conflicting".into());
+        }
+
+        let mut seen = HashSet::with_capacity(task_ids.len());
+        for id in task_ids {
+            if id.trim().is_empty() || !seen.insert(id.as_str()) {
+                return Err("suspension task identity is empty or duplicated".into());
+            }
+
+            if let Some(child) = self.pending.get(id) {
+                if child.request.parent_session_id != root_session_id {
+                    return Err("suspension task belongs to another root".into());
+                }
+                return Ok(false);
+            }
+            if let Some(child) = self.active.get(id) {
+                if child.request.parent_session_id != root_session_id {
+                    return Err("suspension task belongs to another root".into());
+                }
+                return Ok(false);
+            }
+            if let Some(child) = self.suspended.get_mut(id) {
+                if child.request.parent_session_id != root_session_id
+                    || child.checkpoint.operation_id != operation_id
+                {
+                    return Err("suspended task belongs to another root or operation".into());
+                }
+                if !self
+                    .runner
+                    .suspension_retired(&mut child._completion_data)?
+                {
+                    return Ok(false);
+                }
+                continue;
+            }
+            if let Some(child) = self.completed.get(id) {
+                if child.request.parent_session_id != root_session_id {
+                    return Err("completed task belongs to another root".into());
+                }
+                continue;
+            }
+            return Err(format!("suspension task {id:?} is unknown"));
+        }
+
+        let retiring_ids: Vec<String> = self
+            .retiring
+            .iter()
+            .filter(|(_, child)| child.request.parent_session_id == root_session_id)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in retiring_ids {
+            let child = self
+                .retiring
+                .get_mut(&id)
+                .expect("retiring child identity was collected from this map");
+            if child.request.parent_session_id != root_session_id {
+                return Err("retiring task belongs to another root".into());
+            }
+            if !self.runner.suspension_retired(&mut child.completion_data)? {
+                return Ok(false);
+            }
+            self.retiring.remove(&id);
+        }
+        Ok(true)
+    }
+
+    fn adopt_suspended(
+        &mut self,
+        request: SubagentRequest,
+        security_parent_session_id: &str,
+        checkpoint: ChildCheckpoint,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    ) {
+        macro_rules! reject {
+            ($error:expr) => {{
+                let _ = respond_to.send(Err($error));
+                return;
+            }};
+        }
+
+        let id = request.id.clone();
+        let root_session_id = request.parent_session_id.clone();
+        if id.trim().is_empty()
+            || root_session_id.trim().is_empty()
+            || security_parent_session_id.trim().is_empty()
+            || checkpoint.operation_id.trim().is_empty()
+            || checkpoint.session_id != id
+            || request.cancel_token.is_cancelled()
+        {
+            reject!("adoption identity or request is invalid".to_owned());
+        }
+
+        if self.pending.contains_key(&id)
+            || self.active.contains_key(&id)
+            || self.completed.contains_key(&id)
+            || self.finalizations.contains_key(&id)
+            || self.retiring.contains_key(&id)
+        {
+            reject!(format!("subagent id {id:?} already has an owner"));
+        }
+
+        let security_parent = if security_parent_session_id == root_session_id {
+            None
+        } else {
+            match self.active.values().find(|child| {
+                child.child_session_id == security_parent_session_id
+                    && child.request.parent_session_id == root_session_id
+            }) {
+                Some(child) => Some(child.control.security_context()),
+                None => {
+                    reject!("direct security parent is not an active child of this root".into())
+                }
+            }
+        };
+
+        if let Some(suspended) = self.suspended.get_mut(&id) {
+            if suspended.request.parent_session_id != root_session_id
+                || suspended.immediate_parent_session_id != security_parent_session_id
+                || suspended.checkpoint != checkpoint
+                || !adoption_request_matches(&suspended.request, &request)
+            {
+                reject!("existing suspended identity does not match adoption request".into());
+            }
+            if self
+                .runner
+                .has_physical_retirement_owner(&suspended._completion_data)
+            {
+                match self
+                    .runner
+                    .suspension_retired(&mut suspended._completion_data)
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        reject!("existing suspended child thread is not retired".into())
+                    }
+                    Err(error) => reject!(format!(
+                        "cannot confirm suspended child retirement: {error}"
+                    )),
+                }
+            }
+        }
+
+        if let Some(current) = self.frozen_roots.get(&root_session_id) {
+            if current != &checkpoint.operation_id {
+                reject!("root is frozen for another suspension operation".into());
+            }
+        } else {
+            self.frozen_roots
+                .insert(root_session_id.clone(), checkpoint.operation_id.clone());
+            let mut freeze_error = None;
+            for child in self
+                .active
+                .values()
+                .filter(|child| child.request.parent_session_id == root_session_id)
+            {
+                if let Err(error) = child.control.freeze_admission() {
+                    freeze_error = Some(error);
+                }
+            }
+            if let Some(error) = freeze_error {
+                reject!(format!(
+                    "could not freeze existing child admission: {error}"
+                ));
+            }
+        }
+
+        {
+            let tree = self
+                .restored_trees
+                .entry(root_session_id.clone())
+                .or_insert_with(|| RestoredTreeState {
+                    operation_id: checkpoint.operation_id.clone(),
+                    pending: HashSet::new(),
+                    blocked: HashSet::new(),
+                });
+            if tree.operation_id != checkpoint.operation_id || tree.pending.contains(&id) {
+                reject!("restore tree has a conflicting or duplicate adoption".into());
+            }
+            tree.blocked.remove(&id);
+            tree.pending.insert(id.clone());
+        }
+
+        let cancellation = request.cancel_token.clone();
+        let runner_request = request.clone();
+        self.pending.insert(
+            id.clone(),
+            PendingChild {
+                request,
+                immediate_parent_session_id: security_parent_session_id.to_owned(),
+                started_at: std::time::Instant::now(),
+                cancellation: cancellation.clone(),
+                spawn_reply: None,
+                foreground_deadline: None,
+                handle_only: true,
+                explicitly_killed: false,
+                restore: Some(checkpoint.clone()),
+                adoption_reply: Some(respond_to),
+            },
+        );
+        self.running_count_changed();
+        let reporter = ChildReporter {
+            subagent_id: id.clone(),
+            tx: self.internal_tx.clone(),
+        };
+        self.runs.push(TaggedFuture {
+            subagent_id: id,
+            future: Box::pin(
+                std::panic::AssertUnwindSafe(self.runner.run(ChildRunRequest {
+                    request: runner_request,
+                    security_parent_session_id: security_parent_session_id.to_owned(),
+                    security_parent,
+                    cancellation,
+                    restore: Some(checkpoint),
+                    reporter,
+                }))
+                .catch_unwind(),
+            ),
+        });
+    }
+
+    fn release_restored_tree(
+        &mut self,
+        root_session_id: &str,
+        operation_id: &str,
+    ) -> Result<(), String> {
+        if root_session_id.trim().is_empty()
+            || operation_id.trim().is_empty()
+            || self.frozen_roots.get(root_session_id).map(String::as_str) != Some(operation_id)
+        {
+            return Err("restore tree owner is unknown or conflicting".into());
+        }
+        if let Some(tree) = self.restored_trees.get(root_session_id) {
+            if tree.operation_id != operation_id {
+                return Err("restore tree operation is conflicting".into());
+            }
+            if !tree.pending.is_empty() || !tree.blocked.is_empty() {
+                return Err("restore tree still has pending or blocked adoptions".into());
+            }
+        }
+        if self.pending.values().any(|child| {
+            child.request.parent_session_id == root_session_id
+                && child
+                    .restore
+                    .as_ref()
+                    .is_some_and(|checkpoint| checkpoint.operation_id == operation_id)
+        }) || self.suspended.values().any(|child| {
+            child.request.parent_session_id == root_session_id
+                && child.checkpoint.operation_id == operation_id
+        }) {
+            return Err("restore tree still has pending or suspended children".into());
+        }
+        self.frozen_roots.remove(root_session_id);
+        self.restored_trees.remove(root_session_id);
+        Ok(())
+    }
+
+    fn restore_checkpoint(&self, id: &str) -> Option<ChildCheckpoint> {
+        self.pending
+            .get(id)
+            .and_then(|child| child.restore.clone())
+            .or_else(|| self.active.get(id).and_then(|child| child.restore.clone()))
+    }
+
+    fn pending_restore_checkpoint(&self, id: &str) -> Option<ChildCheckpoint> {
+        self.pending.get(id).and_then(|child| child.restore.clone())
+    }
+
+    fn blocked_restore_checkpoint(&self, id: &str) -> Option<ChildCheckpoint> {
+        let child = self.active.get(id)?;
+        let checkpoint = child.restore.as_ref()?;
+        self.restored_trees
+            .get(&child.request.parent_session_id)
+            .filter(|tree| {
+                tree.operation_id == checkpoint.operation_id && tree.blocked.contains(id)
+            })
+            .map(|_| checkpoint.clone())
+    }
+
+    fn block_restored_child(
+        &mut self,
+        id: &str,
+        reported_checkpoint: ChildCheckpoint,
+        mut error: String,
+        mut completion_data: R::CompletionData,
+    ) {
+        let Some(checkpoint) = self.restore_checkpoint(id) else {
+            self.finish_child(
+                id,
+                ChildRunOutput {
+                    result: SubagentResult {
+                        success: false,
+                        error: Some(format!(
+                            "runner reported a blocked restore without a pending adoption: {error}"
+                        )),
+                        subagent_id: id.to_owned(),
+                        child_session_id: id.to_owned(),
+                        ..Default::default()
+                    },
+                    completion_data,
+                },
+            );
+            return;
+        };
+        if reported_checkpoint != checkpoint {
+            error = format!("runner checkpoint did not match the adopted checkpoint: {error}");
+        }
+
+        let control = self.active.get(id).map(|child| &child.control);
+        self.runner
+            .retain_execution_owner(&mut completion_data, control);
+        let (request, immediate_parent_session_id, timing, spawn_reply, handle_only) =
+            if let Some(child) = self.active.remove(id) {
+                let timing = super::coordinator_state::running_seed(&child);
+                (
+                    child.request,
+                    child.immediate_parent_session_id,
+                    (timing.started_at_epoch_ms, timing.duration_ms),
+                    child.spawn_reply,
+                    child.handle_only,
+                )
+            } else if let Some(child) = self.pending.remove(id) {
+                let timing = super::coordinator_state::pending_snapshot(&child);
+                if let Some(reply) = child.adoption_reply {
+                    let _ = reply.send(Err(error.clone()));
+                }
+                (
+                    child.request,
+                    child.immediate_parent_session_id,
+                    (timing.started_at_epoch_ms, timing.duration_ms),
+                    child.spawn_reply,
+                    child.handle_only,
+                )
+            } else {
+                return;
+            };
+        let mut waiters = self.waiters.remove(id).unwrap_or_default();
+        if let Some(mut suspended) = self.suspended.remove(id) {
+            waiters.extend(suspended.waiters);
+            suspended.waiters = waiters;
+            if suspended.spawn_reply.is_none() {
+                suspended.spawn_reply = spawn_reply;
+            }
+            suspended.handle_only = handle_only;
+            if self.runner.has_physical_retirement_owner(&completion_data) {
+                suspended._completion_data = completion_data;
+            }
+            self.suspended.insert(id.to_owned(), suspended);
+        } else {
+            self.suspended.insert(
+                id.to_owned(),
+                SuspendedChild {
+                    request,
+                    immediate_parent_session_id,
+                    checkpoint: checkpoint.clone(),
+                    started_at_epoch_ms: timing.0,
+                    duration_ms: timing.1,
+                    spawn_reply,
+                    handle_only,
+                    waiters,
+                    _completion_data: completion_data,
+                },
+            );
+        }
+        let root = self
+            .suspended
+            .get(id)
+            .map(|child| child.request.parent_session_id.clone())
+            .unwrap_or_default();
+        let tree = self
+            .restored_trees
+            .entry(root)
+            .or_insert_with(|| RestoredTreeState {
+                operation_id: checkpoint.operation_id.clone(),
+                pending: HashSet::new(),
+                blocked: HashSet::new(),
+            });
+        tree.pending.remove(id);
+        tree.blocked.insert(id.to_owned());
+        self.running_count_changed();
+        tracing::warn!(
+            subagent_id = id,
+            error,
+            "suspended child restore remains blocked"
+        );
+    }
+
+    fn sweep_retiring(&mut self) {
+        let ids: Vec<String> = self.retiring.keys().cloned().collect();
+        for id in ids {
+            let retired = self.retiring.get_mut(&id).and_then(|child| {
+                self.runner
+                    .suspension_retired(&mut child.completion_data)
+                    .ok()
+            });
+            if retired == Some(true) {
+                self.retiring.remove(&id);
+            }
+        }
+    }
+
     fn interaction_route(
         &self,
         request: &super::interaction::AgentInteractionRequest,
@@ -752,6 +1326,12 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 }),
             (AgentInteraction::Send { reply_to: None, .. }, Some(id)) => {
                 self.send_to_child_route(&request.source_session_id, id)
+            }
+            (AgentInteraction::Replan { .. }, Some(id)) => {
+                self.send_to_child_route(&request.source_session_id, id)
+            }
+            (AgentInteraction::ReplanHandled { reply_to, .. }, None) => {
+                self.reply_route(&request.source_session_id, reply_to)
             }
             (AgentInteraction::Ask { .. }, None) => self
                 .active
@@ -865,7 +1445,9 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         use super::interaction::AgentInteraction;
 
         let result = match request.action {
-            AgentInteraction::Send { .. } => Ok(
+            AgentInteraction::Send { .. }
+            | AgentInteraction::Replan { .. }
+            | AgentInteraction::ReplanHandled { .. } => Ok(
                 super::interaction::AgentInteractionOutput::message_rejected(
                     request.id, code, message,
                 ),
@@ -906,25 +1488,83 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     let _ = respond_to.send(false);
                     return;
                 }
-                self.active.insert(
-                    subagent_id,
-                    ActiveChild {
-                        execution_outcome: None,
-                        request: pending.request,
-                        immediate_parent_session_id: pending.immediate_parent_session_id,
-                        started_at: pending.started_at,
-                        cancellation: pending.cancellation,
-                        spawn_reply: pending.spawn_reply,
-                        foreground_deadline: pending.foreground_deadline,
-                        handle_only: pending.handle_only,
-                        definition_background: child.definition_background,
-                        explicitly_killed: pending.explicitly_killed,
-                        child_session_id: child.child_session_id,
-                        resumed_from: child.resumed_from,
-                        control: child.control,
-                    },
-                );
-                let _ = respond_to.send(true);
+                let admission_open = !self
+                    .frozen_roots
+                    .contains_key(&pending.request.parent_session_id);
+                let restore = pending.restore.clone();
+                let restore_requested = restore.is_some();
+                let mut active = ActiveChild {
+                    execution_outcome: None,
+                    request: pending.request,
+                    immediate_parent_session_id: pending.immediate_parent_session_id,
+                    started_at: pending.started_at,
+                    cancellation: pending.cancellation,
+                    spawn_reply: pending.spawn_reply,
+                    foreground_deadline: pending.foreground_deadline,
+                    handle_only: pending.handle_only,
+                    definition_background: child.definition_background,
+                    explicitly_killed: pending.explicitly_killed,
+                    child_session_id: child.child_session_id,
+                    resumed_from: child.resumed_from,
+                    restore: restore.clone(),
+                    control: child.control,
+                };
+                let admitted = if admission_open && restore.is_none() {
+                    true
+                } else {
+                    active.control.freeze_admission().is_ok()
+                };
+                let restore_tree_matches = restore.as_ref().is_some_and(|checkpoint| {
+                    self.restored_trees
+                        .get(&active.request.parent_session_id)
+                        .is_some_and(|tree| {
+                            tree.operation_id == checkpoint.operation_id
+                                && tree.pending.contains(&subagent_id)
+                        })
+                });
+                let restore_started = admitted && (restore.is_none() || restore_tree_matches);
+                if restore_started && restore.is_some() {
+                    if let Some(suspended) = self.suspended.remove(&subagent_id) {
+                        self.waiters
+                            .entry(subagent_id.clone())
+                            .or_default()
+                            .extend(suspended.waiters);
+                        active.spawn_reply = suspended.spawn_reply;
+                        active.handle_only = suspended.handle_only;
+                    }
+                }
+                self.active.insert(subagent_id.clone(), active);
+                if let Some(checkpoint) = restore {
+                    let root = self.active[&subagent_id].request.parent_session_id.clone();
+                    let tree =
+                        self.restored_trees
+                            .entry(root)
+                            .or_insert_with(|| RestoredTreeState {
+                                operation_id: checkpoint.operation_id.clone(),
+                                pending: HashSet::new(),
+                                blocked: HashSet::new(),
+                            });
+                    tree.pending.remove(&subagent_id);
+                    if !restore_started || tree.operation_id != checkpoint.operation_id {
+                        tree.blocked.insert(subagent_id.clone());
+                    }
+                    if let Some(respond_to) = pending.adoption_reply {
+                        let result =
+                            if restore_started && tree.operation_id == checkpoint.operation_id {
+                                Ok(())
+                            } else {
+                                Err(
+                                "restored child was not installed with matching frozen admission"
+                                    .into(),
+                            )
+                            };
+                        let _ = respond_to.send(result);
+                    }
+                }
+                // On freeze failure, retain the control handle in active state
+                // and reject startup acknowledgement so the adapter tears down
+                // its half-initialized runtime without opening admission.
+                let _ = respond_to.send(admitted && (!restore_requested || restore_started));
             }
             InternalEvent::SourceIsActive {
                 source_id,
@@ -950,6 +1590,21 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     }
 
     fn finish_child(&mut self, id: &str, mut output: ChildRunOutput<R::CompletionData>) {
+        if let Some(checkpoint) = self
+            .pending_restore_checkpoint(id)
+            .or_else(|| self.blocked_restore_checkpoint(id))
+        {
+            let error = output
+                .result
+                .error
+                .clone()
+                .unwrap_or_else(|| "adopted child finished before confirming startup".into());
+            self.block_restored_child(id, checkpoint, error, output.completion_data);
+            return;
+        }
+        let control = self.active.get(id).map(|child| &child.control);
+        self.runner
+            .retain_execution_owner(&mut output.completion_data, control);
         let record = if let Some(child) = self.active.remove(id) {
             ChildRecord::Active(child)
         } else if let Some(child) = self.pending.remove(id) {
@@ -981,6 +1636,19 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
 
         let finalization_pending = !self.runner.terminal_committed(&output.completion_data);
         output.result.finalization_pending = finalization_pending;
+
+        if self
+            .runner
+            .has_physical_retirement_owner(&output.completion_data)
+        {
+            self.retiring.insert(
+                id.to_owned(),
+                RetiringChild {
+                    request: request.clone(),
+                    completion_data: output.completion_data.clone(),
+                },
+            );
+        }
 
         if finalization_pending {
             let held_bytes: usize = self
@@ -1074,6 +1742,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             completion_data: output.completion_data,
             disposition,
         });
+        self.sweep_retiring();
         self.resolve_goal_cancel_waiters(id);
         self.resolve_session_cancel_waiters(id);
         if let Some(run_id) = workflow_run_id {
@@ -1116,14 +1785,23 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     fn finish_reconciliation(
         &mut self,
         id: &str,
-        output: std::thread::Result<ChildRunOutput<R::CompletionData>>,
+        output: std::thread::Result<ChildRunOutcome<R::CompletionData>>,
     ) {
         let Some(pending) = self.finalizations.get_mut(id) else {
             return;
         };
         pending.in_flight = false;
         let next_cycle_deadline = pending.next_cycle_deadline.take();
-        let Ok(mut output) = output else {
+        let Ok(output) = output else {
+            if let Some(deadline) = next_cycle_deadline {
+                pending.attempts = 0;
+                pending.cycle_deadline = deadline;
+            } else {
+                pending.attempts = 3;
+            }
+            return;
+        };
+        let ChildRunOutcome::Finished(mut output) = output else {
             if let Some(deadline) = next_cycle_deadline {
                 pending.attempts = 0;
                 pending.cycle_deadline = deadline;
@@ -1555,6 +2233,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     .flatten()
                     .map(|waiter| waiter.deadline),
             )
+            .chain(
+                self.suspended
+                    .values()
+                    .flat_map(|child| child.waiters.iter().map(|waiter| waiter.deadline)),
+            )
             .min()
     }
 
@@ -1564,6 +2247,11 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
         }
         for child in self.active.values_mut() {
             background_if_caller_gone(child);
+        }
+        for child in self.suspended.values_mut() {
+            if !child.handle_only && child.spawn_reply.as_ref().is_some_and(|tx| tx.is_closed()) {
+                child.handle_only = true;
+            }
         }
     }
 
@@ -1625,6 +2313,19 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 }
             }
         }
+        for child in self.suspended.values_mut() {
+            let (due, live): (Vec<_>, Vec<_>) = std::mem::take(&mut child.waiters)
+                .into_iter()
+                .partition(|waiter| waiter.deadline <= now);
+            child.waiters = live;
+            for waiter in due {
+                if !waiter.respond_to.is_closed() {
+                    let _ = waiter
+                        .respond_to
+                        .send(Ok(Some(query::suspended_snapshot(child))));
+                }
+            }
+        }
     }
 
     fn running_count_changed(&self) {
@@ -1640,13 +2341,136 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
 
     fn cancel_all_children(&self) {
         for child in self.active.values() {
+            if self
+                .frozen_roots
+                .contains_key(&child.request.parent_session_id)
+            {
+                continue;
+            }
             child.cancellation.cancel();
             child.control.cancel();
         }
         for child in self.pending.values() {
+            if self
+                .frozen_roots
+                .contains_key(&child.request.parent_session_id)
+            {
+                continue;
+            }
             child.cancellation.cancel();
         }
     }
+
+    fn suspend_child(
+        &mut self,
+        id: &str,
+        checkpoint: ChildCheckpoint,
+        mut completion_data: R::CompletionData,
+    ) {
+        let control = self.active.get(id).map(|child| &child.control);
+        self.runner
+            .retain_execution_owner(&mut completion_data, control);
+        let root = self
+            .active
+            .get(id)
+            .map(|child| child.request.parent_session_id.clone())
+            .or_else(|| {
+                self.pending
+                    .get(id)
+                    .map(|child| child.request.parent_session_id.clone())
+            });
+        let Some(root) = root else { return };
+        let frozen_operation = self.frozen_roots.get(&root).map(String::as_str);
+        if self.active.get(id).is_some_and(|child| {
+            suspension_matches(
+                Some(root.as_str()),
+                frozen_operation,
+                &child.request.parent_session_id,
+                &child.child_session_id,
+                &checkpoint,
+            )
+        }) {
+            let Some(child) = self.active.remove(id) else {
+                return;
+            };
+            let timing = super::coordinator_state::running_seed(&child);
+            self.suspended.insert(
+                id.to_owned(),
+                SuspendedChild {
+                    request: child.request,
+                    immediate_parent_session_id: child.immediate_parent_session_id,
+                    checkpoint,
+                    started_at_epoch_ms: timing.started_at_epoch_ms,
+                    duration_ms: timing.duration_ms,
+                    spawn_reply: child.spawn_reply,
+                    handle_only: child.handle_only,
+                    waiters: self.waiters.remove(id).unwrap_or_default(),
+                    _completion_data: completion_data,
+                },
+            );
+            self.running_count_changed();
+            return;
+        }
+
+        // Before Started, the task id is the provisional child-session identity
+        // exposed by the frozen inventory. Keep the pending owner if it differs.
+        if self.pending.get(id).is_some_and(|child| {
+            suspension_matches(
+                Some(root.as_str()),
+                frozen_operation,
+                &child.request.parent_session_id,
+                &child.request.id,
+                &checkpoint,
+            )
+        }) {
+            let Some(child) = self.pending.remove(id) else {
+                return;
+            };
+            let timing = super::coordinator_state::pending_snapshot(&child);
+            self.suspended.insert(
+                id.to_owned(),
+                SuspendedChild {
+                    request: child.request,
+                    immediate_parent_session_id: child.immediate_parent_session_id,
+                    checkpoint,
+                    started_at_epoch_ms: timing.started_at_epoch_ms,
+                    duration_ms: timing.duration_ms,
+                    spawn_reply: child.spawn_reply,
+                    handle_only: child.handle_only,
+                    waiters: self.waiters.remove(id).unwrap_or_default(),
+                    _completion_data: completion_data,
+                },
+            );
+            self.running_count_changed();
+        }
+    }
+}
+
+fn suspension_matches(
+    frozen_root_session_id: Option<&str>,
+    frozen_operation: Option<&str>,
+    child_root_session_id: &str,
+    expected_child_session_id: &str,
+    checkpoint: &ChildCheckpoint,
+) -> bool {
+    frozen_root_session_id == Some(child_root_session_id)
+        && frozen_operation == Some(checkpoint.operation_id.as_str())
+        && expected_child_session_id == checkpoint.session_id.as_str()
+}
+
+fn adoption_request_matches(existing: &SubagentRequest, adopted: &SubagentRequest) -> bool {
+    existing.id == adopted.id
+        && existing.origin_tool_call_id == adopted.origin_tool_call_id
+        && existing.prompt == adopted.prompt
+        && existing.description == adopted.description
+        && existing.subagent_type == adopted.subagent_type
+        && existing.parent_session_id == adopted.parent_session_id
+        && existing.parent_step_id == adopted.parent_step_id
+        && existing.parent_prompt_id == adopted.parent_prompt_id
+        && existing.resume_from == adopted.resume_from
+        && existing.cwd == adopted.cwd
+        && existing.execution_recipe() == adopted.execution_recipe()
+        && existing.surface_completion == adopted.surface_completion
 }
 
 fn belongs_to_session(

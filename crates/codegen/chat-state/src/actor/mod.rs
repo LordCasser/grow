@@ -366,6 +366,84 @@ impl ChatStateActor {
     /// Dispatch a command to the appropriate mutation or query handler.
     async fn handle_command(&mut self, cmd: ChatStateCommand) {
         match cmd {
+            ChatStateCommand::CheckpointRuntime {
+                operation_id,
+                runtime_source_hash,
+                turn,
+                step,
+                deadline,
+                reply,
+            } => {
+                let frontier = self.state.timeline.events().last().map(|event| event.seq);
+                let result = match frontier {
+                    Some(frontier) => {
+                        let kind = TimelineEventKind::Runtime(
+                            crate::session_runtime::SessionRuntimeEvent::Checkpoint {
+                                operation_id,
+                                checkpoint: crate::session_runtime::RuntimeCheckpoint {
+                                    frontier,
+                                    runtime_source_hash,
+                                    turn,
+                                    step,
+                                },
+                            },
+                        );
+                        match self.state.timeline.prepare(kind) {
+                            Ok(event) => {
+                                self.commit_timeline_event_before(event, Some(deadline))
+                                    .await
+                            }
+                            Err(error) => Err(crate::commands::TimelineWriteError::Invalid(error)),
+                        }
+                    }
+                    None => Err(crate::commands::TimelineWriteError::AcknowledgementLost),
+                };
+                let _ = reply.send(result);
+            }
+            ChatStateCommand::SettleHooksForSuspension {
+                operation_id,
+                deadline,
+                reply,
+            } => {
+                let runtime = self.state.timeline.runtime_lifecycle();
+                let result = if runtime.phase != crate::session_runtime::RuntimePhase::Suspending
+                    || runtime.operation_id.as_deref() != Some(operation_id.as_str())
+                {
+                    Err(crate::commands::TimelineWriteError::Invalid(
+                        crate::TimelineError::InvalidRuntime(
+                            "hook settlement does not belong to the active suspension".into(),
+                        ),
+                    ))
+                } else {
+                    let mut candidate = self.state.timeline.clone();
+                    match candidate.settle_interrupted_hooks() {
+                        Err(error) => Err(crate::commands::TimelineWriteError::Invalid(error)),
+                        Ok(events) => {
+                            let mut committed = Vec::with_capacity(events.len());
+                            let mut failure = None;
+                            for event in events {
+                                if tokio::time::Instant::now() >= deadline {
+                                    failure =
+                                        Some(crate::commands::TimelineWriteError::DeadlineExceeded);
+                                    break;
+                                }
+                                match self
+                                    .commit_timeline_event_before(event, Some(deadline))
+                                    .await
+                                {
+                                    Ok(event) => committed.push(event),
+                                    Err(error) => {
+                                        failure = Some(error);
+                                        break;
+                                    }
+                                }
+                            }
+                            failure.map_or(Ok(committed), Err)
+                        }
+                    }
+                };
+                let _ = reply.send(result);
+            }
             // ═══ Mutations ═══
             ChatStateCommand::PushUserMessage { item } => {
                 self.push_user_message(item).await;
@@ -500,6 +578,29 @@ impl ChatStateActor {
                 };
                 let _ = reply.send(result);
             }
+            ChatStateCommand::ConsumeInputGroupConditionally {
+                input_ids,
+                turn,
+                item,
+                display_echo,
+                skill_loads,
+                expected_surface_revision,
+                max_context_tokens,
+                reply,
+            } => {
+                let result = self
+                    .consume_input_group_conditionally(
+                        input_ids,
+                        turn,
+                        item,
+                        display_echo,
+                        skill_loads,
+                        expected_surface_revision,
+                        max_context_tokens,
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
             ChatStateCommand::RecoverInterruptedDurably { reply } => {
                 let prepared = {
                     let mut candidate = self.state.timeline.clone();
@@ -582,6 +683,31 @@ impl ChatStateActor {
                         max_result_tokens,
                     )
                     .await;
+                let _ = reply.send(result);
+            }
+            ChatStateCommand::PublishModelSkillConditionally {
+                item,
+                skill,
+                rejection_item,
+                expected_surface_revision,
+                max_context_tokens,
+                max_result_tokens,
+                reply,
+            } => {
+                let result = self
+                    .publish_model_skill_conditionally(
+                        item,
+                        skill,
+                        rejection_item,
+                        expected_surface_revision,
+                        max_context_tokens,
+                        max_result_tokens,
+                    )
+                    .await;
+                let _ = reply.send(result);
+            }
+            ChatStateCommand::SettleUnconsumedSkillLoads { reply } => {
+                let result = self.settle_unconsumed_skill_loads().await;
                 let _ = reply.send(result);
             }
             ChatStateCommand::RecordProviderContextAnchor {
@@ -887,6 +1013,15 @@ impl ChatStateActor {
             }
             ChatStateCommand::GetTimelineEvents { reply } => {
                 let _ = reply.send(self.state.timeline.events().to_vec());
+            }
+            ChatStateCommand::GetPlanningState { reply } => {
+                let _ = reply.send(self.state.timeline.planning_snapshot().cloned());
+            }
+            ChatStateCommand::GetConsumedAgentMessages { ids, reply } => {
+                let _ = reply.send(self.state.timeline.consumed_agent_messages(&ids));
+            }
+            ChatStateCommand::GetRuntimeState { reply } => {
+                let _ = reply.send(self.state.timeline.runtime_lifecycle().clone());
             }
             ChatStateCommand::GetAdmittedResponse { identity, reply } => {
                 let _ = reply.send(self.state.timeline.admitted_response(&identity));

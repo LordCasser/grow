@@ -79,6 +79,7 @@ impl SessionActor {
                 expected_turn_id: expected_turn_id.to_owned(),
             },
             prompt_blocks: blocks,
+            skill_invocations: Vec::new(),
             client_identifier: None,
             screen_mode: None,
             verbatim: false,
@@ -351,7 +352,7 @@ impl SessionActor {
         notify_pager: bool,
         images: &[acp::ImageContent],
     ) {
-        self.publish_synthetic_user_message(text, item, notify_pager, images, true)
+        self.publish_synthetic_user_message(text, item, notify_pager, images, true, None)
             .await;
     }
 
@@ -362,6 +363,7 @@ impl SessionActor {
         notify_pager: bool,
         images: &[acp::ImageContent],
         append_to_chat: bool,
+        display_echo: Option<&chat_state::UserDisplayEcho>,
     ) {
         let model_id = self.current_catalog_model_id();
         let permission_evidence = match &item {
@@ -376,6 +378,16 @@ impl SessionActor {
             user_chunk_meta.insert(
                 "permissionEvidence".into(),
                 serde_json::to_value(evidence).expect("permission evidence serializes"),
+            );
+        }
+        if let Some(display_echo) = display_echo {
+            user_chunk_meta.insert(
+                "messageId".into(),
+                serde_json::json!(display_echo.message_id),
+            );
+            user_chunk_meta.insert(
+                "promptIndex".into(),
+                serde_json::json!(display_echo.prompt_index),
             );
         }
         let user_chunk_meta = Some(user_chunk_meta);
@@ -420,50 +432,6 @@ impl SessionActor {
         }
     }
 
-    /// Expand skill slash references in interjection text.
-    ///
-    /// Interjections bypass turn-start slash resolution
-    /// (`slash_commands::resolve`), so without this a queued `/skill` row
-    /// force-sent mid-turn — or a typed `/skill` interjection — reaches the
-    /// model as a bare, unexpanded slash command. Returns `None` when the text
-    /// references no known skill.
-    async fn interjection_skill_information(&self, text: &str) -> Option<String> {
-        // Mirror turn-start gating (`parse_slash_prefix`): only a leading
-        // slash invokes skills — "don't run /commit yet" is steering text,
-        // not an invocation.
-        if !text.trim_start().starts_with('/') {
-            return None;
-        }
-        let slash_skills = self.slash_skills_for_resolve().await;
-        // Availability without `command_availability()`'s goal-reconciliation
-        // side effects — this runs mid-turn inside the drain.
-        let tool_names = self.registered_tool_names().await;
-        let has_workflow_runs = !self.workflow_tracker().await.lock().list().is_empty();
-        let availability = self.build_command_availability(&tool_names, has_workflow_runs);
-        let parsed = slash_commands::parse_skill_references(text, &slash_skills, availability)?;
-        // Deliberately lighter diagnostics than turn start: no `skill.activated`
-        // span, `PluginUsed`, or `active_skill` stamp — those attribute the
-        // turn, which this skill did not start. `SkillDispatched` still
-        // carries `plugin_source`, so dispatch counts stay complete.
-        for sk in &parsed {
-            ::diagnostics::session_ctx::log_event(::diagnostics::events::SlashCommandUsed {
-                command: sk.name.clone(),
-                args_provided: !sk.args.is_empty(),
-            });
-            ::diagnostics::session_ctx::log_event(::diagnostics::events::SkillDispatched {
-                skill_name: sk.name.clone(),
-                plugin_source: sk.plugin_name.clone(),
-            });
-        }
-        slash_commands::build_skill_information_for_refs(
-            &parsed,
-            &slash_skills,
-            &self.session_id_string(),
-        )
-        .await
-        .information
-    }
-
     /// Drain all pending interjections, wrap them, and inject each as a
     /// [`ConversationItem::interjection`] tagged
     /// `SyntheticReason::Interjection`) — never appended to tool results, so
@@ -473,9 +441,11 @@ impl SessionActor {
     /// Returns `true` if any interjections were drained (caller may want to
     /// `continue` the turn loop so the model sees them on the next iteration).
     pub(super) async fn drain_pending_interjections(&self) -> bool {
-        // Manual drain (not `drain_formatted`): skill parsing needs the raw
-        // text — parsed post-wrap, the envelope's closing `</user_query>` tag
-        // would pollute the trailing skill's args.
+        if self.events.has_active_tool() {
+            return false;
+        }
+        // Manual drain keeps each entry paired with its admitted input
+        // identity while the shared Runtime loader reads immutable snapshots.
         let entries = self.pending_interjections.drain_all();
         if entries.is_empty() {
             return false;
@@ -489,39 +459,35 @@ impl SessionActor {
         &self,
         entries: Vec<PendingInterjection<acp::ImageContent>>,
     ) {
+        if self.events.has_active_tool() {
+            for entry in entries.into_iter().rev() {
+                self.pending_interjections.push(entry);
+            }
+            return;
+        }
         for PendingInterjection {
             text,
             attachments,
             requeue,
         } in entries
         {
+            let retry = PendingInterjection {
+                text: text.clone(),
+                attachments: attachments.clone(),
+                requeue: requeue.clone(),
+            };
             // Sanitizer drops `[Image #N: <path>]` → `[Image #N]` before the
             // text reaches the model, covering legacy-client raw text AND the
             // queue-interject harvest. Wrapping and truncation stay in the
             // shared crate (`format_interjection`).
             let sanitized =
                 crate::session::placeholder_images::strip_paths_from_image_placeholders(text);
-            let skill_information = self.interjection_skill_information(&sanitized).await;
             let display_text = sanitized.clone();
             let mut wrapped = format_interjection(sanitized);
             let images = self
                 .prepare_interjection_images(&mut wrapped, attachments)
                 .await;
-            // Model-visible text: <skill_information> follows the wrapped
-            // <user_query> — same order as turn-start prompt assembly, and
-            // appended after the image pipeline so the template-specific
-            // transcription rewrite cannot mangle the envelope. The
-            // persisted user chunk stays envelope-free so session replay
-            // renders the compact interjection, not the SKILL.md body
-            // (mirrors turn-start skills, which replay via `displayText`).
-            let model_text = match &skill_information {
-                Some(skill_information) => {
-                    tracing::info!("expanded skill references in mid-turn interjection");
-                    format!("{wrapped}\n{skill_information}")
-                }
-                None => wrapped.clone(),
-            };
-            let mut item = ConversationItem::interjection(model_text, display_text.clone());
+            let mut item = ConversationItem::interjection(wrapped.clone(), display_text.clone());
             for img in &images {
                 item.add_image(pick_user_image_url(img));
             }
@@ -529,25 +495,137 @@ impl SessionActor {
                 .as_ref()
                 .map(|requeue| requeue.input_ids.as_slice())
                 .unwrap_or_default();
+            let mut injected = false;
             if input_ids.is_empty() {
                 self.inject_synthetic_user_message(&display_text, item, false, &images)
                     .await;
+                injected = true;
             } else {
                 let Some(turn) = self.events.current_turn() else {
                     tracing::error!("accepted steer lost its durable Turn before consumption");
                     continue;
                 };
-                if let Err(error) = self
-                    .consume_steer_inputs(input_ids.to_vec(), turn, item.clone())
-                    .await
-                {
-                    tracing::error!(%error, ?input_ids, "steer consumption was not durable");
+
+                if self.events.has_active_tool() {
+                    self.pending_interjections.push(retry);
                     continue;
                 }
-                self.publish_synthetic_user_message(&display_text, item, false, &images, false)
+
+                let prompt_index = self.chat_state_handle.current_prompt_index().await;
+                let Some(prompt_index) = prompt_index else {
+                    self.fail_steer_skill_load(
+                        input_ids,
+                        turn,
+                        "The current prompt identity was unavailable for skill preparation.",
+                    )
                     .await;
+                    continue;
+                };
+                item.set_prompt_index(prompt_index);
+                let group = match self.prepare_user_skill_loads(input_ids, prompt_index).await {
+                    Ok(group) => group,
+                    Err(error) => {
+                        self.fail_steer_skill_load(input_ids, turn, &error.to_string())
+                            .await;
+                        continue;
+                    }
+                };
+                let mut display_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
+                    display_text.clone(),
+                ))];
+                display_blocks.extend(images.iter().cloned().map(acp::ContentBlock::Image));
+                let input_identity = serde_json::to_vec(input_ids)
+                    .expect("admitted input identities serialize to JSON");
+                let message_id = format!("steer-{}", blake3::hash(&input_identity).to_hex());
+                let display_echo =
+                    super::user_display_echo(message_id, prompt_index, &display_blocks);
+
+                let publication = if group.items.is_empty() {
+                    self.consume_steer_inputs(
+                        input_ids.to_vec(),
+                        turn,
+                        item.clone(),
+                        Some(display_echo.clone()),
+                    )
+                    .await
+                    .map(|_| ())
+                    .map_err(|error| (false, error.to_string()))
+                } else {
+                    let revision = self.chat_state_handle.get_surface_revision().await;
+                    let Some(revision) = revision else {
+                        let _ = self.finish_user_skill_loads(&group, false).await;
+                        self.fail_steer_skill_load(
+                            input_ids,
+                            turn,
+                            "The conversation surface revision was unavailable.",
+                        )
+                        .await;
+                        continue;
+                    };
+                    let window = self
+                        .chat_state_handle
+                        .get_sampling_config()
+                        .await
+                        .map(|config| config.context_window.get())
+                        .unwrap_or(0);
+                    match self
+                        .chat_state_handle
+                        .consume_input_group_conditionally(
+                            input_ids.to_vec(),
+                            turn,
+                            item.clone(),
+                            Some(display_echo.clone()),
+                            group.items.clone(),
+                            revision,
+                            super::context_recall::context_recall_max_context_tokens(window),
+                        )
+                        .await
+                    {
+                        Ok(chat_state::ConditionalToolResultOutcome::Accepted) => Ok(()),
+                        Ok(outcome) => Err((
+                            true,
+                            format!("skill group publication was rejected: {outcome:?}"),
+                        )),
+                        Err(error) => {
+                            Err((false, format!("skill group publication failed: {error}")))
+                        }
+                    }
+                };
+
+                match publication {
+                    Ok(()) => {
+                        if !group.items.is_empty() {
+                            if let Err(error) = self.finish_user_skill_loads(&group, true).await {
+                                tracing::error!(%error, ?input_ids, "published steer skill loads could not be finalized");
+                                continue;
+                            }
+                        }
+                        self.publish_synthetic_user_message(
+                            &display_text,
+                            item,
+                            false,
+                            &images,
+                            false,
+                            Some(&display_echo),
+                        )
+                        .await;
+                        injected = true;
+                    }
+                    Err((rejected, error)) => {
+                        if rejected {
+                            let _ = self.finish_user_skill_loads(&group, false).await;
+                            self.fail_steer_skill_load(input_ids, turn, &error).await;
+                        } else {
+                            tracing::error!(%error, ?input_ids, "steer consumption was not durable");
+                        }
+                    }
+                }
             }
-            tracing::info!("Injected mid-turn interjection as standalone synthetic user message");
+            if injected {
+                tracing::info!(
+                    "Injected mid-turn interjection as standalone synthetic user message"
+                );
+            }
         }
         // An interjection never cancels the turn, so it leaves no marker on the
         // next user turn (that field is reserved for fatal aborts). The
@@ -555,12 +633,42 @@ impl SessionActor {
         // `Event::Interjected` (carrying the shared `redirect_kind`).
     }
 
+    async fn fail_steer_skill_load(
+        &self,
+        input_ids: &[String],
+        turn: chat_state::TurnId,
+        error: &str,
+    ) {
+        let settlement = self
+            .complete_unmodeled_fifo_inputs(input_ids.to_vec(), turn)
+            .await
+            .map_err(|settle_error| {
+                tracing::error!(%settle_error, ?input_ids, "failed steer could not be settled");
+                settle_error
+            });
+        let details = settlement
+            .err()
+            .map(|settle_error| format!("{error}\nInput settlement also failed: {settle_error}"))
+            .unwrap_or_else(|| error.to_string());
+        if let Err(notice_error) = self.persist_ui_notice(crate::extensions::notification::UiNotice {
+            correlation_id: input_ids.join(","),
+            category: crate::extensions::notification::UiNoticeCategory::Lifecycle,
+            subject: Some("steering skill".into()),
+            description: None,
+            message: "Your steering message was not applied because its requested skill could not be loaded. The current work continues.".into(),
+            tone: crate::extensions::notification::UiNoticeTone::Error,
+            details: Some(details),
+        }).await {
+            tracing::warn!(%notice_error, ?input_ids, "failed to publish steer skill failure notice");
+        }
+    }
+
     /// Linearize final-response settlement against `SteerTurn` admission.
     /// Both sides hold `state`: an accepted steer is queued before this fence
     /// and injected into a successor step, or observes the closed gate and is
     /// rejected. It cannot be acknowledged behind the final drain.
     pub(super) async fn close_steering_and_drain(&self, prompt_id: &str) -> bool {
-        let _control_gate = self.step_control_gate.lock().await;
+        let control_gate = self.step_control_gate.lock().await;
         let entries = {
             let mut state = self.state.lock().await;
             let Some(task) = state.foreground.regular_mut() else {
@@ -570,8 +678,13 @@ impl SessionActor {
                 return false;
             }
             task.steering_open = false;
-            self.pending_interjections.drain_all()
+            if self.events.has_active_tool() {
+                Vec::new()
+            } else {
+                self.pending_interjections.drain_all()
+            }
         };
+        drop(control_gate);
         let had_interjections = !entries.is_empty();
         if had_interjections {
             self.inject_pending_interjections(entries).await;

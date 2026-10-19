@@ -1148,10 +1148,13 @@ mod tests {
                 chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
                     subagent_id: subagent_id.into(),
                     child_session_id: child_session_id.into(),
+                    origin_tool_call_id: None,
                     security_parent_session_id: "parent-session".into(),
+                    parent_step_id: None,
                     subagent_type: "general-purpose".into(),
                     description: "task".into(),
                     prompt: prompt.into(),
+                    execution_recipe: serde_json::json!({}),
                     context_source: chat_state::SubagentContextSource::New,
                     source_ref: None,
                     context_normalized: false,

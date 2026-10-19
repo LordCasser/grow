@@ -19,7 +19,9 @@ fn tool_call_ev() -> ToolCallEvent {
         tool_kind: Some("execute".into()),
         status: Some(acp::ToolCallStatus::InProgress),
         tool_name: "bash".into(),
+        is_skill: false,
         raw_input: json!({"command": "ls"}),
+        raw_output: None,
         content: json!([]),
         locations: json!([]),
     }

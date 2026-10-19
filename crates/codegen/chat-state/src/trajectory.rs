@@ -222,15 +222,18 @@ impl TrajectoryProjector {
                 );
                 1
             }
-            TimelineEventKind::Input(InputEvent::Consumed { .. }) => {
-                self.surface_rows.insert(
-                    SurfaceId {
-                        event: event.seq,
-                        item: 0,
-                    },
-                    row_index,
-                );
-                1
+            TimelineEventKind::Input(InputEvent::Consumed { skill_loads, .. }) => {
+                let item_count = skill_loads.len() + 1;
+                for item in 0..item_count {
+                    self.surface_rows.insert(
+                        SurfaceId {
+                            event: event.seq,
+                            item: item as u32,
+                        },
+                        row_index,
+                    );
+                }
+                item_count
             }
             TimelineEventKind::Notification(NotificationEvent::Consumed {
                 input: None, ..
@@ -257,6 +260,8 @@ impl TrajectoryProjector {
                 }
                 current
             }
+            // Cache-integrity metadata is auditable but never model-visible.
+            TimelineEventKind::DisplayProjectionExpected(_) => 0,
             _ => 0,
         };
         self.current_items_per_row.push(current_items);
@@ -549,22 +554,38 @@ fn row(
 
 fn event_relation_ids(kind: &TimelineEventKind, primary: Option<&str>) -> Vec<String> {
     if let TimelineEventKind::Messages(MessageEvent { items, .. }) = kind {
-        let agent_receipts = items
+        let runtime_ids = items
             .iter()
             .filter_map(|item| match item {
                 sampling_types::ConversationItem::AgentMessage(batch) => Some(
                     batch
                         .messages
                         .iter()
-                        .map(|message| message.receipt_id.clone()),
+                        .map(|message| message.receipt_id.clone())
+                        .collect::<Vec<_>>(),
                 ),
+                sampling_types::ConversationItem::SkillLoad(skill) => {
+                    Some(vec![skill.call_id.clone()])
+                }
                 _ => None,
             })
             .flatten()
             .collect::<Vec<_>>();
-        if !agent_receipts.is_empty() {
-            return agent_receipts;
+        if !runtime_ids.is_empty() {
+            return runtime_ids;
         }
+    }
+    if let TimelineEventKind::Input(InputEvent::Consumed {
+        input_ids,
+        skill_loads,
+        ..
+    }) = kind
+    {
+        return input_ids
+            .iter()
+            .cloned()
+            .chain(skill_loads.iter().map(|skill| skill.call_id.clone()))
+            .collect();
     }
     let ids = match kind {
         TimelineEventKind::Notification(NotificationEvent::Consumed {
@@ -588,6 +609,13 @@ fn dimensions(
     tool_scopes: &BTreeMap<String, (String, u32, String)>,
 ) -> (String, String, String, String) {
     match event {
+        TimelineEventKind::Runtime(_) => coordinates("meta", "lifecycle", "core", "runtime", state),
+        TimelineEventKind::Interaction(_) => {
+            coordinates("meta", "lifecycle", "user", "interaction", state)
+        }
+        TimelineEventKind::Planning(_) => {
+            coordinates("meta", "governance", "core", "planning", state)
+        }
         TimelineEventKind::Messages(message) => message_dimensions(message, tool_scopes),
         TimelineEventKind::Input(_) => coordinates("meta", "governance", "user", "input", state),
         TimelineEventKind::Hook(_) => coordinates("meta", "governance", "hook", "hook", state),
@@ -725,6 +753,13 @@ fn dimensions(
         TimelineEventKind::Notification(_) => {
             coordinates("meta", "governance", "core", "notification", state)
         }
+        TimelineEventKind::DisplayProjectionExpected(_) => coordinates(
+            "meta",
+            "governance",
+            "core",
+            "display.projection.expected",
+            state,
+        ),
     }
 }
 
@@ -764,6 +799,7 @@ fn message_dimensions(
         crate::MessageCause::IntegrityRepair
             | crate::MessageCause::Compaction
             | crate::MessageCause::ToolResultPrune
+            | crate::MessageCause::SkillLoadSettlement
             | crate::MessageCause::ContextRebuild
             | crate::MessageCause::Rewind
     );
@@ -772,6 +808,7 @@ fn message_dimensions(
             crate::MessageCause::Compaction => "replacement.summary",
             crate::MessageCause::Rewind => "context.branch",
             crate::MessageCause::ToolResultPrune => "replacement.range_ref",
+            crate::MessageCause::SkillLoadSettlement => "replacement.skill_settlement",
             crate::MessageCause::IntegrityRepair => "context.repair",
             crate::MessageCause::ContextRebuild => "context.rebuild",
             _ => unreachable!(),
@@ -799,6 +836,9 @@ fn message_dimensions(
         }
         Some(sampling_types::ConversationItem::AgentMessage(_)) => {
             ("agent.runtime", "runtime", "agent.message")
+        }
+        Some(sampling_types::ConversationItem::SkillLoad(_)) => {
+            ("skill.runtime", "runtime", "skill.load")
         }
         Some(sampling_types::ConversationItem::ToolResult(result)) => {
             let producer = tool_scopes
@@ -845,6 +885,74 @@ fn describe(
     String,
 ) {
     match kind {
+        TimelineEventKind::Interaction(event) => {
+            let (state, call_id, attempt_id) = match event {
+                crate::InteractionEvent::Opened {
+                    tool_call_id,
+                    attempt_id,
+                    ..
+                } => ("opened", tool_call_id, attempt_id),
+                crate::InteractionEvent::Resolved {
+                    tool_call_id,
+                    attempt_id,
+                    ..
+                } => ("resolved", tool_call_id, attempt_id),
+            };
+            tuple(
+                "interaction",
+                state,
+                "recorded",
+                None,
+                None,
+                Some(format!("{call_id}/{attempt_id}")),
+                None,
+                format!("human interaction {state}"),
+            )
+        }
+        TimelineEventKind::Planning(event) => tuple(
+            "planning",
+            "updated",
+            "recorded",
+            None,
+            None,
+            Some(event.plan.scope_id.clone()),
+            Some(event.plan.revision),
+            format!("{} local steps", event.plan.steps.len()),
+        ),
+        TimelineEventKind::Runtime(event) => {
+            use crate::session_runtime::SessionRuntimeEvent;
+            let (name, operation_id) = match event {
+                SessionRuntimeEvent::SuspendRequested { operation_id, .. } => {
+                    ("suspending", operation_id)
+                }
+                SessionRuntimeEvent::Checkpoint { operation_id, .. } => {
+                    ("checkpoint", operation_id)
+                }
+                SessionRuntimeEvent::CommandsSettled { operation_id, .. } => {
+                    ("commands_settled", operation_id)
+                }
+                SessionRuntimeEvent::TreeSuspended { operation_id, .. } => {
+                    ("suspended", operation_id)
+                }
+                SessionRuntimeEvent::RestorePrepared { operation_id, .. } => {
+                    ("restoring", operation_id)
+                }
+                SessionRuntimeEvent::Resumed { operation_id, .. } => ("resumed", operation_id),
+                SessionRuntimeEvent::ExecutionReleased { operation_id, .. } => {
+                    ("execution_released", operation_id)
+                }
+            };
+            tuple(
+                "runtime",
+                name,
+                "recorded",
+                None,
+                None,
+                Some(operation_id.clone()),
+                None,
+                name.into(),
+            )
+        }
         TimelineEventKind::Messages(event) => describe_message(event),
         TimelineEventKind::Input(event) => match event {
             InputEvent::Submitted {
@@ -1097,6 +1205,7 @@ fn describe(
                 handoff,
                 duration_ms,
                 message,
+                ..
             } => tuple(
                 "workflow",
                 "end",
@@ -1349,6 +1458,19 @@ fn describe(
             None,
             format!("{} notification(s) · {reason:?}", notification_ids.len()),
         ),
+        TimelineEventKind::DisplayProjectionExpected(expectation) => tuple(
+            "display_projection",
+            "expected",
+            "durable",
+            None,
+            None,
+            Some(expectation.event_id.clone()),
+            Some(expectation.source_revision),
+            format!(
+                "{:?} projection from {}",
+                expectation.kind, expectation.source_id
+            ),
+        ),
     }
 }
 
@@ -1591,6 +1713,7 @@ fn describe_message(event: &MessageEvent) -> ReturnTuple {
             .messages
             .first()
             .map(|message| message.receipt_id.clone()),
+        sampling_types::ConversationItem::SkillLoad(skill) => Some(skill.call_id.clone()),
         sampling_types::ConversationItem::BackendToolCall(_) => None,
         _ => None,
     });
@@ -2044,6 +2167,44 @@ mod tests {
     use super::*;
     use crate::MessageCause;
 
+    #[test]
+    fn command_settlement_has_a_runtime_trajectory_projection() {
+        let event = TimelineEventKind::Runtime(
+            crate::session_runtime::SessionRuntimeEvent::CommandsSettled {
+                operation_id: "suspend-op".into(),
+                commands: Vec::new(),
+            },
+        );
+        let described = describe(&event, &BTreeMap::new(), &BTreeMap::new());
+        assert_eq!(described.0, "runtime");
+        assert_eq!(described.1, "commands_settled");
+        assert_eq!(described.2, "recorded");
+        assert_eq!(described.5.as_deref(), Some("suspend-op"));
+    }
+
+    #[test]
+    fn display_projection_expectation_is_audit_only_not_model_surface() {
+        let event = TimelineEvent {
+            version: crate::TIMELINE_SCHEMA_VERSION,
+            seq: crate::EventSeq::new(0),
+            at_ms: 0,
+            kind: TimelineEventKind::DisplayProjectionExpected(
+                crate::DisplayProjectionExpectation {
+                    event_id: "event-1".into(),
+                    kind: crate::DisplayProjectionKind::GoalUpdated,
+                    source_id: "goal:g1".into(),
+                    source_revision: 4,
+                    payload_digest: "a".repeat(64),
+                },
+            ),
+        };
+        let mut projector = TrajectoryProjector::default();
+        projector.accept(&event);
+        assert_eq!(projector.rows()[0].visibility, SurfaceVisibility::LogOnly);
+        assert!(projector.surface_rows.is_empty());
+        assert_eq!(projector.rows()[0].state, "durable");
+    }
+
     fn malformed_response() -> ConversationItem {
         ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
             id: "".into(),
@@ -2364,6 +2525,7 @@ mod tests {
         let step = crate::StepId { turn, index: 3 };
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity: crate::TurnIdentity {
@@ -2497,6 +2659,7 @@ mod tests {
         let turn = crate::TurnId(7);
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity: crate::TurnIdentity {
@@ -2570,6 +2733,7 @@ mod tests {
         let step = crate::StepId { turn, index: 0 };
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity: crate::TurnIdentity {
@@ -2781,6 +2945,7 @@ mod tests {
         let step = crate::StepId { turn, index: 2 };
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity: crate::TurnIdentity {
@@ -2880,6 +3045,7 @@ mod tests {
         let mut timeline = Timeline::default();
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity: crate::TurnIdentity {

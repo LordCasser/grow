@@ -12,6 +12,13 @@ use serde::{Deserialize, Serialize};
 /// autonomously.
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TaskToolInput {
+    /// Optional weak link to one current local TODO. The child still owns its
+    /// own plan; edits to this step request replanning rather than restart it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_step_id: Option<String>,
+    /// Mark an explicit deliverable that needs parent review before completion.
+    #[serde(default)]
+    pub required_deliverable: bool,
     /// The full task prompt for the subagent to execute.
     #[schemars(description = "The full task prompt for the subagent to execute.")]
     pub prompt: String,
@@ -215,6 +222,8 @@ pub struct SubagentCompletedOutput {
     pub turns: u32,
     pub duration_ms: u64,
     pub worktree_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planning_summary: Option<crate::planning::SubagentPlanningSummary>,
 }
 
 impl SubagentCompletedOutput {
@@ -226,14 +235,19 @@ impl SubagentCompletedOutput {
     /// Render the full model-facing completion block: the answer text, the
     /// `<subagent_meta>` line, and the `<subagent_result>` resume footer.
     pub fn to_model_text(&self) -> String {
-        format_subagent_completed(
+        let mut text = format_subagent_completed(
             &self.output,
             &self.subagent_id,
             &self.subagent_type,
             self.tool_calls,
             self.turns,
             self.duration_ms,
-        )
+        );
+        if let Some(summary) = &self.planning_summary {
+            text.push('\n');
+            text.push_str(&summary.render_bounded());
+        }
+        text
     }
 }
 
@@ -1067,6 +1081,8 @@ mod tests {
     #[test]
     fn task_tool_input_model_none_skips_serialize() {
         let input = TaskToolInput {
+            parent_step_id: None,
+            required_deliverable: false,
             prompt: "p".into(),
             description: "d".into(),
             subagent_type: default_subagent_type(),

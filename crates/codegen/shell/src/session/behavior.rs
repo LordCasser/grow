@@ -113,7 +113,65 @@ pub struct PlanDecisionHandoff {
     pub kind: chat_state::PlanHandoffKind,
     pub artifact_hash: String,
     pub artifact_revision: u64,
+    pub submission_id: Option<PlanSubmissionId>,
+    pub decision_id: Option<String>,
     pub feedback: Option<String>,
+}
+
+/// A submitted Plan identity is allocated monotonically by its session, so
+/// resetting Plan runtime cannot make an old approval look current again.
+pub type PlanSubmissionId = u64;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetainedPlanStatus {
+    Deferred,
+    Reviewing,
+    Abandoned,
+    Approved,
+    RevisionRequested,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RetainedPlanAction {
+    Defer,
+    Review,
+    Abandon,
+    Approve,
+    Revise,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedPlanDecision {
+    pub decision_id: String,
+    pub submission_id: PlanSubmissionId,
+    pub action: RetainedPlanAction,
+    pub feedback: Option<String>,
+    pub resulting_status: RetainedPlanStatus,
+}
+
+/// An immutable artifact reference and its decision receipts, independent of
+/// whichever Behavior currently owns the live Plan runtime.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RetainedPlanCandidate {
+    pub submission_id: PlanSubmissionId,
+    pub artifact_revision: u64,
+    pub artifact_hash: String,
+    pub amendment: bool,
+    pub status: RetainedPlanStatus,
+    pub decisions: Vec<RetainedPlanDecision>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetainedPlanDecisionOutcome {
+    Applied(RetainedPlanStatus),
+    Duplicate(RetainedPlanStatus),
+    Conflict,
+    Stale,
+    Invalid,
 }
 
 /// Serialized control projection. The coordinator does not use this enum as
@@ -142,6 +200,7 @@ struct PlanRuntime {
     artifact_revision: u64,
     artifact_hash: Option<String>,
     last_handoff: Option<PlanDecisionHandoff>,
+    submission_id: Option<PlanSubmissionId>,
 }
 
 impl Default for PlanRuntime {
@@ -152,6 +211,7 @@ impl Default for PlanRuntime {
             artifact_revision: 0,
             artifact_hash: None,
             last_handoff: None,
+            submission_id: None,
         }
     }
 }
@@ -159,6 +219,8 @@ impl Default for PlanRuntime {
 pub struct BehaviorCoordinator {
     selected: BehaviorId,
     plan: PlanRuntime,
+    last_plan_submission_id: PlanSubmissionId,
+    retained_plan: Option<RetainedPlanCandidate>,
     pending_switch: Option<PendingBehaviorSwitch>,
 }
 
@@ -178,6 +240,9 @@ pub struct BehaviorSnapshot {
     pub plan_artifact_hash: Option<String>,
     #[serde(default)]
     pub last_plan_handoff: Option<PlanDecisionHandoff>,
+    pub plan_submission_id: Option<PlanSubmissionId>,
+    pub last_plan_submission_id: PlanSubmissionId,
+    pub retained_plan: Option<RetainedPlanCandidate>,
 }
 
 impl BehaviorSnapshot {
@@ -199,6 +264,9 @@ impl BehaviorSnapshot {
             plan_artifact_revision: 0,
             plan_artifact_hash: None,
             last_plan_handoff: None,
+            plan_submission_id: None,
+            last_plan_submission_id: 0,
+            retained_plan: None,
         }
     }
 
@@ -220,7 +288,108 @@ impl BehaviorSnapshot {
             || (!self.approval_pending
                 && self.plan_artifact_revision == 0
                 && self.plan_artifact_hash.is_none()
-                && self.last_plan_handoff.is_none())
+                && self.last_plan_handoff.is_none()
+                && self.plan_submission_id.is_none())
+    }
+
+    pub fn retained_plan_is_valid(&self) -> bool {
+        if self
+            .plan_submission_id
+            .is_some_and(|id| id == 0 || id > self.last_plan_submission_id)
+        {
+            return false;
+        }
+        let Some(candidate) = self.retained_plan.as_ref() else {
+            return true;
+        };
+        let decisions_well_formed = candidate.decisions.iter().all(|decision| {
+            !decision.decision_id.trim().is_empty()
+                && decision.submission_id == candidate.submission_id
+                && decision.resulting_status == status_after(decision.action)
+                && decision
+                    .feedback
+                    .as_deref()
+                    .is_none_or(|text| !text.trim().is_empty() && text == text.trim())
+        });
+        let decisions_unique = candidate
+            .decisions
+            .iter()
+            .enumerate()
+            .all(|(index, decision)| {
+                candidate.decisions[..index]
+                    .iter()
+                    .all(|prior| prior.decision_id != decision.decision_id)
+            });
+        let mut replayed_status = RetainedPlanStatus::Reviewing;
+        let transitions_valid = candidate.decisions.iter().all(|decision| {
+            let next = match (replayed_status, decision.action) {
+                (RetainedPlanStatus::Reviewing, RetainedPlanAction::Defer) => {
+                    RetainedPlanStatus::Deferred
+                }
+                (RetainedPlanStatus::Deferred, RetainedPlanAction::Review) => {
+                    RetainedPlanStatus::Reviewing
+                }
+                (RetainedPlanStatus::Reviewing, RetainedPlanAction::Review) => {
+                    RetainedPlanStatus::Reviewing
+                }
+                (RetainedPlanStatus::Reviewing, RetainedPlanAction::Approve) => {
+                    RetainedPlanStatus::Approved
+                }
+                (RetainedPlanStatus::Reviewing, RetainedPlanAction::Revise) => {
+                    RetainedPlanStatus::RevisionRequested
+                }
+                (
+                    RetainedPlanStatus::Deferred | RetainedPlanStatus::Reviewing,
+                    RetainedPlanAction::Abandon,
+                ) => RetainedPlanStatus::Abandoned,
+                _ => return false,
+            };
+            replayed_status = next;
+            decision.resulting_status == next
+        });
+        candidate.submission_id > 0
+            && candidate.submission_id <= self.last_plan_submission_id
+            && candidate.artifact_revision > 0
+            && is_blake3_hash(&candidate.artifact_hash)
+            && !candidate.decisions.is_empty()
+            && (self.plan_submission_id != Some(candidate.submission_id)
+                || (self.plan_artifact_revision == candidate.artifact_revision
+                    && self.plan_artifact_hash.as_deref()
+                        == Some(candidate.artifact_hash.as_str())))
+            && decisions_well_formed
+            && decisions_unique
+            && transitions_valid
+            && replayed_status == candidate.status
+            && match (
+                candidate.status,
+                self.plan_submission_id == Some(candidate.submission_id),
+                self.last_plan_handoff.as_ref(),
+            ) {
+                (RetainedPlanStatus::Approved, true, Some(handoff)) => {
+                    handoff.kind == chat_state::PlanHandoffKind::Execute
+                        && handoff.submission_id == Some(candidate.submission_id)
+                        && candidate.decisions.last().is_some_and(|decision| {
+                            decision.action == RetainedPlanAction::Approve
+                                && handoff.decision_id.as_deref()
+                                    == Some(decision.decision_id.as_str())
+                        })
+                }
+                (RetainedPlanStatus::RevisionRequested, true, Some(handoff)) => {
+                    handoff.kind == chat_state::PlanHandoffKind::Revise
+                        && handoff.submission_id == Some(candidate.submission_id)
+                        && candidate.decisions.last().is_some_and(|decision| {
+                            decision.action == RetainedPlanAction::Revise
+                                && handoff.decision_id.as_deref()
+                                    == Some(decision.decision_id.as_str())
+                        })
+                }
+                (
+                    RetainedPlanStatus::Approved | RetainedPlanStatus::RevisionRequested,
+                    true,
+                    None,
+                ) => false,
+                _ => true,
+            }
     }
 
     pub fn plan_runtime_is_valid(&self) -> bool {
@@ -233,6 +402,14 @@ impl BehaviorSnapshot {
                 handoff.artifact_revision > 0
                     && self.plan_artifact_revision == handoff.artifact_revision
                     && self.plan_artifact_hash.as_deref() == Some(handoff.artifact_hash.as_str())
+                    && handoff
+                        .submission_id
+                        .is_none_or(|id| self.plan_submission_id == Some(id))
+                    && handoff
+                        .decision_id
+                        .as_deref()
+                        .is_none_or(|id| !id.trim().is_empty())
+                    && (handoff.decision_id.is_none() || handoff.submission_id.is_some())
                     && matches!(
                         (&self.state, handoff.kind),
                         (
@@ -253,6 +430,8 @@ impl BehaviorCoordinator {
         Self {
             selected: BehaviorId::Normal,
             plan: PlanRuntime::default(),
+            last_plan_submission_id: 0,
+            retained_plan: None,
             pending_switch: None,
         }
     }
@@ -273,7 +452,10 @@ impl BehaviorCoordinator {
                 artifact_revision: snapshot.plan_artifact_revision,
                 artifact_hash: snapshot.plan_artifact_hash,
                 last_handoff: snapshot.last_plan_handoff,
+                submission_id: snapshot.plan_submission_id,
             },
+            last_plan_submission_id: snapshot.last_plan_submission_id,
+            retained_plan: snapshot.retained_plan,
             pending_switch: None,
         }
     }
@@ -285,6 +467,9 @@ impl BehaviorCoordinator {
             plan_artifact_revision: self.plan.artifact_revision,
             plan_artifact_hash: self.plan.artifact_hash.clone(),
             last_plan_handoff: self.plan.last_handoff.clone(),
+            plan_submission_id: self.plan.submission_id,
+            last_plan_submission_id: self.last_plan_submission_id,
+            retained_plan: self.retained_plan.clone(),
         }
     }
 
@@ -606,8 +791,12 @@ impl BehaviorCoordinator {
         if !self.is_plan() || self.plan.phase != PlanPhase::Drafting {
             return false;
         }
+        let Some(submission_id) = self.allocate_plan_submission_id() else {
+            return false;
+        };
         self.plan.phase = PlanPhase::AwaitingApproval;
         self.plan.approval_pending = true;
+        self.plan.submission_id = Some(submission_id);
         true
     }
 
@@ -616,9 +805,265 @@ impl BehaviorCoordinator {
         {
             return false;
         }
+        let Some(submission_id) = self.allocate_plan_submission_id() else {
+            return false;
+        };
         self.plan.phase = PlanPhase::Amending;
         self.plan.approval_pending = true;
+        self.plan.submission_id = Some(submission_id);
         true
+    }
+
+    fn allocate_plan_submission_id(&mut self) -> Option<PlanSubmissionId> {
+        let next = self.last_plan_submission_id.checked_add(1)?;
+        self.last_plan_submission_id = next;
+        self.plan.submission_id = Some(next);
+        Some(next)
+    }
+
+    pub fn plan_submission_id(&self) -> Option<PlanSubmissionId> {
+        self.plan.submission_id
+    }
+
+    pub fn retained_plan(&self) -> Option<&RetainedPlanCandidate> {
+        self.retained_plan.as_ref()
+    }
+
+    /// Resolve a submitted Plan with a stable decision identity. The complete
+    /// BehaviorSnapshot is the CAS key; retries are checked before CAS so an
+    /// already accepted decision remains idempotent after its own mutation.
+    pub fn decide_submitted_plan_if(
+        &mut self,
+        expected: &BehaviorSnapshot,
+        submission_id: PlanSubmissionId,
+        decision_id: &str,
+        action: RetainedPlanAction,
+        feedback: Option<String>,
+    ) -> RetainedPlanDecisionOutcome {
+        let feedback = normalize_plan_feedback(feedback);
+        if decision_id.trim().is_empty() || action == RetainedPlanAction::Review {
+            return RetainedPlanDecisionOutcome::Invalid;
+        }
+        if let Some(prior) = self.retained_plan.as_ref().and_then(|candidate| {
+            candidate
+                .decisions
+                .iter()
+                .find(|d| d.decision_id == decision_id)
+        }) {
+            return if prior.submission_id == submission_id
+                && prior.action == action
+                && prior.feedback == feedback
+            {
+                RetainedPlanDecisionOutcome::Duplicate(prior.resulting_status)
+            } else {
+                RetainedPlanDecisionOutcome::Conflict
+            };
+        }
+        let abandon_expected_matches = action == RetainedPlanAction::Abandon
+            && self.snapshot() == *expected
+            && !(self.is_plan()
+                && self.plan.approval_pending
+                && self.plan.submission_id == Some(submission_id));
+        if abandon_expected_matches
+            && let Some(candidate) = self.retained_plan.as_mut()
+            && candidate.submission_id == submission_id
+            && matches!(
+                candidate.status,
+                RetainedPlanStatus::Deferred | RetainedPlanStatus::Reviewing
+            )
+        {
+            candidate.status = RetainedPlanStatus::Abandoned;
+            candidate.decisions.push(RetainedPlanDecision {
+                decision_id: decision_id.to_owned(),
+                submission_id,
+                action,
+                feedback,
+                resulting_status: RetainedPlanStatus::Abandoned,
+            });
+            return RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Abandoned);
+        }
+        if self.snapshot() != *expected
+            || !self.is_plan()
+            || self.plan.submission_id != Some(submission_id)
+            || !self.plan.approval_pending
+            || !matches!(
+                self.plan.phase,
+                PlanPhase::AwaitingApproval | PlanPhase::Amending
+            )
+            || self.plan.artifact_revision == 0
+            || !self
+                .plan
+                .artifact_hash
+                .as_deref()
+                .is_some_and(is_blake3_hash)
+        {
+            return RetainedPlanDecisionOutcome::Stale;
+        }
+        let Some(artifact_hash) = expected.plan_artifact_hash.clone() else {
+            return RetainedPlanDecisionOutcome::Invalid;
+        };
+        let existing = self.retained_plan.as_ref();
+        if existing.is_some_and(|candidate| {
+            candidate.submission_id != submission_id
+                && !matches!(
+                    candidate.status,
+                    RetainedPlanStatus::Abandoned
+                        | RetainedPlanStatus::Approved
+                        | RetainedPlanStatus::RevisionRequested
+                )
+        }) {
+            return RetainedPlanDecisionOutcome::Conflict;
+        }
+        if existing.is_some_and(|candidate| {
+            candidate.submission_id == submission_id
+                && (candidate.artifact_revision != self.plan.artifact_revision
+                    || Some(candidate.artifact_hash.as_str()) != self.plan.artifact_hash.as_deref())
+        }) {
+            return RetainedPlanDecisionOutcome::Stale;
+        }
+        let starting_status = existing
+            .filter(|candidate| candidate.submission_id == submission_id)
+            .map(|candidate| candidate.status)
+            .unwrap_or(RetainedPlanStatus::Reviewing);
+        if starting_status != RetainedPlanStatus::Reviewing {
+            return RetainedPlanDecisionOutcome::Invalid;
+        }
+        let next = match action {
+            RetainedPlanAction::Defer => RetainedPlanStatus::Deferred,
+            RetainedPlanAction::Abandon => RetainedPlanStatus::Abandoned,
+            RetainedPlanAction::Approve => RetainedPlanStatus::Approved,
+            RetainedPlanAction::Revise => RetainedPlanStatus::RevisionRequested,
+            RetainedPlanAction::Review => unreachable!(),
+        };
+        match action {
+            RetainedPlanAction::Approve => {
+                if !self.approve_submitted_plan_if_with_feedback(expected, feedback.clone()) {
+                    return RetainedPlanDecisionOutcome::Stale;
+                }
+            }
+            RetainedPlanAction::Revise => {
+                if !self.reject_submitted_plan_if_with_feedback(expected, feedback.clone()) {
+                    return RetainedPlanDecisionOutcome::Stale;
+                }
+            }
+            RetainedPlanAction::Defer | RetainedPlanAction::Abandon => {
+                self.plan.approval_pending = false;
+                self.plan.last_handoff = None;
+                if self.plan.phase == PlanPhase::AwaitingApproval {
+                    self.plan.phase = PlanPhase::Drafting;
+                }
+            }
+            RetainedPlanAction::Review => unreachable!(),
+        }
+        if !self
+            .retained_plan
+            .as_ref()
+            .is_some_and(|candidate| candidate.submission_id == submission_id)
+        {
+            self.retained_plan = Some(RetainedPlanCandidate {
+                submission_id,
+                artifact_revision: expected.plan_artifact_revision,
+                artifact_hash,
+                amendment: expected.state == BehaviorState::Plan(PlanPhase::Amending),
+                status: starting_status,
+                decisions: Vec::new(),
+            });
+        }
+        let candidate = self
+            .retained_plan
+            .as_mut()
+            .expect("candidate was initialized");
+        candidate.status = next;
+        candidate.decisions.push(RetainedPlanDecision {
+            decision_id: decision_id.to_owned(),
+            submission_id,
+            action,
+            feedback,
+            resulting_status: next,
+        });
+        if let Some(handoff) = self.plan.last_handoff.as_mut() {
+            if matches!(
+                action,
+                RetainedPlanAction::Approve | RetainedPlanAction::Revise
+            ) {
+                handoff.submission_id = Some(submission_id);
+                handoff.decision_id = Some(decision_id.to_owned());
+            }
+        }
+        RetainedPlanDecisionOutcome::Applied(next)
+    }
+
+    /// Open the actual Plan approval gate for a retained candidate. Review is
+    /// CAS-bound to the full snapshot and never creates an execution handoff.
+    pub fn review_retained_plan_if(
+        &mut self,
+        expected: &BehaviorSnapshot,
+        submission_id: PlanSubmissionId,
+        decision_id: &str,
+        feedback: Option<String>,
+    ) -> RetainedPlanDecisionOutcome {
+        let feedback = normalize_plan_feedback(feedback);
+        if decision_id.trim().is_empty() {
+            return RetainedPlanDecisionOutcome::Invalid;
+        }
+        let Some(current) = self.retained_plan.as_ref() else {
+            return RetainedPlanDecisionOutcome::Stale;
+        };
+        if let Some(prior) = current
+            .decisions
+            .iter()
+            .find(|prior| prior.decision_id == decision_id)
+        {
+            return if prior.submission_id == submission_id
+                && prior.action == RetainedPlanAction::Review
+                && prior.feedback == feedback
+            {
+                RetainedPlanDecisionOutcome::Duplicate(prior.resulting_status)
+            } else {
+                RetainedPlanDecisionOutcome::Conflict
+            };
+        }
+        if current.submission_id != submission_id {
+            return RetainedPlanDecisionOutcome::Stale;
+        }
+        if self.snapshot() != *expected
+            || !matches!(
+                current.status,
+                RetainedPlanStatus::Deferred | RetainedPlanStatus::Reviewing
+            )
+            || !matches!(self.behavior(), BehaviorId::Normal | BehaviorId::Plan)
+            || self.plan.approval_pending
+            || (self.is_plan()
+                && self.plan.phase != PlanPhase::Drafting
+                && !(self.plan.phase == PlanPhase::Amending && current.amendment))
+        {
+            return RetainedPlanDecisionOutcome::Stale;
+        }
+        let candidate = current.clone();
+        self.selected = BehaviorId::Plan;
+        self.plan = PlanRuntime {
+            phase: if candidate.amendment {
+                PlanPhase::Amending
+            } else {
+                PlanPhase::AwaitingApproval
+            },
+            approval_pending: true,
+            artifact_revision: candidate.artifact_revision,
+            artifact_hash: Some(candidate.artifact_hash.clone()),
+            last_handoff: None,
+            submission_id: Some(candidate.submission_id),
+        };
+        let current = self.retained_plan.as_mut().expect("candidate was checked");
+        current.status = RetainedPlanStatus::Reviewing;
+        current.decisions.push(RetainedPlanDecision {
+            decision_id: decision_id.to_owned(),
+            submission_id,
+            action: RetainedPlanAction::Review,
+            feedback,
+            resulting_status: RetainedPlanStatus::Reviewing,
+        });
+        self.pending_switch = None;
+        RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Reviewing)
     }
 
     pub fn approve_submitted_plan(&mut self) -> bool {
@@ -643,6 +1088,8 @@ impl BehaviorCoordinator {
             kind: chat_state::PlanHandoffKind::Execute,
             artifact_hash,
             artifact_revision: self.plan.artifact_revision,
+            submission_id: self.plan.submission_id,
+            decision_id: None,
             feedback: normalize_plan_feedback(feedback),
         });
         true
@@ -676,6 +1123,8 @@ impl BehaviorCoordinator {
             kind: chat_state::PlanHandoffKind::Revise,
             artifact_hash,
             artifact_revision: self.plan.artifact_revision,
+            submission_id: self.plan.submission_id,
+            decision_id: None,
             feedback: normalize_plan_feedback(feedback),
         });
         true
@@ -745,6 +1194,8 @@ impl BehaviorCoordinator {
             kind: chat_state::PlanHandoffKind::Execute,
             artifact_hash,
             artifact_revision: self.plan.artifact_revision,
+            submission_id: self.plan.submission_id,
+            decision_id: None,
             feedback: normalize_plan_feedback(feedback),
         });
         true
@@ -794,6 +1245,8 @@ impl BehaviorCoordinator {
             kind: chat_state::PlanHandoffKind::Revise,
             artifact_hash,
             artifact_revision: self.plan.artifact_revision,
+            submission_id: self.plan.submission_id,
+            decision_id: None,
             feedback: normalize_plan_feedback(feedback),
         });
         true
@@ -813,6 +1266,7 @@ impl BehaviorCoordinator {
         self.plan.artifact_revision = self.plan.artifact_revision.saturating_add(1);
         self.plan.artifact_hash = Some(blake3::hash(markdown.as_bytes()).to_hex().to_string());
         self.plan.last_handoff = None;
+        self.plan.submission_id = None;
     }
 
     pub fn plan_artifact_hash(&self) -> Option<&str> {
@@ -846,6 +1300,20 @@ fn normalize_plan_feedback(feedback: Option<String>) -> Option<String> {
         let feedback = feedback.trim();
         (!feedback.is_empty()).then(|| feedback.to_owned())
     })
+}
+
+fn status_after(action: RetainedPlanAction) -> RetainedPlanStatus {
+    match action {
+        RetainedPlanAction::Defer => RetainedPlanStatus::Deferred,
+        RetainedPlanAction::Review => RetainedPlanStatus::Reviewing,
+        RetainedPlanAction::Abandon => RetainedPlanStatus::Abandoned,
+        RetainedPlanAction::Approve => RetainedPlanStatus::Approved,
+        RetainedPlanAction::Revise => RetainedPlanStatus::RevisionRequested,
+    }
+}
+
+fn is_blake3_hash(hash: &str) -> bool {
+    hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 pub fn plan_behavior_template() -> &'static str {
@@ -1191,8 +1659,352 @@ mod tests {
             plan_artifact_revision: 1,
             plan_artifact_hash: Some("stale".into()),
             last_plan_handoff: None,
+            plan_submission_id: Some(1),
+            last_plan_submission_id: 1,
+            retained_plan: None,
         };
         assert!(!snapshot.runtime_fields_match_selection());
+    }
+
+    #[test]
+    fn retained_candidate_survives_plan_reset_and_submission_identity_is_monotonic() {
+        let mut controller = controller();
+        controller.select_behavior(BehaviorId::Plan);
+        controller.record_plan_artifact("# first");
+        assert!(controller.submit_initial_plan());
+        let first = controller.plan_submission_id().unwrap();
+        assert_eq!(first, 1);
+        let expected = controller.snapshot();
+        assert_eq!(
+            controller.decide_submitted_plan_if(
+                &expected,
+                first,
+                "defer-1",
+                RetainedPlanAction::Defer,
+                None,
+            ),
+            RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Deferred)
+        );
+
+        assert!(controller.finish_plan());
+        assert_eq!(controller.behavior(), BehaviorId::Normal);
+        let retained = controller.snapshot();
+        assert!(retained.retained_plan_is_valid());
+        assert_eq!(
+            retained.retained_plan.as_ref().unwrap().submission_id,
+            first
+        );
+
+        let restored = BehaviorCoordinator::from_snapshot(retained);
+        assert_eq!(restored.retained_plan(), controller.retained_plan());
+        let mut restored = restored;
+        restored.select_behavior(BehaviorId::Plan);
+        restored.record_plan_artifact("# second");
+        assert!(restored.submit_initial_plan());
+        assert_eq!(restored.plan_submission_id(), Some(first + 1));
+        assert_eq!(restored.retained_plan().unwrap().submission_id, first);
+    }
+
+    #[test]
+    fn retained_decisions_are_idempotent_and_reject_identity_conflicts() {
+        let mut controller = controller();
+        controller.select_behavior(BehaviorId::Plan);
+        controller.record_plan_artifact("# candidate");
+        assert!(controller.submit_initial_plan());
+        let submission_id = controller.plan_submission_id().unwrap();
+        let expected = controller.snapshot();
+        assert_eq!(
+            controller.decide_submitted_plan_if(
+                &expected,
+                submission_id,
+                "decision-1",
+                RetainedPlanAction::Defer,
+                Some("  later  ".into()),
+            ),
+            RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Deferred)
+        );
+        assert_eq!(
+            controller.decide_submitted_plan_if(
+                &expected,
+                submission_id,
+                "decision-1",
+                RetainedPlanAction::Defer,
+                Some("later".into()),
+            ),
+            RetainedPlanDecisionOutcome::Duplicate(RetainedPlanStatus::Deferred)
+        );
+        assert_eq!(
+            controller.decide_submitted_plan_if(
+                &expected,
+                submission_id,
+                "decision-1",
+                RetainedPlanAction::Approve,
+                Some("different".into()),
+            ),
+            RetainedPlanDecisionOutcome::Conflict
+        );
+        let deferred = controller.snapshot();
+        assert_eq!(
+            controller.review_retained_plan_if(&deferred, submission_id, "decision-2", None),
+            RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Reviewing)
+        );
+        let reviewing = controller.snapshot();
+        assert_eq!(
+            controller.decide_submitted_plan_if(
+                &reviewing,
+                submission_id,
+                "decision-3",
+                RetainedPlanAction::Abandon,
+                None,
+            ),
+            RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Abandoned)
+        );
+        assert!(controller.snapshot().retained_plan_is_valid());
+        assert_eq!(
+            controller.review_retained_plan_if(&reviewing, submission_id, "decision-4", None),
+            RetainedPlanDecisionOutcome::Stale
+        );
+    }
+
+    #[test]
+    fn retained_plan_validation_rejects_invalid_references_and_decision_history() {
+        let mut controller = controller();
+        controller.select_behavior(BehaviorId::Plan);
+        controller.record_plan_artifact("# candidate");
+        assert!(controller.submit_initial_plan());
+        let id = controller.plan_submission_id().unwrap();
+        let expected = controller.snapshot();
+        assert_eq!(
+            controller.decide_submitted_plan_if(
+                &expected,
+                id,
+                "d1",
+                RetainedPlanAction::Defer,
+                None,
+            ),
+            RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Deferred)
+        );
+        controller.finish_plan();
+
+        let mut snapshot = controller.snapshot();
+        snapshot.retained_plan.as_mut().unwrap().artifact_hash = "broken".into();
+        assert!(!snapshot.retained_plan_is_valid());
+
+        let mut snapshot = controller.snapshot();
+        snapshot.retained_plan.as_mut().unwrap().decisions[0].resulting_status =
+            RetainedPlanStatus::Abandoned;
+        assert!(!snapshot.retained_plan_is_valid());
+    }
+
+    #[test]
+    fn retained_review_rebinds_the_exact_candidate_and_decisions_create_matching_handoffs() {
+        let mut controller = controller();
+        controller.select_behavior(BehaviorId::Plan);
+        controller.record_plan_artifact("# candidate");
+        assert!(controller.submit_initial_plan());
+        let submission_id = controller.plan_submission_id().unwrap();
+        let submitted = controller.snapshot();
+        assert_eq!(
+            controller.decide_submitted_plan_if(
+                &submitted,
+                submission_id,
+                "defer-1",
+                RetainedPlanAction::Defer,
+                None,
+            ),
+            RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Deferred)
+        );
+        controller.finish_plan();
+
+        let deferred = controller.snapshot();
+        assert_eq!(
+            controller.review_retained_plan_if(&deferred, submission_id, "review-1", None),
+            RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Reviewing)
+        );
+        let pending = controller.snapshot();
+        assert_eq!(
+            pending.state,
+            BehaviorState::Plan(PlanPhase::AwaitingApproval)
+        );
+        assert!(pending.approval_pending);
+        assert_eq!(pending.plan_submission_id, Some(submission_id));
+        assert_eq!(
+            pending.plan_artifact_revision,
+            deferred.retained_plan.as_ref().unwrap().artifact_revision
+        );
+        assert_eq!(
+            pending.plan_artifact_hash,
+            deferred
+                .retained_plan
+                .as_ref()
+                .map(|candidate| candidate.artifact_hash.clone())
+        );
+
+        assert_eq!(
+            controller.decide_submitted_plan_if(
+                &pending,
+                submission_id,
+                "approve-1",
+                RetainedPlanAction::Approve,
+                Some("  ship  ".into()),
+            ),
+            RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Approved)
+        );
+        let approved = controller.snapshot();
+        assert_eq!(approved.state, BehaviorState::Plan(PlanPhase::Executing));
+        assert_eq!(
+            approved.last_plan_handoff.as_ref().unwrap().submission_id,
+            Some(submission_id)
+        );
+        assert_eq!(
+            approved
+                .last_plan_handoff
+                .as_ref()
+                .unwrap()
+                .decision_id
+                .as_deref(),
+            Some("approve-1")
+        );
+        assert!(approved.retained_plan_is_valid());
+        assert_eq!(
+            controller.decide_submitted_plan_if(
+                &pending,
+                submission_id,
+                "approve-1",
+                RetainedPlanAction::Approve,
+                Some("ship".into()),
+            ),
+            RetainedPlanDecisionOutcome::Duplicate(RetainedPlanStatus::Approved)
+        );
+    }
+
+    #[test]
+    fn revise_decision_keeps_the_existing_handoff_and_rejects_stale_snapshots() {
+        let mut controller = controller();
+        controller.select_behavior(BehaviorId::Plan);
+        controller.record_plan_artifact("# candidate");
+        assert!(controller.submit_initial_plan());
+        let submission_id = controller.plan_submission_id().unwrap();
+        let expected = controller.snapshot();
+        let mut stale = expected.clone();
+        stale.last_plan_submission_id += 1;
+        assert_eq!(
+            controller.decide_submitted_plan_if(
+                &stale,
+                submission_id,
+                "revise-1",
+                RetainedPlanAction::Revise,
+                Some("clarify scope".into()),
+            ),
+            RetainedPlanDecisionOutcome::Stale
+        );
+        assert_eq!(controller.snapshot(), expected);
+
+        assert_eq!(
+            controller.decide_submitted_plan_if(
+                &expected,
+                submission_id,
+                "revise-1",
+                RetainedPlanAction::Revise,
+                Some("clarify scope".into()),
+            ),
+            RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::RevisionRequested)
+        );
+        let revised = controller.snapshot();
+        assert_eq!(revised.state, BehaviorState::Plan(PlanPhase::Drafting));
+        let handoff = revised.last_plan_handoff.as_ref().unwrap();
+        assert_eq!(handoff.kind, chat_state::PlanHandoffKind::Revise);
+        assert_eq!(handoff.submission_id, Some(submission_id));
+        assert_eq!(handoff.decision_id.as_deref(), Some("revise-1"));
+        assert!(revised.retained_plan_is_valid());
+    }
+
+    #[test]
+    fn abandoned_candidate_can_be_closed_after_leaving_plan() {
+        let mut controller = controller();
+        controller.select_behavior(BehaviorId::Plan);
+        controller.record_plan_artifact("# candidate");
+        assert!(controller.submit_initial_plan());
+        let submission_id = controller.plan_submission_id().unwrap();
+        let expected = controller.snapshot();
+        assert_eq!(
+            controller.decide_submitted_plan_if(
+                &expected,
+                submission_id,
+                "defer-1",
+                RetainedPlanAction::Defer,
+                None,
+            ),
+            RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Deferred)
+        );
+        controller.finish_plan();
+        let expected = controller.snapshot();
+        assert_eq!(
+            controller.decide_submitted_plan_if(
+                &expected,
+                submission_id,
+                "abandon-1",
+                RetainedPlanAction::Abandon,
+                None,
+            ),
+            RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Abandoned)
+        );
+        assert!(controller.snapshot().retained_plan_is_valid());
+    }
+
+    #[test]
+    fn deferring_an_amendment_clears_the_previous_execute_handoff() {
+        let mut controller = controller();
+        controller.select_behavior(BehaviorId::Plan);
+        controller.record_plan_artifact("# original");
+        assert!(controller.submit_initial_plan());
+        assert!(controller.approve_submitted_plan());
+        assert_eq!(
+            controller.last_plan_handoff().unwrap().kind,
+            chat_state::PlanHandoffKind::Execute
+        );
+
+        assert!(controller.submit_plan_amendment());
+        let amendment_id = controller.plan_submission_id().unwrap();
+        let expected = controller.snapshot();
+        assert_eq!(
+            controller.decide_submitted_plan_if(
+                &expected,
+                amendment_id,
+                "defer-amendment",
+                RetainedPlanAction::Defer,
+                None,
+            ),
+            RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Deferred)
+        );
+        let deferred = controller.snapshot();
+        assert_eq!(deferred.state, BehaviorState::Plan(PlanPhase::Amending));
+        assert!(!deferred.approval_pending);
+        assert!(deferred.last_plan_handoff.is_none());
+        assert_eq!(deferred.plan_submission_id, Some(amendment_id));
+        assert!(deferred.retained_plan_is_valid());
+
+        assert_eq!(
+            controller.review_retained_plan_if(&deferred, amendment_id, "review-amendment", None,),
+            RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Reviewing)
+        );
+        let reviewing = controller.snapshot();
+        assert_eq!(reviewing.state, BehaviorState::Plan(PlanPhase::Amending));
+        assert!(reviewing.approval_pending);
+        assert_eq!(
+            controller.decide_submitted_plan_if(
+                &reviewing,
+                amendment_id,
+                "approve-amendment",
+                RetainedPlanAction::Approve,
+                None,
+            ),
+            RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Approved)
+        );
+        assert_eq!(
+            controller.snapshot().state,
+            BehaviorState::Plan(PlanPhase::Executing)
+        );
     }
 
     #[test]

@@ -225,7 +225,7 @@ impl SessionActor {
     pub(super) async fn send_available_commands_update_if_idle(&self) -> bool {
         let idle = {
             let admission = self.state.lock().await;
-            admission.foreground.is_idle() && admission.termination.is_open()
+            admission.foreground.is_idle() && admission.execution_open()
         };
         if !idle {
             return false;

@@ -2,6 +2,17 @@
 
 use super::*;
 
+fn comparable_input_payload(
+    payload: &crate::session::input_inbox::InputPayload,
+) -> Result<serde_json::Value, String> {
+    let mut value = serde_json::to_value(payload)
+        .map_err(|error| format!("input payload cannot be compared: {error}"))?;
+    if let Some(object) = value.as_object_mut() {
+        object.remove("skill_invocations");
+    }
+    Ok(value)
+}
+
 pub(super) struct AdmittedInput {
     pub input_id: String,
     pub replayed: bool,
@@ -27,10 +38,140 @@ pub(super) enum ExistingInputState {
     Dismissed,
 }
 
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExplicitSkillSelection {
+    name: String,
+    path: String,
+    plugin_name: Option<String>,
+}
+
+fn explicit_selection_matches(
+    selection: &ExplicitSkillSelection,
+    reference: &crate::session::slash_commands::ParsedSkillRef,
+) -> bool {
+    reference.name == selection.name
+        && reference.skill_path == selection.path
+        && reference.plugin_name == selection.plugin_name
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::session::input_inbox::{self, InputPayload};
+
+    fn explicit_selection_payload(prompt_id: &str) -> InputPayload {
+        let mut payload =
+            input_inbox::tests::text_payload(prompt_id, "/__grow_test_missing_skill__ args");
+        let InputPayload::Prompt { prompt_blocks, .. } = &mut payload;
+        let mut text = acp::TextContent::new("/__grow_test_missing_skill__ args");
+        text.meta = Some(
+            [(
+                "grow/skillSelection".into(),
+                serde_json::json!({
+                    "name": "__grow_test_missing_skill__",
+                    "path": "/__grow_test/missing/SKILL.md",
+                    "plugin_name": null
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        *prompt_blocks = vec![acp::ContentBlock::Text(text)];
+        payload
+    }
+
+    #[test]
+    fn replay_payload_comparison_ignores_only_frozen_host_skill_refs() {
+        let original = input_inbox::tests::text_payload("stable-prompt", "/local:commit fix");
+        let mut frozen = original.clone();
+        let InputPayload::Prompt {
+            skill_invocations, ..
+        } = &mut frozen;
+        *skill_invocations = vec![crate::session::input_inbox::FrozenSkillInvocation {
+            callable_name: "commit".into(),
+            qualified_name: "local:commit".into(),
+            args: "fix".into(),
+            skill: Some(tools::implementations::skills::types::SkillInfo {
+                name: "commit".into(),
+                path: "/skills/commit/SKILL.md".into(),
+                body: Some("frozen body".into()),
+                ..Default::default()
+            }),
+            selection_error: None,
+        }];
+
+        assert_eq!(
+            comparable_input_payload(&original).unwrap(),
+            comparable_input_payload(&frozen).unwrap(),
+        );
+        let InputPayload::Prompt { prompt_blocks, .. } = &mut frozen;
+        *prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new("changed"))];
+        assert_ne!(
+            comparable_input_payload(&original).unwrap(),
+            comparable_input_payload(&frozen).unwrap(),
+            "original user content remains part of replay identity"
+        );
+    }
+
+    #[test]
+    fn explicit_skill_selection_metadata_is_strict_and_host_readable() {
+        let mut text = acp::TextContent::new("/acme:deploy prod");
+        text.meta = Some(
+            [(
+                "grow/skillSelection".into(),
+                serde_json::json!({
+                    "name": "acme:deploy",
+                    "path": "/plugins/acme/deploy/SKILL.md",
+                    "plugin_name": "acme"
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let selected = SessionActor::explicit_skill_selection(&[acp::ContentBlock::Text(text)])
+            .unwrap()
+            .expect("metadata carries explicit selection identity");
+        assert_eq!(selected.name, "acme:deploy");
+        assert_eq!(selected.path, "/plugins/acme/deploy/SKILL.md");
+        assert_eq!(selected.plugin_name.as_deref(), Some("acme"));
+
+        let mut malformed = acp::TextContent::new("/acme:deploy prod");
+        malformed.meta = Some(
+            [(
+                "grow/skillSelection".into(),
+                serde_json::json!({"name": "deploy"}),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        assert!(
+            SessionActor::explicit_skill_selection(&[acp::ContentBlock::Text(malformed)]).is_err()
+        );
+    }
+
+    #[test]
+    fn explicit_skill_selection_requires_exact_resolved_source() {
+        let selected = ExplicitSkillSelection {
+            name: "acme:deploy".into(),
+            path: "/plugins/acme/deploy/SKILL.md".into(),
+            plugin_name: Some("acme".into()),
+        };
+        let resolved = crate::session::slash_commands::ParsedSkillRef {
+            name: "acme:deploy".into(),
+            args: "prod".into(),
+            skill_path: "/plugins/acme/deploy/SKILL.md".into(),
+            qualified_name: "acme:deploy".into(),
+            plugin_name: Some("acme".into()),
+        };
+        assert!(explicit_selection_matches(&selected, &resolved));
+        let mut stale = resolved.clone();
+        stale.skill_path = "/plugins/acme-v2/deploy/SKILL.md".into();
+        assert!(!explicit_selection_matches(&selected, &stale));
+        stale = resolved;
+        stale.plugin_name = Some("other".into());
+        assert!(!explicit_selection_matches(&selected, &stale));
+    }
 
     struct JsonlTimelinePersistence {
         storage: crate::session::storage::jsonl::JsonlStorageAdapter,
@@ -77,6 +218,7 @@ mod tests {
         const READY_ENV: &str = "GROW_TEST_STABLE_INPUT_REPLACEMENT_READY";
         const TEST: &str = "session::actor::input_admission::tests::physical_writer_replacement_replays_stable_input_identity_once";
         const PROMPT_ID: &str = "stable-writer-replacement-prompt";
+        const READY_BYTES: &[u8] = b"submitted and Hook facts durable";
 
         fn fixture_info() -> crate::session::info::Info {
             crate::session::info::Info {
@@ -144,8 +286,7 @@ mod tests {
                 .append_timeline_event_durable(&info, &completed)
                 .await
                 .unwrap();
-            std::fs::write(ready, b"submitted and Hook facts durable")
-                .expect("signal durable fixture readiness");
+            std::fs::write(ready, READY_BYTES).expect("signal durable fixture readiness");
             loop {
                 std::thread::park_timeout(std::time::Duration::from_secs(60));
             }
@@ -170,16 +311,18 @@ mod tests {
             .unwrap();
         let mut child = KillChildOnDrop(child);
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-        while !ready.is_file() && std::time::Instant::now() < deadline {
+        while std::time::Instant::now() < deadline
+            && !std::fs::read(&ready).is_ok_and(|bytes| bytes == READY_BYTES)
+        {
             if let Some(status) = child.0.try_wait().unwrap() {
                 panic!("fixture writer exited before readiness: {status}");
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
-        assert!(ready.is_file(), "child did not publish durable input facts");
         assert_eq!(
             std::fs::read(&ready).unwrap(),
-            b"submitted and Hook facts durable"
+            READY_BYTES,
+            "child must finish publishing its readiness marker after durable input facts"
         );
 
         let info = fixture_info();
@@ -444,6 +587,105 @@ mod tests {
                     after_first.len(),
                     "a conflicting payload must fail before Hook or admission"
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn explicit_skill_input_replay_reuses_frozen_selection_without_duplicate_admission() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway) = crate::session::actor::tests::support::build_actor().await;
+                let prompt_id = "explicit-skill-replay";
+                let original = explicit_selection_payload(prompt_id);
+                let first = actor
+                    .admit_human_input(
+                        chat_state::InputIntent::Prompt,
+                        original.clone(),
+                        Some(prompt_id.into()),
+                        chat_state::InputRoute::Fifo,
+                        Vec::new(),
+                    )
+                    .await
+                    .expect("explicit selection snapshot is admitted");
+                let events_after_first = actor.chat_state_handle.timeline_events().await.unwrap();
+                let replay = actor
+                    .admit_human_input(
+                        chat_state::InputIntent::Prompt,
+                        original,
+                        Some(prompt_id.into()),
+                        chat_state::InputRoute::Fifo,
+                        Vec::new(),
+                    )
+                    .await
+                    .expect("exact retry reuses its frozen selection");
+                assert!(replay.replayed);
+                assert_eq!(replay.input_id, first.input_id);
+                let events_after_replay = actor.chat_state_handle.timeline_events().await.unwrap();
+                assert_eq!(events_after_replay.len(), events_after_first.len());
+                assert_eq!(
+                    events_after_replay
+                        .iter()
+                        .filter(|event| matches!(
+                            &event.kind,
+                            chat_state::TimelineEventKind::Input(
+                                chat_state::InputEvent::Submitted { input_id, .. }
+                            ) if input_id == &first.input_id
+                        ))
+                        .count(),
+                    1
+                );
+                assert_eq!(
+                    events_after_replay
+                        .iter()
+                        .filter(|event| matches!(
+                            &event.kind,
+                            chat_state::TimelineEventKind::Hook(
+                                chat_state::HookEvent::Triggered {
+                                    event: chat_state::HookEventType::UserPromptSubmit,
+                                    cause: chat_state::HookCause::Input { input_id },
+                                    ..
+                                }
+                            ) if input_id == &first.input_id
+                        ))
+                        .count(),
+                    1
+                );
+
+                let frozen = events_after_replay
+                    .iter()
+                    .find_map(|event| match &event.kind {
+                        chat_state::TimelineEventKind::Input(
+                            chat_state::InputEvent::Submitted {
+                                input_id,
+                                payload_ref,
+                                ..
+                            },
+                        ) if input_id == &first.input_id => Some(
+                            input_inbox::read_payload(&actor.session_directory, payload_ref)
+                                .expect("frozen payload body remains readable"),
+                        ),
+                        _ => None,
+                    })
+                    .expect("one immutable Submitted payload");
+                let InputPayload::Prompt {
+                    prompt_blocks,
+                    skill_invocations,
+                    ..
+                } = frozen;
+                assert_eq!(
+                    prompt_blocks,
+                    match explicit_selection_payload(prompt_id) {
+                        InputPayload::Prompt { prompt_blocks, .. } => prompt_blocks,
+                    }
+                );
+                assert_eq!(skill_invocations.len(), 1);
+                assert_eq!(
+                    skill_invocations[0].qualified_name,
+                    "__grow_test_missing_skill__"
+                );
+                assert!(skill_invocations[0].skill.is_none());
+                assert!(skill_invocations[0].selection_error.is_some());
             })
             .await;
     }
@@ -1079,6 +1321,7 @@ mod tests {
                     .chat_state_handle
                     .record_timeline_event_durably(chat_state::TimelineEventKind::Turn(
                         chat_state::TurnEvent::Started {
+                            prompt_id: "fixture-prompt".into(),
                             id: turn,
                             input_ids: vec![input_id.clone()],
                             identity: crate::session::PromptOrigin::User
@@ -1098,6 +1341,7 @@ mod tests {
                         vec![input_id],
                         turn,
                         sampling_types::ConversationItem::user("consumed image"),
+                        None,
                     )
                     .await
                     .unwrap();
@@ -1185,6 +1429,123 @@ impl SessionActor {
         })
     }
 
+    fn explicit_skill_selection(
+        prompt_blocks: &[acp::ContentBlock],
+    ) -> Result<Option<ExplicitSkillSelection>, String> {
+        let mut selected = None;
+        for block in prompt_blocks {
+            let acp::ContentBlock::Text(text) = block else {
+                continue;
+            };
+            let Some(value) = text
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("grow/skillSelection"))
+            else {
+                continue;
+            };
+            if selected.is_some() {
+                return Err("input contains multiple explicit skill selections".into());
+            }
+            let selection: ExplicitSkillSelection = serde_json::from_value(value.clone())
+                .map_err(|_| "explicit skill selection metadata is malformed".to_string())?;
+            if selection.name.trim().is_empty() || selection.path.trim().is_empty() {
+                return Err("explicit skill selection identity is incomplete".into());
+            }
+            selected = Some(selection);
+        }
+        Ok(selected)
+    }
+
+    async fn freeze_skill_invocations(
+        &self,
+        prompt_blocks: &[acp::ContentBlock],
+    ) -> Vec<crate::session::input_inbox::FrozenSkillInvocation> {
+        use crate::session::input_inbox::FrozenSkillInvocation;
+        use crate::session::slash_commands::SlashCommandOutcome;
+        use tools::implementations::skills::skill::format_skill_name;
+
+        let selection = match Self::explicit_skill_selection(prompt_blocks) {
+            Ok(selection) => selection,
+            Err(error) => {
+                return vec![FrozenSkillInvocation {
+                    callable_name: String::new(),
+                    qualified_name: String::new(),
+                    args: String::new(),
+                    skill: None,
+                    selection_error: Some(error),
+                }];
+            }
+        };
+        let skills = self.slash_skills_for_resolve().await;
+        // Admission may already own the queue-edit control fence. Resolving
+        // immutable user intent must not reconcile Goal or mutate business state.
+        let tool_names = self.registered_tool_names().await;
+        let has_workflow_runs = !self.workflow_tracker().await.lock().list().is_empty();
+        let availability = self.build_command_availability(&tool_names, has_workflow_runs);
+        let (_, workflows, _) = self.named_workflow_snapshot();
+        let parsed = match crate::session::slash_commands::resolve(
+            prompt_blocks.to_vec(),
+            &skills,
+            availability,
+            &workflows,
+        ) {
+            Err(SlashCommandOutcome::InvokeSkill { skills, .. }) => skills,
+            Ok(_) | Err(SlashCommandOutcome::Builtin(_)) => Vec::new(),
+        };
+
+        if let Some(selection) = selection {
+            let selected = parsed
+                .first()
+                .filter(|reference| explicit_selection_matches(&selection, reference));
+            if selected.is_none() {
+                return vec![FrozenSkillInvocation {
+                    callable_name: selection.name.clone(),
+                    qualified_name: selection.name,
+                    args: parsed
+                        .first()
+                        .map_or_else(String::new, |reference| reference.args.clone()),
+                    skill: None,
+                    selection_error: Some(
+                        "selected skill source no longer matches this command; choose it again"
+                            .into(),
+                    ),
+                }];
+            }
+        }
+
+        parsed
+            .into_iter()
+            .map(|reference| {
+                let skill = skills.iter().find(|skill| {
+                    skill.path == reference.skill_path
+                        && skill.plugin_name == reference.plugin_name
+                        && format_skill_name(skill) == reference.qualified_name
+                });
+                match skill {
+                    Some(skill) => FrozenSkillInvocation {
+                        callable_name: reference.name,
+                        qualified_name: reference.qualified_name,
+                        args: reference.args,
+                        // Keep the exact in-memory list snapshot. Admission
+                        // does not reread SKILL.md or refresh its body.
+                        skill: Some(skill.clone()),
+                        selection_error: None,
+                    },
+                    None => FrozenSkillInvocation {
+                        callable_name: reference.name,
+                        qualified_name: reference.qualified_name,
+                        args: reference.args,
+                        skill: None,
+                        selection_error: Some(
+                            "resolved skill source disappeared before input admission".into(),
+                        ),
+                    },
+                }
+            })
+            .collect()
+    }
+
     /// Publish a HumanIntent and run its one UserPromptSubmit Hook occurrence,
     /// but leave the final admission decision to the caller. Direct steering
     /// uses this split phase so target liveness is checked after a potentially
@@ -1192,7 +1553,7 @@ impl SessionActor {
     pub(super) async fn run_human_input_admission_hook(
         &self,
         intent: chat_state::InputIntent,
-        payload: crate::session::input_inbox::InputPayload,
+        mut payload: crate::session::input_inbox::InputPayload,
         prompt_id: Option<String>,
     ) -> Result<InputAdmissionAttempt, String> {
         let payload_prompt_id = match &payload {
@@ -1230,7 +1591,27 @@ impl SessionActor {
             self.session_info.id.0.as_ref(),
             &prompt_id,
         );
-        let compare_payload = payload.clone();
+        let events = self
+            .chat_state_handle
+            .timeline_events()
+            .await
+            .ok_or_else(|| "Timeline unavailable while reconciling input identity".to_string())?;
+        if let Some(existing_id) = self
+            .find_existing_prompt_input(&events, &prompt_id, intent, &payload)
+            .await?
+        {
+            return Ok(InputAdmissionAttempt::Existing {
+                state: existing_input_state(&events, &existing_id)?,
+                input_id: existing_id,
+            });
+        }
+
+        let crate::session::input_inbox::InputPayload::Prompt {
+            prompt_blocks,
+            skill_invocations,
+            ..
+        } = &mut payload;
+        *skill_invocations = self.freeze_skill_invocations(prompt_blocks).await;
         let artifact_guard = self.input_artifact_gate.lock().await;
         let directory = self
             .session_directory
@@ -1245,22 +1626,6 @@ impl SessionActor {
         .await
         .map_err(|error| format!("input artifact writer failed: {error}"))?
         .map_err(|error| format!("input artifact write failed: {error}"))?;
-
-        let events = self
-            .chat_state_handle
-            .timeline_events()
-            .await
-            .ok_or_else(|| "Timeline unavailable while reconciling input identity".to_string())?;
-        if let Some(existing_id) = self
-            .find_existing_prompt_input(&events, &prompt_id, intent, &compare_payload)
-            .await?
-        {
-            drop(artifact_guard);
-            return Ok(InputAdmissionAttempt::Existing {
-                state: existing_input_state(&events, &existing_id)?,
-                input_id: existing_id,
-            });
-        }
 
         let submitted = self
             .chat_state_handle
@@ -1360,10 +1725,8 @@ impl SessionActor {
                     .map_err(|error| {
                         format!("input payload evidence is unavailable for {input_id}: {error}")
                     })?;
-            let existing_value = serde_json::to_value(existing_payload)
-                .map_err(|error| format!("existing input payload cannot be compared: {error}"))?;
-            let requested_value = serde_json::to_value(requested)
-                .map_err(|error| format!("requested input payload cannot be compared: {error}"))?;
+            let existing_value = comparable_input_payload(&existing_payload)?;
+            let requested_value = comparable_input_payload(requested)?;
             if existing_value != requested_value {
                 return Err(format!(
                     "input identity conflict for prompt {prompt_id}: immutable payload or route differs"
@@ -1427,11 +1790,14 @@ impl SessionActor {
         input_ids: Vec<String>,
         turn: chat_state::TurnId,
         item: sampling_types::ConversationItem,
+        display_echo: Option<chat_state::UserDisplayEcho>,
     ) -> Result<(), String> {
         self.record_input_event(chat_state::InputEvent::Consumed {
             input_ids,
             turn,
             item,
+            display_echo,
+            skill_loads: Vec::new(),
         })
         .await
     }
@@ -1441,11 +1807,14 @@ impl SessionActor {
         input_ids: Vec<String>,
         turn: chat_state::TurnId,
         item: sampling_types::ConversationItem,
+        display_echo: Option<chat_state::UserDisplayEcho>,
     ) -> Result<(), String> {
         self.record_input_event(chat_state::InputEvent::Consumed {
             input_ids,
             turn,
             item,
+            display_echo,
+            skill_loads: Vec::new(),
         })
         .await
     }
@@ -1536,6 +1905,7 @@ impl SessionActor {
                         prompt_id,
                         requested_route: _,
                         prompt_blocks,
+                        skill_invocations: _,
                         client_identifier,
                         screen_mode,
                         verbatim,

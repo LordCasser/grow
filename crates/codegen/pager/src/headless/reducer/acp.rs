@@ -47,6 +47,8 @@ enum AcpLine {
         tool_name: String,
         #[serde(rename = "rawInput")]
         raw_input: Value,
+        #[serde(rename = "rawOutput", skip_serializing_if = "Option::is_none")]
+        raw_output: Option<Value>,
         content: Value,
         locations: Value,
     },
@@ -113,6 +115,7 @@ impl Reducer for AcpReducer {
                 status: tc.status.and_then(tool_call_status_wire),
                 tool_name: tc.tool_name,
                 raw_input: tc.raw_input,
+                raw_output: tc.raw_output,
                 content: tc.content,
                 locations: tc.locations,
             },

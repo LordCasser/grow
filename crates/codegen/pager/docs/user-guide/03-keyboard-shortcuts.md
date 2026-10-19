@@ -101,9 +101,9 @@ Switch between the prompt input and scrollback pane.
 
 | State | Gesture | Effect |
 |--------|---------|--------|
-| Turn running, **minimal mode or vim scrollback mode off (the default)** | `Esc` | Cancel immediately (prompt or scrollback focused, even with a draft — the draft is **preserved**, unlike Ctrl+C's clear-first gesture). |
-| Turn running, **fullscreen vim mode** | `Esc` | Swallowed no-op (does **not** cancel). Use `Ctrl+C` (or palette / other cancel entry points). |
-| Turn cancelling | `Esc` | Re-sends cancel in **every** mode (retry if the first ack was lost). `Ctrl+C` in this state escalates toward quit. |
+| Turn running, **minimal mode or vim scrollback mode off (the default)** | `Esc` | Cancel immediately (prompt or scrollback focused, even with a draft — the draft is **preserved**). |
+| Turn running, **fullscreen vim mode** | `Esc` | Swallowed no-op (does **not** cancel). Use Stop Turn or another explicit cancel entry point. |
+| Turn cancelling | `Esc` | Re-sends cancel in **every** mode (retry if the first ack was lost). |
 | Idle + non-empty prompt (text or image chips), **prompt focused** | **2× `Esc` within 800ms** | Clear the prompt; non-empty text is saved to prompt history. First press shows “press again to clear”. |
 | Idle + empty prompt + conversation messages, **prompt or scrollback focused** | **2× `Esc` within 800ms** | Open the rewind picker (same as `/rewind`). First press is silent (no toast). |
 | Idle + empty + no messages, **or scrollback focused with a draft / moded (`!` `#` feedback) composer / pending needs-input overlay / open history search** | `Esc` | Swallowed no-op (does not focus scrollback). Clear is prompt-pane only; rewind requires an empty Normal-mode composer, no pending overlay, and no open history search — reading the scrollback never mutates your draft, your composer mode, a question awaiting an answer, or an in-progress search. |
@@ -112,7 +112,7 @@ Switch between the prompt input and scrollback pane.
 
 **Steal-Esc (runs before mid-turn cancel / swallow and clear / rewind):** overlays, modals, slash/file/completion dropdowns, history search, scrollback search, text selection, link highlight, and **Bash / Remember mode exit** when the prompt is empty (Esc leaves `!` / `#` mode and returns to the normal prompt — even while a turn is running).
 
-**Ctrl+C vs Esc:** with a non-empty draft while a turn is running, Ctrl+C clears the draft and keeps the turn; a second Ctrl+C on an empty prompt cancels. Esc cancels immediately and preserves the draft (in fullscreen vim mode it does not cancel — it only retries while already cancelling). Idle non-empty Ctrl+C clears in one press; Esc requires two presses within 800ms.
+**Esc vs Ctrl+C:** Esc keeps its cancel / clear / rewind behavior above. On an execution session, Ctrl+C requests suspension of the session tree and exits; it preserves the composer draft and does not cancel the turn or pause the Goal. Repeated Ctrl+C joins the first request. If the result is unconfirmed, the screen offers `r` to retry and `f` to force quit with a warning that recovery may be incomplete. Use Esc or the Stop Turn control when you mean to cancel the active turn. A read-only replay keeps its local exit behavior. See the [session-tree suspension contract](../../../../../openspec/changes/archive/2026-10-19-suspend-session-tree/specs/client-surfaces/spec.md#requirement-ctrl-c-requests-bounded-session-tree-suspension) for the exact boundary.
 
 ---
 
@@ -124,8 +124,8 @@ Actions that affect the agent session, available from the agent screen.
 |-----|---------|--------|
 | `Ctrl+P` | Agent screen | Open the command palette |
 | `?` (Shift+/) | Agent screen | Open the command palette (alt binding) |
+| `Ctrl+C` | Execution session | Suspend the session tree, then exit; drafts are preserved |
 | `Ctrl+M` | Prompt focused | Toggle multiline input mode |
-| `Ctrl+C` | Agent screen | Cancel the current turn (or clear non-empty draft first; see Escape table) |
 | `Ctrl+S` | Agent screen | Open the session picker (resume a previous session) |
 | `Ctrl+;` (alt: `Ctrl+'`) | Agent screen | Toggle the prompt queue pane (when non-empty). **Local macOS** VS Code family only: primary **`Ctrl+4`** (`;` / `'` still alts). SSH and non-Mac keep **`Ctrl+;`** / **`Ctrl+'`**. |
 | `Ctrl+R` | Prompt focused | Redo (alternate to `Ctrl+Shift+Z`) |
@@ -215,9 +215,11 @@ Actions available from any screen.
 |-----|---------|--------|-------------|
 | `Ctrl+N` | | Create a new session (optionally in a git worktree) | Yes (double-press within 1000ms) |
 | `Ctrl+\` | | Open or toggle the [Agent Dashboard](23-dashboard.md) | No |
-| `Ctrl+Q` | `Ctrl+D` | Quit the application | Yes, except on the welcome screen (no session to lose — quits on the first press) |
+| `Ctrl+Q` | `Ctrl+D` | Quit the application through the same session-tree suspension flow | Yes; Welcome exits immediately |
 
 **VS Code family terminal** (VS Code, Cursor, Windsurf, Zed integrated terminals): `Ctrl+Q` is captured by the host, so Grow makes **`Ctrl+D` the sole quit key** (`Ctrl+Q` is not bound). Half-page-down is rebound to bare **`Shift+D`**. Mid-turn interject uses **`Ctrl+L`** (no alternates) because `Ctrl+Enter` / `Ctrl+I` do not reliably reach the PTY; extensions are opened via `/plugins` instead of `Ctrl+L`.
+
+Normal quit and the first controlled OS quit signal use the same suspension request and five-second deadline. An unconfirmed result leaves the application open. Retry creates a new request identity for the same suspension operation; force quit is only available as an explicit action from the unconfirmed screen.
 
 > **Returning to the welcome screen has no key binding** — use the `/home` slash command from inside a session. See [Slash Commands](04-slash-commands.md).
 
@@ -331,7 +333,7 @@ Paste image:      Alt+V (Windows only — for screenshots / "Copy Image")
 Select all:       Cmd+A (macOS, Ghostty only — see note below)
 Leave:            Tab (back to scrollback)
 Undo / redo:      Ctrl+Z / Ctrl+R (also Ctrl+Shift+Z)
-Cancel (running): Ctrl+C (empty prompt; non-empty draft clears first)
+Cancel (running): Esc (or Stop Turn)
 Clear (idle):     Esc Esc within 800ms (non-empty prompt)
 Rewind (idle):    Esc Esc within 800ms (empty prompt + messages)
 ```
@@ -362,7 +364,7 @@ Rewind (idle):    Esc Esc within 800ms (empty prompt + messages)
 Command palette:  Ctrl+P or ?
 Model picker:     Ctrl+X, then M
 Agent picker:     Ctrl+X, then A
-Cancel:           Ctrl+C (see Escape table)
+Cancel:           Esc (or Stop Turn)
 Permission:       Ctrl+X, then P
 Behavior:         Ctrl+X, then B
 New session:      Ctrl+N (press again, then choose normal/worktree)

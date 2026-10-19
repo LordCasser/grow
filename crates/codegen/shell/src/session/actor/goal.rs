@@ -823,7 +823,7 @@ impl SessionActor {
                 let state = session.state.lock().await;
                 state.foreground.is_idle() && state.pending_inputs.is_empty()
             };
-            if retry {
+            if retry && !session.planning_waits_for_event().await {
                 session.idle_arbiter.notify_one();
             }
         });
@@ -849,11 +849,12 @@ impl SessionActor {
         let previous_behavior_snapshot = self.behavior.lock().snapshot();
         let previous_behavior = previous_behavior_snapshot.behavior();
         let persisted = if previous_behavior == tool_types::BehaviorId::Goal {
-            self.persist_behavior_transition_durably(
-                crate::session::behavior::BehaviorSnapshot::normal(),
-                next,
-            )
-            .await
+            let mut stopped_behavior = crate::session::behavior::BehaviorCoordinator::from_snapshot(
+                previous_behavior_snapshot.clone(),
+            );
+            stopped_behavior.select_behavior(tool_types::BehaviorId::Normal);
+            self.persist_behavior_transition_durably(stopped_behavior.snapshot(), next)
+                .await
         } else {
             self.persist_control_snapshot_durably(previous_behavior_snapshot, next)
                 .await
@@ -1221,7 +1222,8 @@ impl SessionActor {
         drop(workflow_admission);
         self.send_available_commands_update().await;
         self.goal_notify_sender()
-            .emit_goal_updated(&self.goal_tracker.lock(), next.tokens_used);
+            .emit_goal_updated(self.goal_notification_snapshot(), next.tokens_used)
+            .await;
         if next.status == GoalStatus::Active {
             self.idle_arbiter.notify_one();
         }
@@ -1275,7 +1277,8 @@ impl SessionActor {
         // A new Goal epoch must not steal or erase still-running work admitted
         // by the previous Goal.
         self.goal_notify_sender()
-            .emit_goal_updated(&self.goal_tracker.lock(), 0);
+            .emit_goal_updated(self.goal_notification_snapshot(), 0)
+            .await;
         self.idle_arbiter.notify_one();
         Ok(())
     }
@@ -1333,7 +1336,8 @@ impl SessionActor {
         drop(boundary);
         let used = self.goal_tokens_used();
         self.goal_notify_sender()
-            .emit_goal_updated(&self.goal_tracker.lock(), used);
+            .emit_goal_updated(self.goal_notification_snapshot(), used)
+            .await;
         self.idle_arbiter.notify_one();
         if usage_is_lower_bound.is_some() {
             "Goal restarted. Automatic continuation is armed. Token usage remains a durable lower bound."
@@ -1387,7 +1391,8 @@ impl SessionActor {
                 .await;
         }
         self.goal_notify_sender()
-            .emit_goal_updated(&self.goal_tracker.lock(), used);
+            .emit_goal_updated(self.goal_notification_snapshot(), used)
+            .await;
         true
     }
 
@@ -1426,7 +1431,8 @@ impl SessionActor {
                     )
                     .await;
                     self.goal_notify_sender()
-                        .emit_goal_updated(&self.goal_tracker.lock(), used);
+                        .emit_goal_updated(self.goal_notification_snapshot(), used)
+                        .await;
                 }
             }
             return self.events.current_goal_id().as_deref() == Some(current.goal_id.as_str());
@@ -1468,7 +1474,8 @@ impl SessionActor {
                 .await;
         }
         self.goal_notify_sender()
-            .emit_goal_updated(&self.goal_tracker.lock(), used);
+            .emit_goal_updated(self.goal_notification_snapshot(), used)
+            .await;
         true
     }
 
@@ -1539,7 +1546,7 @@ impl SessionActor {
         }
         {
             let state = self.state.lock().await;
-            if !state.termination.is_open()
+            if !state.execution_open()
                 || !state.foreground.is_idle()
                 || !state.pending_inputs.is_empty()
             {
@@ -1547,6 +1554,9 @@ impl SessionActor {
             }
         }
         if self.enforce_goal_spending_limit().await {
+            return;
+        }
+        if self.planning_waits_for_event().await {
             return;
         }
         let tokens_used = self.goal_tokens_used();
@@ -1584,7 +1594,7 @@ impl SessionActor {
         }
         let _admission_gate = self.step_control_gate.lock().await;
         let mut state = self.state.lock().await;
-        if !state.termination.is_open()
+        if !state.execution_open()
             || !state.foreground.is_idle()
             || !state.pending_inputs.is_empty()
             || !state.pending_step_controls.is_empty()
@@ -1700,6 +1710,22 @@ impl SessionActor {
                     ));
                     return;
                 }
+                if matches!(input.status, GoalUpdateStatus::Complete) {
+                    match self.planning_completion_blockers().await {
+                        Ok(blockers) if !blockers.is_empty() => {
+                            let _ = respond_to.send(Err(format!(
+                                "Goal completion has unresolved work: {}",
+                                blockers.join("; ")
+                            )));
+                            return;
+                        }
+                        Err(error) => {
+                            let _ = respond_to.send(Err(error));
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
                 let used = self.goal_tokens_used();
                 let previous = self.goal_tracker.lock().snapshot().cloned();
                 let retired_goal_owner = previous
@@ -1789,7 +1815,8 @@ impl SessionActor {
                     .await;
                 }
                 self.goal_notify_sender()
-                    .emit_goal_updated(&self.goal_tracker.lock(), used);
+                    .emit_goal_updated(self.goal_notification_snapshot(), used)
+                    .await;
                 let _ = respond_to.send(Ok(summary));
             }
         }

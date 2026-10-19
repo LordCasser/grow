@@ -19,6 +19,7 @@ use super::{
 };
 
 mod activity;
+mod cache_completeness;
 
 const MAX_NODES: usize = 512;
 const MAX_DEPTH: usize = 32;
@@ -47,6 +48,9 @@ pub struct TranscriptSession {
     /// A reopened process wrote terminal facts at recovery time. These gaps
     /// are candidates for estimated skipping, never confirmed historical idle.
     pub recovery_gaps: Vec<std::ops::Range<u64>>,
+    /// Confirmed offline time for this exact runtime-tree member, established
+    /// by its root's matching TreeSuspended/ExecutionReleased operation.
+    pub offline_gaps: Vec<std::ops::Range<u64>>,
     /// Operations with no captured terminal remain potentially active until
     /// the global tree frontier, including while a sibling emits updates.
     pub open_activity: Vec<u64>,
@@ -432,6 +436,35 @@ fn verify_seed(
     Ok(())
 }
 
+/// Load and validate the lifecycle root named by this node's Timeline. A
+/// Seed names a direct parent for subagent provenance; runtime ownership can
+/// be rooted several delegation levels above it.
+fn ensure_runtime_root_facts(
+    session_id: &str,
+    grow_home: &Path,
+    facts: &mut BTreeMap<String, Facts>,
+    budget: &mut Budget,
+) -> io::Result<()> {
+    let root_id = facts
+        .get(session_id)
+        .expect("session facts loaded")
+        .timeline
+        .runtime_lifecycle()
+        .root_session_id
+        .clone();
+    let Some(root_id) = root_id else {
+        return Ok(());
+    };
+    load_facts(&root_id, grow_home, facts, budget, false)?;
+    let root = facts.get(&root_id).expect("runtime root loaded");
+    if root.timeline.runtime_lifecycle().root_session_id.as_deref() != Some(root_id.as_str()) {
+        return Err(invalid(format!(
+            "runtime lifecycle root identity mismatch for session '{session_id}'"
+        )));
+    }
+    Ok(())
+}
+
 /// A rewind selects a branch, but does not delete old lifecycle facts. Keep
 /// only children attached to turns that survived the branch selection. The
 /// actual display row is still filtered independently by updates.jsonl.
@@ -510,6 +543,7 @@ pub fn capture_tree_at(session_id: &str, grow_home: &Path) -> io::Result<Transcr
     let mut budget = Budget::default();
     load_facts(session_id, grow_home, &mut facts, &mut budget, true)?;
     verify_seed(session_id, grow_home, &mut facts, &mut budget)?;
+    ensure_runtime_root_facts(session_id, grow_home, &mut facts, &mut budget)?;
     let mut nodes = Vec::new();
     let mut visited = BTreeSet::new();
     visit(
@@ -610,6 +644,7 @@ fn visit(
             )));
         }
         verify_seed(&child_id, grow_home, facts, budget)?;
+        ensure_runtime_root_facts(&child_id, grow_home, facts, budget)?;
         visit(
             &child_id,
             Some(session_id),
@@ -634,6 +669,7 @@ pub fn read_session_at(session_id: &str, grow_home: &Path) -> io::Result<Transcr
     let mut budget = Budget::default();
     load_facts(session_id, grow_home, &mut facts, &mut budget, true)?;
     verify_seed(session_id, grow_home, &mut facts, &mut budget)?;
+    ensure_runtime_root_facts(session_id, grow_home, &mut facts, &mut budget)?;
     project_session(session_id, &facts, &mut budget)
 }
 
@@ -707,6 +743,21 @@ fn project_session(
         )));
     }
     let filtered = filter_rewind_lines(lines.iter().map(String::as_str).collect());
+    // Rewind selects the visible branch for transcript reconstruction but does
+    // not rewrite the append-only updates ledger. Validate durable projection
+    // expectations against that captured physical ledger before filtering, or
+    // a valid projection from a discarded branch would look missing.
+    cache_completeness::validate_expected_display_projections(
+        session_id.as_str(),
+        &facts.timeline,
+        &lines.iter().map(String::as_str).collect::<Vec<_>>(),
+    )?;
+    cache_completeness::validate_committed_user_echoes(
+        session_id.as_str(),
+        &facts.timeline,
+        &filtered,
+    )?;
+    cache_completeness::validate_ended_user_turns(session_id.as_str(), &facts.timeline, &filtered)?;
     // Reconciliation replaces a payload-free preview anchor with canonical
     // text. Preserve that anchor's recorded timing and prompt ownership, not
     // the newly serialized envelope's current timestamp.
@@ -846,6 +897,17 @@ fn project_session(
     }
     restore_observational_facts(&session_id, facts, all, &mut events, budget)?;
     restore_control_snapshot(facts, &mut events, budget)?;
+    let (offline_gaps, offline_unknown) = facts
+        .timeline
+        .runtime_lifecycle()
+        .root_session_id
+        .as_deref()
+        .and_then(|runtime_root_id| {
+            all.get(runtime_root_id).map(|root| {
+                activity::runtime_offline_intervals(root.timeline.events(), &session_id)
+            })
+        })
+        .unwrap_or_default();
     let mut activity = activity::from_timeline(facts.timeline.events());
     let background = activity::background_task_activity(&events);
     activity.protected.extend(background.protected);
@@ -854,7 +916,10 @@ fn project_session(
     activity
         .protected
         .extend(facts.sideband_activity.iter().cloned());
-    activity.protected = activity::merged(activity.protected);
+    activity.protected = activity::subtract_ranges(activity.protected, &offline_gaps);
+    activity.recovery_gaps = activity::subtract_ranges(activity.recovery_gaps, &offline_gaps);
+    activity.offline_gaps = activity::merged(offline_gaps);
+    activity.unknown_activity |= offline_unknown;
     Ok(TranscriptSession {
         session_id: opened.summary().info.id.to_string(),
         title: facts.title.clone(),
@@ -863,6 +928,7 @@ fn project_session(
         events,
         activity: activity.protected,
         recovery_gaps: activity.recovery_gaps,
+        offline_gaps: activity.offline_gaps,
         open_activity: activity.open_starts,
         unknown_activity: activity.unknown_activity,
     })
@@ -1107,6 +1173,16 @@ mod tests {
     }
 
     fn write_session(root: &Path, id: &str, cwd: &str, timeline: &Timeline, child: bool) {
+        write_session_with_parent(root, id, cwd, timeline, child.then_some("root"));
+    }
+
+    fn write_session_with_parent(
+        root: &Path,
+        id: &str,
+        cwd: &str,
+        timeline: &Timeline,
+        parent: Option<&str>,
+    ) {
         let dir = root.join("sessions").join(encode_cwd_dirname(cwd)).join(id);
         std::fs::create_dir_all(&dir).unwrap();
         let info = crate::session::info::Info {
@@ -1114,8 +1190,8 @@ mod tests {
             cwd: cwd.to_owned(),
         };
         let mut summary = Summary::new(&info, crate::agent::models::ModelId::new("model")).unwrap();
-        if child {
-            summary.parent_session_id = Some("root".into());
+        if let Some(parent) = parent {
+            summary.parent_session_id = Some(parent.into());
             summary.session_kind = Some("subagent".into());
         }
         std::fs::write(
@@ -1139,14 +1215,82 @@ mod tests {
         .unwrap();
     }
 
+    fn set_event_times(timeline: Timeline, times: &[i64]) -> Timeline {
+        let mut events = timeline.events().to_vec();
+        assert_eq!(events.len(), times.len());
+        for (event, at_ms) in events.iter_mut().zip(times) {
+            event.at_ms = *at_ms;
+        }
+        Timeline::from_events(events).unwrap()
+    }
+
+    fn append_runtime_checkpoint(timeline: &mut Timeline, root_id: &str) -> u64 {
+        use chat_state::session_runtime::{
+            RuntimeCheckpoint, RuntimeCommandSettlement, SessionRuntimeEvent,
+        };
+        timeline
+            .record(TimelineEventKind::Runtime(
+                SessionRuntimeEvent::SuspendRequested {
+                    operation_id: "op-1".into(),
+                    root_session_id: root_id.into(),
+                },
+            ))
+            .unwrap();
+        let settled = timeline
+            .record(TimelineEventKind::Runtime(
+                SessionRuntimeEvent::CommandsSettled {
+                    operation_id: "op-1".into(),
+                    commands: Vec::<RuntimeCommandSettlement>::new(),
+                },
+            ))
+            .unwrap();
+        let checkpoint = timeline
+            .record(TimelineEventKind::Runtime(
+                SessionRuntimeEvent::Checkpoint {
+                    operation_id: "op-1".into(),
+                    checkpoint: RuntimeCheckpoint {
+                        frontier: settled.seq,
+                        runtime_source_hash: "a".repeat(64),
+                        turn: None,
+                        step: None,
+                    },
+                },
+            ))
+            .unwrap();
+        checkpoint.seq.get()
+    }
+
+    fn append_runtime_release(timeline: &mut Timeline) {
+        use chat_state::session_runtime::SessionRuntimeEvent;
+        for event in [
+            SessionRuntimeEvent::RestorePrepared {
+                operation_id: "op-1".into(),
+                instance_id: "instance-1".into(),
+            },
+            SessionRuntimeEvent::Resumed {
+                operation_id: "op-1".into(),
+                instance_id: "instance-1".into(),
+            },
+            SessionRuntimeEvent::ExecutionReleased {
+                operation_id: "op-1".into(),
+                instance_id: "instance-1".into(),
+            },
+        ] {
+            timeline.record(TimelineEventKind::Runtime(event)).unwrap();
+        }
+    }
+
     fn spawn(child_id: &str, security_parent: &str) -> chat_state::SubagentSpawnEvent {
         chat_state::SubagentSpawnEvent {
             subagent_id: format!("agent-{child_id}"),
             child_session_id: child_id.into(),
+            origin_tool_call_id: None,
             security_parent_session_id: security_parent.into(),
+            parent_step_id: None,
             subagent_type: "explore".into(),
             description: "inspect".into(),
             prompt: "inspect".into(),
+            execution_recipe: serde_json::json!({}),
             context_source: chat_state::SubagentContextSource::New,
             source_ref: None,
             context_normalized: false,
@@ -1290,6 +1434,110 @@ mod tests {
             ["child", "grandchild"]
         );
         assert_eq!(child_tree[0].parent_id, None);
+    }
+
+    #[test]
+    fn grandchild_offline_projection_reads_the_lifecycle_root() {
+        use acp_transport::protocol as acp;
+        use chat_state::session_runtime::{RuntimeNodeRef, SessionRuntimeEvent};
+        use chat_state::{EventSeq, SubagentEvent};
+
+        let home = tempfile::tempdir().unwrap();
+        let mut root = Timeline::default();
+        let child_spawn = spawn("child", "root");
+        let child_spawn_seq = root
+            .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+                child_spawn.clone(),
+            )))
+            .unwrap()
+            .seq
+            .get();
+        let root_checkpoint_seq = append_runtime_checkpoint(&mut root, "root");
+
+        let mut child = Timeline::default();
+        child
+            .record(TimelineEventKind::SubagentSeed(child_seed(
+                "root",
+                child_spawn_seq,
+                &child_spawn,
+            )))
+            .unwrap();
+        let grandchild_spawn = spawn("grandchild", "child");
+        let grandchild_spawn_seq = child
+            .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+                grandchild_spawn.clone(),
+            )))
+            .unwrap()
+            .seq
+            .get();
+        let child_checkpoint_seq = append_runtime_checkpoint(&mut child, "root");
+
+        let mut grandchild = Timeline::default();
+        grandchild
+            .record(TimelineEventKind::SubagentSeed(child_seed(
+                "child",
+                grandchild_spawn_seq,
+                &grandchild_spawn,
+            )))
+            .unwrap();
+        let grandchild_checkpoint_seq = append_runtime_checkpoint(&mut grandchild, "root");
+
+        root.record(TimelineEventKind::Runtime(
+            SessionRuntimeEvent::TreeSuspended {
+                operation_id: "op-1".into(),
+                nodes: vec![
+                    RuntimeNodeRef {
+                        session_id: "root".into(),
+                        checkpoint_seq: EventSeq::new(root_checkpoint_seq),
+                    },
+                    RuntimeNodeRef {
+                        session_id: "child".into(),
+                        checkpoint_seq: EventSeq::new(child_checkpoint_seq),
+                    },
+                    RuntimeNodeRef {
+                        session_id: "grandchild".into(),
+                        checkpoint_seq: EventSeq::new(grandchild_checkpoint_seq),
+                    },
+                ],
+            },
+        ))
+        .unwrap();
+        append_runtime_release(&mut root);
+        root = set_event_times(
+            root,
+            &[500, 1_000, 1_100, 1_200, 2_000, 50_000, 51_000, 90_000],
+        );
+
+        write_session(home.path(), "root", "/project", &root, false);
+        write_session_with_parent(home.path(), "child", "/project", &child, Some("root"));
+        write_session_with_parent(
+            home.path(),
+            "grandchild",
+            "/project",
+            &grandchild,
+            Some("child"),
+        );
+        let update = SessionUpdate::Acp(Box::new(acp::SessionNotification::new(
+            acp::SessionId::new("grandchild"),
+            acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new(
+                acp::SessionModeId::new("normal"),
+            )),
+        )));
+        let envelope = SessionUpdateEnvelope::from_update(&update).unwrap();
+        let mut committed = serde_json::to_vec(&envelope).unwrap();
+        committed.push(b'\n');
+        std::fs::write(
+            home.path()
+                .join("sessions")
+                .join(encode_cwd_dirname("/project"))
+                .join("grandchild")
+                .join(UPDATES_FILE),
+            committed,
+        )
+        .unwrap();
+
+        let projected = read_session_at("grandchild", home.path()).unwrap();
+        assert_eq!(projected.offline_gaps, vec![2_000..90_000]);
     }
 
     #[test]

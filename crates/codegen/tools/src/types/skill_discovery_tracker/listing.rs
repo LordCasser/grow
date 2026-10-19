@@ -5,6 +5,7 @@
 
 use std::collections::HashSet;
 
+use super::callable_names;
 use crate::implementations::skills::types::{SkillInfo, SkillScope};
 use crate::util::truncate_str_with_marker;
 
@@ -39,10 +40,12 @@ const TRIGGER_PREFIXES: &[&str] = &[
 /// Default client-facing name for the skill tool when TemplateRenderer
 /// has not resolved one. Single source of truth — used by both
 /// `format_announcement` callers and test helpers.
-pub(super) const DEFAULT_SKILL_TOOL_NAME: &str = "Skill";
+pub(super) const DEFAULT_SKILL_TOOL_NAME: &str = "load_skill";
 
-fn listing_header(_tool_name: &str) -> String {
-    "The following skills are available for use:\n\n".to_string()
+fn listing_header(tool_name: &str) -> String {
+    format!(
+        "The following skills are available. Use `{tool_name}` with a skill name and optional args to load one:\n\n"
+    )
 }
 
 /// Whether a skill belongs in the model-facing listing. Native, bundled, and
@@ -55,7 +58,7 @@ fn is_listable(s: &SkillInfo) -> bool {
 
 /// A single skill entry to be rendered in a listing announcement.
 struct SkillEntry<'a> {
-    name: &'a str,
+    name: String,
     description: &'a str,
     when_to_use: Option<&'a str>,
     display_path: String,
@@ -84,12 +87,12 @@ impl<'a> SkillEntry<'a> {
         if let Some(wtu) = self.when_to_use {
             let wtu = truncate_str_with_marker(strip_leading_trigger_prefix(wtu), wtu_budget);
             format!(
-                "- {}: {}\n  Use when: {}\n  Absolute path: {}",
+                "- `{}`: {}\n  Use when: {}\n  Absolute path: {}",
                 self.name, desc, wtu, self.display_path
             )
         } else {
             format!(
-                "- {}: {}\n  Absolute path: {}",
+                "- `{}`: {}\n  Absolute path: {}",
                 self.name, desc, self.display_path
             )
         }
@@ -117,7 +120,7 @@ impl<'a> SkillEntry<'a> {
 
     /// Render name only (no description or path).
     fn name_only(&self) -> String {
-        format!("- {}", self.name)
+        format!("- `{}`", self.name)
     }
 
     /// Byte length of the fixed overhead (name, path, Use when label) excluding content.
@@ -125,6 +128,7 @@ impl<'a> SkillEntry<'a> {
         // "- " + name + ": " + "\n  Absolute path: " + path + "\n"
         let base = "- ".len()
             + self.name.len()
+            + 2 // Backticks around the advertised callable name.
             + ": ".len()
             + "\n  Absolute path: ".len()
             + self.display_path.len()
@@ -317,6 +321,7 @@ fn strip_leading_trigger_prefix(wtu: &str) -> &str {
 /// populates `when_to_use` without modifying the description text.
 fn build_skill_entry<'a>(
     s: &'a SkillInfo,
+    callable_name: String,
     real_prefix: Option<&str>,
     display_prefix: Option<&str>,
     extract_triggers: bool,
@@ -329,7 +334,7 @@ fn build_skill_entry<'a>(
         None
     };
     SkillEntry {
-        name: &s.name,
+        name: callable_name,
         description: &s.description,
         when_to_use: wtu,
         display_path: match (real_prefix, display_prefix) {
@@ -352,16 +357,18 @@ pub(super) fn format_announcement(
     skill_tool_name: &str,
 ) -> Option<String> {
     let budget = listing_budget_chars.unwrap_or(DEFAULT_CHAR_BUDGET);
+    let callable_skills: Vec<_> = skills
+        .iter()
+        .filter(|skill| skill.enabled && !skill.disable_model_invocation)
+        .cloned()
+        .collect();
     let listing = SkillListing(
-        skills
-            .iter()
-            .filter(|s| {
-                s.enabled
-                    && !s.disable_model_invocation
-                    && is_listable(s)
-                    && announced.insert(s.dedup_key())
+        callable_names(&callable_skills)
+            .into_iter()
+            .filter(|(_, skill)| is_listable(skill) && announced.insert(skill.dedup_key()))
+            .map(|(callable_name, skill)| {
+                build_skill_entry(&skill, callable_name, real_prefix, display_prefix, true)
             })
-            .map(|s| build_skill_entry(s, real_prefix, display_prefix, true))
             .collect(),
     );
     listing.render(budget, skill_tool_name)
@@ -416,6 +423,21 @@ mod tests {
     #[test]
     fn no_skills_returns_none() {
         assert!(announce(&[], 8_000).is_none());
+    }
+
+    #[test]
+    fn listing_advertises_load_skill_and_qualified_collisions() {
+        let mut user = skill("review", "Review source code carefully.");
+        user.scope = SkillScope::User;
+        let mut plugin = skill("review", "Review a pull request with checks.");
+        plugin.scope = SkillScope::Plugin;
+        plugin.plugin_name = Some("pull-request".to_owned());
+        plugin.has_user_specified_description = true;
+
+        let listing = announce(&[user, plugin], 8_000).unwrap();
+        assert!(listing.contains("Use `load_skill`"));
+        assert!(listing.contains("`user:review`"));
+        assert!(listing.contains("`pull-request:review`"));
     }
 
     // ── "Use when" label de-duplication ───────────────────────────
@@ -522,7 +544,7 @@ mod tests {
     fn proportional_budgets_covers_all_branches() {
         fn entry<'a>(desc: &'a str, wtu: Option<&'a str>) -> SkillEntry<'a> {
             SkillEntry {
-                name: "s",
+                name: "s".into(),
                 description: desc,
                 when_to_use: wtu,
                 display_path: "/p/SKILL.md".to_owned(),
@@ -767,12 +789,13 @@ mod tests {
     #[test]
     fn tier3_no_overflow_indicator_when_all_names_fit() {
         let skills = [skill("a", "desc"), skill("b", "desc")];
-        // Budget: header + two name-only lines ("- a\n- b") -- use a tight budget
+        // Budget: header + two backtick-quoted name-only lines -- use a tight budget
         // that fits names but not full descriptions + paths.
-        let text = announce(&skills, 80).unwrap();
+        let budget = listing_header(DEFAULT_SKILL_TOOL_NAME).len() + "- `a`\n- `b`".len();
+        let text = announce(&skills, budget).unwrap();
         assert!(!text.contains("... and"));
-        assert!(text.contains("- a"));
-        assert!(text.contains("- b"));
+        assert!(text.contains("- `a`"));
+        assert!(text.contains("- `b`"));
     }
 
     // ── Custom tool name ─────────────────────────────────────────
@@ -911,7 +934,7 @@ mod tests {
         .unwrap();
         // Functional description appears (trigger suffix stripped)
         assert!(
-            text.contains("memorize: Persist knowledge"),
+            text.contains("`memorize`: Persist knowledge"),
             "functional desc should appear: {text}"
         );
         // Triggers rendered as separate Use when: line, with the leading
@@ -952,7 +975,7 @@ mod tests {
         );
         // Functional description without trigger suffix
         assert!(
-            text.contains("s: Full desc"),
+            text.contains("`s`: Full desc"),
             "functional desc should appear: {text}"
         );
         // Embedded trigger text should be stripped from desc line
@@ -991,7 +1014,7 @@ mod tests {
         }];
         let text = announce(&skills, 8_000).unwrap();
         assert!(
-            text.contains("memorize: Persist knowledge."),
+            text.contains("`memorize`: Persist knowledge."),
             "desc line: {text}"
         );
         assert!(
@@ -1009,7 +1032,7 @@ mod tests {
         let skills = [skill("commit", "Commit staged changes.")];
         let text = announce(&skills, 8_000).unwrap();
         assert!(
-            text.contains("commit: Commit staged changes."),
+            text.contains("`commit`: Commit staged changes."),
             "desc: {text}"
         );
         assert!(!text.contains("Use when:"), "no Use when: line: {text}");
@@ -1018,13 +1041,13 @@ mod tests {
     #[test]
     fn overhead_larger_with_when_to_use() {
         let without = SkillEntry {
-            name: "s",
+            name: "s".into(),
             description: "desc",
             when_to_use: None,
             display_path: "/p/SKILL.md".to_owned(),
         };
         let with = SkillEntry {
-            name: "s",
+            name: "s".into(),
             description: "desc",
             when_to_use: Some("trigger"),
             display_path: "/p/SKILL.md".to_owned(),
@@ -1056,7 +1079,7 @@ mod tests {
         )];
         let text = announce(&skills, 8_000).unwrap();
         assert!(
-            text.contains("memorize: Persist knowledge"),
+            text.contains("`memorize`: Persist knowledge"),
             "functional desc: {text}"
         );
         // Leading connective stripped so the "Use when:" label is not duplicated.

@@ -99,6 +99,14 @@ impl AgentView {
         &self,
         pav: &crate::views::plan_approval_view::PlanApprovalViewState,
     ) -> Vec<HintItem> {
+        if self.pending_plan_approval_decision.is_some() || pav.decision_pending() {
+            let mut hints = vec![HintItem::new(key!('r'), "check confirmation")];
+            if self.line_viewer.is_some() && pav.focus == PlanApprovalFocus::Preview {
+                hints.push(HintItem::new(key!('y'), "copy plan"));
+            }
+            hints.push(HintItem::new(key!(Esc), "close"));
+            return hints;
+        }
         match pav.focus {
             PlanApprovalFocus::Commenting => {
                 vec![
@@ -112,17 +120,21 @@ impl AgentView {
                     vec![
                         HintItem::new(key!(Enter), "request changes"),
                         HintItem::new(key!(Tab), "plan"),
-                        HintItem::new(key!(Esc), "back"),
+                        HintItem::new(key!(Esc), "close"),
                     ]
                 } else {
                     vec![
                         HintItem::new(key!('a'), "approve"),
                         HintItem::new(key!(Tab), "plan"),
-                        HintItem::new(key!(Esc), "back"),
+                        HintItem::new(key!(Esc), "close"),
                     ]
                 }
             }
-            PlanApprovalFocus::Preview => vec![HintItem::new(key!('y'), "copy plan")],
+            PlanApprovalFocus::Preview => vec![
+                HintItem::new(key!('l'), "later"),
+                HintItem::new(key!('y'), "copy plan"),
+                HintItem::new(key!(Esc), "close"),
+            ],
         }
     }
     /// Returns the *exact* hints the bottom shortcuts bar would render right now.
@@ -204,6 +216,17 @@ impl AgentView {
                     HintItem::new(key!('y'), "copy plan"),
                     HintItem::new(key!('f', CONTROL), "fullscreen"),
                 ];
+                if self.plan_artifact_preview.as_ref().is_some_and(|preview| {
+                    preview.retained
+                        && preview.binding_epoch == self.session_binding_epoch
+                        && self
+                            .session
+                            .session_id
+                            .as_ref()
+                            .is_some_and(|session_id| preview.session_id == session_id.0.as_ref())
+                }) {
+                    h.push(HintItem::new(key!('r'), "review"));
+                }
                 if !self.plan_comments.is_empty() {
                     h.push(HintItem::new(key!('s'), "send"));
                 }

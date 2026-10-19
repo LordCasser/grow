@@ -240,6 +240,7 @@ impl SessionActor {
                 prompt_id: prompt_id.clone(),
                 requested_route: crate::session::input_inbox::InputRequestRoute::Fifo,
                 prompt_blocks: prompt_blocks.clone(),
+                skill_invocations: Vec::new(),
                 client_identifier: client_identifier.clone(),
                 screen_mode: screen_mode.clone(),
                 verbatim,
@@ -386,6 +387,10 @@ impl SessionActor {
             )
             .await;
         }
+        // A same-turn Goal wait must notice a real FIFO prompt before it
+        // samples again. The queue remains authoritative after any explicit
+        // steer promotion above.
+        self.idle_arbiter.notify_waiters();
     }
 
     /// Admission gate for `follow_up_behavior = "steer"` at [`queue_input`]
@@ -900,6 +905,7 @@ impl SessionActor {
             prompt_id: input_prompt_id.clone(),
             requested_route: crate::session::input_inbox::InputRequestRoute::Fifo,
             prompt_blocks: replacement.prompt_blocks.clone(),
+            skill_invocations: Vec::new(),
             client_identifier: replacement.client_identifier.clone(),
             screen_mode: replacement.screen_mode.clone(),
             verbatim: replacement.verbatim,
@@ -1257,7 +1263,7 @@ impl SessionActor {
         // A bash row executes `extract_bash_command`'s meta value, not the
         // block text — rebuild the meta with the edited text or the edit
         // demotes the row to a plain model prompt.
-        let meta = Self::extract_bash_command(&item.prompt_blocks)
+        let mut meta = Self::extract_bash_command(&item.prompt_blocks)
             .is_some()
             .then(|| {
                 let value = serde_json::to_value(
@@ -1269,6 +1275,27 @@ impl SessionActor {
                     .cloned()
                     .expect("PromptBlockMeta serializes to object")
             });
+        // Editing only arguments keeps the selector's exact source intent.
+        // A different command name is a new choice and is resolved at its new
+        // input identity, rather than inheriting the old source accidentally.
+        let command = new_text
+            .trim_start()
+            .strip_prefix('/')
+            .and_then(|text| text.split_whitespace().next());
+        if let Some(selection) = item
+            .prompt_blocks
+            .iter()
+            .find_map(|block| match block {
+                acp::ContentBlock::Text(text) => text.meta.as_ref()?.get("grow/skillSelection"),
+                _ => None,
+            })
+            .filter(|selection| {
+                selection.get("name").and_then(serde_json::Value::as_str) == command
+            })
+        {
+            meta.get_or_insert_with(serde_json::Map::new)
+                .insert("grow/skillSelection".into(), selection.clone());
+        }
         let mut blocks = vec![acp::ContentBlock::Text(
             acp::TextContent::new(new_text.clone()).meta(meta),
         )];
@@ -1655,6 +1682,94 @@ mod follow_up_admission_tests {
         vec![acp::ContentBlock::Text(acp::TextContent::new(
             text.to_string(),
         ))]
+    }
+
+    fn selected_skill_blocks(command: &str) -> Vec<acp::ContentBlock> {
+        let mut text = acp::TextContent::new(command);
+        text.meta = Some(
+            [(
+                "grow/skillSelection".into(),
+                serde_json::json!({
+                    "name": "acme:deploy",
+                    "path": "/plugins/acme/deploy/SKILL.md",
+                    "plugin_name": "acme"
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        vec![acp::ContentBlock::Text(text)]
+    }
+
+    fn input_with_selected_skill() -> InputItem {
+        let (respond_to, _response) = tokio::sync::oneshot::channel();
+        InputItem {
+            input_ids: vec!["input-1".into()],
+            prompt_id: "prompt-1".into(),
+            turn_kind: crate::session::TurnKind::User,
+            prompt_blocks: selected_skill_blocks("/acme:deploy prod"),
+            client_identifier: None,
+            screen_mode: None,
+            verbatim: false,
+            json_schema: None,
+            origin: crate::session::PromptOrigin::User,
+            host_command: None,
+            notification_ids: Vec::new(),
+            respond_to,
+            persist_ack: None,
+            queue_meta: Some(crate::session::prompt_queue::QueueEntryMeta {
+                id: "queue-1".into(),
+                version: 4,
+                owner: None,
+                last_editor: None,
+                kind: "prompt".into(),
+                text: "/acme:deploy prod".into(),
+                combined_texts: None,
+            }),
+        }
+    }
+
+    #[test]
+    fn queued_skill_edit_keeps_selection_for_same_command_and_clears_it_on_command_change() {
+        let mut same_command = input_with_selected_skill();
+        SessionActor::apply_queued_prompt_edit(
+            &mut same_command,
+            "/acme:deploy staging".into(),
+            Some("editor"),
+        );
+        let acp::ContentBlock::Text(edited) = &same_command.prompt_blocks[0] else {
+            panic!("edited prompt starts with text");
+        };
+        assert_eq!(edited.text, "/acme:deploy staging");
+        assert_eq!(
+            edited
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("grow/skillSelection")),
+            Some(&serde_json::json!({
+                "name": "acme:deploy",
+                "path": "/plugins/acme/deploy/SKILL.md",
+                "plugin_name": "acme"
+            }))
+        );
+        assert_eq!(same_command.queue_meta.as_ref().unwrap().version, 5);
+
+        let mut changed_command = input_with_selected_skill();
+        SessionActor::apply_queued_prompt_edit(
+            &mut changed_command,
+            "/acme:rollback staging".into(),
+            Some("editor"),
+        );
+        let acp::ContentBlock::Text(edited) = &changed_command.prompt_blocks[0] else {
+            panic!("edited prompt starts with text");
+        };
+        assert_eq!(edited.text, "/acme:rollback staging");
+        assert!(
+            edited
+                .meta
+                .as_ref()
+                .is_none_or(|meta| !meta.contains_key("grow/skillSelection"))
+        );
     }
 
     fn bash_blocks() -> Vec<acp::ContentBlock> {

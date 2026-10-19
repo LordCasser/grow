@@ -22,13 +22,66 @@ fn update_restart_intent_survives_terminal_teardown() {
 
     let effects = dispatch(Action::RestartForUpdate, &mut app);
 
-    assert!(app.restart_for_update);
+    assert!(
+        !app.restart_for_update,
+        "restart follows confirmed suspension"
+    );
+    let [Effect::SuspendForExit { exit_id }] = effects.as_slice() else {
+        panic!("expected one suspension request, got {effects:?}");
+    };
+    assert_eq!(app.exit_suspension.as_ref().unwrap().exit_id, *exit_id);
+    assert!(app.exit_suspension.as_ref().unwrap().restart_for_update);
+    assert!(!effects.iter().any(|effect| matches!(effect, Effect::Quit)));
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::CancelTurn { .. }))
+    );
+}
+
+#[test]
+fn repeated_quit_coalesces_while_exit_suspension_is_pending() {
+    let mut app = test_app_with_agent();
+    let first = dispatch(Action::Quit, &mut app);
+    let first_id = match first.as_slice() {
+        [Effect::SuspendForExit { exit_id }] => exit_id.clone(),
+        _ => panic!("expected a single suspension request, got {first:?}"),
+    };
+    let deadline = app.exit_suspension.as_ref().unwrap().deadline;
+
+    assert!(dispatch(Action::Quit, &mut app).is_empty());
+
+    let pending = app.exit_suspension.as_ref().unwrap();
+    assert_eq!(pending.exit_id, first_id);
+    assert_eq!(pending.deadline, deadline);
+}
+
+#[test]
+fn welcome_quit_suspends_a_resident_owned_root_session() {
+    let mut app = test_app_with_agent();
+    app.active_view = ActiveView::Welcome;
+
+    let effects = dispatch(Action::Quit, &mut app);
+
+    assert!(matches!(
+        effects.as_slice(),
+        [Effect::SuspendForExit { .. }]
+    ));
+    assert!(app.exit_suspension.is_some());
+}
+
+#[test]
+fn welcome_quit_without_owned_session_quits_immediately() {
+    let mut app = test_app();
+
+    let effects = dispatch(Action::Quit, &mut app);
+
     assert!(matches!(effects.last(), Some(Effect::Quit)));
-    assert!(effects.iter().any(|effect| matches!(
-        effect,
-        Effect::UnregisterActiveSession { session_id }
-            if session_id.0.as_ref() == "test-session"
-    )));
+    assert!(
+        !effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::SuspendForExit { .. }))
+    );
 }
 
 #[test]
@@ -1023,9 +1076,12 @@ fn slash_quit_dispatches_quit() {
     let mut app = test_app_with_agent();
     let effects = dispatch(Action::SendPrompt("/quit".into()), &mut app);
     assert!(
-        effects.last().is_some_and(|e| matches!(e, Effect::Quit)),
-        "expected Quit as last effect, got: {effects:?}"
+        effects
+            .iter()
+            .any(|e| matches!(e, Effect::SuspendForExit { .. })),
+        "expected a session suspension request, got: {effects:?}"
     );
+    assert!(!effects.iter().any(|e| matches!(e, Effect::Quit)));
 }
 #[test]
 fn removed_slash_exit_does_not_dispatch_quit() {

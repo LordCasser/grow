@@ -482,7 +482,6 @@ pub(super) async fn record_coordination_inquiry(
                 "source session closed before persisting coordination audit",
             )
         })?
-        .map_err(|error| CoordinationError::new(CoordinationErrorCode::AuditFailure, error))
 }
 
 fn reject_unavailable(inquiry: crate::coordination::InboundInquiry) {

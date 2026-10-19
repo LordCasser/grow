@@ -1,0 +1,3 @@
+Use the effective database path as the identity for recovery epochs. Canonicalize its existing parent directory and retain the database filename so aliases of the same root share an epoch while separate roots do not. Store the latest epoch per identity behind the existing process-local synchronization boundary; quarantine namespace changes and successful recreation advance only that identity.
+
+`CacheEpoch` captures both the index identity and its current epoch. Query recovery and bootstrap completion checks compare only that captured identity, so concurrent repair of another root cannot request a redundant bootstrap or clear this index's completed marker. The existing bootstrap lease remains the cross-process owner; this epoch remains an in-process invalidation signal.

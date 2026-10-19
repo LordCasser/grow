@@ -3,6 +3,29 @@
 use super::*;
 use crate::session::notification_inbox::AgentMessageDeliveryError;
 
+fn plan_handoff_notification_matches(
+    source: &chat_state::NotificationSource,
+    source_version: &chat_state::NotificationSourceVersion,
+    handoff: &crate::session::behavior::PlanDecisionHandoff,
+) -> bool {
+    let Some(submission_id) = handoff.submission_id else {
+        return false;
+    };
+    matches!(
+        source,
+        chat_state::NotificationSource::PlanHandoff {
+            artifact_hash,
+            artifact_revision,
+            handoff: kind,
+        } if artifact_hash == &handoff.artifact_hash
+            && *artifact_revision == handoff.artifact_revision
+            && *kind == handoff.kind
+    ) && matches!(
+        source_version,
+        chat_state::NotificationSourceVersion::Ordinal { value } if *value == submission_id
+    )
+}
+
 impl SessionActor {
     pub(super) async fn receive_agent_message(
         &self,
@@ -54,7 +77,7 @@ impl SessionActor {
         }
         {
             let state = self.state.lock().await;
-            let accepts = state.termination.is_open()
+            let accepts = state.execution_open()
                 && (matches!(source, chat_state::NotificationSource::AgentReply { .. })
                     || state
                         .foreground
@@ -379,18 +402,13 @@ impl SessionActor {
             .await
             .ok_or(chat_state::TimelineWriteError::AcknowledgementLost)?
             .into_iter()
-            .filter_map(|notification| match notification.source {
-                chat_state::NotificationSource::PlanHandoff {
-                    artifact_hash,
-                    artifact_revision,
-                    handoff: kind,
-                } if artifact_hash == handoff.artifact_hash
-                    && artifact_revision == handoff.artifact_revision
-                    && kind == handoff.kind =>
-                {
-                    Some(notification.id)
-                }
-                _ => None,
+            .filter_map(|notification| {
+                plan_handoff_notification_matches(
+                    &notification.source,
+                    &notification.source_version,
+                    handoff,
+                )
+                .then_some(notification.id)
             })
             .collect();
         if notification_ids.is_empty() {
@@ -641,7 +659,7 @@ impl SessionActor {
         let may_combine;
         {
             let state = self.state.lock().await;
-            if !state.termination.is_open() || !state.foreground.is_idle() {
+            if !state.execution_open() || !state.foreground.is_idle() {
                 let queue_depth = state.pending_inputs.len();
                 if queue_depth > 0 {
                     ::diagnostics::unified_log::debug(
@@ -696,9 +714,7 @@ impl SessionActor {
         let _admission_gate = self.step_control_gate.lock().await;
         let mut state = self.state.lock().await;
         // Re-check after the await gap.
-        if !state.termination.is_open()
-            || !state.foreground.is_idle()
-            || state.pending_inputs.is_empty()
+        if !state.execution_open() || !state.foreground.is_idle() || state.pending_inputs.is_empty()
         {
             return;
         }
@@ -1006,9 +1022,11 @@ impl SessionActor {
                 handoff,
             } = &notification.source
                 && current_plan_handoff.as_ref().is_none_or(|current| {
-                    current.artifact_hash != *artifact_hash
-                        || current.artifact_revision != *artifact_revision
-                        || current.kind != *handoff
+                    !plan_handoff_notification_matches(
+                        &notification.source,
+                        &notification.source_version,
+                        current,
+                    )
                 })
             {
                 stale_plan_receipts.push((
@@ -1051,15 +1069,15 @@ impl SessionActor {
         }
         notifications.retain(|notification| match notification.source.owner() {
             chat_state::NotificationOwner::Session => true,
-            chat_state::NotificationOwner::Plan {
-                artifact_hash,
-                artifact_revision,
-                handoff,
-            } => current_plan_handoff.as_ref().is_some_and(|current| {
-                current.artifact_hash == artifact_hash
-                    && current.artifact_revision == artifact_revision
-                    && current.kind == handoff
-            }),
+            chat_state::NotificationOwner::Plan { .. } => {
+                current_plan_handoff.as_ref().is_some_and(|current| {
+                    plan_handoff_notification_matches(
+                        &notification.source,
+                        &notification.source_version,
+                        current,
+                    )
+                })
+            }
             chat_state::NotificationOwner::Goal { .. } => false,
         });
         if notifications.is_empty() {
@@ -1237,9 +1255,11 @@ impl SessionActor {
                 handoff,
             } => {
                 active_plan_handoff.is_some_and(|active| {
-                    active.artifact_hash == artifact_hash
-                        && active.artifact_revision == artifact_revision
-                        && active.kind == handoff
+                    plan_handoff_notification_matches(
+                        &notification.source,
+                        &notification.source_version,
+                        active,
+                    )
                 }) || matches!(
                     origin,
                     crate::session::PromptOrigin::PlanHandoff {
@@ -1461,6 +1481,49 @@ mod tests {
     }
 
     #[test]
+    fn plan_handoff_receipt_requires_the_current_submission_id() {
+        let artifact_hash = blake3::hash(b"# same plan").to_hex().to_string();
+        let handoff = crate::session::behavior::PlanDecisionHandoff {
+            kind: chat_state::PlanHandoffKind::Execute,
+            artifact_hash: artifact_hash.clone(),
+            artifact_revision: 4,
+            submission_id: Some(12),
+            decision_id: Some("decision-12".into()),
+            feedback: None,
+        };
+        let source = chat_state::NotificationSource::PlanHandoff {
+            artifact_hash,
+            artifact_revision: 4,
+            handoff: chat_state::PlanHandoffKind::Execute,
+        };
+
+        assert!(plan_handoff_notification_matches(
+            &source,
+            &chat_state::NotificationSourceVersion::Ordinal { value: 12 },
+            &handoff,
+        ));
+        assert!(!plan_handoff_notification_matches(
+            &source,
+            &chat_state::NotificationSourceVersion::Ordinal { value: 11 },
+            &handoff,
+        ));
+        assert!(!plan_handoff_notification_matches(
+            &source,
+            &chat_state::NotificationSourceVersion::Opaque { value: "12".into() },
+            &handoff,
+        ));
+        let missing_submission = crate::session::behavior::PlanDecisionHandoff {
+            submission_id: None,
+            ..handoff
+        };
+        assert!(!plan_handoff_notification_matches(
+            &source,
+            &chat_state::NotificationSourceVersion::Ordinal { value: 12 },
+            &missing_submission,
+        ));
+    }
+
+    #[test]
     fn queued_prompt_promotion_publishes_fresh_behavior_availability() {
         run_with_session_stack(|| {
             let runtime = tokio::runtime::Builder::new_current_thread()
@@ -1592,6 +1655,8 @@ mod tests {
             kind: chat_state::PlanHandoffKind::Execute,
             artifact_hash: artifact_hash.clone(),
             artifact_revision: 3,
+            submission_id: Some(3),
+            decision_id: None,
             feedback: Some("review".into()),
         };
         let notification = chat_state::PendingNotification {

@@ -10,7 +10,9 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
     type Control = crate::agent::subagent::ShellChildRuntime;
     type CompletionData = crate::agent::subagent::ShellCompletionData;
     type RunFuture = tools::implementations::grow_build::task::coordinator::LocalBoxFuture<
-        tools::implementations::grow_build::task::coordinator::ChildRunOutput<Self::CompletionData>,
+        tools::implementations::grow_build::task::coordinator::ChildRunOutcome<
+            Self::CompletionData,
+        >,
     >;
     type ValidateFuture = tools::implementations::grow_build::task::coordinator::LocalBoxFuture<
         tools::implementations::grow_build::task::types::SubagentValidateTypeOutcome,
@@ -55,6 +57,7 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
                 security_parent,
                 cancellation,
                 reporter,
+                restore,
             } = run;
             let this = agent_ref.get();
             let parent_sid = request.parent_session_id.clone();
@@ -64,9 +67,11 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
                     subagent_id = %request.id,
                     "Spawn for unknown or evicted parent session"
                 );
-                return tools::implementations::grow_build::task::coordinator::ChildRunOutput {
+                return tools::implementations::grow_build::task::coordinator::ChildRunOutcome::Finished(
+                    tools::implementations::grow_build::task::coordinator::ChildRunOutput {
                     result: tools::implementations::grow_build::task::types::SubagentResult {
                         success: false,
+                        not_dispatched: true,
                         error: Some(
                             "Parent session not found (evicted or torn down); cannot spawn subagent."
                                 .to_owned(),
@@ -76,18 +81,25 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
                         ..Default::default()
                     },
                     completion_data: crate::agent::subagent::ShellCompletionData::not_admitted(),
-                };
+                    },
+                );
             };
             let delegation_handle = match security_parent {
                 Some(handle) => handle,
                 None if security_parent_session_id == parent_sid => {
                     let parent_sid = acp::SessionId::new(parent_sid.clone());
                     let Some(handle) = this.sessions.borrow().get(&parent_sid).cloned() else {
-                        return missing_delegation_parent_output(request);
+                        return tools::implementations::grow_build::task::coordinator::ChildRunOutcome::Finished(
+                            missing_delegation_parent_output(request),
+                        );
                     };
                     handle
                 }
-                None => return missing_delegation_parent_output(request),
+                None => {
+                    return tools::implementations::grow_build::task::coordinator::ChildRunOutcome::Finished(
+                        missing_delegation_parent_output(request),
+                    );
+                }
             };
             // Lifecycle remains rooted at `parent_sid`; every authority and
             // workspace-bearing field is instead inherited from the session
@@ -98,12 +110,13 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
                 &delegation_handle,
             )
             .await;
-            crate::agent::subagent::run_shell_child(
+            crate::agent::subagent::run_shell_child_with_restore(
                 request,
                 ctx,
                 cancellation,
                 reporter,
                 &this.gateway,
+                restore,
             )
             .await
         })
@@ -125,13 +138,44 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
             if let Some(parent) =
                 this.get_session_handle(&acp::SessionId::new(request.parent_session_id.clone()))
             {
+                if output
+                    .completion_data
+                    .completion_parent_session_id()
+                    .is_none()
+                    && let Some(events) = parent.chat_state_handle.timeline_events().await
+                    && let Ok(timeline) = chat_state::Timeline::from_events(events)
+                    && let Some(session_id) =
+                        timeline
+                            .events()
+                            .iter()
+                            .find_map(|event| match &event.kind {
+                                chat_state::TimelineEventKind::Subagent(
+                                    chat_state::SubagentEvent::Spawned(spawn),
+                                ) if spawn.subagent_id == request.id => {
+                                    Some(spawn.security_parent_session_id.clone())
+                                }
+                                _ => None,
+                            })
+                {
+                    output
+                        .completion_data
+                        .set_completion_parent_session_id(session_id);
+                }
+                let completion_parent = output
+                    .completion_data
+                    .completion_parent_session_id()
+                    .map(acp::SessionId::new)
+                    .and_then(|id| this.control_session_handle(&id));
                 crate::agent::subagent::refresh_finalization_parent(
                     &mut output.completion_data,
                     &parent,
+                    completion_parent.as_ref(),
                     this.storage_admission.clone(),
                 );
             }
-            crate::agent::subagent::reconcile_shell_child(request, output, deadline).await
+            let output =
+                crate::agent::subagent::reconcile_shell_child(request, output, deadline).await;
+            tools::implementations::grow_build::task::coordinator::ChildRunOutcome::Finished(output)
         }))
     }
     fn completion_after_panic(
@@ -177,6 +221,22 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
     }
     fn terminal_committed(&self, completion_data: &Self::CompletionData) -> bool {
         completion_data.terminal_committed()
+    }
+    fn suspension_retired(
+        &self,
+        completion_data: &mut Self::CompletionData,
+    ) -> Result<bool, String> {
+        completion_data.suspension_retired()
+    }
+    fn has_physical_retirement_owner(&self, completion_data: &Self::CompletionData) -> bool {
+        completion_data.has_physical_retirement_owner()
+    }
+    fn retain_execution_owner(
+        &self,
+        completion_data: &mut Self::CompletionData,
+        control: Option<&Self::Control>,
+    ) {
+        completion_data.retain_execution_owner(control);
     }
     fn finalization_error(&self, completion_data: &Self::CompletionData) -> Option<String> {
         completion_data.finalization_error()
@@ -548,6 +608,7 @@ impl MvpAgent {
             background_workflows_enabled: self.cfg.borrow().resolve_workflows().value,
             ask_user_question_enabled,
             parent_cmd_tx: parent_cmd_tx.clone(),
+            completion_cmd_tx: parent_cmd_tx.clone(),
             goal_usage_window: {
                 let sessions = self.sessions.borrow();
                 sessions
@@ -655,6 +716,7 @@ impl MvpAgent {
     ) {
         let route = handle.model_route.snapshot();
         ctx.security_parent_session_id = security_parent_session_id;
+        ctx.completion_cmd_tx = Some(handle.cmd_tx.clone());
         ctx.model_id = route.model_id;
         ctx.sampling_config = route.sampling_config;
         ctx.parent_cwd = std::path::PathBuf::from(&handle.info.cwd);

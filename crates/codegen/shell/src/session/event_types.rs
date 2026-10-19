@@ -12,6 +12,7 @@ pub const EVENT_SCHEMA_VERSION: &str = "3.0";
 pub enum Event {
     TurnStarted {
         session_id: String,
+        prompt_id: String,
         turn_number: u64,
         input_ids: Vec<String>,
         identity: chat_state::TurnIdentity,
@@ -369,6 +370,7 @@ mod tests {
     #[test]
     fn turn_started_redirect_kind_present_when_set_omitted_when_none() {
         let with_kind = serde_json::to_value(Event::TurnStarted {
+            prompt_id: "fixture-prompt".into(),
             session_id: "s".into(),
             turn_number: 2,
             input_ids: Vec::new(),
@@ -388,6 +390,7 @@ mod tests {
         assert_eq!(with_kind["redirect_kind"], "queued_after_cancel");
 
         let normal = serde_json::to_value(Event::TurnStarted {
+            prompt_id: "fixture-prompt".into(),
             session_id: "s".into(),
             turn_number: 1,
             input_ids: Vec::new(),

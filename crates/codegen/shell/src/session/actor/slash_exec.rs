@@ -248,7 +248,8 @@ mod feedback_contract_tests {
                 assert!(output[0].message.contains("/goal budget"));
                 actor
                     .goal_notify_sender()
-                    .emit_goal_updated(&actor.goal_tracker.lock(), 100);
+                    .emit_goal_updated(actor.goal_notification_snapshot(), 100)
+                    .await;
                 assert!(
                     notices(&mut rx).is_empty(),
                     "checkpoints cannot invent lifecycle events"
@@ -1673,7 +1674,8 @@ impl SessionActor {
                     drop(transaction);
                     drop(boundary);
                     self.goal_notify_sender()
-                        .emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
+                        .emit_goal_updated(self.goal_notification_snapshot(), tokens_used)
+                        .await;
                     if let Some((goal_id, definition_revision)) = retired_goal_owner {
                         self.cancel_goal_owned_work(&goal_id, definition_revision)
                             .await;

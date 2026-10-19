@@ -1,6 +1,7 @@
 use acp_transport::protocol as acp;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use tokio::sync::oneshot;
 
 pub use config_types::ClientType;
@@ -200,7 +201,7 @@ pub struct PermissionCallEvidence {
     pub operation: Option<serde_json::Value>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct PermissionRequestContext {
     pub source: PermissionRequestSource,
     pub request_mode: Option<RequestPermissionMode>,
@@ -218,6 +219,39 @@ pub struct PermissionRequestContext {
     /// Exact-call evidence captured from the same frozen arguments that later
     /// bind the one-shot execution permit.
     pub call_evidence: Option<PermissionCallEvidence>,
+    /// Records the real client-visible permission request boundary. This is
+    /// invoked only when policy reaches the ACP prompt, never for local grants.
+    pub human_interaction: Option<Arc<dyn HumanPermissionInteractionObserver>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HumanInteractionResolution {
+    Answered,
+    Allowed,
+    Rejected,
+    Cancelled,
+    TimedOut,
+    Failed,
+}
+
+#[async_trait::async_trait]
+pub trait HumanPermissionInteractionObserver: std::fmt::Debug + Send + Sync {
+    async fn opened(&self) -> Result<(), String>;
+    async fn resolved(&self, outcome: HumanInteractionResolution) -> Result<(), String>;
+}
+
+impl std::fmt::Debug for PermissionRequestContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PermissionRequestContext")
+            .field("source", &self.source)
+            .field("request_mode", &self.request_mode)
+            .field("within_capability_fence", &self.within_capability_fence)
+            .field("execution_cwd", &self.execution_cwd)
+            .field("classifier_turns", &self.classifier_turns)
+            .field("call_evidence", &self.call_evidence)
+            .field("human_interaction", &self.human_interaction.is_some())
+            .finish()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1,0 +1,4 @@
+- [x] Add a minimal client-surfaces delta for per-index recovery epochs.
+- [x] Key recovery epoch capture and advances by effective index path.
+- [x] Bind search query and bootstrap checks to the relevant index identity.
+- [x] Add tests for same-root replacement and independent multi-root epochs.

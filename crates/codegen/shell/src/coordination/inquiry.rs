@@ -217,7 +217,7 @@ impl InquiryEvent {
 }
 
 /// Receiving-side Timeline facts, also projected into UiNotice details. Identity is
-/// scoped exactly like the runtime's dedup key, never inferred from UI prose.
+/// scoped by source session and inquiry ID, never by transport incarnation or UI prose.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct IncomingInquiryAudit {

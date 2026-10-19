@@ -2,14 +2,63 @@
     use super::*;
 
     #[test]
+    fn new_approval_retires_preview_reads_and_only_adopts_its_own_comments() {
+        use crate::views::plan_approval_view::PlanComment;
+        use tools::implementations::grow_build::plan_control::PlanArtifactQueryResponse;
+
+        for same_submission in [true, false] {
+            let mut app = make_app_with_agent("sess-1");
+            let body = "# Submitted Plan";
+            let (mut ext, _rx) = make_exit_plan_ext(Some(body));
+            let mut params: serde_json::Value = serde_json::from_str(ext.request.params.get()).unwrap();
+            let hash = blake3::hash(body.as_bytes()).to_hex().to_string();
+            params["artifactHash"] = hash.clone().into();
+            ext.request.params = serde_json::value::to_raw_value(&params).unwrap().into();
+            let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+            agent.resolve_plan_preview(PlanArtifactQueryResponse {
+                session_id: "sess-1".into(),
+                submission_id: if same_submission { 1 } else { 9 },
+                retained: true,
+                artifact_revision: 2,
+                artifact_hash: hash,
+                plan_content: body.into(),
+            }).unwrap();
+            agent.plan_comments_artifact = agent.plan_artifact_preview.clone();
+            agent.plan_comments.push(PlanComment {
+                id: 4,
+                line_range: 1..2,
+                text: "keep this version's note".into(),
+            });
+            agent.plan_next_comment_id = 5;
+            let request_id = agent.plan_preview_request_id;
+
+            assert!(handle_plan_approval(ext, &mut app));
+            let agent = &app.agents[&AgentId(0)];
+            assert_ne!(agent.plan_preview_request_id, request_id);
+            assert_eq!(agent.plan_comments.len(), 1, "saved comments must not be lost");
+            let approval = agent.plan_approval_view.as_ref().unwrap();
+            assert_eq!(approval.comments.len(), usize::from(same_submission));
+            if same_submission {
+                assert_eq!(approval.comments[0].text, "keep this version's note");
+                assert_eq!(approval.next_comment_id, 5);
+            }
+        }
+    }
+
+    #[test]
     fn plan_approval_opens_submitted_plan_preview() {
         let mut app = make_app_with_agent("sess-1");
+        app.agents
+            .get_mut(&AgentId(0))
+            .unwrap()
+            .show_behavior_switch_warning(tools::types::BehaviorId::Normal, 8_000);
         let (ext, _rx) = make_exit_plan_ext(Some("# Submitted Plan"));
 
         assert!(handle_plan_approval(ext, &mut app));
         let agent = app.agents.get(&AgentId(0)).unwrap();
 
         assert!(agent.plan_approval_view.is_some());
+        assert!(agent.behavior_switch_target.is_none());
         assert_eq!(
             agent
                 .line_viewer
@@ -160,6 +209,9 @@
             session_id: "sess-A".into(),
             tool_call_id: "tc-normal".into(),
             plan_content: "# Plan\nDo stuff".into(),
+            submission_id: 1,
+            artifact_revision: 2,
+            artifact_hash: "a".repeat(64),
         };
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         let msg = AcpClientMessage::ExtMethod(acp_transport::AcpArgs {
@@ -195,6 +247,9 @@
             session_id: "sess-A".into(),
             tool_call_id: "tc-always-approve".into(),
             plan_content: "# Plan\nDo stuff".into(),
+            submission_id: 1,
+            artifact_revision: 2,
+            artifact_hash: "a".repeat(64),
         };
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         let msg = AcpClientMessage::ExtMethod(acp_transport::AcpArgs {
@@ -226,6 +281,9 @@
             session_id: "sess-B".into(),
             tool_call_id: "tc-bg-plan".into(),
             plan_content: "# Plan".into(),
+            submission_id: 1,
+            artifact_revision: 2,
+            artifact_hash: "a".repeat(64),
         };
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         let msg = AcpClientMessage::ExtMethod(acp_transport::AcpArgs {

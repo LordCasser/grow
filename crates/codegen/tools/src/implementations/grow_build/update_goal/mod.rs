@@ -49,6 +49,7 @@ pub struct UpdateGoalInput {
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct GoalView {
     pub goal_id: String,
     pub definition_revision: u64,
@@ -68,7 +69,8 @@ impl tool_runtime::ToolOutput for GoalView {}
 
 /// Immutable Goal snapshot inherited by a Goal-owned child session. It is
 /// context, not an independently mutable Goal runtime.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GoalContextSnapshot {
     pub view: GoalView,
 }

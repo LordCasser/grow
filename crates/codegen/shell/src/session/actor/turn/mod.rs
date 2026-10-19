@@ -17,7 +17,8 @@ use admission::{UserEchoMode, user_echo_mode};
 const STRUCTURED_OUTPUT_TOOL: &str = "StructuredOutput";
 /// Max times the model may re-call `StructuredOutput` with non-conforming args
 /// before the turn ends with the last validation error.
-const STRUCTURED_OUTPUT_MAX_RETRIES: u32 = 3;
+const STRUCTURED_OUTPUT_MAX_RETRIES: u32 =
+    chat_state::session_runtime::MAX_STRUCTURED_OUTPUT_RETRIES;
 /// What a `StructuredOutput` tool call means for the turn (see
 /// `handle_structured_output_tool_call`).
 enum StructuredOutputStep {
@@ -28,6 +29,224 @@ enum StructuredOutputStep {
     /// No sole StructuredOutput call (absent, or co-emitted with real tools that
     /// should run this round).
     Proceed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlanningCompletionGate {
+    Clear,
+    Retry,
+    MaxTurnsReached { limit: usize },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PlannedCompletionPreflight {
+    Ready,
+    ContinueTurn,
+    YieldGoalForFifo,
+    GoalSpendingStopped,
+    MaxTurnsReached { limit: usize },
+}
+
+fn planning_completion_gate(
+    has_blockers: bool,
+    next_turn: usize,
+    max_turns: Option<usize>,
+) -> PlanningCompletionGate {
+    if !has_blockers {
+        PlanningCompletionGate::Clear
+    } else if max_turns.is_some_and(|limit| next_turn > limit) {
+        PlanningCompletionGate::MaxTurnsReached {
+            limit: max_turns.expect("checked above"),
+        }
+    } else {
+        PlanningCompletionGate::Retry
+    }
+}
+
+#[cfg(test)]
+mod planning_completion_gate_tests {
+    use super::{PlanningCompletionGate, planning_completion_gate};
+
+    #[test]
+    fn all_final_output_paths_share_blocker_and_turn_limit_decision() {
+        assert_eq!(
+            planning_completion_gate(false, 4, Some(3)),
+            PlanningCompletionGate::Clear
+        );
+        assert_eq!(
+            planning_completion_gate(true, 3, Some(3)),
+            PlanningCompletionGate::Retry
+        );
+        assert_eq!(
+            planning_completion_gate(true, 4, Some(3)),
+            PlanningCompletionGate::MaxTurnsReached { limit: 3 }
+        );
+    }
+}
+
+#[cfg(test)]
+mod structured_output_recovery_tests {
+    use super::{
+        PlannedCompletionPreflight, STRUCTURED_OUTPUT_TOOL, next_structured_output_retry_count,
+        retain_settled_structured_output_calls, structured_output_result_already_recorded,
+        validate_structured_output,
+    };
+    use sampling_types::conversation::ToolCall;
+    use std::collections::BTreeSet;
+    use std::sync::Arc;
+
+    #[test]
+    fn accepted_structured_output_call_survives_result_filter_and_reuses_result() {
+        let validator = sampling_types::compile_output_schema(&serde_json::json!({
+            "type": "object",
+            "properties": { "ok": { "type": "boolean" } },
+            "required": ["ok"],
+            "additionalProperties": false
+        }))
+        .unwrap();
+        let mut calls = vec![
+            ToolCall {
+                id: Arc::from("structured-call"),
+                name: STRUCTURED_OUTPUT_TOOL.into(),
+                arguments: Arc::from(r#"{"ok":true}"#),
+            },
+            ToolCall {
+                id: Arc::from("ordinary-call"),
+                name: "read_file".into(),
+                arguments: Arc::from("{}"),
+            },
+        ];
+        let settled = BTreeSet::from(["structured-call", "ordinary-call"]);
+
+        retain_settled_structured_output_calls(&mut calls, &settled);
+
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, STRUCTURED_OUTPUT_TOOL);
+        assert_eq!(
+            validate_structured_output(&Ok(validator), &calls[0].arguments).unwrap(),
+            serde_json::json!({ "ok": true })
+        );
+        assert!(
+            structured_output_result_already_recorded(
+                Some("Structured output accepted."),
+                "Structured output accepted."
+            )
+            .unwrap()
+        );
+        assert!(
+            !structured_output_result_already_recorded(None, "Structured output accepted.")
+                .unwrap()
+        );
+    }
+
+    #[test]
+    fn restored_invalid_schema_attempt_keeps_retry_budget_and_conflicts_fail_closed() {
+        let retries_after_first_invalid = next_structured_output_retry_count(0, false);
+        assert_eq!(retries_after_first_invalid, 1);
+        assert_eq!(
+            next_structured_output_retry_count(retries_after_first_invalid, true),
+            1,
+            "replaying the same durable correction result must not spend another retry"
+        );
+        assert_eq!(next_structured_output_retry_count(2, false), 3);
+        assert_eq!(next_structured_output_retry_count(3, false), 3);
+        assert!(
+            structured_output_result_already_recorded(
+                Some("different result"),
+                "Structured output accepted."
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn structured_output_completion_preflight_waits_before_next_provider_step() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) =
+                    crate::session::actor::tests::support::build_actor().await;
+                crate::session::actor::tests::support::begin_test_active_causal_turn(&actor).await;
+                let mut plan =
+                    tool_types::LocalPlan::new(actor.session_id_string(), "work:structured");
+                plan.waits.push(tool_types::PlanWait {
+                    id: "wait-question".into(),
+                    step_ids: Vec::new(),
+                    dependencies: vec![tool_types::WaitDependency {
+                        kind: tool_types::DependencyKind::Question,
+                        id: "structured-question".into(),
+                    }],
+                    condition: tool_types::WaitCondition::All,
+                });
+                actor
+                    .chat_state_handle
+                    .record_timeline_event_durably(chat_state::TimelineEventKind::Planning(
+                        chat_state::timeline::PlanningEvent {
+                            previous: None,
+                            plan: Box::new(plan),
+                        },
+                    ))
+                    .await
+                    .expect("completion wait must be durable");
+
+                let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let guard = crate::session::pending_interaction::PendingInteractionGuard::new(
+                    actor.pending_interactions.clone(),
+                    acp_transport::AcpAgentGatewaySender::new(gateway_tx),
+                    actor.session_info.id.clone(),
+                    "structured-question".into(),
+                    crate::session::pending_interaction::PendingKind::Question,
+                );
+                let provider_steps = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let completed_turn_count =
+                    std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(2));
+                let waiter = {
+                    let actor = actor.clone();
+                    let provider_steps = provider_steps.clone();
+                    let completed_turn_count = completed_turn_count.clone();
+                    tokio::task::spawn_local(async move {
+                        let mut tool_turn_count = 2;
+                        let outcome = actor
+                            .planned_completion_preflight(
+                                &crate::session::PromptOrigin::User,
+                                "structured-preflight-turn",
+                                &mut tool_turn_count,
+                            )
+                            .await
+                            .expect("preflight should wait and resume the same turn");
+                        if outcome == PlannedCompletionPreflight::ContinueTurn {
+                            provider_steps.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        completed_turn_count
+                            .store(tool_turn_count, std::sync::atomic::Ordering::SeqCst);
+                        outcome
+                    })
+                };
+
+                tokio::time::sleep(std::time::Duration::from_millis(30)).await;
+                assert_eq!(provider_steps.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert_eq!(
+                    completed_turn_count.load(std::sync::atomic::Ordering::SeqCst),
+                    2
+                );
+                assert!(
+                    !waiter.is_finished(),
+                    "provider preflight must remain parked on the question"
+                );
+
+                drop(guard);
+                let outcome = tokio::time::timeout(std::time::Duration::from_millis(500), waiter)
+                    .await
+                    .expect("answer must wake completion without polling delay")
+                    .expect("preflight task must finish");
+                assert_eq!(outcome, PlannedCompletionPreflight::ContinueTurn);
+                assert_eq!(provider_steps.load(std::sync::atomic::Ordering::SeqCst), 1);
+                assert_eq!(
+                    completed_turn_count.load(std::sync::atomic::Ordering::SeqCst),
+                    3
+                );
+            })
+            .await;
+    }
 }
 /// Parse `raw` as JSON and validate it against a `validator` compiled once per
 /// turn. Returns the value on success, or a human-readable error (surfaced to
@@ -41,6 +260,34 @@ fn validate_structured_output(
     let value: serde_json::Value = serde_json::from_str(raw.trim())
         .map_err(|e| format!("model output was not valid JSON: {e}"))?;
     sampling_types::validate_output_value(validator, &value).map(|()| value)
+}
+
+fn structured_output_result_already_recorded(
+    existing: Option<&str>,
+    expected: &str,
+) -> Result<bool, String> {
+    match existing {
+        Some(existing) if existing == expected => Ok(true),
+        Some(_) => Err("StructuredOutput call already has a different canonical result".into()),
+        None => Ok(false),
+    }
+}
+
+fn next_structured_output_retry_count(current: u32, result_replayed: bool) -> u32 {
+    if result_replayed {
+        current
+    } else {
+        current.saturating_add(1).min(STRUCTURED_OUTPUT_MAX_RETRIES)
+    }
+}
+
+fn retain_settled_structured_output_calls(
+    tool_calls: &mut Vec<sampling_types::conversation::ToolCall>,
+    settled_call_ids: &std::collections::BTreeSet<&str>,
+) {
+    tool_calls.retain(|call| {
+        call.name == STRUCTURED_OUTPUT_TOOL || !settled_call_ids.contains(call.id.as_ref())
+    });
 }
 /// Result of the turn-end usage drain (and cancel's no-drain snapshot).
 ///
@@ -475,6 +722,17 @@ impl SessionActor {
                 recovery_key = None;
                 delay_satisfied_for = None;
                 result_precedes_current_agent = false;
+                // A late explicit Skill steer can open a Runtime Step after
+                // the response's final Step boundary has already closed.
+                // Settle that loader through the ordinary control boundary
+                // before admitting the next model Step of this same Turn.
+                if self.events.has_active_step() {
+                    let Some(boundary) = self.end_step_control_boundary("steering_skills").await
+                    else {
+                        return result;
+                    };
+                    self.apply_pending_controls_at_step_boundary(boundary).await;
+                }
                 if !self.start_step_after_control_boundary(req_id, None).await {
                     return result;
                 }
@@ -709,6 +967,78 @@ impl SessionActor {
             crate::session::helpers::memory_context::format_memory_reminder(&results)
         })
     }
+    async fn check_planning_completion_gate(
+        &self,
+        completed_turns: usize,
+    ) -> Result<PlanningCompletionGate, acp::Error> {
+        let blockers = self
+            .planning_completion_blockers()
+            .await
+            .map_err(|error| acp::Error::internal_error().data(error))?;
+        let next_turn = completed_turns.saturating_add(1);
+        let gate = planning_completion_gate(!blockers.is_empty(), next_turn, self.max_turns);
+        if gate == PlanningCompletionGate::Retry {
+            self.chat_state_handle
+                .push_user_message_durably(ConversationItem::system_reminder(format!(
+                    "This work cannot be declared complete yet: {}. Inspect the exact result and resolve the obligation with todo_write; unfinished optional TODOs alone do not block completion.",
+                    blockers.into_iter().take(16).collect::<Vec<_>>().join("; ")
+                )))
+                .await
+                .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
+        }
+        Ok(gate)
+    }
+
+    async fn planned_completion_preflight(
+        &self,
+        origin: &crate::session::PromptOrigin,
+        req_id: &str,
+        tool_turn_count: &mut usize,
+    ) -> Result<PlannedCompletionPreflight, acp::Error> {
+        match self.await_planned_dependencies(origin).await? {
+            super::planning::PlannedDependenciesOutcome::NotWaiting => {
+                Ok(PlannedCompletionPreflight::Ready)
+            }
+            super::planning::PlannedDependenciesOutcome::YieldGoalForFifo => {
+                Ok(PlannedCompletionPreflight::YieldGoalForFifo)
+            }
+            super::planning::PlannedDependenciesOutcome::ContinueTurn => {
+                let is_goal_continuation = matches!(
+                    origin,
+                    crate::session::PromptOrigin::GoalContinuation { .. }
+                );
+                let fifo_has_user_input = {
+                    let state = self.state.lock().await;
+                    state
+                        .pending_inputs
+                        .iter()
+                        .any(|input| !input.origin.is_synthetic())
+                };
+                if is_goal_continuation && fifo_has_user_input {
+                    return Ok(PlannedCompletionPreflight::YieldGoalForFifo);
+                }
+                if is_goal_continuation && !self.state.lock().await.execution_open() {
+                    return Ok(PlannedCompletionPreflight::YieldGoalForFifo);
+                }
+                if is_goal_continuation
+                    && self
+                        .enforce_goal_spending_limit_for_prompt(Some(req_id))
+                        .await
+                {
+                    return Ok(PlannedCompletionPreflight::GoalSpendingStopped);
+                }
+                let next_turn = tool_turn_count.saturating_add(1);
+                if let Some(limit) = self.max_turns
+                    && next_turn > limit
+                {
+                    return Ok(PlannedCompletionPreflight::MaxTurnsReached { limit });
+                }
+                *tool_turn_count = next_turn;
+                Ok(PlannedCompletionPreflight::ContinueTurn)
+            }
+        }
+    }
+
     /// Inspect `tool_calls` for a `StructuredOutput` call and decide the turn's
     /// next step, pushing the call's `tool_result` (correction / retry error /
     /// terminal) as a side effect. Validates the args against `validator` and
@@ -718,49 +1048,79 @@ impl SessionActor {
         tool_calls: &mut Vec<sampling_types::conversation::ToolCall>,
         validator: &Result<sampling_types::OutputSchemaValidator, String>,
         retries: &mut u32,
-    ) -> StructuredOutputStep {
+    ) -> Result<StructuredOutputStep, String> {
         let Some(pos) = tool_calls
             .iter()
             .position(|tc| tc.name == STRUCTURED_OUTPUT_TOOL)
         else {
-            return StructuredOutputStep::Proceed;
+            return Ok(StructuredOutputStep::Proceed);
         };
         if tool_calls.len() > 1 {
             for tc in tool_calls
                 .iter()
                 .filter(|tc| tc.name == STRUCTURED_OUTPUT_TOOL)
             {
-                self.chat_state_handle
-                    .push_tool_result(ConversationItem::tool_result(
-                        tc.id.as_ref().to_owned(),
-                        "Call StructuredOutput alone, exactly once, after all other tools finish.",
-                    ));
+                self.record_structured_output_result(
+                    tc.id.as_ref(),
+                    "Call StructuredOutput alone, exactly once, after all other tools finish.",
+                )
+                .await?;
             }
             tool_calls.retain(|tc| tc.name != STRUCTURED_OUTPUT_TOOL);
-            return StructuredOutputStep::Proceed;
+            return Ok(StructuredOutputStep::Proceed);
         }
         let call_id = tool_calls[pos].id.as_ref().to_owned();
         let validated = validate_structured_output(validator, &tool_calls[pos].arguments);
         if let Err(err) = &validated
             && *retries < STRUCTURED_OUTPUT_MAX_RETRIES
         {
-            *retries += 1;
-            self.chat_state_handle
-                .push_tool_result(ConversationItem::tool_result(
-                    call_id,
-                    format!("{err}\nFix the arguments and call StructuredOutput again."),
-                ));
-            return StructuredOutputStep::Retry;
+            let result = format!("{err}\nFix the arguments and call StructuredOutput again.");
+            let replayed = self
+                .record_structured_output_result(&call_id, &result)
+                .await?;
+            if !replayed {
+                *retries = next_structured_output_retry_count(*retries, false);
+                if let Some(cursor) = self.turn_continuation.borrow_mut().as_mut() {
+                    cursor.structured_output_retries = *retries;
+                }
+            }
+            return Ok(StructuredOutputStep::Retry);
+        }
+        let result = match &validated {
+            Ok(_) => "Structured output accepted.".to_string(),
+            Err(err) => err.clone(),
+        };
+        self.record_structured_output_result(&call_id, &result)
+            .await?;
+        Ok(StructuredOutputStep::Complete(validated))
+    }
+
+    async fn record_structured_output_result(
+        &self,
+        call_id: &str,
+        content: &str,
+    ) -> Result<bool, String> {
+        let surface = self.chat_state_handle.get_conversation().await;
+        let mut matching = surface.iter().filter_map(|item| match item {
+            ConversationItem::ToolResult(result) if result.tool_call_id == call_id => Some(result),
+            _ => None,
+        });
+        let existing = matching.next();
+        if matching.next().is_some() {
+            return Err("StructuredOutput call has multiple canonical results".into());
+        }
+        if let Some(existing) = existing {
+            if !existing.images.is_empty() {
+                return Err("StructuredOutput canonical result has unexpected images".into());
+            }
+            return structured_output_result_already_recorded(
+                Some(existing.content.as_ref()),
+                content,
+            );
         }
         self.chat_state_handle
-            .push_tool_result(ConversationItem::tool_result(
-                call_id,
-                match &validated {
-                    Ok(_) => "Structured output accepted.".to_string(),
-                    Err(err) => err.clone(),
-                },
-            ));
-        StructuredOutputStep::Complete(validated)
+            .push_tool_result(ConversationItem::tool_result(call_id.to_owned(), content));
+        Ok(false)
     }
     /// Single shell tool call whose parsed command is `true` (via ToolBridge).
     async fn is_run_true_step(
@@ -781,7 +1141,7 @@ impl SessionActor {
             _ => false,
         }
     }
-    /// Shared turn-completion bookkeeping (plan cleanup, local signals snapshot,
+    /// Shared turn-completion bookkeeping (local signals snapshot,
     /// persistence, feedback prompt). Runs identically for
     /// the explicit-intent and structured-output completion paths. Returns the
     /// turn-end snapshot for `TurnOutcome::Completed`.
@@ -792,7 +1152,6 @@ impl SessionActor {
         turn_span_totals: &TurnSpanTotals,
         model_fingerprint: Option<String>,
     ) -> Option<TurnDeltaSnapshot> {
-        self.emit_turn_end_plan_cleanup().await;
         self.signals_handle().record_turn_complete();
         let mut snapshot = self.signals_handle().take_turn_end_snapshot().await;
         if let Some(snap) = snapshot.as_mut() {
@@ -815,6 +1174,38 @@ impl SessionActor {
         }
         snapshot
     }
+    async fn restored_accepted_response(
+        &self,
+    ) -> Result<Option<(ConversationResponse, chat_state::ResponseAdmissionIdentity)>, acp::Error>
+    {
+        let pending = self.restored_response.borrow_mut().take();
+        let Some(pending) = pending else {
+            return Ok(None);
+        };
+        let admitted = self
+            .chat_state_handle
+            .admitted_response(pending.identity.clone())
+            .await
+            .ok_or_else(|| {
+                acp::Error::internal_error()
+                    .data("checkpoint response is absent from the canonical branch")
+            })?;
+        *self.restored_response_for_stop_gate.borrow_mut() = Some(pending.identity.clone());
+        let response = ConversationResponse {
+            items: admitted.items,
+            stop_reason: pending.stop_reason,
+            stop_message: pending.stop_message,
+            usage: None,
+            cost_usd_ticks: None,
+            message_chunks_emitted: 1,
+            doom_loop_signals: Vec::new(),
+            message_id: None,
+            provider_terminal: None,
+            native_continuation: None,
+        };
+        Ok(Some((response, pending.identity)))
+    }
+
     #[tracing::instrument(
         name = "session.process_conversation_turn",
         skip_all,
@@ -915,7 +1306,12 @@ impl SessionActor {
         self.record_turn_model().await;
         let mut metrics_drop_guard = TurnMetrics::new();
         let mut turn_tools_called: Vec<String> = Vec::new();
-        let mut tool_turn_count: usize = 1;
+        let mut tool_turn_count = self
+            .turn_continuation
+            .borrow()
+            .as_ref()
+            .filter(|cursor| cursor.prompt_id == req_id)
+            .map_or(1, |cursor| cursor.tool_turns_used);
         let mut loop_index = if step_already_started {
             self.events.next_step_index().saturating_sub(1)
         } else {
@@ -923,11 +1319,21 @@ impl SessionActor {
         };
         let mut identical_tool_calls = IdenticalToolCallRun::default();
         let mut auth_retry_schedule = AuthRetrySchedule::new();
-        let mut sampling_recovery = sampler::RecoveryBudget::default();
+        let mut sampling_recovery = self
+            .sampling_continuation
+            .borrow()
+            .clone()
+            .unwrap_or_default();
+        *self.sampling_continuation.borrow_mut() = Some(sampling_recovery.clone());
         let _preview_guard = super::updates::SamplingPreviewGuard(self);
         let mut turn_span_totals = TurnSpanTotals::default();
         let mut model_fingerprint: Option<String> = None;
-        let mut structured_output_retries: u32 = 0;
+        let mut structured_output_retries = self
+            .turn_continuation
+            .borrow()
+            .as_ref()
+            .filter(|cursor| cursor.prompt_id == req_id)
+            .map_or(0, |cursor| cursor.structured_output_retries);
         let mut image_projection_retries: u8 = 0;
         let mut pending_forced_compaction: Option<compaction::AutoCompactTriggerInfo> = None;
         let mut plan_handoff_resample_pending = false;
@@ -948,454 +1354,459 @@ impl SessionActor {
         let mut structured_output_tool_mode = false;
         let mut structured_output_reminder_installed = false;
         loop {
-            let using_prestarted_step = std::mem::take(&mut step_already_started);
-            let mut tools_changed_for_step = false;
-            if !using_prestarted_step {
-                let control_boundary =
-                    if self.events.next_step_index() == 0 && !self.events.has_active_step() {
-                        self.initial_step_control_boundary(req_id).await
-                    } else {
-                        self.end_step_control_boundary("continued").await
-                    };
-                let Some(control_boundary) = control_boundary else {
-                    return Ok(TurnOutcome::Cancelled {
-                        category: None,
-                        context: Some(serde_json::json!({
-                            "reason": "the next Step could not establish its control boundary",
-                        })),
-                    });
+            self.park_during_runtime_handoff().await;
+            if self.restored_response.borrow().is_none() {
+                if let Some(cursor) = self.turn_continuation.borrow_mut().as_mut() {
+                    cursor.accepted_response = None;
+                }
+            }
+            if let Some(cursor) = self.turn_continuation.borrow_mut().as_mut() {
+                cursor.tool_turns_used = tool_turn_count;
+                cursor.tool_calls_used = self.events.tool_count_this_turn() as usize;
+                cursor.next_step_index = self.events.next_step_index();
+            }
+            let restored_response = self.restored_accepted_response().await?;
+            let (
+                mut response,
+                latency,
+                response_request_id,
+                model_duration_ms,
+                usage_model_id,
+                structured_output_tool,
+                already_admitted,
+            ) = if let Some((response, identity)) = restored_response {
+                step_already_started = false;
+                let structured_output_tool = response
+                    .tool_calls()
+                    .iter()
+                    .any(|call| call.name == STRUCTURED_OUTPUT_TOOL);
+                let latency = sampler::InferenceLatencyStats {
+                    attempts: identity.attempt,
+                    ..Default::default()
                 };
-                let (model_changed, agent_changed, behavior_changed) = self
-                    .apply_pending_controls_at_step_boundary(control_boundary)
-                    .await;
-                // Every accepted definition/route control is now durable
-                // and live. Fence the new Goal budget before any
-                // model-switch compaction, forced compaction, recovery, or
-                // next-step provider request can spend under it.
-                if self
-                    .enforce_goal_spending_limit_for_prompt(Some(req_id))
-                    .await
-                {
-                    let snapshot = self
-                        .finalize_turn_bookkeeping(
-                            req_id,
-                            conv_turn_start,
-                            &turn_span_totals,
-                            model_fingerprint.clone(),
-                        )
+                (
+                    response,
+                    latency,
+                    identity.request_id,
+                    0,
+                    self.current_catalog_model_id(),
+                    structured_output_tool,
+                    true,
+                )
+            } else {
+                let using_prestarted_step = std::mem::take(&mut step_already_started);
+                let mut tools_changed_for_step = false;
+                if !using_prestarted_step {
+                    let control_boundary =
+                        if self.events.next_step_index() == 0 && !self.events.has_active_step() {
+                            self.initial_step_control_boundary(req_id).await
+                        } else {
+                            self.end_step_control_boundary("continued").await
+                        };
+                    let Some(control_boundary) = control_boundary else {
+                        return Ok(TurnOutcome::Cancelled {
+                            category: None,
+                            context: Some(serde_json::json!({
+                                "reason": "the next Step could not establish its control boundary",
+                            })),
+                        });
+                    };
+                    let (model_changed, agent_changed, behavior_changed) = self
+                        .apply_pending_controls_at_step_boundary(control_boundary)
                         .await;
-                    return Ok(TurnOutcome::GoalSpendingStopped {
-                        snapshot: Box::new(snapshot),
-                    });
-                }
-                if behavior_changed {
-                    let snapshot = self
-                        .finalize_turn_bookkeeping(
-                            req_id,
-                            conv_turn_start,
-                            &turn_span_totals,
-                            model_fingerprint.clone(),
-                        )
-                        .await;
-                    return Ok(TurnOutcome::ControlEnded {
-                        snapshot: Box::new(snapshot),
-                    });
-                }
-                if plan_handoff_resample_pending {
-                    self.consume_live_plan_handoff_for_next_step()
+                    // Every accepted definition/route control is now durable
+                    // and live. Fence the new Goal budget before any
+                    // model-switch compaction, forced compaction, recovery, or
+                    // next-step provider request can spend under it.
+                    if self
+                        .enforce_goal_spending_limit_for_prompt(Some(req_id))
                         .await
-                        .map_err(|error| {
-                            acp::Error::internal_error().data(format!(
+                    {
+                        let snapshot = self
+                            .finalize_turn_bookkeeping(
+                                req_id,
+                                conv_turn_start,
+                                &turn_span_totals,
+                                model_fingerprint.clone(),
+                            )
+                            .await;
+                        return Ok(TurnOutcome::GoalSpendingStopped {
+                            snapshot: Box::new(snapshot),
+                        });
+                    }
+                    if behavior_changed {
+                        let snapshot = self
+                            .finalize_turn_bookkeeping(
+                                req_id,
+                                conv_turn_start,
+                                &turn_span_totals,
+                                model_fingerprint.clone(),
+                            )
+                            .await;
+                        return Ok(TurnOutcome::ControlEnded {
+                            snapshot: Box::new(snapshot),
+                        });
+                    }
+                    if plan_handoff_resample_pending {
+                        self.consume_live_plan_handoff_for_next_step()
+                            .await
+                            .map_err(|error| {
+                                acp::Error::internal_error().data(format!(
                                 "failed to consume the live Plan handoff before resampling: {error}"
                             ))
-                        })?;
-                    plan_handoff_resample_pending = false;
-                }
-                if model_changed || agent_changed {
-                    if let Some(stale) = pending_forced_compaction.take() {
-                        tracing::info!(
-                            source = stale.source,
-                            "discarded forced compaction from the previous request projection epoch"
-                        );
+                            })?;
+                        plan_handoff_resample_pending = false;
                     }
-                    context_overflow_recovery_pending = false;
-                }
-                if model_changed {
-                    // A smaller model window must compact before the first
-                    // request that uses it, not at the next outer turn.
-                    self.maybe_compact_on_model_switch().await?;
-                    self.record_turn_model().await;
-                    auth_retry_schedule.reset();
-                    structured_output_retries = 0;
-                    image_projection_retries = 0;
-                    model_fingerprint = None;
-                }
-                if let Some(trigger_info) = pending_forced_compaction.take() {
-                    if let Err(e) = self.run_compact_only(trigger_info).await {
-                        tracing::error!(error = %e, "Between-step compaction failed");
-                        if Self::is_auth_compact_error(&e) {
-                            return Err(self.surface_compact_auth_failure(e).await);
+                    if model_changed || agent_changed {
+                        if let Some(stale) = pending_forced_compaction.take() {
+                            tracing::info!(
+                                source = stale.source,
+                                "discarded forced compaction from the previous request projection epoch"
+                            );
                         }
-                        return Err(e);
+                        context_overflow_recovery_pending = false;
                     }
-                }
-                let async_compaction_applied = self.background_compaction_boundary().await?;
-                tools_changed_for_step = async_compaction_applied;
-                if model_changed || agent_changed {
-                    // The request projection epoch changed. A provider
-                    // overflow on the replacement route/Agent gets its own
-                    // single recovery attempt.
-                    identical_tool_calls = IdenticalToolCallRun::default();
-                    let span = tracing::Span::current();
-                    span.record("agent.name", self.agent.borrow().name());
-                    if let Some(cfg) = self.chat_state_handle.get_sampling_config().await {
-                        span.record("model_id", self.current_catalog_model_id());
-                        span.record(
-                            "effort",
-                            cfg.reasoning_effort
-                                .map(|effort| effort.as_str())
-                                .unwrap_or("none"),
+                    if model_changed {
+                        // A smaller model window must compact before the first
+                        // request that uses it, not at the next outer turn.
+                        self.maybe_compact_on_model_switch().await?;
+                        self.record_turn_model().await;
+                        auth_retry_schedule.reset();
+                        structured_output_retries = 0;
+                        if let Some(cursor) = self.turn_continuation.borrow_mut().as_mut() {
+                            cursor.structured_output_retries = 0;
+                        }
+                        image_projection_retries = 0;
+                        model_fingerprint = None;
+                    }
+                    if let Some(trigger_info) = pending_forced_compaction.take() {
+                        if let Err(e) = self.run_compact_only(trigger_info).await {
+                            tracing::error!(error = %e, "Between-step compaction failed");
+                            if Self::is_auth_compact_error(&e) {
+                                return Err(self.surface_compact_auth_failure(e).await);
+                            }
+                            return Err(e);
+                        }
+                    }
+                    let async_compaction_applied = self.background_compaction_boundary().await?;
+                    tools_changed_for_step = async_compaction_applied;
+                    if model_changed || agent_changed {
+                        // The request projection epoch changed. A provider
+                        // overflow on the replacement route/Agent gets its own
+                        // single recovery attempt.
+                        identical_tool_calls = IdenticalToolCallRun::default();
+                        let span = tracing::Span::current();
+                        span.record("agent.name", self.agent.borrow().name());
+                        if let Some(cfg) = self.chat_state_handle.get_sampling_config().await {
+                            span.record("model_id", self.current_catalog_model_id());
+                            span.record(
+                                "effort",
+                                cfg.reasoning_effort
+                                    .map(|effort| effort.as_str())
+                                    .unwrap_or("none"),
+                            );
+                        }
+                    }
+                    if agent_changed {
+                        // Completion requirements belong to the Agent epoch. A
+                        // similarly named tool called under the previous role
+                        // cannot satisfy the replacement Agent's contract.
+                        turn_tools_called.clear();
+                        structured_output_retries = 0;
+                        if let Some(cursor) = self.turn_continuation.borrow_mut().as_mut() {
+                            cursor.structured_output_retries = 0;
+                        }
+                        tools_changed_for_step = true;
+                    }
+                    if identical_tool_calls.run_len >= identical_tool_calls.hard_stop_threshold() {
+                        let run_len = identical_tool_calls.run_len;
+                        let tool_name = identical_tool_calls.tool_name.clone();
+                        let true_noop = identical_tool_calls.is_true_noop_run;
+                        tracing::warn!(
+                            session_id = %self.session_info.id,
+                            tool_name = %tool_name,
+                            run_len,
+                            true_noop,
+                            "action stationarity: ending turn after repeated identical tool calls"
                         );
+                        ::diagnostics::unified_log::warn(
+                            "shell.turn.action_stationarity_stop",
+                            Some(self.session_info.id.0.as_ref()),
+                            Some(serde_json::json!({
+                                "loop_index": loop_index,
+                                "tool_name": tool_name,
+                                "run_len": run_len,
+                                "true_noop": true_noop,
+                            })),
+                        );
+                        ::diagnostics::session_ctx::log_event(
+                            ::diagnostics::events::ActionStationarityStop {
+                                true_noop,
+                                run_len,
+                                tool_name: tool_name.clone(),
+                            },
+                        );
+                        let snapshot = self
+                            .finalize_turn_bookkeeping(
+                                req_id,
+                                conv_turn_start,
+                                &turn_span_totals,
+                                model_fingerprint.clone(),
+                            )
+                            .await;
+                        return Ok(TurnOutcome::StationarityEnded {
+                            snapshot: Box::new(snapshot),
+                        });
+                    }
+                    let step_started = {
+                        let _boundary = self.step_control_gate.lock().await;
+                        self.refresh_goal_step_resources().await;
+                        let admission = self.state.lock().await;
+                        if !admission.can_continue_regular_turn(req_id) {
+                            false
+                        } else {
+                            // The owner has admitted another Step. Keep the handoff
+                            // after the retained tail, without reopening a completed
+                            // turn or turning a summary into a new user instruction.
+                            if async_compaction_applied && self.events.next_step_index() > 0 {
+                                self.chat_state_handle
+                                    .push_user_message_durably(ConversationItem::auto_continue(
+                                        compaction::ASYNC_COMPACTION_CONTINUE_PROMPT,
+                                    ))
+                                    .await
+                                    .map_err(|error| {
+                                        crate::session::commands::fatal_turn_boundary_error(
+                                            "async compaction continuation",
+                                            error.to_string(),
+                                        )
+                                    })?;
+                            }
+                            // The ended Step's immutable admission horizon was
+                            // captured before controls were applied. Requests
+                            // accepted afterwards remain pending for the Step
+                            // starting here, even if they arrived before this
+                            // append acquired the gate.
+                            // Runtime skill-loading Steps may have advanced the
+                            // same turn's cursor while steering was consumed.
+                            loop_index = self.events.next_step_index();
+                            self.emit_event(crate::session::events::Event::LoopStarted {
+                                loop_index,
+                            });
+                            true
+                        }
+                    };
+                    if !step_started {
+                        return Ok(TurnOutcome::Cancelled {
+                            category: None,
+                            context: Some(serde_json::json!({
+                                "reason": "foreground ownership ended at the step boundary",
+                            })),
+                        });
                     }
                 }
-                if agent_changed {
-                    // Completion requirements belong to the Agent epoch. A
-                    // similarly named tool called under the previous role
-                    // cannot satisfy the replacement Agent's contract.
-                    turn_tools_called.clear();
-                    structured_output_retries = 0;
-                    tools_changed_for_step = true;
+                loop_index += 1;
+                if (!using_prestarted_step && loop_index > 1) || tools_changed_for_step {
+                    // A first compaction can expose Recall even in the first Step
+                    // of a new Turn, after the initial tool manifest was prepared.
+                    // Capability grants become visible at the next model sample, not
+                    // at the next outer user turn. Refresh only after the previous
+                    // tool batch has fully completed, so a model response cannot
+                    // request a capability and forge a newly exposed call in the
+                    // same batch.
+                    tool_definitions = self.prepare_tool_definitions_inner().await;
                 }
-                if identical_tool_calls.run_len >= identical_tool_calls.hard_stop_threshold() {
+                let native_backend = if json_schema.is_some() {
+                    match self.chat_state_handle.get_sampling_config().await {
+                        Some(c) => c.api_backend.supports_native_schema(),
+                        None => {
+                            tracing::warn!(
+                                "structured output: no sampling config; using StructuredOutput tool"
+                            );
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+                structured_output_tool_mode |= schema_ok && !native_backend;
+                let structured_output_tool = schema_ok && structured_output_tool_mode;
+                let structured_output_native =
+                    schema_ok && native_backend && !structured_output_tool;
+                if structured_output_tool && !structured_output_reminder_installed {
+                    self.push_system_reminder(
+                        "A response schema is required. After any tool use, call the \
+                     `StructuredOutput` tool exactly once with your final answer as its \
+                     arguments; do not return the answer as text.",
+                    );
+                    structured_output_reminder_installed = true;
+                }
+                if identical_tool_calls.take_nudge() {
                     let run_len = identical_tool_calls.run_len;
                     let tool_name = identical_tool_calls.tool_name.clone();
-                    let true_noop = identical_tool_calls.is_true_noop_run;
                     tracing::warn!(
                         session_id = %self.session_info.id,
                         tool_name = %tool_name,
                         run_len,
-                        true_noop,
-                        "action stationarity: ending turn after repeated identical tool calls"
+                        "action stationarity: nudging model to break repeated identical tool calls"
                     );
                     ::diagnostics::unified_log::warn(
-                        "shell.turn.action_stationarity_stop",
+                        "shell.turn.action_stationarity_nudge",
                         Some(self.session_info.id.0.as_ref()),
                         Some(serde_json::json!({
                             "loop_index": loop_index,
                             "tool_name": tool_name,
                             "run_len": run_len,
-                            "true_noop": true_noop,
                         })),
                     );
-                    ::diagnostics::session_ctx::log_event(
-                        ::diagnostics::events::ActionStationarityStop {
-                            true_noop,
-                            run_len,
-                            tool_name: tool_name.clone(),
-                        },
-                    );
-                    let snapshot = self
-                        .finalize_turn_bookkeeping(
-                            req_id,
-                            conv_turn_start,
-                            &turn_span_totals,
-                            model_fingerprint.clone(),
+                    let reminder = self
+                        .tool_bridge_handle()
+                        .render_prompt(
+                            ACTION_STATIONARITY_NUDGE_TEMPLATE,
+                            &serde_json::json!({
+                                "tool_name": tool_name,
+                                "run_len": run_len,
+                            }),
                         )
-                        .await;
-                    return Ok(TurnOutcome::StationarityEnded {
-                        snapshot: Box::new(snapshot),
-                    });
+                        .await
+                        .unwrap_or_else(|| ACTION_STATIONARITY_NUDGE_TEMPLATE.to_string());
+                    self.push_system_reminder(&reminder);
                 }
-                let step_started = {
-                    let _boundary = self.step_control_gate.lock().await;
-                    self.refresh_goal_step_resources().await;
-                    let admission = self.state.lock().await;
-                    if !admission.can_continue_regular_turn(req_id) {
-                        false
-                    } else {
-                        // The owner has admitted another Step. Keep the handoff
-                        // after the retained tail, without reopening a completed
-                        // turn or turning a summary into a new user instruction.
-                        if async_compaction_applied && self.events.next_step_index() > 0 {
-                            self.chat_state_handle
-                                .push_user_message_durably(ConversationItem::auto_continue(
-                                    compaction::ASYNC_COMPACTION_CONTINUE_PROMPT,
-                                ))
-                                .await
-                                .map_err(|error| {
-                                    crate::session::commands::fatal_turn_boundary_error(
-                                        "async compaction continuation",
-                                        error.to_string(),
-                                    )
-                                })?;
-                        }
-                        // The ended Step's immutable admission horizon was
-                        // captured before controls were applied. Requests
-                        // accepted afterwards remain pending for the Step
-                        // starting here, even if they arrived before this
-                        // append acquired the gate.
-                        self.emit_event(crate::session::events::Event::LoopStarted { loop_index });
-                        true
-                    }
+                self.drain_pending_interjections().await;
+                self.drain_deferred_completions().await;
+                self.flush_pending_system_reminders().await;
+                self.drain_active_notifications().await;
+                let memory_reminder = self.first_turn_memory_reminder().await;
+                let memory_reminder = match self
+                    .local_planning_context()
+                    .await
+                    .map_err(|error| acp::Error::internal_error().data(error))?
+                {
+                    Some(planning) => Some(match memory_reminder {
+                        Some(memory) => format!("{memory}\n\n{planning}"),
+                        None => planning,
+                    }),
+                    None => memory_reminder,
                 };
-                if !step_started {
-                    return Ok(TurnOutcome::Cancelled {
-                        category: None,
-                        context: Some(serde_json::json!({
-                            "reason": "foreground ownership ended at the step boundary",
-                        })),
+                if memory_reminder.is_some() {
+                    self.memory
+                        .injection_count
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::info!(
+                        target: ::diagnostics::memory_log::TARGET,
+                        "MEMORY_INJECT: first-turn memory context injected"
+                    );
+                }
+                self.maybe_inject_mcp_reminder().await;
+                if self.tool_context.task_output_token_budget.is_none() {
+                    self.refresh_byok_credential().await;
+                }
+                let projected_images = self.project_images_for_known_text_model().await?;
+                if projected_images.total_images() > 0 {
+                    tracing::info!(
+                        described_images = projected_images.described_images,
+                        removed_images = projected_images.removed_images,
+                        "installed irreversible model-facing ImageShadows"
+                    );
+                }
+                let mut effective_tools: Vec<ToolSpec> =
+                    self.turn_base_tool_specs(&tool_definitions);
+                if structured_output_tool && let Some(schema) = json_schema.clone() {
+                    effective_tools.push(ToolSpec {
+                        name: STRUCTURED_OUTPUT_TOOL.to_string(),
+                        description: Some(
+                            "Return your final answer as JSON matching the required schema. \
+                         Call this exactly once, at the end."
+                                .to_string(),
+                        ),
+                        parameters: schema,
                     });
                 }
-            }
-            loop_index += 1;
-            if (!using_prestarted_step && loop_index > 1) || tools_changed_for_step {
-                // A first compaction can expose Recall even in the first Step
-                // of a new Turn, after the initial tool manifest was prepared.
-                // Capability grants become visible at the next model sample, not
-                // at the next outer user turn. Refresh only after the previous
-                // tool batch has fully completed, so a model response cannot
-                // request a capability and forge a newly exposed call in the
-                // same batch.
-                tool_definitions = self.prepare_tool_definitions_inner().await;
-            }
-            let native_backend = if json_schema.is_some() {
-                match self.chat_state_handle.get_sampling_config().await {
-                    Some(c) => c.api_backend.supports_native_schema(),
-                    None => {
-                        tracing::warn!(
-                            "structured output: no sampling config; using StructuredOutput tool"
-                        );
-                        false
-                    }
-                }
-            } else {
-                false
-            };
-            structured_output_tool_mode |= schema_ok && !native_backend;
-            let structured_output_tool = schema_ok && structured_output_tool_mode;
-            let structured_output_native = schema_ok && native_backend && !structured_output_tool;
-            if structured_output_tool && !structured_output_reminder_installed {
-                self.push_system_reminder(
-                    "A response schema is required. After any tool use, call the \
-                     `StructuredOutput` tool exactly once with your final answer as its \
-                     arguments; do not return the answer as text.",
-                );
-                structured_output_reminder_installed = true;
-            }
-            if identical_tool_calls.take_nudge() {
-                let run_len = identical_tool_calls.run_len;
-                let tool_name = identical_tool_calls.tool_name.clone();
-                tracing::warn!(
-                    session_id = %self.session_info.id,
-                    tool_name = %tool_name,
-                    run_len,
-                    "action stationarity: nudging model to break repeated identical tool calls"
-                );
-                ::diagnostics::unified_log::warn(
-                    "shell.turn.action_stationarity_nudge",
-                    Some(self.session_info.id.0.as_ref()),
-                    Some(serde_json::json!({
-                        "loop_index": loop_index,
-                        "tool_name": tool_name,
-                        "run_len": run_len,
-                    })),
-                );
-                let reminder = self
-                    .tool_bridge_handle()
-                    .render_prompt(
-                        ACTION_STATIONARITY_NUDGE_TEMPLATE,
-                        &serde_json::json!({
-                            "tool_name": tool_name,
-                            "run_len": run_len,
-                        }),
+                let active_goal = self.active_goal_directive_tag();
+                let request_json_output = structured_output_native
+                    .then(|| {
+                        json_schema
+                            .clone()
+                            .map(sampling_types::JsonOutputFormat::JsonSchema)
+                    })
+                    .flatten();
+                let build_req_start = std::time::Instant::now();
+                let mut request = self
+                    .chat_state_handle
+                    .build_request_for_image_mode(
+                        self.session_info.id.0.as_ref(),
+                        effective_tools,
+                        memory_reminder,
+                        active_goal,
+                        request_json_output,
+                        self.unsupported_current_model_for_images().await.is_some(),
                     )
                     .await
-                    .unwrap_or_else(|| ACTION_STATIONARITY_NUDGE_TEMPLATE.to_string());
-                self.push_system_reminder(&reminder);
-            }
-            self.drain_pending_interjections().await;
-            self.drain_deferred_completions().await;
-            self.flush_pending_system_reminders().await;
-            self.drain_active_notifications().await;
-            let memory_reminder = self.first_turn_memory_reminder().await;
-            if memory_reminder.is_some() {
-                self.memory
-                    .injection_count
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                tracing::info!(
-                    target: ::diagnostics::memory_log::TARGET,
-                    "MEMORY_INJECT: first-turn memory context injected"
+                    .map_err(|error| {
+                        let message = if matches!(
+                            error,
+                            chat_state::TimelineWriteError::ImageDescriptionUnavailable(_)
+                        ) {
+                            Self::image_projection_failure_message(&error)
+                        } else {
+                            format!("failed to durably prepare model context: {error}")
+                        };
+                        acp::Error::internal_error().data(message)
+                    })?;
+                ::diagnostics::unified_log::debug(
+                    "shell.turn.build_request_done",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({
+                        "build_request_ms": build_req_start.elapsed().as_millis() as u64,
+                        "loop_index": loop_index,
+                    })),
                 );
-            }
-            self.maybe_inject_mcp_reminder().await;
-            if self.tool_context.task_output_token_budget.is_none() {
-                self.refresh_byok_credential().await;
-            }
-            let projected_images = self.project_images_for_known_text_model().await?;
-            if projected_images.total_images() > 0 {
-                tracing::info!(
-                    described_images = projected_images.described_images,
-                    removed_images = projected_images.removed_images,
-                    "installed irreversible model-facing ImageShadows"
-                );
-            }
-            let mut effective_tools: Vec<ToolSpec> = self.turn_base_tool_specs(&tool_definitions);
-            if structured_output_tool && let Some(schema) = json_schema.clone() {
-                effective_tools.push(ToolSpec {
-                    name: STRUCTURED_OUTPUT_TOOL.to_string(),
-                    description: Some(
-                        "Return your final answer as JSON matching the required schema. \
-                         Call this exactly once, at the end."
-                            .to_string(),
-                    ),
-                    parameters: schema,
-                });
-            }
-            let active_goal = self.active_goal_directive_tag();
-            let request_json_output = structured_output_native
-                .then(|| {
-                    json_schema
-                        .clone()
-                        .map(sampling_types::JsonOutputFormat::JsonSchema)
-                })
-                .flatten();
-            let build_req_start = std::time::Instant::now();
-            let mut request = self
-                .chat_state_handle
-                .build_request_for_image_mode(
-                    self.session_info.id.0.as_ref(),
-                    effective_tools,
-                    memory_reminder,
-                    active_goal,
-                    request_json_output,
-                    self.unsupported_current_model_for_images().await.is_some(),
-                )
-                .await
-                .map_err(|error| {
-                    let message = if matches!(
-                        error,
-                        chat_state::TimelineWriteError::ImageDescriptionUnavailable(_)
-                    ) {
-                        Self::image_projection_failure_message(&error)
-                    } else {
-                        format!("failed to durably prepare model context: {error}")
-                    };
-                    acp::Error::internal_error().data(message)
-                })?;
-            ::diagnostics::unified_log::debug(
-                "shell.turn.build_request_done",
-                Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!({
-                    "build_request_ms": build_req_start.elapsed().as_millis() as u64,
-                    "loop_index": loop_index,
-                })),
-            );
-            if self.tool_context.task_output_token_budget.is_none()
-                && let Some(trigger_info) = self.check_auto_compact_needed().await
-            {
-                // This request projection is complete even though its pressure
-                // requires a synchronous compaction before provider admission.
-                // Finalize any earlier async notice before that later
-                // compaction establishes a different result.
-                self.publish_pending_async_compaction_notice().await;
-                // Compaction is a provider call of its own. Move it across the
-                // StepEnded fence so response settlement, Goal limits and any
-                // queued route/definition controls become authoritative before
-                // the sideband is admitted.
-                pending_forced_compaction = Some(trigger_info);
-                continue;
-            }
-            if request.image_count() > 0
-                && let Some(model) = self.unsupported_current_model_for_images().await
-            {
-                image_projection_retries = image_projection_retries.saturating_add(1);
-                if image_projection_retries > 2 {
-                    return Err(acp::Error::internal_error().data(format!(
+                if self.tool_context.task_output_token_budget.is_none()
+                    && let Some(trigger_info) = self.check_auto_compact_needed().await
+                {
+                    // This request projection is complete even though its pressure
+                    // requires a synchronous compaction before provider admission.
+                    // Finalize any earlier async notice before that later
+                    // compaction establishes a different result.
+                    self.publish_pending_async_compaction_notice().await;
+                    // Compaction is a provider call of its own. Move it across the
+                    // StepEnded fence so response settlement, Goal limits and any
+                    // queued route/definition controls become authoritative before
+                    // the sideband is admitted.
+                    pending_forced_compaction = Some(trigger_info);
+                    continue;
+                }
+                if request.image_count() > 0
+                    && let Some(model) = self.unsupported_current_model_for_images().await
+                {
+                    image_projection_retries = image_projection_retries.saturating_add(1);
+                    if image_projection_retries > 2 {
+                        return Err(acp::Error::internal_error().data(format!(
                         "text-only model {model} still has unprojected image input after two Surface retries"
                     )));
+                    }
+                    tracing::info!(
+                        model,
+                        image_projection_retries,
+                        "Surface changed after ImageShadow installation; rebuilding request projection"
+                    );
+                    continue;
                 }
-                tracing::info!(
-                    model,
-                    image_projection_retries,
-                    "Surface changed after ImageShadow installation; rebuilding request projection"
+                image_projection_retries = 0;
+                self.publish_pending_async_compaction_notice().await;
+                // Request assembly may itself spend Goal tokens (most notably
+                // irreversible image-description and compaction Sidebands), and a
+                // descendant can settle usage concurrently. Wait for every older
+                // admitted provider attempt before rechecking at the final
+                // provider-admission edge. Stop does not await this fence; only a
+                // later model call does.
+                let usage_owner = self.session_id_string();
+                let usage_epoch = super::tasks_cancel::turn_usage_epoch_or(
+                    self.goal_usage_window.owner_epoch(&usage_owner),
                 );
-                continue;
-            }
-            image_projection_retries = 0;
-            self.publish_pending_async_compaction_notice().await;
-            // Request assembly may itself spend Goal tokens (most notably
-            // irreversible image-description and compaction Sidebands), and a
-            // descendant can settle usage concurrently. Wait for every older
-            // admitted provider attempt before rechecking at the final
-            // provider-admission edge. Stop does not await this fence; only a
-            // later model call does.
-            let usage_owner = self.session_id_string();
-            let usage_epoch = super::tasks_cancel::turn_usage_epoch_or(
-                self.goal_usage_window.owner_epoch(&usage_owner),
-            );
-            self.goal_usage_window
-                .wait_for_owner_settlements_through(&usage_owner, usage_epoch)
-                .await;
-            if self.goal_provider_admission_closed() {
-                let snapshot = self
-                    .finalize_turn_bookkeeping(
-                        req_id,
-                        conv_turn_start,
-                        &turn_span_totals,
-                        model_fingerprint.clone(),
-                    )
+                self.goal_usage_window
+                    .wait_for_owner_settlements_through(&usage_owner, usage_epoch)
                     .await;
-                return Ok(TurnOutcome::GoalSpendingStopped {
-                    snapshot: Box::new(snapshot),
-                });
-            }
-            request.max_output_tokens = self
-                .tool_context
-                .clamp_task_model_request(request.max_output_tokens)
-                .map_err(|message| acp::Error::internal_error().data(message))?;
-            let provider_admitted = {
-                let _boundary = self.step_control_gate.lock().await;
-                let admission = self.state.lock().await;
-                admission.can_continue_regular_turn(req_id)
-                    && self.events.has_active_step()
-                    && self
-                        .tool_context
-                        .storage_admission
-                        .as_ref()
-                        .is_none_or(|gate| gate.check(self.session_info.id.0.as_ref()).is_ok())
-            };
-            if !provider_admitted {
-                return Ok(TurnOutcome::Cancelled {
-                    category: None,
-                    context: Some(serde_json::json!({
-                        "reason": "provider admission closed before sampling",
-                    })),
-                });
-            }
-            ::diagnostics::unified_log::info(
-                "shell.turn.inference_start",
-                Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!({
-                    "loop_index": loop_index,
-                    "elapsed_since_turn_start_ms": conv_turn_start.elapsed().as_millis() as u64,
-                })),
-            );
-            let model_timer = std::time::Instant::now();
-            // Bill the selected provider/model, not a provider-returned alias.
-            // Capture before awaiting sampling so later control changes cannot reattribute it.
-            let usage_model_id = self.current_catalog_model_id();
-            let (mut response, latency, response_request_id) = match self
-                .run_turn_via_sampler(request.clone(), sampling_recovery.clone())
-                .await
-            {
-                Ok(SamplerTurnOutcome::Response(r, latency, request_id)) => {
-                    (r, latency, request_id)
-                }
-                Err(error) => {
-                    self.tool_context.fail_task_output_usage_closed();
-                    return Err(error);
-                }
-                Ok(SamplerTurnOutcome::GoalSpendingStopped) => {
+                if self.goal_provider_admission_closed() {
                     let snapshot = self
                         .finalize_turn_bookkeeping(
                             req_id,
@@ -1408,209 +1819,314 @@ impl SessionActor {
                         snapshot: Box::new(snapshot),
                     });
                 }
-                Ok(SamplerTurnOutcome::CompactAndResubmit(trigger_info)) => {
-                    if context_overflow_recovery_pending {
-                        return Err(self
-                            .surface_repeated_context_overflow(
-                                trigger_info.tokens_used,
-                                trigger_info.context_window,
+                request.max_output_tokens = self
+                    .tool_context
+                    .clamp_task_model_request(request.max_output_tokens)
+                    .map_err(|message| acp::Error::internal_error().data(message))?;
+                if request
+                    .items
+                    .iter()
+                    .any(|item| matches!(item, ConversationItem::SkillLoad(_)))
+                {
+                    let window = self
+                        .chat_state_handle
+                        .get_sampling_config()
+                        .await
+                        .map(|config| config.context_window.get())
+                        .unwrap_or(0);
+                    let input_tokens = chat_state::estimate_request_input_tokens(&request);
+                    let output_reserve = request.max_output_tokens.map(u64::from).unwrap_or(2_048);
+                    if input_tokens
+                        .saturating_add(output_reserve)
+                        .saturating_add(256)
+                        > window
+                    {
+                        return Err(acp::Error::invalid_params().data(
+                        "Loaded skills do not fit the complete model request, including tools and output reserve. No truncated skill request was sent.",
+                    ));
+                    }
+                }
+                let provider_admitted = {
+                    let _boundary = self.step_control_gate.lock().await;
+                    let admission = self.state.lock().await;
+                    admission.can_continue_regular_turn(req_id)
+                        && self.events.has_active_step()
+                        && self
+                            .tool_context
+                            .storage_admission
+                            .as_ref()
+                            .is_none_or(|gate| gate.check(self.session_info.id.0.as_ref()).is_ok())
+                };
+                if !provider_admitted {
+                    return Ok(TurnOutcome::Cancelled {
+                        category: None,
+                        context: Some(serde_json::json!({
+                            "reason": "provider admission closed before sampling",
+                        })),
+                    });
+                }
+                ::diagnostics::unified_log::info(
+                    "shell.turn.inference_start",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({
+                        "loop_index": loop_index,
+                        "elapsed_since_turn_start_ms": conv_turn_start.elapsed().as_millis() as u64,
+                    })),
+                );
+                let model_timer = std::time::Instant::now();
+                // Bill the selected provider/model, not a provider-returned alias.
+                // Capture before awaiting sampling so later control changes cannot reattribute it.
+                let usage_model_id = self.current_catalog_model_id();
+                let (mut response, latency, response_request_id) = match self
+                    .run_turn_via_sampler(request.clone(), sampling_recovery.clone())
+                    .await
+                {
+                    Ok(SamplerTurnOutcome::Response(r, latency, request_id)) => {
+                        (r, latency, request_id)
+                    }
+                    Err(error) => {
+                        self.tool_context.fail_task_output_usage_closed();
+                        return Err(error);
+                    }
+                    Ok(SamplerTurnOutcome::GoalSpendingStopped) => {
+                        let snapshot = self
+                            .finalize_turn_bookkeeping(
+                                req_id,
+                                conv_turn_start,
+                                &turn_span_totals,
+                                model_fingerprint.clone(),
                             )
-                            .await);
+                            .await;
+                        return Ok(TurnOutcome::GoalSpendingStopped {
+                            snapshot: Box::new(snapshot),
+                        });
                     }
-                    context_overflow_recovery_pending = true;
-                    auth_retry_schedule.reset();
-                    pending_forced_compaction = Some(trigger_info);
-                    continue;
-                }
-                Ok(SamplerTurnOutcome::ImageInputUnsupportedAndResubmit) => {
-                    // Irreversible ImageShadows changed the provider-facing
-                    // projection, so a later overflow belongs to a new input
-                    // epoch rather than the prior compaction attempt.
-                    context_overflow_recovery_pending = false;
-                    auth_retry_schedule.reset();
-                    continue;
-                }
-                Ok(SamplerTurnOutcome::ResetContinuationAndResubmit) => {
-                    if !self.chat_state_handle.reset_continuation().await {
-                        let message =
-                            "native continuation could not be cleared; sampling was not resumed";
-                        self.send_grow_notification(GrowSessionUpdate::RetryState(
-                            crate::extensions::notification::RetryState::Failed {
-                                error_type: "continuation_reset_failed".to_owned(),
-                                message: message.to_owned(),
-                            },
-                        ))
-                        .await;
-                        return Err(acp::Error::internal_error().data(message));
-                    }
-                    context_overflow_recovery_pending = false;
-                    auth_retry_schedule.reset();
-                    continue;
-                }
-                Ok(SamplerTurnOutcome::EnablePortableReasoningAndResubmit) => {
-                    context_overflow_recovery_pending = false;
-                    auth_retry_schedule.reset();
-                    continue;
-                }
-                Ok(SamplerTurnOutcome::RefreshByokAndResubmit { credential }) => {
-                    match auth_retry_schedule.on_recovered_401(credential) {
-                        AuthRetryDecision::UnchargedResubmit { resubmit } => {
-                            tracing::info!(
-                                resubmit,
-                                "BYOK 401 retry: request carried no credential; retrying without charging rejection budget"
-                            );
-                            sampling_recovery
-                                .wait_before_retry(std::time::Duration::from_millis(100))
-                                .await
-                                .map_err(|error| self.to_acp_error(error))?;
-                            continue;
+                    Ok(SamplerTurnOutcome::CompactAndResubmit(trigger_info)) => {
+                        if context_overflow_recovery_pending {
+                            return Err(self
+                                .surface_repeated_context_overflow(
+                                    trigger_info.tokens_used,
+                                    trigger_info.context_window,
+                                )
+                                .await);
                         }
-                        AuthRetryDecision::Backoff { attempt, delay } => {
-                            let delay_ms = delay.as_millis() as u64;
-                            ::diagnostics::unified_log::warn(
-                                "shell.turn.byok_retry_backoff",
-                                Some(self.session_info.id.0.as_ref()),
-                                Some(serde_json::json!({
-                                    "loop_index": loop_index,
-                                    "attempt": attempt,
-                                    "max_retries": AuthRetrySchedule::MAX_RETRIES,
-                                    "delay_ms": delay_ms,
-                                })),
-                            );
+                        context_overflow_recovery_pending = true;
+                        auth_retry_schedule.reset();
+                        pending_forced_compaction = Some(trigger_info);
+                        continue;
+                    }
+                    Ok(SamplerTurnOutcome::ImageInputUnsupportedAndResubmit) => {
+                        // Irreversible ImageShadows changed the provider-facing
+                        // projection, so a later overflow belongs to a new input
+                        // epoch rather than the prior compaction attempt.
+                        context_overflow_recovery_pending = false;
+                        auth_retry_schedule.reset();
+                        continue;
+                    }
+                    Ok(SamplerTurnOutcome::ResetContinuationAndResubmit) => {
+                        if !self.chat_state_handle.reset_continuation().await {
+                            let message = "native continuation could not be cleared; sampling was not resumed";
                             self.send_grow_notification(GrowSessionUpdate::RetryState(
-                                crate::extensions::notification::RetryState::Retrying {
-                                    attempt,
-                                    max_retries: AuthRetrySchedule::MAX_RETRIES,
-                                    reason: "BYOK credential reloaded after 401; retrying request"
-                                        .to_string(),
+                                crate::extensions::notification::RetryState::Failed {
+                                    error_type: "continuation_reset_failed".to_owned(),
+                                    message: message.to_owned(),
                                 },
                             ))
                             .await;
-                            sampling_recovery
-                                .wait_before_retry(delay)
-                                .await
-                                .map_err(|error| self.to_acp_error(error))?;
-                            continue;
+                            return Err(acp::Error::internal_error().data(message));
                         }
-                        AuthRetryDecision::Exhausted => {
-                            let msg = format!(
-                                "BYOK credential remained rejected after {} retries",
-                                AuthRetrySchedule::MAX_RETRIES
-                            );
-                            return Err(acp::Error::internal_error().data(
-                                crate::sampling::error::error_data_with_status(msg, Some(401)),
-                            ));
-                        }
-                        AuthRetryDecision::RunawayGuard { resubmits } => {
-                            let msg = format!(
-                                "BYOK credential was still missing after {resubmits} resubmits"
-                            );
-                            return Err(acp::Error::internal_error().data(
-                                crate::sampling::error::error_data_with_status(msg, Some(401)),
-                            ));
+                        context_overflow_recovery_pending = false;
+                        auth_retry_schedule.reset();
+                        continue;
+                    }
+                    Ok(SamplerTurnOutcome::EnablePortableReasoningAndResubmit) => {
+                        context_overflow_recovery_pending = false;
+                        auth_retry_schedule.reset();
+                        continue;
+                    }
+                    Ok(SamplerTurnOutcome::RefreshByokAndResubmit { credential }) => {
+                        match auth_retry_schedule.on_recovered_401(credential) {
+                            AuthRetryDecision::UnchargedResubmit { resubmit } => {
+                                tracing::info!(
+                                    resubmit,
+                                    "BYOK 401 retry: request carried no credential; retrying without charging rejection budget"
+                                );
+                                sampling_recovery
+                                    .wait_before_retry(std::time::Duration::from_millis(100))
+                                    .await
+                                    .map_err(|error| self.to_acp_error(error))?;
+                                continue;
+                            }
+                            AuthRetryDecision::Backoff { attempt, delay } => {
+                                let delay_ms = delay.as_millis() as u64;
+                                ::diagnostics::unified_log::warn(
+                                    "shell.turn.byok_retry_backoff",
+                                    Some(self.session_info.id.0.as_ref()),
+                                    Some(serde_json::json!({
+                                        "loop_index": loop_index,
+                                        "attempt": attempt,
+                                        "max_retries": AuthRetrySchedule::MAX_RETRIES,
+                                        "delay_ms": delay_ms,
+                                    })),
+                                );
+                                self.send_grow_notification(GrowSessionUpdate::RetryState(
+                                    crate::extensions::notification::RetryState::Retrying {
+                                        attempt,
+                                        max_retries: AuthRetrySchedule::MAX_RETRIES,
+                                        reason:
+                                            "BYOK credential reloaded after 401; retrying request"
+                                                .to_string(),
+                                    },
+                                ))
+                                .await;
+                                sampling_recovery
+                                    .wait_before_retry(delay)
+                                    .await
+                                    .map_err(|error| self.to_acp_error(error))?;
+                                continue;
+                            }
+                            AuthRetryDecision::Exhausted => {
+                                let msg = format!(
+                                    "BYOK credential remained rejected after {} retries",
+                                    AuthRetrySchedule::MAX_RETRIES
+                                );
+                                return Err(acp::Error::internal_error().data(
+                                    crate::sampling::error::error_data_with_status(msg, Some(401)),
+                                ));
+                            }
+                            AuthRetryDecision::RunawayGuard { resubmits } => {
+                                let msg = format!(
+                                    "BYOK credential was still missing after {resubmits} resubmits"
+                                );
+                                return Err(acp::Error::internal_error().data(
+                                    crate::sampling::error::error_data_with_status(msg, Some(401)),
+                                ));
+                            }
                         }
                     }
-                }
-                Ok(SamplerTurnOutcome::Steered) => {
-                    sampling_recovery = sampler::RecoveryBudget::default();
-                    auth_retry_schedule.reset();
-                    continue;
-                }
-            };
-            auth_retry_schedule.reset();
-            let model_elapsed_ms = model_timer.elapsed().as_millis() as u64;
-            let usage = response.usage.as_ref();
-            let prompt_tokens = usage.map(|u| u.prompt_tokens);
-            let cached_prompt_tokens = usage.and_then(|u| u.cache_read_tokens());
-            let completion_tokens = usage.map(|u| u.completion_tokens);
-            let reasoning_tokens = usage.map(|u| u.reasoning_tokens);
-            let ttft_ms = latency.time_to_first_token_ms;
-            let tokens_per_sec = match completion_tokens {
-                Some(ct) if ct > 0 => {
-                    let decode_ms = match ttft_ms {
-                        Some(ttft) if model_elapsed_ms > ttft => model_elapsed_ms - ttft,
-                        _ => model_elapsed_ms,
-                    };
-                    (decode_ms > 0).then(|| {
-                        let tps = f64::from(ct) * 1000.0 / decode_ms as f64;
-                        (tps * 10.0).round() / 10.0
-                    })
-                }
-                _ => None,
-            };
-            ::diagnostics::unified_log::info(
-                "shell.turn.inference_done",
-                Some(self.session_info.id.0.as_ref()),
-                Some(serde_json::json!({
-                    "loop_index": loop_index,
-                    "model_elapsed_ms": model_elapsed_ms,
-                    "elapsed_since_turn_start_ms": conv_turn_start.elapsed().as_millis() as u64,
-                    "ttft_ms": ttft_ms,
-                    "itl_p50_ms": latency.itl_p50_ms,
-                    "attempts": latency.attempts,
-                    "prompt_tokens": prompt_tokens,
-                    "cached_prompt_tokens": cached_prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "reasoning_tokens": reasoning_tokens,
-                    "tokens_per_sec": tokens_per_sec,
-                })),
-            );
-            turn_span_totals.record(&tracing::Span::current(), &response);
-            let _ = self.compaction.auto_compact_suppressed.compare_exchange(
-                crate::session::compaction_config::SUPPRESS_UNTIL_SUCCESS,
-                crate::session::compaction_config::SUPPRESS_NONE,
-                std::sync::atomic::Ordering::Relaxed,
-                std::sync::atomic::Ordering::Relaxed,
-            );
-            self.clear_auth_compact_suppression();
-            let model_duration_ms = model_timer.elapsed().as_millis() as u64;
-            {
-                let model_id = self.current_catalog_model_id();
-                ::diagnostics::session_ctx::log_event(
-                    ::diagnostics::events::ModelResponseReceived {
-                        model_id,
-                        duration_ms: model_duration_ms,
-                        stop_reason: response
-                            .stop_reason
-                            .as_ref()
-                            .map(|r| format!("{r:?}").to_ascii_lowercase()),
-                        prompt_tokens: response.usage.as_ref().map(|u| u.prompt_tokens),
-                        completion_tokens: response.usage.as_ref().map(|u| u.completion_tokens),
-                        reasoning_tokens: response.usage.as_ref().map(|u| u.reasoning_tokens),
-                        cached_prompt_tokens: response
-                            .usage
-                            .as_ref()
-                            .and_then(|u| u.cache_read_tokens()),
-                    },
+                    Ok(SamplerTurnOutcome::Steered) => {
+                        sampling_recovery = sampler::RecoveryBudget::default();
+                        *self.sampling_continuation.borrow_mut() = Some(sampling_recovery.clone());
+                        auth_retry_schedule.reset();
+                        continue;
+                    }
+                };
+                auth_retry_schedule.reset();
+                let model_elapsed_ms = model_timer.elapsed().as_millis() as u64;
+                let usage = response.usage.as_ref();
+                let prompt_tokens = usage.map(|u| u.prompt_tokens);
+                let cached_prompt_tokens = usage.and_then(|u| u.cache_read_tokens());
+                let completion_tokens = usage.map(|u| u.completion_tokens);
+                let reasoning_tokens = usage.map(|u| u.reasoning_tokens);
+                let ttft_ms = latency.time_to_first_token_ms;
+                let tokens_per_sec = match completion_tokens {
+                    Some(ct) if ct > 0 => {
+                        let decode_ms = match ttft_ms {
+                            Some(ttft) if model_elapsed_ms > ttft => model_elapsed_ms - ttft,
+                            _ => model_elapsed_ms,
+                        };
+                        (decode_ms > 0).then(|| {
+                            let tps = f64::from(ct) * 1000.0 / decode_ms as f64;
+                            (tps * 10.0).round() / 10.0
+                        })
+                    }
+                    _ => None,
+                };
+                ::diagnostics::unified_log::info(
+                    "shell.turn.inference_done",
+                    Some(self.session_info.id.0.as_ref()),
+                    Some(serde_json::json!({
+                        "loop_index": loop_index,
+                        "model_elapsed_ms": model_elapsed_ms,
+                        "elapsed_since_turn_start_ms": conv_turn_start.elapsed().as_millis() as u64,
+                        "ttft_ms": ttft_ms,
+                        "itl_p50_ms": latency.itl_p50_ms,
+                        "attempts": latency.attempts,
+                        "prompt_tokens": prompt_tokens,
+                        "cached_prompt_tokens": cached_prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "reasoning_tokens": reasoning_tokens,
+                        "tokens_per_sec": tokens_per_sec,
+                    })),
                 );
-            }
-            let response_completed = self.response_completed_update(&response);
-            if let Some(pt) = prompt_timing.take() {
-                let mcp_count = self.mcp_state.lock().await.configs.len() as u32;
-                let mcp_tools = self
-                    .agent
-                    .borrow()
-                    .tool_bridge()
-                    .tool_definitions()
-                    .await
-                    .iter()
-                    .filter(|t| t.function.name.contains("__"))
-                    .count() as u32;
-                let turn_index = self
-                    .chat_state_handle
-                    .get_prompt_index()
-                    .await
-                    .saturating_sub(1) as u32;
-                pt.emit(
+                turn_span_totals.record(&tracing::Span::current(), &response);
+                let _ = self.compaction.auto_compact_suppressed.compare_exchange(
+                    crate::session::compaction_config::SUPPRESS_UNTIL_SUCCESS,
+                    crate::session::compaction_config::SUPPRESS_NONE,
+                    std::sync::atomic::Ordering::Relaxed,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+                self.clear_auth_compact_suppression();
+                let model_duration_ms = model_timer.elapsed().as_millis() as u64;
+                {
+                    let model_id = self.current_catalog_model_id();
+                    ::diagnostics::session_ctx::log_event(
+                        ::diagnostics::events::ModelResponseReceived {
+                            model_id,
+                            duration_ms: model_duration_ms,
+                            stop_reason: response
+                                .stop_reason
+                                .as_ref()
+                                .map(|r| format!("{r:?}").to_ascii_lowercase()),
+                            prompt_tokens: response.usage.as_ref().map(|u| u.prompt_tokens),
+                            completion_tokens: response.usage.as_ref().map(|u| u.completion_tokens),
+                            reasoning_tokens: response.usage.as_ref().map(|u| u.reasoning_tokens),
+                            cached_prompt_tokens: response
+                                .usage
+                                .as_ref()
+                                .and_then(|u| u.cache_read_tokens()),
+                        },
+                    );
+                }
+                if let Some(pt) = prompt_timing.take() {
+                    let mcp_count = self.mcp_state.lock().await.configs.len() as u32;
+                    let mcp_tools = self
+                        .agent
+                        .borrow()
+                        .tool_bridge()
+                        .tool_definitions()
+                        .await
+                        .iter()
+                        .filter(|t| t.function.name.contains("__"))
+                        .count() as u32;
+                    let turn_index = self
+                        .chat_state_handle
+                        .get_prompt_index()
+                        .await
+                        .saturating_sub(1) as u32;
+                    pt.emit(
+                        model_duration_ms,
+                        turn_index,
+                        mcp_count,
+                        mcp_tools,
+                        self.mcp.strategy,
+                        self.current_catalog_model_id(),
+                    );
+                }
+                (
+                    *response,
+                    *latency,
+                    response_request_id,
                     model_duration_ms,
-                    turn_index,
-                    mcp_count,
-                    mcp_tools,
-                    self.mcp.strategy,
-                    self.current_catalog_model_id(),
-                );
-            }
+                    usage_model_id,
+                    structured_output_tool,
+                    false,
+                )
+            };
+            let response_completed = self.response_completed_update(&response);
             let mut tool_calls = response.tool_calls().to_vec();
+            if already_admitted {
+                let surface = self.chat_state_handle.get_conversation().await;
+                let settled = surface
+                    .iter()
+                    .filter_map(|item| match item {
+                        ConversationItem::ToolResult(result) => Some(result.tool_call_id.as_str()),
+                        _ => None,
+                    })
+                    .collect::<std::collections::BTreeSet<_>>();
+                retain_settled_structured_output_calls(&mut tool_calls, &settled);
+            }
+
             metrics_drop_guard.record_model_response(tool_calls.len());
             if let Some(fp) = response
                 .assistant()
@@ -1620,6 +2136,7 @@ impl SessionActor {
             }
             let fallback_text = response.fallback_text();
             let stop_reason = response.stop_reason;
+            let response_had_tool_calls = !response.tool_calls().is_empty();
             let response_is_empty = response.is_empty();
             let turn_refused = stop_reason == Some(sampling_types::StopReason::ContentFilter);
             let refusal_explanation = response.stop_message.clone();
@@ -1631,25 +2148,47 @@ impl SessionActor {
                 request_id: response_request_id.clone(),
                 attempt: latency.attempts,
             };
-            Box::pin(self.confirm_preview_before_admission(&response_request_id, latency.attempts))
-                .await?;
-            let assistant_messages = response_items
-                .iter()
-                .filter(|item| matches!(item, sampling_types::ConversationItem::Assistant(_)))
-                .count();
-            let quarantined = self
-                .chat_state_handle
-                .push_response_durably_with_identity(
-                    response_items,
-                    admission_identity.clone(),
-                    native_continuation,
+            let quarantined = if already_admitted {
+                self.chat_state_handle
+                    .admitted_response(admission_identity.clone())
+                    .await
+                    .ok_or_else(|| {
+                        acp::Error::internal_error().data("restored response admission disappeared")
+                    })?
+                    .quarantined_tool_exchanges
+            } else {
+                if let Some(cursor) = self.turn_continuation.borrow_mut().as_mut() {
+                    cursor.accepted_response =
+                        Some(chat_state::session_runtime::AcceptedResponseContinuation {
+                            identity: admission_identity.clone(),
+                            stop_reason,
+                            stop_message: refusal_explanation.clone(),
+                        });
+                }
+                Box::pin(
+                    self.confirm_preview_before_admission(&response_request_id, latency.attempts),
                 )
-                .await
-                .map_err(crate::session::commands::response_admission_error)?;
-            for _ in 0..assistant_messages {
-                self.signals_handle().record_assistant_message();
-            }
+                .await?;
+                let assistant_messages = response_items
+                    .iter()
+                    .filter(|item| matches!(item, sampling_types::ConversationItem::Assistant(_)))
+                    .count();
+                let quarantined = self
+                    .chat_state_handle
+                    .push_response_durably_with_identity(
+                        response_items,
+                        admission_identity.clone(),
+                        native_continuation,
+                    )
+                    .await
+                    .map_err(crate::session::commands::response_admission_error)?;
+                for _ in 0..assistant_messages {
+                    self.signals_handle().record_assistant_message();
+                }
+                quarantined
+            };
             if quarantined == 0
+                && !already_admitted
                 && let Some(text) = fallback_text.clone()
             {
                 tracing::warn!(
@@ -1705,6 +2244,7 @@ impl SessionActor {
                 })?;
             self.finish_sampling_preview(quarantined == 0);
             sampling_recovery = sampler::RecoveryBudget::default();
+            *self.sampling_continuation.borrow_mut() = Some(sampling_recovery.clone());
             // The response Surface facts must precede the provider anchor.
             // With usage, the anchor replaces their local estimates; without
             // usage, the estimates remain as fail-safe context pressure.
@@ -1897,6 +2437,15 @@ impl SessionActor {
                         })?;
                 }
             }
+            if already_admitted && tool_calls.is_empty() && response_had_tool_calls {
+                tool_turn_count = tool_turn_count.saturating_add(1);
+                if let Some(limit) = self.max_turns {
+                    if tool_turn_count > limit {
+                        return Ok(TurnOutcome::MaxTurnsReached { limit });
+                    }
+                }
+                continue;
+            }
             if tool_calls.is_empty() {
                 if self.drain_pending_interjections().await
                     || self.drain_deferred_completions().await
@@ -1905,6 +2454,56 @@ impl SessionActor {
                         "Drained foreground event(s) before turn completion — continuing"
                     );
                     continue;
+                }
+                if !turn_refused {
+                    match self
+                        .planned_completion_preflight(origin, req_id, &mut tool_turn_count)
+                        .await?
+                    {
+                        PlannedCompletionPreflight::Ready => {}
+                        PlannedCompletionPreflight::YieldGoalForFifo => {
+                            let snapshot = self
+                                .finalize_turn_bookkeeping(
+                                    req_id,
+                                    conv_turn_start,
+                                    &turn_span_totals,
+                                    model_fingerprint.clone(),
+                                )
+                                .await;
+                            return Ok(TurnOutcome::ControlEnded {
+                                snapshot: Box::new(snapshot),
+                            });
+                        }
+                        PlannedCompletionPreflight::GoalSpendingStopped => {
+                            let snapshot = self
+                                .finalize_turn_bookkeeping(
+                                    req_id,
+                                    conv_turn_start,
+                                    &turn_span_totals,
+                                    model_fingerprint.clone(),
+                                )
+                                .await;
+                            return Ok(TurnOutcome::GoalSpendingStopped {
+                                snapshot: Box::new(snapshot),
+                            });
+                        }
+                        PlannedCompletionPreflight::MaxTurnsReached { limit } => {
+                            return Ok(TurnOutcome::MaxTurnsReached { limit });
+                        }
+                        PlannedCompletionPreflight::ContinueTurn => continue,
+                    }
+                }
+                if !turn_refused {
+                    match self.check_planning_completion_gate(tool_turn_count).await? {
+                        PlanningCompletionGate::Clear => {}
+                        PlanningCompletionGate::Retry => {
+                            tool_turn_count = tool_turn_count.saturating_add(1);
+                            continue;
+                        }
+                        PlanningCompletionGate::MaxTurnsReached { limit } => {
+                            return Ok(TurnOutcome::MaxTurnsReached { limit });
+                        }
+                    }
                 }
                 let snapshot = self
                     .finalize_turn_bookkeeping(
@@ -1948,8 +2547,55 @@ impl SessionActor {
                         &mut structured_output_retries,
                     )
                     .await
+                    .map_err(|error| acp::Error::internal_error().data(error))?
                 {
                     StructuredOutputStep::Complete(validated) => {
+                        match self
+                            .planned_completion_preflight(origin, req_id, &mut tool_turn_count)
+                            .await?
+                        {
+                            PlannedCompletionPreflight::Ready => {}
+                            PlannedCompletionPreflight::YieldGoalForFifo => {
+                                let snapshot = self
+                                    .finalize_turn_bookkeeping(
+                                        req_id,
+                                        conv_turn_start,
+                                        &turn_span_totals,
+                                        model_fingerprint.clone(),
+                                    )
+                                    .await;
+                                return Ok(TurnOutcome::ControlEnded {
+                                    snapshot: Box::new(snapshot),
+                                });
+                            }
+                            PlannedCompletionPreflight::GoalSpendingStopped => {
+                                let snapshot = self
+                                    .finalize_turn_bookkeeping(
+                                        req_id,
+                                        conv_turn_start,
+                                        &turn_span_totals,
+                                        model_fingerprint.clone(),
+                                    )
+                                    .await;
+                                return Ok(TurnOutcome::GoalSpendingStopped {
+                                    snapshot: Box::new(snapshot),
+                                });
+                            }
+                            PlannedCompletionPreflight::MaxTurnsReached { limit } => {
+                                return Ok(TurnOutcome::MaxTurnsReached { limit });
+                            }
+                            PlannedCompletionPreflight::ContinueTurn => continue,
+                        }
+                        match self.check_planning_completion_gate(tool_turn_count).await? {
+                            PlanningCompletionGate::Clear => {}
+                            PlanningCompletionGate::Retry => {
+                                tool_turn_count = tool_turn_count.saturating_add(1);
+                                continue;
+                            }
+                            PlanningCompletionGate::MaxTurnsReached { limit } => {
+                                return Ok(TurnOutcome::MaxTurnsReached { limit });
+                            }
+                        }
                         turn_tools_called.push(STRUCTURED_OUTPUT_TOOL.to_string());
                         let snapshot = self
                             .finalize_turn_bookkeeping(
@@ -2062,6 +2708,9 @@ impl SessionActor {
                 }
                 _ => false,
             };
+            if let Some(cursor) = self.turn_continuation.borrow_mut().as_mut() {
+                cursor.accepted_response = None;
+            }
             let next_turn = tool_turn_count + 1;
             if let Some(limit) = self.max_turns
                 && next_turn > limit
@@ -2215,6 +2864,7 @@ mod continuation_step_tests {
                 actor
                     .events
                     .start_turn(crate::session::events::Event::TurnStarted {
+                        prompt_id: "fixture-prompt".into(),
                         session_id: actor.session_id_string(),
                         turn_number: 1,
                         input_ids: Vec::new(),

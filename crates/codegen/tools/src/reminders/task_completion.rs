@@ -238,6 +238,10 @@ pub fn format_subagent_completion(
         completion.tool_calls,
         completion.turns,
     );
+    if let Some(summary) = &completion.planning_summary {
+        output.push('\n');
+        output.push_str(&summary.render_bounded());
+    }
     output.push_str(match task_output_name {
         Some(_) => "\n",
         None => "\n\n",
@@ -434,6 +438,7 @@ mod tests {
             tool_calls: 2,
             turns: 1,
             output: std::sync::Arc::from(large_output.as_str()),
+            planning_summary: None,
         };
         let message = format_subagent_completion(&completion, None);
         assert!(message.contains(&large_output));

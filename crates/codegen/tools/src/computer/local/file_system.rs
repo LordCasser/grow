@@ -216,6 +216,33 @@ impl AsyncFileSystem for LocalFs {
         }
     }
 
+    #[tracing::instrument(name = "fs.read_file_bounded", skip_all)]
+    async fn read_file_bounded(
+        &self,
+        path: &Path,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, ComputerError> {
+        use tokio::io::AsyncReadExt;
+
+        let file = fs::File::open(path).await.map_err(|error| {
+            if is_permission_error(&error) {
+                sandbox::log_violation(&path.display().to_string(), "read");
+            }
+            ComputerError::from(error)
+        })?;
+        let mut bytes = Vec::new();
+        file.take(max_bytes.saturating_add(1) as u64)
+            .read_to_end(&mut bytes)
+            .await
+            .map_err(|error| {
+                if is_permission_error(&error) {
+                    sandbox::log_violation(&path.display().to_string(), "read");
+                }
+                ComputerError::from(error)
+            })?;
+        Ok(bytes)
+    }
+
     #[tracing::instrument(name = "fs.write_file", skip_all)]
     async fn write_file(&self, path: &Path, data: &[u8]) -> Result<(), ComputerError> {
         // implicitly creates the missing directories if any

@@ -68,12 +68,12 @@ const INTERNAL_ERROR_CODE: i64 = -32603;
 /// `grow/mcp/sdk_call` and writes the server→client response back. The pump exits when
 /// rmcp drops its half of the duplex (service shutdown), so it never leaks.
 ///
-/// `invoke_timeout` is the resolved per-server tool timeout; it bounds every reverse
-/// round trip so the zero-IPC path honors the same budget as loopback/HTTP.
+/// `invoke_timeout` supplies the current reverse-RPC backstop for each request.
+/// The client's outer per-call deadline remains authoritative.
 pub fn acp_bridge_transport(
     server_id: String,
     invoker: Arc<dyn AcpReverseInvoker>,
-    invoke_timeout: Duration,
+    invoke_timeout: Arc<dyn Fn() -> Duration + Send + Sync>,
 ) -> AcpBridgeTransport {
     let (agent_read, pump_write) = tokio::io::duplex(BRIDGE_BUF); // server -> client
     let (pump_read, agent_write) = tokio::io::duplex(BRIDGE_BUF); // client -> server
@@ -96,7 +96,7 @@ pub fn acp_bridge_transport(
 async fn pump(
     server_id: String,
     invoker: Arc<dyn AcpReverseInvoker>,
-    invoke_timeout: Duration,
+    invoke_timeout: Arc<dyn Fn() -> Duration + Send + Sync>,
     client_to_server: DuplexStream,
     server_to_client: DuplexStream,
 ) {
@@ -132,7 +132,7 @@ async fn pump(
 async fn read_requests(
     server_id: String,
     invoker: Arc<dyn AcpReverseInvoker>,
-    invoke_timeout: Duration,
+    invoke_timeout: Arc<dyn Fn() -> Duration + Send + Sync>,
     client_to_server: DuplexStream,
     responses_tx: tokio::sync::mpsc::Sender<String>,
 ) {
@@ -173,8 +173,9 @@ async fn read_requests(
         let invoker = invoker.clone();
         let server_id = server_id.clone();
         let responses_tx = responses_tx.clone();
+        let request_timeout = invoke_timeout();
         invokes.spawn(async move {
-            let result = invoker.invoke(&server_id, message, invoke_timeout).await;
+            let result = invoker.invoke(&server_id, message, request_timeout).await;
             let response = match result {
                 Ok(response) => with_id(response, id),
                 Err(err) => json_rpc_error(id, INTERNAL_ERROR_CODE, &err),
@@ -268,7 +269,7 @@ mod tests {
         tokio::spawn(pump(
             "srv".to_string(),
             Arc::new(EchoInvoker),
-            Duration::from_secs(60),
+            Arc::new(|| Duration::from_secs(60)),
             pump_read,
             pump_write,
         ));
@@ -330,7 +331,7 @@ mod tests {
         tokio::spawn(pump(
             "srv".to_string(),
             Arc::new(DelayInvoker),
-            Duration::from_secs(60),
+            Arc::new(|| Duration::from_secs(60)),
             pump_read,
             pump_write,
         ));
@@ -380,7 +381,7 @@ mod tests {
         tokio::spawn(pump(
             "srv".to_string(),
             Arc::new(DelayInvoker),
-            Duration::from_secs(60),
+            Arc::new(|| Duration::from_secs(60)),
             pump_read,
             pump_write,
         ));
@@ -460,7 +461,7 @@ mod tests {
         tokio::spawn(pump(
             "srv".to_string(),
             Arc::new(NonObjectInvoker),
-            Duration::from_secs(60),
+            Arc::new(|| Duration::from_secs(60)),
             pump_read,
             pump_write,
         ));
@@ -507,7 +508,7 @@ mod tests {
         tokio::spawn(pump(
             "srv".to_string(),
             Arc::new(RecordingInvoker(seen.clone())),
-            configured,
+            Arc::new(move || configured),
             pump_read,
             pump_write,
         ));
@@ -575,7 +576,7 @@ mod tests {
                 completed: completed.clone(),
                 dropped: dropped.clone(),
             }),
-            Duration::from_secs(600),
+            Arc::new(|| Duration::from_secs(600)),
             pump_read,
             pump_write,
         ));
@@ -692,7 +693,7 @@ mod tests {
         let transport = acp_bridge_transport(
             "srv".to_string(),
             Arc::new(MockSdkServer),
-            Duration::from_secs(60),
+            Arc::new(|| Duration::from_secs(60)),
         );
 
         // `()` is rmcp's minimal `ClientHandler`; `serve` runs the real initialize

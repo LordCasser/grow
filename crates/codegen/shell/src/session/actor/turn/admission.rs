@@ -14,6 +14,12 @@ enum AdmittedTurnSuccess {
     Model(TurnOutcome),
 }
 
+fn initial_stop_continuations_used(
+    continuation: Option<&chat_state::session_runtime::TurnContinuation>,
+) -> u32 {
+    continuation.map_or(0, |cursor| cursor.stop_continuations_used)
+}
+
 fn cancellation_terminal_source(
     category: Option<crate::session::events::CancellationCategory>,
 ) -> chat_state::TurnTerminalSource {
@@ -57,7 +63,157 @@ pub(super) fn user_echo_mode(origin: &super::super::PromptOrigin) -> UserEchoMod
         _ => UserEchoMode::Broadcast,
     }
 }
+
+#[cfg(test)]
+mod stop_continuation_tests {
+    use super::initial_stop_continuations_used;
+    use chat_state::session_runtime::{
+        AcceptedResponseContinuation, TurnContinuation, TurnResumePoint,
+    };
+
+    #[test]
+    fn restored_cursor_preserves_stop_continuation_budget() {
+        let continuation = TurnContinuation {
+            turn_id: chat_state::TurnId(3),
+            prompt_id: "prompt".into(),
+            prompt_index: 0,
+            origin: "user".into(),
+            next_step_index: 4,
+            tool_turns_used: 1,
+            tool_calls_used: 0,
+            stop_continuations_used: 5,
+            output_schema: None,
+            resume_point: TurnResumePoint::Model,
+            task_output_usage: None,
+            accepted_response: Some(AcceptedResponseContinuation {
+                identity: chat_state::ResponseAdmissionIdentity {
+                    request_id: "request".into(),
+                    attempt: 1,
+                },
+                stop_reason: Some(sampling_types::StopReason::Stop),
+                stop_message: None,
+            }),
+            structured_output_retries: 2,
+            sampling_attempts_used: 0,
+            sampling_max_attempts: None,
+            sampling_replay_safe: true,
+            sampling_deadline_ms: None,
+            operations: Vec::new(),
+        };
+
+        let mut count = initial_stop_continuations_used(Some(&continuation));
+        assert_eq!(count, 5);
+        let encoded = serde_json::to_string(&continuation).unwrap();
+        let restored: TurnContinuation = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(restored.structured_output_retries, 2);
+        count += 1;
+        assert_eq!(count, 6, "recovery must continue from the saved count");
+        assert_eq!(initial_stop_continuations_used(None), 0);
+    }
+}
 impl SessionActor {
+    /// Run one admitted model turn, including bounded stop-gate continuations.
+    /// Callers that resume an already-open step pass `step_already_started`;
+    /// normal prompt admission starts the first model step here.
+    pub(super) async fn run_admitted_model_turn(
+        self: &Arc<Self>,
+        prompt_id: &str,
+        origin: super::super::PromptOrigin,
+        json_schema: Option<serde_json::Value>,
+        step_already_started: bool,
+    ) -> Result<TurnOutcome, acp::Error> {
+        let mut stop_continuations_this_turn =
+            initial_stop_continuations_used(self.turn_continuation.borrow().as_ref());
+        let mut step_already_started = step_already_started;
+        loop {
+            if self.goal_runtime_available() {
+                let goal_loop_active = self.goal_tracker.lock().status()
+                    == Some(crate::session::goal_tracker::GoalStatus::Active);
+                self.set_goal_loop_active(goal_loop_active);
+            }
+            let round = self
+                .process_conversation_turn_with_recovery(
+                    prompt_id,
+                    origin.clone(),
+                    json_schema.clone(),
+                    std::mem::take(&mut step_already_started),
+                )
+                .await;
+            let restored_response = self.restored_response_for_stop_gate.borrow_mut().take();
+            let restored_stop_gate = restored_response.filter(|identity| {
+                self.turn_continuation
+                    .borrow()
+                    .as_ref()
+                    .and_then(|cursor| cursor.accepted_response.as_ref())
+                    .is_some_and(|accepted| accepted.identity == *identity)
+            });
+            if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
+                break round;
+            }
+            if matches!(
+                round,
+                Ok(TurnOutcome::Completed {
+                    refusal: Some(_),
+                    ..
+                })
+            ) {
+                break round;
+            }
+            if matches!(origin, super::super::PromptOrigin::GoalContinuation { .. }) {
+                break round;
+            }
+            let restored_decision = match restored_stop_gate {
+                Some(identity) => Some(
+                    self.restore_completed_stop_gate(identity)
+                        .await
+                        .map_err(|error| acp::Error::internal_error().data(error))?,
+                ),
+                None => None,
+            };
+            let stop_gate = match restored_decision.flatten() {
+                Some(decision) => decision,
+                None => {
+                    self.run_stop_gate(prompt_id, stop_continuations_this_turn)
+                        .await
+                }
+            };
+            match stop_gate {
+                StopGateDecision::AllowStop => break round,
+                StopGateDecision::KeepWorking { feedback } => {
+                    if self
+                        .enforce_goal_spending_limit_for_prompt(Some(prompt_id))
+                        .await
+                    {
+                        let snapshot = match round {
+                            Ok(TurnOutcome::Completed { snapshot, .. }) => snapshot,
+                            _ => Box::new(None),
+                        };
+                        break Ok(TurnOutcome::GoalSpendingStopped { snapshot });
+                    }
+                    if !self
+                        .start_step_after_control_boundary(
+                            prompt_id,
+                            Some(ConversationItem::stop_hook_feedback(feedback)),
+                        )
+                        .await
+                    {
+                        break Ok(TurnOutcome::Cancelled {
+                            category: None,
+                            context: Some(serde_json::json!({
+                                "reason": "stop-hook continuation lost foreground admission",
+                            })),
+                        });
+                    }
+                    stop_continuations_this_turn += 1;
+                    if let Some(cursor) = self.turn_continuation.borrow_mut().as_mut() {
+                        cursor.stop_continuations_used = stop_continuations_this_turn;
+                    }
+                    step_already_started = true;
+                }
+            }
+        }
+    }
+
     /// Run the image-normalization pipeline (re-encode caps, min-side and
     /// integrity checks) and surface its outcomes: compression / re-encode
     /// fallback / dropped notices are appended to `text_out` (TEXT only —
@@ -165,12 +321,19 @@ impl SessionActor {
         json_schema: Option<serde_json::Value>,
         persist_ack: Option<oneshot::Sender<()>>,
     ) -> PromptTurnResult {
+        let restored_turn = self
+            .turn_continuation
+            .borrow()
+            .clone()
+            .filter(|cursor| cursor.prompt_id == prompt_id);
         let turn_input_ids = input_ids;
+
         if let Some(gate) = self.tool_context.storage_admission.as_ref()
             && let Err(reason) = gate.check(self.session_info.id.0.as_ref())
         {
             return Err(acp::Error::internal_error().data(reason));
         }
+        let msg_count = self.chat_state_handle.get_conversation_len().await;
         let handle_prompt_start = std::time::Instant::now();
         let prompt_length: usize = prompt_blocks
             .iter()
@@ -236,7 +399,9 @@ impl SessionActor {
         // `admitted_behavior` is captured atomically by the idle admission path.
         // Prompt text and queued metadata never drive Behavior transitions.
         *self.turn_behavior.lock() = admitted_behavior;
-        self.signals_handle().increment_turn();
+        if restored_turn.is_none() {
+            self.signals_handle().increment_turn();
+        }
         let _turn_active_guard =
             TurnActiveGuard::activate(self.tool_context.is_turn_active.as_ref());
         let _session_turn_active_guard = TurnActiveGuard::activate(Some(&self.session_turn_active));
@@ -269,52 +434,54 @@ impl SessionActor {
         // The turn intent is the admission boundary for every route below,
         // including slash commands, Goal/Workflow launches, and direct Bash.
         // No route may perform an external effect before this fact is durable.
-        self.events.begin_turn();
         let model_id = self.current_catalog_model_id();
-        let turn_number = self.chat_state_handle.get_prompt_index().await as u64;
-        self.current_turn_number.set(turn_number);
-        let permission_mode = self.permissions.mode();
-        let msg_count = self.chat_state_handle.get_conversation_len().await;
-        let redirect_kind = if matches!(origin, super::super::PromptOrigin::User) {
-            self.events.take_prior_redirect_kind()
-        } else {
-            None
+        let turn_number = match &restored_turn {
+            Some(cursor) => cursor.prompt_index as u64,
+            None => self.chat_state_handle.get_prompt_index().await as u64,
         };
-        let input_kind = if Self::extract_bash_command(&prompt_blocks).is_some() {
-            chat_state::TurnInputKind::Bash
-        } else {
-            chat_state::TurnInputKind::Prompt
-        };
-        let mut turn_identity = origin.turn_identity(turn_kind);
-        if matches!(origin, super::super::PromptOrigin::User)
-            && admitted_behavior == tool_types::BehaviorId::Goal
-            && let Some(goal) = self.goal_tracker.lock().snapshot()
-            && goal.status == crate::session::goal_tracker::GoalStatus::Active
-        {
-            turn_identity.goal_id = Some(goal.goal_id.clone());
-            turn_identity.goal_definition_revision = Some(goal.definition_revision);
-        }
-        // Every child shares the budget window, including ordinary Tasks.
-        // Only actual Goal delegation confers Goal turn ownership on a child.
-        if turn_identity.goal_id.is_none()
-            && (!self.startup_hints.is_subagent || self.startup_hints.delegated_goal)
-        {
-            turn_identity.goal_id = self.goal_usage_window.active_goal_id();
-            if let Some(goal_id) = turn_identity.goal_id.as_deref()
-                && let Some(goal) = self
-                    .goal_tracker
-                    .lock()
-                    .snapshot()
-                    .filter(|goal| goal.goal_id == goal_id)
+        if restored_turn.is_none() {
+            self.events.begin_turn();
+            let permission_mode = self.permissions.mode();
+            let redirect_kind = if matches!(origin, super::super::PromptOrigin::User) {
+                self.events.take_prior_redirect_kind()
+            } else {
+                None
+            };
+            let input_kind = if Self::extract_bash_command(&prompt_blocks).is_some() {
+                chat_state::TurnInputKind::Bash
+            } else {
+                chat_state::TurnInputKind::Prompt
+            };
+            let mut turn_identity = origin.turn_identity(turn_kind);
+            if matches!(origin, super::super::PromptOrigin::User)
+                && admitted_behavior == tool_types::BehaviorId::Goal
+                && let Some(goal) = self.goal_tracker.lock().snapshot()
+                && goal.status == crate::session::goal_tracker::GoalStatus::Active
             {
+                turn_identity.goal_id = Some(goal.goal_id.clone());
                 turn_identity.goal_definition_revision = Some(goal.definition_revision);
             }
-        }
-        if turn_identity.goal_id.is_some() && turn_identity.goal_definition_revision.is_none() {
-            // A Goal-owned child has no local Goal tracker. Its immutable
-            // inherited view, not a guessed revision, completes the owner pair.
-            let bridge = self.agent.borrow().tool_bridge().clone();
-            if let Some(context) = bridge
+            // Every child shares the budget window, including ordinary Tasks.
+            // Only actual Goal delegation confers Goal turn ownership on a child.
+            if turn_identity.goal_id.is_none()
+                && (!self.startup_hints.is_subagent || self.startup_hints.delegated_goal)
+            {
+                turn_identity.goal_id = self.goal_usage_window.active_goal_id();
+                if let Some(goal_id) = turn_identity.goal_id.as_deref()
+                    && let Some(goal) = self
+                        .goal_tracker
+                        .lock()
+                        .snapshot()
+                        .filter(|goal| goal.goal_id == goal_id)
+                {
+                    turn_identity.goal_definition_revision = Some(goal.definition_revision);
+                }
+            }
+            if turn_identity.goal_id.is_some() && turn_identity.goal_definition_revision.is_none() {
+                // A Goal-owned child has no local Goal tracker. Its immutable
+                // inherited view, not a guessed revision, completes the owner pair.
+                let bridge = self.agent.borrow().tool_bridge().clone();
+                if let Some(context) = bridge
                 .read_resource::<tools::implementations::grow_build::update_goal::GoalContextSnapshotResource>()
                 .await
                 .and_then(|resource| resource.0)
@@ -324,67 +491,95 @@ impl SessionActor {
             {
                 turn_identity.goal_definition_revision = Some(context.view.definition_revision);
             }
-        }
-        if let Err(error) = self
-            .events
-            .start_turn(crate::session::events::Event::TurnStarted {
-                session_id: self.session_id_string(),
-                turn_number,
-                input_ids: turn_input_ids.clone(),
-                identity: turn_identity,
-                model_id: model_id.clone(),
-                permission_mode,
-                conversation_message_count: msg_count,
-                prompt_index: Some(turn_number as usize),
-                prompt_text: Some(original_prompt_text.trim().to_owned()),
-                input_kind,
-                session_relationship: crate::session::events::SessionRelationship::Primary,
-                schema_version: crate::session::events::EVENT_SCHEMA_VERSION.into(),
-                redirect_kind,
-            })
-            .await
-        {
-            super::super::tasks_cancel::signal_durable_turn_start(false);
-            if let Some(extension) = &self.idle_prompt_extension {
-                extension.on_turn_failed();
             }
-            return Err(crate::session::commands::fatal_turn_boundary_error(
-                "start",
-                error.to_string(),
-            ));
-        }
-        super::super::tasks_cancel::signal_durable_turn_start(true);
-        if origin.is_synthetic() && !matches!(origin, super::super::PromptOrigin::HostCommand) {
-            let Some(turn) = self.events.current_turn() else {
-                return Err(crate::session::commands::fatal_turn_boundary_error(
-                    "start",
-                    "synthetic prompt hook has no durable Turn cause",
-                ));
-            };
-            let cause = if let [notification_id] = notification_ids.as_slice() {
-                chat_state::HookCause::Notification {
-                    notification_id: notification_id.clone(),
-                }
-            } else {
-                chat_state::HookCause::Turn { turn }
-            };
-            let envelope = self.make_hook_envelope(
-                ::hooks::event::HookEventName::UserPromptSubmit,
-                Some(prompt_id.to_string()),
-                ::hooks::event::HookPayload::UserPromptSubmit {
-                    prompt: Some(original_prompt_text.clone()),
-                },
-            );
             if let Err(error) = self
-                .dispatch_prompt_hook(cause, envelope, ::hooks::event::GateKind::Observe)
+                .events
+                .start_turn(crate::session::events::Event::TurnStarted {
+                    session_id: self.session_id_string(),
+                    prompt_id: prompt_id.to_owned(),
+                    turn_number,
+                    input_ids: turn_input_ids.clone(),
+                    identity: turn_identity,
+                    model_id: model_id.clone(),
+                    permission_mode,
+                    conversation_message_count: msg_count,
+                    prompt_index: Some(turn_number as usize),
+                    prompt_text: Some(original_prompt_text.trim().to_owned()),
+                    input_kind,
+                    session_relationship: crate::session::events::SessionRelationship::Primary,
+                    schema_version: crate::session::events::EVENT_SCHEMA_VERSION.into(),
+                    redirect_kind,
+                })
                 .await
             {
+                super::super::tasks_cancel::signal_durable_turn_start(false);
+                if let Some(extension) = &self.idle_prompt_extension {
+                    extension.on_turn_failed();
+                }
                 return Err(crate::session::commands::fatal_turn_boundary_error(
                     "start",
-                    format!("synthetic prompt hook lifecycle was not durable: {error}"),
+                    error.to_string(),
                 ));
             }
+            super::super::tasks_cancel::signal_durable_turn_start(true);
+            *self.turn_continuation.borrow_mut() =
+                Some(chat_state::session_runtime::TurnContinuation {
+                    turn_id: self
+                        .events
+                        .current_turn()
+                        .expect("durable Turn was started"),
+                    prompt_id: prompt_id.to_owned(),
+                    prompt_index: turn_number as usize,
+                    origin: serde_json::to_string(&origin)
+                        .map_err(|error| acp::Error::internal_error().data(error.to_string()))?,
+                    next_step_index: self.events.next_step_index(),
+                    tool_turns_used: 1,
+                    tool_calls_used: 0,
+                    stop_continuations_used: 0,
+                    output_schema: json_schema.clone(),
+                    resume_point: chat_state::session_runtime::TurnResumePoint::Input,
+                    task_output_usage: None,
+                    accepted_response: None,
+                    structured_output_retries: 0,
+                    sampling_attempts_used: 0,
+                    sampling_max_attempts: None,
+                    sampling_replay_safe: true,
+                    sampling_deadline_ms: None,
+                    operations: Vec::new(),
+                });
+            if origin.is_synthetic() && !matches!(origin, super::super::PromptOrigin::HostCommand) {
+                let Some(turn) = self.events.current_turn() else {
+                    return Err(crate::session::commands::fatal_turn_boundary_error(
+                        "start",
+                        "synthetic prompt hook has no durable Turn cause",
+                    ));
+                };
+                let cause = if let [notification_id] = notification_ids.as_slice() {
+                    chat_state::HookCause::Notification {
+                        notification_id: notification_id.clone(),
+                    }
+                } else {
+                    chat_state::HookCause::Turn { turn }
+                };
+                let envelope = self.make_hook_envelope(
+                    ::hooks::event::HookEventName::UserPromptSubmit,
+                    Some(prompt_id.to_string()),
+                    ::hooks::event::HookPayload::UserPromptSubmit {
+                        prompt: Some(original_prompt_text.clone()),
+                    },
+                );
+                if let Err(error) = self
+                    .dispatch_prompt_hook(cause, envelope, ::hooks::event::GateKind::Observe)
+                    .await
+                {
+                    return Err(crate::session::commands::fatal_turn_boundary_error(
+                        "start",
+                        format!("synthetic prompt hook lifecycle was not durable: {error}"),
+                    ));
+                }
+            }
         }
+        self.current_turn_number.set(turn_number);
         // SUPPRESS_TURN is scoped to the durable Timeline turn, not to one
         // invocation of the model/recovery wrapper. Stop-hook continuations
         // and completion recovery may sample several times under this same
@@ -408,6 +603,23 @@ impl SessionActor {
         let mut timeline_error_override = None;
         let mut turn_input_settled = false;
         let mut execution: Result<AdmittedTurnSuccess, acp::Error> = async {
+            if let Some(cursor) = &restored_turn {
+                if cursor.resume_point == chat_state::session_runtime::TurnResumePoint::Host {
+                    self.send_host_turn_slash_command_output("The original host operation was interrupted during session suspension. Its recorded command/control facts were preserved; it was not replayed.").await;
+                    return ok_end_turn(0, None).map(AdmittedTurnSuccess::Host);
+                }
+                if cursor.resume_point == chat_state::session_runtime::TurnResumePoint::Model {
+                turn_input_settled = true;
+                model_path_started = true;
+                *self.tool_context.prompt_index.lock().await = current_prompt_index;
+                turn_scope_guard = Some(TurnSubagentScopeGuard::new(self.current_prompt_id.clone(), prompt_id.to_owned()));
+                self.open_subagent_spawn_admission();
+                turn_model_id = Some(self.current_catalog_model_id());
+                turn_timer = Some(std::time::Instant::now());
+                self.await_restored_children().await?;
+                return self.run_admitted_model_turn(prompt_id, origin.clone(), json_schema.clone(), self.events.has_active_step()).await.map(AdmittedTurnSuccess::Model);
+                }
+            }
             let implicit_goal_set = should_capture_implicit_goal_objective(
                 &origin,
                 admitted_behavior == tool_types::BehaviorId::Goal,
@@ -415,6 +627,7 @@ impl SessionActor {
                 &original_prompt_text,
             );
             if implicit_goal_set {
+                if let Some(cursor) = self.turn_continuation.borrow_mut().as_mut() { cursor.resume_point = chat_state::session_runtime::TurnResumePoint::Host; }
                 self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
                 if let Err(message) = self
                     .initialize_goal_runtime(original_prompt_text.trim(), None)
@@ -425,25 +638,28 @@ impl SessionActor {
                 return ok_end_turn(0, None).map(AdmittedTurnSuccess::Host);
             }
             if let Some(bash_command) = Self::extract_bash_command(&prompt_blocks) {
+                if let Some(cursor) = self.turn_continuation.borrow_mut().as_mut() { cursor.resume_point = chat_state::session_runtime::TurnResumePoint::Host; }
                 return self
                     .handle_direct_bash_command(prompt_id, bash_command, &prompt_blocks)
                     .await
                     .map(AdmittedTurnSuccess::Host);
             }
+            let user_skill_group = self.prepare_user_skill_loads(&turn_input_ids, current_prompt_index).await?;
             let slash_skills = self.slash_skills_for_resolve().await;
 
             let availability = self.command_availability().await;
-            let mut pending_skill_information: Option<String> = None;
             let (_, named_workflows, _) = self.named_workflow_snapshot();
-            let prompt_blocks = match slash_commands::resolve(
-                prompt_blocks,
-                &slash_skills,
-                availability,
-
-                &named_workflows,
-            ) {
+            let resolved = if user_skill_group.items.is_empty() {
+                slash_commands::resolve(prompt_blocks, &slash_skills, availability, &named_workflows)
+            } else {
+                // The admitted reference plan owns the choice even when the
+                // live catalog has changed since input admission.
+                Err(SlashCommandOutcome::InvokeSkill { blocks: prompt_blocks, skills: Vec::new() })
+            };
+            let prompt_blocks = match resolved {
                 Ok(blocks) => blocks,
                 Err(SlashCommandOutcome::Builtin(action)) => {
+                    if let Some(cursor) = self.turn_continuation.borrow_mut().as_mut() { cursor.resume_point = chat_state::session_runtime::TurnResumePoint::Host; }
                     let slash_used = ::diagnostics::events::SlashCommandUsed {
                         command: action.command_name().to_string(),
                         args_provided: action.args_provided(),
@@ -485,86 +701,12 @@ impl SessionActor {
                         }
                     }
                 }
-                Err(SlashCommandOutcome::InvokeSkill {
-                    blocks: original_blocks,
-                    skills: parsed_skills,
-                }) => {
-                    if let Some(first) = parsed_skills.first() {
-                        *self.active_skill.lock() = Some(first.name.clone());
-                        let span = tracing::Span::current();
-                        span.record("command_name", first.name.as_str());
-                        span.record(
-                            "command_source",
-                            if first.plugin_name.is_some() {
-                                "plugin"
-                            } else {
-                                "skill"
-                            },
-                        );
-                    }
-                    for sk in &parsed_skills {
-                        ::diagnostics::session_ctx::log_event(
-                            ::diagnostics::events::SlashCommandUsed {
-                                command: sk.name.clone(),
-                                args_provided: !sk.args.is_empty(),
-                            },
-                        );
-                        ::diagnostics::session_ctx::log_event(
-                            ::diagnostics::events::SkillDispatched {
-                                skill_name: sk.name.clone(),
-                                plugin_source: sk.plugin_name.clone(),
-                            },
-                        );
-                        let skill_source = if sk.plugin_name.is_some() {
-                            "plugin"
-                        } else {
-                            crate::session::diagnostics::skill_source_label(
-                                &sk.skill_path,
-                                self.session_info.cwd.as_str(),
-                            )
-                        };
-                        tracing::info_span!(
-                            "skill.activated",
-                            skill_name = %sk.name,
-                            invocation_trigger = "slash_command",
-                            skill_source = skill_source,
-                        )
-                        .in_scope(|| {});
-                    }
-                    let expansion = slash_commands::build_skill_information_for_refs(
-                        &parsed_skills,
-                        &slash_skills,
-                        &self.session_id_string(),
-                    )
-                    .await;
-                    for (sk, success) in parsed_skills.iter().zip(expansion.loaded) {
-                        if let Some(ref pname) = sk.plugin_name {
-                            ::diagnostics::session_ctx::log_event(
-                                ::diagnostics::events::PluginUsed {
-                                    plugin_id: pname.clone(),
-                                    plugin_name: pname.clone(),
-                                    skill_name: Some(sk.name.clone()),
-                                    hook_event: None,
-                                    success,
-                                },
-                            );
-                            tracing::info_span!(
-                                "plugin.used",
-                                plugin_name = %pname,
-                                skill_name = %sk.name,
-                                success,
-                            )
-                            .in_scope(|| {});
-                        }
-                    }
-                    pending_skill_information = expansion.information;
-                    original_blocks
-                }
+                Err(SlashCommandOutcome::InvokeSkill { blocks, .. }) => blocks,
             };
             model_path_started = true;
             self.publish_goal_mutation_authority(prompt_id, current_prompt_index as u64)
                 .await;
-            self.send_before_turn_event(tool_protocol::turn_hook::BeforeTurnPayload {
+            if restored_turn.is_none() { self.send_before_turn_event(tool_protocol::turn_hook::BeforeTurnPayload {
                 turn_number: current_prompt_index as u64,
                 model_id: model_id.clone(),
                 conversation_message_count: msg_count,
@@ -573,6 +715,7 @@ impl SessionActor {
                 schema_version: crate::session::events::EVENT_SCHEMA_VERSION.to_string(),
             })
             .await;
+            }
             ::diagnostics::session_ctx::log_session_event(crate::agent::session_metrics::Turn {
                 session_id: self.session_info.id.0.to_string(),
                 turn_number: current_prompt_index as u64,
@@ -600,7 +743,7 @@ impl SessionActor {
                 .begin_prompt(current_prompt_index)
                 .await;
             let echo_mode = user_echo_mode(&origin);
-            for block in prompt_blocks.iter() {
+            for block in prompt_blocks.iter().filter(|_| restored_turn.is_none()) {
                 let update = acp::SessionUpdate::UserMessageChunk(
                     acp::ContentChunk::new(block.clone()).meta(user_chunk_meta.clone()),
                 );
@@ -629,7 +772,7 @@ impl SessionActor {
                 self.tool_context.cwd.to_path_buf(),
                 &self.session_info,
                 verbatim,
-                pending_skill_information.take().unwrap_or_default(),
+                String::new(),
             )
             .await
             {
@@ -780,6 +923,12 @@ impl SessionActor {
                 for image in &extra_images {
                     user_chat.add_image(format!("data:{};base64,{}", image.mime_type, image.data));
                 }
+                let display_echo = Some(super::super::user_display_echo(
+                    prompt_id,
+                    current_prompt_index,
+                    &prompt_blocks,
+                ));
+                let mut skill_commit_confirmed = user_skill_group.items.is_empty();
                 let input_commit = if matches!(origin, super::super::PromptOrigin::User)
                     && !turn_input_ids.is_empty()
                 {
@@ -787,9 +936,26 @@ impl SessionActor {
                         "human input commit has no durable Turn reservation".to_string()
                     });
                     match turn {
-                        Ok(turn) => self
-                            .consume_fifo_inputs(turn_input_ids.clone(), turn, user_chat)
-                            .await,
+                        Ok(turn) if !user_skill_group.items.is_empty() => {
+                            let revision = self.chat_state_handle.get_surface_revision().await
+                                .ok_or_else(|| "Skill Surface revision unavailable".to_string());
+                            match revision {
+                                Ok(revision) => {
+                                    let window = self.chat_state_handle.get_sampling_config().await
+                                        .map(|config| config.context_window.get()).unwrap_or(0);
+                                    self.chat_state_handle.consume_input_group_conditionally(
+                                        turn_input_ids.clone(), turn, user_chat, display_echo.clone(), user_skill_group.items.clone(),
+                                        revision, super::super::context_recall::context_recall_max_context_tokens(window),
+                                    ).await.map_err(|error| error.to_string()).and_then(|outcome| {
+                                        skill_commit_confirmed = true;
+                                        (outcome == chat_state::ConditionalToolResultOutcome::Accepted).then_some(())
+                                            .ok_or_else(|| format!("Skill group was not published: {outcome:?}"))
+                                    })
+                                }
+                                Err(error) => Err(error),
+                            }
+                        }
+                        Ok(turn) => self.consume_fifo_inputs(turn_input_ids.clone(), turn, user_chat, display_echo).await,
                         Err(error) => Err(error),
                     }
                 } else {
@@ -817,7 +983,20 @@ impl SessionActor {
                     }
                 };
                 drop(image_asset_guard);
+                if input_commit.is_ok() {
+                    self.finish_user_skill_loads(&user_skill_group, true).await?;
+                } else if skill_commit_confirmed {
+                    self.finish_user_skill_loads(&user_skill_group, false).await?;
+                }
                 if let Err(error) = input_commit {
+                    if !skill_commit_confirmed {
+                        // A writer may still own this exact publication. Do
+                        // not issue Handled, Failed, or a second consumption.
+                        turn_input_settled = true;
+                        return Err(crate::session::commands::fatal_turn_boundary_error(
+                            "skill_publication_unconfirmed", error,
+                        ));
+                    }
                     if !user_images.is_empty() {
                         self.reconcile_user_image_assets(&self.background_service_shutdown)
                             .await;
@@ -884,77 +1063,20 @@ impl SessionActor {
             self.open_subagent_spawn_admission();
             turn_model_id = Some(self.current_catalog_model_id());
             turn_timer = Some(std::time::Instant::now());
-            let result = {
-                let mut stop_continuations_this_turn: u32 = 0;
-                let mut step_already_started = false;
-                loop {
-                    if self.goal_runtime_available() {
-                        let goal_loop_active = self.goal_tracker.lock().status()
-                            == Some(crate::session::goal_tracker::GoalStatus::Active);
-                        self.set_goal_loop_active(goal_loop_active);
-                    }
-                    let round = self
-                        .process_conversation_turn_with_recovery(
-                            prompt_id,
-                            origin.clone(),
-                            json_schema.clone(),
-                            std::mem::take(&mut step_already_started),
-                        )
-                        .await;
-                    if !matches!(round, Ok(TurnOutcome::Completed { .. })) {
-                        break round;
-                    }
-                    if matches!(
-                        round,
-                        Ok(TurnOutcome::Completed {
-                            refusal: Some(_),
-                            ..
-                        })
-                    ) {
-                        break round;
-                    }
-                    if matches!(origin, super::super::PromptOrigin::GoalContinuation { .. }) {
-                        break round;
-                    }
-                    match self
-                        .run_stop_gate(prompt_id, stop_continuations_this_turn)
-                        .await
-                    {
-                        StopGateDecision::AllowStop => break round,
-                        StopGateDecision::KeepWorking { feedback } => {
-                            if self
-                                .enforce_goal_spending_limit_for_prompt(Some(prompt_id))
-                                .await
-                            {
-                                let snapshot = match round {
-                                    Ok(TurnOutcome::Completed { snapshot, .. }) => snapshot,
-                                    _ => Box::new(None),
-                                };
-                                break Ok(TurnOutcome::GoalSpendingStopped { snapshot });
-                            }
-                            if !self
-                                .start_step_after_control_boundary(
-                                    prompt_id,
-                                    Some(ConversationItem::stop_hook_feedback(feedback)),
-                                )
-                                .await
-                            {
-                                break Ok(TurnOutcome::Cancelled {
-                                    category: None,
-                                    context: Some(serde_json::json!({
-                                        "reason": "stop-hook continuation lost foreground admission",
-                                    })),
-                                });
-                            }
-                            stop_continuations_this_turn += 1;
-                            step_already_started = true;
-                        }
-                    }
-                }
-            };
-            result.map(AdmittedTurnSuccess::Model)
+            if let Some(cursor) = self.turn_continuation.borrow_mut().as_mut() {
+                cursor.resume_point = chat_state::session_runtime::TurnResumePoint::Model;
+            }
+            self.run_admitted_model_turn(
+                prompt_id,
+                origin.clone(),
+                json_schema.clone(),
+                false,
+            )
+            .await
+            .map(AdmittedTurnSuccess::Model)
         }
         .await;
+        self.park_during_runtime_handoff().await;
         if !turn_input_settled && !turn_input_ids.is_empty() {
             let handled = match self.events.current_turn() {
                 Some(turn) => {
@@ -1034,7 +1156,9 @@ impl SessionActor {
                             "limit": limit,
                         })),
                     ),
-                    PromptCompletionKind::Rewound | PromptCompletionKind::RemovedFromQueue => (
+                    PromptCompletionKind::Rewound
+                    | PromptCompletionKind::RemovedFromQueue
+                    | PromptCompletionKind::Suspended { .. } => (
                         crate::session::events::TurnOutcomeLabel::Error,
                         chat_state::TurnTerminal {
                             source: chat_state::TurnTerminalSource::Host,
@@ -1202,6 +1326,8 @@ impl SessionActor {
                 usage,
             ));
         }
+        self.turn_continuation.borrow_mut().take();
+        self.sampling_continuation.borrow_mut().take();
         let result = match execution {
             Ok(AdmittedTurnSuccess::Host(ok)) => {
                 if let Some(extension) = &self.idle_prompt_extension {

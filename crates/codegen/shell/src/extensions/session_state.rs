@@ -265,8 +265,83 @@ fn validate_timeline_column(
     for (index, event) in events.iter().enumerate() {
         validate_jsonl_entry_size(event, &format!("Timeline event {index}"))?;
     }
-    chat_state::Timeline::from_events(events)
-        .map_err(|error| acp::Error::invalid_params().data(error.to_string()))
+    let timeline = chat_state::Timeline::from_events(events)
+        .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+    let runtime = timeline.runtime_lifecycle();
+    if runtime.phase != chat_state::session_runtime::RuntimePhase::Running
+        && (runtime.checkpoint.is_some() || runtime.operation_id.is_some())
+    {
+        return Err(acp::Error::invalid_params().data(
+            "session/import cannot import an unconsumed runtime checkpoint; restore or resolve the source session first",
+        ));
+    }
+    validate_import_plan_authority(&timeline)?;
+    Ok(timeline)
+}
+
+fn validate_import_plan_authority(timeline: &chat_state::Timeline) -> Result<(), acp::Error> {
+    let control =
+        crate::session::control::SessionControlSnapshot::latest_from_timeline(timeline.events())
+            .map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+    let retained_plan_or_execution = control.as_ref().is_some_and(|control| {
+        let behavior = &control.behavior;
+        behavior.retained_plan.as_ref().is_some_and(|candidate| {
+            matches!(
+                candidate.status,
+                crate::session::behavior::RetainedPlanStatus::Deferred
+                    | crate::session::behavior::RetainedPlanStatus::Reviewing
+            )
+        }) || behavior.approval_pending
+            || behavior.last_plan_handoff.is_some()
+            || matches!(
+                behavior.state,
+                crate::session::behavior::BehaviorState::Plan(
+                    crate::session::behavior::PlanPhase::AwaitingApproval
+                        | crate::session::behavior::PlanPhase::Amending
+                        | crate::session::behavior::PlanPhase::Executing
+                )
+            )
+    });
+    let unconsumed_plan_handoff = timeline.pending_notifications().iter().any(|notification| {
+        matches!(
+            &notification.source,
+            chat_state::NotificationSource::PlanHandoff { .. }
+        )
+    });
+    let unresolved_plan_approval = {
+        let mut open = std::collections::HashSet::new();
+        for event in timeline.events() {
+            match &event.kind {
+                chat_state::TimelineEventKind::Interaction(
+                    chat_state::InteractionEvent::Opened {
+                        tool_call_id,
+                        attempt_id,
+                        kind: chat_state::InteractionKind::PlanApproval,
+                    },
+                ) => {
+                    open.insert((tool_call_id.as_str(), attempt_id.as_str()));
+                }
+                chat_state::TimelineEventKind::Interaction(
+                    chat_state::InteractionEvent::Resolved {
+                        tool_call_id,
+                        attempt_id,
+                        kind: chat_state::InteractionKind::PlanApproval,
+                        ..
+                    },
+                ) => {
+                    open.remove(&(tool_call_id.as_str(), attempt_id.as_str()));
+                }
+                _ => {}
+            }
+        }
+        !open.is_empty()
+    };
+    if retained_plan_or_execution || unresolved_plan_approval || unconsumed_plan_handoff {
+        return Err(acp::Error::invalid_params().data(
+            "session/import cannot transfer retained Plan approval or execution authority; create a new Plan submission and approve it on the target owner",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_sidebands_column(
@@ -665,6 +740,437 @@ mod tests {
     use super::*;
     use crate::session::storage::StorageAdapter as _;
     use serde_json::json;
+
+    fn runtime_test_timeline(resumed: bool, open_turn: bool) -> chat_state::Timeline {
+        let mut timeline = chat_state::Timeline::default();
+        let turn_id = open_turn.then_some(chat_state::TurnId(98));
+        if let Some(turn_id) = turn_id {
+            timeline
+                .record(chat_state::TimelineEventKind::Turn(
+                    chat_state::TurnEvent::Started {
+                        prompt_id: "import-prompt".into(),
+                        id: turn_id,
+                        input_ids: Vec::new(),
+                        identity: chat_state::TurnIdentity {
+                            origin: "user".into(),
+                            turn_kind: "internal".into(),
+                            goal_id: None,
+                            goal_definition_revision: None,
+                            stage_id: None,
+                        },
+                        model_id: "test-model".into(),
+                        input_message_count: 0,
+                        prompt_index: 0,
+                        prompt_text: "open imported turn".into(),
+                        input_kind: chat_state::TurnInputKind::Prompt,
+                        redirect_kind: None,
+                    },
+                ))
+                .unwrap();
+        }
+        timeline
+            .record(chat_state::TimelineEventKind::Runtime(
+                chat_state::session_runtime::SessionRuntimeEvent::SuspendRequested {
+                    operation_id: "import-suspend-op".into(),
+                    root_session_id: "session-import-test".into(),
+                },
+            ))
+            .unwrap();
+        let settled = timeline
+            .record(chat_state::TimelineEventKind::Runtime(
+                chat_state::session_runtime::SessionRuntimeEvent::CommandsSettled {
+                    operation_id: "import-suspend-op".into(),
+                    commands: Vec::new(),
+                },
+            ))
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Runtime(
+                chat_state::session_runtime::SessionRuntimeEvent::Checkpoint {
+                    operation_id: "import-suspend-op".into(),
+                    checkpoint: chat_state::session_runtime::RuntimeCheckpoint {
+                        frontier: settled.seq,
+                        runtime_source_hash: "c".repeat(64),
+                        turn: turn_id.map(|turn_id| {
+                            chat_state::session_runtime::TurnContinuation {
+                                turn_id,
+                                prompt_id: "import-prompt".into(),
+                                prompt_index: 0,
+                                origin: "user".into(),
+                                next_step_index: 0,
+                                tool_turns_used: 0,
+                                tool_calls_used: 0,
+                                stop_continuations_used: 0,
+                                output_schema: None,
+                                resume_point: chat_state::session_runtime::TurnResumePoint::Model,
+                                task_output_usage: None,
+                                accepted_response: None,
+                                structured_output_retries: 0,
+                                sampling_attempts_used: 0,
+                                sampling_max_attempts: None,
+                                sampling_replay_safe: true,
+                                sampling_deadline_ms: None,
+                                operations: Vec::new(),
+                            }
+                        }),
+                        step: None,
+                    },
+                },
+            ))
+            .unwrap();
+        if resumed {
+            timeline
+                .record(chat_state::TimelineEventKind::Runtime(
+                    chat_state::session_runtime::SessionRuntimeEvent::RestorePrepared {
+                        operation_id: "import-suspend-op".into(),
+                        instance_id: "import-instance".into(),
+                    },
+                ))
+                .unwrap();
+            timeline
+                .record(chat_state::TimelineEventKind::Runtime(
+                    chat_state::session_runtime::SessionRuntimeEvent::Resumed {
+                        operation_id: "import-suspend-op".into(),
+                        instance_id: "import-instance".into(),
+                    },
+                ))
+                .unwrap();
+            timeline
+                .record(chat_state::TimelineEventKind::Runtime(
+                    chat_state::session_runtime::SessionRuntimeEvent::ExecutionReleased {
+                        operation_id: "import-suspend-op".into(),
+                        instance_id: "import-instance".into(),
+                    },
+                ))
+                .unwrap();
+        }
+        timeline
+    }
+
+    #[test]
+    fn import_rejects_unconsumed_checkpoint_but_accepts_resumed_audit() {
+        let suspended = runtime_test_timeline(false, false);
+        let suspended_state = std::collections::HashMap::from([(
+            TIMELINE_COLUMN.to_string(),
+            serde_json::to_value(suspended.events()).unwrap(),
+        )]);
+        assert!(validate_timeline_column(&suspended_state).is_err());
+
+        let resumed = runtime_test_timeline(true, true);
+        let resumed_state = std::collections::HashMap::from([(
+            TIMELINE_COLUMN.to_string(),
+            serde_json::to_value(resumed.events()).unwrap(),
+        )]);
+        let mut imported = validate_timeline_column(&resumed_state)
+            .expect("consumed checkpoint remains valid read-only audit history");
+        assert_eq!(
+            imported.runtime_lifecycle().phase,
+            chat_state::session_runtime::RuntimePhase::Running
+        );
+        assert!(imported.runtime_lifecycle().checkpoint.is_some());
+        assert_eq!(imported.active_turn(), Some(chat_state::TurnId(98)));
+        assert!(!imported.recover_interrupted().unwrap().is_empty());
+        assert!(imported.active_turn().is_none());
+    }
+
+    fn plan_import_timeline(approved: bool, pending_handoff: bool) -> chat_state::Timeline {
+        use crate::session::behavior::{
+            BehaviorCoordinator, RetainedPlanAction, RetainedPlanDecisionOutcome,
+        };
+
+        let mut timeline = chat_state::Timeline::default();
+        if approved {
+            let mut behavior = BehaviorCoordinator::new();
+            behavior.select_behavior(tool_types::BehaviorId::Plan);
+            behavior.record_plan_artifact("# source plan");
+            assert!(behavior.submit_initial_plan());
+            let submitted = behavior.snapshot();
+            let submission_id = behavior.plan_submission_id().unwrap();
+            assert!(matches!(
+                behavior.decide_submitted_plan_if(
+                    &submitted,
+                    submission_id,
+                    "source-approved-decision",
+                    RetainedPlanAction::Approve,
+                    None,
+                ),
+                RetainedPlanDecisionOutcome::Applied(
+                    crate::session::behavior::RetainedPlanStatus::Approved
+                )
+            ));
+            timeline
+                .record(
+                    crate::session::control::SessionControlSnapshot::new(
+                        1,
+                        "grow-build",
+                        behavior.snapshot(),
+                        None,
+                    )
+                    .timeline_kind()
+                    .unwrap(),
+                )
+                .unwrap();
+        } else {
+            timeline
+                .record(
+                    crate::session::control::SessionControlSnapshot::new(
+                        1,
+                        "grow-build",
+                        crate::session::behavior::BehaviorSnapshot::normal(),
+                        None,
+                    )
+                    .timeline_kind()
+                    .unwrap(),
+                )
+                .unwrap();
+        }
+
+        if pending_handoff {
+            let body = b"approved plan handoff";
+            let owner_session_id = "import-owner-session";
+            let source = chat_state::NotificationSource::PlanHandoff {
+                artifact_hash: blake3::hash(b"# source plan").to_hex().to_string(),
+                artifact_revision: 1,
+                handoff: chat_state::PlanHandoffKind::Execute,
+            };
+            let source_version = chat_state::NotificationSourceVersion::Ordinal { value: 1 };
+            timeline
+                .record(chat_state::TimelineEventKind::Notification(
+                    chat_state::NotificationEvent::Received {
+                        id: chat_state::notification_id(owner_session_id, &source, &source_version)
+                            .unwrap(),
+                        owner_session_id: owner_session_id.into(),
+                        source,
+                        source_version,
+                        payload_ref: chat_state::NotificationPayloadRef {
+                            blake3: blake3::hash(body).to_hex().to_string(),
+                            bytes: body.len() as u64,
+                        },
+                    },
+                ))
+                .unwrap();
+        }
+        timeline
+    }
+
+    fn validate_import_timeline(timeline: &chat_state::Timeline) -> Result<(), acp::Error> {
+        let state = std::collections::HashMap::from([(
+            TIMELINE_COLUMN.to_string(),
+            serde_json::to_value(timeline.events()).unwrap(),
+        )]);
+        validate_timeline_column(&state).map(|_| ())
+    }
+
+    #[test]
+    fn import_rejects_reviewable_or_approved_plan_authority_but_accepts_closed_history() {
+        let mut deferred = crate::session::behavior::BehaviorCoordinator::new();
+        deferred.select_behavior(tool_types::BehaviorId::Plan);
+        deferred.record_plan_artifact("# deferred source");
+        assert!(deferred.submit_initial_plan());
+        let submitted = deferred.snapshot();
+        let submission_id = deferred.plan_submission_id().unwrap();
+        assert!(matches!(
+            deferred.decide_submitted_plan_if(
+                &submitted,
+                submission_id,
+                "source-defer-decision",
+                crate::session::behavior::RetainedPlanAction::Defer,
+                None,
+            ),
+            crate::session::behavior::RetainedPlanDecisionOutcome::Applied(
+                crate::session::behavior::RetainedPlanStatus::Deferred
+            )
+        ));
+        assert!(deferred.finish_plan());
+        let mut deferred_timeline = chat_state::Timeline::default();
+        deferred_timeline
+            .record(
+                crate::session::control::SessionControlSnapshot::new(
+                    1,
+                    "grow-build",
+                    deferred.snapshot(),
+                    None,
+                )
+                .timeline_kind()
+                .unwrap(),
+            )
+            .unwrap();
+        let error = validate_import_timeline(&deferred_timeline).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("new Plan submission and approve")
+        );
+
+        let approved = plan_import_timeline(true, false);
+        let error = validate_import_timeline(&approved).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("new Plan submission and approve")
+        );
+
+        let mut awaiting = crate::session::behavior::BehaviorCoordinator::new();
+        awaiting.select_behavior(tool_types::BehaviorId::Plan);
+        awaiting.record_plan_artifact("# pending source");
+        assert!(awaiting.submit_initial_plan());
+        let mut awaiting_timeline = chat_state::Timeline::default();
+        awaiting_timeline
+            .record(
+                crate::session::control::SessionControlSnapshot::new(
+                    1,
+                    "grow-build",
+                    awaiting.snapshot(),
+                    None,
+                )
+                .timeline_kind()
+                .unwrap(),
+            )
+            .unwrap();
+        let error = validate_import_timeline(&awaiting_timeline).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("new Plan submission and approve")
+        );
+
+        let pending_handoff_without_control = plan_import_timeline(false, true);
+        let error = validate_import_timeline(&pending_handoff_without_control).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("new Plan submission and approve")
+        );
+
+        let mut unresolved_approval = plan_import_timeline(false, false);
+        unresolved_approval
+            .record(chat_state::TimelineEventKind::Interaction(
+                chat_state::InteractionEvent::Opened {
+                    tool_call_id: "plan-call-open".into(),
+                    attempt_id: "plan-attempt-open".into(),
+                    kind: chat_state::InteractionKind::PlanApproval,
+                },
+            ))
+            .unwrap();
+        let error = validate_import_timeline(&unresolved_approval).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("new Plan submission and approve")
+        );
+
+        let mut resolved_approval = plan_import_timeline(false, false);
+        resolved_approval
+            .record(chat_state::TimelineEventKind::Interaction(
+                chat_state::InteractionEvent::Opened {
+                    tool_call_id: "plan-call-resolved".into(),
+                    attempt_id: "plan-attempt-resolved".into(),
+                    kind: chat_state::InteractionKind::PlanApproval,
+                },
+            ))
+            .unwrap();
+        resolved_approval
+            .record(chat_state::TimelineEventKind::Interaction(
+                chat_state::InteractionEvent::Resolved {
+                    tool_call_id: "plan-call-resolved".into(),
+                    attempt_id: "plan-attempt-resolved".into(),
+                    kind: chat_state::InteractionKind::PlanApproval,
+                    resolution: chat_state::InteractionResolution::Answered,
+                },
+            ))
+            .unwrap();
+        validate_import_timeline(&resolved_approval)
+            .expect("resolved approval history does not carry a live waiter");
+
+        let mut closed_plan_history = plan_import_timeline(true, false);
+        let mut closed_behavior = crate::session::behavior::BehaviorSnapshot::normal();
+        closed_behavior.last_plan_submission_id = 1;
+        closed_plan_history
+            .record(
+                crate::session::control::SessionControlSnapshot::new(
+                    2,
+                    "grow-build",
+                    closed_behavior,
+                    None,
+                )
+                .timeline_kind()
+                .unwrap(),
+            )
+            .unwrap();
+        assert!(validate_import_timeline(&closed_plan_history).is_ok());
+
+        for (action, expected_status) in [
+            (
+                crate::session::behavior::RetainedPlanAction::Approve,
+                crate::session::behavior::RetainedPlanStatus::Approved,
+            ),
+            (
+                crate::session::behavior::RetainedPlanAction::Abandon,
+                crate::session::behavior::RetainedPlanStatus::Abandoned,
+            ),
+        ] {
+            let mut closed = crate::session::behavior::BehaviorCoordinator::new();
+            closed.select_behavior(tool_types::BehaviorId::Plan);
+            closed.record_plan_artifact("# closed candidate history");
+            assert!(closed.submit_initial_plan());
+            let submission_id = closed.plan_submission_id().unwrap();
+            if action == crate::session::behavior::RetainedPlanAction::Abandon {
+                let submitted = closed.snapshot();
+                assert!(matches!(
+                    closed.decide_submitted_plan_if(
+                        &submitted,
+                        submission_id,
+                        "closed-candidate-defer",
+                        crate::session::behavior::RetainedPlanAction::Defer,
+                        None,
+                    ),
+                    crate::session::behavior::RetainedPlanDecisionOutcome::Applied(
+                        crate::session::behavior::RetainedPlanStatus::Deferred
+                    )
+                ));
+                assert!(closed.finish_plan());
+            }
+            let expected = closed.snapshot();
+            assert!(matches!(
+                closed.decide_submitted_plan_if(
+                    &expected,
+                    submission_id,
+                    "closed-candidate-decision",
+                    action,
+                    None,
+                ),
+                crate::session::behavior::RetainedPlanDecisionOutcome::Applied(status)
+                    if status == expected_status
+            ));
+            if action == crate::session::behavior::RetainedPlanAction::Approve {
+                assert!(closed.finish_plan());
+            }
+            let closed_snapshot = closed.snapshot();
+            assert_eq!(
+                closed_snapshot
+                    .retained_plan
+                    .as_ref()
+                    .map(|candidate| candidate.status),
+                Some(expected_status),
+                "the regression must preserve actual closed candidate metadata"
+            );
+            let mut closed_candidate_history = chat_state::Timeline::default();
+            closed_candidate_history
+                .record(
+                    crate::session::control::SessionControlSnapshot::new(
+                        1,
+                        "grow-build",
+                        closed_snapshot,
+                        None,
+                    )
+                    .timeline_kind()
+                    .unwrap(),
+                )
+                .unwrap();
+            validate_import_timeline(&closed_candidate_history)
+                .expect("closed candidate metadata has no review or execution authority");
+        }
+    }
 
     fn linked_ledgers() -> (
         String,

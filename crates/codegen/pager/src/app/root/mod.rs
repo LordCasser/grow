@@ -413,6 +413,21 @@ pub struct ScreenModeRelaunch {
     /// Shell intent tokens after replay reconstructs each Session.
     pub control_handoffs: Vec<crate::app::session::SessionControlHandoff>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExitSuspensionPhase {
+    Pending,
+    Unconfirmed { error: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExitSuspension {
+    pub exit_id: String,
+    pub phase: ExitSuspensionPhase,
+    pub restart_for_update: bool,
+    pub deadline: Instant,
+}
+
 /// Root view component — owns all application state.
 pub struct AppView {
     /// Stable monotonic origin shared by every rendered animation surface.
@@ -460,6 +475,9 @@ pub struct AppView {
     pub cursor: CursorState,
     /// Pending double-press confirmation (quit, etc.).
     pub pending_action: Option<PendingAction>,
+    /// The sole in-flight exit suspension. Repeated quit input coalesces onto
+    /// this identity until its result is confirmed or the user retries.
+    pub exit_suspension: Option<ExitSuspension>,
     /// Pending exit-session confirmation for slash command path.
     /// Set when `/home` is first typed; confirmed on second invocation within TTL.
     pub exit_session_pending: Option<Instant>,
@@ -837,6 +855,52 @@ fn paint_welcome_toast(
         }
     }
 }
+
+fn paint_exit_suspension_notice(
+    buf: &mut ratatui::buffer::Buffer,
+    area: ratatui::layout::Rect,
+    suspension: &ExitSuspension,
+) {
+    use ratatui::widgets::{Paragraph, Widget, Wrap};
+    let (tone, text) = match &suspension.phase {
+        ExitSuspensionPhase::Pending => (
+            crate::scrollback::blocks::NoticeTone::Info,
+            "Suspending session tree…".to_owned(),
+        ),
+        ExitSuspensionPhase::Unconfirmed { error } => (
+            crate::scrollback::blocks::NoticeTone::Error,
+            format!(
+                "Exit not confirmed: {error}\nr retry with a new 5-second request · f force quit (may be unrecoverable)"
+            ),
+        ),
+    };
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let theme = crate::theme::Theme::current();
+    let height = if matches!(&suspension.phase, ExitSuspensionPhase::Pending) {
+        1
+    } else {
+        3
+    }
+    .min(area.height);
+    let rect = ratatui::layout::Rect {
+        x: area.x,
+        y: area.bottom().saturating_sub(height),
+        width: area.width,
+        height,
+    };
+    ratatui::widgets::Clear.render(rect, buf);
+    Paragraph::new(text)
+        .style(
+            ratatui::style::Style::default()
+                .fg(tone.color(&theme))
+                .bg(theme.bg_base),
+        )
+        .wrap(Wrap { trim: true })
+        .render(rect, buf);
+}
+
 impl AppView {
     pub(crate) fn sync_local_drafts(&mut self, now: Instant) {
         let active = match self.active_view {
@@ -943,6 +1007,7 @@ impl AppView {
             scratch: ScratchBuffer::new(),
             cursor: CursorState::new(),
             pending_action: None,
+            exit_suspension: None,
             exit_session_pending: None,
             scroll_state: MouseScrollState::default(),
             scroll_config: ScrollConfig::from_settings(),
@@ -1512,14 +1577,11 @@ impl AppView {
 impl AppView {
     /// Handle a terminal event. Routes through the input layer stack:
     ///
-    /// 1. Pending action check (double-press confirmation)
-    /// 2. Active view (Welcome or Agent — agent does pane + agent-level)
-    /// 3. Global actions (quit with confirmation)
-    ///
-    /// Quit always goes through double-press confirmation, even when
-    /// escalated from agent-level (e.g., Ctrl-C while cancelling) — except
-    /// on the welcome screen, which has no session or input state to lose
-    /// and quits on the first press.
+    /// Execution-screen Ctrl+C first enters the shared session-suspension
+    /// flow; local selection and child-view controls may consume it. Other
+    /// input follows pending confirmation, active-view, and global routing.
+    /// Ctrl+Q retains its confirmation gesture. Welcome has no session to
+    /// suspend and quits immediately.
     pub fn handle_input(&mut self, ev: &Event) -> InputOutcome {
         self.handle_input_at_with_paste_provenance(ev, Instant::now(), PasteProvenance::Terminal)
     }
@@ -1535,6 +1597,74 @@ impl AppView {
         );
         let normalized = self.keyboard_normalizer.rescue(ev);
         let ev: &Event = &normalized;
+        let key_event = match ev {
+            Event::Key(k) if k.kind != KeyEventKind::Release => Some(k),
+            _ => None,
+        };
+        if key_event.is_some_and(|key| key!('c', CONTROL).matches(key)) {
+            if self.exit_suspension.is_some() {
+                // Repeated Ctrl+C coalesces. It never retries or force quits.
+                return InputOutcome::Changed;
+            }
+            match self.active_view {
+                ActiveView::Welcome => return InputOutcome::Action(Action::Quit),
+                ActiveView::Agent(id) => {
+                    if let Some(agent) = self.agents.get_mut(&id) {
+                        if let Some(child_id) = agent.active_subagent.as_deref() {
+                            let child_has_selection = agent
+                                .subagent_views
+                                .get(child_id)
+                                .is_some_and(|child| child.persistent_text_selection.is_some());
+                            if child_has_selection {
+                                // Keep a genuine selection local to the viewer.
+                                return InputOutcome::Changed;
+                            }
+                            let child_is_busy = agent
+                                .subagent_views
+                                .get(child_id)
+                                .is_some_and(|child| !child.session.state.is_idle());
+                            if agent.session.state.is_idle() && !child_is_busy {
+                                // An idle historical child transcript is a local view.
+                                agent.active_subagent = None;
+                                return InputOutcome::Changed;
+                            }
+                        }
+                        if agent.persistent_text_selection.is_some() {
+                            // Keep a genuine transcript selection local to the viewer.
+                            return InputOutcome::Changed;
+                        }
+                    }
+                    return InputOutcome::Action(Action::Quit);
+                }
+                ActiveView::AgentDashboard => {
+                    if let Some(agent_id) = self.dashboard.as_ref().and_then(|d| d.attached_agent)
+                        && let Some(agent) = self.agents.get_mut(&agent_id)
+                    {
+                        if let Some(child_id) = agent.active_subagent.as_deref() {
+                            let child_has_selection = agent
+                                .subagent_views
+                                .get(child_id)
+                                .is_some_and(|child| child.persistent_text_selection.is_some());
+                            let child_is_busy = agent
+                                .subagent_views
+                                .get(child_id)
+                                .is_some_and(|child| !child.session.state.is_idle());
+                            if child_has_selection {
+                                return InputOutcome::Changed;
+                            }
+                            if agent.session.state.is_idle() && !child_is_busy {
+                                agent.active_subagent = None;
+                                if let Some(dashboard) = self.dashboard.as_mut() {
+                                    dashboard.close_popup();
+                                }
+                                return InputOutcome::Changed;
+                            }
+                        }
+                    }
+                    return InputOutcome::Action(Action::Quit);
+                }
+            }
+        }
         if let ActiveView::Agent(id) = self.active_view
             && let Some(agent) = self.agents.get_mut(&id)
             && agent.active_subagent.is_none()
@@ -1543,10 +1673,17 @@ impl AppView {
             self.pending_action = None;
             return outcome;
         }
-        let key_event = match ev {
-            Event::Key(k) if k.kind != KeyEventKind::Release => Some(k),
-            _ => None,
-        };
+        if let Some(key) = key_event
+            && let Some(exit) = self.exit_suspension.as_ref()
+            && matches!(&exit.phase, ExitSuspensionPhase::Unconfirmed { .. })
+        {
+            if key!('r').matches(key) {
+                return InputOutcome::Action(Action::RetryExitSuspension);
+            }
+            if key!('f').matches(key) {
+                return InputOutcome::Action(Action::ForceQuit);
+            }
+        }
         if let Event::Resize(_, rows) = ev {
             for agent in self.agents.values_mut() {
                 agent.note_terminal_resize();
@@ -2056,6 +2193,13 @@ impl AppView {
                 ActiveView::Agent(_) | ActiveView::AgentDashboard
             )
         {
+            if key!('c', CONTROL).matches(key) {
+                return if self.exit_suspension.is_some() {
+                    InputOutcome::Changed
+                } else {
+                    InputOutcome::Action(Action::Quit)
+                };
+            }
             self.pending_action = Some(PendingAction::new(
                 Action::Quit,
                 KeyShortcut::from(*key),
@@ -2815,6 +2959,7 @@ impl AppView {
         let scroll_debug_panel = self.scroll_debug_panel();
         let dev_fps_rows = self.dev_fps_rows();
         let fps_overlay = self.fps_hud.overlay(dev_fps_rows);
+        let exit_suspension = self.exit_suspension.clone();
         let Self {
             active_view,
             agents,
@@ -3210,6 +3355,9 @@ impl AppView {
                                     frame_stamp,
                                 );
                             }
+                            if let Some(suspension) = exit_suspension.as_ref() {
+                                paint_exit_suspension_notice(f.buffer_mut(), full_area, suspension);
+                            }
                             if let Some(fps) = &fps_overlay {
                                 fps.render(full_area, f.buffer_mut());
                             }
@@ -3227,6 +3375,11 @@ impl AppView {
                         }
                     }
                 }
+            }
+            if let Some(suspension) = exit_suspension.as_ref()
+                && !matches!(*active_view, ActiveView::Welcome)
+            {
+                paint_exit_suspension_notice(f.buffer_mut(), full_area, suspension);
             }
             if let Some(fps) = &fps_overlay {
                 fps.render(full_area, f.buffer_mut());
@@ -4095,6 +4248,7 @@ pub(crate) mod tests {
             scratch: crate::scrollback::render::ScratchBuffer::new(),
             cursor: CursorState::new(),
             pending_action: None,
+            exit_suspension: None,
             exit_session_pending: None,
             scroll_state: MouseScrollState::default(),
             scroll_config: ScrollConfig::default(),
@@ -6788,90 +6942,119 @@ pub(crate) mod tests {
         assert!(app.pending_action.is_none());
     }
     #[test]
-    fn ctrl_c_running_cancels_turn() {
+    fn ctrl_c_running_turn_starts_exit_suspension() {
         let mut app = test_app_with_agent();
         let id = super::super::session::AgentId(0);
         app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
         let outcome = app.handle_input(&ctrl_c());
-        assert!(matches!(outcome, InputOutcome::Action(Action::CancelTurn)));
+        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
     }
     #[test]
-    fn ctrl_c_cancelling_escalates_to_quit_pending() {
+    fn ctrl_c_cancelling_turn_starts_exit_suspension() {
         let mut app = test_app_with_agent();
         let id = super::super::session::AgentId(0);
         app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnCancelling;
-        let outcome = app.handle_input(&ctrl_c());
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert!(app.pending_action.is_some());
-        assert_eq!(app.pending_action.as_ref().unwrap().label, Some("quit"));
-    }
-    fn assert_pending_quit(app: &AppView) {
-        let pending = app
-            .pending_action
-            .as_ref()
-            .expect("expected pending action");
-        assert_eq!(pending.label, Some("quit"));
-        assert!(matches!(pending.action, Action::Quit));
-    }
-    #[test]
-    fn ctrl_c_idle_empty_prompt_sets_pending_quit() {
-        crate::appearance::cache::set_simple_mode(true);
-        let mut app = test_app_with_agent();
-        let outcome = app.handle_input(&ctrl_c());
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert_pending_quit(&app);
-    }
-    #[test]
-    fn ctrl_c_idle_empty_prompt_focused_sets_pending_quit() {
-        crate::appearance::cache::set_simple_mode(true);
-        let mut app = test_app_with_agent();
-        let id = super::super::session::AgentId(0);
-        app.agents.get_mut(&id).unwrap().active_pane = crate::views::agent::ActivePane::Prompt;
-        let outcome = app.handle_input(&ctrl_c());
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert_pending_quit(&app);
-    }
-    #[test]
-    fn ctrl_c_double_press_idle_quits() {
-        crate::appearance::cache::set_simple_mode(true);
-        let mut app = test_app_with_agent();
-        let _ = app.handle_input(&ctrl_c());
-        assert!(app.pending_action.is_some());
         let outcome = app.handle_input(&ctrl_c());
         assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
         assert!(app.pending_action.is_none());
     }
     #[test]
-    fn ctrl_c_consumed_by_cancel_does_not_set_pending() {
+    fn ctrl_c_idle_empty_prompt_starts_exit() {
+        crate::appearance::cache::set_simple_mode(true);
+        let mut app = test_app_with_agent();
+        let outcome = app.handle_input(&ctrl_c());
+        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
+        assert!(app.pending_action.is_none());
+    }
+    #[test]
+    fn ctrl_c_idle_empty_prompt_focused_starts_exit() {
+        crate::appearance::cache::set_simple_mode(true);
+        let mut app = test_app_with_agent();
+        let id = super::super::session::AgentId(0);
+        app.agents.get_mut(&id).unwrap().active_pane = crate::views::agent::ActivePane::Prompt;
+        let outcome = app.handle_input(&ctrl_c());
+        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
+        assert!(app.pending_action.is_none());
+    }
+    #[test]
+    fn ctrl_c_first_press_starts_exit_and_repeats_coalesce() {
+        crate::appearance::cache::set_simple_mode(true);
+        let mut app = test_app_with_agent();
+        let outcome = app.handle_input(&ctrl_c());
+        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
+        let effects = crate::app::root::dispatch::dispatch(Action::Quit, &mut app);
+        let first_id = match effects.as_slice() {
+            [crate::app::actions::Effect::SuspendForExit { exit_id }] => exit_id.clone(),
+            _ => panic!("expected one suspend request, got {effects:?}"),
+        };
+        let outcome = app.handle_input(&ctrl_c());
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert_eq!(app.exit_suspension.as_ref().unwrap().exit_id, first_id);
+    }
+    #[test]
+    fn global_ctrl_c_on_a_running_turn_enters_exit_suspension() {
         let mut app = test_app_with_agent();
         let id = super::super::session::AgentId(0);
         app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
         let outcome = app.handle_input(&ctrl_c());
-        assert!(matches!(outcome, InputOutcome::Action(Action::CancelTurn)));
+        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
         assert!(app.pending_action.is_none());
     }
     #[test]
-    fn ctrl_c_consumed_by_text_clear_does_not_set_pending() {
+    fn ctrl_c_with_composer_draft_starts_suspension_and_preserves_draft() {
         let mut app = test_app_with_agent();
         let id = super::super::session::AgentId(0);
         let agent = app.agents.get_mut(&id).unwrap();
         agent.active_pane = crate::views::agent::ActivePane::Prompt;
         agent.prompt.textarea.set_text("some text");
         let outcome = app.handle_input(&ctrl_c());
-        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
+        assert_eq!(app.agents[&id].prompt.textarea.text(), "some text");
         assert!(app.pending_action.is_none());
     }
     #[test]
-    fn ctrl_c_then_other_key_resets_pending() {
+    fn ctrl_c_with_persistent_text_selection_stays_local() {
+        let mut app = test_app_with_agent();
+        let agent = app
+            .agents
+            .get_mut(&super::super::session::AgentId(0))
+            .unwrap();
+        agent.persistent_text_selection =
+            Some(crate::scrollback::text_selection::PersistentTextSelection {
+                entry_idx: 0,
+                range_id: 0,
+                anchor: crate::scrollback::text_selection::SelectionEndpoint {
+                    block_line_idx: 0,
+                    col_within_range: 0,
+                },
+                head: crate::scrollback::text_selection::SelectionEndpoint {
+                    block_line_idx: 0,
+                    col_within_range: 1,
+                },
+                origin: crate::scrollback::text_selection::SelectionOrigin::DoubleClick,
+                kind: crate::scrollback::text_selection::SelectionKind::Linear,
+            });
+
+        assert!(matches!(app.handle_input(&ctrl_c()), InputOutcome::Changed));
+        assert!(app.exit_suspension.is_none());
+        assert!(
+            app.agents[&super::super::session::AgentId(0)]
+                .persistent_text_selection
+                .is_some()
+        );
+    }
+    #[test]
+    fn ctrl_c_starts_exit_without_arming_confirmation() {
         crate::appearance::cache::set_simple_mode(true);
         let mut app = test_app_with_agent();
-        let _ = app.handle_input(&ctrl_c());
-        assert!(app.pending_action.is_some());
-        let _ = app.handle_input(&key_event(KeyCode::Char('j'), KeyModifiers::NONE));
+        assert!(matches!(
+            app.handle_input(&ctrl_c()),
+            InputOutcome::Action(Action::Quit)
+        ));
         assert!(app.pending_action.is_none());
     }
     #[test]
-    fn ctrl_c_idle_prompt_with_text_clears_text() {
+    fn ctrl_c_idle_prompt_with_draft_preserves_draft_and_starts_suspension() {
         let mut app = test_app_with_agent();
         let id = super::super::session::AgentId(0);
         let agent = app.agents.get_mut(&id).unwrap();
@@ -6879,18 +7062,11 @@ pub(crate) mod tests {
         agent.prompt.textarea.set_text("draft prompt");
         assert!(agent.session.state.is_idle());
         let outcome = app.handle_input(&ctrl_c());
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "Ctrl+C with text in idle prompt must Change (clear text), got: {outcome:?}",
-        );
-        assert!(
-            app.agents[&id].prompt.textarea.text().is_empty(),
-            "Ctrl+C must clear prompt text when agent is idle; got: {:?}",
-            app.agents[&id].prompt.textarea.text(),
-        );
+        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
+        assert_eq!(app.agents[&id].prompt.textarea.text(), "draft prompt");
     }
     #[test]
-    fn ctrl_c_running_prompt_with_text_clears_text_and_preserves_turn() {
+    fn ctrl_c_running_prompt_with_draft_preserves_draft_and_suspends() {
         let mut app = test_app_with_agent();
         let id = super::super::session::AgentId(0);
         let agent = app.agents.get_mut(&id).unwrap();
@@ -6898,24 +7074,52 @@ pub(crate) mod tests {
         agent.active_pane = crate::views::agent::ActivePane::Prompt;
         agent.prompt.textarea.set_text("draft prompt");
         let outcome = app.handle_input(&ctrl_c());
-        assert!(
-            matches!(outcome, InputOutcome::Changed),
-            "Ctrl+C with text in a running prompt must clear the text, got: {outcome:?}",
-        );
-        assert!(
-            app.agents[&id].prompt.textarea.text().is_empty(),
-            "Ctrl+C must clear prompt text first; got: {:?}",
-            app.agents[&id].prompt.textarea.text(),
-        );
+        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
+        assert_eq!(app.agents[&id].prompt.textarea.text(), "draft prompt");
         assert!(
             app.agents[&id].session.state.is_turn_running(),
-            "First Ctrl+C must NOT cancel the turn while a draft was present",
+            "Ctrl+C requests suspension and must preserve the running turn",
         );
+    }
+    #[test]
+    fn ctrl_c_fullscreen_live_subagent_starts_tree_suspension() {
+        let mut app = test_app_with_agent();
+        let root_id = super::super::session::AgentId(0);
+        let child_id = "live-child";
+        let mut child = AgentView::new(
+            make_test_session(&app, root_id, child_id),
+            ScrollbackState::new(),
+        );
+        child.session.state = AgentState::TurnRunning;
+        let root = app.agents.get_mut(&root_id).unwrap();
+        root.insert_subagent_view(child_id.into(), Box::new(child));
+        root.active_subagent = Some(child_id.into());
+
         let outcome = app.handle_input(&ctrl_c());
-        assert!(
-            matches!(outcome, InputOutcome::Action(Action::CancelTurn)),
-            "Second Ctrl+C on empty running prompt must CancelTurn, got: {outcome:?}",
+
+        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
+        assert_eq!(
+            app.agents[&root_id].active_subagent.as_deref(),
+            Some(child_id)
         );
+    }
+    #[test]
+    fn ctrl_c_fullscreen_idle_subagent_closes_local_history_view() {
+        let mut app = test_app_with_agent();
+        let root_id = super::super::session::AgentId(0);
+        let child_id = "historical-child";
+        let child = AgentView::new(
+            make_test_session(&app, root_id, child_id),
+            ScrollbackState::new(),
+        );
+        let root = app.agents.get_mut(&root_id).unwrap();
+        root.insert_subagent_view(child_id.into(), Box::new(child));
+        root.active_subagent = Some(child_id.into());
+
+        let outcome = app.handle_input(&ctrl_c());
+
+        assert!(matches!(outcome, InputOutcome::Changed));
+        assert!(app.agents[&root_id].active_subagent.is_none());
     }
     #[test]
     fn esc_from_prompt_pane_running_turn_cancels_in_non_vim_mode() {
@@ -6954,7 +7158,7 @@ pub(crate) mod tests {
         assert_eq!(
             app.agents[&id].prompt.textarea.text(),
             "draft while streaming",
-            "Esc cancel must preserve the draft (not clear it like Ctrl+C)"
+            "Esc cancel must preserve the draft"
         );
         assert_eq!(
             app.agents[&id].cancel_trigger_hint,
@@ -8594,25 +8798,17 @@ pub(crate) mod tests {
             "wheel must not reach the background scroll path while the cheatsheet is open",
         );
     }
-    /// Ctrl+C on the session-less dashboard arms the quit confirmation
-    /// (like the agent view) and a second press confirms. Regression for
-    /// "Ctrl+C/D/Q do nothing on the dashboard prompt".
+    /// Ctrl+C on a dashboard with an owned root starts the shared exit flow.
     #[test]
-    fn ctrl_c_on_dashboard_arms_then_confirms_quit() {
-        let mut app = test_app();
+    fn ctrl_c_on_dashboard_starts_exit_and_repeats_coalesce() {
+        let mut app = test_app_with_agent();
         app.active_view = ActiveView::AgentDashboard;
         app.dashboard = Some(crate::views::dashboard::DashboardState::new());
         let outcome = app.handle_input(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert!(
-            app.pending_action.is_some(),
-            "Ctrl+C on the dashboard must arm a pending quit confirmation"
-        );
+        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
+        let _ = crate::app::root::dispatch::dispatch(Action::Quit, &mut app);
         let outcome = app.handle_input(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(
-            matches!(outcome, InputOutcome::Action(Action::Quit)),
-            "second Ctrl+C must quit, got {outcome:?}"
-        );
+        assert!(matches!(outcome, InputOutcome::Changed));
     }
     /// Ctrl+Q on the dashboard arms quit via the global `When::Always`
     /// lookup (it's not bound to `When::DashboardFocused`).
@@ -8949,6 +9145,9 @@ pub(crate) mod tests {
                     session_id: "s".into(),
                     tool_call_id: "c".into(),
                     plan_content: "p".into(),
+                    submission_id: 1,
+                    artifact_revision: 2,
+                    artifact_hash: "a".repeat(64),
                 };
                 let stashed = crate::views::prompt_widget::StashedPrompt {
                     text: String::new(),
@@ -9242,6 +9441,9 @@ pub(crate) mod tests {
             session_id: "s".into(),
             tool_call_id: "c".into(),
             plan_content: "p".into(),
+            submission_id: 1,
+            artifact_revision: 2,
+            artifact_hash: "a".repeat(64),
         };
         let stashed = crate::views::prompt_widget::StashedPrompt {
             text: String::new(),
@@ -9478,6 +9680,9 @@ pub(crate) mod tests {
             session_id: "s".into(),
             tool_call_id: "c".into(),
             plan_content: "# Plan\n- step one\n- step two".into(),
+            submission_id: 1,
+            artifact_revision: 2,
+            artifact_hash: "a".repeat(64),
         };
         let view = crate::views::plan_approval_view::PlanApprovalViewState::new(
             request,
@@ -9756,7 +9961,7 @@ pub(crate) mod tests {
     /// the `handle_input` filter must clear `attached_agent`
     /// immediately rather than waiting for the next draw frame.
     #[test]
-    fn minimal_double_ctrl_c_arms_then_quits() {
+    fn minimal_ctrl_c_starts_exit_without_confirmation() {
         let prev = crate::app::minimal_mode_active();
         crate::app::set_minimal_mode_active_for_test(true);
         let mut app = test_app_with_agent();
@@ -9764,35 +9969,27 @@ pub(crate) mod tests {
             app.agents.get_mut(&id).unwrap().active_pane = crate::views::agent::ActivePane::Prompt;
         }
         let o1 = app.handle_input(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        let armed = app.pending_action.is_some();
-        let o2 = app.handle_input(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
+        let pending = app.pending_action.is_some();
         crate::app::set_minimal_mode_active_for_test(prev);
-        assert!(armed, "first Ctrl+C should arm quit (o1={o1:?})");
         assert!(
-            matches!(o2, InputOutcome::Action(crate::app::actions::Action::Quit)),
-            "second Ctrl+C should quit (o2={o2:?})"
+            matches!(o1, InputOutcome::Action(crate::app::actions::Action::Quit)),
+            "first Ctrl+C should start exit (o1={o1:?})"
         );
+        assert!(!pending, "Ctrl+C should not arm a confirmation");
     }
     #[test]
-    fn agent_idle_ctrl_c_arms_quit_pending() {
-        // Regression guard: the welcome screen now quits on the first press,
-        // but the agent view must keep the two-press quit confirmation.
+    fn agent_idle_ctrl_c_starts_exit_immediately() {
         let mut app = test_app_with_agent();
         if let ActiveView::Agent(id) = app.active_view {
             app.agents.get_mut(&id).unwrap().active_pane = crate::views::agent::ActivePane::Prompt;
         }
         let outcome = app.handle_input(&key_event(KeyCode::Char('c'), KeyModifiers::CONTROL));
-        assert!(matches!(outcome, InputOutcome::Changed));
-        let pending = app
-            .pending_action
-            .as_ref()
-            .expect("first Ctrl+C on the agent view must arm quit pending");
-        assert!(matches!(pending.action, Action::Quit));
+        assert!(matches!(outcome, InputOutcome::Action(Action::Quit)));
+        assert!(app.pending_action.is_none());
     }
     #[test]
     fn agent_idle_ctrl_q_arms_quit_pending() {
-        // Regression guard: Ctrl+Q on the agent view must keep the two-press
-        // quit confirmation (see agent_idle_ctrl_c_arms_quit_pending).
+        // Ctrl+Q keeps its explicit confirmation behavior.
         let mut app = test_app_with_agent();
         if let ActiveView::Agent(id) = app.active_view {
             app.agents.get_mut(&id).unwrap().active_pane = crate::views::agent::ActivePane::Prompt;

@@ -157,6 +157,7 @@ async fn append_perf_timeline(root: &Path, info: &Info, spec: &SessionSpec) {
         let started = timeline
             .record(chat_state::TimelineEventKind::Turn(
                 chat_state::TurnEvent::Started {
+                    prompt_id: "fixture-prompt".into(),
                     id: turn,
                     input_ids: Vec::new(),
                     identity: chat_state::TurnIdentity {

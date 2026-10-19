@@ -30,6 +30,7 @@ fn primary_permission_context() -> workspace::permission::types::PermissionReque
         execution_cwd: None,
         classifier_turns: None,
         call_evidence: None,
+        human_interaction: None,
     }
 }
 
@@ -91,6 +92,7 @@ async fn request_child_judgment(
                 execution_cwd: Some(std::path::PathBuf::from("/tmp")),
                 classifier_turns: Some(vec![]),
                 call_evidence: None,
+                human_interaction: None,
             },
         )
         .await
@@ -356,6 +358,7 @@ async fn permission_judgment_deadline_covers_sideband_admission() {
                             execution_cwd: Some(std::path::PathBuf::from("/tmp")),
                             classifier_turns: Some(vec![]),
                             call_evidence: None,
+                            human_interaction: None,
                         },
                     )
                     .await
@@ -601,6 +604,7 @@ async fn live_child_judge_receives_primary_context_without_chat_state_pollution(
                         execution_cwd: Some(std::path::PathBuf::from("/tmp")),
                         classifier_turns: Some(vec![]),
                         call_evidence: None,
+                        human_interaction: None,
                     },
                 )
                 .await;
@@ -712,6 +716,7 @@ async fn child_judgment_distinguishes_slow_provider_from_stalled_primary() {
                                 execution_cwd: Some(std::path::PathBuf::from("/tmp")),
                                 classifier_turns: Some(vec![]),
                                 call_evidence: None,
+                                human_interaction: None,
                             },
                         )
                         .await
@@ -861,6 +866,7 @@ async fn chat_child_judge_retries_empty_invalid_and_transient_responses_once() {
                             execution_cwd: Some(std::path::PathBuf::from("/tmp")),
                             classifier_turns: Some(vec![]),
                             call_evidence: None,
+                            human_interaction: None,
                         },
                     )
                     .await;

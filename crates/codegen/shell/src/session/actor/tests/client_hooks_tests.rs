@@ -552,11 +552,7 @@ async fn post_tool_use_and_failure_never_double_fire() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
-            let (gateway_tx, mut gateway_rx) =
-                tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-            let (persistence_tx, _persistence_rx) =
-                tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-            let actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+            let (actor, mut gateway_rx) = build_actor_with_planning_driver().await;
             // `get_goal` is valid but its test bridge has no Goal runtime resource,
             // so dispatch reaches the real tool and returns a structured failure.
             *actor.agent.borrow_mut() =
@@ -564,7 +560,7 @@ async fn post_tool_use_and_failure_never_double_fire() {
                     tools::implementations::grow_build::update_goal::GetGoalTool,
                 >()])
                 .await;
-            begin_test_causal_turn(&actor).await;
+            begin_test_active_causal_turn(&actor).await;
 
             let mut client_hooks = crate::extensions::hooks::ClientHooks::new();
             for event in [
@@ -604,7 +600,7 @@ async fn post_tool_use_and_failure_never_double_fire() {
                 kind: "function".to_string(),
                 function: crate::sampling::types::ToolCallFunction::new(
                     "todo_write",
-                    r#"{"todos":[{"id":"t1","content":"do","status":"completed"}]}"#,
+                    r#"{"actions":[],"todos":[{"id":"t1","content":"do","status":"completed"}]}"#,
                 ),
             };
 
@@ -625,6 +621,7 @@ async fn post_tool_use_and_failure_never_double_fire() {
             );
 
             *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
+            install_test_planning_resources(&actor, "test-active-turn").await;
             actor
                 .execute_tool_calls(vec![todo_call("call_ok")])
                 .await
@@ -667,7 +664,7 @@ async fn pre_tool_use_deny_feeds_reason_back_and_continues_turn() {
                 kind: "function".to_string(),
                 function: crate::sampling::types::ToolCallFunction::new(
                     "todo_write",
-                    r#"{"todos":[{"id":"t1","content":"do","status":"completed"}]}"#,
+                    r#"{"actions":[],"todos":[{"id":"t1","content":"do","status":"completed"}]}"#,
                 ),
             };
 

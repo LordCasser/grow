@@ -1,0 +1,3 @@
+- [x] 1.1 Classify durable stop reasons with an explicit success allowlist while preserving cancellation, error, and rate-limit UX.
+- [x] 1.2 Add focused tests for known success, unknown/interrupted failure, and duplicate terminal handling.
+- [x] 1.3 Record validation evidence after the parent runs the Pager test suite.

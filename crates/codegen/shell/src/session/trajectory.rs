@@ -3787,10 +3787,13 @@ mod tests {
             goal_definition_revision: None,
             subagent_id: subagent_id.into(),
             child_session_id: child_session_id.into(),
+            origin_tool_call_id: None,
             security_parent_session_id: "parent-session".into(),
+            parent_step_id: None,
             subagent_type: "explore".into(),
             description: "inspect architecture".into(),
             prompt: "trace the canonical state".into(),
+            execution_recipe: serde_json::json!({}),
             context_source: chat_state::SubagentContextSource::New,
             source_ref: None,
             context_normalized: false,
@@ -4351,6 +4354,7 @@ mod tests {
                     run_id: "wf_debug".into(),
                     execution_epoch: 0,
                     status: chat_state::WorkflowExecutionStatus::Complete,
+                    execution_suspended: false,
                     handoff: chat_state::WorkflowTurnHandoff::Completion,
                     duration_ms: 9,
                     message: None,
@@ -5051,6 +5055,7 @@ mod tests {
         timeline
             .record(chat_state::TimelineEventKind::Turn(
                 chat_state::TurnEvent::Started {
+                    prompt_id: "fixture-prompt".into(),
                     id: turn,
                     input_ids: Vec::new(),
                     identity: chat_state::TurnIdentity {
@@ -5193,6 +5198,7 @@ mod tests {
         timeline
             .record(chat_state::TimelineEventKind::Turn(
                 chat_state::TurnEvent::Started {
+                    prompt_id: "fixture-prompt".into(),
                     id: turn,
                     input_ids: Vec::new(),
                     identity: chat_state::TurnIdentity {

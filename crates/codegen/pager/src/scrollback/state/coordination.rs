@@ -5,13 +5,13 @@ use super::*;
 use crate::scrollback::blocks::tool::{CoordinationPhase, OtherToolCallBlock};
 
 impl ScrollbackState {
-    fn coordination_entry_id(&self, source_peer_id: &str, inquiry_id: &str) -> Option<EntryId> {
+    fn coordination_entry_id(&self, source_session_id: &str, inquiry_id: &str) -> Option<EntryId> {
         self.entries
             .iter()
             .find_map(|(id, entry)| match &entry.block {
                 RenderBlock::ToolCall(ToolCallBlock::Other(block))
                     if block.coordination.as_ref().is_some_and(|row| {
-                        row.source_peer_id == source_peer_id && row.inquiry_id == inquiry_id
+                        row.source_session_id == source_session_id && row.inquiry_id == inquiry_id
                     }) =>
                 {
                     Some(*id)
@@ -28,14 +28,14 @@ impl ScrollbackState {
         let Some(row) = block
             .coordination
             .as_ref()
-            .filter(|row| !row.source_peer_id.is_empty() && !row.inquiry_id.is_empty())
+            .filter(|row| !row.source_session_id.is_empty() && !row.inquiry_id.is_empty())
         else {
             return false;
         };
         let phase = row.phase;
         let terminal = phase == CoordinationPhase::Terminal;
         let mut running = !is_replay && !terminal;
-        let existing = self.coordination_entry_id(&row.source_peer_id, &row.inquiry_id);
+        let existing = self.coordination_entry_id(&row.source_session_id, &row.inquiry_id);
         let id = if let Some(id) = existing {
             let entry = self.entries.get(&id).expect("existing inquiry row");
             let RenderBlock::ToolCall(ToolCallBlock::Other(previous)) = &entry.block else {
@@ -105,7 +105,8 @@ impl ScrollbackState {
                     return None;
                 };
                 let row = block.coordination.as_ref()?;
-                let existing = self.coordination_entry_id(&row.source_peer_id, &row.inquiry_id)?;
+                let existing =
+                    self.coordination_entry_id(&row.source_session_id, &row.inquiry_id)?;
                 Some((
                     *id,
                     existing,
@@ -139,7 +140,7 @@ mod tests {
             "Inquiry ID: {id}\nQuestion: status?\nAnswer: working"
         ));
         block.coordination = Some(CoordinationRow {
-            source_peer_id: "peer".into(),
+            source_session_id: "peer".into(),
             inquiry_id: id.into(),
             phase: if terminal {
                 CoordinationPhase::Terminal
@@ -153,7 +154,7 @@ mod tests {
     fn phased_row(id: &str, peer: &str, phase: CoordinationPhase) -> OtherToolCallBlock {
         let mut block = row(id, phase == CoordinationPhase::Terminal);
         let coordination = block.coordination.as_mut().unwrap();
-        coordination.source_peer_id = peer.into();
+        coordination.source_session_id = peer.into();
         coordination.phase = phase;
         block.name = match phase {
             CoordinationPhase::Received => "Inquiry received",
@@ -244,7 +245,7 @@ mod tests {
         let mut state = ScrollbackState::new();
         state.upsert_coordination_row(row("same", true), false);
         let mut other = row("same", false);
-        other.coordination.as_mut().unwrap().source_peer_id = "other-peer".into();
+        other.coordination.as_mut().unwrap().source_session_id = "other-peer".into();
         state.upsert_coordination_row(other.clone(), false);
         assert_eq!(state.len(), 2);
         assert!(state.entry(1).unwrap().is_running);
@@ -302,7 +303,12 @@ mod tests {
             OtherToolCallBlock::new("Answering session peer", ""),
             {
                 let mut block = row("one", false);
-                block.coordination.as_mut().unwrap().source_peer_id.clear();
+                block
+                    .coordination
+                    .as_mut()
+                    .unwrap()
+                    .source_session_id
+                    .clear();
                 block
             },
             {

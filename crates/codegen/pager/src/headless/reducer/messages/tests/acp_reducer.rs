@@ -51,6 +51,64 @@ fn acp_reducer_maps_tool_call_update_to_native_shape() {
 }
 
 #[test]
+fn replayed_completed_skill_call_keeps_raw_output_in_both_headless_formats() {
+    let skill_result = serde_json::to_value(tools::types::output::ToolOutput::from(
+        tools::implementations::grow_build::load_skill::LoadSkillOutput {
+            skill_name: "review".into(),
+            source: "/skills/review/SKILL.md".into(),
+            args: String::new(),
+            prepared_body: "Keep the original body".into(),
+        },
+    ))
+    .unwrap();
+    let make_update = || {
+        let mut meta = acp::Meta::new();
+        meta.insert(
+            "grow/tool".into(),
+            json!({"name": "load_skill", "kind": "skill"}),
+        );
+        acp::SessionUpdate::ToolCall(
+            acp::ToolCall::new("skill-1", "load_skill")
+                .kind(acp::ToolKind::Other)
+                .status(acp::ToolCallStatus::Completed)
+                .raw_input(Some(json!({"name": "review", "args": ""})))
+                .raw_output(Some(skill_result.clone()))
+                .meta(Some(meta)),
+        )
+    };
+
+    let mut acp_reducer = AcpReducer;
+    let native_event = crate::headless::reducer::map_session_update(&make_update()).unwrap();
+    assert_eq!(
+        acp_reducer.reduce(native_event)[0]["rawOutput"],
+        skill_result,
+        "terminal ACP ToolCall must carry the folded output"
+    );
+
+    let mut r = messages(false);
+    let mut out = r.reduce(crate::headless::reducer::map_session_update(&make_update()).unwrap());
+    out.extend(r.finish(&end_turn()));
+    let uses: Vec<_> = out
+        .iter()
+        .filter(|line| line["type"] == "assistant")
+        .flat_map(|line| line["message"]["content"].as_array().unwrap())
+        .filter(|block| block["type"] == "tool_use" && block["id"] == "skill-1")
+        .collect();
+    let results: Vec<_> = out
+        .iter()
+        .filter(|line| line["type"] == "user")
+        .flat_map(|line| line["message"]["content"].as_array().unwrap())
+        .filter(|block| block["type"] == "tool_result" && block["tool_use_id"] == "skill-1")
+        .collect();
+    assert_eq!(uses.len(), 1);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["is_error"], false);
+    let result: Value = serde_json::from_str(results[0]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(result["value"]["source"], "/skills/review/SKILL.md");
+    assert_eq!(result["value"]["prepared_body"], "Keep the original body");
+}
+
+#[test]
 fn acp_response_completed_emits_usage_line() {
     let mut r = AcpReducer;
     let out = r.reduce(StreamEvent::ResponseCompleted {

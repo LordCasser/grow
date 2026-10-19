@@ -176,15 +176,16 @@ impl AgentView {
         else {
             return false;
         };
-        if status != "cleared" {
-            match self.session.workflow_run_revisions.get(&run_id).copied() {
-                Some(last) if revision == 0 && last > 0 => return false,
-                Some(last) if revision > 0 && revision <= last => return false,
-                _ => {}
-            }
-            if revision == 0 && self.session.cleared_workflow_runs.contains(&run_id) {
-                return false;
-            }
+        match self.session.workflow_run_revisions.get(&run_id).copied() {
+            Some(last) if revision > 0 && revision <= last => return false,
+            Some(last) if status != "cleared" && revision == 0 && last > 0 => return false,
+            _ => {}
+        }
+        if status != "cleared"
+            && revision == 0
+            && self.session.cleared_workflow_runs.contains(&run_id)
+        {
+            return false;
         }
         if revision > 0 {
             self.session
@@ -247,5 +248,85 @@ impl AgentView {
             elapsed_ms,
         );
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::agent_view::test_agent_view;
+    use std::path::PathBuf;
+
+    fn update(run_id: &str, revision: u64, status: &str) -> GrowSessionUpdate {
+        GrowSessionUpdate::WorkflowUpdated {
+            run_id: run_id.into(),
+            definition_id: None,
+            definition_scope: None,
+            definition_hash: None,
+            revision,
+            name: "workflow".into(),
+            objective: "inspect".into(),
+            status: status.into(),
+            foreground: false,
+            phases: vec![],
+            current_phase: None,
+            agent_budget: None,
+            agents_used: 0,
+            agents_remaining: None,
+            agent_usage_incomplete: false,
+            elapsed_ms: 10,
+            active_agents: 0,
+            current_agent_label: None,
+            agents: vec![],
+            pause_message: None,
+            result_summary: None,
+        }
+    }
+
+    #[test]
+    fn stale_positive_clear_does_not_remove_newer_live_run() {
+        let mut agent = test_agent_view(Some("s1"), PathBuf::from("/tmp"));
+        assert!(agent.ingest_workflow_update(update("run-1", 7, "active")));
+        let block_id = agent.workflow_blocks["run-1"];
+
+        assert!(!agent.ingest_workflow_update(update("run-1", 6, "cleared")));
+        assert_eq!(agent.session.workflow_runs.len(), 1);
+        assert_eq!(agent.session.workflow_runs[0].status, "active");
+        assert_eq!(agent.session.workflow_run_revisions.get("run-1"), Some(&7));
+        assert!(!agent.session.cleared_workflow_runs.contains("run-1"));
+        assert!(
+            agent
+                .scrollback
+                .get_by_id(block_id)
+                .is_some_and(|entry| entry.is_running)
+        );
+    }
+
+    #[test]
+    fn newer_clear_and_revisionless_compatibility_preserve_run_history() {
+        let mut agent = test_agent_view(Some("s1"), PathBuf::from("/tmp"));
+        assert!(agent.ingest_workflow_update(update("run-1", 7, "active")));
+        let block_id = agent.workflow_blocks["run-1"];
+        assert!(agent.ingest_workflow_update(update("run-1", 8, "cleared")));
+        assert!(agent.session.workflow_runs.is_empty());
+        assert_eq!(agent.session.workflow_run_revisions.get("run-1"), Some(&8));
+        assert!(agent.session.cleared_workflow_runs.contains("run-1"));
+        assert!(!agent.workflow_blocks.contains_key("run-1"));
+        assert!(
+            agent
+                .scrollback
+                .get_by_id(block_id)
+                .is_some_and(|entry| !entry.is_running)
+        );
+        assert!(!agent.ingest_workflow_update(update("run-1", 8, "active")));
+
+        assert!(agent.ingest_workflow_update(update("legacy", 2, "active")));
+        assert!(agent.ingest_workflow_update(update("legacy", 0, "cleared")));
+        assert_eq!(agent.session.workflow_run_revisions.get("legacy"), Some(&2));
+        assert!(agent.session.cleared_workflow_runs.contains("legacy"));
+        assert!(!agent.ingest_workflow_update(update("legacy", 0, "active")));
+        assert!(agent.ingest_workflow_update(update("new-run", 1, "active")));
+        assert_eq!(agent.session.workflow_runs.len(), 1);
+        assert_eq!(agent.session.workflow_runs[0].run_id, "new-run");
     }
 }

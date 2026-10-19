@@ -943,6 +943,9 @@ pub struct AgentSession {
     /// Prompts waiting to be sent. Drained front-to-back when
     /// `state` becomes [`AgentState::Idle`].
     pub pending_prompts: VecDeque<QueuedPrompt>,
+    /// Source identity attached to an explicitly selected skill restored as
+    /// an unsent local draft. It carries no admission or replay identity.
+    pub(crate) staged_skill_selection: Option<FrozenSkillSelection>,
     /// Next monotonic ID for [`QueuedPrompt`].
     pub(crate) next_queue_id: u64,
     /// Canonical permission mode for this session.
@@ -1241,6 +1244,10 @@ pub struct InFlightPrompt {
     /// `Some(false)` means it was durably rejected or dismissed. `None` keeps
     /// the result unknown or still Submitted.
     pub admission_resolved: Option<bool>,
+    /// Source identity for an explicitly selected skill whose prompt is still
+    /// awaiting a durable admission acknowledgement. Retrying an unchanged
+    /// input must not resolve the slash alias against a newer command list.
+    pub frozen_skill_selection: Option<FrozenSkillSelection>,
     pub text: String,
     pub images: Vec<crate::prompt_images::PastedImage>,
     /// Primary (last) user-prompt block for restore/cancel.
@@ -1251,6 +1258,16 @@ pub struct InFlightPrompt {
     /// active in the textarea at send time. Restored on rewind so collapsed
     /// chips render correctly instead of raw text.
     pub chip_elements: Vec<ChipElement>,
+}
+
+/// Pager-side identity copied from `grow/skillSelection` on a selected skill
+/// invocation. Shell remains responsible for validating it at admission.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FrozenSkillSelection {
+    pub name: String,
+    pub path: String,
+    pub plugin_name: Option<String>,
 }
 /// Snapshot of a textarea chip element for rewind restore.
 /// Covers paste blocks, @-file refs, and image chips.
@@ -1294,6 +1311,7 @@ impl AgentSession {
             forked_from: None,
             subagent_sessions: HashMap::new(),
             pending_prompts: VecDeque::new(),
+            staged_skill_selection: None,
             next_queue_id: 0,
             permission_mode,
             pending_permission_count: 0,
@@ -3205,6 +3223,7 @@ mod tests {
         session.enqueue_in_flight_prompt_front(InFlightPrompt {
             prompt_id: None,
             admission_resolved: None,
+            frozen_skill_selection: None,
             expected_turn_id: None,
             text: "look [Image #1]".into(),
             images: vec![image],

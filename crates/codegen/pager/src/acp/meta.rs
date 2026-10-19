@@ -4,7 +4,25 @@
 //! typed fields.  All fields are `Option` — gracefully degrades when
 //! shell hasn't been updated or meta is absent.
 
+use acp_transport::protocol as acp;
 use serde::{Deserialize, Serialize};
+
+/// Resolve the canonical session identity returned by `session/load`.
+///
+/// A load request may name a suspended child, while the server resumes and
+/// returns its owning root. Consumers must retain the response identity for
+/// subsequent prompts. If metadata is absent, keep the request identity.
+pub(crate) fn session_load_identity(
+    response_meta: Option<&acp::Meta>,
+    requested: &acp::SessionId,
+) -> acp::SessionId {
+    response_meta
+        .and_then(|meta| meta.get("sessionId"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|session_id| !session_id.is_empty())
+        .map(|session_id| acp::SessionId::new(session_id.to_owned()))
+        .unwrap_or_else(|| requested.clone())
+}
 
 /// Parsed fields from `SessionNotification._meta`.
 ///
@@ -148,6 +166,22 @@ impl NotificationMeta {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn session_load_uses_canonical_response_identity() {
+        let requested = acp::SessionId::new("suspended-child".to_owned());
+        let response_meta = json!({ "sessionId": "owning-root" });
+        assert_eq!(
+            session_load_identity(response_meta.as_object(), &requested),
+            acp::SessionId::new("owning-root".to_owned()),
+        );
+    }
+
+    #[test]
+    fn session_load_identity_falls_back_when_response_meta_has_no_id() {
+        let requested = acp::SessionId::new("ordinary-session".to_owned());
+        assert_eq!(session_load_identity(None, &requested), requested);
+    }
 
     #[test]
     fn parse_full_meta() {

@@ -238,21 +238,18 @@ async fn child_finalization_canonical_boundaries_retry_after_file_and_directory_
             },
         ))
         .unwrap();
-    let initial_writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
-    let error = initial_writer
+    let error = initial
         .append_timeline_event_durable(&parent_info, &skipped_event)
         .await
         .expect_err("a new ledger cannot begin at seq 1");
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     assert_eq!(
-        std::fs::metadata(initial_writer.timeline_file(&parent_info))
+        std::fs::metadata(initial.timeline_file(&parent_info))
             .map(|metadata| metadata.len())
             .unwrap_or(0),
         0,
         "pre-write sequence rejection leaves no canonical bytes"
     );
-    drop(initial_writer);
-
     let subagent_id = "finalization-matrix-child";
     let mut parent = chat_state::Timeline::default();
     let spawn = parent
@@ -260,10 +257,13 @@ async fn child_finalization_canonical_boundaries_retry_after_file_and_directory_
             chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
                 subagent_id: subagent_id.into(),
                 child_session_id: child_info.id.0.to_string(),
+                origin_tool_call_id: None,
                 security_parent_session_id: parent_info.id.0.to_string(),
+                parent_step_id: None,
                 subagent_type: "worker".into(),
                 description: "finalization boundary matrix".into(),
                 prompt: "complete the task".into(),
+                execution_recipe: serde_json::json!({}),
                 context_source: chat_state::SubagentContextSource::New,
                 source_ref: None,
                 context_normalized: false,
@@ -317,6 +317,7 @@ async fn child_finalization_canonical_boundaries_retry_after_file_and_directory_
                     "artifact:subagent-output:blake3:{}",
                     "a".repeat(64)
                 )),
+                planning_summary: None,
             },
         ))
         .unwrap();

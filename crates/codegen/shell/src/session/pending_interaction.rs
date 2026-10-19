@@ -8,14 +8,15 @@
 //! is pending right now" and is read by the roster to surface
 //! [`crate::agent::roster::RosterActivity::NeedsInput`].
 //!
-//! Pending interactions are **requests, not notifications** — they are never
-//! persisted. We broadcast `pending_interaction` / `interaction_resolved`
+//! Request contents stay in memory. Timeline records only typed attempt
+//! boundaries; no questions, answers, or permission options are copied there.
+//! We broadcast `pending_interaction` / `interaction_resolved`
 //! **fire-and-forget** via the gateway (same idiom as
 //! [`crate::session::actor::summary`]); the routing layer fans them to every
 //! subscriber because they carry a `sessionId`.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use acp_transport::AcpAgentGatewaySender as GatewaySender;
 use acp_transport::protocol as acp;
@@ -28,7 +29,145 @@ use crate::extensions::notification::{SessionNotification, SessionUpdate as Grow
 /// [`crate::session::handle::SessionHandle`]: the same `Arc` is shared between
 /// the session actor (which mutates it) and the handle (which the roster reads
 /// synchronously).
-pub type PendingInteractions = Arc<Mutex<HashMap<String, PendingKind>>>;
+#[derive(Clone)]
+pub struct PendingInteractions {
+    entries: Arc<Mutex<HashMap<String, PendingKind>>>,
+    attempts: Arc<Mutex<HashMap<String, String>>>,
+    resolution_gate: Arc<tokio::sync::Mutex<()>>,
+    changed: tokio::sync::watch::Sender<u64>,
+}
+
+impl PendingInteractions {
+    pub fn new() -> Self {
+        let (changed, _) = tokio::sync::watch::channel(0);
+        Self {
+            entries: Arc::new(Mutex::new(HashMap::new())),
+            attempts: Arc::new(Mutex::new(HashMap::new())),
+            resolution_gate: Arc::new(tokio::sync::Mutex::new(())),
+            changed,
+        }
+    }
+
+    pub fn lock(&self) -> std::sync::LockResult<MutexGuard<'_, HashMap<String, PendingKind>>> {
+        self.entries.lock()
+    }
+
+    /// Subscribe before inspecting the registry to avoid missing a resolution
+    /// that races with dependency readiness checks.
+    pub(crate) fn subscribe_changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changed.subscribe()
+    }
+
+    fn signal_change(&self) {
+        self.changed
+            .send_modify(|generation| *generation = generation.wrapping_add(1));
+    }
+
+    pub(crate) fn snapshot_attempts(&self) -> Vec<(String, PendingKind, String)> {
+        let entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let attempts = self
+            .attempts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        entries
+            .iter()
+            .filter_map(|(call_id, kind)| {
+                attempts
+                    .get(call_id)
+                    .map(|attempt| (call_id.clone(), *kind, attempt.clone()))
+            })
+            .collect()
+    }
+
+    pub(crate) async fn resolve_durably(
+        &self,
+        call_id: &str,
+        attempt_id: &str,
+        kind: PendingKind,
+        resolution: chat_state::InteractionResolution,
+        chat_state: &chat_state::ChatStateHandle,
+        gateway: &GatewaySender,
+        session_id: &acp::SessionId,
+    ) -> Result<bool, String> {
+        let _gate = self.resolution_gate.lock().await;
+        let active = self
+            .entries
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(call_id)
+            .copied()
+            == Some(kind)
+            && self
+                .attempts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .get(call_id)
+                .is_some_and(|active| active == attempt_id);
+        if !active {
+            return Ok(false);
+        }
+        chat_state
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Interaction(
+                chat_state::InteractionEvent::Resolved {
+                    tool_call_id: call_id.to_owned(),
+                    attempt_id: attempt_id.to_owned(),
+                    kind: interaction_kind(kind),
+                    resolution,
+                },
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
+        let removed = {
+            let mut entries = self
+                .entries
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let mut attempts = self
+                .attempts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if entries.get(call_id).copied() == Some(kind)
+                && attempts
+                    .get(call_id)
+                    .is_some_and(|active| active == attempt_id)
+            {
+                entries.remove(call_id);
+                attempts.remove(call_id);
+                true
+            } else {
+                false
+            }
+        };
+        if removed {
+            self.signal_change();
+            broadcast(
+                gateway,
+                session_id,
+                GrowSessionUpdate::InteractionResolved {
+                    tool_call_id: call_id.to_owned(),
+                },
+            );
+        }
+        Ok(removed)
+    }
+}
+
+fn interaction_kind(kind: PendingKind) -> chat_state::InteractionKind {
+    match kind {
+        PendingKind::Permission => chat_state::InteractionKind::Permission,
+        PendingKind::Question => chat_state::InteractionKind::Question,
+        PendingKind::PlanApproval => chat_state::InteractionKind::PlanApproval,
+    }
+}
+
+impl Default for PendingInteractions {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 /// Which kind of blocking reverse-request is pending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -91,6 +230,8 @@ pub struct PendingInteractionGuard {
     gateway: GatewaySender,
     session_id: acp::SessionId,
     tool_call_id: String,
+    attempt_id: String,
+    published: bool,
 }
 
 impl PendingInteractionGuard {
@@ -102,24 +243,114 @@ impl PendingInteractionGuard {
         tool_call_id: String,
         kind: PendingKind,
     ) -> Self {
+        Self::new_with_attempt(
+            pending,
+            gateway,
+            session_id,
+            tool_call_id,
+            kind,
+            uuid::Uuid::now_v7().to_string(),
+        )
+    }
+
+    pub fn new_with_attempt(
+        pending: PendingInteractions,
+        gateway: GatewaySender,
+        session_id: acp::SessionId,
+        tool_call_id: String,
+        kind: PendingKind,
+        attempt_id: String,
+    ) -> Self {
         {
             let mut map = pending.lock().unwrap_or_else(|e| e.into_inner());
             map.insert(tool_call_id.clone(), kind);
         }
-        broadcast(
-            &gateway,
-            &session_id,
-            GrowSessionUpdate::PendingInteraction {
-                tool_call_id: tool_call_id.clone(),
-                kind,
-            },
-        );
+        pending
+            .attempts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(tool_call_id.clone(), attempt_id.clone());
+        pending.signal_change();
         Self {
             pending,
             gateway,
             session_id,
             tool_call_id,
+            attempt_id,
+            published: false,
         }
+    }
+
+    pub fn attempt_id(&self) -> &str {
+        &self.attempt_id
+    }
+
+    pub async fn open_durably(
+        &mut self,
+        chat_state: &chat_state::ChatStateHandle,
+    ) -> Result<(), String> {
+        let kind = self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&self.tool_call_id)
+            .copied()
+            .ok_or("interaction owner disappeared before open")?;
+        if !self
+            .pending
+            .attempts
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&self.tool_call_id)
+            .is_some_and(|active| active == &self.attempt_id)
+        {
+            return Err("interaction attempt no longer owns its tool call".into());
+        }
+        chat_state
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Interaction(
+                chat_state::InteractionEvent::Opened {
+                    tool_call_id: self.tool_call_id.clone(),
+                    attempt_id: self.attempt_id.clone(),
+                    kind: interaction_kind(kind),
+                },
+            ))
+            .await
+            .map_err(|error| error.to_string())?;
+        broadcast(
+            &self.gateway,
+            &self.session_id,
+            GrowSessionUpdate::PendingInteraction {
+                tool_call_id: self.tool_call_id.clone(),
+                kind,
+            },
+        );
+        self.published = true;
+        Ok(())
+    }
+
+    pub async fn resolve_durably(
+        &self,
+        chat_state: &chat_state::ChatStateHandle,
+        resolution: chat_state::InteractionResolution,
+    ) -> Result<bool, String> {
+        let kind = self
+            .pending
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .get(&self.tool_call_id)
+            .copied()
+            .ok_or("interaction owner disappeared before resolution")?;
+        self.pending
+            .resolve_durably(
+                &self.tool_call_id,
+                &self.attempt_id,
+                kind,
+                resolution,
+                chat_state,
+                &self.gateway,
+                &self.session_id,
+            )
+            .await
     }
 }
 
@@ -127,11 +358,26 @@ impl Drop for PendingInteractionGuard {
     fn drop(&mut self) {
         let removed = {
             let mut map = self.pending.lock().unwrap_or_else(|e| e.into_inner());
-            map.remove(&self.tool_call_id).is_some()
+            let mut attempts = self
+                .pending
+                .attempts
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            let owns = attempts
+                .get(&self.tool_call_id)
+                .is_some_and(|active| active == &self.attempt_id);
+            if owns {
+                map.remove(&self.tool_call_id);
+                attempts.remove(&self.tool_call_id);
+            }
+            owns
         };
         // First-answer-wins: only announce resolution if this guard actually
         // owned the live entry. An already-resolved id is a silent no-op.
         if removed {
+            self.pending.signal_change();
+        }
+        if removed && self.published {
             broadcast(
                 &self.gateway,
                 &self.session_id,
@@ -148,7 +394,7 @@ mod tests {
     use super::*;
 
     fn new_registry() -> PendingInteractions {
-        Arc::new(Mutex::new(HashMap::new()))
+        PendingInteractions::new()
     }
 
     #[test]
@@ -173,6 +419,36 @@ mod tests {
             );
         }
         assert!(reg.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn question_and_permission_resolution_wake_waiters() {
+        for (call_id, kind) in [
+            ("question-call", PendingKind::Question),
+            ("permission-call", PendingKind::Permission),
+        ] {
+            let reg = new_registry();
+            let mut changed = reg.subscribe_changes();
+            let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+            let gateway = GatewaySender::new(tx);
+            let guard = PendingInteractionGuard::new(
+                reg.clone(),
+                gateway,
+                acp::SessionId::new("sess-1"),
+                call_id.to_string(),
+                kind,
+            );
+            tokio::time::timeout(std::time::Duration::from_millis(100), changed.changed())
+                .await
+                .expect("registration should wake dependency observers")
+                .expect("registry watch stays open");
+            drop(guard);
+            tokio::time::timeout(std::time::Duration::from_millis(100), changed.changed())
+                .await
+                .expect("answer/removal should wake dependency observers")
+                .expect("registry watch stays open");
+            assert!(!reg.lock().unwrap().contains_key(call_id));
+        }
     }
 
     /// `has_parked_plan_approval` counts ONLY a parked plan-approval; other

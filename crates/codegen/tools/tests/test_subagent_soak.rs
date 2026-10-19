@@ -23,8 +23,9 @@ use test_support::env::env_parse;
 use test_support::resources::{ResourceGrowth, ResourceSnapshot};
 use tools::implementations::grow_build::task::backend::{ChannelBackend, SubagentBackend};
 use tools::implementations::grow_build::task::coordinator::{
-    ChildCompletion, ChildControl, ChildRunOutput, ChildRunRequest, ChildRunner, CoordinatorConfig,
-    LocalBoxFuture, MAX_COMPLETED_ENTRIES, StartedChild, SubagentCoordinator, SubagentProgress,
+    ChildCompletion, ChildControl, ChildRunOutcome, ChildRunOutput, ChildRunRequest, ChildRunner,
+    CoordinatorConfig, LocalBoxFuture, MAX_COMPLETED_ENTRIES, StartedChild, SubagentCoordinator,
+    SubagentProgress,
 };
 use tools::implementations::grow_build::task::types::{
     SubagentOwner, SubagentRegistryCounts, SubagentRequest, SubagentResult,
@@ -301,7 +302,7 @@ struct SoakRunner {
 impl ChildRunner for SoakRunner {
     type Control = SoakControl;
     type CompletionData = ();
-    type RunFuture = LocalBoxFuture<ChildRunOutput<()>>;
+    type RunFuture = LocalBoxFuture<ChildRunOutcome<()>>;
     type ValidateFuture = LocalBoxFuture<SubagentValidateTypeOutcome>;
 
     fn run(&self, run: ChildRunRequest<Self::Control>) -> Self::RunFuture {
@@ -312,6 +313,7 @@ impl ChildRunner for SoakRunner {
                 security_parent_session_id: _,
                 security_parent: _,
                 cancellation,
+                restore: _,
                 reporter,
             } = run;
             let promoted = reporter
@@ -325,7 +327,7 @@ impl ChildRunner for SoakRunner {
                 })
                 .await;
             if !promoted || cancellation.is_cancelled() {
-                return ChildRunOutput {
+                return ChildRunOutcome::Finished(ChildRunOutput {
                     result: SubagentResult {
                         success: false,
                         cancelled: true,
@@ -335,13 +337,13 @@ impl ChildRunner for SoakRunner {
                         ..Default::default()
                     },
                     completion_data: (),
-                };
+                });
             }
             if request.id.starts_with("conc-") {
                 // Hold in `active` until the concurrent phase releases the gate.
                 let _ = gate.acquire().await;
             }
-            ChildRunOutput {
+            ChildRunOutcome::Finished(ChildRunOutput {
                 result: SubagentResult {
                     success: true,
                     output: Arc::from("soak child output"),
@@ -352,7 +354,7 @@ impl ChildRunner for SoakRunner {
                     ..Default::default()
                 },
                 completion_data: (),
-            }
+            })
         })
     }
 
@@ -366,10 +368,13 @@ impl ChildRunner for SoakRunner {
 fn soak_request(id: String, background: bool) -> SubagentRequest {
     SubagentRequest {
         id,
+
+        origin_tool_call_id: None,
         prompt: "soak work".to_owned(),
         description: "soak child".to_owned(),
         subagent_type: "explore".to_owned(),
         parent_session_id: PARENT_SESSION_ID.to_owned(),
+        parent_step_id: None,
         parent_prompt_id: Some("soak-prompt".to_owned()),
         resume_from: None,
         cwd: None,

@@ -3,7 +3,256 @@
 use super::parse::execute_tool_call_parts;
 use super::*;
 
+struct TimelinePermissionObserver {
+    pending: crate::session::pending_interaction::PendingInteractions,
+    gateway: acp_transport::AcpAgentGatewaySender,
+    session_id: acp::SessionId,
+    call_id: String,
+    attempt_id: String,
+    chat_state: chat_state::ChatStateHandle,
+    runtime_suspend: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    guard: std::sync::Mutex<Option<crate::session::pending_interaction::PendingInteractionGuard>>,
+}
+
+impl std::fmt::Debug for TimelinePermissionObserver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TimelinePermissionObserver")
+            .field("session_id", &self.session_id)
+            .field("call_id", &self.call_id)
+            .field("attempt_id", &self.attempt_id)
+            .finish_non_exhaustive()
+    }
+}
+
+#[async_trait::async_trait]
+impl workspace::permission::types::HumanPermissionInteractionObserver
+    for TimelinePermissionObserver
+{
+    async fn opened(&self) -> Result<(), String> {
+        let mut guard =
+            crate::session::pending_interaction::PendingInteractionGuard::new_with_attempt(
+                self.pending.clone(),
+                self.gateway.clone(),
+                self.session_id.clone(),
+                self.call_id.clone(),
+                crate::session::pending_interaction::PendingKind::Permission,
+                self.attempt_id.clone(),
+            );
+        guard.open_durably(&self.chat_state).await?;
+        *self.guard.lock().unwrap_or_else(|error| error.into_inner()) = Some(guard);
+        Ok(())
+    }
+
+    async fn resolved(
+        &self,
+        outcome: workspace::permission::types::HumanInteractionResolution,
+    ) -> Result<(), String> {
+        let resolution = if self
+            .runtime_suspend
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            chat_state::InteractionResolution::Suspended
+        } else {
+            match outcome {
+                workspace::permission::types::HumanInteractionResolution::Answered => {
+                    chat_state::InteractionResolution::Answered
+                }
+                workspace::permission::types::HumanInteractionResolution::Allowed => {
+                    chat_state::InteractionResolution::Allowed
+                }
+                workspace::permission::types::HumanInteractionResolution::Rejected => {
+                    chat_state::InteractionResolution::Rejected
+                }
+                workspace::permission::types::HumanInteractionResolution::Cancelled => {
+                    chat_state::InteractionResolution::Cancelled
+                }
+                workspace::permission::types::HumanInteractionResolution::TimedOut => {
+                    chat_state::InteractionResolution::TimedOut
+                }
+                workspace::permission::types::HumanInteractionResolution::Failed => {
+                    chat_state::InteractionResolution::Failed
+                }
+            }
+        };
+        let guard = self
+            .guard
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .take()
+            .ok_or("permission interaction resolved before it was opened")?;
+        guard
+            .resolve_durably(&self.chat_state, resolution)
+            .await
+            .map(|_| ())
+    }
+}
+
+fn restored_waiting_operation(
+    continuation: Option<&chat_state::session_runtime::TurnContinuation>,
+    call_id: &str,
+) -> Result<bool, String> {
+    let Some(continuation) = continuation else {
+        return Ok(false);
+    };
+    let mut matches = continuation
+        .operations
+        .iter()
+        .filter(|operation| operation.call_id == call_id);
+    let Some(operation) = matches.next() else {
+        return Ok(false);
+    };
+    if matches.next().is_some() {
+        return Err(format!(
+            "restored turn repeats tool call identity {call_id}"
+        ));
+    }
+    match &operation.state {
+        chat_state::session_runtime::SuspendedOperationState::AwaitUser
+        | chat_state::session_runtime::SuspendedOperationState::AwaitPermission => Ok(true),
+        // A call that had not been dispatched has no existing ToolStarted to
+        // reuse, so it still follows the ordinary new-call path.
+        chat_state::session_runtime::SuspendedOperationState::NotDispatched => Ok(false),
+        state => Err(format!(
+            "restored tool call {call_id} is not resumable from state {state:?}"
+        )),
+    }
+}
+
+fn restored_pre_tool_decision_from_facts(
+    continuation: Option<&chat_state::session_runtime::TurnContinuation>,
+    active_tool_ids: &[String],
+    call_id: &str,
+    tool_name: &str,
+    tool_input: &serde_json::Value,
+    events: &[chat_state::TimelineEvent],
+) -> Result<Option<::hooks::result::HookDecision>, String> {
+    if !restored_waiting_operation(continuation, call_id)? {
+        return Ok(None);
+    }
+    if !active_tool_ids.iter().any(|active| active == call_id) {
+        return Err(format!(
+            "restored waiting tool {call_id} is not active in the event tracker"
+        ));
+    }
+    let starts: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Started {
+                call_id: started_id,
+                name,
+                input,
+                ..
+            }) if started_id == call_id => Some((name.as_str(), input.as_ref())),
+            _ => None,
+        })
+        .collect();
+    if starts.len() != 1 || starts[0].0 != tool_name || starts[0].1 != Some(tool_input) {
+        return Err(format!(
+            "restored waiting tool {call_id} has missing, repeated, or conflicting Timeline start or input"
+        ));
+    }
+    if events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Completed {
+                call_id: completed_id,
+                ..
+            }) if completed_id == call_id
+        )
+    }) {
+        return Err(format!(
+            "restored waiting tool {call_id} already has a Timeline completion"
+        ));
+    }
+
+    let occurrences: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            chat_state::TimelineEventKind::Hook(chat_state::HookEvent::Triggered {
+                occurrence_id,
+                event: chat_state::HookEventType::PreToolUse,
+                gate: chat_state::HookGateKind::Tool,
+                cause: chat_state::HookCause::Tool { call_id: hooked_id },
+                ..
+            }) if hooked_id == call_id => Some(occurrence_id.as_str()),
+            _ => None,
+        })
+        .collect();
+    if occurrences.len() != 1 {
+        return Err(format!(
+            "restored waiting tool {call_id} has no unique PreToolUse occurrence"
+        ));
+    }
+    let occurrence_id = occurrences[0];
+    if events.iter().any(|event| {
+        matches!(
+            &event.kind,
+            chat_state::TimelineEventKind::Hook(chat_state::HookEvent::RunFinished {
+                occurrence_id: finished_id,
+                outcome: chat_state::HookRunOutcome::InterruptedOutcomeUnknown,
+                ..
+            }) if finished_id == occurrence_id
+        )
+    }) {
+        return Err(format!(
+            "restored waiting tool {call_id} has an unknown PreToolUse side-effect outcome"
+        ));
+    }
+    let completions: Vec<_> = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            chat_state::TimelineEventKind::Hook(chat_state::HookEvent::Completed {
+                occurrence_id: completed_id,
+                decision,
+            }) if completed_id == occurrence_id => Some(decision),
+            _ => None,
+        })
+        .collect();
+    if completions.len() != 1 {
+        return Err(format!(
+            "restored waiting tool {call_id} has no unique completed PreToolUse decision"
+        ));
+    }
+    let chat_state::HookAggregateDecision::Tool { decision } = completions[0] else {
+        return Err(format!(
+            "restored waiting tool {call_id} has a conflicting PreToolUse decision kind"
+        ));
+    };
+    Ok(Some(match decision {
+        chat_state::HookGateDecision::Allow => ::hooks::result::HookDecision::Allow,
+        chat_state::HookGateDecision::Block { reason } => ::hooks::result::HookDecision::Deny {
+            hook_name: "restored_pre_tool_use".to_owned(),
+            reason: reason.clone(),
+        },
+    }))
+}
+
 impl SessionActor {
+    pub(super) async fn recovered_pre_tool_hook_decision(
+        &self,
+        call_id: &str,
+        tool_name: &str,
+        tool_input: &serde_json::Value,
+    ) -> Result<Option<::hooks::result::HookDecision>, String> {
+        let continuation = self.turn_continuation.borrow().clone();
+        if !restored_waiting_operation(continuation.as_ref(), call_id)? {
+            return Ok(None);
+        }
+        let events = self
+            .chat_state_handle
+            .timeline_events()
+            .await
+            .ok_or_else(|| "cannot read Timeline for restored PreToolUse decision".to_owned())?;
+        restored_pre_tool_decision_from_facts(
+            continuation.as_ref(),
+            &self.events.active_tool_ids(),
+            call_id,
+            tool_name,
+            tool_input,
+            &events,
+        )
+    }
+
     /// Merge the canonical `grow/tool` identity envelope into a tool-call
     /// event's `_meta`, resolving the tool from the live toolset by wire name.
     pub(super) fn stamp_tool_meta(
@@ -369,6 +618,16 @@ impl SessionActor {
         call: crate::sampling::types::ToolCallResponse,
         deferred_followups: &mut Vec<ConversationItem>,
     ) -> Result<ToolPreflight, acp::Error> {
+        self.prepare_tool_call_with_hook_decision(call, deferred_followups, None)
+            .await
+    }
+
+    pub(super) async fn prepare_tool_call_with_hook_decision(
+        &self,
+        call: crate::sampling::types::ToolCallResponse,
+        deferred_followups: &mut Vec<ConversationItem>,
+        recovered_hook_decision: Option<::hooks::result::HookDecision>,
+    ) -> Result<ToolPreflight, acp::Error> {
         let tool_call_id = acp::ToolCallId::new(Arc::from(call.id.clone()));
         let model_id_str = self.current_catalog_model_id();
         tracing::info!(
@@ -535,7 +794,6 @@ impl SessionActor {
                 return Ok(ToolPreflight::resolved(ToolLoop::ToolParsingError));
             }
         };
-        let access_kind = AccessKind::from_tool_call(&call.function.name, &tool_input);
         let (tool_kind, descriptor_max) = {
             let agent = self.agent.borrow();
             let bridge = agent.tool_bridge();
@@ -546,6 +804,63 @@ impl SessionActor {
                     .unwrap_or(tool_protocol::ToolAccess::All),
             )
         };
+        let skill_selection = if tool_kind == Some(tools::types::tool::ToolKind::Skill) {
+            let bridge = self.agent.borrow().tool_bridge().clone();
+            let input: tools::implementations::grow_build::load_skill::LoadSkillInput =
+                serde_json::from_value(match &tool_input {
+                    ToolInput::Dynamic(value) => value.clone(),
+                    _ => {
+                        return Err(acp::Error::internal_error()
+                            .data("Skill loader has an invalid input projection"));
+                    }
+                })?;
+            let user_selection = super::super::skill_loading::user_skill_selection();
+            let user_invocation = user_selection.is_some();
+            match bridge.resolve_skill(&input.name, user_invocation).await {
+                Ok(skill) => {
+                    if let Some(frozen) = user_selection {
+                        if skill.path != frozen.skill.path
+                            || skill.plugin_name != frozen.skill.plugin_name
+                            || skill.plugin_root != frozen.skill.plugin_root
+                            || skill.plugin_data != frozen.skill.plugin_data
+                            || skill.scope != frozen.skill.scope
+                        {
+                            self.handle_tool_not_executed(
+                                &call.id,
+                                &tool_call_id,
+                                "The selected skill source changed before loading".into(),
+                            )
+                            .await?;
+                            return Ok(ToolPreflight::resolved(ToolLoop::Continue));
+                        }
+                        Some(frozen)
+                    } else {
+                        Some(
+                            tools::implementations::grow_build::load_skill::SkillLoadSelection {
+                                skill,
+                                user_invocation: false,
+                            },
+                        )
+                    }
+                }
+                Err(error) => {
+                    self.handle_tool_not_executed(&call.id, &tool_call_id, error.to_string())
+                        .await?;
+                    return Ok(ToolPreflight::resolved(ToolLoop::Continue));
+                }
+            }
+        } else {
+            None
+        };
+        let access_kind = skill_selection.as_ref().map_or_else(
+            || AccessKind::from_tool_call(&call.function.name, &tool_input),
+            |selected| {
+                AccessKind::Read(
+                    (selected.skill.body.is_none() && !selected.skill.path.contains("://"))
+                        .then(|| selected.skill.path.clone()),
+                )
+            },
+        );
         let mcp_max_access = mcp_call_max_access(&self.mcp_state, &access_kind).await;
         let required_access = project_call_access(&tool_input, descriptor_max, mcp_max_access);
         if !descriptor_max.covers(required_access) {
@@ -691,8 +1006,10 @@ impl SessionActor {
                 subagent_type: self.subagent_type_label(),
             },
         );
-        let aggregate = self
-            .dispatch_hook_occurrence(
+        let decision = if let Some(decision) = recovered_hook_decision {
+            decision
+        } else {
+            self.dispatch_hook_occurrence(
                 ::hooks::event::HookEventName::PreToolUse,
                 chat_state::HookCause::Tool {
                     call_id: call.id.clone(),
@@ -705,8 +1022,9 @@ impl SessionActor {
             .map_err(|error| {
                 acp::Error::internal_error()
                     .data(format!("pre-tool hook lifecycle was not durable: {error}"))
-            })?;
-        let decision = aggregate.into_tool_decision();
+            })?
+            .into_tool_decision()
+        };
         if let ::hooks::result::HookDecision::Deny { hook_name, reason } = decision {
             return Ok(ToolPreflight::resolved(
                 self.deny_tool(&call.id, &tool_call_id, hook_name, reason)
@@ -840,52 +1158,50 @@ impl SessionActor {
                         .map(|cwd| std::path::PathBuf::from(cwd.as_str())),
                 }
             });
-            let decision = {
-                let _pending_guard =
-                    crate::session::pending_interaction::PendingInteractionGuard::new(
-                        self.pending_interactions.clone(),
-                        self.notifications.gateway.clone(),
-                        self.session_info.id.clone(),
-                        tool_call_id.to_string(),
-                        crate::session::pending_interaction::PendingKind::Permission,
-                    );
-                self.permissions
-                    .request_with_context(
-                        access_kind.clone(),
-                        tool_call_update,
-                        edit_path_context,
-                        workspace::permission::types::PermissionRequestContext {
-                            source: if self.startup_hints.is_subagent {
-                                workspace::permission::types::PermissionRequestSource::Child {
-                                    session_id: self.session_info.id.0.to_string(),
-                                    subagent_type: self.subagent_type_label(),
-                                    subagent_description: self
-                                        .startup_hints
-                                        .subagent_description
-                                        .clone(),
-                                }
-                            } else {
-                                workspace::permission::types::PermissionRequestSource::Primary {
-                                    session_id: Some(self.session_info.id.0.to_string()),
-                                }
-                            },
-                            request_mode: child_permission_mode,
-                            within_capability_fence,
-                            execution_cwd: Some(std::path::PathBuf::from(
-                                self.session_info.cwd.as_str(),
-                            )),
-                            classifier_turns,
-                            call_evidence: self.startup_hints.is_subagent.then(|| {
-                                permission_call_evidence(
-                                    &call.function.name,
-                                    &raw_input,
-                                    &tool_input,
-                                )
-                            }),
+            let runtime_suspend = self.state.lock().await.runtime_suspend.clone();
+            let decision = self
+                .permissions
+                .request_with_context(
+                    access_kind.clone(),
+                    tool_call_update,
+                    edit_path_context,
+                    workspace::permission::types::PermissionRequestContext {
+                        source: if self.startup_hints.is_subagent {
+                            workspace::permission::types::PermissionRequestSource::Child {
+                                session_id: self.session_info.id.0.to_string(),
+                                subagent_type: self.subagent_type_label(),
+                                subagent_description: self
+                                    .startup_hints
+                                    .subagent_description
+                                    .clone(),
+                            }
+                        } else {
+                            workspace::permission::types::PermissionRequestSource::Primary {
+                                session_id: Some(self.session_info.id.0.to_string()),
+                            }
                         },
-                    )
-                    .await
-            };
+                        request_mode: child_permission_mode,
+                        within_capability_fence,
+                        execution_cwd: Some(std::path::PathBuf::from(
+                            self.session_info.cwd.as_str(),
+                        )),
+                        classifier_turns,
+                        call_evidence: self.startup_hints.is_subagent.then(|| {
+                            permission_call_evidence(&call.function.name, &raw_input, &tool_input)
+                        }),
+                        human_interaction: Some(std::sync::Arc::new(TimelinePermissionObserver {
+                            pending: self.pending_interactions.clone(),
+                            gateway: self.notifications.gateway.clone(),
+                            session_id: self.session_info.id.clone(),
+                            call_id: tool_call_id.to_string(),
+                            attempt_id: uuid::Uuid::now_v7().to_string(),
+                            chat_state: self.chat_state_handle.clone(),
+                            runtime_suspend: runtime_suspend.clone(),
+                            guard: std::sync::Mutex::new(None),
+                        })),
+                    },
+                )
+                .await;
             if emit_permission_diagnostics {
                 self.events.permission_resolved(
                     &call.function.name,
@@ -1088,6 +1404,24 @@ impl SessionActor {
                     return Ok(ToolPreflight::resolved(ToolLoop::Continue));
                 }
             } else {
+                // A checkpoint retains the original submitted tool call. Rebind
+                // that approval against its committed submission instead of
+                // submitting again or rejecting AwaitingApproval as Drafting.
+                let restoring_submission = self
+                    .turn_continuation
+                    .borrow()
+                    .as_ref()
+                    .and_then(|turn| {
+                        turn.operations
+                            .iter()
+                            .find(|operation| operation.call_id == call.id)
+                    })
+                    .is_some_and(|operation| {
+                        matches!(
+                            operation.state,
+                            chat_state::session_runtime::SuspendedOperationState::AwaitUser
+                        )
+                    });
                 let valid = match input.action {
                     PlanControlAction::Submit => self.behavior.lock().is_drafting_plan(),
                     PlanControlAction::Amend => {
@@ -1101,7 +1435,7 @@ impl SessionActor {
                     }
                     PlanControlAction::Complete | PlanControlAction::Cancel => unreachable!(),
                 };
-                if !valid {
+                if !valid && !restoring_submission {
                     self.handle_tool_not_executed(
                         &call.id,
                         &tool_call_id,
@@ -1120,57 +1454,98 @@ impl SessionActor {
                     .trim()
                     .to_owned();
 
-                // Persist the control-plane artifact before opening approval UI.
-                // This is not a workspace edit and does not grant the Agent an
-                // Edit tool.
-                let artifact_hash = match write_plan_artifact_async(
-                    self.session_directory.clone(),
-                    plan_content.clone(),
-                )
-                .await
-                {
-                    Ok(hash) => hash,
-                    Err(error) => {
-                        tracing::warn!(
-                            %error,
-                            "failed to persist submitted plan before approval"
-                        );
-                        self.handle_tool_not_executed(
-                            &call.id,
-                            &tool_call_id,
-                            format!("Failed to persist the plan artifact: {error}"),
-                        )
-                        .await?;
-                        return Ok(ToolPreflight::resolved(ToolLoop::Continue));
+                if restoring_submission {
+                    let snapshot = self.behavior.lock().snapshot();
+                    let expected_phase = match input.action {
+                        PlanControlAction::Submit => {
+                            crate::session::behavior::PlanPhase::AwaitingApproval
+                        }
+                        PlanControlAction::Amend => crate::session::behavior::PlanPhase::Amending,
+                        _ => unreachable!(),
+                    };
+                    if !snapshot.approval_pending
+                        || snapshot.state
+                            != crate::session::behavior::BehaviorState::Plan(expected_phase)
+                        || snapshot.plan_submission_id.is_none()
+                        || !self.behavior.lock().plan_artifact_is_valid(&plan_content)
+                    {
+                        return Err(crate::session::commands::fatal_turn_boundary_error(
+                            "plan-approval-restore",
+                            "restored Plan call conflicts with the committed pending submission",
+                        ));
                     }
-                };
-                let previous_behavior = self.behavior.lock().snapshot();
-                self.behavior.lock().record_plan_artifact(&plan_content);
-                debug_assert_eq!(
-                    self.behavior.lock().plan_artifact_hash(),
-                    Some(artifact_hash.as_str())
-                );
-                let submitted = match input.action {
-                    PlanControlAction::Submit => self.behavior.lock().submit_initial_plan(),
-                    PlanControlAction::Amend => self.behavior.lock().submit_plan_amendment(),
-                    PlanControlAction::Complete | PlanControlAction::Cancel => unreachable!(),
-                };
-                if !submitted {
-                    self.handle_tool_not_executed(
+                    let body = read_plan_artifact_async(
+                        self.session_directory.clone(),
+                        snapshot
+                            .plan_artifact_hash
+                            .expect("validated artifact hash"),
+                    )
+                    .await
+                    .map_err(|error| {
+                        crate::session::commands::fatal_turn_boundary_error(
+                            "plan-approval-restore",
+                            error.to_string(),
+                        )
+                    })?;
+                    if body != plan_content {
+                        return Err(crate::session::commands::fatal_turn_boundary_error(
+                            "plan-approval-restore",
+                            "restored Plan body differs from its artifact",
+                        ));
+                    }
+                } else {
+                    // Persist the control-plane artifact before opening approval UI.
+                    // This is not a workspace edit and does not grant the Agent an
+                    // Edit tool.
+                    let artifact_hash = match write_plan_artifact_async(
+                        self.session_directory.clone(),
+                        plan_content.clone(),
+                    )
+                    .await
+                    {
+                        Ok(hash) => hash,
+                        Err(error) => {
+                            tracing::warn!(
+                                %error,
+                                "failed to persist submitted plan before approval"
+                            );
+                            self.handle_tool_not_executed(
+                                &call.id,
+                                &tool_call_id,
+                                format!("Failed to persist the plan artifact: {error}"),
+                            )
+                            .await?;
+                            return Ok(ToolPreflight::resolved(ToolLoop::Continue));
+                        }
+                    };
+                    let previous_behavior = self.behavior.lock().snapshot();
+                    self.behavior.lock().record_plan_artifact(&plan_content);
+                    debug_assert_eq!(
+                        self.behavior.lock().plan_artifact_hash(),
+                        Some(artifact_hash.as_str())
+                    );
+                    let submitted = match input.action {
+                        PlanControlAction::Submit => self.behavior.lock().submit_initial_plan(),
+                        PlanControlAction::Amend => self.behavior.lock().submit_plan_amendment(),
+                        PlanControlAction::Complete | PlanControlAction::Cancel => unreachable!(),
+                    };
+                    if !submitted {
+                        self.handle_tool_not_executed(
                     &call.id,
                     &tool_call_id,
                     "Rejected: a plan can only be submitted while drafting or while executing an approved plan that needs amendment.".to_owned(),
                 )
                 .await?;
-                    return Ok(ToolPreflight::resolved(ToolLoop::Continue));
-                }
-                if let Err(message) = self
-                    .commit_behavior_mutation_or_restore(previous_behavior)
-                    .await
-                {
-                    self.handle_tool_not_executed(&call.id, &tool_call_id, message)
-                        .await?;
-                    return Ok(ToolPreflight::resolved(ToolLoop::Continue));
+                        return Ok(ToolPreflight::resolved(ToolLoop::Continue));
+                    }
+                    if let Err(message) = self
+                        .commit_behavior_mutation_or_restore(previous_behavior)
+                        .await
+                    {
+                        self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                            .await?;
+                        return Ok(ToolPreflight::resolved(ToolLoop::Continue));
+                    }
                 }
                 let approval_snapshot = self.behavior.lock().snapshot();
 
@@ -1182,133 +1557,119 @@ impl SessionActor {
                     .request_plan_approval(&tool_call_id, plan_content.clone())
                     .await;
                 match resp {
-                    Ok(parsed) => match parsed.outcome {
-                        PlanApprovalOutcome::Abandoned => {
-                            tracing::info!("plan_control: user abandoned Plan");
-                            match self.finish_plan_to_default_if(&approval_snapshot).await {
-                                Ok(true) => {}
-                                Ok(false) => {
-                                    tracing::info!("plan_control: dropping stale abandon decision");
-                                    self.handle_tool_not_executed(
-                                        &call.id,
-                                        &tool_call_id,
-                                        "Plan approval was stale and was discarded.".to_owned(),
-                                    )
-                                    .await?;
-                                    return Ok(ToolPreflight::resolved(ToolLoop::Continue));
-                                }
-                                Err(message) => {
-                                    self.handle_tool_not_executed(&call.id, &tool_call_id, message)
-                                        .await?;
-                                    return Ok(ToolPreflight::resolved(ToolLoop::Continue));
-                                }
-                            }
-                            let message = format!(
-                                "The user chose to abandon the plan entirely (via the Abandon option in the plan approval dialog). Plan mode has been disabled. Do not call {} again unless the user explicitly asks to re-enter plan mode.",
-                                call.function.name
-                            );
-                            let tool_update = acp::ToolCallUpdate::new(
-                                tool_call_id.clone(),
-                                acp::ToolCallUpdateFields::new()
-                                    .status(Some(acp::ToolCallStatus::Completed))
-                                    .content(Some(vec![acp::ToolCallContent::from(
-                                        acp::ContentBlock::Text(acp::TextContent::new(
-                                            message.clone(),
-                                        )),
-                                    )])),
-                            );
-                            self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
-                                .await;
-                            let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
-                            self.chat_state_handle.push_tool_result(tool_chat);
-                            return Ok(ToolPreflight::resolved(ToolLoop::Control(
-                                ControlDisposition::EndTurn,
-                            )));
+                    Ok(parsed) => {
+                        if let Err(message) =
+                            self.accept_plan_decision(&approval_snapshot, &parsed).await
+                        {
+                            self.handle_tool_not_executed(&call.id, &tool_call_id, message)
+                                .await?;
+                            return Ok(ToolPreflight::resolved(ToolLoop::Continue));
                         }
-                        PlanApprovalOutcome::Cancelled => {
-                            let previous_behavior = self.behavior.lock().snapshot();
-                            if !self.behavior.lock().reject_submitted_plan_if_with_feedback(
-                                &approval_snapshot,
-                                parsed.feedback.clone(),
-                            ) {
-                                tracing::info!(
-                                    "plan_control: dropping stale request-changes decision"
+                        match parsed.outcome {
+                            PlanApprovalOutcome::Abandoned => {
+                                tracing::info!("plan_control: user abandoned Plan");
+                                self.enqueue_current_mode_update(acp::SessionModeId::new(
+                                    tool_types::BehaviorId::Normal.as_id(),
+                                ));
+                                self.send_available_commands_update().await;
+                                let message = format!(
+                                    "The user chose to abandon the plan entirely (via the Abandon option in the plan approval dialog). Plan mode has been disabled. Do not call {} again unless the user explicitly asks to re-enter plan mode.",
+                                    call.function.name
                                 );
-                                self.handle_tool_not_executed(
-                                    &call.id,
-                                    &tool_call_id,
-                                    "Plan approval was stale and was discarded.".to_owned(),
+                                let tool_update = acp::ToolCallUpdate::new(
+                                    tool_call_id.clone(),
+                                    acp::ToolCallUpdateFields::new()
+                                        .status(Some(acp::ToolCallStatus::Completed))
+                                        .content(Some(vec![acp::ToolCallContent::from(
+                                            acp::ContentBlock::Text(acp::TextContent::new(
+                                                message.clone(),
+                                            )),
+                                        )])),
+                                );
+                                self.send_update(
+                                    acp::SessionUpdate::ToolCallUpdate(tool_update),
+                                    None,
                                 )
-                                .await?;
-                                return Ok(ToolPreflight::resolved(ToolLoop::Continue));
-                            }
-                            if let Err(message) = self
-                                .commit_behavior_mutation_or_restore(previous_behavior)
-                                .await
-                            {
-                                self.handle_tool_not_executed(&call.id, &tool_call_id, message)
-                                    .await?;
-                                return Ok(ToolPreflight::resolved(ToolLoop::Continue));
-                            }
-                            let next = self.behavior.lock().snapshot();
-                            if let Err(error) = self.admit_plan_handoff_notification(&next).await {
-                                tracing::warn!(%error, "Plan revision handoff receipt will be reconciled after restore");
-                            }
-                            let message = "The Plan is now in the revision phase.".to_owned();
-                            let tool_update = acp::ToolCallUpdate::new(
-                                tool_call_id.clone(),
-                                acp::ToolCallUpdateFields::new()
-                                    .status(Some(acp::ToolCallStatus::Completed))
-                                    .content(Some(vec![acp::ToolCallContent::from(
-                                        acp::ContentBlock::Text(acp::TextContent::new(
-                                            message.clone(),
-                                        )),
-                                    )])),
-                            );
-                            self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
                                 .await;
-                            let tool_chat = ConversationItem::tool_result(call.id.clone(), message);
-                            self.chat_state_handle.push_tool_result(tool_chat);
-                            return Ok(ToolPreflight::resolved(ToolLoop::Control(
-                                ControlDisposition::ResampleStep,
-                            )));
-                        }
-                        PlanApprovalOutcome::Approved => {
-                            let previous_behavior = self.behavior.lock().snapshot();
-                            if !self
-                                .behavior
-                                .lock()
-                                .approve_submitted_plan_if_with_feedback(
-                                    &approval_snapshot,
-                                    parsed.feedback.clone(),
+                                let tool_chat =
+                                    ConversationItem::tool_result(call.id.clone(), message);
+                                self.chat_state_handle.push_tool_result(tool_chat);
+                                return Ok(ToolPreflight::resolved(ToolLoop::Control(
+                                    ControlDisposition::EndTurn,
+                                )));
+                            }
+                            PlanApprovalOutcome::Cancelled => {
+                                let next = self.behavior.lock().snapshot();
+                                if let Err(error) =
+                                    self.admit_plan_handoff_notification(&next).await
+                                {
+                                    tracing::warn!(%error, "Plan revision handoff receipt will be reconciled after restore");
+                                }
+                                let message = "The Plan is now in the revision phase.".to_owned();
+                                let tool_update = acp::ToolCallUpdate::new(
+                                    tool_call_id.clone(),
+                                    acp::ToolCallUpdateFields::new()
+                                        .status(Some(acp::ToolCallStatus::Completed))
+                                        .content(Some(vec![acp::ToolCallContent::from(
+                                            acp::ContentBlock::Text(acp::TextContent::new(
+                                                message.clone(),
+                                            )),
+                                        )])),
+                                );
+                                self.send_update(
+                                    acp::SessionUpdate::ToolCallUpdate(tool_update),
+                                    None,
                                 )
-                            {
-                                self.handle_tool_not_executed(
-                                    &call.id,
-                                    &tool_call_id,
-                                    "Plan approval arrived in an invalid phase.".to_owned(),
-                                )
-                                .await?;
-                                return Ok(ToolPreflight::resolved(ToolLoop::Continue));
+                                .await;
+                                let tool_chat =
+                                    ConversationItem::tool_result(call.id.clone(), message);
+                                self.chat_state_handle.push_tool_result(tool_chat);
+                                return Ok(ToolPreflight::resolved(ToolLoop::Control(
+                                    ControlDisposition::ResampleStep,
+                                )));
                             }
-                            if let Err(message) = self
-                                .commit_behavior_mutation_or_restore(previous_behavior)
-                                .await
-                            {
-                                self.handle_tool_not_executed(&call.id, &tool_call_id, message)
-                                    .await?;
-                                return Ok(ToolPreflight::resolved(ToolLoop::Continue));
+                            PlanApprovalOutcome::Approved => {
+                                let next = self.behavior.lock().snapshot();
+                                if let Err(error) =
+                                    self.admit_plan_handoff_notification(&next).await
+                                {
+                                    tracing::warn!(%error, "Plan execution handoff receipt will be reconciled after restore");
+                                }
+                                self.enqueue_current_mode_update(acp::SessionModeId::new(
+                                    tools::types::BehaviorId::Plan.as_id(),
+                                ));
+                                tracing::info!("plan_control: user approved frozen Plan contract");
                             }
-                            let next = self.behavior.lock().snapshot();
-                            if let Err(error) = self.admit_plan_handoff_notification(&next).await {
-                                tracing::warn!(%error, "Plan execution handoff receipt will be reconciled after restore");
+                            PlanApprovalOutcome::Deferred => {
+                                let message = "The user retained this Plan for later review. Execution has not been approved. This planning interaction ends now; do not resubmit or continue execution until the user explicitly reviews it again.".to_owned();
+                                self.chat_state_handle
+                                    .push_tool_result_durably(ConversationItem::tool_result(
+                                        call.id.clone(),
+                                        message.clone(),
+                                    ))
+                                    .await
+                                    .map_err(|error| {
+                                        crate::session::commands::fatal_turn_boundary_error(
+                                            "Plan defer result",
+                                            error.to_string(),
+                                        )
+                                    })?;
+                                let update = acp::ToolCallUpdate::new(
+                                    tool_call_id.clone(),
+                                    acp::ToolCallUpdateFields::new()
+                                        .status(Some(acp::ToolCallStatus::Completed))
+                                        .content(Some(vec![acp::ToolCallContent::from(
+                                            acp::ContentBlock::Text(acp::TextContent::new(message)),
+                                        )])),
+                                );
+                                self.send_update(acp::SessionUpdate::ToolCallUpdate(update), None)
+                                    .await;
+                                return Ok(ToolPreflight::resolved(ToolLoop::Control(
+                                    ControlDisposition::EndTurn,
+                                )));
                             }
-                            self.enqueue_current_mode_update(acp::SessionModeId::new(
-                                tools::types::BehaviorId::Plan.as_id(),
-                            ));
-                            tracing::info!("plan_control: user approved frozen Plan contract");
                         }
-                    },
+                    }
                     Err(err) => {
                         if ext_method_no_client(&err) {
                             tracing::warn!(%err, "plan_control: no approval client; failing closed");
@@ -1434,6 +1795,7 @@ impl SessionActor {
         )
         .await;
         let prepared = PreparedToolCall {
+            skill_selection,
             call_id: call.id.clone(),
             tool_call_id,
             tool_name: call.function.name.clone(),
@@ -1591,5 +1953,232 @@ mod coordination_tool_start_tests {
                 .await;
             })
             .await;
+    }
+}
+
+#[cfg(test)]
+mod restored_pre_tool_hook_tests {
+    use super::*;
+    use chat_state::session_runtime::{
+        SuspendedOperation, SuspendedOperationState, TurnContinuation,
+    };
+
+    fn continuation(state: SuspendedOperationState) -> TurnContinuation {
+        TurnContinuation {
+            turn_id: chat_state::TurnId(7),
+            prompt_id: "prompt-7".into(),
+            prompt_index: 0,
+            origin: "user".into(),
+            next_step_index: 1,
+            tool_turns_used: 1,
+            tool_calls_used: 1,
+            stop_continuations_used: 0,
+            output_schema: None,
+            resume_point: chat_state::session_runtime::TurnResumePoint::Model,
+            task_output_usage: None,
+            accepted_response: None,
+            structured_output_retries: 0,
+            sampling_attempts_used: 1,
+            sampling_max_attempts: None,
+            sampling_replay_safe: false,
+            sampling_deadline_ms: None,
+            operations: vec![SuspendedOperation {
+                call_id: "call-1".into(),
+                state,
+                dependency_id: Some("question-or-permission".into()),
+            }],
+        }
+    }
+
+    fn event(seq: u64, kind: chat_state::TimelineEventKind) -> chat_state::TimelineEvent {
+        chat_state::TimelineEvent {
+            version: chat_state::TIMELINE_SCHEMA_VERSION,
+            seq: chat_state::EventSeq::new(seq),
+            at_ms: seq as i64,
+            kind,
+        }
+    }
+
+    fn facts(decision: chat_state::HookGateDecision) -> Vec<chat_state::TimelineEvent> {
+        use chat_state::{
+            HookAggregateDecision, HookCause, HookEvent, HookEventType, HookGateKind, StepId,
+            TimelineEventKind, ToolEvent,
+        };
+        vec![
+            event(
+                0,
+                TimelineEventKind::Tool(ToolEvent::Started {
+                    call_id: "call-1".into(),
+                    turn: chat_state::TurnId(7),
+                    step: StepId {
+                        turn: chat_state::TurnId(7),
+                        index: 0,
+                    },
+                    name: "ask_user_question".into(),
+                    input: Some(serde_json::json!({"questions": ["continue?"]})),
+                }),
+            ),
+            event(
+                1,
+                TimelineEventKind::Hook(HookEvent::Triggered {
+                    occurrence_id: "hook-call-1".into(),
+                    event: HookEventType::PreToolUse,
+                    gate: HookGateKind::Tool,
+                    cause: HookCause::Tool {
+                        call_id: "call-1".into(),
+                    },
+                    config_generation: 1,
+                    handlers: Vec::new(),
+                }),
+            ),
+            event(
+                2,
+                TimelineEventKind::Hook(HookEvent::Completed {
+                    occurrence_id: "hook-call-1".into(),
+                    decision: HookAggregateDecision::Tool { decision },
+                }),
+            ),
+        ]
+    }
+
+    #[test]
+    fn exact_restored_call_reuses_completed_hook_without_replaying_it() {
+        let continuation = continuation(SuspendedOperationState::AwaitUser);
+        let events = facts(chat_state::HookGateDecision::Allow);
+        let decision = restored_pre_tool_decision_from_facts(
+            Some(&continuation),
+            &["call-1".into()],
+            "call-1",
+            "ask_user_question",
+            &serde_json::json!({"questions": ["continue?"]}),
+            &events,
+        )
+        .expect("completed pre-tool decision is reusable");
+        assert_eq!(decision, Some(::hooks::result::HookDecision::Allow));
+        assert_eq!(
+            events.len(),
+            3,
+            "recovery does not append a second hook lifecycle"
+        );
+
+        let unknown = restored_pre_tool_decision_from_facts(
+            Some(&continuation),
+            &["call-1".into()],
+            "different-call",
+            "ask_user_question",
+            &serde_json::json!({"questions": ["continue?"]}),
+            &events,
+        )
+        .expect("an unrelated call is ordinary work");
+        assert!(unknown.is_none());
+    }
+
+    #[test]
+    fn restored_waiting_call_without_unique_completed_hook_fails_closed() {
+        let waiting_continuation = continuation(SuspendedOperationState::AwaitPermission);
+        let start_only = facts(chat_state::HookGateDecision::Allow)
+            .into_iter()
+            .take(1)
+            .collect::<Vec<_>>();
+        let missing = restored_pre_tool_decision_from_facts(
+            Some(&waiting_continuation),
+            &["call-1".into()],
+            "call-1",
+            "ask_user_question",
+            &serde_json::json!({"questions": ["continue?"]}),
+            &start_only,
+        );
+        assert!(missing.unwrap_err().contains("PreToolUse occurrence"));
+
+        let complete = facts(chat_state::HookGateDecision::Block {
+            reason: "denied by policy".into(),
+        });
+        let not_active = restored_pre_tool_decision_from_facts(
+            Some(&waiting_continuation),
+            &[],
+            "call-1",
+            "ask_user_question",
+            &serde_json::json!({"questions": ["continue?"]}),
+            &complete,
+        );
+        assert!(
+            not_active
+                .unwrap_err()
+                .contains("not active in the event tracker")
+        );
+
+        let changed_questions = restored_pre_tool_decision_from_facts(
+            Some(&waiting_continuation),
+            &["call-1".into()],
+            "call-1",
+            "ask_user_question",
+            &serde_json::json!({"questions": ["different question?"]}),
+            &complete,
+        );
+        assert!(
+            changed_questions
+                .unwrap_err()
+                .contains("conflicting Timeline start or input")
+        );
+
+        let not_dispatched = continuation(SuspendedOperationState::NotDispatched);
+        assert!(
+            !restored_waiting_operation(Some(&not_dispatched), "call-1")
+                .expect("not-yet-started call uses ordinary path")
+        );
+        let outcome_unknown = continuation(SuspendedOperationState::OutcomeUnknown);
+        assert!(
+            restored_waiting_operation(Some(&outcome_unknown), "call-1")
+                .unwrap_err()
+                .contains("not resumable")
+        );
+    }
+
+    #[test]
+    fn unknown_pre_tool_side_effect_cannot_be_reused_as_a_restored_decision() {
+        use chat_state::{
+            HookAggregateDecision, HookEvent, HookGateDecision, HookRunControl, HookRunOutcome,
+            TimelineEventKind,
+        };
+        let mut events = facts(HookGateDecision::Allow);
+        events.pop();
+        events.push(event(
+            2,
+            TimelineEventKind::Hook(HookEvent::RunStarted {
+                occurrence_id: "hook-call-1".into(),
+                run_id: "hook-run".into(),
+                handler_index: 0,
+            }),
+        ));
+        events.push(event(
+            3,
+            TimelineEventKind::Hook(HookEvent::RunFinished {
+                occurrence_id: "hook-call-1".into(),
+                run_id: "hook-run".into(),
+                handler_index: 0,
+                elapsed_ms: 0,
+                outcome: HookRunOutcome::InterruptedOutcomeUnknown,
+                control: HookRunControl::None,
+            }),
+        ));
+        events.push(event(
+            4,
+            TimelineEventKind::Hook(HookEvent::Completed {
+                occurrence_id: "hook-call-1".into(),
+                decision: HookAggregateDecision::Tool {
+                    decision: HookGateDecision::Allow,
+                },
+            }),
+        ));
+        let error = restored_pre_tool_decision_from_facts(
+            Some(&continuation(SuspendedOperationState::AwaitPermission)),
+            &["call-1".into()],
+            "call-1",
+            "ask_user_question",
+            &serde_json::json!({"questions": ["continue?"]}),
+            &events,
+        )
+        .unwrap_err();
+        assert!(error.contains("unknown PreToolUse side-effect outcome"));
     }
 }

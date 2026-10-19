@@ -486,6 +486,7 @@ async fn auto_promote_follow_up_uses_the_interjection_path_once() {
                 prompt_id: queued.prompt_id.clone(),
                 requested_route: crate::session::input_inbox::InputRequestRoute::Fifo,
                 prompt_blocks: queued.prompt_blocks.clone(),
+                skill_invocations: Vec::new(),
                 client_identifier: queued.client_identifier.clone(),
                 screen_mode: queued.screen_mode.clone(),
                 verbatim: queued.verbatim,

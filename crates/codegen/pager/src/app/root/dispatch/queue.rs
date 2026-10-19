@@ -539,9 +539,13 @@ pub(crate) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                     block.message_id = Some(prompt_id.clone());
                 }
             }
-            // Stash for cancel-with-restore. Only plain (non-skill) prompts
-            // can be reversed back into the input box.
-            if queued.wire_blocks.is_none() {
+            // Preserve the exact submission for checkpoint and explicit retry.
+            // A selected Skill keeps its source metadata beside the raw text.
+            let frozen_skill_selection = queued
+                .wire_blocks
+                .as_deref()
+                .and_then(frozen_skill_selection_from_blocks);
+            if queued.wire_blocks.is_none() || frozen_skill_selection.is_some() {
                 let earlier = combined_entries
                     .iter()
                     .copied()
@@ -551,6 +555,7 @@ pub(crate) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                     prompt_id: Some(prompt_id.clone()),
                     admission_resolved: None,
                     expected_turn_id: queued.expected_turn_id.clone(),
+                    frozen_skill_selection,
                     text: queued.text.clone(),
                     images: queued.images.clone(),
                     scrollback_entry: prompt_entry_id,
@@ -683,6 +688,79 @@ pub(crate) fn maybe_drain_queue(agent: &mut AgentView) -> QueueDrain {
                 page_flip_entry: None,
             }
         }
+    }
+}
+
+fn frozen_skill_selection_from_blocks(
+    blocks: &[acp::ContentBlock],
+) -> Option<crate::app::session::FrozenSkillSelection> {
+    blocks.iter().find_map(|block| {
+        let acp::ContentBlock::Text(text) = block else {
+            return None;
+        };
+        text.meta
+            .as_ref()?
+            .get("grow/skillSelection")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+    })
+}
+
+#[cfg(test)]
+mod frozen_skill_queue_tests {
+    use super::*;
+
+    #[test]
+    fn selected_skill_drain_keeps_checkpoint_intent_and_source_identity() {
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        let id = *app.agents.keys().next().expect("test agent");
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("selected-skill-checkpoint"));
+        let mut block = acp::TextContent::new("/local:review inspect".to_owned());
+        block.meta = Some(
+            [(
+                "grow/skillSelection".into(),
+                serde_json::json!({
+                    "name": "local:review",
+                    "path": "/repo/.grow/skills/review/SKILL.md",
+                    "plugin_name": null
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        agent
+            .session
+            .pending_prompts
+            .push_back(crate::app::session::QueuedPrompt {
+                wire_blocks: Some(vec![acp::ContentBlock::Text(block)]),
+                display_as_skill: true,
+                ..crate::app::session::QueuedPrompt::plain(
+                    1,
+                    "/local:review inspect",
+                    crate::app::session::QueueEntryKind::Prompt,
+                )
+            });
+
+        let drain = maybe_drain_queue(agent);
+
+        assert!(matches!(
+            drain.effects.as_slice(),
+            [Effect::SendPromptBlocks { .. }]
+        ));
+        let in_flight = agent
+            .session
+            .in_flight_prompt
+            .as_ref()
+            .expect("skill request must enter the durable input-intent checkpoint");
+        assert_eq!(in_flight.text, "/local:review inspect");
+        assert_eq!(
+            in_flight.frozen_skill_selection,
+            Some(crate::app::session::FrozenSkillSelection {
+                name: "local:review".into(),
+                path: "/repo/.grow/skills/review/SKILL.md".into(),
+                plugin_name: None,
+            })
+        );
     }
 }
 
@@ -851,6 +929,7 @@ pub(crate) fn apply_turn_start_shim(
                 prompt_id: Some(prompt_id.clone()),
                 admission_resolved: None,
                 expected_turn_id: None,
+                frozen_skill_selection: None,
                 text: restore,
                 images: Vec::new(),
                 scrollback_entry: last_id,
@@ -893,6 +972,7 @@ pub(crate) fn apply_turn_start_shim(
                 prompt_id: Some(prompt_id.clone()),
                 admission_resolved: None,
                 expected_turn_id: None,
+                frozen_skill_selection: None,
                 text: restore_text,
                 images: Vec::new(),
                 scrollback_entry: prompt_entry_id,

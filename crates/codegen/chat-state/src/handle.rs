@@ -47,6 +47,76 @@ impl Drop for HandleLifetime {
 }
 
 impl ChatStateHandle {
+    pub async fn planning_state(
+        &self,
+    ) -> Result<Option<crate::timeline::PlanningSnapshot>, String> {
+        self.query("GetPlanningState", |reply| {
+            ChatStateCommand::GetPlanningState { reply }
+        })
+        .await
+        .ok_or_else(|| "planning authority is unavailable".into())
+    }
+
+    pub async fn consumed_agent_messages(
+        &self,
+        ids: Vec<String>,
+    ) -> Result<std::collections::BTreeSet<String>, String> {
+        self.query("GetConsumedAgentMessages", |reply| {
+            ChatStateCommand::GetConsumedAgentMessages { ids, reply }
+        })
+        .await
+        .ok_or_else(|| "agent-message consumption evidence is unavailable".into())
+    }
+
+    pub async fn runtime_state(&self) -> Result<crate::session_runtime::RuntimeLifecycle, String> {
+        self.query("GetRuntimeState", |reply| {
+            ChatStateCommand::GetRuntimeState { reply }
+        })
+        .await
+        .ok_or_else(|| "runtime authority is unavailable".into())
+    }
+
+    /// The Timeline owner selects the frontier in the same mailbox operation
+    /// as the checkpoint commit; a caller cannot race a query against writes.
+    pub async fn checkpoint_runtime(
+        &self,
+        operation_id: String,
+        runtime_source_hash: String,
+        turn: Option<crate::session_runtime::TurnContinuation>,
+        step: Option<crate::StepId>,
+        deadline: tokio::time::Instant,
+    ) -> Result<crate::TimelineEvent, TimelineWriteError> {
+        self.query("CheckpointRuntime", |reply| {
+            ChatStateCommand::CheckpointRuntime {
+                operation_id,
+                runtime_source_hash,
+                turn,
+                step,
+                deadline,
+                reply,
+            }
+        })
+        .await
+        .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
+    }
+
+    /// Settle only in-flight Hook executions under the current suspension
+    /// operation. Every emitted fact is durably committed before returning.
+    pub async fn settle_hooks_for_suspension(
+        &self,
+        operation_id: String,
+        deadline: tokio::time::Instant,
+    ) -> Result<Vec<crate::TimelineEvent>, TimelineWriteError> {
+        self.query("SettleHooksForSuspension", |reply| {
+            ChatStateCommand::SettleHooksForSuspension {
+                operation_id,
+                deadline,
+                reply,
+            }
+        })
+        .await
+        .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
+    }
     /// Create a new handle with the given command sender.
     pub(crate) fn new(
         cmd_tx: mpsc::UnboundedSender<ChatStateCommand>,
@@ -201,6 +271,35 @@ impl ChatStateHandle {
         .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
     }
 
+    /// Atomically consume an admitted input group and append its User message
+    /// followed by ordered user SkillLoad items, provided the frozen Surface
+    /// revision and canonical token headroom still match.
+    pub async fn consume_input_group_conditionally(
+        &self,
+        input_ids: Vec<String>,
+        turn: crate::TurnId,
+        item: ConversationItem,
+        display_echo: Option<crate::UserDisplayEcho>,
+        skill_loads: Vec<sampling_types::SkillLoadItem>,
+        expected_surface_revision: u64,
+        max_context_tokens: u64,
+    ) -> Result<ConditionalToolResultOutcome, TimelineWriteError> {
+        self.query("ConsumeInputGroupConditionally", |reply| {
+            ChatStateCommand::ConsumeInputGroupConditionally {
+                input_ids,
+                turn,
+                item,
+                display_echo,
+                skill_loads,
+                expected_surface_revision,
+                max_context_tokens,
+                reply,
+            }
+        })
+        .await
+        .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
+    }
+
     pub async fn recover_interrupted_durably(
         &self,
     ) -> Result<Vec<crate::TimelineEvent>, TimelineWriteError> {
@@ -332,6 +431,44 @@ impl ChatStateHandle {
         })
         .await
         .ok_or(TimelineWriteError::AcknowledgementLost)?
+    }
+
+    /// Atomically publish a model `load_skill` result with its SkillLoad item,
+    /// or close the call with only the rejection result when admission fails.
+    pub async fn publish_model_skill_conditionally(
+        &self,
+        item: ConversationItem,
+        skill: sampling_types::SkillLoadItem,
+        rejection_item: ConversationItem,
+        expected_surface_revision: u64,
+        max_context_tokens: u64,
+        max_result_tokens: u64,
+    ) -> Result<ConditionalToolResultOutcome, TimelineWriteError> {
+        self.query("PublishModelSkillConditionally", |reply| {
+            ChatStateCommand::PublishModelSkillConditionally {
+                item,
+                skill,
+                rejection_item,
+                expected_surface_revision,
+                max_context_tokens,
+                max_result_tokens,
+                reply,
+            }
+        })
+        .await
+        .ok_or(TimelineWriteError::AcknowledgementLost)?
+    }
+
+    /// Persist removal of unconsumed loaded-skill bodies from the active
+    /// Surface. Returns `None` when every current SkillLoad was consumed.
+    pub async fn settle_unconsumed_skill_loads(
+        &self,
+    ) -> Result<Option<crate::TimelineEvent>, TimelineWriteError> {
+        self.query("SettleUnconsumedSkillLoads", |reply| {
+            ChatStateCommand::SettleUnconsumedSkillLoads { reply }
+        })
+        .await
+        .unwrap_or(Err(TimelineWriteError::AcknowledgementLost))
     }
 
     /// Record the provider's canonical current-context total.

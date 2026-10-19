@@ -26,6 +26,10 @@ pub(crate) enum InputPayload<Block = ContentBlock> {
         #[serde(default)]
         requested_route: InputRequestRoute,
         prompt_blocks: Vec<Block>,
+        /// Host-resolved skill references frozen at first admission. This is
+        /// durable identity data, never a model tool argument.
+        #[serde(default)]
+        skill_invocations: Vec<FrozenSkillInvocation>,
         client_identifier: Option<String>,
         screen_mode: Option<String>,
         verbatim: bool,
@@ -34,6 +38,19 @@ pub(crate) enum InputPayload<Block = ContentBlock> {
         turn_kind: crate::session::TurnKind,
         queue: Option<StoredQueueEntry>,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct FrozenSkillInvocation {
+    /// Exact slash-command token accepted at admission time. This remains
+    /// frozen with the selected source so later catalog changes cannot rename
+    /// the callable used to load it.
+    pub(crate) callable_name: String,
+    pub(crate) qualified_name: String,
+    pub(crate) args: String,
+    pub(crate) skill: Option<tools::implementations::skills::types::SkillInfo>,
+    pub(crate) selection_error: Option<String>,
 }
 
 /// Route intent fixed by the first submission, before Hook admission. A steer
@@ -109,6 +126,7 @@ impl<Block> InputPayload<Block> {
             prompt_id,
             requested_route,
             prompt_blocks,
+            skill_invocations,
             client_identifier,
             screen_mode,
             verbatim,
@@ -124,6 +142,7 @@ impl<Block> InputPayload<Block> {
                 .into_iter()
                 .map(map)
                 .collect::<io::Result<_>>()?,
+            skill_invocations,
             client_identifier,
             screen_mode,
             verbatim,
@@ -763,6 +782,52 @@ pub(crate) mod tests {
         assert_ne!(first, input_id_for_prompt("session-a", "prompt-2"));
     }
 
+    #[test]
+    fn legacy_prompt_payload_defaults_to_no_frozen_skill_invocations() {
+        let mut value = serde_json::to_value(text_payload("p", "/local:commit")).unwrap();
+        value.as_object_mut().unwrap().remove("skill_invocations");
+        let restored: InputPayload = serde_json::from_value(value).unwrap();
+        let InputPayload::Prompt {
+            skill_invocations, ..
+        } = restored;
+        assert!(skill_invocations.is_empty());
+    }
+
+    #[test]
+    fn immutable_input_payload_round_trips_exact_frozen_skill_snapshot() {
+        let mut payload = text_payload("p", "/acme:deploy prod");
+        let InputPayload::Prompt {
+            skill_invocations, ..
+        } = &mut payload;
+        *skill_invocations = vec![FrozenSkillInvocation {
+            callable_name: "deploy".into(),
+            qualified_name: "acme:deploy".into(),
+            args: "prod".into(),
+            skill: Some(tools::implementations::skills::types::SkillInfo {
+                name: "deploy".into(),
+                path: "/plugins/acme/deploy/SKILL.md".into(),
+                plugin_name: Some("acme".into()),
+                body: Some("in-memory cached body".into()),
+                ..Default::default()
+            }),
+            selection_error: None,
+        }];
+
+        let temp = tempfile::tempdir().unwrap();
+        let session = open_test_session(temp.path());
+        let frozen_snapshot = payload.clone();
+        let reference = write_payload(&session, &payload).unwrap();
+        let InputPayload::Prompt {
+            skill_invocations, ..
+        } = &mut payload;
+        skill_invocations[0].skill.as_mut().unwrap().body = Some("changed source body".into());
+        assert_eq!(
+            serde_json::to_value(read_payload(&session, &reference).unwrap()).unwrap(),
+            serde_json::to_value(frozen_snapshot).unwrap(),
+            "restoration reads the immutable body snapshot, not the current source"
+        );
+    }
+
     pub(crate) fn text_payload(prompt_id: &str, text: &str) -> InputPayload {
         InputPayload::Prompt {
             prompt_id: prompt_id.into(),
@@ -770,6 +835,7 @@ pub(crate) mod tests {
             prompt_blocks: vec![agent_client_protocol::schema::v1::ContentBlock::Text(
                 agent_client_protocol::schema::v1::TextContent::new(text),
             )],
+            skill_invocations: Vec::new(),
             client_identifier: None,
             screen_mode: None,
             verbatim: false,

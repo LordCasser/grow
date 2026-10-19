@@ -1,11 +1,12 @@
 use super::*;
 use crate::session::{PromptOrigin, TurnKind};
 
-/// Scoped ACP control route for a live child actor. Dropping the child run
-/// removes the route even on cancellation or an early error return.
+/// Scoped ACP control route for a live child actor. Terminal child runs remove
+/// the route; a suspended run transfers its registration to the coordinator.
 struct ActiveChildRegistration {
     sessions: ActiveChildSessions,
     session_id: acp::SessionId,
+    retained: bool,
 }
 
 impl ActiveChildRegistration {
@@ -18,13 +19,20 @@ impl ActiveChildRegistration {
         Self {
             sessions,
             session_id,
+            retained: false,
         }
+    }
+
+    fn retain_route(&mut self) {
+        self.retained = true;
     }
 }
 
 impl Drop for ActiveChildRegistration {
     fn drop(&mut self) {
-        self.sessions.borrow_mut().remove(&self.session_id);
+        if !self.retained {
+            self.sessions.borrow_mut().remove(&self.session_id);
+        }
     }
 }
 use sampling_types::ReasoningEffort;
@@ -47,6 +55,12 @@ pub(super) fn canonical_total_tokens(totals: &chat_state::UsageTotals) -> u64 {
 /// input inbox from admitting an identity that `TurnStarted` cannot reserve.
 pub(super) fn child_task_prompt_identity() -> (PromptOrigin, TurnKind) {
     (PromptOrigin::User, TurnKind::User)
+}
+
+pub(super) fn has_restored_pending_input(inputs: &[chat_state::PendingAllowedInput]) -> bool {
+    // Startup restoration puts every still-allowed input back in the FIFO;
+    // Steer entries are durably rerouted there before being queued.
+    !inputs.is_empty()
 }
 
 pub(super) fn usage_is_incomplete(
@@ -274,14 +288,134 @@ async fn catch_up_child_catalog_generation(
     )
 )]
 pub(crate) async fn run_shell_child(
+    request: SubagentRequest,
+    ctx: SubagentSpawnContext,
+    cancellation: CancellationToken,
+    reporter: ChildReporter<ShellChildRuntime>,
+    gateway: &GatewaySender,
+) -> ChildRunOutcome<ShellCompletionData> {
+    run_shell_child_with_restore(request, ctx, cancellation, reporter, gateway, None).await
+}
+
+pub(crate) async fn run_shell_child_with_restore(
+    request: SubagentRequest,
+    ctx: SubagentSpawnContext,
+    cancellation: CancellationToken,
+    reporter: ChildReporter<ShellChildRuntime>,
+    gateway: &GatewaySender,
+    restore: Option<ChildCheckpoint>,
+) -> ChildRunOutcome<ShellCompletionData> {
+    let outcome = run_shell_child_inner(
+        request,
+        ctx,
+        cancellation,
+        reporter,
+        gateway,
+        restore.clone(),
+    )
+    .await;
+    match (restore, outcome) {
+        (Some(checkpoint), ChildRunOutcome::Finished(output))
+            if !output.completion_data.terminal_committed =>
+        {
+            ChildRunOutcome::RestoreBlocked {
+                checkpoint,
+                error: output
+                    .result
+                    .error
+                    .unwrap_or_else(|| "original child restoration was not confirmed".into()),
+                completion_data: output.completion_data,
+            }
+        }
+        (_, outcome) => outcome,
+    }
+}
+
+async fn run_shell_child_inner(
     mut request: SubagentRequest,
     mut ctx: SubagentSpawnContext,
     cancel_token: CancellationToken,
     reporter: ChildReporter<ShellChildRuntime>,
     gateway: &GatewaySender,
-) -> ChildRunOutput<ShellCompletionData> {
+    restore: Option<ChildCheckpoint>,
+) -> ChildRunOutcome<ShellCompletionData> {
     let start = std::time::Instant::now();
     let mut completion_data = ShellCompletionData::from_context(&ctx);
+    if restore.is_some() {
+        completion_data.spawn_admitted = true;
+        completion_data.terminal_committed = false;
+    }
+    let mut restored_persistence = None;
+    let mut restored_spawn = None;
+    if let Some(checkpoint) = &restore {
+        let source = match ctx.parent_chat_state.as_ref() {
+            Some(parent) => parent.timeline_events().await.and_then(|events| events.into_iter().find(|event| {
+                matches!(&event.kind, chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn)) if spawn.subagent_id == request.id && spawn.child_session_id == checkpoint.session_id && spawn.security_parent_session_id == ctx.security_parent_session_id)
+            })),
+            None => None,
+        };
+        let Some(source) = source else {
+            return child_run_output(
+                failure_result(&request, "original parent Spawn is unavailable"),
+                completion_data,
+            );
+        };
+        let chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn)) =
+            &source.kind
+        else {
+            unreachable!()
+        };
+        let info = SessionInfo {
+            id: acp::SessionId::new(spawn.child_session_id.clone()),
+            cwd: spawn.child_cwd.clone(),
+        };
+        if !Path::new(&info.cwd).is_dir()
+            || spawn
+                .worktree_path
+                .as_deref()
+                .is_some_and(|path| !Path::new(path).is_dir())
+        {
+            return child_run_output(
+                failure_result(&request, "original child workspace is missing"),
+                completion_data,
+            );
+        }
+        match session::persistence::load_light(&info, Some(gateway.clone()), true).await {
+            Ok((loaded, persistence)) => {
+                let runtime = loaded.timeline.runtime_lifecycle();
+                if !matches!(
+                    runtime.phase,
+                    chat_state::session_runtime::RuntimePhase::Suspended
+                        | chat_state::session_runtime::RuntimePhase::Restoring
+                ) || runtime.operation_id.as_deref() != Some(&checkpoint.operation_id)
+                    || runtime.checkpoint_seq.map(|seq| seq.get())
+                        != Some(checkpoint.checkpoint_seq)
+                {
+                    return child_run_output(
+                        failure_result(&request, "original child checkpoint identity changed"),
+                        completion_data,
+                    );
+                }
+                restored_persistence = Some((loaded, persistence));
+            }
+            Err(error) => {
+                return child_run_output(
+                    failure_result(
+                        &request,
+                        &format!("original child writer is unavailable: {error}"),
+                    ),
+                    completion_data,
+                );
+            }
+        }
+        request.cwd = Some(spawn.child_cwd.clone());
+        request.runtime_overrides.model = Some(spawn.effective_model_id.clone());
+        request.runtime_overrides.model_transport_key = Some(spawn.model_transport_key.clone());
+        request.runtime_overrides.reasoning_effort =
+            Some(spawn.reasoning_effort.map(|effort| effort.to_string()));
+        restored_spawn = Some(source);
+    }
+
     if let Err(reason) = ctx.storage_admission.check(&ctx.parent_session_id) {
         return child_run_output(failure_result(&request, &reason), completion_data);
     }
@@ -294,14 +428,20 @@ pub(crate) async fn run_shell_child(
     if let Err(message) = validate_goal_context(&request) {
         return child_run_output(failure_result(&request, &message), completion_data);
     }
+    let selected_agent = restored_persistence
+        .as_ref()
+        .and_then(|(loaded, _)| {
+            loaded
+                .control_snapshot
+                .as_ref()
+                .map(|control| control.agent_name.as_str())
+        })
+        .unwrap_or(&request.subagent_type)
+        .to_owned();
     let (definition, frozen_workflow_skills, frozen_subagent_names) =
         match frozen_workflow_agent_definition(&request, &ctx) {
             Ok(Some((definition, skills, names))) => (Some(definition), Some(skills), Some(names)),
-            Ok(None) => (
-                resolve_agent_definition(&request.subagent_type, &ctx),
-                None,
-                None,
-            ),
+            Ok(None) => (resolve_agent_definition(&selected_agent, &ctx), None, None),
             Err(message) => {
                 return child_run_output(failure_result(&request, &message), completion_data);
             }
@@ -335,7 +475,7 @@ pub(crate) async fn run_shell_child(
         }
     }
     if !request.owner.is_workflow() {
-        resolve_subagent_toolset(&request.subagent_type, &ctx, &mut definition);
+        resolve_subagent_toolset(&selected_agent, &ctx, &mut definition);
     }
     let mut effective_runtime = crate::agent::subagent::resolution::resolve_runtime_config(
         &request.runtime_overrides,
@@ -365,7 +505,7 @@ pub(crate) async fn run_shell_child(
     let resume_source = if let Some(resume_id) = request
         .resume_from
         .as_deref()
-        .filter(|s| is_valid_resume_id(s))
+        .filter(|s| restore.is_none() && is_valid_resume_id(s))
     {
         if reporter
             .source_is_active(resume_id, &ctx.security_parent_session_id)
@@ -428,7 +568,14 @@ pub(crate) async fn run_shell_child(
             return child_run_output(failure_result(&request, &error), completion_data);
         }
     }
-    let (worktree_path, worktree_materialization) = if let Some(ref source) = resume_source {
+    let (worktree_path, worktree_materialization) = if let Some(source) = restored_spawn.as_ref() {
+        let chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn)) =
+            &source.kind
+        else {
+            unreachable!()
+        };
+        (spawn.worktree_path.as_ref().map(PathBuf::from), None)
+    } else if let Some(ref source) = resume_source {
         if effective_runtime.isolation != tool_types::SubagentIsolationMode::None
             && source.worktree_path.is_none()
         {
@@ -574,7 +721,7 @@ pub(crate) async fn run_shell_child(
     // it with the parent's later model selection would make phases of one Run
     // nondeterministic. The forked conversation remains valid without cache
     // reuse, so Workflow ownership wins here.
-    if request.fork_context && !request.owner.is_workflow() {
+    if restore.is_none() && request.fork_context && !request.owner.is_workflow() {
         effective_runtime.model = Some(ctx.model_id.0.to_string());
     }
     let workflow_model = resume_source
@@ -757,22 +904,33 @@ pub(crate) async fn run_shell_child(
         conversation: mut forked_conversation,
         prompt_blobs: inherited_prompt_blobs,
         verbatim_fork: context_verbatim_fork,
-    } = match bootstrap_initial_context(
-        &request,
-        resume_source.as_ref(),
-        &ctx,
-        effective_sampling_config.context_window,
-    )
-    .await
-    {
-        BootstrapInitialContext::Ready(ctx) => ctx,
-        BootstrapInitialContext::Abort(msg) => {
-            tracing::error!(
-                subagent_id = %request.id,
-                error = %msg,
-                "Requested child lineage failed, aborting subagent spawn"
-            );
-            return child_run_output(failure_result(&request, &msg), completion_data);
+    } = if restore.is_some() {
+        InitialContext {
+            source: InitialContextSource::New,
+            source_ref: None,
+            prefix_len: Some(0),
+            conversation: Vec::new(),
+            prompt_blobs: Default::default(),
+            verbatim_fork: false,
+        }
+    } else {
+        match bootstrap_initial_context(
+            &request,
+            resume_source.as_ref(),
+            &ctx,
+            effective_sampling_config.context_window,
+        )
+        .await
+        {
+            BootstrapInitialContext::Ready(ctx) => ctx,
+            BootstrapInitialContext::Abort(msg) => {
+                tracing::error!(
+                    subagent_id = %request.id,
+                    error = %msg,
+                    "Requested child lineage failed, aborting subagent spawn"
+                );
+                return child_run_output(failure_result(&request, &msg), completion_data);
+            }
         }
     };
     let verbatim_mirror_fork =
@@ -788,13 +946,15 @@ pub(crate) async fn run_shell_child(
         })
         .render()
     };
-    if let Err(message) = seed_child_system_head(
-        &context_source,
-        verbatim_mirror_fork,
-        &mut forked_conversation,
-        &mut inherited_prefix_len,
-        child_system_head.as_deref(),
-    ) {
+    if restore.is_none()
+        && let Err(message) = seed_child_system_head(
+            &context_source,
+            verbatim_mirror_fork,
+            &mut forked_conversation,
+            &mut inherited_prefix_len,
+            child_system_head.as_deref(),
+        )
+    {
         return child_run_output(failure_result(&request, &message), completion_data);
     }
     let task_prompt_text = prompt.clone();
@@ -869,44 +1029,57 @@ pub(crate) async fn run_shell_child(
             completion_data,
         );
     };
-    let parent_spawn = match parent_chat_state
-        .record_timeline_event_durably(chat_state::TimelineEventKind::Subagent(
-            chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
-                subagent_id: subagent_id.clone(),
-                child_session_id: child_session_id.0.to_string(),
-                security_parent_session_id: ctx.security_parent_session_id.clone(),
-                subagent_type: request.subagent_type.clone(),
-                description: request.description.clone(),
-                prompt: request.prompt.clone(),
-                context_source: timeline_context_source,
-                source_ref: source_ref.clone(),
-                context_normalized,
-                resumed_from: request.resume_from.clone(),
-                parent_prompt_id: request.parent_prompt_id.clone(),
-                capability_mode: capability_mode.clone(),
-                permission_mode: permission_mode.clone(),
-                effective_permission_mode: effective_permission_mode.clone(),
-                workflow_run_id: workflow_run_id.clone(),
-                goal_id: goal_id.clone(),
-                goal_definition_revision: request.owner.goal_definition_revision(),
-                surface_completion: request.surface_completion,
-                child_cwd: child_session_info.cwd.clone(),
-                worktree_path: worktree_path
-                    .as_ref()
-                    .map(|path| path.to_string_lossy().into_owned()),
-                effective_model_id: effective_model_id.0.to_string(),
-                model_transport_key: model_transport_key.clone(),
-                reasoning_effort: effective_sampling_config.reasoning_effort,
-            }),
-        ))
-        .await
-    {
-        Ok(event) => event,
-        Err(error) => {
-            let message = format!("Cannot persist subagent spawn in parent Timeline: {error}");
-            return child_run_output(failure_result(&request, &message), completion_data);
+    // Once the Spawn write is issued, a lost ACK is not evidence that the
+    // child was never admitted. Keep the original identity pending.
+    completion_data.spawn_admitted = true;
+    completion_data.terminal_committed = false;
+    let parent_spawn = if let Some(source) = restored_spawn.clone() {
+        source
+    } else {
+        match parent_chat_state
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Subagent(
+                chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
+                    subagent_id: subagent_id.clone(),
+                    child_session_id: child_session_id.0.to_string(),
+                    origin_tool_call_id: request.origin_tool_call_id.clone(),
+                    security_parent_session_id: ctx.security_parent_session_id.clone(),
+                    parent_step_id: request.parent_step_id.clone(),
+                    subagent_type: request.subagent_type.clone(),
+                    description: request.description.clone(),
+                    prompt: request.prompt.clone(),
+                    execution_recipe: request.execution_recipe(),
+                    context_source: timeline_context_source,
+                    source_ref: source_ref.clone(),
+                    context_normalized,
+                    resumed_from: request.resume_from.clone(),
+                    parent_prompt_id: request.parent_prompt_id.clone(),
+                    capability_mode: capability_mode.clone(),
+                    permission_mode: permission_mode.clone(),
+                    effective_permission_mode: effective_permission_mode.clone(),
+                    workflow_run_id: workflow_run_id.clone(),
+                    goal_id: goal_id.clone(),
+                    goal_definition_revision: request.owner.goal_definition_revision(),
+                    surface_completion: request.surface_completion,
+                    child_cwd: child_session_info.cwd.clone(),
+                    worktree_path: worktree_path
+                        .as_ref()
+                        .map(|path| path.to_string_lossy().into_owned()),
+                    effective_model_id: effective_model_id.0.to_string(),
+                    model_transport_key: model_transport_key.clone(),
+                    reasoning_effort: effective_sampling_config.reasoning_effort,
+                }),
+            ))
+            .await
+        {
+            Ok(event) => event,
+            Err(error) => {
+                let message = format!("Cannot persist subagent spawn in parent Timeline: {error}");
+                return child_run_output(failure_result(&request, &message), completion_data);
+            }
         }
     };
+    completion_data.spawn_admitted = true;
+    completion_data.expected_parent_step_id = request.parent_step_id.clone();
     completion_data.terminal_committed = false;
     let subagent_seed = chat_state::SubagentSeedEvent {
         parent_timeline_id: ctx.parent_session_id.clone(),
@@ -1009,49 +1182,63 @@ pub(crate) async fn run_shell_child(
         return child_run_output(result, completion_data);
     }
 
+    let mut restored_control = None;
+    let mut restored_signals = None;
+    let mut restored_workflow_runs = Vec::new();
     let (persistence, child_timeline, child_session_directory) =
-        match session::persistence::new_child(
-            &child_session_info,
-            effective_model_id.clone(),
-            session::persistence::SessionLineage {
-                session_kind: match &context_source {
-                    InitialContextSource::New => "subagent",
-                    InitialContextSource::Forked => "subagent_fork",
-                    InitialContextSource::Resumed => "subagent_resume",
-                }
-                .to_string(),
-                context_source: effective_source_str.to_string(),
-                parent_session_id: ctx.parent_session_id.clone(),
-                parent_prompt_id: request.parent_prompt_id.clone(),
-                subagent_seed,
-            },
-            forked_conversation.clone(),
-            inherited_prompt_blobs,
-        )
-        .await
-        {
-            Ok(p) => p,
-            Err(e) => {
-                if chat_state::persistence_error_is_permanent(&e) {
-                    ctx.storage_admission.record_failure(
-                        &ctx.parent_session_id,
-                        &ctx.parent_control_epoch,
-                        None,
-                        Some(e.kind()),
-                        format!("child session persistence failed: {e}"),
-                    );
-                }
-                let msg = format!("Persistence error: {e}");
-                let result = failure_result(&request, &msg);
-                if record_parent_subagent_end(parent_chat_state, &result, None, None)
-                    .await
-                    .is_ok()
-                {
-                    completion_data.mark_terminal_committed();
-                    admit_completion_receipt_before_result(&request, &result, &mut completion_data)
+        if let Some((loaded, persistence)) = restored_persistence.take() {
+            restored_control = loaded.control_snapshot;
+            restored_signals = loaded.signals;
+            restored_workflow_runs = loaded.workflow_runs;
+            (persistence, loaded.timeline, loaded.session_directory)
+        } else {
+            match session::persistence::new_child(
+                &child_session_info,
+                effective_model_id.clone(),
+                session::persistence::SessionLineage {
+                    session_kind: match &context_source {
+                        InitialContextSource::New => "subagent",
+                        InitialContextSource::Forked => "subagent_fork",
+                        InitialContextSource::Resumed => "subagent_resume",
+                    }
+                    .to_string(),
+                    context_source: effective_source_str.to_string(),
+                    parent_session_id: ctx.parent_session_id.clone(),
+                    parent_prompt_id: request.parent_prompt_id.clone(),
+                    subagent_seed,
+                },
+                forked_conversation.clone(),
+                inherited_prompt_blobs,
+            )
+            .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    if chat_state::persistence_error_is_permanent(&e) {
+                        ctx.storage_admission.record_failure(
+                            &ctx.parent_session_id,
+                            &ctx.parent_control_epoch,
+                            None,
+                            Some(e.kind()),
+                            format!("child session persistence failed: {e}"),
+                        );
+                    }
+                    let msg = format!("Persistence error: {e}");
+                    let result = failure_result(&request, &msg);
+                    if record_parent_subagent_end(parent_chat_state, &result, None, None)
+                        .await
+                        .is_ok()
+                    {
+                        completion_data.mark_terminal_committed();
+                        admit_completion_receipt_before_result(
+                            &request,
+                            &result,
+                            &mut completion_data,
+                        )
                         .await;
+                    }
+                    return child_run_output(result, completion_data);
                 }
-                return child_run_output(result, completion_data);
             }
         };
     let child_cwd = resolve_child_cwd(worktree_path.as_deref(), override_cwd, &ctx.parent_cwd);
@@ -1280,13 +1467,15 @@ pub(crate) async fn run_shell_child(
         .idle_timeout_secs
         .unwrap_or(effective_route.inference_idle_timeout.as_secs());
     let effective_reasoning_effort = effective_sampling_config.reasoning_effort;
-    let _ = persistence
-        .tx
-        .send(crate::session::persistence::PersistenceMsg::CurrentModel {
-            model_id: effective_model_id.clone(),
-            agent_name: Some(definition.selector_identity()),
-            reasoning_effort: Some(effective_sampling_config.reasoning_effort),
-        });
+    if restore.is_none() {
+        let _ = persistence
+            .tx
+            .send(crate::session::persistence::PersistenceMsg::CurrentModel {
+                model_id: effective_model_id.clone(),
+                agent_name: Some(definition.selector_identity()),
+                reasoning_effort: Some(effective_sampling_config.reasoning_effort),
+            });
+    }
     let recovery_persistence = persistence.clone();
     let recovery_timeline_events = child_timeline.events().to_vec();
     let spawn_result = session::spawn_session_on_thread(
@@ -1349,11 +1538,17 @@ pub(crate) async fn run_shell_child(
         frozen_workflow_skills
             .or_else(|| inherit_skills.then(|| ctx.parent_skills.take()).flatten()),
         false,
-        None,
-        None,
-        None,
-        0,
-        Vec::new(),
+        restored_signals,
+        restored_control
+            .as_ref()
+            .map(|control| control.behavior.clone()),
+        restored_control
+            .as_ref()
+            .and_then(|control| control.goal.clone()),
+        restored_control
+            .as_ref()
+            .map_or(0, |control| control.control_revision),
+        restored_workflow_runs,
         None,
         if verbatim_mirror_fork {
             None
@@ -1421,7 +1616,11 @@ pub(crate) async fn run_shell_child(
         Ok(r) => r,
         Err(e) => {
             let msg = format!("Failed to spawn child session: {e}");
-            let result = fail_subagent(
+            if restore.is_some() {
+                return child_run_output(failure_result(&request, &msg), completion_data);
+            }
+
+            let mut result = fail_subagent(
                 &msg,
                 &subagent_id,
                 &child_session_id,
@@ -1430,7 +1629,7 @@ pub(crate) async fn run_shell_child(
             let result_ref = record_child_result_with_persistence(
                 &recovery_persistence,
                 recovery_timeline_events,
-                &result,
+                &mut result,
             )
             .await
             .ok();
@@ -1452,16 +1651,18 @@ pub(crate) async fn run_shell_child(
     {
         child_handle.workflow_tracker = tracker;
     }
-    let _active_child_registration = ActiveChildRegistration::install(
+    let mut active_child_registration = ActiveChildRegistration::install(
         ctx.active_child_sessions.clone(),
         child_session_id.clone(),
         child_handle.clone(),
     );
-    if let Err(error) = catch_up_child_catalog_generation(&ctx, &child_handle).await {
+    if restore.is_none()
+        && let Err(error) = catch_up_child_catalog_generation(&ctx, &child_handle).await
+    {
         let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown);
         drop(child_thread);
         let message = format!("Failed to converge child model catalog: {error}");
-        let result = fail_subagent(
+        let mut result = fail_subagent(
             &message,
             &subagent_id,
             &child_session_id,
@@ -1470,7 +1671,7 @@ pub(crate) async fn run_shell_child(
         let result_ref = record_child_result_with_persistence(
             &recovery_persistence,
             recovery_timeline_events,
-            &result,
+            &mut result,
         )
         .await
         .ok();
@@ -1498,6 +1699,14 @@ pub(crate) async fn run_shell_child(
         })
         .await;
     if !promoted {
+        if let Some(checkpoint) = restore.clone() {
+            active_child_registration.retain_route();
+            return ChildRunOutcome::RestoreBlocked {
+                checkpoint,
+                error: "coordinator did not accept the original child control route".into(),
+                completion_data,
+            };
+        }
         if let Some(permission_handle) = &ctx.permission_handle {
             permission_handle
                 .release_child(child_session_id.0.to_string())
@@ -1505,7 +1714,7 @@ pub(crate) async fn run_shell_child(
         }
         ctx.workspace_ops
             .end_local_session(child_session_id.0.as_ref());
-        let result = cancel_pending_shell_child(
+        let mut result = cancel_pending_shell_child(
             &subagent_id,
             &child_session_id,
             worktree_path.as_deref(),
@@ -1513,7 +1722,7 @@ pub(crate) async fn run_shell_child(
             start.elapsed().as_millis() as u64,
         )
         .await;
-        let result_ref = record_child_result(&child_handle.chat_state_handle, &result, None)
+        let result_ref = record_child_result(&child_handle.chat_state_handle, &mut result, None)
             .await
             .ok();
         let _ = child_handle.cmd_tx.send(SessionCommand::Shutdown);
@@ -1531,31 +1740,36 @@ pub(crate) async fn run_shell_child(
     // accepted it. Timeline admission remains the earlier durable write-ahead
     // fact, but Pager can now act on this projection immediately without an
     // `unknown session id` race.
-    emit_subagent_notification(
-        gateway,
-        &ctx.parent_session_id,
-        SessionUpdate::SubagentSpawned {
-            subagent_id: subagent_id.clone(),
-            child_session_id: child_session_id.0.to_string(),
-            parent_session_id: ctx.parent_session_id.clone(),
-            parent_prompt_id: request.parent_prompt_id.clone(),
-            subagent_type: request.subagent_type.clone(),
-            description: request.description.clone(),
-            effective_context_source: Some(effective_source_str.to_string()),
-            context_normalized,
-            capability_mode,
-            permission_mode,
-            effective_permission_mode,
-            model: Some(effective_model_name),
-            reasoning_effort: effective_reasoning_effort.map(|effort| effort.to_string()),
-            model_state: Some(child_model_state),
-            workflow_agent_names,
-            resumed_from: request.resume_from.clone(),
-            workflow_run_id,
-            goal_id,
-        },
-        ctx.parent_cmd_tx.as_ref(),
-    );
+    if let Some(delegator) = &ctx.completion_cmd_tx {
+        let _ = delegator.send(SessionCommand::ReconcilePlanning);
+    }
+    if restore.is_none() {
+        emit_subagent_notification(
+            gateway,
+            &ctx.parent_session_id,
+            SessionUpdate::SubagentSpawned {
+                subagent_id: subagent_id.clone(),
+                child_session_id: child_session_id.0.to_string(),
+                parent_session_id: ctx.parent_session_id.clone(),
+                parent_prompt_id: request.parent_prompt_id.clone(),
+                subagent_type: request.subagent_type.clone(),
+                description: request.description.clone(),
+                effective_context_source: Some(effective_source_str.to_string()),
+                context_normalized,
+                capability_mode,
+                permission_mode,
+                effective_permission_mode,
+                model: Some(effective_model_name),
+                reasoning_effort: effective_reasoning_effort.map(|effort| effort.to_string()),
+                model_state: Some(child_model_state),
+                workflow_agent_names,
+                resumed_from: request.resume_from.clone(),
+                workflow_run_id,
+                goal_id,
+            },
+            ctx.parent_cmd_tx.as_ref(),
+        );
+    }
     completion_data.spawned_notification_emitted = true;
     let mut launch_error = None;
     // SubagentSpawned creates the Pager child view. Publish the child's
@@ -1575,18 +1789,6 @@ pub(crate) async fn run_shell_child(
                 .to_owned(),
         );
     }
-    if launch_error.is_none() {
-        spawn_progress_publisher(
-            child_handle.signals_handle.clone(),
-            progress_snapshot,
-            gateway.clone(),
-            ctx.parent_session_id.clone(),
-            request.id.clone(),
-            child_session_id.0.to_string(),
-            start,
-            cancel_token.clone(),
-        );
-    }
     if launch_error.is_none()
         && let Some(snapshot) = request.goal_context.clone()
         && child_handle
@@ -1600,10 +1802,183 @@ pub(crate) async fn run_shell_child(
         );
     }
     let (prompt_tx, prompt_rx) = oneshot::channel();
+    let mut prompt_tx = Some(prompt_tx);
     let prompt_text = task_prompt_text;
     let child_prompt_id = uuid::Uuid::now_v7().to_string();
     let (prompt_origin, turn_kind) = child_task_prompt_identity();
-    if launch_error.is_none() && !cancel_token.is_cancelled() {
+    let mut wait_for_cancel_without_prompt = false;
+    let restoring_open_turn = if let Some(checkpoint) = &restore {
+        let runtime = child_handle.chat_state_handle.runtime_state().await;
+        let already_admitted = matches!(&runtime, Ok(runtime) if runtime.checkpoint.as_ref().is_some_and(|checkpoint| checkpoint.turn.is_some()));
+        let has_restored_pending_input = if already_admitted {
+            false
+        } else {
+            match child_handle
+                .chat_state_handle
+                .get_pending_allowed_inputs()
+                .await
+            {
+                Some(inputs) => has_restored_pending_input(&inputs),
+                None => {
+                    active_child_registration.retain_route();
+                    return ChildRunOutcome::RestoreBlocked {
+                        checkpoint: checkpoint.clone(),
+                        error: "restored input inbox is unavailable; refusing to queue a duplicate prompt".into(),
+                        completion_data,
+                    };
+                }
+            }
+        };
+        if already_admitted || has_restored_pending_input {
+            if child_handle
+                .cmd_tx
+                .send(SessionCommand::WatchRuntimeTurn {
+                    respond_to: prompt_tx.take().expect("single restored Turn watcher"),
+                })
+                .is_err()
+            {
+                active_child_registration.retain_route();
+                return ChildRunOutcome::RestoreBlocked {
+                    checkpoint: checkpoint.clone(),
+                    error: "child actor rejected the restored Turn watcher".into(),
+                    completion_data,
+                };
+            }
+            if !already_admitted {
+                let (released, release_ack) = oneshot::channel();
+                if child_handle
+                    .cmd_tx
+                    .send(SessionCommand::WaitRuntimeRelease {
+                        operation_id: checkpoint.operation_id.clone(),
+                        respond_to: released,
+                    })
+                    .is_err()
+                    || !matches!(release_ack.await, Ok(Ok(())))
+                {
+                    active_child_registration.retain_route();
+                    return ChildRunOutcome::RestoreBlocked {
+                        checkpoint: checkpoint.clone(),
+                        error: "tree release was not confirmed".into(),
+                        completion_data,
+                    };
+                }
+            }
+            true
+        } else {
+            let (released, release_ack) = oneshot::channel();
+            if child_handle
+                .cmd_tx
+                .send(SessionCommand::WaitRuntimeRelease {
+                    operation_id: checkpoint.operation_id.clone(),
+                    respond_to: released,
+                })
+                .is_err()
+                || !matches!(release_ack.await, Ok(Ok(())))
+            {
+                active_child_registration.retain_route();
+                return ChildRunOutcome::RestoreBlocked {
+                    checkpoint: checkpoint.clone(),
+                    error: "tree release was not confirmed".into(),
+                    completion_data,
+                };
+            }
+            false
+        }
+    } else {
+        false
+    };
+
+    if !restoring_open_turn
+        && launch_error.is_none()
+        && !cancel_token.is_cancelled()
+        && child_handle
+            .runtime_suspend
+            .load(std::sync::atomic::Ordering::Acquire)
+    {
+        let (wait_tx, wait_rx) = oneshot::channel();
+        let waiter_result = if child_handle
+            .cmd_tx
+            .send(SessionCommand::WaitRuntimeSuspended {
+                respond_to: wait_tx,
+            })
+            .is_ok()
+        {
+            match wait_rx.await {
+                Ok(result) => result,
+                Err(_) => Err(
+                    "child actor closed before its suspension checkpoint was acknowledged".into(),
+                ),
+            }
+        } else {
+            Err("child actor rejected the suspension waiter".to_string())
+        };
+        match waiter_result {
+            Ok(node) => {
+                let runtime = child_handle.chat_state_handle.runtime_state().await;
+                match runtime {
+                    Ok(runtime)
+                        if runtime.phase
+                            == chat_state::session_runtime::RuntimePhase::Suspended
+                            && runtime.checkpoint_seq == Some(node.checkpoint_seq) =>
+                    {
+                        if let Some(operation_id) = runtime.operation_id {
+                            active_child_registration.retain_route();
+                            return ChildRunOutcome::Suspended {
+                                checkpoint: ChildCheckpoint {
+                                    session_id: node.session_id,
+                                    operation_id,
+                                    checkpoint_seq: node.checkpoint_seq.get(),
+                                },
+                                completion_data,
+                            };
+                        }
+                        tracing::warn!(
+                            child_session_id = %node.session_id,
+                            "suspension waiter resolved without an operation identity"
+                        );
+                    }
+                    Ok(_) => tracing::warn!(
+                        child_session_id = %node.session_id,
+                        checkpoint_seq = node.checkpoint_seq.get(),
+                        "suspension waiter identity no longer matches runtime state"
+                    ),
+                    Err(error) => tracing::warn!(
+                        child_session_id = %node.session_id,
+                        %error,
+                        "could not confirm child suspension metadata after checkpoint"
+                    ),
+                }
+            }
+            Err(error) => tracing::warn!(
+                child_session_id = %child_session_id.0,
+                %error,
+                "child initializer is waiting for explicit cancellation after suspension became unconfirmed"
+            ),
+        }
+        cancel_token.cancelled().await;
+        wait_for_cancel_without_prompt = true;
+    }
+    if !restoring_open_turn
+        && launch_error.is_none()
+        && !wait_for_cancel_without_prompt
+        && !cancel_token.is_cancelled()
+    {
+        spawn_progress_publisher(
+            child_handle.signals_handle.clone(),
+            progress_snapshot,
+            gateway.clone(),
+            ctx.parent_session_id.clone(),
+            request.id.clone(),
+            child_session_id.0.to_string(),
+            start,
+            cancel_token.clone(),
+        );
+    }
+    if !restoring_open_turn
+        && launch_error.is_none()
+        && !wait_for_cancel_without_prompt
+        && !cancel_token.is_cancelled()
+    {
         let (persist_ack_tx, persist_ack_rx) = oneshot::channel();
         if child_handle
             .cmd_tx
@@ -1616,7 +1991,7 @@ pub(crate) async fn run_shell_child(
                 screen_mode: None,
                 verbatim: true,
                 json_schema: request.runtime_overrides.output_schema.clone(),
-                respond_to: prompt_tx,
+                respond_to: prompt_tx.take().expect("single original prompt admission"),
                 persist_ack: Some(persist_ack_tx),
             })
             .is_err()
@@ -1642,6 +2017,36 @@ pub(crate) async fn run_shell_child(
         drop(prompt_tx);
     }
     let turn_result = await_subagent_turn_or_cancellation(prompt_rx, cancel_token.clone()).await;
+    if let Ok(Ok(crate::session::commands::PromptTurnOk {
+        completion_kind:
+            PromptCompletionKind::Suspended {
+                operation_id,
+                checkpoint_seq,
+            },
+        ..
+    })) = &*turn_result
+    {
+        active_child_registration.retain_route();
+        return ChildRunOutcome::Suspended {
+            checkpoint: ChildCheckpoint {
+                session_id: child_session_id.0.to_string(),
+                operation_id: operation_id.clone(),
+                checkpoint_seq: *checkpoint_seq,
+            },
+            completion_data,
+        };
+    }
+    if let Some(checkpoint) = restore.clone() {
+        if !matches!(child_handle.chat_state_handle.runtime_state().await, Ok(runtime) if runtime.phase == chat_state::session_runtime::RuntimePhase::Running)
+        {
+            active_child_registration.retain_route();
+            return ChildRunOutcome::RestoreBlocked {
+                checkpoint,
+                error: "original child closed before execution release was confirmed".into(),
+                completion_data,
+            };
+        }
+    }
     let duration_ms = start.elapsed().as_millis() as u64;
     let mut cancellation_may_hide_usage = false;
     let mut result = {
@@ -1664,6 +2069,10 @@ pub(crate) async fn run_shell_child(
         let result_tokens = child_handle.chat_state_handle.get_projected_tokens().await;
         match *turn_result {
             Ok(Ok(crate::session::commands::PromptTurnOk {
+                completion_kind: PromptCompletionKind::Suspended { .. },
+                ..
+            })) => unreachable!("suspension was returned before terminal processing"),
+            Ok(Ok(crate::session::commands::PromptTurnOk {
                 completion_kind: PromptCompletionKind::Cancelled { category, context },
                 ..
             })) => {
@@ -1671,6 +2080,7 @@ pub(crate) async fn run_shell_child(
                 let reason = cancellation_error_message(category, context.as_ref());
                 SubagentResult {
                     success: false,
+                    not_dispatched: false,
                     cancelled: true,
                     error: Some(reason),
                     output: if final_text.is_empty() {
@@ -1689,6 +2099,7 @@ pub(crate) async fn run_shell_child(
                     tokens_used: result_tokens,
                     output_tokens_used: 0,
                     output_usage_incomplete: true,
+                    planning_summary: None,
                     total_tokens_used: 0,
                     worktree_path: worktree_path
                         .as_ref()
@@ -1703,6 +2114,7 @@ pub(crate) async fn run_shell_child(
                 ..
             })) => SubagentResult {
                 success: false,
+                not_dispatched: false,
                 cancelled: true,
                 error: Some(format!("max turns reached (limit: {limit})")),
                 output: if final_text.is_empty() {
@@ -1721,6 +2133,7 @@ pub(crate) async fn run_shell_child(
                 tokens_used: result_tokens,
                 output_tokens_used: 0,
                 output_usage_incomplete: true,
+                planning_summary: None,
                 total_tokens_used: 0,
                 worktree_path: worktree_path
                     .as_ref()
@@ -1920,7 +2333,7 @@ pub(crate) async fn run_shell_child(
         let child_result_ref = if output_ready {
             record_child_result_before(
                 &child_handle.chat_state_handle,
-                &result,
+                &mut result,
                 persisted_output_ref.map(|artifact| artifact.timeline_ref),
                 finalization_deadline,
             )

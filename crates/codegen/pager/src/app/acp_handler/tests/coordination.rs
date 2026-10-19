@@ -9,14 +9,23 @@ use shell::extensions::notification::{
 #[test]
 fn leader_resync_requests_full_reload_of_attached_root() {
     let mut app = make_app_with_agent("target");
-    app.agents.get_mut(&AgentId(0)).unwrap().scrollback.push_block(RenderBlock::notice("stale projection"));
-    app.agents.get_mut(&AgentId(0)).unwrap().session.last_seen_event_id =
-        Some("target-42".into());
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .scrollback
+        .push_block(RenderBlock::notice("stale projection"));
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .session
+        .last_seen_event_id = Some("target-42".into());
     let notif = acp::ExtNotification::new(
         "grow/leader/resync_required",
         serde_json::value::RawValue::from_string(
             serde_json::json!({"sessionId": "target"}).to_string(),
-        ).unwrap().into(),
+        )
+        .unwrap()
+        .into(),
     );
     assert!(handle_ext_notification(&notif, &mut app));
     assert!(app.agents[&AgentId(0)].session_reload.is_some());
@@ -29,38 +38,59 @@ fn leader_resync_requests_full_reload_of_attached_root() {
         unreachable!()
     };
     crate::app::root::dispatch::dispatch(
-        crate::app::actions::Action::TaskComplete(crate::app::actions::TaskResult::SessionResynced {
-            agent_id: AgentId(0),
-            session_id: acp::SessionId::new("target"),
-            generation,
-            result: Ok(None),
-        }),
+        crate::app::actions::Action::TaskComplete(
+            crate::app::actions::TaskResult::SessionResynced {
+                agent_id: AgentId(0),
+                session_id: acp::SessionId::new("target"),
+                generation,
+                result: Ok(None),
+            },
+        ),
         &mut app,
     );
     assert!(!app.agents[&AgentId(0)].session.loading_replay);
-    assert_eq!(app.agents[&AgentId(0)].scrollback.len(), 0, "resync must replace stale transcript even without a replay marker");
+    assert_eq!(
+        app.agents[&AgentId(0)].scrollback.len(),
+        0,
+        "resync must replace stale transcript even without a replay marker"
+    );
 }
 
 #[test]
 fn leader_resync_of_child_reloads_root_and_failure_restores_old_view() {
     let mut app = make_app_with_parent_and_child("root", "child");
-    app.agents.get_mut(&AgentId(0)).unwrap().scrollback.push_block(RenderBlock::notice("existing"));
+    app.agents
+        .get_mut(&AgentId(0))
+        .unwrap()
+        .scrollback
+        .push_block(RenderBlock::notice("existing"));
     let notif = acp::ExtNotification::new(
         "grow/leader/resync_required",
         serde_json::value::RawValue::from_string(
             serde_json::json!({"sessionId": "child"}).to_string(),
-        ).unwrap().into(),
+        )
+        .unwrap()
+        .into(),
     );
     handle_ext_notification(&notif, &mut app);
-    let Effect::ResyncSession { session_id, generation, .. } = app.pending_effects.remove(0) else {
+    let Effect::ResyncSession {
+        session_id,
+        generation,
+        ..
+    } = app.pending_effects.remove(0)
+    else {
         panic!("root resync effect missing");
     };
     assert_eq!(session_id.0.as_ref(), "root");
     crate::app::root::dispatch::dispatch(
-        crate::app::actions::Action::TaskComplete(crate::app::actions::TaskResult::SessionResynced {
-            agent_id: AgentId(0), session_id, generation,
-            result: Err("load failed".into()),
-        }),
+        crate::app::actions::Action::TaskComplete(
+            crate::app::actions::TaskResult::SessionResynced {
+                agent_id: AgentId(0),
+                session_id,
+                generation,
+                result: Err("load failed".into()),
+            },
+        ),
         &mut app,
     );
     assert!(app.agents[&AgentId(0)].session_reload.is_none());
@@ -453,7 +483,10 @@ fn coordination_target_approval_before_start_retains_audit_detail() {
         "Answering session peer",
         UiNoticeTone::Success,
     );
-    assert!(handle(make_ext_session_notification("target", approval), &mut app));
+    assert!(handle(
+        make_ext_session_notification("target", approval),
+        &mut app
+    ));
     let id = app.agents[&AgentId(0)].scrollback.entry(0).unwrap().id;
     let start = notice(
         "inquiry-1",
@@ -461,7 +494,10 @@ fn coordination_target_approval_before_start_retains_audit_detail() {
         "Answering session peer",
         UiNoticeTone::Info,
     );
-    assert!(!handle(make_ext_session_notification("target", start), &mut app));
+    assert!(!handle(
+        make_ext_session_notification("target", start),
+        &mut app
+    ));
     assert_eq!(app.agents[&AgentId(0)].scrollback.len(), 1);
     assert_eq!(app.agents[&AgentId(0)].scrollback.entry(0).unwrap().id, id);
     let block = tool_row(&app, 0);
@@ -867,4 +903,158 @@ fn parent_message_routes_to_existing_child_view_and_handles_missing_body() {
     )
     .unwrap();
     assert_eq!(data["receipt_id"], "receipt-2");
+}
+
+#[test]
+fn coordination_rows_are_scoped_by_source_session_and_inquiry_id() {
+    fn peer_notice(
+        source_peer_id: &str,
+        source_session_id: &str,
+        completed: bool,
+    ) -> GrowSessionUpdate {
+        let subject = if completed {
+            "inquiry completed"
+        } else {
+            "incoming inquiry"
+        };
+        let mut update = notice(
+            "shared-inquiry",
+            subject,
+            "Answering session peer",
+            if completed {
+                UiNoticeTone::Success
+            } else {
+                UiNoticeTone::Info
+            },
+        );
+        let GrowSessionUpdate::UiNotice(ref mut ui_notice) = update else {
+            unreachable!()
+        };
+        let mut audit = shell::coordination::IncomingInquiryAudit::from_notice(ui_notice)
+            .expect("fixture contains a structured incoming inquiry audit");
+        audit.source_peer_id = source_peer_id.into();
+        audit.source_session_id = source_session_id.into();
+        audit.question = format!("Question from {source_session_id}");
+        if completed {
+            audit.outcome = Some(shell::coordination::InquiryOutcome::answered(
+                "shared-inquiry",
+                format!("Answer for {source_session_id}"),
+            ));
+        }
+        ui_notice.details = Some(serde_json::to_string(&audit).unwrap());
+        update
+    }
+
+    let mut app = make_app_with_agent("target");
+    for (source_session_id, completed) in [("source-a", false), ("source-b", false)] {
+        assert!(handle(
+            make_ext_session_notification(
+                "target",
+                peer_notice("same-peer-process", source_session_id, completed),
+            ),
+            &mut app,
+        ));
+    }
+    for source_session_id in ["source-a", "source-b"] {
+        assert!(handle(
+            make_ext_session_notification(
+                "target",
+                peer_notice("same-peer-process", source_session_id, true),
+            ),
+            &mut app,
+        ));
+    }
+
+    let agent = &app.agents[&AgentId(0)];
+    assert_eq!(agent.scrollback.len(), 2);
+    assert!(!agent.scrollback.has_running_entries());
+    let rows: Vec<_> = (0..agent.scrollback.len())
+        .map(|index| tool_row(&app, index))
+        .collect();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row
+                .coordination
+                .as_ref()
+                .unwrap()
+                .source_session_id
+                .as_str())
+            .collect::<Vec<_>>(),
+        ["source-a", "source-b"]
+    );
+    for (row, source_session_id) in rows.into_iter().zip(["source-a", "source-b"]) {
+        assert_eq!(
+            row.coordination.as_ref().unwrap().inquiry_id,
+            "shared-inquiry"
+        );
+        assert_eq!(
+            row.communication_body().unwrap().raw_text(),
+            format!("Question from {source_session_id}\n\nAnswer for {source_session_id}")
+        );
+    }
+}
+
+#[test]
+fn coordination_source_peer_change_keeps_the_same_session_inquiry_row() {
+    fn peer_notice(source_peer_id: &str, completed: bool) -> GrowSessionUpdate {
+        let mut update = notice(
+            "stable-inquiry",
+            if completed {
+                "inquiry completed"
+            } else {
+                "incoming inquiry"
+            },
+            "Answering session peer",
+            if completed {
+                UiNoticeTone::Success
+            } else {
+                UiNoticeTone::Info
+            },
+        );
+        let GrowSessionUpdate::UiNotice(ref mut ui_notice) = update else {
+            unreachable!()
+        };
+        let mut audit = shell::coordination::IncomingInquiryAudit::from_notice(ui_notice)
+            .expect("fixture contains a structured incoming inquiry audit");
+        audit.source_peer_id = source_peer_id.into();
+        audit.source_session_id = "stable-source-session".into();
+        audit.question = "Keep this question bound to its source session".into();
+        if completed {
+            audit.outcome = Some(shell::coordination::InquiryOutcome::answered(
+                "stable-inquiry",
+                "The original inquiry completed".into(),
+            ));
+        }
+        ui_notice.details = Some(serde_json::to_string(&audit).unwrap());
+        update
+    }
+
+    let mut app = make_app_with_agent("target");
+    assert!(handle(
+        make_ext_session_notification("target", peer_notice("peer-before-reconnect", false)),
+        &mut app,
+    ));
+    let original_entry_id = app.agents[&AgentId(0)].scrollback.entry(0).unwrap().id;
+    assert!(handle(
+        make_ext_session_notification("target", peer_notice("peer-after-reconnect", true)),
+        &mut app,
+    ));
+
+    let agent = &app.agents[&AgentId(0)];
+    assert_eq!(agent.scrollback.len(), 1);
+    let entry = agent.scrollback.entry(0).unwrap();
+    assert_eq!(entry.id, original_entry_id);
+    assert!(!entry.is_running);
+    let row = tool_row(&app, 0);
+    assert_eq!(
+        row.coordination.as_ref().unwrap().source_session_id,
+        "stable-source-session"
+    );
+    assert_eq!(
+        row.coordination.as_ref().unwrap().inquiry_id,
+        "stable-inquiry"
+    );
+    let audit: shell::coordination::IncomingInquiryAudit =
+        serde_json::from_str(row.communication_data().unwrap()).unwrap();
+    assert_eq!(audit.source_peer_id, "peer-after-reconnect");
 }

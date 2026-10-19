@@ -328,6 +328,13 @@ fn render_item_to_background(out: &mut String, item: &ConversationItem) {
                 );
             }
         }
+        ConversationItem::SkillLoad(skill) => {
+            let _ = writeln!(
+                out,
+                "[Historical Skill Load: {} args={}]\n{}",
+                skill.skill_name, skill.args, skill.prepared_body
+            );
+        }
         ConversationItem::System(_) => {}
         ConversationItem::BackendToolCall(b) => {
             let _ = writeln!(out, "[Backend Tool]: {}", b.text_summary());

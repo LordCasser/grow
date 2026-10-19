@@ -43,6 +43,10 @@ pub enum ConversationItem {
     /// each contained message to a receive call/result pair at request time.
     /// It is never a model-generated tool call and is never dispatched.
     AgentMessage(AgentMessageItem),
+    /// A loaded skill body committed into runtime context. Provider adapters
+    /// project this fact into a local tool exchange when needed; it is never
+    /// dispatched and is not an AgentMessage.
+    SkillLoad(SkillLoadItem),
     /// Provider-neutral display fact for a tool call executed server-side by
     /// the backend. The native continuation lane, not Timeline, carries the
     /// protocol object required for a same-route follow-up request.
@@ -51,6 +55,57 @@ pub enum ConversationItem {
     /// (signatures, encrypted blobs, native ids and statuses) never crosses
     /// this durable boundary.
     Reasoning(VisibleReasoningItem),
+}
+
+/// Whether a skill load came from a user reference or a real model tool call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillLoadSource {
+    User,
+    Model,
+}
+
+/// Immutable Runtime result for one skill reference, scoped to its session.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillLoadItem {
+    pub input_id: String,
+    pub reference_index: usize,
+    pub call_id: String,
+    pub skill_name: String,
+    pub source: SkillLoadSource,
+    pub args: String,
+    pub prepared_body: Arc<str>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt_index: Option<usize>,
+}
+
+/// Provider-neutral registered name used for synthetic historical projection.
+pub const LOAD_SKILL_TOOL_NAME: &str = "load_skill";
+
+/// Stable local tool id for projecting a committed Runtime skill result.
+pub fn skill_load_call_id(item: &SkillLoadItem) -> String {
+    let identity = serde_json::to_vec(&(&item.input_id, item.reference_index, &item.call_id))
+        .expect("skill load identity is serializable");
+    let digest = blake3::hash(&identity).to_hex();
+    format!("grow_load_skill_{}", &digest[..32])
+}
+
+/// Serialize the committed skill result without losing its structured identity.
+pub fn skill_load_result_content(item: &SkillLoadItem) -> String {
+    serde_json::json!({
+        "input_id": item.input_id,
+        "reference_index": item.reference_index,
+        "call_id": item.call_id,
+        "skill_name": item.skill_name,
+        "source": item.source,
+        "args": item.args,
+        "prepared_body": item.prepared_body,
+    })
+    .to_string()
+}
+
+fn skill_load_call_arguments(item: &SkillLoadItem) -> String {
+    serde_json::json!({ "name": item.skill_name, "args": item.args }).to_string()
 }
 
 /// Stable identity of a message in the source session.
@@ -672,6 +727,12 @@ pub fn is_unconditional_image_input_unsupported(
     ]
     .iter()
     .any(|claim| contains_terminal_claim(&message, claim));
+    let text_only_content_type = [
+        "messages.content.type 参数非法，取值范围 ['text']",
+        "messages.content.type 参数非法，取值范围 [\"text\"]",
+    ]
+    .iter()
+    .any(|claim| contains_terminal_claim(&message, claim));
     let model_rejects_images = [
         "is not a multimodal model",
         "model does not support images",
@@ -693,7 +754,10 @@ pub fn is_unconditional_image_input_unsupported(
     .iter()
     .any(|needle| message.contains(needle));
 
-    text_only_model || model_rejects_images || (names_image_content && image_type_rejected_as_text)
+    text_only_model
+        || text_only_content_type
+        || model_rejects_images
+        || (names_image_content && image_type_rejected_as_text)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1690,6 +1754,51 @@ fn agent_message_call_id_for(ids: &BTreeMap<String, String>, message: &AgentMess
         .unwrap_or_else(|| agent_message_call_id(&message.receipt_id))
 }
 
+fn skill_load_call_ids(
+    items: &[ConversationItem],
+    native: Option<&NativeContinuationProjection>,
+) -> BTreeMap<(String, usize, String), String> {
+    let mut reserved = collect_agent_message_model_ids(items, native);
+    let mut ids = BTreeMap::new();
+    for item in items {
+        let ConversationItem::SkillLoad(skill) = item else {
+            continue;
+        };
+        let identity = (
+            skill.input_id.clone(),
+            skill.reference_index,
+            skill.call_id.clone(),
+        );
+        if ids.contains_key(&identity) {
+            continue;
+        }
+        let base = skill_load_call_id(skill);
+        let mut candidate = base.clone();
+        let mut suffix = 0usize;
+        while reserved.contains(&candidate) {
+            suffix += 1;
+            candidate = format!("{base}_{suffix}");
+        }
+        reserved.insert(candidate.clone());
+        ids.insert(identity, candidate);
+    }
+    ids
+}
+
+fn skill_load_call_id_for(
+    ids: &BTreeMap<(String, usize, String), String>,
+    item: &SkillLoadItem,
+) -> String {
+    let identity = (
+        item.input_id.clone(),
+        item.reference_index,
+        item.call_id.clone(),
+    );
+    ids.get(&identity)
+        .cloned()
+        .unwrap_or_else(|| skill_load_call_id(item))
+}
+
 /// Keep a runtime message outside an open model tool batch in provider input.
 /// The canonical item order remains unchanged; this only moves the expanded
 /// receive pair to the first safe boundary after all expected results.
@@ -1733,6 +1842,9 @@ fn defer_agent_messages_after_tool_batch(items: Vec<ConversationItem>) -> Vec<Co
             }
             ConversationItem::AgentMessage(batch) if !pending_tool_ids.is_empty() => {
                 deferred_messages.push(ConversationItem::AgentMessage(batch));
+            }
+            ConversationItem::SkillLoad(skill) if !pending_tool_ids.is_empty() => {
+                deferred_messages.push(ConversationItem::SkillLoad(skill));
             }
             item => projected.push(item),
         }
@@ -1972,6 +2084,11 @@ pub fn project_portable_history_with_reasoning(
                 // Keep the canonical runtime fact intact. Provider adapters
                 // expand it only at request projection time.
                 projected.push(ConversationItem::AgentMessage(agent_messages.clone()));
+                index += 1;
+            }
+            ConversationItem::SkillLoad(skill) => {
+                pending_reasoning.clear();
+                projected.push(ConversationItem::SkillLoad(skill.clone()));
                 index += 1;
             }
             ConversationItem::BackendToolCall(call) => {
@@ -2242,7 +2359,8 @@ impl From<Usage> for TokenUsage {
             reasoning_tokens: u
                 .completion_tokens_details
                 .as_ref()
-                .map_or(0, |d| d.reasoning_tokens),
+                .and_then(|d| d.reasoning_tokens)
+                .unwrap_or(0),
             cached_prompt_tokens: read.unwrap_or(0),
             cache_read_known: read.is_some(),
             cache_creation_prompt_tokens: 0,
@@ -2870,7 +2988,7 @@ impl ConversationItem {
             // Runtime messages have no standalone provider role. User is the
             // neutral role fallback for callers that only need a coarse role;
             // request adapters never use this branch for wire projection.
-            Self::AgentMessage(_) => Role::User,
+            Self::AgentMessage(_) | Self::SkillLoad(_) => Role::User,
             Self::BackendToolCall(_) => Role::Assistant,
             // Reasoning is semantically part of the assistant's turn.
             Self::Reasoning(_) => Role::Assistant,
@@ -2908,6 +3026,7 @@ impl ConversationItem {
                 .map(|message| message.message.as_ref())
                 .collect::<Vec<_>>()
                 .join("\n"),
+            Self::SkillLoad(skill) => skill.prepared_body.as_ref().to_owned(),
             Self::BackendToolCall(b) => b.text_summary(),
             Self::Reasoning(r) => reasoning_item_text(r),
         }
@@ -3058,13 +3177,13 @@ impl ConversationItem {
         }
     }
 
-    /// Record the prompt-turn index this user item starts (see
-    /// [`UserItem::prompt_index`]). Runtime message batches use the same
-    /// coordinate so an idle turn remains attached to its active prompt.
+    /// Record the prompt-turn index this item belongs to. Runtime context
+    /// facts use the same coordinate so they remain attached to their prompt.
     pub fn set_prompt_index(&mut self, prompt_index: usize) {
         match self {
             Self::User(u) => u.prompt_index = Some(prompt_index),
             Self::AgentMessage(batch) => batch.prompt_index = Some(prompt_index),
+            Self::SkillLoad(skill) => skill.prompt_index = Some(prompt_index),
             _ => {}
         }
     }
@@ -3075,6 +3194,7 @@ impl ConversationItem {
         match self {
             Self::User(user) => user.prompt_index,
             Self::AgentMessage(batch) => batch.prompt_index,
+            Self::SkillLoad(skill) => skill.prompt_index,
             _ => None,
         }
     }
@@ -3336,6 +3456,9 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
         ConversationItem::AgentMessage(_) => unreachable!(
             "conversation_to_chat_messages expands AgentMessage into a call/result pair"
         ),
+        ConversationItem::SkillLoad(_) => {
+            unreachable!("conversation_to_chat_messages expands SkillLoad into a call/result pair")
+        }
         // Backend tool calls have no Chat Completions equivalent.
         // Emit a synthetic assistant message so the model sees context
         // about what was searched, without breaking the message sequence.
@@ -3361,13 +3484,15 @@ pub fn conversation_item_to_chat_message(item: ConversationItem) -> ChatRequestM
 /// the ephemeral native continuation lane.
 pub fn conversation_to_chat_messages(items: Vec<ConversationItem>) -> Vec<ChatRequestMessage> {
     let ids = agent_message_call_ids(&items, None);
-    conversation_to_chat_messages_with_reasoning(items, false, &ids)
+    let skill_ids = skill_load_call_ids(&items, None);
+    conversation_to_chat_messages_with_reasoning(items, false, &ids, &skill_ids)
 }
 
 fn conversation_to_chat_messages_with_reasoning(
     items: Vec<ConversationItem>,
     replay_reasoning: bool,
     agent_ids: &BTreeMap<String, String>,
+    skill_ids: &BTreeMap<(String, usize, String), String>,
 ) -> Vec<ChatRequestMessage> {
     let items = defer_agent_messages_after_tool_batch(items);
     let mut reasoning = Vec::new();
@@ -3394,6 +3519,24 @@ fn conversation_to_chat_messages_with_reasoning(
                     agent_message_result_content(&message),
                 ));
             }
+            continue;
+        }
+        if let ConversationItem::SkillLoad(skill) = item {
+            reasoning.clear();
+            // Model-triggered loads already have their real tool exchange in
+            // the conversation. The typed fact must not add a second body.
+            if skill.source == SkillLoadSource::Model {
+                continue;
+            }
+            let call_id = skill_load_call_id_for(skill_ids, &skill);
+            let call =
+                ToolCallRequest::function(LOAD_SKILL_TOOL_NAME, skill_load_call_arguments(&skill))
+                    .with_id(call_id.clone());
+            messages.push(ChatRequestMessage::assistant_tool_call(call));
+            messages.push(ChatRequestMessage::tool(
+                call_id,
+                skill_load_result_content(&skill),
+            ));
             continue;
         }
         let mut message = conversation_item_to_chat_message(item);
@@ -3724,6 +3867,7 @@ const STRUCTURED_OUTPUT_SCHEMA_NAME: &str = "structured_output";
 impl From<ConversationRequest> for ChatCompletionRequest {
     fn from(req: ConversationRequest) -> Self {
         let agent_ids = agent_message_call_ids(&req.items, req.native_continuation.as_ref());
+        let skill_ids = skill_load_call_ids(&req.items, req.native_continuation.as_ref());
         let messages: Vec<ChatRequestMessage> = request_segments(&req, ApiBackend::ChatCompletions)
             .into_iter()
             .flat_map(|segment| match segment {
@@ -3734,6 +3878,7 @@ impl From<ConversationRequest> for ChatCompletionRequest {
                     items,
                     replay_portable_reasoning,
                     &agent_ids,
+                    &skill_ids,
                 ),
                 RequestSegment::Native(NativeContinuationFragment::ChatCompletions(
                     mut message,
@@ -3891,6 +4036,7 @@ impl From<&ConversationRequest> for rs::CreateResponse {
 /// required.
 fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
     let agent_ids = agent_message_call_ids(&req.items, req.native_continuation.as_ref());
+    let skill_ids = skill_load_call_ids(&req.items, req.native_continuation.as_ref());
     let items: Vec<rs::InputItem> = request_segments(req, ApiBackend::Responses)
         .into_iter()
         .flat_map(|segment| match segment {
@@ -3900,7 +4046,12 @@ fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
             } => defer_agent_messages_after_tool_batch(items)
                 .iter()
                 .flat_map(|item| {
-                    conversation_item_to_input_items(item, replay_portable_reasoning, &agent_ids)
+                    conversation_item_to_input_items(
+                        item,
+                        replay_portable_reasoning,
+                        &agent_ids,
+                        &skill_ids,
+                    )
                 })
                 .collect(),
             RequestSegment::Native(NativeContinuationFragment::Responses(items)) => items,
@@ -3949,6 +4100,7 @@ fn conversation_item_to_input_items(
     item: &ConversationItem,
     replay_visible_reasoning: bool,
     agent_ids: &BTreeMap<String, String>,
+    skill_ids: &BTreeMap<(String, usize, String), String>,
 ) -> Vec<rs::InputItem> {
     match item {
         ConversationItem::System(s) => {
@@ -4094,6 +4246,30 @@ fn conversation_item_to_input_items(
                 ]
             })
             .collect(),
+        ConversationItem::SkillLoad(skill) => {
+            if skill.source == SkillLoadSource::Model {
+                return Vec::new();
+            }
+            let call_id = skill_load_call_id_for(skill_ids, skill);
+            vec![
+                rs::InputItem::Item(rs::Item::FunctionCall(rs::FunctionToolCall {
+                    call_id: call_id.clone(),
+                    name: LOAD_SKILL_TOOL_NAME.to_owned(),
+                    arguments: skill_load_call_arguments(skill),
+                    id: None,
+                    status: None,
+                    namespace: None,
+                })),
+                rs::InputItem::Item(rs::Item::FunctionCallOutput(
+                    rs::FunctionCallOutputItemParam {
+                        call_id,
+                        output: rs::FunctionCallOutput::Text(skill_load_result_content(skill)),
+                        id: None,
+                        status: None,
+                    },
+                )),
+            ]
+        }
         ConversationItem::BackendToolCall(b) => {
             vec![rs::InputItem::EasyMessage(rs::EasyInputMessage {
                 r#type: rs::MessageType::Message,
@@ -4437,6 +4613,8 @@ pub fn transform_conversation_cwd(
             // and source identity must survive a worktree path rewrite byte
             // for byte, so they are intentionally left untouched.
             ConversationItem::AgentMessage(_) => {}
+            // Prepared skill bodies are immutable committed runtime facts.
+            ConversationItem::SkillLoad(_) => {}
             // Backend tool calls don't contain workspace paths — no-op.
             ConversationItem::BackendToolCall(_) => {}
             ConversationItem::Reasoning(r) => {
@@ -4855,6 +5033,7 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
     let segments = request_segments(req, ApiBackend::Messages);
     let tool_ids = messages_tool_id_map(&segments);
     let agent_ids = agent_message_call_ids(&req.items, req.native_continuation.as_ref());
+    let skill_ids = skill_load_call_ids(&req.items, req.native_continuation.as_ref());
     let wire_tool_id = |id: &str| tool_ids.get(id).map_or(id, String::as_str).to_owned();
 
     // Helper to convert ContentPart to Anthropic ContentBlock
@@ -5033,6 +5212,34 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                                     ]),
                                 });
                             }
+                        }
+                        ConversationItem::SkillLoad(skill) => {
+                            flush_assistant(&mut pending_assistant, &mut messages);
+                            flush_tool_results(&mut pending_tool_results, &mut messages);
+                            if skill.source == SkillLoadSource::Model {
+                                continue;
+                            }
+                            let call_id = skill_load_call_id_for(&skill_ids, skill);
+                            messages.push(Message {
+                                role: MessageRole::Assistant,
+                                content: MessageContent::Blocks(vec![ContentBlock::ToolUse {
+                                    id: call_id.clone(),
+                                    name: LOAD_SKILL_TOOL_NAME.to_owned(),
+                                    input: serde_json::from_str(&skill_load_call_arguments(skill))
+                                        .expect("skill load arguments are valid JSON"),
+                                    cache_control: None,
+                                }]),
+                            });
+                            messages.push(Message {
+                                role: MessageRole::User,
+                                content: MessageContent::Blocks(vec![ContentBlock::ToolResult {
+                                    tool_use_id: call_id,
+                                    content: ToolResultContent::Text(skill_load_result_content(
+                                        skill,
+                                    )),
+                                    cache_control: None,
+                                }]),
+                            });
                         }
                         // Anthropic Messages API has no native backend-tool-call concept.
                         // Emit a synthetic assistant text block so the model retains
@@ -5453,6 +5660,211 @@ mod tests {
             })
             .expect("unpaired model call");
         assert!(receive_index < model_index);
+    }
+
+    fn user_skill_load() -> ConversationItem {
+        ConversationItem::SkillLoad(SkillLoadItem {
+            input_id: "input-1".into(),
+            reference_index: 2,
+            call_id: "runtime-user-ref-2".into(),
+            skill_name: "reviewer".into(),
+            source: SkillLoadSource::User,
+            args: "focus on error handling".into(),
+            prepared_body: Arc::from("Review errors carefully."),
+            prompt_index: Some(3),
+        })
+    }
+
+    fn wire_skill_load_call_ids(value: &serde_json::Value, ids: &mut Vec<String>) {
+        match value {
+            serde_json::Value::Array(values) => {
+                for value in values {
+                    wire_skill_load_call_ids(value, ids);
+                }
+            }
+            serde_json::Value::Object(object) => {
+                let is_chat_call = object
+                    .get("function")
+                    .and_then(|function| function.get("name"))
+                    .and_then(serde_json::Value::as_str)
+                    == Some(LOAD_SKILL_TOOL_NAME);
+                let is_responses_call = object.get("type").and_then(serde_json::Value::as_str)
+                    == Some("function_call")
+                    && object.get("name").and_then(serde_json::Value::as_str)
+                        == Some(LOAD_SKILL_TOOL_NAME);
+                let is_messages_call = object.get("type").and_then(serde_json::Value::as_str)
+                    == Some("tool_use")
+                    && object.get("name").and_then(serde_json::Value::as_str)
+                        == Some(LOAD_SKILL_TOOL_NAME);
+                if is_chat_call || is_responses_call || is_messages_call {
+                    let id_key = if is_responses_call { "call_id" } else { "id" };
+                    if let Some(id) = object.get(id_key).and_then(serde_json::Value::as_str) {
+                        ids.push(id.to_owned());
+                    }
+                }
+                for value in object.values() {
+                    wire_skill_load_call_ids(value, ids);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn assert_skill_load_projected_once_per_backend(
+        request: &ConversationRequest,
+        expected_call_id: &str,
+        expected_body: &str,
+    ) {
+        for backend in [
+            ApiBackend::ChatCompletions,
+            ApiBackend::Responses,
+            ApiBackend::Messages,
+        ] {
+            let wire = portable_wire(request, backend.clone());
+            let mut calls = Vec::new();
+            wire_skill_load_call_ids(&wire, &mut calls);
+            assert_eq!(
+                calls,
+                [expected_call_id],
+                "backend {backend:?} must project exactly one load_skill call: {wire}"
+            );
+            assert_wire_tool_pairs(&wire, &[expected_call_id]);
+            assert!(
+                wire.to_string().contains(expected_body),
+                "backend {backend:?} must carry the complete skill body: {wire}"
+            );
+        }
+    }
+
+    #[test]
+    fn skill_load_projects_as_namespaced_pair_before_unpaired_real_tool_call() {
+        let skill = user_skill_load();
+        let portable = project_portable_history(std::slice::from_ref(&skill));
+        assert!(matches!(
+            portable.as_slice(),
+            [ConversationItem::SkillLoad(_)]
+        ));
+
+        let request = ConversationRequest::from_items(vec![
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: "real-load-call".into(),
+                name: LOAD_SKILL_TOOL_NAME.into(),
+                arguments: r#"{"name":"other"}"#.into(),
+            }]),
+            skill,
+        ]);
+        let chat = ChatCompletionRequest::from(request);
+        let skill_call = chat
+            .messages
+            .iter()
+            .position(|message| {
+                message.tool_calls.iter().any(|call| {
+                    call.function.name == LOAD_SKILL_TOOL_NAME
+                        && call
+                            .id
+                            .as_deref()
+                            .is_some_and(|id| id.starts_with("grow_load_skill_"))
+                })
+            })
+            .expect("runtime skill call projection");
+        let skill_result = chat
+            .messages
+            .iter()
+            .position(|message| {
+                message
+                    .tool_call_id
+                    .as_deref()
+                    .is_some_and(|id| id.starts_with("grow_load_skill_"))
+            })
+            .expect("runtime skill result projection");
+        let dangling_real_call = chat
+            .messages
+            .iter()
+            .position(|message| {
+                message.tool_calls.iter().any(|call| {
+                    call.id.as_deref() == Some("real-load-call")
+                        && call.function.name == LOAD_SKILL_TOOL_NAME
+                })
+            })
+            .expect("original dangling model call remains represented");
+        assert_eq!(skill_result, skill_call + 1);
+        assert!(skill_call < dangling_real_call);
+        assert!(
+            !chat.messages[dangling_real_call + 1..]
+                .iter()
+                .any(|message| message.tool_call_id.as_deref() == Some("real-load-call"))
+        );
+    }
+
+    #[test]
+    fn model_skill_load_fact_does_not_duplicate_its_real_tool_exchange() {
+        let mut skill = match user_skill_load() {
+            ConversationItem::SkillLoad(skill) => skill,
+            _ => unreachable!(),
+        };
+        skill.source = SkillLoadSource::Model;
+        skill.call_id = "real-load-call".into();
+        let chat = ChatCompletionRequest::from(ConversationRequest::from_items(vec![
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: "real-load-call".into(),
+                name: LOAD_SKILL_TOOL_NAME.into(),
+                arguments: skill_load_call_arguments(&skill).into(),
+            }]),
+            ConversationItem::tool_result("real-load-call", "loaded"),
+            ConversationItem::SkillLoad(skill),
+        ]));
+        assert_eq!(
+            chat.messages
+                .iter()
+                .filter(|message| message
+                    .tool_calls
+                    .iter()
+                    .any(|call| call.function.name == LOAD_SKILL_TOOL_NAME))
+                .count(),
+            1
+        );
+        assert_eq!(
+            chat.messages
+                .iter()
+                .filter(|message| message.tool_call_id.as_deref() == Some("real-load-call"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn user_skill_load_projects_one_complete_call_result_pair_on_every_backend() {
+        let skill = user_skill_load();
+        let ConversationItem::SkillLoad(item) = &skill else {
+            unreachable!();
+        };
+        let call_id = skill_load_call_id(item);
+        let body = item.prepared_body.clone();
+        let request = ConversationRequest::from_items(vec![skill]);
+
+        assert_skill_load_projected_once_per_backend(&request, &call_id, body.as_ref());
+    }
+
+    #[test]
+    fn model_skill_load_keeps_only_its_real_tool_exchange_on_every_backend() {
+        let mut skill = match user_skill_load() {
+            ConversationItem::SkillLoad(skill) => skill,
+            _ => unreachable!(),
+        };
+        skill.source = SkillLoadSource::Model;
+        skill.call_id = "model-load-skill-call".into();
+        let body = skill.prepared_body.to_string();
+        let request = ConversationRequest::from_items(vec![
+            ConversationItem::assistant_tool_calls(vec![ToolCall {
+                id: skill.call_id.clone().into(),
+                name: LOAD_SKILL_TOOL_NAME.into(),
+                arguments: skill_load_call_arguments(&skill).into(),
+            }]),
+            ConversationItem::tool_result(skill.call_id.clone(), skill_load_result_content(&skill)),
+            ConversationItem::SkillLoad(skill.clone()),
+        ]);
+
+        assert_skill_load_projected_once_per_backend(&request, &skill.call_id, &body);
     }
 
     #[test]
@@ -10490,6 +10902,50 @@ mod tests {
             assert!(
                 is_unconditional_image_input_unsupported(Some(400), message, 1),
                 "expected capability claim to classify: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn text_only_content_type_rejection_requires_the_exact_terminal_allowed_list() {
+        for message in [
+            "1210: messages.content.type 参数非法，取值范围 ['text']",
+            "messages.content.type 参数非法，取值范围 [\"text\"]",
+            "API error: messages.content.type 参数非法，取值范围 ['text']. \n",
+        ] {
+            assert!(
+                is_unconditional_image_input_unsupported(Some(400), message, 19),
+                "{message}"
+            );
+            assert!(!is_unconditional_image_input_unsupported(
+                Some(400),
+                message,
+                0
+            ));
+            assert!(!is_unconditional_image_input_unsupported(
+                Some(500),
+                message,
+                19
+            ));
+            assert!(!is_unconditional_image_input_unsupported(None, message, 19));
+        }
+        for message in [
+            "messages.content.type 参数非法，取值范围 ['text', 'image_url']",
+            "messages.content.type 参数非法，取值范围 ['image_url']",
+            "messages.content.type 参数非法，取值范围 []",
+            "messages.content.type 参数非法，取值范围 ['text'] or image_url",
+            "messages.content.type 参数非法，取值范围 ['text'] for tool messages only",
+            "messages.content.type 参数非法",
+            "messages.content.type 参数非法，取值范围 ['textual']",
+            "messages.content.type 参数非法，取值范围 ['text'] invalid image encoding",
+            "messages.content.type 参数非法，取值范围 ['text']; content policy violation",
+            "tool.schema.type 参数非法，取值范围 ['text']",
+            "messages.content.image_url.detail 参数非法，取值范围 ['text']",
+            "messages.content.type 参数非法，text",
+        ] {
+            assert!(
+                !is_unconditional_image_input_unsupported(Some(400), message, 19),
+                "{message}"
             );
         }
     }

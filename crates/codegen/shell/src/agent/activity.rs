@@ -216,8 +216,7 @@ impl AgentActivity {
     ) {
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();
         let current_prompt_id = Arc::new(Mutex::new(None));
-        let pending_interactions: PendingInteractions =
-            Arc::new(Mutex::new(std::collections::HashMap::new()));
+        let pending_interactions: PendingInteractions = PendingInteractions::new();
         self.lock_live_sessions().push(SessionActivityEntry {
             id: id.to_string(),
             cmd_tx,

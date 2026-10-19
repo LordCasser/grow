@@ -1242,6 +1242,13 @@ fn render_archive_item(
                 .collect::<Vec<_>>()
                 .join("\n"),
         ),
+        ConversationItem::SkillLoad(skill) => (
+            "skill_load",
+            format!(
+                "skill_name={} args={}\n{}",
+                skill.skill_name, skill.args, skill.prepared_body
+            ),
+        ),
         ConversationItem::BackendToolCall(_) => ("backend_tool", item.text_content()),
         ConversationItem::Reasoning(_) => unreachable!(),
     };

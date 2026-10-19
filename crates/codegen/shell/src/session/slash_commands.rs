@@ -672,6 +672,9 @@ pub(super) fn available_commands(
         let mut meta_map = serde_json::Map::new();
         meta_map.insert("scope".into(), serde_json::json!(skill.scope));
         meta_map.insert("path".into(), serde_json::json!(skill.path));
+        if let Some(plugin_name) = skill.plugin_name.as_deref() {
+            meta_map.insert("plugin_name".into(), serde_json::json!(plugin_name));
+        }
         meta_map.insert("grow/commandKind".into(), serde_json::json!("run"));
         meta_map.insert("grow/commandSource".into(), serde_json::json!("skill"));
         if let Some(display_name) = skill.display_name.as_deref().filter(|s| !s.is_empty()) {

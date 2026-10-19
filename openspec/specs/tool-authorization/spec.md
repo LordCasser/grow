@@ -121,11 +121,13 @@ AskUserQuestion SHALL retain the active label-based answer formatter and SHALL N
 - **THEN** the active formatter preserves both without consulting a format selector.
 
 ### Requirement: Legacy unregistered Skill IO is removed
-ToolInput and ToolOutput SHALL NOT expose the unregistered legacy Skill variants. Registered tools, dynamic ToolPack calls and skill prompt expansion SHALL remain available.
+ToolInput 和 ToolOutput SHALL NOT 暴露未注册的旧 Skill 变体。技能显式加载 SHALL 使用已注册的 load_skill 能力及其真实调用语义；已注册工具、动态 ToolPack、技能发现与初始化预加载 SHALL 保持可用。
 
 #### Scenario: Built-in skill capability
-- **WHEN** the built-in registry is assembled
-- **THEN** skills continue through discovery and prompt expansion without a legacy Skill tool IO variant.
+- **WHEN** 构造具有技能加载能力的内建工具集
+- **THEN** 模型可通过已注册 load_skill 加载目录中的合格技能，不依赖旧 Skill IO 或运行时用户消息正文展开。
+
+证据入口：`crates/codegen/tools/src/implementations/skills/`、工具注册与 `crates/codegen/shell/src/session/actor/tool/preparation.rs`；旧 IO 的移除保持，新增注册操作不代表恢复旧无效变体。
 
 ### Requirement: Descriptor-owned child review is call-bound
 Native tool descriptors SHALL be able to require the ordinary permission Gate for every child invocation independently of the child's initial RWX. A review-required descriptor that survives final tool and policy filtering SHALL be hard-eligible for an exact call and model-visible as approval-required, including when the implementation was injected after authored tool resolution; it SHALL NOT enter the initial-RWX fast path. Tools without this declaration SHALL retain authored-identity and RWX behavior. Hard-ineligible identities SHALL remain non-reviewable.
@@ -376,3 +378,70 @@ ResetState SHALL 在 actor 中先撤销旧请求并清空内存权限域，随�
 #### Scenario: Reset persistence fails
 - **WHEN** Reset 已撤销在途旧请求，但权限文件无法写入
 - **THEN** Reset 返回错误，当前进程不恢复旧 grant，也不把旧请求的迟到允许采纳为新授权。
+
+### Requirement: Suspended tool continuations revalidate current authority
+
+恢复 SHALL 保留工具原调用身份、最终已冻结参数及尚待用户决定的请求关联，但不得恢复旧运行实例的一次性 permit 或以挂起事实授予权限。未派发调用 SHALL 按当前 actor、工作区、工具定义和 MCP transport/trust generation 重新核对；需要用户决定时重建与原操作绑定的真实等待。挂起 SHALL 不生成 Allow/Reject 业务决定，不重跑结果未知的外部 Hook。
+
+#### Scenario: Suspension occurs at a permission prompt
+- **WHEN** 用户尚未回答原操作的权限问题就挂起退出
+- **THEN** 保存待决关联，恢复后重新展示该操作的有效问题；没有答复不等于拒绝或授权。
+
+#### Scenario: Tool or permission scope changes offline
+- **WHEN** 运行环境、工具参数契约、MCP generation 或权限在离线期间改变
+- **THEN** 旧 permit 不可用，恢复阻止不再合法的派发并报告原因，不静默扩大权限或重新生成另一项任务。
+
+#### Scenario: A preflight Hook has an unknown outcome
+- **WHEN** 挂起时权限或参数处理所需 Hook 已开始但结果不明
+- **THEN** 保留该 occurrence 的证据并使相关操作恢复受阻，不能为取得参数或批准而盲目再运行外部 Hook。
+
+目标入口：`crates/codegen/shell/src/session/actor/tool/{preparation,authorization,dispatch}.rs`、现有 permission/Hook owner。
+
+### Requirement: Planning commands validate local ownership and exact relationships
+
+计划写入、task 关联、等待及重规划确认 SHALL 在 runtime 依据当前 session/工作范围和已验证委派关系检查。模型提供的 owner、任意他人步骤、非接收方处理确认或缺失结果身份 SHALL NOT 获得授权。合法内部重规划通知只能由已提交父项变化产生，不作为可任意调用的跨 session 写入口。
+
+#### Scenario: TA-01 Forged plan owner or relationship
+- **WHEN** 模型尝试修改另一个 session 的 TODO，关联 sibling 的步骤或不属于当前范围的历史 ID
+- **THEN** 精确调用被拒绝，不改任何计划、不产生通知，也不改变 task 的实际 owner。
+
+#### Scenario: TA-02 Handling acknowledgment has no receipt authority
+- **WHEN** child 确认未消费的变化、另一个 child 的请求，或父级验收引用不存在的结果
+- **THEN** runtime 拒绝确认并保留原责任；自然语言声称“已完成”不弥补缺失证据。
+
+证据与实施入口：`crates/codegen/tools/src/implementations/grow_build/task/{types.rs,coordinator.rs}`、`crates/codegen/shell/src/session/actor/notification_drain.rs`、现有 `GoalMutationAuthority` 模式。
+
+### Requirement: Parent replanning guidance grants no additional execution rights
+
+自动重规划指导 SHALL 保留 agent 来源，仅在合法直接委派关系和允许的执行状态处理，不授予文件/进程权限、用户同意或一次性 permit。普通 parent message 的 Write 投影与精确参数校验 SHALL 保留；内部通知不成为绕过这些规则的公共 Send。Workflow child 的既有通信限制 SHALL 保留。
+
+#### Scenario: TA-03 Replanning asks for an unauthorized action
+- **WHEN** 父项新要求涉及 child 无权执行的文件写入或命令
+- **THEN** child 可重规划或报告限制，但执行仍经过原权限 Gate；父项变化不能作为人类批准。
+
+#### Scenario: TA-04 Inactive or Workflow target is addressed
+- **WHEN** 普通消息尝试发送到终态 child 或受现有通信限制的 Workflow child，或者重规划目标暂处挂起
+- **THEN** 普通消息按原规则拒绝或仅核对既有回执；挂起目标的自动重规划保留来源责任等待合法恢复，不扩大普通消息准入。
+
+证据与实施入口：`crates/codegen/tools/src/implementations/grow_build/task/coordinator.rs::{interaction_route,send_to_child_route}`、`crates/codegen/shell/src/session/actor/notification_drain.rs::receive_agent_message`、既有 “Receipt-bound replies grant only communication authority”。
+
+### Requirement: Forced skill loading preserves execution gates
+用户强制触发 SHALL 只保证 Runtime 派发，加载仍 MUST 遵守当前工具能力上限、权限、适用文件访问边界、Hook 和取消规则。技能元数据 SHALL 不额外授予权限。Hook SHALL 复用现有允许、拒绝、观察及失败策略，不因技能加载新增参数或结果正文改写能力。
+
+#### Scenario: User load is denied
+- **WHEN** 用户显式加载被权限或 PreToolUse 拒绝
+- **THEN** 返回可见失败，拒绝前尚未读取的正文不被读取，依赖输入不执行。
+
+#### Scenario: Child cannot use loader
+- **WHEN** 子 Agent 的能力上限不允许加载操作
+- **THEN** 用户或模型触发均不能通过用户消息展开或另一个读取入口代为执行加载。
+
+#### Scenario: Metadata does not authorize subsequent tools
+- **WHEN** 成功加载的技能声明 allowed-tools 或要求执行其他工具
+- **THEN** 声明保持描述作用，后续工具仍接受正常权限判定。
+
+#### Scenario: Hook failure and observation preserve existing policy
+- **WHEN** 加载的门控 Hook 失败、取消，或工具终态触发 PostToolUse / PostToolUseFailure
+- **THEN** 门控按现有 on_failure 和取消策略结算，Post Hook 在对应工具终态确认后观察；不改写调用参数或正文，已结算或结果不明的 Hook 不因恢复重跑。
+
+证据入口：`crates/codegen/shell/src/session/actor/tool/preparation.rs` 的工具门控与 Hook、`crates/codegen/tools/src/implementations/grow_build/read_file/mod.rs` 的运行时文件访问，以及主规范现有 capability ceiling 契约。

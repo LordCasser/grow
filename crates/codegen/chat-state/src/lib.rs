@@ -29,6 +29,7 @@ pub mod compaction_utils;
 pub mod events;
 pub mod handle;
 pub mod persistence;
+pub mod session_runtime;
 pub mod sideband;
 pub mod timeline;
 pub mod trajectory;
@@ -61,13 +62,14 @@ pub use sideband::{
 };
 pub use timeline::{
     ActiveControlContext, AdmittedResponse, CompactionEvent, CompactionMode, ControlContext,
-    ControlContextActivation, ControlContextLayer, ControlEvent, EventSeq, HookAggregateDecision,
-    HookCause, HookEvent, HookEventType, HookFailurePolicy, HookGateDecision, HookGateKind,
-    HookHandlerKind, HookHandlerLifecycle, HookHandlerPlan, HookHandlerPlanAction,
-    HookHandlerProvenance, HookLifecycleProjection, HookRunControl, HookRunOutcome,
-    HookRunSkipReason, HookStopDecision, ImageProjectionEvent, ImageShadow, ImageShadowSource,
-    ImageToolCallShadow, InputAdmissionDecision, InputBlockReason, InputDismissReason, InputEvent,
-    InputIntent, InputLifecycle, InputPayloadRef, InputRoute, InputState,
+    ControlContextActivation, ControlContextLayer, ControlEvent, DisplayProjectionExpectation,
+    DisplayProjectionKind, EventSeq, HookAggregateDecision, HookCause, HookEvent, HookEventType,
+    HookFailurePolicy, HookGateDecision, HookGateKind, HookHandlerKind, HookHandlerLifecycle,
+    HookHandlerPlan, HookHandlerPlanAction, HookHandlerProvenance, HookLifecycleProjection,
+    HookRunControl, HookRunOutcome, HookRunSkipReason, HookStopDecision, ImageProjectionEvent,
+    ImageShadow, ImageShadowSource, ImageToolCallShadow, InputAdmissionDecision, InputBlockReason,
+    InputDismissReason, InputEvent, InputIntent, InputLifecycle, InputPayloadRef, InputRoute,
+    InputState, InteractionEvent, InteractionKind, InteractionResolution,
     MAX_HOOK_CONTROL_TEXT_BYTES, MAX_HOOK_HANDLER_NAME_BYTES, MAX_HOOK_HANDLERS, MAX_HOOK_ID_BYTES,
     MAX_INPUT_PAYLOAD_BYTES, MAX_NOTIFICATION_ID_BYTES, MAX_NOTIFICATION_PAYLOAD_BYTES,
     MAX_PENDING_MONITOR_PROGRESS_PER_TASK, MAX_TURN_INPUTS, MAX_WORKFLOW_INITIAL_MANIFEST_BYTES,
@@ -81,8 +83,8 @@ pub use timeline::{
     SubagentSpawnEvent, SubagentTerminalEvent, SurfaceId, SurfaceOp, SurfaceRange,
     TIMELINE_SCHEMA_VERSION, Timeline, TimelineError, TimelineEvent, TimelineEventKind, ToolEvent,
     TurnEvent, TurnId, TurnIdentity, TurnInputKind, TurnTerminal, TurnTerminalSource,
-    WorkflowEvent, WorkflowExecutionStatus, WorkflowLifecycle, WorkflowTurnHandoff,
-    notification_id,
+    UserDisplayEcho, WorkflowEvent, WorkflowExecutionStatus, WorkflowLifecycle,
+    WorkflowTurnHandoff, notification_id,
 };
 pub use trajectory::{
     SurfaceVisibility, TRAJECTORY_SCHEMA_VERSION, TrajectoryIssueSeverity, TrajectoryProjector,

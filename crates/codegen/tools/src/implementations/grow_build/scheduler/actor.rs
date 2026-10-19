@@ -1025,10 +1025,13 @@ impl SchedulerActor {
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
         let request = SubagentRequest {
             id: subagent_id.clone(),
+
+            origin_tool_call_id: None,
             prompt: framed_prompt,
             description,
             subagent_type: "general-purpose".to_string(),
             parent_session_id,
+            parent_step_id: None,
             parent_prompt_id: None,
             resume_from,
             cwd: None,

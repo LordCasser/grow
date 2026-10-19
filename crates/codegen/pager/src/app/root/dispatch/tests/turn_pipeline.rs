@@ -17,6 +17,7 @@ fn failed_image_submission(app: &mut AppView) -> Vec<Effect> {
     agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
         prompt_id: Some("failed-image".into()),
         admission_resolved: None,
+        frozen_skill_selection: None,
         expected_turn_id: None,
         text,
         images,

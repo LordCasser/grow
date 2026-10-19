@@ -294,7 +294,7 @@ fn coordination_row(phase: pager::scrollback::blocks::tool::CoordinationPhase) -
     let mut block = OtherToolCallBlock::new(title, "")
         .with_output("Inquiry ID: one\nQuestion: status?\nAnswer: working");
     block.coordination = Some(CoordinationRow {
-        source_peer_id: "peer".into(),
+        source_session_id: "peer".into(),
         inquiry_id: "one".into(),
         phase,
     });

@@ -324,6 +324,36 @@ pub(crate) fn build_prompt_response_meta(
     };
     serde_json::to_value(meta).expect("PromptResponseMeta is always serializable")
 }
+
+pub(crate) fn build_suspended_prompt_response_meta(
+    session_id: &str,
+    prompt_id: &str,
+    model_id: &str,
+    operation_id: &str,
+    checkpoint_seq: u64,
+) -> serde_json::Value {
+    let mut meta = build_prompt_response_meta(PromptResponseMetaArgs {
+        session_id,
+        prompt_id,
+        total_tokens: 0,
+        model_id,
+        last_turn_usage: None,
+        prompt_usage: None,
+        cancellation_category: None,
+        cancel_trigger: None,
+        structured_output: None,
+    });
+    meta.as_object_mut()
+        .expect("prompt response metadata is an object")
+        .insert(
+            "grow/runtimeSuspended".into(),
+            serde_json::json!({
+                "operationId": operation_id,
+                "checkpointSeq": checkpoint_seq,
+            }),
+        );
+    meta
+}
 /// Typed payload for the `grow/settings/update` notification sent to pager
 /// clients after remote settings settings are refreshed on `/new`.
 ///
@@ -459,20 +489,19 @@ pub struct MvpAgent {
     default_permission_mode: crate::util::config::PermissionMode,
     /// Memory system configuration (None when --experimental-memory not set).
     memory_config: Option<crate::config::MemoryConfig>,
-    /// Optional channel to the leader's `ConfigFileWatcher` for dynamic
+    /// Optional channel to the runtime's `ConfigFileWatcher` for dynamic
     /// per-cwd registration as new sessions open. Each
     /// successful session insert in `spawn_and_register_session` sends
     /// the session's cwd to the watcher task spawned in
-    /// `agent/app.rs`, which calls
+    /// the leader or in-process runtime, which calls
     /// [`crate::config::watcher::ConfigFileWatcher::watch_path`] (a
     /// **non-recursive** watch on `<cwd>/` and `<cwd>/.grow/`).
     ///
-    /// `None` outside leader mode and in tests — the registration is a
-    /// no-op in that case, which is fine: the existing per-extra-path
-    /// loop already covers the leader's startup cwd.
+    /// `None` when project watching is disabled or unavailable, and in tests
+    /// without a watcher; registration is a no-op in that case.
     /// Plain `Option` (not `RefCell`) — this is written
     /// exactly once, by `set_config_watcher_path_tx(&mut self)` during
-    /// leader construction while the agent is still uniquely owned, and
+    /// runtime construction while the agent is still uniquely owned, and
     /// only read thereafter. No interior mutability is required.
     pub(crate) config_watcher_path_tx: Option<
         tokio::sync::mpsc::UnboundedSender<std::path::PathBuf>,
@@ -576,6 +605,7 @@ pub struct MvpAgent {
     supervisor_started: std::cell::Cell<bool>,
     /// Local tasks holding a raw reference to this agent. Aborted before any
     /// agent fields are dropped, including on an abrupt leader generation exit.
+    exit_suspend: RefCell<Option<(String, futures::future::Shared<oneshot::Receiver<Result<(), String>>>)>>,
     owned_local_tasks: RefCell<Vec<tokio::task::JoinHandle<()>>>,
     /// Test-only spy recording every terminal roster delta `(session_id,
     /// final_state)` emitted by `record_roster_delta` (reap → `DeadFailed`,
@@ -836,6 +866,7 @@ impl Drop for SessionLifecycleGuard<'_> {
 mod code_nav;
 mod coordination;
 mod session_lifecycle;
+mod runtime_handoff;
 mod subagent_coordinator;
 mod agent_ops;
 mod acp_agent;

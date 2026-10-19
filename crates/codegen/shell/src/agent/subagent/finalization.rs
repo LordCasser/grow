@@ -65,6 +65,7 @@ where
 pub(crate) fn refresh_finalization_parent(
     data: &mut ShellCompletionData,
     parent: &crate::session::SessionHandle,
+    completion_parent: Option<&crate::session::SessionHandle>,
     gate: Arc<crate::session::storage_admission::StorageAdmission>,
 ) {
     if !parent.chat_state_handle.is_closed() {
@@ -84,6 +85,19 @@ pub(crate) fn refresh_finalization_parent(
         data.parent_chat_state = Some(parent.chat_state_handle.clone());
         data.storage_admission = Some(gate);
         data.parent_cmd_tx = Some(parent.cmd_tx.clone());
+        let completion_parent =
+            completion_parent.filter(|handle| !handle.chat_state_handle.is_closed());
+        let completion_epoch =
+            completion_parent.map(|handle| handle.runtime_observation.read().control_epoch.clone());
+        if data
+            .completion_parent_epoch
+            .as_ref()
+            .is_some_and(|previous| Some(previous) != completion_epoch.as_ref())
+        {
+            data.receipt_in_flight = false;
+        }
+        data.completion_parent_epoch = completion_epoch;
+        data.completion_cmd_tx = completion_parent.map(|handle| handle.cmd_tx.clone());
     }
 }
 

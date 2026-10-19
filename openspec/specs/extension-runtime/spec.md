@@ -298,7 +298,7 @@ SkillManager SHALL remain the source for merged startup/discovered skill listing
 
 ### Requirement: Abandoned MCP calls notify their originating service
 
-Grow 对 stdio/Streamable HTTP MCP `tools/call` SHALL 持有本次请求的 JSON-RPC id 与发起时的 peer。请求在收到回复前因工具期限到期或调用 future 被取消而放弃时，SHALL best-effort 向原 peer 发送匹配 id 的 `notifications/cancelled`，而不是向按服务器名称查得的替代连接发送。已完成调用 SHALL 不发取消；通知失败 SHALL 不修改工具结果或既有恢复判定。取消通知不承诺 server 停止或撤销副作用。
+Grow 对 stdio/Streamable HTTP MCP `tools/call` SHALL 持有本次请求的 JSON-RPC id 与发起时的 peer。请求在收到回复前因工具期限到期或调用 future 被取消而放弃时，SHALL best-effort 向原 peer 发送匹配 id 的 `notifications/cancelled`，而不是向按服务器名称查得的替代连接发送。已完成调用 SHALL 不发取消；通知失败 SHALL 不修改工具结果。取消通知不承诺 server 停止或撤销副作用，也不授权重放。
 
 #### Scenario: Completed result or business error
 - **WHEN** 一次工具调用正常返回结果或 `isError` 业务结果
@@ -306,15 +306,15 @@ Grow 对 stdio/Streamable HTTP MCP `tools/call` SHALL 持有本次请求的 JSON
 
 #### Scenario: Tool deadline expires
 - **WHEN** 在途请求到达其配置期限而没有回复
-- **THEN** 原 peer 收到至多一次与该请求 id 匹配的取消通知；Grow 返回 timeout，HTTP 仅按原服务身份条件重置 transport，不自动重放该工具。
+- **THEN** 原 peer 收到至多一次与该请求 id 匹配的取消通知；Grow 返回说明可能已有副作用的 timeout，HTTP 仅按原服务身份条件重置 transport，不自动重放该工具。
 
 #### Scenario: Turn cancellation drops the call
 - **WHEN** 有 request id 的调用 future 在收到回复前被丢弃
 - **THEN** 不等待远端处理即 best-effort 发匹配 id 的取消通知；没有 id 时不伪造通知。
 
 #### Scenario: Retry belongs to another request
-- **WHEN** 既有恢复规则允许从可恢复错误发起唯一一次重试
-- **THEN** 两轮使用各自的 id/peer；任一轮放弃只通知该轮，重试数仍最多一次。
+- **WHEN** 原调用失败后，调用方明确接纳一次新的独立操作
+- **THEN** 新旧操作使用各自的 id/peer，任一轮放弃只通知该轮；连接恢复不自动生成第二次工具调用。
 
 #### Scenario: Replacement service or failed notification
 - **WHEN** 旧调用被取消时新 Ready 服务已安装，或取消通知发送失败
@@ -351,3 +351,227 @@ Grow SHALL 对 MCP `CallToolResult` 的成功与 `isError` 结果保留 `structu
 #### Scenario: Direct response exceeds its budget
 - **WHEN** 完整 direct 结果的编码大小超出明确响应上限
 - **THEN** extension 返回可识别的超限错误，不发送不完整却声称成功的结果。
+
+### Requirement: Live ACP sessions refresh their MCP catalog from configuration changes
+Pager 进程内 ACP session SHALL 接收适用的 `McpCatalogChanged` 并通过既有 Shell catalog reload 路径刷新其 MCP server 集合。刷新 SHALL 使用 session 实际 cwd 和现有 `mcp_recursive_config_watch` 配置控制项目监听；配置合并、信任过滤与客户端 MCP 配置优先级保持现有语义。重复相同配置 SHALL 幂等；关闭项目监听 SHALL 不登记项目路径，进程取消 SHALL 结束该运行时的配置监听任务。
+
+#### Scenario: Global MCP server is added after session startup
+- **WHEN** 活动 ACP session 启动后新增全局 MCP server 配置
+- **THEN** session 收到 catalog 刷新并可 initialize/list 及调用该 server 的工具，无需重启 session。
+
+#### Scenario: Project MCP configuration changes for an active session
+- **WHEN** 已启用项目监听的 session cwd 下新增或修改项目 MCP 配置
+- **THEN** 仅适用该 session 的 catalog 合并并刷新，已有目录信任过滤继续生效。
+
+#### Scenario: Project configuration directory is created later
+- **WHEN** session cwd 对应的 `.grow` 配置目录在 watcher 启动时不存在，之后创建并加入 MCP 配置
+- **THEN** 延迟目录监听发现变化并刷新该 session 的 catalog。
+
+#### Scenario: A session starts with a different cwd
+- **WHEN** Pager 动态建立 cwd 不同的 session
+- **THEN** watcher 为该实际 cwd 注册项目配置监听，刷新范围按该 cwd 解析。
+
+#### Scenario: Session cwd and filesystem event use directory aliases
+- **WHEN** session cwd 经过符号链接或平台目录别名，而 filesystem event 使用同一目录的规范路径
+- **THEN** 延迟项目目录监听及 reload 范围匹配仍识别该 session，且不匹配其他目录。
+
+#### Scenario: Identical catalog update is repeated
+- **WHEN** 配置重载重复交付同一份有效 MCP catalog
+- **THEN** session 保持同一有效 catalog，不重复注册或破坏已初始化的等价 server。
+
+#### Scenario: Recursive project watching is disabled
+- **WHEN** `mcp_recursive_config_watch` 解析为 disabled
+- **THEN** 不注册项目 cwd watcher，且不产生未消费的动态路径登记；适用的 global reload 仍可工作。
+
+#### Scenario: Client MCP configuration wins for the same merge key
+- **WHEN** 刷新 catalog 时目录配置与 ACP client 配置使用相同目录合并键
+- **THEN** 继续采用既有客户端配置优先级并保留其连接与工具。
+
+#### Scenario: In-process watcher is cancelled
+- **WHEN** Pager 进程取消或退出
+- **THEN** 配置 watcher、动态 cwd drain 与 reload consumer 均结束，不遗留后台任务。
+
+### Requirement: MCP catalog lifecycle follows the effective configuration
+
+An ACP session's advertised MCP tools, callable MCP tools, and owned server connections SHALL converge on the session's current effective merged catalog after configuration changes. Removal or replacement SHALL retire the superseded server and its tools. An asynchronous initialize or reconnect result started for an older configuration SHALL NOT restore a removed or replaced server. Catalog changes SHALL remain scoped to the sessions and cwd for which the existing merge rules make the configuration applicable. Cold recovery SHALL rebuild from current applicable configuration and preserve client-source behavior supported by the existing session recovery semantics; enabled project watching SHALL resume for the recovered session's cwd.
+
+#### Scenario: Removed server is no longer listed or callable
+- **WHEN** an applicable configuration update removes an MCP server from a live session's effective catalog
+- **THEN** the session no longer advertises that server's tools, calls cannot use its retired connection, and unrelated servers remain available.
+
+#### Scenario: Replaced server converges on the replacement
+- **WHEN** an applicable configuration update replaces a server while retaining its catalog identity
+- **THEN** the session advertises and calls through the replacement configuration, and the superseded connection and tools are retired.
+
+#### Scenario: Stale connection work completes after removal or replacement
+- **WHEN** initialize or reconnect work for an old server configuration completes after a newer catalog update removed or replaced it
+- **THEN** the stale result cannot restore the old connection, readiness, configuration, or tools.
+
+#### Scenario: A direct call names a retired endpoint
+- **WHEN** a direct MCP call includes an explicit server URL that is no longer in the session's effective catalog
+- **THEN** it is rejected without routing to a same-name server at another URL.
+
+#### Scenario: Recovery or list notification changes tool definitions
+- **WHEN** the enabled session event dispatcher observes a current connection becoming ready after recovery or publishing a tools-list change
+- **THEN** it refreshes the server's complete tool definitions and search snapshot, including an empty tool list, even if automatic transport recovery is disabled.
+
+#### Scenario: Session dispatcher stops during catalog discovery
+- **WHEN** the session event dispatcher is stopped while its catalog discovery is pending
+- **THEN** its pending discovery tasks are cancelled and cannot later publish a catalog or continue discovery for another session.
+
+#### Scenario: A retired client's call fails late
+- **WHEN** an already-dispatched call reports a recoverable failure after its client was removed or replaced
+- **THEN** it returns the failure without reconnecting or retrying the retired client and without routing the call to the replacement.
+
+#### Scenario: Catalog changes remain isolated by session cwd
+- **WHEN** two sessions use different cwd values and a project MCP configuration changes for one cwd
+- **THEN** only sessions applicable to that project configuration update their catalog; the other session's listed and callable tools remain unchanged.
+
+#### Scenario: A nested session consumes an ancestor project configuration
+- **WHEN** a session's configuration merge reads an ancestor directory up to its repository root
+- **THEN** the same directory chain is watched for configuration creation, replacement, and deletion; removing another cwd's registration does not remove shared ancestor watches still needed by the session.
+
+#### Scenario: Cold recovery rebuilds from current configuration
+- **WHEN** an ACP session is recreated after its prior runtime has stopped and applicable MCP configuration changed while it was stopped
+- **THEN** recovery builds the effective catalog from current applicable configuration, retains client-source behavior provided by the existing recovery inputs and precedence rules, and restores project watching when enabled for that session cwd.
+
+### Requirement: Live MCP auxiliary policy follows effective configuration
+
+An existing session's effective MCP policy SHALL follow applicable configuration changes to `disabled_mcp_tools`, `startup_timeout_sec`, `tool_timeout_sec`, and `tool_timeouts`. Removing an override SHALL expose the remaining lower-priority setting or that field's default. Policy assembly SHALL retain existing metadata precedence and configuration trust/cwd applicability. Asynchronous work started under older policy SHALL NOT commit that policy after a newer effective policy is accepted. A call already admitted SHALL retain the deadline selected for that call; later policy changes apply to subsequently admitted calls.
+
+Subagent sessions SHALL refresh their local disabled-tool gate and bridge registrations when effective global or trusted project policy changes, while ignoring client MCP catalog replacements. A subagent SHALL NOT mutate timeout policy on inherited shared clients; only the owning session refreshes those clients. Internal configuration reload SHALL enqueue this policy refresh for every active child whose cwd matches the reload scope, including workflow children, without replacing the child's frozen catalog or shared-client ownership.
+
+#### Scenario: Existing session receives policy changes
+- **WHEN** applicable configuration changes one or more of `disabled_mcp_tools`, `startup_timeout_sec`, `tool_timeout_sec`, or `tool_timeouts`
+- **THEN** the existing session applies the new effective policy without requiring session recreation
+
+#### Scenario: Policy override is removed
+- **WHEN** an applicable configuration source removes an override for one of the policy fields
+- **THEN** the session uses that field's default instead of retaining the previously effective override
+
+#### Scenario: Metadata precedence is preserved
+- **WHEN** a policy value from metadata and another applicable policy source provide competing values
+- **THEN** the established metadata precedence determines the effective value
+
+#### Scenario: Project policy is untrusted or outside session scope
+- **WHEN** a project policy is not trusted under existing rules or does not apply to a session's cwd
+- **THEN** that policy does not affect the session
+
+#### Scenario: Older asynchronous work finishes after policy refresh
+- **WHEN** initialization or reconnect started under an older policy completes after a newer effective policy is accepted
+- **THEN** the older work cannot restore the old policy
+
+#### Scenario: In-flight call crosses a policy update
+- **WHEN** a call has been admitted with a timeout and the effective policy changes before that call completes
+- **THEN** the in-flight call retains its admitted deadline and a subsequently admitted call uses the updated policy
+
+#### Scenario: Policy changes while an admitted call waits for initialization
+- **WHEN** a call begins initialization under one effective timeout and policy changes before initialization completes
+- **THEN** initialization and the call remain bounded by the deadline captured at admission, and the new policy applies to later calls
+
+#### Scenario: Subagent refreshes its local disabled gate
+- **WHEN** an applicable global or trusted project disabled-tool policy changes while a subagent is active
+- **THEN** the subagent reconciles its local bridge and runtime gate without accepting a client MCP catalog replacement or changing timeout policy on inherited shared clients
+
+#### Scenario: Cold recovery reads current auxiliary policy
+- **WHEN** a session runtime is recreated after its applicable disabled-tool or timeout configuration changed while stopped
+- **THEN** it installs the current effective policy and does not recover an older cached mask or timeout from session history.
+
+#### Scenario: Subagent policy refresh preserves inherited ownership
+- **WHEN** an existing subagent receives a policy-only refresh while using inherited parent MCP clients
+- **THEN** it reconciles its own applicable disabled-tool mask without accepting replacement client catalogs or mutating policy on shared parent clients.
+
+#### Scenario: Internal reload reaches active child policy
+- **WHEN** an internal configuration reload applies to an active child session's cwd
+- **THEN** the child recomputes its local effective auxiliary policy through its actor command path
+- **AND** its inherited MCP catalog and parent-owned shared client policy remain unchanged
+
+#### Scenario: Scoped reload skips unrelated child
+- **WHEN** an internal configuration reload names a project root that does not contain an active child's cwd
+- **THEN** that child receives no policy refresh command
+
+### Requirement: MCP server name is the session identity
+
+Within one session, an MCP server's `name` SHALL be the single identity used by its catalog directory entry, client, and tool-name prefix. Configuration SHALL preserve the established source precedence, including configuration over plugin and client precedence where applicable. When same-name entries from different sources refer to different endpoints, the catalog SHALL select one authoritative entry deterministically according to that precedence and SHALL NOT combine identity from one entry with the endpoint or client of another. A single client-provided server array containing duplicate names SHALL be rejected.
+
+#### Scenario: Same name appears across sources with different endpoints
+- **WHEN** applicable configuration sources provide the same server name with different endpoints
+- **THEN** one authoritative entry is selected by the existing source precedence and its name, client, endpoint, and tool prefix remain associated
+
+#### Scenario: Client array repeats a server name
+- **WHEN** one client-provided server array contains the same server name more than once
+- **THEN** the array is rejected with a clear validation error and no ambiguous catalog is published
+
+### Requirement: Explicit MCP call identity matches the current catalog
+
+A direct MCP call that supplies both server `name` and URL SHALL be accepted only when both identify the same current authoritative catalog entry. A URL match SHALL NOT redirect a mismatched name to a different server. The identity check SHALL continue to apply across cold recovery and hot replacement, so calls and published tools cannot use a stale or mixed identity.
+
+#### Scenario: Explicit name and URL identify different entries
+- **WHEN** a direct call provides a name and URL that do not belong to the same current authoritative catalog entry
+- **THEN** the call is rejected without routing to either entry by partial match
+
+#### Scenario: Explicit name and URL match the current entry
+- **WHEN** a direct call provides the current authoritative entry's name and URL
+- **THEN** the call is routed through that entry's client
+
+#### Scenario: Cold recovery rebuilds server identity
+- **WHEN** a session recovers after its previous runtime stopped
+- **THEN** each catalog name, client, endpoint, and tool prefix are rebuilt from the same current authoritative entry
+
+#### Scenario: Hot replacement completes while old work is pending
+- **WHEN** a same-name server is replaced while initialization or call-discovery work for the previous endpoint is pending
+- **THEN** the old work cannot publish old tools as current or route a new call through the previous endpoint
+
+#### Scenario: Configuration mutation shares catalog authority
+- **WHEN** setup, toggle, upsert, or delete changes a disk definition whose name also exists in client input
+- **THEN** the live session applies the complete merged catalog using the same source precedence as reload, and its displayed configuration and invocation use that same authoritative entry.
+
+### Requirement: Uncertain MCP tool calls are never automatically replayed
+
+Grow SHALL dispatch an ordinary MCP `tools/call` at most once after invocation begins unless it has explicit evidence that the tool request was never sent. Transport loss, HTTP MCP errors, timeouts, identical arguments, and tool annotations SHALL NOT independently authorize replay. An uncertain failure SHALL explain that effects may already have occurred. Connection recovery MAY prepare a later independent call and SHALL remain conditional on the originating service identity.
+
+#### Scenario: Server writes before its reply is lost
+- **WHEN** a server applies a tool effect and the invocation loses its transport or reply
+- **THEN** Grow reports an uncertain outcome without sending a second tool request, and the server effect count remains one.
+
+#### Scenario: Later explicit call uses recovered connectivity
+- **WHEN** a failed originating transport has been invalidated and a new independent tool invocation is admitted
+- **THEN** existing initialization may reconnect for that new invocation without replaying the previous one.
+
+#### Scenario: Replacement and annotations do not grant replay
+- **WHEN** an old invocation fails after replacement, or its tool advertises read-only or idempotent hints
+- **THEN** Grow neither replays it on the old or replacement client nor resets the replacement using the old failure.
+
+### Requirement: Explicit skill loading shares one runtime operation
+用户斜杠技能调用与 Agent 工具调用 SHALL 使用同一技能加载操作，复用唯一运行时目录和正文准备规则。显式用户调用 SHALL 由 Runtime 派发，不依赖前置模型决定。触发来源 SHALL 由 Runtime 持有，不接受调用参数伪造。
+
+#### Scenario: User and model load the same skill
+- **WHEN** 用户斜杠命令与 Agent 分别请求同一有效来源和参数
+- **THEN** 两者使用相同加载语义和结果结构；用户路径无需前置任务模型决定是否加载，来源分别标记为用户与模型，现有权限辅助调用仍按原管线执行。
+
+#### Scenario: Model attempts to claim user invocation
+- **WHEN** 模型试图通过加载参数声明用户来源或权限批准
+- **THEN** Runtime 不接受该声明，仍按模型调用资格和权限处理。
+
+#### Scenario: Read and initialization remain distinct
+- **WHEN** Agent 通过文件工具审阅 SKILL.md，或初始化阶段处理 Agent 的 skills 声明
+- **THEN** 文件读取不构成显式加载，初始化保持预加载角色；两者都不伪造用户斜杠加载记录。
+
+证据入口：`crates/codegen/tools/src/types/skill_discovery_tracker/mod.rs` 的 SkillManager、`tools/src/implementations/skills/skill.rs` 的内容准备、`shell/src/session/slash_commands.rs`、`agent/src/prompt/skills.rs`（后面三项均位于 `crates/codegen/`）。本条是新增契约。
+
+### Requirement: Skill load eligibility follows its actual caller
+加载 SHALL 复核已选条目的 enabled、条件可见性和调用资格。用户入口 SHALL 遵守 user_invocable；模型入口 SHALL 遵守 disable_model_invocation；不得将一个入口的过滤结果冒充另一个入口的可调用目录。
+
+#### Scenario: User-only skill
+- **WHEN** 技能允许用户调用且禁止模型自主调用
+- **THEN** 用户显式调用可进入加载门控，模型调用被明确拒绝。
+
+#### Scenario: Model-only skill
+- **WHEN** 技能禁止用户调用但允许模型调用，且满足其余门控
+- **THEN** 模型可加载，用户入口不把它作为可调用斜杠技能。
+
+#### Scenario: Catalog changes before execution
+- **WHEN** 已接纳引用的来源在消费前禁用、不可见或失去调用资格
+- **THEN** 加载失败，不使用旧目录可见性绕过当前门控。
+
+证据入口：`crates/codegen/shell/src/session/slash_commands.rs` 的 EffectiveCommandCatalog、`crates/codegen/tools/src/types/skill_discovery_tracker/listing.rs` 的模型列表过滤。

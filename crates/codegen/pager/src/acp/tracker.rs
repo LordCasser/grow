@@ -14,7 +14,8 @@ use crate::scrollback::blocks::tool::search::{
 use crate::scrollback::blocks::tool::{
     DiscoveredTool, EditHighlightPhase, EditToolCallBlock, ExecuteToolCallBlock,
     IntegrationSearchToolCallBlock, LineRange, MemorySearchToolCallBlock, OtherToolCallBlock,
-    ReadMediaKind, ReadToolCallBlock, ToolCallBlock, UseToolCallBlock, WebFetchToolCallBlock,
+    ReadMediaKind, ReadToolCallBlock, SkillDisplayStatus, ToolCallBlock, UseToolCallBlock,
+    WebFetchToolCallBlock,
 };
 use crate::scrollback::entry::{EntryId, ScrollbackEntry};
 use crate::scrollback::state::ScrollbackState;
@@ -1920,6 +1921,14 @@ fn canonical_tool_name(tc: &acp::ToolCall) -> Option<&str> {
         .and_then(serde_json::Value::as_str)
 }
 
+fn canonical_tool_kind(tc: &acp::ToolCall) -> Option<&str> {
+    tc.meta
+        .as_ref()
+        .and_then(|meta| meta.get("grow/tool"))
+        .and_then(|value| value.get("kind"))
+        .and_then(serde_json::Value::as_str)
+}
+
 fn communication_tool(tc: &acp::ToolCall) -> Option<CommunicationTool> {
     match extract_variant(tc) {
         Some("AskParent") => return Some(CommunicationTool::AskParent),
@@ -2314,6 +2323,9 @@ fn communication_tool_call_to_block(tc: &acp::ToolCall) -> Option<OtherToolCallB
 /// extracting fields from `raw_input` JSON when available. `session_cwd` sets
 /// execute `header_display` when a leading `cd <cwd>` is redundant.
 fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderBlock {
+    if canonical_tool_kind(tc) == Some("skill") {
+        return skill_call_to_block(tc);
+    }
     if let Some(block) = communication_tool_call_to_block(tc) {
         return RenderBlock::ToolCall(ToolCallBlock::Other(block));
     }
@@ -2603,28 +2615,60 @@ fn tool_call_to_block(tc: &acp::ToolCall, session_cwd: Option<&Path>) -> RenderB
             } else {
                 format!("{:?}", tc.kind).to_lowercase()
             };
-            let (label, ctor): (String, fn(OtherToolCallBlock) -> ToolCallBlock) = if name
-                .eq_ignore_ascii_case("skill")
-                || name.to_ascii_lowercase().starts_with("skill:")
-            {
-                let label = match name.find(':') {
-                    Some(i) => format!("Skill{}", &name[i..]),
-                    None => "Skill".into(),
-                };
-                (label, ToolCallBlock::Skill)
-            } else {
-                (name.into_owned(), ToolCallBlock::Other)
-            };
-            let mut block = OtherToolCallBlock::new(label, summary);
+            let mut block = OtherToolCallBlock::new(name.into_owned(), summary);
             let ct = content_text(tc);
             if !success {
                 block.error = Some(if ct.is_empty() { "Failed".into() } else { ct });
             } else if !ct.is_empty() {
                 block.set_output_text(ct);
             }
-            RenderBlock::ToolCall(ctor(block))
+            RenderBlock::ToolCall(ToolCallBlock::Other(block))
         }
     }
+}
+
+/// Project the structured `grow/load_skill` ACP fields. The `ToolKind` is the
+/// sole identity signal; a title that happens to contain "skill" stays generic.
+fn skill_call_to_block(tc: &acp::ToolCall) -> RenderBlock {
+    let input = tc.raw_input.as_ref();
+    let output = tc
+        .raw_output
+        .as_ref()
+        .filter(|value| value.get("type").and_then(serde_json::Value::as_str) == Some("Dynamic"))
+        .and_then(|value| value.get("value"));
+    let raw_status = serde_json::to_value(&tc.status)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned));
+    let status = match raw_status.as_deref() {
+        Some("completed") => SkillDisplayStatus::Loaded,
+        Some("failed") => SkillDisplayStatus::Failed,
+        Some("cancelled" | "canceled") => SkillDisplayStatus::Cancelled,
+        _ => SkillDisplayStatus::Loading,
+    };
+    let error = matches!(
+        status,
+        SkillDisplayStatus::Failed | SkillDisplayStatus::Cancelled
+    )
+    .then(|| content_text(tc))
+    .filter(|text| !text.is_empty());
+    RenderBlock::ToolCall(ToolCallBlock::skill_call(
+        output
+            .and_then(|value| value.get("skill_name"))
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| input.and_then(|value| value.get("name"))?.as_str()),
+        output
+            .and_then(|value| value.get("args"))
+            .and_then(serde_json::Value::as_str)
+            .or_else(|| input.and_then(|value| value.get("args"))?.as_str()),
+        output
+            .and_then(|value| value.get("source"))
+            .and_then(serde_json::Value::as_str),
+        output
+            .and_then(|value| value.get("prepared_body"))
+            .and_then(serde_json::Value::as_str),
+        status,
+        error,
+    ))
 }
 /// Display title for a tool call: its title, or the kind name when empty.
 fn tool_call_title(tc: &acp::ToolCall) -> Cow<'_, str> {
@@ -3268,6 +3312,51 @@ mod tests {
         acp::SessionUpdate::AgentThoughtChunk(acp::ContentChunk::new(acp::ContentBlock::Text(
             acp::TextContent::new(text.to_string()),
         )))
+    }
+    #[test]
+    fn skill_projection_uses_grow_tool_kind_and_structured_result() {
+        let tc = acp::ToolCall::new(acp::ToolCallId::new(Arc::from("skill")), "load_skill")
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::Completed)
+            .raw_input(Some(serde_json::json!({"name":"commit","args":"--amend"})))
+            .raw_output(Some(
+                serde_json::to_value(tools::types::output::ToolOutput::from(
+                    tools::implementations::grow_build::load_skill::LoadSkillOutput {
+                        skill_name: "user:commit".into(),
+                        source: "/skills/commit/SKILL.md".into(),
+                        args: "--amend".into(),
+                        prepared_body: "Do the commit safely.".into(),
+                    },
+                ))
+                .unwrap(),
+            ))
+            .meta(Some(
+                [("grow/tool".to_owned(), serde_json::json!({"kind":"skill"}))]
+                    .into_iter()
+                    .collect(),
+            ));
+
+        let RenderBlock::ToolCall(ToolCallBlock::Skill(block)) = tool_call_to_block(&tc, None)
+        else {
+            panic!("grow/tool kind=skill should produce an explicit skill row");
+        };
+        assert_eq!(block.name, "Skill: user:commit");
+        assert_eq!(block.summary, "Loaded · args: --amend");
+        assert_eq!(
+            block.output.as_deref(),
+            Some("Source: /skills/commit/SKILL.md\n\nPrepared body:\nDo the commit safely.")
+        );
+    }
+
+    #[test]
+    fn skill_title_without_grow_tool_kind_stays_generic() {
+        let tc = acp::ToolCall::new(acp::ToolCallId::new(Arc::from("generic")), "skill: deploy")
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::Completed);
+        assert!(matches!(
+            tool_call_to_block(&tc, None),
+            RenderBlock::ToolCall(ToolCallBlock::Other(_))
+        ));
     }
     #[test]
     fn workflow_suppression_keeps_authoring_calls_visible() {

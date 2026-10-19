@@ -153,6 +153,31 @@ fn estimate_agent_message_tokens(batch: &sampling_types::AgentMessageItem) -> u6
         .sum()
 }
 
+/// Estimate the provider-visible synthetic exchange for a committed skill
+/// result. The result includes the complete prepared body, which is mandatory
+/// request context until the skill content is consumed.
+fn estimate_skill_load_tokens(skill: &sampling_types::SkillLoadItem) -> u64 {
+    let call_id = sampling_types::skill_load_call_id(skill);
+    let arguments = serde_json::json!({ "name": skill.skill_name, "args": skill.args });
+    let call = serde_json::json!({
+        "role": "assistant",
+        "tool_calls": [{
+            "id": call_id,
+            "type": "function",
+            "function": {
+                "name": sampling_types::LOAD_SKILL_TOOL_NAME,
+                "arguments": arguments.to_string(),
+            },
+        }],
+    });
+    let result = serde_json::json!({
+        "role": "tool",
+        "tool_call_id": call_id,
+        "content": sampling_types::skill_load_result_content(skill),
+    });
+    token_estimation::estimate_tokens(&format!("{call}{result}"))
+}
+
 /// Bytes/4 estimate for a single [`ConversationItem`].
 ///
 /// Images are counted at [`token_estimation::IMAGE_TOKEN_ESTIMATE`] each.
@@ -195,6 +220,7 @@ pub fn estimate_item_tokens(item: &ConversationItem) -> u64 {
                 + token_estimation::estimate_image_tokens(images)
         }
         ConversationItem::AgentMessage(batch) => estimate_agent_message_tokens(batch),
+        ConversationItem::SkillLoad(skill) => estimate_skill_load_tokens(skill),
         ConversationItem::BackendToolCall(b) => {
             token_estimation::estimate_tokens(&b.text_summary())
         }
@@ -981,6 +1007,21 @@ mod tests {
         let tokens = estimate_item_tokens(&item);
         assert!(tokens > 0);
         assert!(tokens > token_estimation::estimate_tokens("body\twith\r\nsource identity"));
+    }
+
+    #[test]
+    fn estimate_skill_load_tokens_includes_the_complete_prepared_body() {
+        let item = ConversationItem::SkillLoad(sampling_types::SkillLoadItem {
+            input_id: "input-1".into(),
+            reference_index: 0,
+            call_id: "user-skill-0".into(),
+            skill_name: "reviewer".into(),
+            source: sampling_types::SkillLoadSource::User,
+            args: String::new(),
+            prepared_body: std::sync::Arc::from("x".repeat(8_000)),
+            prompt_index: Some(0),
+        });
+        assert!(estimate_item_tokens(&item) >= 2_000);
     }
 
     #[test]

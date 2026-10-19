@@ -1258,6 +1258,9 @@ pub(super) mod paste_key_tests {
             session_id: "test-session".into(),
             tool_call_id: "call-1".into(),
             plan_content: "# Plan\n\n## Step 1\nDo something".into(),
+            submission_id: 1,
+            artifact_revision: 2,
+            artifact_hash: "a".repeat(64),
         };
         crate::views::plan_approval_view::PlanApprovalViewState::new(
             request,

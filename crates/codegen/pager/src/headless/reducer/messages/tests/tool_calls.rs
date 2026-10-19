@@ -29,6 +29,60 @@ fn messages_tool_use_grouped_then_user_results() {
 }
 
 #[test]
+fn live_skill_pending_call_and_terminal_update_keep_one_structured_result() {
+    let mut r = messages(false);
+    let mut meta = acp::Meta::new();
+    meta.insert(
+        "grow/tool".into(),
+        json!({"name": "load_skill", "kind": "skill"}),
+    );
+    let pending = acp::SessionUpdate::ToolCall(
+        acp::ToolCall::new("skill-1", "load_skill")
+            .kind(acp::ToolKind::Other)
+            .status(acp::ToolCallStatus::Pending)
+            .raw_input(Some(json!({"name": "review", "args": ""})))
+            .meta(Some(meta)),
+    );
+    let mut out = r.reduce(crate::headless::reducer::map_session_update(&pending).unwrap());
+    let skill_output = serde_json::to_value(tools::types::output::ToolOutput::from(
+        tools::implementations::grow_build::load_skill::LoadSkillOutput {
+            skill_name: "review".into(),
+            source: "/skills/review/SKILL.md".into(),
+            args: String::new(),
+            prepared_body: "Keep the original body".into(),
+        },
+    ))
+    .unwrap();
+    let terminal = acp::SessionUpdate::ToolCallUpdate(acp::ToolCallUpdate::new(
+        "skill-1",
+        acp::ToolCallUpdateFields::new()
+            .status(Some(acp::ToolCallStatus::Completed))
+            .raw_output(Some(skill_output.clone())),
+    ));
+    out.extend(r.reduce(crate::headless::reducer::map_session_update(&terminal).unwrap()));
+    out.extend(r.finish(&end_turn()));
+
+    let uses: Vec<_> = out
+        .iter()
+        .filter(|line| line["type"] == "assistant")
+        .flat_map(|line| line["message"]["content"].as_array().unwrap())
+        .filter(|block| block["type"] == "tool_use" && block["id"] == "skill-1")
+        .collect();
+    let results: Vec<_> = out
+        .iter()
+        .filter(|line| line["type"] == "user")
+        .flat_map(|line| line["message"]["content"].as_array().unwrap())
+        .filter(|block| block["type"] == "tool_result" && block["tool_use_id"] == "skill-1")
+        .collect();
+    assert_eq!(uses.len(), 1);
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0]["is_error"], false);
+    let result: Value = serde_json::from_str(results[0]["content"].as_str().unwrap()).unwrap();
+    assert_eq!(result["value"]["source"], "/skills/review/SKILL.md");
+    assert_eq!(result["value"]["prepared_body"], "Keep the original body");
+}
+
+#[test]
 fn messages_sequential_tool_rounds_interleave_without_response_started() {
     let mut r = messages(false);
     let mut out = Vec::new();

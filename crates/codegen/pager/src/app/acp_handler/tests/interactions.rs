@@ -502,6 +502,9 @@
             session_id: "sess-A".into(),
             tool_call_id: "tc-persist".into(),
             plan_content: "# Plan\nDo stuff".into(),
+            submission_id: 1,
+            artifact_revision: 2,
+            artifact_hash: "a".repeat(64),
         };
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         handle(
@@ -542,6 +545,9 @@
             session_id: "sess-A".into(),
             tool_call_id: "tc-reopen".into(),
             plan_content: "# Plan\nStep 1".into(),
+            submission_id: 1,
+            artifact_revision: 2,
+            artifact_hash: "a".repeat(64),
         };
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         handle(
@@ -575,6 +581,9 @@
             session_id: "sess-A".into(),
             tool_call_id: "tc-prompt".into(),
             plan_content: "# Plan\nDo things".into(),
+            submission_id: 1,
+            artifact_revision: 2,
+            artifact_hash: "a".repeat(64),
         };
         let raw = serde_json::value::to_raw_value(&ext_req).unwrap();
         handle(

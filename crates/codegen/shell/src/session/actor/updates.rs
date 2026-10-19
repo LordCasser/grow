@@ -321,16 +321,22 @@ impl SessionActor {
         current_mode_id: acp::SessionModeId,
         behavior_change: Option<serde_json::Value>,
     ) {
-        let behavior_meta = serde_json::json!({
-            "grow/behavior": match self.behavior.lock().behavior() {
-                tool_types::BehaviorId::Normal => "normal",
-                tool_types::BehaviorId::Clarify => "clarify",
-                tool_types::BehaviorId::Plan => "plan",
-                tool_types::BehaviorId::Workflow => "workflow",
-                tool_types::BehaviorId::Goal => "goal",
-            },
+        let behavior_name = match self.behavior.lock().behavior() {
+            tool_types::BehaviorId::Normal => "normal",
+            tool_types::BehaviorId::Clarify => "clarify",
+            tool_types::BehaviorId::Plan => "plan",
+            tool_types::BehaviorId::Workflow => "workflow",
+            tool_types::BehaviorId::Goal => "goal",
+        };
+        let control_revision = self
+            .control_revision
+            .load(std::sync::atomic::Ordering::Acquire);
+        let mut behavior_meta = serde_json::json!({
+            "grow/behavior": behavior_name,
             "grow/planPhase": self.behavior.lock().plan_phase_label(),
             "grow/behaviorChange": behavior_change,
+            "grow/displayProjectionSource": format!("behavior:{behavior_name}"),
+            "grow/displayProjectionRevision": control_revision,
         });
         let notification = acp::SessionNotification::new(
             self.session_info.id.clone(),
@@ -339,7 +345,15 @@ impl SessionActor {
                     .meta(behavior_meta.as_object().cloned()),
             ),
         )
-        .meta(self.build_notification_meta().as_object().cloned());
+        .meta({
+            let mut meta = self.build_notification_meta();
+            if let (Some(meta), Some(behavior_meta)) =
+                (meta.as_object_mut(), behavior_meta.as_object_mut())
+            {
+                meta.append(behavior_meta);
+            }
+            meta.as_object().cloned()
+        });
         let _ = self
             .event_tx
             .send(SessionEvent::Notification(notification.into()));
@@ -482,6 +496,46 @@ impl SessionActor {
             &self.session_info.id.0,
             &mut notification.meta,
         );
+        if let acp::SessionUpdate::CurrentModeUpdate(_) = &notification.update {
+            let meta = notification.meta.as_ref();
+            let event_id = meta
+                .and_then(|meta| meta.get("eventId"))
+                .and_then(serde_json::Value::as_str);
+            let source_id = meta
+                .and_then(|meta| meta.get("grow/displayProjectionSource"))
+                .and_then(serde_json::Value::as_str);
+            let source_revision = meta
+                .and_then(|meta| meta.get("grow/displayProjectionRevision"))
+                .and_then(serde_json::Value::as_u64);
+            let Some((event_id, source_id, source_revision)) = event_id
+                .zip(source_id)
+                .zip(source_revision)
+                .map(|((id, source), revision)| (id, source, revision))
+            else {
+                tracing::error!(session_id = %self.session_info.id, "CurrentModeUpdate lacks enqueue-time projection identity; suppressing publication");
+                return;
+            };
+            let payload = match serde_json::to_value(&notification.update) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    tracing::error!(%error, "CurrentModeUpdate projection could not be serialized; suppressing publication");
+                    return;
+                }
+            };
+            if let Err(error) = crate::session::notifications::record_display_projection_payload(
+                &self.chat_state_handle,
+                event_id,
+                &payload,
+                chat_state::DisplayProjectionKind::CurrentModeUpdate,
+                source_id.to_owned(),
+                source_revision,
+            )
+            .await
+            {
+                tracing::error!(%error, "CurrentModeUpdate projection expectation was not committed; suppressing publication");
+                return;
+            }
+        }
         self.log_outbound_notification(&notification);
         let active_preview = self
             .sampling_preview
@@ -795,7 +849,9 @@ impl SessionActor {
         if goal_owned_spawn && self.goal_runtime_available() {
             let tokens_used = self.goal_tokens_used();
             let notify = self.goal_notify_sender();
-            notify.emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
+            notify
+                .emit_goal_updated(self.goal_notification_snapshot(), tokens_used)
+                .await;
         }
         Ok(())
     }
@@ -985,6 +1041,50 @@ impl SessionActor {
         live_update: GrowSessionUpdate,
     ) -> Result<(), crate::session::persistence::DurableAppendError> {
         let durable_notification = self.build_grow_notification(durable_update, None);
+        if let GrowSessionUpdate::ControlStateUpdate(control) = &durable_notification.update
+            && !control.snapshot
+        {
+            let event_id = durable_notification
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("eventId"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    crate::session::persistence::DurableAppendError::NotCommitted(
+                        std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "durable control projection has no event ID",
+                        ),
+                    )
+                })?;
+            let payload = serde_json::to_value(&durable_notification.update).map_err(|error| {
+                crate::session::persistence::DurableAppendError::NotCommitted(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    error,
+                ))
+            })?;
+            let intent_identity = control
+                .intent
+                .as_ref()
+                .and_then(|intent| serde_json::to_vec(intent).ok())
+                .map(|bytes| blake3::hash(&bytes).to_hex().to_string())
+                .unwrap_or_else(|| "none".to_owned());
+            crate::session::notifications::record_display_projection_payload(
+                &self.chat_state_handle,
+                event_id,
+                &payload,
+                chat_state::DisplayProjectionKind::ControlStateUpdate,
+                format!("{}:{:?}:{intent_identity}", control.epoch, control.domain),
+                control.revision,
+            )
+            .await
+            .map_err(|error| {
+                crate::session::persistence::DurableAppendError::NotCommitted(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    error,
+                ))
+            })?;
+        }
         // Both projections are one logical event. Reusing the stamped metadata
         // keeps the live reconnect cursor resolvable against the durable line.
         let mut live_notification = durable_notification.clone();
@@ -1103,6 +1203,36 @@ impl SessionActor {
     ) {
         self.close_rewind_window().await;
         let notification = self.build_grow_notification(update, extra_meta);
+        if let GrowSessionUpdate::GoalUpdated { goal_id, .. } = &notification.update {
+            let event_id = notification
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("eventId"))
+                .and_then(serde_json::Value::as_str);
+            let payload = serde_json::to_value(&notification.update);
+            let (Some(event_id), Ok(payload)) = (event_id, payload) else {
+                tracing::error!(session_id = %self.session_info.id, "GoalUpdated lacks a durable projection identity; suppressing publication");
+                return;
+            };
+            if let Err(error) = crate::session::notifications::record_display_projection_payload(
+                &self.chat_state_handle,
+                event_id,
+                &payload,
+                chat_state::DisplayProjectionKind::GoalUpdated,
+                if goal_id.is_empty() {
+                    "goal:cleared".to_owned()
+                } else {
+                    format!("goal:{goal_id}")
+                },
+                self.control_revision
+                    .load(std::sync::atomic::Ordering::Acquire),
+            )
+            .await
+            {
+                tracing::error!(%error, "GoalUpdated projection expectation was not committed; suppressing publication");
+                return;
+            }
+        }
         self.persist_grow_notification(&notification).await;
         self.forward_grow_notification(notification).await;
     }
@@ -1282,10 +1412,13 @@ mod grow_event_id_stamping_tests {
                         chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
                             subagent_id: "child-1".into(),
                             child_session_id: "child-1".into(),
+                            origin_tool_call_id: None,
                             security_parent_session_id: actor.session_info.id.to_string(),
+                            parent_step_id: None,
                             subagent_type: "explore".into(),
                             description: "inspect code".into(),
                             prompt: "inspect code".into(),
+                            execution_recipe: serde_json::json!({}),
                             context_source: chat_state::SubagentContextSource::New,
                             source_ref: None,
                             context_normalized: false,
@@ -1860,8 +1993,8 @@ mod grow_event_id_stamping_tests {
                 actor
                     .emit_notification_direct(acp::SessionNotification::new(
                         acp::SessionId::new("test-actor"),
-                        acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new(
-                            acp::SessionModeId::new("plan"),
+                        acp::SessionUpdate::AgentMessageChunk(acp::ContentChunk::new(
+                            acp::ContentBlock::Text(acp::TextContent::new("unstamped")),
                         )),
                     ))
                     .await;
@@ -2013,12 +2146,24 @@ mod grow_event_id_stamping_tests {
                 *actor.sampling_preview.lock() = Some(("request".into(), 2, false));
                 let task = tokio::task::spawn_local(async move {
                     actor
-                        .emit_notification_direct(acp::SessionNotification::new(
-                            acp::SessionId::new("test-actor"),
-                            acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new(
-                                acp::SessionModeId::new("plan"),
-                            )),
-                        ))
+                        .emit_notification_direct(
+                            acp::SessionNotification::new(
+                                acp::SessionId::new("test-actor"),
+                                acp::SessionUpdate::CurrentModeUpdate(acp::CurrentModeUpdate::new(
+                                    acp::SessionModeId::new("plan"),
+                                )),
+                            )
+                            .meta(serde_json::Map::from_iter([
+                                (
+                                    "grow/displayProjectionSource".to_owned(),
+                                    serde_json::Value::String("behavior:plan".to_owned()),
+                                ),
+                                (
+                                    "grow/displayProjectionRevision".to_owned(),
+                                    serde_json::Value::from(1),
+                                ),
+                            ])),
+                        )
                         .await;
                 });
                 let PersistenceMsg::PreviewIndependent { respond_to, .. } =

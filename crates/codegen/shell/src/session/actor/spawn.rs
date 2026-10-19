@@ -509,6 +509,7 @@ pub(super) fn start_user_question_worker(
     user_question_rx: tokio::sync::mpsc::UnboundedReceiver<
         tools::implementations::grow_build::ask_user_question::UserQuestionRequest,
     >,
+    runtime_suspend: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) {
     use acp_transport::AcpClientHandler as _;
     use tools::implementations::grow_build::ask_user_question::{
@@ -521,6 +522,7 @@ pub(super) fn start_user_question_worker(
     let pending_interactions = session.pending_interactions.clone();
     let weak_session = Arc::downgrade(&session);
     let shutdown = session.background_service_shutdown.clone();
+    let chat_state_handle = session.chat_state_handle.clone();
     let mut user_question_rx = user_question_rx;
     let worker = tokio::task::spawn_local(async move {
         loop {
@@ -555,13 +557,6 @@ pub(super) fn start_user_question_worker(
             );
             let questions_for_response = request.questions.clone();
             let tool_call_id = request.tool_call_id.clone();
-            let _pending_guard = crate::session::pending_interaction::PendingInteractionGuard::new(
-                pending_interactions.clone(),
-                gateway.clone(),
-                session_id.clone(),
-                tool_call_id.clone(),
-                crate::session::pending_interaction::PendingKind::Question,
-            );
             let hook_completed = if let Some(session) = weak_session.upgrade() {
                 tokio::select! {
                     biased;
@@ -581,12 +576,30 @@ pub(super) fn start_user_question_worker(
                 let _ = request.result_tx.send(Ok(UserQuestionResponse::Cancelled));
                 break;
             }
+            let mut pending_guard =
+                crate::session::pending_interaction::PendingInteractionGuard::new(
+                    pending_interactions.clone(),
+                    gateway.clone(),
+                    session_id.clone(),
+                    tool_call_id.clone(),
+                    crate::session::pending_interaction::PendingKind::Question,
+                );
+            if let Err(error) = pending_guard.open_durably(&chat_state_handle).await {
+                let _ = request
+                    .result_tx
+                    .send(Err(UserQuestionError::TransportError(format!(
+                        "question interaction could not be durably opened: {error}"
+                    ))));
+                continue;
+            }
+            let mut receiver_closed = false;
             let result = tokio::select! {
                 biased;
                 _ = shutdown.cancelled() => {
                     Ok(UserQuestionResponse::Cancelled)
                 }
                 () = request.result_tx.closed() => {
+                    receiver_closed = true;
                     tracing::info!(
                         %tool_call_id,
                         "ask_user_question tool receiver closed (timeout or cancel); abandoning ACP wait"
@@ -610,6 +623,36 @@ pub(super) fn start_user_question_worker(
                         Err(e) => Err(UserQuestionError::TransportError(e.to_string())),
                     }
                 }
+            };
+            let resolution = if runtime_suspend.load(std::sync::atomic::Ordering::Acquire)
+                && shutdown.is_cancelled()
+            {
+                chat_state::InteractionResolution::Suspended
+            } else {
+                match &result {
+                    Ok(UserQuestionResponse::Cancelled) => {
+                        if receiver_closed
+                            && request
+                                .deadline
+                                .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+                        {
+                            chat_state::InteractionResolution::TimedOut
+                        } else {
+                            chat_state::InteractionResolution::Cancelled
+                        }
+                    }
+                    Ok(_) => chat_state::InteractionResolution::Answered,
+                    Err(_) => chat_state::InteractionResolution::Failed,
+                }
+            };
+            let result = match pending_guard
+                .resolve_durably(&chat_state_handle, resolution)
+                .await
+            {
+                Ok(_) => result,
+                Err(error) => Err(UserQuestionError::TransportError(format!(
+                    "question interaction could not be durably resolved: {error}"
+                ))),
             };
             let _ = request.result_tx.send(result);
             if shutdown.is_cancelled() {
@@ -810,6 +853,15 @@ pub(crate) async fn spawn_session_actor(
             }
         };
     let is_resumed = validated_timeline.is_some();
+    // A non-Running runtime lifecycle is a startup admission barrier. Keep it
+    // before the validated Timeline is moved into ChatState so recovery below
+    // cannot admit work before the suspended tree has been validated.
+    let restored_runtime = validated_timeline
+        .as_ref()
+        .map(|timeline| timeline.runtime_lifecycle().clone())
+        .unwrap_or_default();
+    let runtime_recovery_gated =
+        restored_runtime.phase != chat_state::session_runtime::RuntimePhase::Running;
     // Later Workflow restoration needs only the bounded set of run lifecycle
     // facts, not another copy of the full conversation Timeline. Capture the
     // facts now; keep projection repair at its original post-ChatState point.
@@ -1052,9 +1104,12 @@ pub(crate) async fn spawn_session_actor(
     };
     let workflow_alpha_test_key = credentials.alpha_test_key.clone();
     chat_state_handle.update_credentials(credentials);
+    let runtime_suspend =
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(runtime_recovery_gated));
     let state = TokioMutex::new(AdmissionState {
         foreground: ForegroundState::Idle,
         termination: TerminationState::Open,
+        runtime_suspend: runtime_suspend.clone(),
         pending_inputs: VecDeque::new(),
         queue_edit_holds: std::collections::HashMap::new(),
         notifications_suppressed: false,
@@ -1097,13 +1152,18 @@ pub(crate) async fn spawn_session_actor(
     // silently deleting the objective. Invalid payloads were already rejected
     // by the Control loader and must never degrade into an empty Goal here.
     let restored_goal_tracker = match persisted_goal_mode {
-        Some(goal) => Some(
-            crate::session::goal_tracker::GoalTracker::from_snapshot(goal).ok_or_else(|| {
-                agent::AgentBuildError::InvalidConfig(
-                    "invalid persisted Goal control payload".to_string(),
-                )
-            })?,
-        ),
+        Some(goal) => {
+            let mut tracker = crate::session::goal_tracker::GoalTracker::from_snapshot(goal)
+                .ok_or_else(|| {
+                    agent::AgentBuildError::InvalidConfig(
+                        "invalid persisted Goal control payload".to_string(),
+                    )
+                })?;
+            if runtime_recovery_gated {
+                tracker.freeze_runtime_clock();
+            }
+            Some(tracker)
+        }
         None => None,
     };
     let goal_was_restored = restored_goal_tracker.is_some();
@@ -1459,7 +1519,7 @@ pub(crate) async fn spawn_session_actor(
         },
     });
     let pending_interactions: crate::session::pending_interaction::PendingInteractions =
-        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        crate::session::pending_interaction::PendingInteractions::new();
     let agent = rebuild_spec
         .build_agent_with_initial_overrides(
             agent_definition,
@@ -1522,6 +1582,12 @@ pub(crate) async fn spawn_session_actor(
         tool_types::BehaviorId::Clarify | tool_types::BehaviorId::Normal => false,
     };
     let mut behavior_normalized = selected_behavior_unavailable;
+    if runtime_recovery_gated && selected_behavior_unavailable {
+        return Err(agent::AgentBuildError::InvalidConfig(
+            "the suspended Behavior runtime is unavailable; its business state was preserved"
+                .into(),
+        ));
+    }
     if selected_behavior_unavailable {
         behavior
             .lock()
@@ -1555,6 +1621,7 @@ pub(crate) async fn spawn_session_actor(
     let system_prompt = agent.system_prompt().to_string();
     let mut initial_context_changed = false;
     if is_resumed
+        && !runtime_recovery_gated
         && !startup_hints.preserve_inherited_system
         && !conversation_has_project_instructions(&conversation)
         && let Some(agents_md_reminder) = agent.agents_md_user_reminder()
@@ -1671,6 +1738,9 @@ pub(crate) async fn spawn_session_actor(
     let (goal_command_tx, goal_command_rx) = tokio::sync::mpsc::unbounded_channel::<
         tools::implementations::grow_build::update_goal::GoalCommand,
     >();
+    let (planning_command_tx, mut planning_command_rx) = tokio::sync::mpsc::unbounded_channel::<
+        tools::implementations::grow_build::todo::runtime::PlanningCommand,
+    >();
     let workflow_session_directory = session_directory.clone();
     let (workflow_store, workflow_snapshots, corrupt_sidecar_repairs) =
         crate::session::workflow::store::WorkflowRunStore::from_restored(
@@ -1720,10 +1790,8 @@ pub(crate) async fn spawn_session_actor(
         preview_gateway_budget.clone(),
         sampling_preview.clone(),
         workflow_store.clone(),
+        chat_state_handle.clone(),
     );
-    for state in workflow_tracker.lock().snapshot() {
-        workflow_notify.emit(&state, state.elapsed_ms_floor, 0);
-    }
     let mut workflow_default_sampler = sampling_config.clone();
     workflow_default_sampler.idle_timeout_secs = Some(inference_idle_timeout_secs);
     workflow_default_sampler.max_retries = max_retries;
@@ -1753,7 +1821,7 @@ pub(crate) async fn spawn_session_actor(
             std::path::PathBuf::from(session_info.cwd.as_str()),
             workflow_tracker.clone(),
             workflow_store,
-            workflow_notify,
+            workflow_notify.clone(),
             tool_context.subagent_event_tx.clone().unwrap_or_else(|| {
                 tracing::warn!(
                     "workflow manager: no subagent coordinator; agent() spawns will fail"
@@ -1772,10 +1840,31 @@ pub(crate) async fn spawn_session_actor(
             workflow_agent_catalog_source,
         ),
     ));
+    if restored_runtime.phase == chat_state::session_runtime::RuntimePhase::Running {
+        workflow_manager
+            .lock()
+            .await
+            .pause_released_suspended_runs_for_manual_resume()
+            .await
+            .map_err(|error| {
+                agent::AgentBuildError::IoError(std::io::Error::other(format!(
+                    "released Workflow recovery state was not reconciled: {error}"
+                )))
+            })?;
+    }
+    let restored_workflow_states = workflow_tracker.lock().snapshot();
+    for state in restored_workflow_states {
+        workflow_notify
+            .emit(&state, state.elapsed_ms_floor, 0)
+            .await;
+    }
     let (workflow_tx, mut workflow_rx) = tokio::sync::mpsc::unbounded_channel::<
         tools::implementations::grow_build::workflow::WorkflowEnvelope,
     >();
     let workflow_service_shutdown = tokio_util::sync::CancellationToken::new();
+    if runtime_recovery_gated {
+        workflow_manager.lock().await.close_admission();
+    }
     let workflow_service_shutdown_signal = workflow_service_shutdown.clone();
     let workflow_worker = {
         let manager = workflow_manager.clone();
@@ -2309,6 +2398,14 @@ pub(crate) async fn spawn_session_actor(
         .unwrap_or_default();
     effective_config.remote_settings = remote_settings.clone();
     let goal_behavior_available = goal_enabled;
+    if runtime_recovery_gated
+        && behavior.lock().behavior() == tool_types::BehaviorId::Goal
+        && !goal_behavior_available
+    {
+        return Err(agent::AgentBuildError::InvalidConfig(
+            "the suspended Goal runtime is unavailable; its business state was preserved".into(),
+        ));
+    }
     if behavior.lock().behavior() == tool_types::BehaviorId::Goal && !goal_behavior_available {
         behavior
             .lock()
@@ -2515,6 +2612,19 @@ pub(crate) async fn spawn_session_actor(
         goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashMap::new()),
         goal_command_rx: std::cell::RefCell::new(Some(goal_command_rx)),
         goal_command_tx,
+        planning_command_tx,
+        planning_delivery: TaskSlot::new(),
+        runtime_suspension_worker: TaskSlot::new(),
+        runtime_suspension_fault: std::cell::RefCell::new(None),
+        runtime_suspended_waiters: std::cell::RefCell::new(Vec::new()),
+        planning_delivery_dirty: std::cell::Cell::new(false),
+        runtime_release_waiters: std::cell::RefCell::new(Vec::new()),
+        restoration_release: std::cell::RefCell::new(None),
+        runtime_completion_watchers: std::cell::RefCell::new(Vec::new()),
+        restored_response: std::cell::RefCell::new(None),
+        restored_response_for_stop_gate: std::cell::RefCell::new(None),
+        turn_continuation: std::cell::RefCell::new(None),
+        sampling_continuation: std::cell::RefCell::new(None),
         workflow_manager: workflow_manager.clone(),
         workflow_tx: workflow_tx.clone(),
         workflow_worker: {
@@ -2566,11 +2676,15 @@ pub(crate) async fn spawn_session_actor(
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         workspace_ops: workspace_ops.clone(),
     });
-    session.recover_pending_rewind().await.map_err(|error| {
-        agent::AgentBuildError::IoError(std::io::Error::other(
-            error.context("failed to recover pending rewind transaction"),
-        ))
-    })?;
+    // Rewind recovery mutates the conversation branch. A retained runtime
+    // checkpoint owns that branch until its full suspended tree is restored.
+    if !runtime_recovery_gated {
+        session.recover_pending_rewind().await.map_err(|error| {
+            agent::AgentBuildError::IoError(std::io::Error::other(
+                error.context("failed to recover pending rewind transaction"),
+            ))
+        })?;
+    }
     // Close process-local causal scopes before reconstructing the durable input
     // inbox. In particular, TurnEnded releases FIFO reservations and makes a
     // steer whose target died with the process eligible for deterministic
@@ -2585,14 +2699,19 @@ pub(crate) async fn spawn_session_actor(
                 "failed to close interrupted Timeline scopes: {error}"
             )))
         })?;
-    session
-        .recover_interrupted_coordination_inquiries()
-        .await
-        .map_err(|error| {
-            agent::AgentBuildError::IoError(std::io::Error::other(format!(
-                "failed to close interrupted coordination inquiries: {error}"
-            )))
-        })?;
+    // Preserve checkpoint-owned coordination requests until tree validation.
+    // Interrupted Timeline scopes still recover through their checkpoint-aware
+    // path above, and queued human input is always reconstructed below.
+    if !runtime_recovery_gated {
+        session
+            .recover_interrupted_coordination_inquiries()
+            .await
+            .map_err(|error| {
+                agent::AgentBuildError::IoError(std::io::Error::other(format!(
+                    "failed to close interrupted coordination inquiries: {error}"
+                )))
+            })?;
+    }
     session
         .restore_pending_human_inputs()
         .await
@@ -2642,7 +2761,9 @@ pub(crate) async fn spawn_session_actor(
     } else {
         false
     };
-    if persisted_control_revision == 0 || is_resumed {
+    // The selected Agent snapshot is not a mutable role transition until the
+    // checkpointed runtime tree has passed restoration validation.
+    if !runtime_recovery_gated && (persisted_control_revision == 0 || is_resumed) {
         let (agent_name, role_prompt, capability_catalog) = {
             let agent = session.agent.borrow();
             (
@@ -2692,7 +2813,9 @@ pub(crate) async fn spawn_session_actor(
         ));
     // A restored Active Goal must never reach the idle arbiter until the live
     // bridge proves that every required Goal tool is actually registered.
-    session.refresh_goal_runtime_availability().await;
+    if !runtime_recovery_gated {
+        session.refresh_goal_runtime_availability().await;
+    }
     // Reconstruct provider admission from the complete durable Goal snapshot,
     // including whether incomplete usage has been explicitly acknowledged.
     // The initial window constructor only carries ownership across parent /
@@ -2738,7 +2861,8 @@ pub(crate) async fn spawn_session_actor(
         // performed by `from_snapshot`; do not enqueue a second, weaker copy.
         session
             .goal_notify_sender()
-            .emit_goal_updated(&session.goal_tracker.lock(), tokens_used);
+            .emit_goal_updated(session.goal_notification_snapshot(), tokens_used)
+            .await;
     }
     {
         let drainer_session = session.clone();
@@ -2781,6 +2905,19 @@ pub(crate) async fn spawn_session_actor(
         });
     }
     {
+        let session_cmd_tx = cmd_tx.clone();
+        tokio::task::spawn_local(async move {
+            while let Some(command) = planning_command_rx.recv().await {
+                if session_cmd_tx
+                    .send(SessionCommand::PlanningControl { command })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+    }
+    {
         let snapshot = session.mcp.tool_metadata_snapshot.clone();
         let tool_index = crate::session::tool_index::Bm25ToolSearchIndex::new(snapshot);
         session
@@ -2793,6 +2930,20 @@ pub(crate) async fn spawn_session_actor(
             .await;
     }
     session.inject_deny_read_globs().await;
+    session
+        .agent
+        .borrow()
+        .tool_bridge()
+        .update_resource(
+            tools::implementations::grow_build::todo::runtime::PlanningRuntimeHandle(
+                session.planning_command_tx.clone(),
+            ),
+        )
+        .await;
+    session
+        .hydrate_local_plan()
+        .await
+        .map_err(|error| agent::AgentBuildError::IoError(std::io::Error::other(error)))?;
     // The primary may be in Ask while globally configured subagents use Auto;
     // the wiring method resolves both cases and keeps the classifier on the
     // primary model/config rather than the child's model.
@@ -2997,7 +3148,7 @@ pub(crate) async fn spawn_session_actor(
         });
         session.memory_reindex_worker.arm(worker);
     }
-    start_user_question_worker(&session, user_question_rx);
+    start_user_question_worker(&session, user_question_rx, runtime_suspend.clone());
     let (session_done_tx, session_done_rx) = tokio::sync::oneshot::channel::<()>();
     let diagnostics_ctx = ::diagnostics::session_ctx::DiagnosticCtx::new(
         session.session_info.id.0.to_string(),
@@ -3073,7 +3224,9 @@ pub(crate) async fn spawn_session_actor(
             cmd_tx,
             goal_usage_window,
             persistence_tx: persistence.tx.clone(),
+            session_directory: session_directory.clone(),
             runtime_observation,
+            runtime_suspend,
             current_prompt_id,
             pending_interactions,
             info: session_info,
@@ -3648,17 +3801,29 @@ pub(crate) async fn spawn_session_on_thread(
 pub(crate) struct SessionRestartActions {
     session: Arc<SessionActor>,
     shutdown: crate::session::mcp_dispatcher::SharedShutdownState,
+    auto_restart_enabled: bool,
 }
 impl SessionRestartActions {
     pub(crate) fn new(
         session: Arc<SessionActor>,
         shutdown: crate::session::mcp_dispatcher::SharedShutdownState,
+        auto_restart_enabled: bool,
     ) -> Self {
-        Self { session, shutdown }
+        Self {
+            session,
+            shutdown,
+            auto_restart_enabled,
+        }
     }
 }
 #[async_trait::async_trait(?Send)]
 impl crate::session::mcp_restart::RestartActions for SessionRestartActions {
+    fn auto_restart_enabled(&self) -> bool {
+        self.auto_restart_enabled
+    }
+    async fn refresh_tools(&self, server: &str, episode: ::mcp::servers::McpClientEpisode) {
+        self.session.refresh_mcp_server_tools(server, episode).await;
+    }
     async fn is_stdio_server_configured(&self, server: &str) -> bool {
         self.session.is_stdio_server_configured(server).await
     }

@@ -7,7 +7,10 @@
 
 pub mod types;
 
-pub use types::{PlanApprovalExtRequest, PlanApprovalExtResponse, PlanApprovalOutcome};
+pub use types::{
+    PlanApprovalExtRequest, PlanApprovalExtResponse, PlanApprovalOutcome, PlanArtifactQueryRequest,
+    PlanArtifactQueryResponse,
+};
 
 use crate::types::output::PlanControlOutput;
 use crate::types::tool::{ToolKind, ToolNamespace};

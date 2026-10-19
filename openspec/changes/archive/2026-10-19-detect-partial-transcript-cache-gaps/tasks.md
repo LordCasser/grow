@@ -1,0 +1,7 @@
+- [x] Persist exact source prompt identity on durable TurnStarted facts and detect a missing TurnCompleted row for eligible ended turns.
+- [x] Include selected synthetic user turns through their exact Notification::Consumed turn association, and reject runtime checkpoints whose continuation prompt ID conflicts with TurnStarted.
+- [x] Persist the raw display echo's ordered block count and digest with consumed input; validate all cached chunks for exact message identity, count, and digest.
+- [x] Add tests for missing terminal rows, missing/truncated/mismatched user chunks, rewind exclusion, captured-snapshot append isolation, and source immutability.
+- [x] Add one typed Timeline expectation for durable Workflow, Goal, Control, and CurrentMode rows and require its ACK before physical cache/live publication; keep ephemeral and pre-persistence coalesced updates outside the expectation set.
+- [x] Validate these cache rows by exact event ID and payload digest at fixed Timeline/update frontiers; add missing, altered, ephemeral/coalesced, and frontier-race tests.
+- [x] Record unsupported historical identity mappings and validate the change.

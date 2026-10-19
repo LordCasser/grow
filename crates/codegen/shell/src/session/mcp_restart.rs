@@ -194,6 +194,14 @@ impl From<String> for RecoveryError {
 /// claims `Send + Sync` does NOT relax this requirement.
 #[async_trait(?Send)]
 pub trait RestartActions {
+    /// Catalog maintenance is independent from automatic transport recovery.
+    fn auto_restart_enabled(&self) -> bool {
+        true
+    }
+
+    /// Refresh only the client episode authorized by the originating event.
+    async fn refresh_tools(&self, _server: &str, _episode: ::mcp::servers::McpClientEpisode) {}
+
     /// Returns `true` iff the server still has a stdio entry in
     /// `McpState::configs` AND is enabled (not on the disabled list).
     /// Used both at schedule time and at the top of each backoff loop.

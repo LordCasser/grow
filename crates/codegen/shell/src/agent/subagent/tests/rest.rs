@@ -3,6 +3,19 @@ use super::*;
 use crate::test_support::lsp_runtime::{ctx_with_toggle, test_gateway};
 use tools::implementations::grow_build::task::backend::ChannelBackend;
 #[test]
+fn suspension_retirement_ack_remains_idempotent_while_other_children_drain() {
+    let thread = crate::session::SessionThread::from_handle(
+        std::thread::spawn(|| {}),
+    );
+    thread.clone().join().expect("test child must exit normally");
+    let mut completion = ShellCompletionData {
+        child_thread: Some(thread),
+        ..Default::default()
+    };
+    assert_eq!(completion.suspension_retired(), Ok(true));
+    assert_eq!(completion.suspension_retired(), Ok(true));
+}
+#[test]
 fn normalize_forked_context_strips_project_layout() {
     use sampling_types::conversation::ConversationItem;
     let big_layout = "<project_layout>\nline1\nline2\nline3\n</project_layout>";
@@ -581,10 +594,13 @@ fn durable_resume_projection_requires_parent_terminal_fact() {
                 goal_definition_revision: None,
                 subagent_id: "sa-resume".into(),
                 child_session_id: "child-resume".into(),
+                origin_tool_call_id: None,
                 security_parent_session_id: "parent-session".into(),
+            parent_step_id: None,
                 subagent_type: "general-purpose".into(),
                 description: "continue work".into(),
                 prompt: "finish implementation".into(),
+                execution_recipe: serde_json::json!({}),
                 context_source: chat_state::SubagentContextSource::Resumed,
                 source_ref: None,
                 context_normalized: false,
@@ -675,10 +691,13 @@ fn canonical_spawn_fact_reconstructs_the_complete_ui_projection() {
             goal_definition_revision: Some(1),
             subagent_id: "sa-projection".into(),
             child_session_id: "child-projection".into(),
+            origin_tool_call_id: None,
             security_parent_session_id: "parent-session".into(),
+            parent_step_id: None,
             subagent_type: "review".into(),
             description: "adversarial review".into(),
             prompt: "review all features".into(),
+            execution_recipe: serde_json::json!({}),
             context_source: chat_state::SubagentContextSource::Forked,
             source_ref: None,
             context_normalized: true,

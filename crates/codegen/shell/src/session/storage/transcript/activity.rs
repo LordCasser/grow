@@ -9,14 +9,15 @@ use std::ops::Range;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use chat_state::{
-    CompactionEvent, HookEvent, RequestEvent, SidebandEvent, SidebandEventKind, TimelineEvent,
-    TimelineEventKind, ToolEvent, WorkflowEvent,
+    CompactionEvent, HookEvent, InteractionEvent, RequestEvent, SidebandEvent, SidebandEventKind,
+    TimelineEvent, TimelineEventKind, ToolEvent, WorkflowEvent,
 };
 
 #[derive(Debug, Default)]
 pub(super) struct Activity {
     pub protected: Vec<Range<u64>>,
     pub recovery_gaps: Vec<Range<u64>>,
+    pub offline_gaps: Vec<Range<u64>>,
     pub open_starts: Vec<u64>,
     pub unknown_activity: bool,
 }
@@ -62,10 +63,12 @@ fn recover_or_protect(
     }
     let boundary = last_evidence.unwrap_or(start).clamp(start, end);
     if let Some(span) = interval(start, boundary) {
-        out.protected.push(span);
+        out.protected
+            .extend(subtract_ranges(vec![span], known_waits));
     }
     if let Some(span) = interval(boundary, end) {
-        out.recovery_gaps.push(span);
+        out.recovery_gaps
+            .extend(subtract_ranges(vec![span], known_waits));
     }
 }
 
@@ -84,6 +87,10 @@ pub(super) fn from_timeline(events: &[TimelineEvent]) -> Activity {
     let mut pending_plan_wait: Option<(String, u64)> = None;
     let mut known_plan_waits = BTreeMap::<String, Vec<Range<u64>>>::new();
     let mut completed_plan_waits = Vec::<Range<u64>>::new();
+    let mut open_interactions =
+        BTreeMap::<(String, String), (chat_state::InteractionKind, u64)>::new();
+    let mut interaction_waits = BTreeMap::<String, Vec<Range<u64>>>::new();
+    let mut unknown_interaction_time = false;
 
     for event in events {
         let Some(at) = u64::try_from(event.at_ms).ok() else {
@@ -213,12 +220,44 @@ pub(super) fn from_timeline(events: &[TimelineEvent]) -> Activity {
                 }
                 None
             }
+            TimelineEventKind::Interaction(InteractionEvent::Opened {
+                tool_call_id,
+                attempt_id,
+                kind,
+            }) => {
+                open_interactions.insert((tool_call_id.clone(), attempt_id.clone()), (*kind, at));
+                None
+            }
+            TimelineEventKind::Interaction(InteractionEvent::Resolved {
+                tool_call_id,
+                attempt_id,
+                kind,
+                ..
+            }) => {
+                let key = (tool_call_id.clone(), attempt_id.clone());
+                if let Some((opened_kind, began)) = open_interactions.remove(&key)
+                    && opened_kind == *kind
+                    && let Some(wait) = interval(began, at)
+                {
+                    interaction_waits
+                        .entry(tool_call_id.clone())
+                        .or_default()
+                        .push(wait);
+                } else {
+                    unknown_interaction_time = true;
+                }
+                None
+            }
             _ => None,
         };
         if let Some(work) = finished {
             if let Some(start) = open.remove(&work) {
                 let waits = match &work {
-                    Work::Tool(call_id) => known_plan_waits.remove(call_id).unwrap_or_default(),
+                    Work::Tool(call_id) => {
+                        let mut waits = known_plan_waits.remove(call_id).unwrap_or_default();
+                        waits.extend(interaction_waits.remove(call_id).unwrap_or_default());
+                        merged(waits)
+                    }
                     _ => Vec::new(),
                 };
                 if matches!(&work, Work::Tool(_)) {
@@ -258,7 +297,90 @@ pub(super) fn from_timeline(events: &[TimelineEvent]) -> Activity {
     }
     out.protected = merged(out.protected);
     out.recovery_gaps = merged(out.recovery_gaps);
+    out.unknown_activity |= unknown_interaction_time || !open_interactions.is_empty();
     out
+}
+
+/// Compute offline intervals only from the validated runtime lifecycle root's
+/// exact suspension operation and node membership. An unreleased operation is
+/// known offline through the captured root frontier; reversed timestamps are
+/// unknown rather than clamped.
+pub(super) fn runtime_offline_intervals(
+    root_events: &[TimelineEvent],
+    session_id: &str,
+) -> (Vec<Range<u64>>, bool) {
+    use chat_state::session_runtime::SessionRuntimeEvent;
+
+    let mut starts = BTreeMap::<String, u64>::new();
+    let mut gaps = Vec::new();
+    let mut unknown = false;
+    let mut horizon = None;
+    for event in root_events {
+        let Some(at) = u64::try_from(event.at_ms).ok() else {
+            continue;
+        };
+        horizon = Some(horizon.map_or(at, |old: u64| old.max(at)));
+        match &event.kind {
+            TimelineEventKind::Runtime(SessionRuntimeEvent::TreeSuspended {
+                operation_id,
+                nodes,
+            }) if nodes.iter().any(|node| node.session_id == session_id) => {
+                starts.insert(operation_id.clone(), at);
+            }
+            TimelineEventKind::Runtime(SessionRuntimeEvent::ExecutionReleased {
+                operation_id,
+                ..
+            }) => {
+                if let Some(start) = starts.remove(operation_id) {
+                    if let Some(gap) = interval(start, at) {
+                        gaps.push(gap);
+                    } else {
+                        unknown = true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(frontier) = horizon {
+        for start in starts.into_values() {
+            if let Some(gap) = interval(start, frontier) {
+                gaps.push(gap);
+            } else {
+                unknown = true;
+            }
+        }
+    } else if !starts.is_empty() {
+        unknown = true;
+    }
+    (merged(gaps), unknown)
+}
+
+/// Remove only confirmed offline intervals from a set of known spans. The
+/// caller applies this after combining evidence for one validated tree member;
+/// activity from a different session owner is never passed here.
+pub(super) fn subtract_ranges(spans: Vec<Range<u64>>, excluded: &[Range<u64>]) -> Vec<Range<u64>> {
+    let excluded = merged(excluded.to_vec());
+    let mut out = Vec::new();
+    for span in spans {
+        let mut cursor = span.start;
+        for gap in &excluded {
+            if gap.end <= cursor || gap.start >= span.end {
+                continue;
+            }
+            if gap.start > cursor {
+                out.push(cursor..gap.start.min(span.end));
+            }
+            cursor = cursor.max(gap.end).min(span.end);
+            if cursor >= span.end {
+                break;
+            }
+        }
+        if cursor < span.end {
+            out.push(cursor..span.end);
+        }
+    }
+    merged(out)
 }
 
 /// Sideband request/end facts are validated in the same capture. A sideband
@@ -460,6 +582,132 @@ mod tests {
             merged(out.protected),
             vec![0..10_000, 20_000..80_000, 90_000..100_000]
         );
+    }
+
+    #[test]
+    fn durable_interaction_wait_is_removed_but_unresolved_attempt_stays_unknown() {
+        use chat_state::{EventSeq, InteractionKind, StepId, TurnId};
+        let turn = TurnId(1);
+        let kinds = vec![
+            TimelineEventKind::Tool(ToolEvent::Started {
+                call_id: "call".into(),
+                turn,
+                step: StepId { turn, index: 0 },
+                name: "ask_user_question".into(),
+                input: None,
+            }),
+            TimelineEventKind::Interaction(InteractionEvent::Opened {
+                tool_call_id: "call".into(),
+                attempt_id: "attempt-1".into(),
+                kind: InteractionKind::Question,
+            }),
+            TimelineEventKind::Interaction(InteractionEvent::Resolved {
+                tool_call_id: "call".into(),
+                attempt_id: "attempt-1".into(),
+                kind: InteractionKind::Question,
+                resolution: chat_state::InteractionResolution::Answered,
+            }),
+            TimelineEventKind::Tool(ToolEvent::Completed {
+                call_id: "call".into(),
+                name: "ask_user_question".into(),
+                outcome: "success".into(),
+                duration_ms: 90_000,
+                details: None,
+            }),
+        ];
+        let at = [0, 10_000, 80_000, 90_000];
+        let events = kinds
+            .into_iter()
+            .enumerate()
+            .map(|(index, kind)| TimelineEvent {
+                version: chat_state::TIMELINE_SCHEMA_VERSION,
+                seq: EventSeq::new(index as u64 + 1),
+                at_ms: at[index],
+                kind,
+            })
+            .collect::<Vec<_>>();
+        let activity = from_timeline(&events);
+        assert_eq!(activity.protected, vec![0..10_000, 80_000..90_000]);
+        assert!(!activity.unknown_activity);
+
+        let mut unresolved = events;
+        unresolved.pop();
+        unresolved.pop();
+        let activity = from_timeline(&unresolved);
+        assert!(activity.unknown_activity);
+        assert_eq!(activity.protected, vec![0..10_000]);
+    }
+
+    #[test]
+    fn offline_span_requires_exact_operation_and_tree_membership() {
+        use chat_state::EventSeq;
+        use chat_state::session_runtime::{RuntimeNodeRef, SessionRuntimeEvent};
+        let events = |runtime_events: Vec<(i64, SessionRuntimeEvent)>| {
+            runtime_events
+                .into_iter()
+                .enumerate()
+                .map(|(index, (at_ms, runtime))| TimelineEvent {
+                    version: chat_state::TIMELINE_SCHEMA_VERSION,
+                    seq: EventSeq::new(index as u64 + 1),
+                    at_ms,
+                    kind: TimelineEventKind::Runtime(runtime),
+                })
+                .collect::<Vec<_>>()
+        };
+        let suspended = SessionRuntimeEvent::TreeSuspended {
+            operation_id: "op-1".into(),
+            nodes: vec![RuntimeNodeRef {
+                session_id: "child".into(),
+                checkpoint_seq: EventSeq::new(1),
+            }],
+        };
+        let released = SessionRuntimeEvent::ExecutionReleased {
+            operation_id: "op-1".into(),
+            instance_id: "instance-1".into(),
+        };
+        let (gaps, unknown) = runtime_offline_intervals(
+            &events(vec![(10, suspended.clone()), (90, released)]),
+            "child",
+        );
+        assert_eq!(gaps, vec![10..90]);
+        assert!(!unknown);
+
+        let (gaps, unknown) =
+            runtime_offline_intervals(&events(vec![(10, suspended.clone())]), "child");
+        assert!(gaps.is_empty());
+        assert!(unknown); // the captured frontier equals the open interval start
+
+        let (gaps, unknown) = runtime_offline_intervals(
+            &events(vec![
+                (10, suspended.clone()),
+                (
+                    90,
+                    SessionRuntimeEvent::ExecutionReleased {
+                        operation_id: "other".into(),
+                        instance_id: "instance-1".into(),
+                    },
+                ),
+            ]),
+            "other-child",
+        );
+        assert!(gaps.is_empty());
+        assert!(!unknown);
+
+        let (gaps, unknown) = runtime_offline_intervals(
+            &events(vec![
+                (90, suspended),
+                (
+                    10,
+                    SessionRuntimeEvent::ExecutionReleased {
+                        operation_id: "op-1".into(),
+                        instance_id: "instance-1".into(),
+                    },
+                ),
+            ]),
+            "child",
+        );
+        assert!(gaps.is_empty());
+        assert!(unknown);
     }
 
     #[test]

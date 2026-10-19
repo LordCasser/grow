@@ -65,7 +65,7 @@ pub(super) async fn maybe_start_pending_manual_compaction(
 ) -> bool {
     let user_context = {
         let mut state = session.state.lock().await;
-        if !state.termination.is_open() || !state.foreground.is_idle() {
+        if !state.execution_open() || !state.foreground.is_idle() {
             return false;
         }
         let Some(user_context) = state.pending_manual_compact.take() else {
@@ -86,7 +86,7 @@ pub(super) async fn arbitrate_idle_wake(
     session: std::sync::Arc<SessionActor>,
     completion_tx: tokio::sync::mpsc::UnboundedSender<(String, PromptTurnResult)>,
 ) {
-    if !session.state.lock().await.termination.is_open() {
+    if !session.state.lock().await.execution_open() {
         return;
     }
     session.apply_pending_step_controls_if_idle().await;
@@ -113,7 +113,7 @@ impl SessionActor {
         >,
     ) {
         let mut state = self.state.lock().await;
-        if !state.termination.is_open() {
+        if !state.execution_open() {
             drop(state);
             if let Some(respond_to) = respond_to {
                 let _ = respond_to.send(Err(

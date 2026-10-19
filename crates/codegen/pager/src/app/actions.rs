@@ -29,6 +29,10 @@ pub enum Action {
     Quit,
     /// Restart the binary to pick up a downloaded update.
     RestartForUpdate,
+    /// Retry a session-tree suspension that was not confirmed.
+    RetryExitSuspension,
+    /// Explicitly abandon confirmed suspension and quit anyway.
+    ForceQuit,
     /// Re-exec into the other screen mode (`true` = minimal).
     RelaunchInScreenMode {
         minimal: bool,
@@ -606,6 +610,9 @@ pub enum Action {
     ShowTasks,
     /// Show the current plan: preview popover if exists, toast if not.
     ShowPlan,
+    ReviewRetainedPlan,
+    /// Reconcile the immutable receipt for the current Plan approval decision.
+    CheckPlanApprovalDecision,
     /// Select a Behavior and, only after the shell applies the transition,
     /// optionally start a turn in that Behavior.
     SetBehaviorThenPrompt {
@@ -1242,6 +1249,27 @@ pub enum AfterSessionDelete {
 }
 #[derive(Debug)]
 pub enum Effect {
+    ReviewRetainedPlan {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
+        submission_id: u64,
+        decision_id: String,
+    },
+    QueryPlanDecisionStatus {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
+        submission_id: u64,
+        decision_id: String,
+    },
+    /// Resolve the current immutable Plan artifact through the Shell session owner.
+    QueryPlanArtifact {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
+        request_id: u64,
+    },
     WriteTranscriptFile {
         id: u64,
         request: crate::app::transcript_file_writes::TranscriptFileWrite,
@@ -1845,6 +1873,8 @@ pub enum Effect {
     UnregisterActiveSession { session_id: acp::SessionId },
     /// Quit the application.
     Quit,
+    /// Ask the shell to suspend the session tree before allowing exit.
+    SuspendForExit { exit_id: String },
     /// Rename the current session.
     RenameSession {
         agent_id: AgentId,
@@ -2144,6 +2174,34 @@ pub struct QueueControlWire {
 #[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum TaskResult {
+    ExitSuspensionResolved {
+        exit_id: String,
+        result: Result<(), String>,
+    },
+    RetainedPlanReviewed {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
+        result: Result<String, String>,
+    },
+    PlanApprovalDecisionStatusResolved {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
+        submission_id: u64,
+        decision_id: String,
+        result: Result<serde_json::Value, String>,
+    },
+    PlanArtifactResolved {
+        agent_id: AgentId,
+        session_id: acp::SessionId,
+        binding_epoch: u32,
+        request_id: u64,
+        result: Result<
+            tools::implementations::grow_build::plan_control::PlanArtifactQueryResponse,
+            String,
+        >,
+    },
     TranscriptFileWritten {
         id: u64,
         agent_id: AgentId,

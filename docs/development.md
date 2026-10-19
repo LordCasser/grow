@@ -14,6 +14,8 @@ HTTP 200 的 SSE `event:error` 要连同事件名核对；平铺的 `code/messag
 是 provider 错误事实，普通事件缺少 `type` 则仍是协议错误。内容检查拒绝不自动重试，
 限流和过载仍须通过统一 attempt 安全与预算门槛。契约见
 [named stream error](../openspec/specs/model-sampling/spec.md#requirement-named-provider-stream-errors-retain-their-error-facts)。
+切换模型后的图片恢复沿用共享能力拒绝分类器：含图片的 HTTP 400 若明确声明 `messages.content.type 参数非法，取值范围 ['text']`，与英文 text-only 声明一样触发现有视觉辅助、OCR 和持久化图片投影；投影确认后才重建请求。分类器同时供 sampler 的拒绝用量结算与 Shell 恢复使用，不能只在一侧加入特例；其他类型列表或一般参数错误保持原路径。见 [图片能力拒绝与恢复](../openspec/specs/model-sampling/spec.md#requirement-session-image-descriptions-retain-original-media)。
+Chat usage 尾帧的 audio、reasoning、prediction 明细可缺失或为 `null`，wire 类型保留为未知；显式零仍保留。可信总量和缓存字段照常归一化、结算，reasoning 未知时沿现有内部统计边界记为零。必需总量为空或明细类型非法仍拒绝整帧，不能靠跳过错误恢复。见 [可空 Chat 明细](../openspec/specs/model-sampling/spec.md#requirement-chat-usage-accepts-null-optional-token-details)。
 当前 `GROW_MAX_RETRIES` / `max_retries` 沿用字段名，表示同一未接纳模型步骤的
 总 attempt 上限，包含初次调用；0 仅允许初次调用。session 默认上限为 5，
 独立 sampler 默认值为 15。共享期限取首次 idle timeout × 总上限，后续修复
@@ -159,6 +161,10 @@ reader 仍存活、writer 卡住或查询失败时按原因降级。可运行
 
 Windows 协调清单用句柄级原子替换保留已有读者；独立会话加载使用共享读取目录能力，写者能力仍由独占 lease 管理。 Windows 存储回归还覆盖超过 MAX_PATH 的输入 artifact 和会话发布，以及扫描时排除普通文件而保留有效会话。对应契约见 [本机协调](../openspec/specs/local-coordination/spec.md) 与 [会话 Timeline](../openspec/specs/session-timeline/spec.md)。
 
+会话 TTL 按已验证的 parent/child Timeline 闭链作为回收单位：所有成员必须分别过期、没有 writer 且结果与交付责任闭合。提交后的回收意图会在重启后继续完成；身份不符时保留整个意图和相关目录。显式单 session 删除遇到跨会话边时会拒绝并指出关联 ID。详见 [闭链回收 change](../openspec/changes/archive/2026-10-19-reclaim-closed-session-chains/design.md)。
+
+询问按 source session 与 inquiry ID 建立稳定身份，source/target Timeline 约束重试、恢复、响应关联和取消；见 [询问身份与恢复契约](../openspec/specs/local-coordination/spec.md#requirement-inquiry-identity-and-replay-are-durable-across-session-recovery)。
+
 跨会话协调与 Windows 存储还应检查对应 `.github/workflows/` 的平台回归。OpenSpec CI 只做文档格式与归档完成状态检查，语义由场景、源码、测试和 review 共同核对。
 
 用量状态栏由 `ChatStateEvent::SessionUsageUpdated` 投影到账本变化时的 transient `SessionInfoUpdate.meta["grow/sessionUsage"]`，复用 `PromptUsage`，不增加周期查询或模型输入。主模型 attempt、子 Agent 终态结算、session incomplete 与冷恢复边界写入 Timeline；新 actor 按结算身份恢复 lifetime aggregate，resident reconnect 不新增分段。Pager 按累计值替换、丢弃倒退及历史 replay；normal 状态栏只显示 lifetime 总体，`/usage` 另外按 Initial run、Resume #N 展示分段。计费窗口和点击行为见 [会话用量契约](../openspec/specs/client-surfaces/spec.md#requirement-ordinary-agent-status-shows-session-usage)。
@@ -172,6 +178,10 @@ Chat 流在 finish reason 与完整 usage 都已解析后，若用户 steer 或�
 Pager 的 cancel notification 没有响应体；`TurnCancelling` 因此在短窗口后核对原 prompt 或 child lifecycle。只有匹配身份的持久 terminal 才结束任务；Unknown/error 展示取消未确认并保留目标，Running/Settling 继续有界核对。首次 session load 使用带来源 surface 的临时 Agent：失败会删除临时页并返回 Welcome、原 Agent 或 Dashboard，原地 reload 仍走既有事务回滚。
 
 ### Runtime 状态与恢复诊断
+
+正常退出和更新重启经 `grow/session/suspend_for_exit` 请求一个五秒共享期限的树挂起；UI 只有收到确认才退出，失败保留原操作供重试。排查恢复先核对 root 的 `TreeSuspended`、各节点 checkpoint、命令结算与物理 writer 退役，再检查 `RestorePrepared` / `Resumed` / `ExecutionReleased`。不要把 sampler 的部分输出、调用方超时或新的 actor 实例当作执行资格；中断或未知命令先核对其记录，不能自动重放。行为见 [session-timeline](../openspec/specs/session-timeline/spec.md)，验证见 [挂起记录](../openspec/changes/archive/2026-10-19-suspend-session-tree/verification.md)。
+
+任务计划通过 SessionActor 的 `PlanningControl` 串行更新，检查 `Planning.previous` 和具体 source/result 引用。父项有效非完成修改要求 child 自行重规划，Consumed 不等于 Handled；普通完成和 Goal 还需核对必需交付的验收/解除记录。Plan 延期审阅使用独立 retained candidate 和不可变 decision identity；重试同一决定时 action、feedback 和候选都必须相同。契约见 [task-planning](../openspec/specs/task-planning/spec.md) 与 [behavior-goal](../openspec/specs/behavior-goal/spec.md)，实现记录见 [局部计划](../openspec/changes/archive/2026-10-19-evolve-task-planning/verification.md) 和 [Plan 审阅](../openspec/changes/archive/2026-10-19-retain-plan-for-later-review/verification.md)。
 
 Pager 的 prompt 与 input-admission 状态 RPC 共用 4 个工作许可和最多 8 个目标登记；watchdog 每轮最多派发 4 个查询，暂未获配额的目标在 250 ms 后重新核对。五秒期限包含许可等待；调用方超时后，仍在运行的 RPC 保留许可与目标登记，重连后的同目标查询不会绕过旧请求所有权。
 
@@ -249,6 +259,8 @@ Agent最后一个草稿所有者关闭后，检查点成功才释放干净运行
 
 本地草稿的路径解析、读取、写入和删除由串行 worker 执行。Pager 只在事件循环中捕获草稿快照，并核对异步恢复结果是否仍属于当前会话和编辑状态；正常退出等待最新草稿检查点。行为见 [草稿 I/O 契约](../openspec/specs/client-surfaces/spec.md#requirement-local-draft-filesystem-latency-does-not-block-pager-interaction)。
 
+CWD 草稿绑定到新 session 时，刚出队的 in-flight 输入也属于当前编辑所有权；空 composer 不能作为恢复旧草稿的充分条件。发送检查点保留原 prompt identity，只有确认成功才派发 ACP。绑定边界见 [草稿 I/O 契约](../openspec/specs/client-surfaces/spec.md#requirement-local-draft-filesystem-latency-does-not-block-pager-interaction)，运行证据见 [已归档修复](../openspec/changes/archive/2026-10-19-preserve-input-during-session-bind/verification.md)。选中的 Skill 同时保留原 name/path/plugin 来源，明确重试不重新选择同名来源，见 [统一 Skill 加载](../openspec/changes/archive/2026-10-19-unify-skill-loading/verification.md)。
+
 /export路径补全最多消费1000个目录迭代结果，隐藏项及错误也计数，最终最多返回100个建议，见 [导出补全预算](../openspec/specs/client-surfaces/spec.md#requirement-export-path-completion-bounds-directory-enumeration)。单次文件系统调用延迟不受此数量预算保证。
 
 滚动日志仅接受普通文件目标，打开句柄检查后才截断；Unix FIFO不等待reader，失败后使用已有禁用状态，见 [滚动日志目标契约](../openspec/specs/client-surfaces/spec.md#requirement-scroll-recorder-rejects-special-file-targets)。普通显式文件覆盖和符号链接行为保留。
@@ -293,9 +305,19 @@ Prompt 中的 ACP 图片附件与从 query 文本提取的 base64 图片都经�
 
 MCP `tools/call` 的一次请求由 `mcp/src/servers.rs::call_tool_cancel_aware` 持有原 peer/request id 和同一绝对期限；取得 id 后的超时、turn 取消只由该调用守卫 best-effort 发一次 `notifications/cancelled`，不向同名替代服务发送，超时工具也不重放。当前 ACP reverse bridge 不转发无 id 通知，因此端到端保证范围是 stdio/Streamable HTTP。排障时以原请求 id 和 transport episode 对照，不能把通知成功等同于远端副作用撤销。契约见 [MCP 取消](../openspec/specs/extension-runtime/spec.md#requirement-abandoned-mcp-calls-notify-their-originating-service)。
 
+普通 MCP 工具调用遇到传输丢失、发送错误或 HTTP MCP 错误时，不会自动重发原 `tools/call`；传输错误和超时会明确报告结果未知。符合恢复条件的旧连接可被重置，供下一次独立调用重新初始化；HTTP MCP 错误本身仍按服务返回的错误呈现。实现与验证见[防止不确定 MCP 工具调用重放 change](../openspec/changes/archive/2026-10-19-prevent-uncertain-mcp-tool-replay/verification.md)。
+
+Pager 的进程内 ACP session 会通过配置 watcher 刷新活动 session 的 MCP catalog，项目目录监听受 `mcp_recursive_config_watch` 控制；见 [活动会话 MCP catalog 刷新](../openspec/specs/extension-runtime/spec.md#requirement-live-acp-sessions-refresh-their-mcp-catalog-from-configuration-changes)。 监听目录沿用配置合并的 cwd 到仓库根目录链，共享祖先监听按注册目录保留。删除或替换会立即清理工具注册和搜索快照，迟到的旧连接结果受 client episode 约束；启用事件 dispatcher 时，重连 Ready 和 tools/list_changed 会重新发现完整目录（包括空列表），不依赖自动重连开关。冷恢复使用当前磁盘配置和本次 session/load 的客户端目录；见 [MCP catalog 生命周期](../openspec/specs/extension-runtime/spec.md#requirement-mcp-catalog-lifecycle-follows-the-effective-configuration)。
+
+MCP 的服务 `name` 同时作为 catalog、客户端和工具前缀身份。跨来源同名项按配置高于插件、客户端高于配置的既有优先级选取一项；单个 ACP 客户端数组内重名会在 new/load/update 接纳前报错。显式 `name + serverUrl` 必须匹配同一当前项，URL 不作跨名称别名；见 [服务身份](../openspec/specs/extension-runtime/spec.md#requirement-mcp-server-name-is-the-session-identity)。
+
+辅助策略与连接配置独立刷新：修改 `disabled_mcp_tools`、启动/工具超时或 per-tool timeout 不需要重连未变化的 endpoint。可信项目按 server name 覆写全局 mask，空数组解除继承的禁用；工具禁用同步作用于模型注册、搜索快照和 direct call。删除超时覆写恢复下一层或默认值，`_meta` 仍优先；已准入调用保留自己的期限。见 [辅助策略热刷新](../openspec/specs/extension-runtime/spec.md#requirement-live-mcp-auxiliary-policy-follows-effective-configuration)。
+
 MCP 工具的模型路径把 `structuredContent` 与 text/resource 描述投成受既有文本限额约束的正文，image block 与 image resource 则作为运行时附件绕开文本截断，并在 Shell 结果结算时走原有正规化、图片预算与 Timeline follow-up。`use_tool` 的三层 JSON value 往返用 `TypedToolOutput.model_output` 携带附件，再还原到运行时 `MCPOutput`；默认 ACP `raw_output` 不序列化这些图片的 base64。显式 `expose_image_base64` 仍会把有界原始数据写进正文，长正文可能被截断并保存完整文件。direct `grow/mcp/call` 不写模型 Timeline，返回原生完整 `CallToolResult`；其 JSON 响应载荷上限为 16 MiB，超限报错而不返回残缺 JSON。契约见 [MCP 结果完整性](../openspec/specs/extension-runtime/spec.md#requirement-mcp-tool-results-retain-structured-and-typed-content) 和 [附件恢复](../openspec/specs/session-timeline/spec.md#requirement-mcp-image-evidence-survives-text-output-truncation)。
 
 已批准的闲置接口清理边界以 [配置规则](../openspec/specs/configuration-rules/spec.md)、[工具协议](../openspec/specs/tool-authorization/spec.md)、[技能运行时](../openspec/specs/extension-runtime/spec.md) 和 [客户端设置持久化](../openspec/specs/client-surfaces/spec.md) 为准。技能列表由 SkillManager 管理；配置整份写入入口仍保留。
+
+显式技能加载统一使用已注册的 `load_skill(name, args)`：用户选中的技能由 Runtime 直接派发同一工具，模型调用走普通工具准入；初始化 `skills:` 仍保留预加载角色，普通 `read_file(SKILL.md)` 仍是文件读取。正文准备复用 `tools/src/implementations/skills/skill.rs` 的严格 UTF-8 读取、链接处理与单次字面替换；输出先做 checked-length 预检，单项及同一用户组均受 1 MiB 上限约束，参数后缀也计入，取消会在准备期间检查。用户组在一个 `Input::Consumed` 中原子发布原文和有序 `SkillLoadUser`，不会把正文拼回原 prompt；模型路径以一个配对 `ToolResult` 和 `SkillLoadModel` 发布。提交 ACK 未确认时结果属于未知状态：不能宣称 Loaded、继续依赖正文或按新身份重跑；必须按稳定身份向权威 Timeline 对账。首次关联请求获得 accepted response 前，Timeline 保护完整正文；首次 accepted response 消费这项保护，显式 TurnEnd 会结算仍未消费的正文。Runtime 挂起保留原 Turn，不等于 TurnEnd，也不解除正文保护。实现契约见 [extension-runtime](../openspec/specs/extension-runtime/spec.md) 与 [input-admission](../openspec/specs/input-admission/spec.md)，验收证据见 [unify-skill-loading](../openspec/changes/archive/2026-10-19-unify-skill-loading/verification.md)。
 
 `search_replace` 在明确 NotFound 后通过本地文件系统的独占创建提交完整新文件；既有文件的普通替换和空文件更新使用读取字节条件提交，并以目标文件 advisory lock 串行化 Grow 写者。ACP 文件系统缺少条件写入能力时明确失败；不遵守 advisory lock 的外部写者仍可能在比较与写入间竞争。见[编辑创建契约](../openspec/specs/tool-authorization/spec.md#requirement-search-replace-creation-requires-confirmed-absence)和[既有文件提交契约](../openspec/specs/tool-authorization/spec.md#requirement-local-search-replace-commits-compare-the-source-bytes)。
 
@@ -325,6 +347,8 @@ GROW_PERF_ASSERT_HISTORY=1 cargo test --locked -p shell --features test-support 
 ```
 
 `GROW_PERF_ASSERT_HISTORY` 单独验证 load response 前历史文本的完整顺序，不用于性能对照。shell 的第一条通知可能是控制通知，不能当作第一条可见历史；完整 ACP load 时间也不能代替真实终端输入回显。normal Pager 加载期间的按键与提交队列由 `loading_replay_preserves_typed_prompt_until_session_loaded` 检查，终端恢复与后续提交由 ignored PTY `continue_resumes_session_with_history` 检查。
+
+冷 writer load 在发布 actor 前按完整物理 `updates.jsonl` 与 Timeline projection expectations 的最大 `eventId` 后缀恢复进程计数器。该边界独立于 `noReplay`、游标和 rewind 展示；被 rewind 隐藏的物理行仍占用身份，exact append 对不同 payload 的重复身份继续拒绝。契约与当前变更见 [冷加载事件身份](../openspec/changes/archive/2026-10-19-reseed-cold-session-event-identities/specs/session-timeline/spec.md#requirement-cold-writer-identity-recovery-is-independent-of-client-replay)。
 
 长会话的真实终端回显可用 ignored PTY 基准取样：先构建当前 `grow`，再运行 `PAGER_BINARY="$PWD/target/debug/grow" cargo test --locked -p pager --test pty_e2e_persistence resume_input_latency_128_512_turns -- --ignored --nocapture --test-threads=1`。它在隔离的 Grow home 和本地 mock provider 中准备 128、512 turns，报告 `--continue` 到末尾历史可见的时间及连续 20 次按键回显 p95。该合成样本不代表密集工具、多子会话、resident/cursor 或真实慢终端；这些场景需要分别取样，不能用单次结果宣称已满足全部长会话验收条件。
 

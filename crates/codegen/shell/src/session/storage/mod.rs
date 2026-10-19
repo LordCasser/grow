@@ -159,6 +159,15 @@ impl ContainedDirectory {
         Ok(left.dev() == right.dev() && left.ino() == right.ino())
     }
 
+    /// Stable identity for a directory capability, suitable for a durable
+    /// maintenance decision that may resume after the process exits.
+    pub(crate) fn entity_identity(&self) -> io::Result<(u64, u64)> {
+        use std::os::unix::fs::MetadataExt as _;
+
+        let metadata = self.handle.metadata()?;
+        Ok((metadata.dev(), metadata.ino()))
+    }
+
     /// Atomically publish this exact pinned child under a sibling name.
     /// Consuming the capability prevents callers from accidentally continuing
     /// to use the pre-publication display path after the namespace commit.
@@ -814,6 +823,26 @@ impl ContainedDirectory {
         let left_identity = identity(&self.handle)?;
         let right_identity = identity(&other.handle)?;
         Ok(left_identity == right_identity)
+    }
+
+    /// Stable identity for a directory capability, suitable for a durable
+    /// maintenance decision that may resume after the process exits.
+    pub(crate) fn entity_identity(&self) -> io::Result<(u64, u64)> {
+        use std::os::windows::io::AsRawHandle as _;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle,
+        };
+
+        let file = self.handle.try_clone()?.into_std_file();
+        let mut information = BY_HANDLE_FILE_INFORMATION::default();
+        unsafe {
+            GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut information)
+                .map_err(io::Error::other)?;
+        }
+        let file_index =
+            (u64::from(information.nFileIndexHigh) << 32) | u64::from(information.nFileIndexLow);
+        Ok((u64::from(information.dwVolumeSerialNumber), file_index))
     }
 
     /// Atomically publish this exact pinned child under a sibling name.
@@ -1559,6 +1588,13 @@ pub(crate) struct ContainedDirectory;
 
 #[cfg(not(any(unix, windows)))]
 impl ContainedDirectory {
+    pub(crate) fn entity_identity(&self) -> io::Result<(u64, u64)> {
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "stable directory identity is unsupported on this platform",
+        ))
+    }
+
     pub(crate) fn open(
         _root: &Path,
         _relative: &Path,
@@ -2456,6 +2492,9 @@ pub(crate) fn validate_sideband_ledgers(
                                 ),
                             )
                         })?;
+                    // Neutral descriptions can predate an unrelated append;
+                    // Timeline validation still binds the new projection's
+                    // exact current revision, source identity and fingerprint.
                     let source_is_selected = attempt
                         .assembly_manifest
                         .selected_surface_ids
@@ -2954,6 +2993,33 @@ pub struct PersistedDataLight {
     /// Latest announcement projection folded from Timeline observations.
     pub announcement_state: Option<crate::session::announcement_state::AnnouncementState>,
     pub workflow_runs: Vec<crate::session::workflow::store::RestoredWorkflowRun>,
+}
+
+/// Return the largest valid eventId suffix in an already parsed physical
+/// update snapshot. Storage-only replay projections intentionally have no
+/// public eventId and therefore do not participate.
+pub(crate) fn max_event_id_suffix(updates: &[SessionUpdate]) -> Option<u64> {
+    updates
+        .iter()
+        .filter_map(|update| {
+            let event_id = match update {
+                SessionUpdate::Acp(notification) => notification
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("eventId"))
+                    .and_then(serde_json::Value::as_str),
+                SessionUpdate::Grow(notification) => notification
+                    .meta
+                    .as_ref()
+                    .and_then(|meta| meta.get("eventId"))
+                    .and_then(serde_json::Value::as_str),
+                SessionUpdate::ResponseReplayProjection(_) => None,
+            }?;
+            event_id
+                .rsplit_once('-')
+                .and_then(|(_, suffix)| suffix.parse::<u64>().ok())
+        })
+        .max()
 }
 
 /// Result of copying session data
@@ -4330,6 +4396,31 @@ pub(crate) struct PreparedReconciledReplay<'a> {
     pub(crate) subagent_projections: SubagentProjectionState,
 }
 
+/// Seed the process-wide event counter from durable projection identities
+/// before a loaded session actor can publish new persistent rows. A Timeline
+/// expectation may have reached disk immediately before a crash that prevented
+/// its cache row from being appended, so cache-only replay reseeding is too
+/// late (and can be skipped entirely by no-replay loads).
+pub(crate) fn reseed_event_counter_from_projection_expectations(
+    timeline: &chat_state::Timeline,
+) -> Option<u64> {
+    let max = timeline
+        .events()
+        .iter()
+        .filter_map(|event| match &event.kind {
+            chat_state::TimelineEventKind::DisplayProjectionExpected(projection) => projection
+                .event_id
+                .rsplit_once('-')
+                .and_then(|(_, suffix)| suffix.parse::<u64>().ok()),
+            _ => None,
+        })
+        .max();
+    if let Some(max) = max {
+        crate::util::event_id::ensure_event_counter_at_least(max.saturating_add(1));
+    }
+    max
+}
+
 /// Prepare the replay directly from the one physical snapshot. Canonical
 /// projection rows are owned only when synthesized; physical rows remain
 /// borrowed from `contents`.
@@ -4561,6 +4652,7 @@ mod tests {
         timeline
             .record(chat_state::TimelineEventKind::Turn(
                 chat_state::TurnEvent::Started {
+                    prompt_id: "fixture-prompt".into(),
                     id: turn,
                     input_ids: Vec::new(),
                     identity: chat_state::TurnIdentity {
@@ -5832,6 +5924,45 @@ mod tests {
             Some(42),
             "max counter across all lines (suffix after last '-')"
         );
+    }
+
+    #[test]
+    fn cold_load_reseeds_from_expectation_missing_from_cache() {
+        let mut timeline = chat_state::Timeline::default();
+        let missing_cache_id = "session-with-dashes-9000000000";
+        timeline
+            .record(chat_state::TimelineEventKind::DisplayProjectionExpected(
+                chat_state::DisplayProjectionExpectation {
+                    event_id: missing_cache_id.into(),
+                    kind: chat_state::DisplayProjectionKind::GoalUpdated,
+                    source_id: "goal:goal-a".into(),
+                    source_revision: 4,
+                    payload_digest: "a".repeat(64),
+                },
+            ))
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::DisplayProjectionExpected(
+                chat_state::DisplayProjectionExpectation {
+                    event_id: "session-with-dashes-9000000001".into(),
+                    kind: chat_state::DisplayProjectionKind::CurrentModeUpdate,
+                    source_id: "behavior:plan".into(),
+                    source_revision: 7,
+                    payload_digest: "b".repeat(64),
+                },
+            ))
+            .unwrap();
+        // There is deliberately no corresponding updates.jsonl row: this is
+        // the crash window after the durable expectation ACK and before cache
+        // append. The other absent expectation may belong to a rewind-hidden
+        // row; the seed uses the full Timeline rather than the visible branch.
+        assert_eq!(
+            reseed_event_counter_from_projection_expectations(&timeline),
+            Some(9_000_000_001)
+        );
+        let next = crate::util::event_id::generate_event_id("session-with-dashes");
+        let next_suffix = next.rsplit('-').next().unwrap().parse::<u64>().unwrap();
+        assert!(next_suffix > 9_000_000_001, "generated {next}");
     }
 
     #[test]

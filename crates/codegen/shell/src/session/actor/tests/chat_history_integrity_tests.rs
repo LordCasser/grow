@@ -35,7 +35,8 @@ use test_support::{MockInferenceServer, ScriptedResponse};
 /// a nudge is delivered mid-turn after identical calls.
 const IDENTICAL_CALLS_TO_TRIP_NUDGE: usize = 8;
 
-const TODO_ARGS: &str = r#"{"todos":[{"id":"t1","content":"poll","status":"completed"}]}"#;
+const TODO_ARGS: &str =
+    r#"{"actions":[],"todos":[{"id":"t1","content":"poll","status":"completed"}]}"#;
 
 const CANCEL_MARKER: &str = "cancelled by the user";
 
@@ -151,7 +152,14 @@ fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_use_id()
                         tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
                     drain_persistence(persistence_rx);
 
-                    let mut actor = create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await;
+                    let (mut actor, planning_rx) = create_test_actor_with_planning_receiver(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await;
                     actor.sampler_handle = sampler_handle;
                     *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
 
@@ -181,6 +189,8 @@ fn mid_turn_user_injection_must_not_duplicate_tool_results_for_one_tool_use_id()
                         .expect("bind_local_session");
 
                     let actor = Arc::new(actor);
+                    start_test_planning_driver(&actor, planning_rx);
+                    install_test_planning_resources(&actor, "chat-history-integrity").await;
                     {
                         let drainer = actor.clone();
                         let mut sampler_event_rx = sampler_event_rx;

@@ -96,13 +96,13 @@ mod mcp_apps_tests {
             Arc::new(schema),
         );
         let meta_map: JsonObject = serde_json::from_value(json!({ "ui": ui_meta })).unwrap();
-        tool.meta = Some(rmcp::model::Meta(meta_map));
+        tool.meta = Some(rmcp::model::MetaObject(meta_map));
         tool
     }
 
     #[test]
     fn test_meta_ui_survives_serialization_roundtrip() {
-        // rmcp Meta is #[serde(transparent)] over JsonObject.
+        // rmcp MetaObject is #[serde(transparent)] over JsonObject.
         // Our pipeline does: tool.meta → serde_json::to_value → Option<Value>.
         // Verify the ui.resourceUri survives this conversion.
         let tool = ui_tool("dashboard", "ui://server/dash", None);

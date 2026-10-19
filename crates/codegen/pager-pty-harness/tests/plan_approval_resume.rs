@@ -1,6 +1,5 @@
-//! Integration test: the shell re-parks Plan approval on
-//! resume, so approval chrome reappears after quit/`--continue` and approving
-//! leaves plan mode + starts the implement turn.
+//! Integration test: a deferred Plan is reviewed after quit/`--continue`,
+//! approval reopens, and approving starts exactly one implementation turn.
 //!
 //! CI stages the pager binary via `PAGER_BINARY`. Also runs under plain cargo
 //! (which builds the pager on demand):
@@ -14,5 +13,13 @@ async fn plan_approval_restored_after_resume() {
     pager_pty_harness::scenarios::plan_approval_resume::assert_plan_approval_restored_after_resume(
     )
     .await
-    .expect("shell must re-park Plan approval on resume so approval chrome returns");
+    .expect("live Plan approval must be restored after process restart");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn deferred_plan_reviewed_after_resume() {
+    pager_pty_harness::scenarios::plan_approval_resume::assert_deferred_plan_reviewed_after_resume(
+    )
+    .await
+    .expect("deferred Plan must remain reviewable after resume");
 }

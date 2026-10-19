@@ -87,8 +87,9 @@ pub enum ConfigChangeEvent {
 /// optimistic suppression window accidentally swallows writes from external
 /// processes.
 ///
-/// Adds narrow **non-recursive** watches for `<cwd>/` and `<cwd>/.grow/`
-/// so `<cwd>/.grow/config.toml` changes can be observed. Recursing on `<cwd>`
+/// Adds narrow **non-recursive** watches for the cwd→repository-root directory
+/// chain used by project config discovery, including each `.grow/` directory.
+/// Recursing on `<cwd>`
 /// would walk `node_modules/`, `target/`, `.git/`, etc. and blow through
 /// `fs.inotify.max_user_watches` on large repos. Use [`Self::watch_path`]
 /// to register additional cwds at runtime when new sessions open in
@@ -101,13 +102,16 @@ struct ConfigWatchState {
     // Installed after callback construction; callback holds only a Weak state.
     debouncer: Option<Debouncer<AccessFilteredWatcher>>,
     watched_cwds: HashSet<PathBuf>,
+    // One registration may consume configs from several repository ancestors.
+    // Retain shared directory watches until their last cwd owner unregisters.
+    project_roots: HashMap<PathBuf, Vec<PathBuf>>,
 }
 
 impl ConfigFileWatcher {
     /// Start watching. Returns `None` if the OS watcher fails to initialize.
     ///
-    /// `cwd`, when `Some`, adds two non-recursive watches: `<cwd>/` and
-    /// `<cwd>/.grow/`. Use [`Self::watch_path`] later to register additional
+    /// `cwd`, when `Some`, registers its project config directory chain.
+    /// Use [`Self::watch_path`] later to register additional
     /// project cwds for sessions that open in previously-unwatched
     /// directories.
     pub fn start(
@@ -122,6 +126,7 @@ impl ConfigFileWatcher {
         let state = std::sync::Arc::new(parking_lot::Mutex::new(ConfigWatchState {
             debouncer: None,
             watched_cwds: HashSet::new(),
+            project_roots: HashMap::new(),
         }));
         let weak_state = std::sync::Arc::downgrade(&state);
         let mut debouncer = new_filtered_debouncer(debounce, move |res: DebounceEventResult| {
@@ -201,24 +206,6 @@ impl ConfigFileWatcher {
             }
         }
 
-        // Add the two narrow non-recursive cwd watches
-        // promoted to first-class watch targets. Both are non-fatal —
-        // the parent watch handles a later `.grow` creation and attaches its watch.
-        //
-        // When the leader's own cwd is also covered by
-        // `extra_paths` (e.g. `find_project_configs(cwd)` already
-        // includes `<cwd>/.grow/config.toml` so the loop above
-        // watches `<cwd>/.grow/`), the call below installs a
-        // duplicate watch on the same directory. `notify` dedupes
-        // silently in its `RecommendedWatcher` (last-write-wins for
-        // the recursion mode), so this is cosmetic — both
-        // additions remain non-recursive, no event amplification.
-        let mut watched_cwds = HashSet::new();
-        if let Some(cwd) = cwd {
-            watch_cwd_dirs(&mut debouncer, cwd);
-            watched_cwds.insert(cwd.to_path_buf());
-        }
-
         tracing::info!(
             grow_home = %grow_home.display(),
             extra_paths = extra_paths.len(),
@@ -230,12 +217,16 @@ impl ConfigFileWatcher {
         {
             let mut current = state.lock();
             current.debouncer = Some(debouncer);
-            current.watched_cwds = watched_cwds;
         }
-        Some((Self { state }, rx))
+        let mut watcher = Self { state };
+        if let Some(cwd) = cwd {
+            watcher.watch_path(cwd);
+        }
+        Some((watcher, rx))
     }
 
-    /// Register `<cwd>/` and `<cwd>/.grow/` as **non-recursive** watch
+    /// Register the project config chain from cwd to repository root as
+    /// **non-recursive** watch
     /// targets, in addition to whatever was passed to [`Self::start`].
     ///
     /// Intended for the session-open path: when a session opens in a cwd
@@ -253,21 +244,26 @@ impl ConfigFileWatcher {
     /// error is logged and swallowed — the leader continues to rely on
     /// the user-triggered refresh as the fallback.
     pub fn watch_path(&mut self, cwd: &Path) {
+        let cwd = dunce::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        let roots = agent::repo::RepoDirChain::resolve(&cwd).dirs;
         // Idempotent at our layer: skip the redundant
         // `notify` watch-add when this cwd is already registered, so
         // re-opening sessions in the same directory doesn't churn the
         // OS watcher. `notify` de-dups internally too, but tracking the
         // set here also enables `unwatch_path`.
         let mut state = self.state.lock();
-        if state.watched_cwds.contains(cwd) {
+        if state.project_roots.contains_key(&cwd) {
             return;
         }
-        watch_cwd_dirs(state.debouncer.as_mut().expect("initialized watcher"), cwd);
-        state.watched_cwds.insert(cwd.to_path_buf());
+        for root in &roots {
+            if state.watched_cwds.insert(root.clone()) {
+                watch_cwd_dirs(state.debouncer.as_mut().expect("initialized watcher"), root);
+            }
+        }
+        state.project_roots.insert(cwd, roots);
     }
 
-    /// Remove the two non-recursive watches (`<cwd>/` and
-    /// `<cwd>/.grow/`) previously registered for `cwd` via
+    /// Release the project config chain previously registered for `cwd` via
     /// [`Self::start`] / [`Self::watch_path`].
     ///
     /// Best-effort and idempotent: a `cwd` that was never registered
@@ -276,13 +272,27 @@ impl ConfigFileWatcher {
     /// across many directories doesn't accumulate inotify watches for
     /// cwds with no live sessions. **Callers must ref-count**: only
     /// unwatch once the *last* session sharing this cwd closes —
-    /// `ConfigFileWatcher` tracks distinct cwds, not session counts.
+    /// `ConfigFileWatcher` tracks distinct cwd owners, not session counts;
+    /// shared ancestor watches remain until the last cwd owner releases them.
     pub fn unwatch_path(&mut self, cwd: &Path) {
+        let cwd = dunce::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
         let mut state = self.state.lock();
-        if !state.watched_cwds.remove(cwd) {
+        let Some(roots) = state.project_roots.remove(&cwd) else {
             return;
+        };
+        for root in roots {
+            if !state
+                .project_roots
+                .values()
+                .any(|roots| roots.contains(&root))
+            {
+                state.watched_cwds.remove(&root);
+                unwatch_cwd_dirs(
+                    state.debouncer.as_mut().expect("initialized watcher"),
+                    &root,
+                );
+            }
         }
-        unwatch_cwd_dirs(state.debouncer.as_mut().expect("initialized watcher"), cwd);
     }
 }
 
@@ -851,6 +861,73 @@ mod tests {
 #[cfg(test)]
 mod late_config_directory_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn ancestor_config_watch_survives_other_cwd_unregistration() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let repo = root.join("repo");
+        let a = repo.join("a");
+        let b = repo.join("b");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        git2::Repository::init(&repo).unwrap();
+        let (mut watcher, mut events) =
+            ConfigFileWatcher::start(&home, &[], Some(&a), Some(Duration::from_millis(40)))
+                .unwrap();
+        watcher.watch_path(&b);
+        watcher.unwatch_path(&a);
+        let grow = repo.join(".grow");
+        let config = grow.join("config.toml");
+        std::fs::create_dir(&grow).unwrap();
+        std::fs::write(&config, "first = true").unwrap();
+        expect_project_change(&mut events, &config).await;
+        while events.try_recv().is_ok() {}
+        std::fs::write(&config, "second = true").unwrap();
+        expect_project_change(&mut events, &config).await;
+        watcher.unwatch_path(&b);
+        while events.try_recv().is_ok() {}
+        std::fs::write(&config, "unwatched = true").unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(400), events.recv())
+                .await
+                .is_err()
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn config_watch_alias_attaches_late_directory_and_unwatches() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let project = root.join("project");
+        let alias = root.join("alias");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(&project).unwrap();
+        std::os::unix::fs::symlink(&project, &alias).unwrap();
+        let (mut watcher, mut rx) =
+            ConfigFileWatcher::start(&home, &[], None, Some(Duration::from_millis(40))).unwrap();
+        watcher.watch_path(&alias);
+        let grow = project.join(".grow");
+        let config = grow.join("config.toml");
+        std::fs::create_dir(&grow).unwrap();
+        std::fs::write(&config, "first = true").unwrap();
+        expect_project_change(&mut rx, &config).await;
+        while rx.try_recv().is_ok() {}
+        std::fs::write(&config, "second = true").unwrap();
+        expect_project_change(&mut rx, &config).await;
+        watcher.unwatch_path(&alias);
+        while rx.try_recv().is_ok() {}
+        std::fs::write(&config, "unwatched = true").unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(400), rx.recv())
+                .await
+                .is_err()
+        );
+    }
 
     async fn expect_project_change(
         rx: &mut mpsc::UnboundedReceiver<ConfigChangeEvent>,

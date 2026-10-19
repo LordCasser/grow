@@ -77,10 +77,13 @@ async fn resume_reconciles_orphaned_running_subagent() {
                 chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
                     subagent_id: sub_id.into(),
                     child_session_id: "child-orphan".into(),
+                    origin_tool_call_id: None,
                     security_parent_session_id: session_id.to_string(),
+                    parent_step_id: None,
                     subagent_type: "general-purpose".into(),
                     description: "stuck task".into(),
                     prompt: "do work".into(),
+                    execution_recipe: serde_json::json!({}),
                     context_source: chat_state::SubagentContextSource::New,
                     source_ref: None,
                     context_normalized: false,

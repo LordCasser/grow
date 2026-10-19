@@ -43,6 +43,28 @@ pub fn effective_max_subagent_depth(resources: &crate::types::resources::Resourc
         .unwrap_or(MAX_SUBAGENT_DEPTH)
 }
 
+async fn record_undispatched_planning_link(
+    sender: &tokio::sync::mpsc::UnboundedSender<
+        crate::implementations::grow_build::todo::runtime::PlanningCommand,
+    >,
+    task_id: String,
+    reason: String,
+) -> Result<(), String> {
+    use crate::implementations::grow_build::todo::runtime::PlanningCommand;
+
+    let (respond_to, response) = tokio::sync::oneshot::channel();
+    sender
+        .send(PlanningCommand::Undispatched {
+            task_id,
+            reason,
+            respond_to,
+        })
+        .map_err(|_| "planning owner closed; dispatch failure remains pending".to_owned())?;
+    response.await.map_err(|_| {
+        "planning owner did not acknowledge; dispatch failure remains pending".to_owned()
+    })?
+}
+
 // ───────────────────────────────────────────────────────────────────────────
 // Tool implementation
 // ───────────────────────────────────────────────────────────────────────────
@@ -393,6 +415,77 @@ impl tool_runtime::Tool for TaskTool {
             .task_id
             .clone()
             .unwrap_or_else(|| uuid::Uuid::now_v7().to_string());
+        let mut prompt = input.prompt.clone();
+        let planning_sender = if let Some(step_id) = input.parent_step_id.as_ref() {
+            use crate::implementations::grow_build::todo::runtime::{
+                PlanningCommand, PlanningRuntimeHandle,
+            };
+            let (sender, prompt_id) = {
+                let res = resources.lock().await;
+                (
+                    res.get::<PlanningRuntimeHandle>()
+                        .map(|handle| handle.0.clone())
+                        .ok_or_else(|| {
+                            tool_runtime::ToolError::custom(
+                                "planning_unavailable",
+                                "Local planning owner is unavailable",
+                            )
+                        })?,
+                    parent_prompt_id.clone().ok_or_else(|| {
+                        tool_runtime::ToolError::custom(
+                            "planning_unavailable",
+                            "Delegation has no admitted turn",
+                        )
+                    })?,
+                )
+            };
+            let (respond_to, response) = tokio::sync::oneshot::channel();
+            sender
+                .send(PlanningCommand::Link {
+                    prompt_id,
+                    step_id: step_id.clone(),
+                    task_id: id.clone(),
+                    required: input.required_deliverable,
+                    respond_to,
+                })
+                .map_err(|_| {
+                    tool_runtime::ToolError::custom("planning_unavailable", "Planning owner closed")
+                })?;
+            let snapshot = response
+                .await
+                .map_err(|_| {
+                    tool_runtime::ToolError::custom(
+                        "planning_unconfirmed",
+                        "Task association was not acknowledged",
+                    )
+                })?
+                .map_err(|error| tool_runtime::ToolError::custom("planning_rejected", error))?;
+            let step = snapshot
+                .steps
+                .iter()
+                .find(|step| step.id == *step_id)
+                .ok_or_else(|| {
+                    tool_runtime::ToolError::custom(
+                        "planning_rejected",
+                        "Committed delegation lost its parent step",
+                    )
+                })?;
+            let guidance = serde_json::json!({
+                "session_id": snapshot.session_id,
+                "scope_id": snapshot.scope_id,
+                "revision": snapshot.revision,
+                "step": step,
+            });
+            prompt.push_str(&format!("\n\nCurrent delegated parent step:\n{guidance}"));
+            Some(sender)
+        } else if input.required_deliverable {
+            return Err(tool_runtime::ToolError::custom(
+                "planning_rejected",
+                "A mandatory deliverable must name its local parent step",
+            ));
+        } else {
+            None
+        };
         let child_cancellation = tokio_util::sync::CancellationToken::new();
         let cancellation_forwarder = (!input.run_in_background)
             .then(|| {
@@ -408,10 +501,13 @@ impl tool_runtime::Tool for TaskTool {
 
         let request = SubagentRequest {
             id: id.clone(),
-            prompt: input.prompt.clone(),
+
+            origin_tool_call_id: Some(ctx.call_id.to_string()),
+            prompt,
             description: input.description.clone(),
             subagent_type: input.subagent_type.clone(),
             parent_session_id,
+            parent_step_id: input.parent_step_id.clone(),
             parent_prompt_id,
             resume_from,
             cwd,
@@ -448,6 +544,7 @@ impl tool_runtime::Tool for TaskTool {
             let bg_backend = backend.clone();
             let bg_id = id.clone();
             let bg_type = input.subagent_type.clone();
+            let bg_planning_sender = planning_sender.clone();
             tokio::spawn(async move {
                 match bg_backend.backend().spawn(request).await {
                     Err(e) => {
@@ -456,6 +553,32 @@ impl tool_runtime::Tool for TaskTool {
                             subagent_type = %bg_type,
                             "background spawn transport error: {e:#}",
                         );
+                    }
+                    Ok(r) if r.not_dispatched => {
+                        let reason = r
+                            .error
+                            .unwrap_or_else(|| "coordinator rejected task admission".into());
+                        match bg_planning_sender {
+                            Some(sender) => {
+                                if let Err(error) = record_undispatched_planning_link(
+                                    &sender,
+                                    bg_id.clone(),
+                                    reason,
+                                )
+                                .await
+                                {
+                                    tracing::error!(
+                                        subagent_id = %bg_id,
+                                        error,
+                                        "dispatch failure remains pending because Planning did not acknowledge it",
+                                    );
+                                }
+                            }
+                            None => tracing::warn!(
+                                subagent_id = %bg_id,
+                                "coordinator rejected background task before dispatch",
+                            ),
+                        }
                     }
                     Ok(r) if !r.success => {
                         tracing::error!(
@@ -497,6 +620,24 @@ impl tool_runtime::Tool for TaskTool {
             forwarder.abort();
         }
         let result = result?;
+        if result.not_dispatched {
+            if let Some(sender) = planning_sender {
+                let reason = result
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "coordinator rejected task admission".into());
+                if let Err(error) =
+                    record_undispatched_planning_link(&sender, id.clone(), reason).await
+                {
+                    return Err(tool_runtime::ToolError::custom(
+                        "planning_unconfirmed",
+                        format!(
+                            "Task {id} was not dispatched; its planning link remains pending: {error}"
+                        ),
+                    ));
+                }
+            }
+        }
         if result.finalization_pending {
             return Ok(ToolOutput::Text(format!(
                 "Subagent execution has returned, but its durable result or delivery is unconfirmed. subagent_id: {id}. Recovery retains this original child; do not spawn it again. Query this ID to inspect finalization."
@@ -564,6 +705,7 @@ impl tool_runtime::Tool for TaskTool {
                 turns: result.turns,
                 duration_ms: result.duration_ms,
                 worktree_path: result.worktree_path,
+                planning_summary: result.planning_summary,
             }))
         } else {
             Err(tool_runtime::ToolError::new(
@@ -699,6 +841,8 @@ mod tests {
             &tool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
+                parent_step_id: None,
+                required_deliverable: false,
                 description: "test task".into(),
                 prompt: "do something".into(),
                 subagent_type: "general-purpose".into(),
@@ -732,6 +876,8 @@ mod tests {
             &TaskTool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
+                parent_step_id: None,
+                required_deliverable: false,
                 description: "nested ok".into(),
                 prompt: "should be allowed at max_depth=2".into(),
                 subagent_type: "explore".into(),
@@ -767,6 +913,8 @@ mod tests {
             &TaskTool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
+                parent_step_id: None,
+                required_deliverable: false,
                 description: "nested spawn".into(),
                 prompt: "should be rejected".into(),
                 subagent_type: "explore".into(),
@@ -798,6 +946,8 @@ mod tests {
             &tool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
+                parent_step_id: None,
+                required_deliverable: false,
                 description: "test task".into(),
                 prompt: "do something".into(),
                 subagent_type: "general-purpose".into(),
@@ -877,6 +1027,8 @@ mod tests {
             &tool,
             test_ctx(shared),
             TaskToolInput {
+                parent_step_id: None,
+                required_deliverable: false,
                 description: "Find auth middleware".into(),
                 prompt: "Search for authentication middleware files".into(),
                 subagent_type: "explore".into(),
@@ -930,6 +1082,8 @@ mod tests {
             &TaskTool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
+                parent_step_id: None,
+                required_deliverable: false,
                 description: "test task".into(),
                 prompt: "do something".into(),
                 subagent_type: "general-purpose".into(),
@@ -976,6 +1130,8 @@ mod tests {
             &tool,
             test_ctx(shared),
             TaskToolInput {
+                parent_step_id: None,
+                required_deliverable: false,
                 description: "test task".into(),
                 prompt: "do something".into(),
                 subagent_type: "general-purpose".into(),
@@ -1028,6 +1184,8 @@ mod tests {
             &tool,
             test_ctx(shared),
             TaskToolInput {
+                parent_step_id: None,
+                required_deliverable: false,
                 description: "test task".into(),
                 prompt: "do something".into(),
                 subagent_type: "general-purpose".into(),
@@ -1127,6 +1285,8 @@ mod tests {
 
     fn task_input(subagent_type: &str, background: bool) -> TaskToolInput {
         TaskToolInput {
+            parent_step_id: None,
+            required_deliverable: false,
             description: "test".into(),
             prompt: "do it".into(),
             subagent_type: subagent_type.into(),
@@ -1481,6 +1641,8 @@ mod tests {
     #[test]
     fn task_input_roundtrips_through_json() {
         let input = TaskToolInput {
+            parent_step_id: None,
+            required_deliverable: false,
             description: "find bugs".into(),
             prompt: "search for bugs".into(),
             subagent_type: "explore".into(),
@@ -1627,6 +1789,8 @@ mod tests {
             "TaskToolInput JSON schema must not expose fork_context"
         );
         let serialized = serde_json::to_string(&TaskToolInput {
+            parent_step_id: None,
+            required_deliverable: false,
             description: "d".into(),
             prompt: "p".into(),
             subagent_type: "general-purpose".into(),
@@ -1676,6 +1840,8 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+                parent_step_id: None,
+                required_deliverable: false,
                 description: "d".into(),
                 prompt: "p".into(),
                 subagent_type: "general-purpose".into(),
@@ -1712,6 +1878,8 @@ mod tests {
     #[test]
     fn resume_from_not_serialized_when_none() {
         let input = TaskToolInput {
+            parent_step_id: None,
+            required_deliverable: false,
             description: "d".into(),
             prompt: "p".into(),
             subagent_type: "general-purpose".into(),
@@ -1758,6 +1926,8 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+                parent_step_id: None,
+                required_deliverable: false,
                 description: "resume".into(),
                 prompt: "continue".into(),
                 subagent_type: "general-purpose".into(),
@@ -1824,6 +1994,8 @@ mod tests {
                 &TaskTool,
                 test_ctx(shared),
                 TaskToolInput {
+                    parent_step_id: None,
+                    required_deliverable: false,
                     description: "test sentinel".into(),
                     prompt: "work".into(),
                     subagent_type: "general-purpose".into(),
@@ -1870,6 +2042,8 @@ mod tests {
     #[test]
     fn cwd_not_serialized_when_none() {
         let input = TaskToolInput {
+            parent_step_id: None,
+            required_deliverable: false,
             description: "d".into(),
             prompt: "p".into(),
             subagent_type: "general-purpose".into(),
@@ -1898,6 +2072,8 @@ mod tests {
             &TaskTool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
+                parent_step_id: None,
+                required_deliverable: false,
                 description: "test cwd conflict".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
@@ -1952,6 +2128,8 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+                parent_step_id: None,
+                required_deliverable: false,
                 description: "test empty cwd".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
@@ -2002,6 +2180,8 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+                parent_step_id: None,
+                required_deliverable: false,
                 description: "test null cwd".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
@@ -2052,6 +2232,8 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+                parent_step_id: None,
+                required_deliverable: false,
                 description: "test whitespace cwd".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
@@ -2105,6 +2287,8 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+                parent_step_id: None,
+                required_deliverable: false,
                 description: "test nonexistent cwd".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
@@ -2139,6 +2323,8 @@ mod tests {
             &TaskTool,
             test_ctx(resources.into_shared()),
             TaskToolInput {
+                parent_step_id: None,
+                required_deliverable: false,
                 description: "test nonexistent cwd no worktree".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
@@ -2194,6 +2380,8 @@ mod tests {
                 &TaskTool,
                 test_ctx(shared.clone()),
                 TaskToolInput {
+                    parent_step_id: None,
+                    required_deliverable: false,
                     description: "test sentinel cwd".into(),
                     prompt: "work".into(),
                     subagent_type: "general-purpose".into(),
@@ -2247,6 +2435,8 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+                parent_step_id: None,
+                required_deliverable: false,
                 description: "cwd test".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
@@ -2304,6 +2494,8 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+                parent_step_id: None,
+                required_deliverable: false,
                 description: "stray quote cwd".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
@@ -2356,6 +2548,8 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+                parent_step_id: None,
+                required_deliverable: false,
                 description: "cwd with none".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),
@@ -2404,6 +2598,8 @@ mod tests {
             &TaskTool,
             test_ctx(shared),
             TaskToolInput {
+                parent_step_id: None,
+                required_deliverable: false,
                 description: "cwd + resume".into(),
                 prompt: "work".into(),
                 subagent_type: "general-purpose".into(),

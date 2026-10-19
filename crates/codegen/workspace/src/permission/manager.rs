@@ -1137,6 +1137,7 @@ impl PermissionHandle {
                 execution_cwd: None,
                 classifier_turns: None,
                 call_evidence: None,
+                human_interaction: None,
             },
         )
         .await
@@ -2384,11 +2385,17 @@ async fn handle_permission_request(
             // not open one permission UI per unsafe chained segment
             // (e.g. `curl … && sh` must not become two separate
             // prompts for `curl …` then `sh`).
-            let prompt_outcome = tokio::select! {
-                outcome = prompter.request_for_session(&access, &tool_call_update, protected_edit, request_session_id.as_deref()) => outcome,
-                _ = respond_to.closed() => PromptOutcome::Cancelled,
-                _ = request_cancel.cancelled() => PromptOutcome::Cancelled,
-            };
+            let prompt_outcome = request_human_permission(
+                context.human_interaction.as_ref(),
+                prompter,
+                &access,
+                &tool_call_update,
+                protected_edit,
+                request_session_id.as_deref(),
+                &request_cancel,
+                &mut respond_to,
+            )
+            .await;
 
             // One event per decision is emitted by the shared `emit_event`
             // after this match; do not emit inline here.
@@ -2439,11 +2446,17 @@ async fn handle_permission_request(
         }
         _ => {
             // Non-bash access kinds keep the single-prompt flow.
-            let prompt_outcome = tokio::select! {
-                outcome = prompter.request_for_session(&access, &tool_call_update, protected_edit, request_session_id.as_deref()) => outcome,
-                _ = respond_to.closed() => PromptOutcome::Cancelled,
-                _ = request_cancel.cancelled() => PromptOutcome::Cancelled,
-            };
+            let prompt_outcome = request_human_permission(
+                context.human_interaction.as_ref(),
+                prompter,
+                &access,
+                &tool_call_update,
+                protected_edit,
+                request_session_id.as_deref(),
+                &request_cancel,
+                &mut respond_to,
+            )
+            .await;
             let (decision, outcome_str, mutation) = match &prompt_outcome {
                 PromptOutcome::AllowOnce => (Decision::Allow, "allow_once", None),
                 PromptOutcome::AllowEditsForSession => (
@@ -2655,6 +2668,62 @@ async fn handle_permission_request(
             Some(trigger),
         );
     }
+}
+
+async fn request_human_permission(
+    observer: Option<&Arc<dyn crate::permission::types::HumanPermissionInteractionObserver>>,
+    prompter: &crate::permission::prompter::AcpPrompter,
+    access: &AccessKind,
+    tool_call_update: &acp::ToolCallUpdate,
+    protected_edit: Option<crate::permission::ProtectedEditReason>,
+    request_session_id: Option<&str>,
+    request_cancel: &tokio_util::sync::CancellationToken,
+    respond_to: &mut oneshot::Sender<Decision>,
+) -> PromptOutcome {
+    if let Some(observer) = observer
+        && let Err(error) = observer.opened().await
+    {
+        return PromptOutcome::Error(format!(
+            "permission interaction could not be durably opened: {error}"
+        ));
+    }
+    let outcome = tokio::select! {
+        outcome = prompter.request_for_session(access, tool_call_update, protected_edit, request_session_id) => outcome,
+        _ = respond_to.closed() => PromptOutcome::Cancelled,
+        _ = request_cancel.cancelled() => PromptOutcome::Cancelled,
+    };
+    if let Some(observer) = observer {
+        let resolution = match &outcome {
+            PromptOutcome::AllowOnce
+            | PromptOutcome::AllowAlways
+            | PromptOutcome::AllowEditsForSession
+            | PromptOutcome::AllowAlwaysBashCommand(_)
+            | PromptOutcome::AllowAlwaysDomain(_)
+            | PromptOutcome::AllowAlwaysMcpTool(_)
+            | PromptOutcome::AllowAlwaysMcpServer(_) => {
+                crate::permission::types::HumanInteractionResolution::Allowed
+            }
+            PromptOutcome::RejectOnce | PromptOutcome::RejectAlwaysBashCommand(_) => {
+                crate::permission::types::HumanInteractionResolution::Rejected
+            }
+            PromptOutcome::Cancelled => {
+                crate::permission::types::HumanInteractionResolution::Cancelled
+            }
+            PromptOutcome::TimedOut => {
+                crate::permission::types::HumanInteractionResolution::TimedOut
+            }
+            PromptOutcome::FollowupMessage(_) => {
+                crate::permission::types::HumanInteractionResolution::Answered
+            }
+            PromptOutcome::Error(_) => crate::permission::types::HumanInteractionResolution::Failed,
+        };
+        if let Err(error) = observer.resolved(resolution).await {
+            return PromptOutcome::Error(format!(
+                "permission interaction resolution could not be durably recorded: {error}"
+            ));
+        }
+    }
+    outcome
 }
 
 /// Spawns the local permission manager actor, returning a handle and the
@@ -3593,6 +3662,7 @@ mod tests {
             execution_cwd: None,
             classifier_turns: Some(turns),
             call_evidence: None,
+            human_interaction: None,
         }
     }
 
@@ -3767,6 +3837,7 @@ mod tests {
                             execution_cwd: Some(cwd.as_path().to_path_buf()),
                             classifier_turns: Some(vec![]),
                             call_evidence: Some(evidence.clone()),
+                            human_interaction: None,
                         },
                     )
                     .await;
@@ -3812,6 +3883,7 @@ mod tests {
                             execution_cwd: Some(cwd.as_path().to_path_buf()),
                             classifier_turns: Some(vec![]),
                             call_evidence: None,
+                            human_interaction: None,
                         },
                     )
                     .await;
@@ -3857,6 +3929,7 @@ mod tests {
                                     session_id.to_owned(),
                                 )]),
                                 call_evidence: None,
+                                human_interaction: None,
                             },
                         )
                         .await;
@@ -3920,6 +3993,7 @@ mod tests {
                                 execution_cwd: Some(cwd.as_path().to_path_buf()),
                                 classifier_turns: Some(vec![]),
                                 call_evidence: None,
+                                human_interaction: None,
                             },
                         )
                         .await;
@@ -3978,6 +4052,7 @@ mod tests {
                                 execution_cwd: Some(cwd.as_path().to_path_buf()),
                                 classifier_turns: Some(vec![]),
                                 call_evidence: None,
+                                human_interaction: None,
                             },
                         )
                         .await;
@@ -4030,6 +4105,7 @@ mod tests {
                     execution_cwd: Some(cwd.as_path().to_path_buf()),
                     classifier_turns: Some(vec![]),
                     call_evidence: None,
+                    human_interaction: None,
                 };
 
                 for mode in [
@@ -4101,6 +4177,7 @@ mod tests {
                             execution_cwd: Some(cwd.as_path().to_path_buf()),
                             classifier_turns: Some(vec![]),
                             call_evidence: None,
+                            human_interaction: None,
                         },
                     )
                     .await;
@@ -4252,6 +4329,7 @@ mod tests {
                             execution_cwd: Some(cwd.as_path().to_path_buf()),
                             classifier_turns: Some(vec![]),
                             call_evidence: None,
+                            human_interaction: None,
                         },
                     )
                     .await;
@@ -5937,6 +6015,7 @@ mod tests {
                             execution_cwd: None,
                             classifier_turns: None,
                             call_evidence: None,
+                            human_interaction: None,
                         },
                         admission_guard: None,
                     })
@@ -6041,6 +6120,7 @@ mod tests {
                             execution_cwd: None,
                             classifier_turns: None,
                             call_evidence: None,
+                            human_interaction: None,
                         },
                         admission_guard: None,
                     })
@@ -6118,6 +6198,7 @@ mod tests {
                                 execution_cwd: Some(cwd.as_path().to_path_buf()),
                                 classifier_turns: Some(vec![]),
                                 call_evidence: None,
+                                human_interaction: None,
                             },
                         )
                         .await
@@ -6197,6 +6278,7 @@ mod tests {
                             execution_cwd: None,
                             classifier_turns: None,
                             call_evidence: None,
+                            human_interaction: None,
                         },
                         admission_guard: None,
                     })
@@ -9056,6 +9138,7 @@ mod tests {
                             execution_cwd: None,
                             classifier_turns: None,
                             call_evidence: None,
+                            human_interaction: None,
                         },
                         admission_guard: None,
                     })

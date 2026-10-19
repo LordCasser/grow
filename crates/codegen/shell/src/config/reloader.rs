@@ -170,12 +170,12 @@ impl ConfigReloader {
             }
         };
 
-        // MCP servers — compare [mcp_servers] table in the **global**
+        // MCP catalog and auxiliary policy — compare their tables in global
         // config (`~/.grow/config.toml`) via toml::Value. Project-
         // scoped changes are dispatched separately with `project_root` set.
-        let old_mcp_table = self.last_global_config.get("mcp_servers");
-        let new_mcp_table = new_global.get("mcp_servers");
-        let mcp_changed = old_mcp_table != new_mcp_table;
+        let mcp_changed = ["mcp_servers", "disabled_mcp_tools", "mcp"]
+            .iter()
+            .any(|section| self.last_global_config.get(section) != new_global.get(section));
         if mcp_changed {
             info!("Global MCP server config change detected");
             let _ = self

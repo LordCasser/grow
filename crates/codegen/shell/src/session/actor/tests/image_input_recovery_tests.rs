@@ -377,6 +377,97 @@ fn explicit_multimodal_400_removes_images_and_resubmits_text_only() {
     });
 }
 
+#[test]
+fn switched_chat_text_only_type_rejection_converts_historical_tool_images() {
+    assert_chat_tool_image_fallback(true);
+}
+
+#[test]
+fn current_chat_text_only_type_rejection_converts_new_tool_images() {
+    assert_chat_tool_image_fallback(false);
+}
+
+fn assert_chat_tool_image_fallback(image_precedes_route_selection: bool) {
+    run_with_session_stack(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            server.enqueue_response("/v1/chat/completions", ScriptedResponse::json(400, json!({
+                "error": {"code": "1210", "message": "messages.content.type 参数非法，取值范围 ['text']"}
+            })));
+            server.enqueue_response("/v1/messages", messages_text_turn("Historical screenshot shows code E42.", "vision-model"));
+            server.enqueue_response("/v1/chat/completions", ScriptedResponse::sse(vec![SseEvent::data(json!({
+                "id": "chat-image-recovery", "object": "chat.completion.chunk", "created": 0,
+                "model": "glm-5.3", "choices": [{"index": 0, "delta": {"content": "Recovered."}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
+            }).to_string())]));
+            let (actor, mut gateway_rx) = actor_with_sampler(&server, Some("vision")).await;
+            let add_tool_image = || {
+                actor.chat_state_handle.push_user_message(ConversationItem::user("inspect the screenshot"));
+                actor.chat_state_handle.push_assistant_response(ConversationItem::assistant_tool_calls(vec![sampling_types::ToolCall {
+                    id: "tool-screenshot".into(), name: "read_file".into(), arguments: "{}".into()
+                }]));
+                actor.chat_state_handle.push_tool_result(ConversationItem::tool_result_with_images(
+                    "tool-screenshot", "Screenshot captured.", vec![sampling_types::ContentPart::Image {
+                        url: inline_data_uri(&test_image_content()).into(), description: None
+                    }]));
+            };
+            if image_precedes_route_selection {
+                add_tool_image();
+            }
+            let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+            config.api_backend = sampling_types::ApiBackend::ChatCompletions;
+            config.model = "glm-5.3".into();
+            actor.chat_state_handle.replace_sampling_route(config);
+            actor.model_route.replace(crate::agent::models::ModelId::new("bigmodel/glm-5.3"), actor.reconstruct_full_config().await);
+            let primary_route_revision = actor.model_route.snapshot().revision;
+            if !image_precedes_route_selection {
+                // A new tool image arrives while the primary route stays the same.
+                add_tool_image();
+            }
+            install_test_foreground(&actor, "switched-image-recovery").await;
+            actor.goal_tracker.lock().create_goal("switched-goal".into(), "continue".into(), None, "2026-10-18T00:00:00Z".into()).unwrap();
+            actor.behavior.lock().select_behavior(tool_types::BehaviorId::Goal);
+            actor.sync_goal_usage_window();
+            actor.handle_prompt(
+                "switched-image-recovery", admit_test_human_input(&actor, "switched-image-recovery").await,
+                crate::session::PromptOrigin::User, Vec::new(), crate::session::TurnKind::User,
+                vec![acp::ContentBlock::Text(acp::TextContent::new("continue"))],
+                tool_types::BehaviorId::Goal, Some("switched-goal".into()), None, false, None, None,
+            ).await.expect("text-only type rejection must enter the existing image fallback");
+
+            let primary: Vec<_> = server.requests().into_iter().filter(|r| r.path == "/v1/chat/completions").collect();
+            assert_eq!(primary.len(), 2, "one rejection followed by one repaired request");
+            assert_eq!(count_wire_images(primary[0].body.as_ref().unwrap()), 1);
+            assert!(primary[0].body.as_ref().unwrap()["messages"].as_array().unwrap().iter().any(|m|
+                m["role"] == "tool" && count_wire_images(m) == 1));
+            assert_eq!(count_wire_images(primary[1].body.as_ref().unwrap()), 0);
+            assert!(primary[1].body.as_ref().unwrap().to_string().contains("code E42"));
+            let auxiliary: Vec<_> = server.requests().into_iter().filter(|r| r.path == "/v1/messages").collect();
+            assert_eq!(auxiliary.len(), 1);
+            assert_eq!(auxiliary[0].body.as_ref().unwrap()["model"], "vision-model");
+            assert_eq!(count_wire_images(auxiliary[0].body.as_ref().unwrap()), 1);
+            let events = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert!(events.iter().any(|e| matches!(e.kind, chat_state::TimelineEventKind::ImageProjection(_))));
+            assert_eq!(sealed_image_groups(&events), 1, "original tool image remains immutable");
+            let replay = chat_state::Timeline::from_events(events).unwrap();
+            assert_eq!(sampling_types::conversation::conversation_image_groups(replay.surface()).len(), 1);
+            assert!(replay.surface().iter().any(|item| sampling_types::conversation::item_image_description(item)
+                .is_some_and(|description| description.contains("code E42"))));
+            assert_eq!(actor.unsupported_current_model_for_images().await.as_deref(), Some("bigmodel/glm-5.3"));
+            assert_eq!(actor.model_route.snapshot().revision, primary_route_revision, "image recovery must keep the primary route");
+            assert!(!actor.goal_tracker.lock().snapshot().unwrap().usage_incomplete,
+                "the request validation rejection must settle as exact zero usage");
+            let drained = drain_notifications(&mut gateway_rx);
+            assert!(drained.retry_failures.is_empty());
+            assert_eq!(drained.image_projected_updates, 1);
+        }));
+    });
+}
+
 /// Projection-related notifications the client received during a turn.
 #[derive(Default)]
 struct DrainedNotifications {

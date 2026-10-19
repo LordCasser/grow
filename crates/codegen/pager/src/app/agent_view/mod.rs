@@ -18,20 +18,17 @@
 //!         Space/i → FocusPrompt
 //!         registry.lookup(key, ScrollbackFocused) → navigation, view, etc.
 //!   → 2. agent level (if pane returned Unchanged):
-//!       registry.lookup(key, AgentScreen) → CancelTurn (Ctrl+C), NextModel
-//!       CancelTurn has runtime guards (Running→cancel, Cancelling→quit on Ctrl+C).
-//!       From the prompt pane, Ctrl+C CancelTurn is a two-step gesture:
-//!       a non-empty prompt skips the AgentScreen promotion so the key
-//!       falls through to the widget's clear path; the next Ctrl+C (now
-//!       on an empty prompt) re-enters this level and runs CancelTurn.
+//!       registry.lookup(key, AgentScreen) → NextModel, other agent actions
+//!       Global Ctrl+C is intercepted by AppView before this per-agent stack
+//!       and requests session-tree suspension; local selection/view handlers
+//!       may consume it first.
 //!   → 3. Esc policy (try_handle_esc_policy) on Prompt or Scrollback only,
 //!       after overlays/dropdowns/selection returned Changed / stole Esc:
 //!       turn running, gate ON (`esc_cancels_turn`: minimal mode OR
 //!         `[ui].vim_mode` off) → CancelTurn (even with a draft; the draft
-//!         is preserved, unlike Ctrl+C's clear-first gesture)
+//!         is preserved)
 //!       turn running, gate OFF (fullscreen vim mode) → Changed (swallow)
-//!       turn cancelling → CancelTurn in every mode (retry lost ack;
-//!         Ctrl+C escalates to Quit)
+//!       turn cancelling → CancelTurn in every mode (retry lost ack)
 //!       idle + non-empty prompt, prompt pane only → ArmPending ClearPrompt (2× within 800ms, hint)
 //!       idle + empty + messages, either pane (Normal composer mode, no
 //!         needs-input overlay pending, no open history search, and not
@@ -117,7 +114,9 @@ use crate::views::extensions_modal::ExtensionsModalState;
 use crate::views::file_search::line_viewer::LineViewerState;
 use crate::views::modal::{self, ActiveModal, ModalButtonHit};
 use crate::views::permission_view::PermissionViewState;
-use crate::views::plan_approval_view::{PlanApprovalViewState, PlanComment};
+use crate::views::plan_approval_view::{
+    PendingPlanApprovalDecision, PlanApprovalViewState, PlanComment,
+};
 use crate::views::prompt_widget::{PromptWidget, StashedPrompt};
 use crate::views::question_view::QuestionViewState;
 use crate::views::queue_pane::QueuePane;
@@ -1068,7 +1067,15 @@ pub struct AgentView {
     /// Active Plan approval view (from `grow/plan_approval`). When `Some`,
     /// the prompt area shows the plan approval overlay and input is modal.
     pub(crate) plan_approval_view: Option<PlanApprovalViewState>,
+    pub(crate) pending_plan_approval_decision: Option<PendingPlanApprovalDecision>,
     pub(crate) plan_comments: Vec<PlanComment>,
+    /// Artifact identity for the line ranges stored in `plan_comments`.
+    pub(crate) plan_comments_artifact: Option<plan::PlanArtifactPreview>,
+    /// Last backend-resolved immutable Plan artifact for this session.
+    pub(crate) plan_artifact_preview: Option<plan::PlanArtifactPreview>,
+    /// Monotonic identity for canonical Plan preview requests.
+    pub(crate) plan_preview_request_id: u64,
+    pub(crate) plan_review_pending: Option<(u64, String)>,
     /// Monotonic counter for casual plan comment IDs.
     pub(crate) plan_next_comment_id: u64,
     /// Line range for the casual comment being composed (1-based).

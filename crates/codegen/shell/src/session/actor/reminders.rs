@@ -591,6 +591,7 @@ mod workflow_reminder_tests {
             save_prompt: false,
             revision: 2,
             execution_epoch: 0,
+            execution_suspended: false,
             runtime_route: WorkflowRuntimeRoute::for_test(
                 "test-model",
                 None,

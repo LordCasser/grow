@@ -263,6 +263,8 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         arguments: acp::NewSessionRequest,
     ) -> Result<acp::NewSessionResponse, acp::Error> {
         tracing::debug!(config = ?self.sampling_config, "Received new session request {arguments:?}");
+        ::mcp::servers::validate_mcp_server_names(&arguments.mcp_servers)
+            .map_err(|error| acp::Error::invalid_params().data(error))?;
         let init = self
             .initialize_request
             .get()
@@ -637,6 +639,9 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         &self,
         arguments: acp::LoadSessionRequest,
     ) -> Result<acp::LoadSessionResponse, acp::Error> {
+        ::mcp::servers::validate_mcp_server_names(&arguments.mcp_servers)
+            .map_err(|error| acp::Error::invalid_params().data(error))?;
+        let arguments = self.resolve_runtime_load_root(arguments).await?;
         let _load_guard = self.begin_session_load(&arguments.session_id);
         let _lifecycle_guard = self.lock_session_lifecycle(&arguments.session_id).await;
         let catalog_transaction = self.model_reload_lock.lock().await;
@@ -830,9 +835,22 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             announcement_state: persisted_announcement_state,
             workflow_runs: persisted_workflow_runs,
         } = persistence_info;
+        // Timeline is already validated by load_light. Seed before replay can
+        // be skipped and before a fresh actor can emit startup projections;
+        // rewind-discarded expectation IDs still occupy the global sequence.
+        crate::session::storage::reseed_event_counter_from_projection_expectations(&timeline);
         let persisted_control_revision = control_snapshot
             .as_ref()
             .map_or(0, |control| control.control_revision);
+        let runtime_recovery_gated = timeline.runtime_lifecycle().phase
+            != chat_state::session_runtime::RuntimePhase::Running;
+        let restoring_committed_tree = timeline.runtime_lifecycle().phase
+            == chat_state::session_runtime::RuntimePhase::Restoring;
+        if runtime_recovery_gated && summary.info.cwd != cwd.as_str() {
+            return Err(acp::Error::invalid_params().data(
+                "Suspended session workspace differs from its checkpoint; restore the original workspace before resuming.",
+            ));
+        }
         let persisted_behavior = control_snapshot
             .as_ref()
             .map(|control| control.behavior.clone());
@@ -901,6 +919,15 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             let previous = crate::session::persistence::latest_model_selection(timeline.events())
                 .map_err(|error| crate::session::persistence::io_error_to_acp(&error))?;
             let missing_baseline = previous.is_none();
+            if runtime_recovery_gated && (missing_baseline || previous.as_ref().is_some_and(
+                |(model, effort, provider, transport)| model != &summary.current_model_id
+                    || effort != &summary.reasoning_effort
+                    || provider != &load_session_sampling.model || transport != &current_transport
+            )) {
+                return Err(acp::Error::invalid_params().data(
+                    "Suspended session model, effort, or provider route changed; restore the checkpoint's original configuration before resuming.",
+                ));
+            }
             let (previous_model, previous_effort, previous_provider, previous_transport) =
                 previous.unwrap_or_else(|| {
                     (
@@ -1037,7 +1064,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             );
         }
         let mut code_restore_info: Option<serde_json::Value> = None;
-        if restore_code_requested && restore_checkout_allowed
+        if restore_code_requested && restore_checkout_allowed && !runtime_recovery_gated
             && let Some(ref target_sha) = summary.head_commit
         {
             use workspace::session::git::RestoreKind;
@@ -1121,7 +1148,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         for rx in delta_completions {
             let _ = rx.await;
         }
-        let reconcile_completions = {
+        let reconcile_completions = if runtime_recovery_gated { Vec::new() } else {
             let _timer = crate::instrumentation_timer!("session.reconcile_stale_tasks");
             self.repair_stale_background_task_projections(&session_id, &session_directory)
         };
@@ -1207,7 +1234,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             return Err(acp::Error::internal_error().data(
                 "Resident session ended during reconnect; retry the session load.",
             ));
-        } else if !mcp_servers.is_empty() {
+        } else {
             tracing::info!(
                 session_id = %session_id.0,
                 mcp_server_count = mcp_servers.len(),
@@ -1223,11 +1250,15 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                         respond_to: tx,
                     });
             }
-        } else {
-            tracing::info!(
-                session_id = %session_id.0,
-                "load_session: reconnecting to existing session (feedback manager already initialized)"
-            );
+        }
+        if runtime_recovery_gated {
+            // A prior process may have released only a leaf prefix. Reconcile
+            // those consumed rights as interruptions before adopting the still
+            // unused checkpoints; the restoring-root filter preserves the rest.
+            if restoring_committed_tree {
+                self.reconcile_loaded_children(&session_id, &subagent_projections, false, spawn_new_actor).await;
+            }
+            self.restore_session_tree(&session_id).await.map_err(|error| acp::Error::internal_error().data(format!("Suspended tree restoration is blocked: {error}")))?;
         }
         // A control snapshot is part of session-load completion, not a
         // best-effort side effect. Fresh actors did not exist at the earlier
@@ -1276,7 +1307,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                 mode: session_permission_mode,
             });
         }
-        if restored_approval_pending {
+        if restored_approval_pending && !runtime_recovery_gated {
             let command_tx = self
                 .sessions
                 .borrow()
@@ -1304,37 +1335,14 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                         .data(format!("Plan approval reconciliation failed: {error}"))
                 })?;
         }
-        let orphan_parent = {
-            let sessions = self.sessions.borrow();
-            sessions
-                .get(&session_id)
-                .map(|handle| {
-                    (
-                        handle.cmd_tx.clone(),
-                        handle.info.cwd.clone(),
-                        handle.chat_state_handle.clone(),
-                        handle.workflow_tracker.clone(),
-                    )
-                })
-        };
-        if let Some((parent_cmd_tx, _session_cwd, parent_chat_state, workflow_tracker)) =
-            orphan_parent
-        {
-            crate::agent::subagent::reconcile_orphaned_subagents_with_backend(
-                    &subagent_projections,
-                    !no_replay,
-                    spawn_new_actor,
-                    &tools::implementations::grow_build::task::backend::ChannelBackend::for_authorized_observer(
-                        self.subagent_event_tx.clone(),
-                    ),
-                    session_id.0.as_ref(),
-                    &parent_chat_state,
-                    Some(&workflow_tracker),
-                    &self.gateway,
-                    Some(&parent_cmd_tx),
-                )
-                .await;
-        }
+        // The restored Turn already has a live owner. Only ordinary cold
+        // loads may close abandoned local scopes at this post-load boundary.
+        self.reconcile_loaded_children(
+            &session_id,
+            &subagent_projections,
+            !no_replay,
+            spawn_new_actor && !runtime_recovery_gated,
+        ).await;
         self.model_unavailable_sessions.borrow_mut().remove(session_id.0.as_ref());
         // Cold actors already hold the replayed selection. Resident actors
         // retain their live selection; reconnect is not a model-control request.
@@ -1721,8 +1729,28 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             .chat_state_handle
             .get_last_turn_usage()
             .await;
+        if let Ok(crate::session::commands::PromptTurnOk {
+            completion_kind:
+                crate::session::commands::PromptCompletionKind::Suspended {
+                    operation_id,
+                    checkpoint_seq,
+                },
+            ..
+        }) = &stop_result
+        {
+            let response_meta = super::build_suspended_prompt_response_meta(
+                &arguments.session_id.to_string(),
+                &prompt_id,
+                &model,
+                operation_id,
+                *checkpoint_seq,
+            );
+            return Ok(acp::PromptResponse::new(acp::StopReason::Cancelled).meta(
+                response_meta.as_object().cloned(),
+            ));
+        }
         if matches!(
-            stop_result,
+            &stop_result,
             Ok(crate::session::commands::PromptTurnOk {
                 completion_kind: crate::session::commands::PromptCompletionKind::RemovedFromQueue,
                 ..
@@ -2059,6 +2087,15 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
         let mut backend_no_bridge_err: Option<acp::Error> = None;
         let method = args.method.clone();
         let result = match method.as_ref() {
+            "grow/session/suspend_for_exit" => {
+                let params: serde_json::Value = serde_json::from_str(args.params.get()).map_err(|error| acp::Error::invalid_params().data(error.to_string()))?;
+                let exit_id = params.get("exit_id").and_then(serde_json::Value::as_str).ok_or_else(|| acp::Error::invalid_params().data("missing exit_id"))?;
+                let result = match self.suspend_for_exit(exit_id.to_owned()).await {
+                    Ok(()) => serde_json::json!({"status":"suspended"}),
+                    Err(error) => serde_json::json!({"status":"unconfirmed","error":error}),
+                };
+                Ok(acp::ExtResponse::new(serde_json::value::to_raw_value(&result).map_err(|error| acp::Error::internal_error().data(error.to_string()))?.into()))
+            }
             "grow/session/info" | "grow/session/set_agent" | "grow/session/close" | "grow/session/list"
             | "grow/sessions/list" => {
                 crate::agent::handlers::session::handle(self, &args).await
@@ -2085,7 +2122,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
             | "grow/internal/reload_workflows" | "grow/internal/reload_models"
             | "grow/internal/reload_announcements"
             | "grow/plugins/reload" | "grow/commands/list" | "grow/commands/execute"
-            | "grow/queue/prompt_status" | "grow/queue/control" => {
+            | "grow/queue/prompt_status" | "grow/queue/control" | "grow/plan/artifact" | "grow/plan/review" | "grow/plan/decision_status" => {
                 crate::extensions::session_admin::handle(self, &args).await
             }
             "grow/session/repair" => crate::extensions::repair::handle(self, &args).await,

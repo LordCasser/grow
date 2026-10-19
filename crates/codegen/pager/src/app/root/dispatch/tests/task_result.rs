@@ -8,6 +8,183 @@ use super::*;
 use shell::session::unified_list::ListScope;
 
 #[test]
+fn closed_plan_preview_rejects_late_reads_after_close_reopen_and_rebind() {
+    use tools::implementations::grow_build::plan_control::PlanArtifactQueryResponse;
+
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let session_id = app.agents[&id].session.session_id.clone().unwrap();
+    let binding_epoch = app.agents[&id].session_binding_epoch;
+    let response = |revision, content: &str| PlanArtifactQueryResponse {
+        session_id: session_id.0.to_string(),
+        submission_id: revision,
+        retained: true,
+        artifact_revision: revision,
+        artifact_hash: blake3::hash(content.as_bytes()).to_hex().to_string(),
+        plan_content: content.into(),
+    };
+    app.agents
+        .get_mut(&id)
+        .unwrap()
+        .resolve_plan_preview(response(1, "original plan"))
+        .unwrap();
+
+    let pending = dispatch(Action::ShowPlan, &mut app);
+    let [
+        Effect::QueryPlanArtifact {
+            request_id: old_request,
+            ..
+        },
+    ] = pending.as_slice()
+    else {
+        panic!("expected an asynchronous canonical read: {pending:?}");
+    };
+    app.agents.get_mut(&id).unwrap().cancel_line_viewer();
+    dispatch_task_result(
+        TaskResult::PlanArtifactResolved {
+            agent_id: id,
+            session_id: session_id.clone(),
+            binding_epoch,
+            request_id: *old_request,
+            result: Ok(response(1, "original plan")),
+        },
+        &mut app,
+    );
+    assert!(
+        app.agents[&id].line_viewer.is_none(),
+        "a closed preview must stay closed"
+    );
+
+    let reopened = dispatch(Action::ShowPlan, &mut app);
+    let [
+        Effect::QueryPlanArtifact {
+            request_id: current_request,
+            ..
+        },
+    ] = reopened.as_slice()
+    else {
+        panic!("expected a fresh canonical read: {reopened:?}");
+    };
+    dispatch_task_result(
+        TaskResult::PlanArtifactResolved {
+            agent_id: id,
+            session_id: session_id.clone(),
+            binding_epoch,
+            request_id: *current_request,
+            result: Ok(response(2, "updated plan")),
+        },
+        &mut app,
+    );
+    for (epoch, request_id) in [
+        (binding_epoch, *old_request),
+        (binding_epoch.wrapping_add(1), *current_request),
+    ] {
+        dispatch_task_result(
+            TaskResult::PlanArtifactResolved {
+                agent_id: id,
+                session_id: session_id.clone(),
+                binding_epoch: epoch,
+                request_id,
+                result: Ok(response(1, "original plan")),
+            },
+            &mut app,
+        );
+        let current = app.agents[&id].plan_artifact_preview.as_ref().unwrap();
+        assert_eq!(current.artifact_revision, 2);
+        assert_eq!(current.plan_content, "updated plan");
+    }
+}
+
+#[test]
+fn exit_suspension_requires_confirmation_and_retries_with_a_new_identity() {
+    let mut app = test_app_with_agent();
+    let first = dispatch(Action::RestartForUpdate, &mut app);
+    let first_id = match first.as_slice() {
+        [Effect::SuspendForExit { exit_id }] => exit_id.clone(),
+        _ => panic!("expected exit suspension request, got {first:?}"),
+    };
+    assert!(!app.restart_for_update);
+
+    assert!(
+        dispatch_task_result(
+            TaskResult::ExitSuspensionResolved {
+                exit_id: first_id.clone(),
+                result: Err("saved, but writer has not exited".into()),
+            },
+            &mut app,
+        )
+        .is_empty()
+    );
+    let exit = app.exit_suspension.as_ref().unwrap();
+    match &exit.phase {
+        crate::app::root::ExitSuspensionPhase::Unconfirmed { error } => {
+            assert!(error.contains("writer has not exited"));
+        }
+        other => panic!("expected visible unconfirmed state, got {other:?}"),
+    }
+    assert!(!app.restart_for_update);
+
+    let retry = dispatch(Action::RetryExitSuspension, &mut app);
+    let retry_id = match retry.as_slice() {
+        [Effect::SuspendForExit { exit_id }] => exit_id.clone(),
+        _ => panic!("expected explicit retry request, got {retry:?}"),
+    };
+    assert_ne!(retry_id, first_id);
+    assert!(app.exit_suspension.as_ref().unwrap().restart_for_update);
+
+    // A late response to the previous request cannot quit the app.
+    assert!(
+        dispatch_task_result(
+            TaskResult::ExitSuspensionResolved {
+                exit_id: first_id,
+                result: Ok(()),
+            },
+            &mut app,
+        )
+        .is_empty()
+    );
+    assert!(!app.restart_for_update);
+
+    let effects = dispatch_task_result(
+        TaskResult::ExitSuspensionResolved {
+            exit_id: retry_id,
+            result: Ok(()),
+        },
+        &mut app,
+    );
+    assert!(effects.iter().any(|effect| matches!(effect, Effect::Quit)));
+    assert!(app.restart_for_update);
+    assert!(app.exit_suspension.is_none());
+}
+
+#[test]
+fn force_quit_is_available_only_after_suspension_is_unconfirmed() {
+    let mut app = test_app_with_agent();
+    let pending = dispatch(Action::Quit, &mut app);
+    assert!(matches!(
+        dispatch(Action::ForceQuit, &mut app).as_slice(),
+        []
+    ));
+    let [Effect::SuspendForExit { exit_id }] = pending.as_slice() else {
+        panic!("expected suspension request, got {pending:?}");
+    };
+    assert!(
+        dispatch_task_result(
+            TaskResult::ExitSuspensionResolved {
+                exit_id: exit_id.clone(),
+                result: Err("not confirmed".into()),
+            },
+            &mut app,
+        )
+        .is_empty()
+    );
+
+    let effects = dispatch(Action::ForceQuit, &mut app);
+    assert!(matches!(effects.last(), Some(Effect::Quit)));
+    assert!(app.exit_suspension.is_none());
+}
+
+#[test]
 fn late_queue_hold_ack_releases_the_confirmed_server_hold() {
     let mut app = test_app_with_agent();
     let agent_id = AgentId(0);

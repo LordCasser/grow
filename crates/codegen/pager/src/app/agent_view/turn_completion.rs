@@ -154,13 +154,29 @@ impl AgentView {
         agent_result: Option<&str>,
     ) -> TerminalOutcome {
         let stop_reason = stop_reason.unwrap_or_default();
+        let successful_stop_reason = matches!(
+            stop_reason,
+            "end_turn" | "max_tokens" | "max_turn_requests" | "refusal"
+        );
         let meta = TerminalMeta {
-            pr_ok: !matches!(stop_reason, "cancelled" | "error" | "rate_limit"),
-            failed_error: (stop_reason == "error").then(|| {
-                agent_result
-                    .map(str::to_string)
-                    .unwrap_or_else(|| "unknown error".to_string())
-            }),
+            pr_ok: successful_stop_reason,
+            failed_error: match stop_reason {
+                "error" => Some(
+                    agent_result
+                        .map(str::to_string)
+                        .unwrap_or_else(|| "unknown error".to_string()),
+                ),
+                "cancelled" | "rate_limit" if !successful_stop_reason => None,
+                _ if !successful_stop_reason => Some(format!(
+                    "unknown turn stop reason: {}",
+                    if stop_reason.is_empty() {
+                        "<missing>"
+                    } else {
+                        stop_reason
+                    }
+                )),
+                _ => None,
+            },
             was_cancelling: stop_reason == "cancelled",
             bash_turn: self.bash_turn,
             skip_error_marker: stop_reason == "rate_limit",
@@ -238,7 +254,7 @@ impl AgentView {
         // Dismiss any active plan approval or review — the turn that produced
         // it has completed, so the state is stale.
         if let Some(mut pav) = self.plan_approval_view.take() {
-            pav.send_stale_cancel();
+            pav.close_stale_waiter();
             self.plan_next_comment_id = pav.next_comment_id;
             self.prompt.restore(pav.stashed_prompt);
             self.line_viewer = None;

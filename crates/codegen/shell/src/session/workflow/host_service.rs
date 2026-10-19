@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::Duration;
 
 use tokio::sync::{mpsc, oneshot};
@@ -49,6 +49,7 @@ pub(crate) struct WorkflowHostParams {
     pub templates: std::collections::HashMap<String, String>,
     pub diagnostics: DiagnosticHook,
     pub cancel: CancellationToken,
+    pub suspend_intent: Arc<AtomicBool>,
     pub max_concurrency: u16,
     pub runtime_route: WorkflowRuntimeRoute,
 }
@@ -75,6 +76,7 @@ pub(crate) fn spawn_workflow_host_service(
             script_diagnostics_events: AtomicU32::new(0),
             scratch_io: tokio::sync::Mutex::new(()),
             agent_slots: tokio::sync::Semaphore::new(max_concurrency),
+            workers: tokio_util::task::TaskTracker::new(),
             params,
         });
         loop {
@@ -92,7 +94,15 @@ pub(crate) fn spawn_workflow_host_service(
             };
             service.clone().dispatch(req).await;
         }
-        let drain_outcome = service.cancel_and_drain_children().await;
+        service.workers.close();
+        service.workers.wait().await;
+        let drain_outcome = if service.params.suspend_intent.load(Ordering::Acquire) {
+            // Children remain owned by the tree coordinator. Dropping a host
+            // waiter cannot turn physical suspension into logical cancellation.
+            HostDrainOutcome::Drained
+        } else {
+            service.cancel_and_drain_children().await
+        };
         let _ = drained_tx.send(drain_outcome);
     });
     (handle, drained_rx)
@@ -126,6 +136,7 @@ struct HostService {
     script_diagnostics_events: AtomicU32,
     scratch_io: tokio::sync::Mutex<()>,
     agent_slots: tokio::sync::Semaphore,
+    workers: tokio_util::task::TaskTracker,
     params: WorkflowHostParams,
 }
 
@@ -219,7 +230,7 @@ impl HostService {
                 reply,
             } => {
                 let svc = self.clone();
-                tokio::spawn(async move {
+                self.workers.spawn(async move {
                     let result = svc.spawn_agent(operation_id, opts).await;
                     let _ = reply.send(result);
                 });
@@ -240,7 +251,7 @@ impl HostService {
                     if replayed {
                         self.params.notify.emit_ephemeral(&state, elapsed, agents);
                     } else {
-                        self.params.notify.emit(&state, elapsed, agents);
+                        self.params.notify.emit(&state, elapsed, agents).await;
                     }
                 }
             }
@@ -288,19 +299,19 @@ impl HostService {
                 reply,
             } => {
                 let svc = self.clone();
-                tokio::spawn(async move {
+                self.workers.spawn(async move {
                     let _ = reply.send(svc.write_scratch_file(&name, &content).await);
                 });
             }
             WorkflowHostRequest::ReadScratchFile { name, reply } => {
                 let svc = self.clone();
-                tokio::spawn(async move {
+                self.workers.spawn(async move {
                     let _ = reply.send(svc.read_scratch_file(&name).await);
                 });
             }
             WorkflowHostRequest::GitDiffSince { commit, reply } => {
                 let svc = self.clone();
-                tokio::spawn(async move {
+                self.workers.spawn(async move {
                     let _ = reply.send(svc.git_diff_since(&commit).await);
                 });
             }
@@ -440,7 +451,9 @@ impl HostService {
                 HostError::Failed("workflow concurrency gate closed".into())
             })?,
             _ = self.params.cancel.cancelled() => {
-                row.finish("cancelled", 0, 0);
+                if !self.params.suspend_intent.load(Ordering::Acquire) {
+                    row.finish("cancelled", 0, 0);
+                }
                 return Err(HostError::Cancelled);
             }
         };
@@ -483,10 +496,13 @@ impl HostService {
                     };
                 SubagentRequest {
                     id: child_id,
+
+                    origin_tool_call_id: None,
                     prompt,
                     description: description.clone(),
                     subagent_type: subagent_type.clone(),
                     parent_session_id: self.params.parent_session_id.clone(),
+                    parent_step_id: None,
                     parent_prompt_id: None,
                     resume_from,
                     cwd: None,
@@ -566,10 +582,52 @@ impl HostService {
             let result = match durable {
                 crate::agent::subagent::DurableChildOperation::Completed(result) => result,
                 crate::agent::subagent::DurableChildOperation::Open => {
-                    row.finish("failed", total_tokens, total_duration);
-                    return Err(HostError::Failed(format!(
-                        "workflow operation {child_id} has an open canonical child; reconcile it before resume"
-                    )));
+                    // Rebind the deterministic journal operation to its
+                    // existing child. Only the canonical result satisfies it;
+                    // observing Running/Suspended never authorizes a spawn.
+                    let observer = ChannelBackend::for_authorized_observer(
+                        self.params.subagent_event_tx.clone(),
+                    );
+                    loop {
+                        let snapshot = tokio::select! {
+                            reply = observer.query(&child_id, true, Some(25_000)) => reply
+                                .map_err(|error| HostError::Failed(error.to_string()))?,
+                            _ = self.params.cancel.cancelled() => {
+                                if !self.params.suspend_intent.load(Ordering::Acquire) {
+                                    row.finish("cancelled", total_tokens, total_duration);
+                                }
+                                return Err(HostError::Cancelled);
+                            }
+                        }
+                        .ok_or_else(|| {
+                            HostError::Failed(format!(
+                                "original Workflow child {child_id} is not rebound"
+                            ))
+                        })?;
+                        if snapshot.status.is_terminal() {
+                            let timeline =
+                                self.params.parent_timeline.as_ref().ok_or_else(|| {
+                                    HostError::Failed("canonical child owner is missing".into())
+                                })?;
+                            match crate::agent::subagent::durable_child_operation(
+                                &self.params.parent_session_id,
+                                &child_id,
+                                timeline,
+                            )
+                            .await
+                            .map_err(HostError::Failed)?
+                            {
+                                crate::agent::subagent::DurableChildOperation::Completed(
+                                    result,
+                                ) => break result,
+                                _ => {
+                                    return Err(HostError::Failed(format!(
+                                        "original Workflow child {child_id} has no confirmed result"
+                                    )));
+                                }
+                            }
+                        }
+                    }
                 }
                 crate::agent::subagent::DurableChildOperation::Missing => {
                     self.active_agents.fetch_add(1, Ordering::Relaxed);
@@ -579,9 +637,10 @@ impl HostService {
                     let result = tokio::select! {
                         result = &mut result_fut => result,
                         _ = self.params.cancel.cancelled() => {
-                            cancel_token.cancel();
+                            let suspending = self.params.suspend_intent.load(Ordering::Acquire);
+                            if !suspending { cancel_token.cancel(); }
                             self.active_agents.fetch_sub(1, Ordering::Relaxed);
-                            row.finish("cancelled", total_tokens, total_duration);
+                            if !suspending { row.finish("cancelled", total_tokens, total_duration); }
                             return Err(HostError::Cancelled);
                         }
                     };
@@ -606,7 +665,9 @@ impl HostService {
             total_tokens = total_tokens.saturating_add(result.total_tokens_used);
             total_duration += result.duration_ms;
             if self.params.cancel.is_cancelled() {
-                row.finish("cancelled", total_tokens, total_duration);
+                if !self.params.suspend_intent.load(Ordering::Acquire) {
+                    row.finish("cancelled", total_tokens, total_duration);
+                }
                 return Err(HostError::Cancelled);
             }
 
@@ -973,6 +1034,7 @@ mod tests {
             sampler::PreviewEventBudget::default(),
             Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
+            crate::session::workflow::manager::test_timeline(),
         );
         let (subagent_tx, mut subagent_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
@@ -990,6 +1052,7 @@ mod tests {
             templates: Default::default(),
             diagnostics: Arc::new(|_, _, _| {}),
             cancel: cancel.clone(),
+            suspend_intent: Default::default(),
             max_concurrency: 1,
             runtime_route: crate::session::workflow::tracker::test_runtime_route(),
         };
@@ -1095,6 +1158,7 @@ mod tests {
             sampler::PreviewEventBudget::default(),
             Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
+            crate::session::workflow::manager::test_timeline(),
         );
         let (subagent_tx, mut subagent_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
@@ -1112,6 +1176,7 @@ mod tests {
             templates: Default::default(),
             diagnostics: Arc::new(|_, _, _| {}),
             cancel: cancel.clone(),
+            suspend_intent: Default::default(),
             max_concurrency: 1,
             runtime_route: crate::session::workflow::tracker::test_runtime_route(),
         };
@@ -1121,6 +1186,7 @@ mod tests {
             script_diagnostics_events: AtomicU32::new(0),
             scratch_io: tokio::sync::Mutex::new(()),
             agent_slots: tokio::sync::Semaphore::new(1),
+            workers: tokio_util::task::TaskTracker::new(),
             params,
         });
 
@@ -1265,6 +1331,7 @@ mod tests {
             sampler::PreviewEventBudget::default(),
             Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
+            crate::session::workflow::manager::test_timeline(),
         );
         let (subagent_tx, _subagent_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
@@ -1282,6 +1349,7 @@ mod tests {
             templates: Default::default(),
             diagnostics: Arc::new(|_, _, _| {}),
             cancel: cancel.clone(),
+            suspend_intent: Default::default(),
             max_concurrency: 3,
             runtime_route: crate::session::workflow::tracker::test_runtime_route(),
         };
@@ -1343,6 +1411,7 @@ mod tests {
             sampler::PreviewEventBudget::default(),
             Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
+            crate::session::workflow::manager::test_timeline(),
         );
         let (subagent_tx, _subagent_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
@@ -1360,6 +1429,7 @@ mod tests {
             templates: Default::default(),
             diagnostics: Arc::new(|_, _, _| {}),
             cancel: cancel.clone(),
+            suspend_intent: Default::default(),
             max_concurrency: 3,
             runtime_route: crate::session::workflow::tracker::test_runtime_route(),
         };

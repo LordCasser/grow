@@ -12,6 +12,7 @@ const GAP_PLAYBACK_MS: f64 = 1_000.0;
 pub(super) enum GapKind {
     Idle,
     RecoveryEstimate,
+    SuspendedOffline,
 }
 
 #[derive(Debug, Clone)]
@@ -45,7 +46,7 @@ fn merged(mut spans: Vec<Range<u64>>) -> Vec<Range<u64>> {
     result
 }
 
-fn uncovered(span: Range<u64>, protected: &[Range<u64>]) -> Vec<Range<u64>> {
+pub(super) fn uncovered(span: Range<u64>, protected: &[Range<u64>]) -> Vec<Range<u64>> {
     let mut cursor = span.start;
     let mut result = Vec::new();
     for cover in protected {
@@ -77,6 +78,7 @@ impl TimeMap {
         mut markers: Vec<u64>,
         protected: Vec<Range<u64>>,
         recovery: Vec<Range<u64>>,
+        offline: Vec<Range<u64>>,
     ) -> Self {
         if markers.is_empty() {
             return Self {
@@ -92,6 +94,7 @@ impl TimeMap {
         let end = *markers.last().expect("nonempty markers");
         let protected = merged(protected);
         let recovery = merged(recovery);
+        let offline = merged(offline);
         let mut candidates = Vec::<(Range<u64>, GapKind)>::new();
         let mut protected_index = 0;
         let mut recovery_index = 0;
@@ -134,6 +137,42 @@ impl TimeMap {
                 }
             }
         }
+        candidates.sort_by_key(|(span, _)| (span.start, span.end));
+        let mut classified = Vec::with_capacity(candidates.len());
+        let mut offline_index = 0;
+        for (span, kind) in candidates {
+            while offline_index < offline.len() && offline[offline_index].end <= span.start {
+                offline_index += 1;
+            }
+            let mut cursor = span.start;
+            for gap in &offline[offline_index..] {
+                if gap.start >= span.end {
+                    break;
+                }
+                let start = cursor.max(gap.start);
+                let end = span.end.min(gap.end);
+                if start > cursor {
+                    classified.push((cursor..start, kind));
+                }
+                if end > start {
+                    classified.push((start..end, GapKind::SuspendedOffline));
+                    cursor = end;
+                }
+                if cursor >= span.end {
+                    break;
+                }
+            }
+            if cursor < span.end {
+                classified.push((cursor..span.end, kind));
+            }
+        }
+        // Offline evidence can split an otherwise long idle/recovery span.
+        // Apply the threshold to the final fragments so short pieces keep
+        // their recorded duration instead of expanding to a one-second gap.
+        let mut candidates = classified
+            .into_iter()
+            .filter(|(span, _)| span.end - span.start > IDLE_THRESHOLD_MS)
+            .collect::<Vec<_>>();
         candidates.sort_by_key(|(span, _)| (span.start, span.end));
         let mut gaps = Vec::with_capacity(candidates.len());
         let mut saved = 0.0;
@@ -219,7 +258,7 @@ mod tests {
 
     #[test]
     fn strict_threshold_and_inverse_mapping() {
-        let map = TimeMap::new(vec![1_000, 31_000, 62_000], vec![], vec![]);
+        let map = TimeMap::new(vec![1_000, 31_000, 62_000], vec![], vec![], vec![]);
         assert_eq!(map.gaps.len(), 1);
         assert_eq!(map.gaps[0].source, 31_000..62_000);
         assert_eq!(map.to_playback(31_000), 30_000.0);
@@ -229,20 +268,72 @@ mod tests {
 
     #[test]
     fn execution_in_another_node_blocks_idle() {
-        let map = TimeMap::new(vec![0, 100_000], vec![10_000..90_000], vec![]);
+        let map = TimeMap::new(vec![0, 100_000], vec![10_000..90_000], vec![], vec![]);
         assert_eq!(map.gaps.len(), 0);
     }
 
     #[test]
     fn recovery_is_visibly_estimated() {
-        let map = TimeMap::new(vec![0, 3_600_000], vec![], vec![0..3_600_000]);
+        let map = TimeMap::new(vec![0, 3_600_000], vec![], vec![0..3_600_000], vec![]);
         assert_eq!(map.gaps[0].kind, GapKind::RecoveryEstimate);
         assert_eq!(map.playback_end, 1_000.0);
     }
 
     #[test]
+    fn confirmed_runtime_offline_time_has_its_own_gap_kind() {
+        let map = TimeMap::new(vec![0, 140_000], vec![], vec![], vec![40_000..100_000]);
+        assert_eq!(map.gaps.len(), 3);
+        assert_eq!(map.gaps[0].source, 0..40_000);
+        assert_eq!(map.gaps[0].kind, GapKind::Idle);
+        assert_eq!(map.gaps[1].source, 40_000..100_000);
+        assert_eq!(map.gaps[1].kind, GapKind::SuspendedOffline);
+        assert_eq!(map.gaps[2].source, 100_000..140_000);
+        assert_eq!(map.gaps[2].kind, GapKind::Idle);
+    }
+
+    #[test]
+    fn overlapping_execution_remains_protected_during_runtime_offline_span() {
+        let map = TimeMap::new(
+            vec![0, 200_000],
+            vec![90_000..110_000],
+            vec![],
+            vec![40_000..160_000],
+        );
+        assert_eq!(map.gaps.len(), 4);
+        assert_eq!(map.gaps[0].source, 0..40_000);
+        assert_eq!(map.gaps[0].kind, GapKind::Idle);
+        assert_eq!(map.gaps[1].source, 40_000..90_000);
+        assert_eq!(map.gaps[1].kind, GapKind::SuspendedOffline);
+        assert_eq!(map.gaps[2].source, 110_000..160_000);
+        assert_eq!(map.gaps[2].kind, GapKind::SuspendedOffline);
+        assert_eq!(map.gaps[3].source, 160_000..200_000);
+        assert_eq!(map.gaps[3].kind, GapKind::Idle);
+    }
+
+    #[test]
+    fn offline_splits_keep_short_fragments_and_preserve_monotone_mapping() {
+        let map = TimeMap::new(
+            vec![0, 200_000],
+            vec![],
+            vec![],
+            vec![29_999..30_000, 60_000..60_001, 160_002..170_000],
+        );
+        assert_eq!(map.gaps.len(), 1);
+        assert_eq!(map.gaps[0].source, 60_001..160_002);
+        assert_eq!(map.gaps[0].kind, GapKind::Idle);
+
+        let source_points = [
+            0, 29_999, 30_000, 60_000, 60_001, 160_001, 160_002, 170_000, 200_000,
+        ];
+        let playback_points = source_points.map(|source| map.to_playback(source));
+        assert!(playback_points.windows(2).all(|pair| pair[0] <= pair[1]));
+        assert_eq!(map.to_playback(29_999) - map.to_playback(0), 29_999.0);
+        assert_eq!(map.to_playback(60_001) - map.to_playback(60_000), 1.0);
+    }
+
+    #[test]
     fn first_gap_reports_once_after_playback_starts() {
-        let map = TimeMap::new(vec![1_000, 61_000], vec![], vec![]);
+        let map = TimeMap::new(vec![1_000, 61_000], vec![], vec![], vec![]);
         assert!(map.crossed_gap(0.0, 0.0).is_none());
         assert!(map.crossed_gap(0.0, 0.1).is_some());
         assert!(map.crossed_gap(0.1, 100.0).is_none());
@@ -251,7 +342,7 @@ mod tests {
     #[test]
     fn many_gaps_preserve_order_and_inverse_mapping() {
         let markers = (0..1000).map(|index| index * 60_000).collect::<Vec<_>>();
-        let map = TimeMap::new(markers.clone(), vec![], vec![]);
+        let map = TimeMap::new(markers.clone(), vec![], vec![], vec![]);
         assert_eq!(map.gaps.len(), 999);
         for (index, source) in markers.into_iter().enumerate() {
             let playback = index as f64 * GAP_PLAYBACK_MS;

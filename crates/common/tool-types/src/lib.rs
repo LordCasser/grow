@@ -3,6 +3,7 @@ mod behavior;
 mod definition;
 mod ext;
 mod model_image;
+pub mod planning;
 mod schema_utils;
 pub mod serde_lenient;
 mod task;
@@ -14,6 +15,12 @@ pub use behavior::{
 pub use definition::{FunctionTool, ToolDefinition, ToolType};
 pub use ext::Extensions;
 pub use model_image::ModelImageInputKey;
+pub use planning::{
+    DeliveryReview, DependencyKind, LocalPlan, PlanLink, PlanPriority, PlanStep, PlanStepStatus,
+    PlanUpdate, PlanUpdateError, PlanUpdateMode, PlanWait, ReplanChange, ReplanError,
+    ReplanOutcome, ReplanProgress, ReviewDecision, StepChange, StepField, SubagentPlanningReview,
+    SubagentPlanningSummary, SubagentRequiredDelivery, WaitCondition, WaitDependency,
+};
 pub use schema_utils::parse_arguments_from_schema_lossy;
 pub use serde_lenient::{
     deserialize_lenient_bool, deserialize_lenient_option_bool, lenient_bool_from_json,

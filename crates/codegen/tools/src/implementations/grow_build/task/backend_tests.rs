@@ -48,10 +48,13 @@ async fn channel_backend_spawn_success() {
 
     let request = SubagentRequest {
         id: "test-id".to_string(),
+
+        origin_tool_call_id: None,
         prompt: "do something".to_string(),
         description: "test".to_string(),
         subagent_type: "general-purpose".to_string(),
         parent_session_id: "parent".to_string(),
+        parent_step_id: None,
         parent_prompt_id: None,
         resume_from: None,
         cwd: None,
@@ -82,10 +85,13 @@ async fn channel_backend_spawn_closed_channel() {
 
     let request = SubagentRequest {
         id: "test-id".to_string(),
+
+        origin_tool_call_id: None,
         prompt: "do something".to_string(),
         description: "test".to_string(),
         subagent_type: "general-purpose".to_string(),
         parent_session_id: "parent".to_string(),
+        parent_step_id: None,
         parent_prompt_id: None,
         resume_from: None,
         cwd: None,
@@ -264,10 +270,13 @@ async fn workflow_spawn_future_drop_cancels_but_task_drop_does_not() {
     fn request_for(owner: super::super::types::SubagentOwner) -> SubagentRequest {
         SubagentRequest {
             id: "drop-owner-test".to_string(),
+
+            origin_tool_call_id: None,
             prompt: "test".to_string(),
             description: "test".to_string(),
             subagent_type: "general-purpose".to_string(),
             parent_session_id: "parent".to_string(),
+            parent_step_id: None,
             parent_prompt_id: None,
             resume_from: None,
             cwd: None,
@@ -318,10 +327,13 @@ async fn channel_backend_spawn_result_dropped() {
 
     let request = SubagentRequest {
         id: "drop-test".to_string(),
+
+        origin_tool_call_id: None,
         prompt: "test".to_string(),
         description: "test".to_string(),
         subagent_type: "general-purpose".to_string(),
         parent_session_id: "parent".to_string(),
+        parent_step_id: None,
         parent_prompt_id: None,
         resume_from: None,
         cwd: None,

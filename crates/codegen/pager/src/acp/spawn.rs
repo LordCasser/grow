@@ -178,7 +178,7 @@ pub async fn spawn_shell(
     let experimental_memory = agent_config.cli_experimental_memory;
     let no_memory = agent_config.cli_no_memory;
 
-    let spawn_fn: Box<dyn FnOnce(AcpClientTx) -> Result<Rc<MvpAgent>> + Send + 'static> = {
+    let spawn_fn: Box<dyn FnOnce(AcpClientTx) -> Result<MvpAgent> + Send + 'static> = {
         Box::new(move |client_tx| {
             let gateway = AcpGatewaySender::new(client_tx);
 
@@ -186,7 +186,7 @@ pub async fn spawn_shell(
             if let Some(mc) = memory_config {
                 agent.set_memory_config(mc);
             }
-            Ok(Rc::new(agent))
+            Ok(agent)
         })
     };
 
@@ -207,12 +207,31 @@ pub async fn spawn_shell(
     })
 }
 
+/// Use the existing catalog/model extension paths in the in-process worker.
+fn config_reload_request(update: shell::config::reloader::ConfigUpdate) -> Option<acp::ExtRequest> {
+    use shell::config::reloader::ConfigUpdate;
+    let (method, params) = match update {
+        ConfigUpdate::ModelsChanged => ("grow/internal/reload_models", serde_json::json!({})),
+        ConfigUpdate::McpCatalogChanged { project_root } => (
+            "grow/internal/reload_mcp_catalog",
+            serde_json::json!({"projectRoot": project_root.map(|root| root.to_string_lossy().into_owned())}),
+        ),
+        _ => return None,
+    };
+    Some(acp::ExtRequest::new(
+        method,
+        serde_json::value::to_raw_value(&params)
+            .expect("config reload params serialize")
+            .into(),
+    ))
+}
+
 /// Spawn an agent in a dedicated thread with direct RPC dispatch.
 ///
 /// The agent runs on a single-threaded tokio LocalSet runtime.
 /// RPC requests go directly to the agent via Rc, bypassing simplex pipes.
 fn spawn_agent_thread_direct(
-    spawn_agent: Box<dyn FnOnce(AcpClientTx) -> Result<Rc<MvpAgent>> + Send + 'static>,
+    spawn_agent: Box<dyn FnOnce(AcpClientTx) -> Result<MvpAgent> + Send + 'static>,
     channel: AcpAgentChannel,
     cancel: CancellationToken,
     skills_paths: Vec<String>,
@@ -228,59 +247,70 @@ fn spawn_agent_thread_direct(
             let local = tokio::task::LocalSet::new();
             local.block_on(&rt, async move {
                 let client_tx = channel.tx.clone();
-                let agent_rc = spawn_agent(client_tx)?;
+                let mut agent = spawn_agent(client_tx)?;
 
-                // Direct dispatch: RPC requests go straight to the agent
-                let gw_rx =
-                    AcpGatewayReceiver::new(channel.rx, agent_rc.clone()).with_tracing(true);
-                tokio::task::spawn_local(gw_rx.run());
-
-                // The in-process pager bypasses the long-lived leader startup
-                // path, so it must attach the same global config reloader here.
-                // Without this runtime, models added to config.toml after the
-                // pager starts never reach `/model` until the process restarts.
+                // Keep the same catalog reloader and narrow project watches as
+                // the leader. Wire cwd registration before accepting sessions.
                 let (config_update_tx, mut config_update_rx) =
                     tokio::sync::mpsc::unbounded_channel();
+                let project_watch_enabled = shell::util::config::resolve_mcp_recursive_config_watch(
+                    shell::config::load_from_disk().ok().as_ref(),
+                );
+                let cwd = std::env::current_dir().unwrap_or_default();
                 let _config_watcher = shell::config::reloader::start_config_reload(
                     &shell::util::grow_home::grow_home(),
                     &[],
-                    None,
+                    project_watch_enabled.then_some(cwd.as_path()),
                     None,
                     config_update_tx,
                     experimental_memory,
                     no_memory,
                     cancel.clone(),
-                )
-                .map(|watcher| {
-                    let agent = agent_rc.clone();
-                    tokio::task::spawn_local(async move {
-                        use shell::config::reloader::ConfigUpdate;
-
-                        while let Some(update) = config_update_rx.recv().await {
-                            if !matches!(update, ConfigUpdate::ModelsChanged) {
-                                continue;
+                ).map(|watcher| {
+                    let watcher = Rc::new(std::cell::RefCell::new(watcher));
+                    if project_watch_enabled {
+                        let (path_tx, mut path_rx) = tokio::sync::mpsc::unbounded_channel();
+                        agent.set_config_watcher_path_tx(path_tx);
+                        let watcher_for_paths = watcher.clone();
+                        let cancel_paths = cancel.clone();
+                        tokio::task::spawn_local(async move {
+                            loop {
+                                tokio::select! {
+                                    biased;
+                                    _ = cancel_paths.cancelled() => break,
+                                    path = path_rx.recv() => match path {
+                                        Some(path) => watcher_for_paths.borrow_mut().watch_path(&path),
+                                        None => break,
+                                    },
+                                }
                             }
-                            tracing::info!(
-                                "Model config change detected — reloading in-process agent model list"
-                            );
-                            let params = serde_json::value::to_raw_value(&serde_json::json!({}))
-                                .expect("empty config reload params must serialize");
-                            let request = acp::ExtRequest::new(
-                                "grow/internal/reload_models",
-                                params.into(),
-                            );
-                            if let Err(error) =
-                                shell::extensions::session_admin::handle(&agent, &request).await
-                            {
-                                tracing::warn!(
-                                    error = ?error,
-                                    "failed to reload in-process agent model list"
-                                );
+                        });
+                    }
+                    watcher
+                });
+                let agent_rc = Rc::new(agent);
+                let gw_rx = AcpGatewayReceiver::new(channel.rx, agent_rc.clone()).with_tracing(true);
+                tokio::task::spawn_local(gw_rx.run());
+                if _config_watcher.is_some() {
+                    let agent = agent_rc.clone();
+                    let cancel_updates = cancel.clone();
+                    tokio::task::spawn_local(async move {
+                        loop {
+                            let update = tokio::select! {
+                                biased;
+                                _ = cancel_updates.cancelled() => break,
+                                update = config_update_rx.recv() => match update {
+                                    Some(update) => update,
+                                    None => break,
+                                },
+                            };
+                            let Some(request) = config_reload_request(update) else { continue };
+                            if let Err(error) = shell::extensions::session_admin::handle(&agent, &request).await {
+                                tracing::warn!(error = ?error, "failed to apply in-process config reload");
                             }
                         }
                     });
-                    watcher
-                });
+                }
 
                 let _skills_watcher = {
                     let cwd = std::env::current_dir().unwrap_or_default();
@@ -331,6 +361,7 @@ fn spawn_agent_thread_direct(
 
 #[cfg(test)]
 mod tests {
+    mod mcp_hot_reload;
     use super::*;
 
     #[test]

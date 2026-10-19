@@ -1,0 +1,3 @@
+- [x] 1.1 Apply the live Workflow revision high-water guard to positive-revision clear updates.
+- [x] 1.2 Add focused tests for stale/newer clears and revisionless clear compatibility/history behavior.
+- [x] 1.3 Record validation evidence after the parent runs the Pager test suite.

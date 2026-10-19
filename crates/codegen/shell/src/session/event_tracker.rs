@@ -2,6 +2,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::time::Instant;
 
+use chat_state::session_runtime::{RuntimeCheckpoint, SuspendedOperationState};
 use chat_state::{
     ObservationEvent, RequestEvent, RequestUsage, StepEvent, StepId, TimelineEventKind,
     TimelineWriteError, ToolEvent, TurnEvent, TurnId, TurnTerminal,
@@ -95,6 +96,109 @@ impl EventTracker {
         self.current_turn.get()
     }
 
+    pub fn active_step_id(&self) -> Option<StepId> {
+        self.active_step.get().map(|(id, _)| id)
+    }
+
+    pub fn active_tool_ids(&self) -> Vec<String> {
+        self.active_tools.borrow().keys().cloned().collect()
+    }
+
+    /// Close provider request scopes before writing a suspension checkpoint.
+    /// Turn and step scopes remain open so the same durable turn can resume.
+    pub async fn settle_requests_for_suspension(&self) {
+        let _causal = self.causal_gate.lock().await;
+        self.close_active_requests("session_suspended");
+    }
+
+    /// Reconstruct only the in-memory cursor represented by a validated
+    /// runtime checkpoint. This deliberately emits no Timeline starts: the
+    /// durable Turn, Step, and Tool facts already exist in the checkpoint's
+    /// source history.
+    pub fn restore_checkpoint(
+        &self,
+        checkpoint: &RuntimeCheckpoint,
+        goal_id: Option<String>,
+        tool_names: &BTreeMap<String, String>,
+    ) -> Result<(), String> {
+        if self.current_turn.get().is_some()
+            || self.active_step.get().is_some()
+            || !self.active_requests.borrow().is_empty()
+            || !self.active_tools.borrow().is_empty()
+        {
+            return Err("cannot restore a checkpoint over active tracker state".into());
+        }
+
+        let turn = checkpoint.turn.as_ref();
+        match (turn, checkpoint.step) {
+            (None, Some(_)) => return Err("checkpoint step has no active turn".into()),
+            (Some(turn), Some(step))
+                if step.turn != turn.turn_id
+                    || (step.index != u32::MAX && turn.next_step_index <= step.index) =>
+            {
+                return Err("checkpoint step does not match its turn cursor".into());
+            }
+            _ => {}
+        }
+        let tool_count = turn
+            .map(|turn| {
+                u32::try_from(turn.tool_calls_used)
+                    .map_err(|_| "checkpoint tool count exceeds tracker capacity".to_string())
+            })
+            .transpose()?
+            .unwrap_or(0);
+
+        let mut active_tools = BTreeMap::new();
+        if let Some(turn) = turn {
+            for operation in &turn.operations {
+                if !matches!(
+                    &operation.state,
+                    SuspendedOperationState::AwaitChild
+                        | SuspendedOperationState::AwaitUser
+                        | SuspendedOperationState::AwaitPermission
+                ) {
+                    continue;
+                }
+                let Some(name) = tool_names.get(&operation.call_id) else {
+                    return Err(format!(
+                        "checkpoint has no original Timeline tool name for {}",
+                        operation.call_id
+                    ));
+                };
+                if name.trim().is_empty() {
+                    return Err(format!(
+                        "checkpoint has an empty original Timeline tool name for {}",
+                        operation.call_id
+                    ));
+                }
+                if active_tools
+                    .insert(
+                        operation.call_id.clone(),
+                        ActiveTool {
+                            name: name.clone(),
+                            started_at: Instant::now(),
+                        },
+                    )
+                    .is_some()
+                {
+                    return Err("checkpoint repeats an active tool call identity".into());
+                }
+            }
+        }
+
+        self.current_turn.set(turn.map(|turn| turn.turn_id));
+        *self.current_goal_id.borrow_mut() = turn.and(goal_id);
+        self.turn_started_at.set(turn.map(|_| Instant::now()));
+        self.active_step
+            .set(checkpoint.step.map(|step| (step, Instant::now())));
+        self.next_step_index
+            .set(turn.map_or(0, |turn| turn.next_step_index));
+        *self.active_tools.borrow_mut() = active_tools;
+        self.turn_tool_count.set(tool_count);
+        self.turn_ended_emitted.set(false);
+        Ok(())
+    }
+
     pub async fn wait_for_causal_idle(&self) {
         let _causal = self.causal_gate.lock().await;
     }
@@ -133,6 +237,7 @@ impl EventTracker {
 
     async fn start_turn_transaction(&self, event: Event) -> Result<(), TimelineWriteError> {
         let Event::TurnStarted {
+            prompt_id,
             input_ids,
             identity,
             model_id,
@@ -155,6 +260,7 @@ impl EventTracker {
         self.timeline
             .record_timeline_event_durably(TimelineEventKind::Turn(TurnEvent::Started {
                 id,
+                prompt_id,
                 input_ids,
                 identity,
                 model_id,
@@ -652,6 +758,196 @@ mod tests {
         }
     }
 
+    fn test_runtime_checkpoint() -> RuntimeCheckpoint {
+        let turn_id = TurnId(77);
+        RuntimeCheckpoint {
+            frontier: chat_state::EventSeq::new(10),
+            runtime_source_hash: "a".repeat(64),
+            turn: Some(chat_state::session_runtime::TurnContinuation {
+                turn_id,
+                prompt_id: "prompt-77".into(),
+                prompt_index: 2,
+                origin: "user".into(),
+                next_step_index: 4,
+                tool_turns_used: 3,
+                tool_calls_used: 5,
+                stop_continuations_used: 0,
+                output_schema: None,
+                resume_point: chat_state::session_runtime::TurnResumePoint::Model,
+                task_output_usage: None,
+                accepted_response: None,
+                structured_output_retries: 0,
+                sampling_attempts_used: 1,
+                sampling_max_attempts: Some(4),
+                sampling_replay_safe: true,
+                sampling_deadline_ms: None,
+                operations: vec![
+                    chat_state::session_runtime::SuspendedOperation {
+                        call_id: "await-child".into(),
+                        state: SuspendedOperationState::AwaitChild,
+                        dependency_id: Some("child-session".into()),
+                    },
+                    chat_state::session_runtime::SuspendedOperation {
+                        call_id: "await-user".into(),
+                        state: SuspendedOperationState::AwaitUser,
+                        dependency_id: Some("question-1".into()),
+                    },
+                    chat_state::session_runtime::SuspendedOperation {
+                        call_id: "completed".into(),
+                        state: SuspendedOperationState::Completed,
+                        dependency_id: None,
+                    },
+                ],
+            }),
+            step: Some(StepId {
+                turn: turn_id,
+                index: 3,
+            }),
+        }
+    }
+
+    fn test_chat_state() -> chat_state::ChatStateHandle {
+        let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+        chat_state::ChatStateActor::spawn(
+            vec![],
+            sampling_types::SamplingConfig {
+                base_url: "http://localhost".into(),
+                model: "model".into(),
+                output_limit: None,
+                temperature: None,
+                top_p: None,
+                api_backend: Default::default(),
+                extra_headers: Default::default(),
+                env_http_headers: Default::default(),
+                query_params: Default::default(),
+                context_window: std::num::NonZeroU64::new(128_000).unwrap(),
+                reasoning_effort: None,
+                stream_tool_calls: None,
+            },
+            Box::new(chat_state::NullTimelinePersistence),
+            event_tx,
+            tokio_util::sync::CancellationToken::new(),
+        )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn restoring_checkpoint_rebuilds_cursor_without_emitting_start_events() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let handle = test_chat_state();
+                let tracker = EventTracker::new(handle.clone());
+                let checkpoint = test_runtime_checkpoint();
+                let names = BTreeMap::from([
+                    ("await-child".into(), "delegate".into()),
+                    ("await-user".into(), "ask_user".into()),
+                    ("completed".into(), "read_file".into()),
+                ]);
+
+                tracker
+                    .restore_checkpoint(&checkpoint, Some("goal-1".into()), &names)
+                    .unwrap();
+
+                assert_eq!(tracker.current_turn(), Some(TurnId(77)));
+                assert_eq!(tracker.current_goal_id().as_deref(), Some("goal-1"));
+                assert_eq!(tracker.active_step_id(), checkpoint.step);
+                assert_eq!(tracker.next_step_index(), 4);
+                assert_eq!(tracker.tool_count_this_turn(), 5);
+                assert_eq!(
+                    tracker.active_tool_ids(),
+                    vec!["await-child".to_string(), "await-user".to_string()]
+                );
+                assert!(handle.timeline_events().await.unwrap().is_empty());
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn suspension_settlement_closes_requests_without_ending_turn_or_step() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let handle = test_chat_state();
+                let tracker = EventTracker::new(handle.clone());
+                tracker
+                    .start_turn(Event::TurnStarted {
+                        prompt_id: "fixture-prompt".into(),
+                        session_id: "session".into(),
+                        turn_number: 1,
+                        input_ids: Vec::new(),
+                        identity: test_identity(),
+                        model_id: "model".into(),
+                        permission_mode: diagnostics::enums::PermissionMode::Ask,
+                        conversation_message_count: 0,
+                        prompt_index: Some(0),
+                        prompt_text: Some("prompt".into()),
+                        input_kind: chat_state::TurnInputKind::Prompt,
+                        session_relationship:
+                            super::super::event_types::SessionRelationship::Primary,
+                        schema_version: super::super::event_types::EVENT_SCHEMA_VERSION.into(),
+                        redirect_kind: None,
+                    })
+                    .await
+                    .unwrap();
+                let turn_id = tracker.current_turn().unwrap();
+                tracker.emit(Event::LoopStarted { loop_index: 0 });
+                tracker
+                    .request_started("request-1".into(), "model".into(), 0, 0)
+                    .await
+                    .unwrap();
+
+                tracker.settle_requests_for_suspension().await;
+
+                let events = handle.timeline_events().await.unwrap();
+                let serialized: Vec<_> = events
+                    .iter()
+                    .map(|event| serde_json::to_value(event).unwrap())
+                    .collect();
+                assert!(serialized.iter().any(|event| {
+                    event["type"] == "request"
+                        && event["event"]["state"] == "cancelled"
+                        && event["event"]["id"] == "request-1"
+                        && event["event"]["reason"] == "session_suspended"
+                }));
+                assert!(serialized.iter().all(|event| {
+                    !((event["type"] == "turn" && event["event"]["state"] == "ended")
+                        || (event["type"] == "step" && event["event"]["state"] == "ended")
+                        || (event["type"] == "tool" && event["event"]["state"] == "completed"))
+                }));
+                assert!(tracker.active_requests.borrow().is_empty());
+                assert_eq!(tracker.current_turn(), Some(turn_id));
+                assert_eq!(
+                    tracker.active_step_id(),
+                    Some(StepId {
+                        turn: turn_id,
+                        index: 0,
+                    })
+                );
+            })
+            .await;
+    }
+
+    #[test]
+    fn checkpoint_restore_rejects_conflicting_tracker_state_and_missing_tool_names() {
+        let checkpoint = test_runtime_checkpoint();
+        let tracker = EventTracker::new(chat_state::ChatStateHandle::noop());
+        tracker.current_turn.set(Some(TurnId(9)));
+        assert!(
+            tracker
+                .restore_checkpoint(&checkpoint, None, &BTreeMap::new())
+                .is_err()
+        );
+        assert_eq!(tracker.current_turn(), Some(TurnId(9)));
+
+        let empty = EventTracker::new(chat_state::ChatStateHandle::noop());
+        assert!(
+            empty
+                .restore_checkpoint(&checkpoint, None, &BTreeMap::new())
+                .is_err()
+        );
+        assert_eq!(empty.current_turn(), None, "failed restore must be atomic");
+        assert_eq!(empty.active_step_id(), None);
+        assert!(empty.active_tool_ids().is_empty());
+    }
+
     fn terminal(stop_reason: &str, completion_kind: &str) -> TurnTerminal {
         TurnTerminal {
             source: chat_state::TurnTerminalSource::Host,
@@ -718,6 +1014,7 @@ mod tests {
                 tracker.begin_turn();
                 tracker
                     .start_turn(Event::TurnStarted {
+                        prompt_id: "fixture-prompt".into(),
                         session_id: "session".into(),
                         turn_number: 1,
                         input_ids: Vec::new(),
@@ -824,6 +1121,7 @@ mod tests {
                 tracker.begin_turn();
                 tracker
                     .start_turn(Event::TurnStarted {
+                        prompt_id: "fixture-prompt".into(),
                         session_id: "session".into(),
                         turn_number: 1,
                         input_ids: Vec::new(),
@@ -915,6 +1213,7 @@ mod tests {
                 let tracker = EventTracker::new(handle.clone());
                 tracker.begin_turn();
                 let start = tracker.start_turn(Event::TurnStarted {
+                    prompt_id: "fixture-prompt".into(),
                     session_id: "session".into(),
                     turn_number: 1,
                     input_ids: Vec::new(),
@@ -1010,6 +1309,7 @@ mod tests {
                 let start_waiter = tokio::task::spawn_local(async move {
                     start_tracker
                         .start_turn(Event::TurnStarted {
+                            prompt_id: "fixture-prompt".into(),
                             session_id: "session".into(),
                             turn_number: 1,
                             input_ids: Vec::new(),
@@ -1094,6 +1394,7 @@ mod tests {
                 let start = tokio::task::spawn_local(async move {
                     start_tracker
                         .start_turn(Event::TurnStarted {
+                            prompt_id: "fixture-prompt".into(),
                             session_id: "session".into(),
                             turn_number: 1,
                             input_ids: Vec::new(),

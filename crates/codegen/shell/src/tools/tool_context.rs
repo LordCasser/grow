@@ -38,6 +38,9 @@ impl TaskOutputTokenBudget {
             })),
         }
     }
+    pub fn total(&self) -> Option<u64> {
+        self.inner.lock().total
+    }
     pub fn remaining(&self) -> Option<u64> {
         let state = self.inner.lock();
         state.total.map(|total| total.saturating_sub(state.spent))

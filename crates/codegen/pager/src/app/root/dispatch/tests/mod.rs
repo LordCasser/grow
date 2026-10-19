@@ -90,6 +90,7 @@ fn test_app() -> AppView {
         scratch: crate::scrollback::render::ScratchBuffer::new(),
         cursor: crate::render::draw::CursorState::new(),
         pending_action: None,
+        exit_suspension: None,
         exit_session_pending: None,
         scroll_state: crate::input::mouse::MouseScrollState::default(),
         scroll_config: crate::input::mouse::ScrollConfig::default(),

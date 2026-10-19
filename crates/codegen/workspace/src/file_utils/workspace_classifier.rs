@@ -329,9 +329,15 @@ mod tests {
         }
 
         #[test]
-        fn bare_downloads_is_unsafe() {
+        fn downloads_is_excluded_unless_it_is_a_git_project() {
+            let _lock = crate::ENV_TEST_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
             if let Some(d) = dirs::download_dir() {
-                assert!(!is_project_dir(&d));
+                // The user's Downloads can itself be a real checkout. Git
+                // projects intentionally take precedence over OS locations.
+                let is_git_project = d.ancestors().any(|path| path.join(".git").exists());
+                assert_eq!(is_project_dir(&d), is_git_project);
             }
         }
 

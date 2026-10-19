@@ -396,7 +396,7 @@ pub(super) fn do_cancel_turn_with_pause(
     agent.cancel_turn_buttons.clear();
     drain_root_permission_queue(agent);
     if let Some(mut pav) = agent.plan_approval_view.take() {
-        pav.send_stale_cancel();
+        pav.close_stale_waiter();
         agent.plan_next_comment_id = pav.next_comment_id;
         agent.prompt.restore(pav.stashed_prompt);
         agent.line_viewer = None;

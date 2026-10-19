@@ -21,6 +21,7 @@ fn item_kind_str(item: &ConversationItem) -> &'static str {
         ConversationItem::Assistant(_) => "assistant",
         ConversationItem::ToolResult(_) => "tool_result",
         ConversationItem::AgentMessage(_) => "agent_message",
+        ConversationItem::SkillLoad(_) => "skill_load",
         ConversationItem::BackendToolCall(_) => "backend_tool_call",
         ConversationItem::Reasoning(_) => "reasoning",
     }
@@ -28,9 +29,9 @@ fn item_kind_str(item: &ConversationItem) -> &'static str {
 
 fn message_cause(item: &ConversationItem) -> Result<MessageCause, crate::TimelineError> {
     match item {
-        ConversationItem::System(_) | ConversationItem::AgentMessage(_) => {
-            Err(crate::TimelineError::InvalidMessageShape)
-        }
+        ConversationItem::System(_)
+        | ConversationItem::AgentMessage(_)
+        | ConversationItem::SkillLoad(_) => Err(crate::TimelineError::InvalidMessageShape),
         ConversationItem::User(user)
             if matches!(
                 user.synthetic_reason.as_ref(),
@@ -68,6 +69,49 @@ fn message_cause(item: &ConversationItem) -> Result<MessageCause, crate::Timelin
 pub(super) const PRUNE_MARKER: &str = "\n\n[... tool result middle pruned ...]\n\n";
 
 impl ChatStateActor {
+    pub(super) async fn consume_input_group_conditionally(
+        &mut self,
+        input_ids: Vec<String>,
+        turn: crate::TurnId,
+        item: ConversationItem,
+        display_echo: Option<crate::UserDisplayEcho>,
+        skill_loads: Vec<sampling_types::SkillLoadItem>,
+        expected_surface_revision: u64,
+        max_context_tokens: u64,
+    ) -> Result<crate::commands::ConditionalToolResultOutcome, crate::commands::TimelineWriteError>
+    {
+        use crate::commands::ConditionalToolResultOutcome;
+
+        let timeline = &self.state.timeline;
+        if timeline.surface_revision() != expected_surface_revision {
+            return Ok(ConditionalToolResultOutcome::RejectedSurfaceChanged);
+        }
+        let surface_tokens = super::state::estimate_conversation_tokens(timeline.surface());
+        let mut added_items = Vec::with_capacity(skill_loads.len() + 1);
+        added_items.push(item.clone());
+        added_items.extend(skill_loads.iter().cloned().map(ConversationItem::SkillLoad));
+        let addition_tokens = super::state::estimate_conversation_tokens(&added_items);
+        if surface_tokens.saturating_add(addition_tokens) > max_context_tokens {
+            return Ok(ConditionalToolResultOutcome::RejectedHeadroom);
+        }
+
+        let candidate = self.state.timeline.clone();
+        let event = candidate
+            .prepare(crate::TimelineEventKind::Input(
+                crate::InputEvent::Consumed {
+                    input_ids,
+                    turn,
+                    item,
+                    display_echo,
+                    skill_loads,
+                },
+            ))
+            .map_err(crate::commands::TimelineWriteError::Invalid)?;
+        self.commit_timeline_event(event).await?;
+        self.apply_projected_token_delta(0, addition_tokens);
+        Ok(ConditionalToolResultOutcome::Accepted)
+    }
+
     async fn append_message_fact(&mut self, item: ConversationItem) -> bool {
         let Ok(cause) = message_cause(&item) else {
             tracing::error!(
@@ -335,6 +379,78 @@ impl ChatStateActor {
         self.commit_timeline_event(event).await?;
         self.apply_projected_token_delta(0, selected_tokens);
         Ok(outcome)
+    }
+
+    pub(super) async fn publish_model_skill_conditionally(
+        &mut self,
+        item: ConversationItem,
+        skill: sampling_types::SkillLoadItem,
+        rejection_item: ConversationItem,
+        expected_surface_revision: u64,
+        max_context_tokens: u64,
+        max_result_tokens: u64,
+    ) -> Result<crate::commands::ConditionalToolResultOutcome, crate::commands::TimelineWriteError>
+    {
+        use crate::commands::ConditionalToolResultOutcome;
+
+        let (ConversationItem::ToolResult(result), ConversationItem::ToolResult(rejection)) =
+            (&item, &rejection_item)
+        else {
+            return Err(crate::TimelineError::InvalidMessageShape.into());
+        };
+        if result.tool_call_id != skill.call_id || rejection.tool_call_id != skill.call_id {
+            return Err(crate::TimelineError::InvalidMessageShape.into());
+        }
+
+        let timeline = &self.state.timeline;
+        let result_tokens = super::state::estimate_item_tokens(&item);
+        let accepted_items = vec![item.clone(), ConversationItem::SkillLoad(skill.clone())];
+        let accepted_tokens = super::state::estimate_conversation_tokens(&accepted_items);
+        let current_tokens = super::state::estimate_conversation_tokens(timeline.surface());
+        let outcome = if timeline.surface_revision() != expected_surface_revision {
+            ConditionalToolResultOutcome::RejectedSurfaceChanged
+        } else if result_tokens > max_result_tokens
+            || current_tokens.saturating_add(accepted_tokens) > max_context_tokens
+        {
+            ConditionalToolResultOutcome::RejectedHeadroom
+        } else {
+            ConditionalToolResultOutcome::Accepted
+        };
+
+        let mut candidate = timeline.clone();
+        let event = if outcome == ConditionalToolResultOutcome::Accepted {
+            candidate.prepare(crate::TimelineEventKind::Messages(crate::MessageEvent {
+                cause: MessageCause::SkillLoadModel,
+                items: accepted_items,
+                surface: crate::SurfaceOp::Append,
+                response_admission: None,
+            }))?
+        } else {
+            candidate.append(rejection_item.clone(), MessageCause::ToolResult)?
+        };
+        let committed_tokens = if outcome == ConditionalToolResultOutcome::Accepted {
+            accepted_tokens
+        } else {
+            super::state::estimate_item_tokens(&rejection_item)
+        };
+        self.commit_timeline_event(event).await?;
+        self.apply_projected_token_delta(0, committed_tokens);
+        Ok(outcome)
+    }
+
+    pub(super) async fn settle_unconsumed_skill_loads(
+        &mut self,
+    ) -> Result<Option<crate::TimelineEvent>, crate::commands::TimelineWriteError> {
+        let tokens_before =
+            super::state::estimate_conversation_tokens(self.state.timeline.surface());
+        let mut candidate = self.state.timeline.clone();
+        let Some(event) = candidate.settle_unconsumed_skill_loads()? else {
+            return Ok(None);
+        };
+        let tokens_after = super::state::estimate_conversation_tokens(candidate.surface());
+        self.commit_timeline_event(event.clone()).await?;
+        self.apply_projected_token_delta(tokens_before, tokens_after);
+        Ok(Some(event))
     }
 
     /// Push a user message, ensuring conversation integrity first.
@@ -900,6 +1016,15 @@ impl ChatStateActor {
         &mut self,
         target_prompt_index: usize,
     ) -> Result<(), crate::commands::TimelineWriteError> {
+        let runtime = self.state.timeline.runtime_lifecycle();
+        if runtime.phase != crate::session_runtime::RuntimePhase::Running
+            && (runtime.checkpoint.is_some() || runtime.operation_id.is_some())
+        {
+            return Err(crate::TimelineError::InvalidRuntime(
+                "rewind cannot alter a session with an unfinished runtime handoff".into(),
+            )
+            .into());
+        }
         let current_prompt_index = self.state.timeline.next_prompt_index();
         if target_prompt_index >= current_prompt_index {
             return Err(crate::commands::TimelineWriteError::InvalidRewindTarget {

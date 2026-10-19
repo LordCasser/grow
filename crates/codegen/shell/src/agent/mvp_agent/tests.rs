@@ -1,5 +1,8 @@
 use super::*;
 
+mod mcp_child_policy_reload_tests;
+mod plan_decision_status_tests;
+
 #[test]
 fn complete_jsonl_snapshot_never_returns_a_partial_record_offset() {
     use std::io::{Read, Seek, SeekFrom, Write};
@@ -627,16 +630,24 @@ fn make_test_handle_with_receiver(
         cmd_tx: cmd_tx.clone(),
         goal_usage_window: crate::session::actor::goal_support::GoalUsageWindow::new(cmd_tx, None),
         persistence_tx,
+        session_directory: std::sync::Arc::new(
+            crate::session::storage::ContainedDirectory::open(
+                &std::env::temp_dir(),
+                std::path::Path::new(""),
+                "test session directory",
+                false,
+            )
+            .unwrap(),
+        ),
         runtime_observation: std::sync::Arc::new(parking_lot::RwLock::new(
             crate::session::actor::RuntimeObservationSnapshot::new(
                 acp::SessionId::new("test"),
                 "test-epoch".to_string(),
             ),
         )),
+        runtime_suspend: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
-        pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashMap::new(),
-        )),
+        pending_interactions: crate::session::pending_interaction::PendingInteractions::new(),
         info: crate::session::info::Info {
             id: acp::SessionId::new("test"),
             cwd: "/tmp".to_string(),
@@ -1422,6 +1433,7 @@ async fn ensure_plugin_registry_lazily_populates_snapshot() {
         "repeat call must keep the populated snapshot"
     );
 }
+mod mcp_catalog;
 #[cfg(unix)]
 mod process_scope_reclaim;
 mod subagent_spawn_context_tests;
@@ -1438,40 +1450,101 @@ async fn wait_for_in_flight_load_returns_immediately_when_idle() {
     .await
     .expect("wait must not block when no load is in flight");
 }
-/// A waiter racing an in-flight `session/load` blocks until the load
-/// finishes and then observes the registered session. This is the
-/// agent-side guarantee that closes the post-leader-crash
-/// "unknown session id" race: the reconnect replay's `session/load` and
-/// the client's next `session/prompt` can arrive back-to-back.
+/// A session actor is installed before suspended-tree restoration completes.
+/// Session-scoped extensions must keep waiting for the load guard instead of
+/// routing into that actor while its execution gate is still closed.
 #[tokio::test]
-async fn wait_for_in_flight_load_blocks_until_load_completes() {
+async fn session_control_lookup_waits_for_load_after_actor_registration() {
     let local = tokio::task::LocalSet::new();
     local
         .run_until(async {
             let agent = std::rc::Rc::new(build_minimal_agent_for_tests());
             let sid = acp::SessionId::new("sess-loading");
             let guard = agent.begin_session_load(&sid);
+            let handle = make_test_handle("test-model", None);
+            agent.sessions.borrow_mut().insert(sid.clone(), handle);
             let waiter_agent = agent.clone();
             let waiter_sid = sid.clone();
             let waiter = tokio::task::spawn_local(async move {
                 waiter_agent
-                    .wait_for_in_flight_session_load(&waiter_sid)
-                    .await;
-                waiter_agent.sessions.borrow().contains_key(&waiter_sid)
+                    .control_session_handle_waiting_for_load(&waiter_sid)
+                    .await
+                    .is_some()
             });
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-            assert!(!waiter.is_finished(), "waiter must block while loading");
-            let handle = make_test_handle("test-model", None);
-            agent.sessions.borrow_mut().insert(sid.clone(), handle);
+            assert!(
+                !waiter.is_finished(),
+                "registered actor must remain hidden behind the session/load barrier"
+            );
             drop(guard);
             let found_session = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
                 .await
-                .expect("waiter must wake when the load guard drops")
+                .expect("lookup must wake when restoration drops the load guard")
                 .expect("waiter task must not panic");
             assert!(
                 found_session,
-                "after the wait, the session must be visible to the racing request"
+                "after restoration, the routed session must be visible"
             );
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn retained_plan_review_waits_for_cold_load_release_before_actor_dispatch() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let agent = std::rc::Rc::new(build_minimal_agent_for_tests());
+            let sid = acp::SessionId::new("sess-plan-restoring");
+            let guard = agent.begin_session_load(&sid);
+            let (handle, mut commands) = make_test_handle_with_receiver("test-model", None);
+            agent.sessions.borrow_mut().insert(sid.clone(), handle);
+            let request = acp::ExtRequest::new(
+                "grow/plan/review",
+                serde_json::value::to_raw_value(&serde_json::json!({
+                    "sessionId": sid.0.as_ref(),
+                    "submissionId": 7,
+                    "decisionId": "review-after-restore",
+                }))
+                .unwrap()
+                .into(),
+            );
+            let request_agent = agent.clone();
+            let waiter = tokio::task::spawn_local(async move {
+                crate::extensions::session_admin::handle(&request_agent, &request).await
+            });
+
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            assert!(
+                !waiter.is_finished(),
+                "Plan review must not reach the actor during cold restoration"
+            );
+            assert!(
+                commands.try_recv().is_err(),
+                "the closed-gate actor must receive no ReviewRetainedPlan command"
+            );
+
+            drop(guard);
+            let command = tokio::time::timeout(std::time::Duration::from_secs(5), commands.recv())
+                .await
+                .expect("review command must follow session/load completion")
+                .expect("session actor command channel must remain open");
+            let crate::session::SessionCommand::ReviewRetainedPlan {
+                submission_id,
+                decision_id,
+                respond_to,
+            } = command
+            else {
+                panic!("unexpected command after Plan review lookup");
+            };
+            assert_eq!(submission_id, 7);
+            assert_eq!(decision_id, "review-after-restore");
+            respond_to
+                .send(Ok(()))
+                .expect("Plan review response receiver must remain open");
+            waiter
+                .await
+                .expect("Plan review handler must not panic")
+                .expect("Plan review must succeed after session restoration");
         })
         .await;
 }
@@ -2130,6 +2203,48 @@ where
         .expect("test runtime must build");
     let local = tokio::task::LocalSet::new();
     local.block_on(&rt, body())
+}
+
+async fn cold_recovery_stage<T>(
+    stage: &'static str,
+    future: impl std::future::Future<Output = T>,
+) -> T {
+    static TRACING: std::sync::Once = std::sync::Once::new();
+    TRACING.call_once(|| {
+        let filter = tracing_subscriber::EnvFilter::new(
+            "shell::agent::mvp_agent=debug,shell::session=debug",
+        );
+        let _ = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_env_filter(filter)
+            .try_init();
+    });
+    eprintln!("[cold-recovery] {stage}: begin");
+    match tokio::time::timeout(std::time::Duration::from_secs(10), future).await {
+        Ok(value) => {
+            eprintln!("[cold-recovery] {stage}: complete");
+            value
+        }
+        Err(_) => panic!("[cold-recovery] {stage}: timed out after 10s"),
+    }
+}
+
+fn drain_test_gateway_completions(
+    mut rx: tokio::sync::mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+) {
+    tokio::task::spawn_local(async move {
+        while let Some(message) = rx.recv().await {
+            match message {
+                acp_transport::AcpClientMessage::SessionNotification(args) => {
+                    let _ = args.response_tx.send(Ok(()));
+                }
+                acp_transport::AcpClientMessage::ExtNotification(args) => {
+                    let _ = args.response_tx.send(Ok(()));
+                }
+                _ => {}
+            }
+        }
+    });
 }
 
 #[test]
@@ -3669,6 +3784,7 @@ fn cold_resume_preserves_durable_effort_chain() {
             .parse()
             .unwrap();
         let case = std::env::var("GROW_TEST_COLD_EFFORT_CASE").unwrap();
+        eprintln!("[cold-recovery] effort case={case} phase={phase}");
         let raw = r#"
 [models]
 default = "test/default"
@@ -3697,11 +3813,17 @@ reasoning_efforts = [{value = "max", default = true}, {value = "high"}]
                 .unwrap();
         cfg.default_model_override = None;
         cfg.remote_settings = Some(crate::util::config::RemoteSettings::default());
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drain_test_gateway_completions(rx);
         let agent = MvpAgent::new(GatewaySender::new(tx), &cfg).unwrap();
-        agent.initialize(acp::InitializeRequest::new(acp::ProtocolVersion::V1).meta(
-            serde_json::json!({"startupHints":{"nonInteractive":true,"skipGitStatus":true,"skipProjectLayout":true}}).as_object().cloned()
-        )).await.unwrap();
+        cold_recovery_stage(
+            "effort.initialize",
+            agent.initialize(acp::InitializeRequest::new(acp::ProtocolVersion::V1).meta(
+                serde_json::json!({"startupHints":{"nonInteractive":true,"skipGitStatus":true,"skipProjectLayout":true}}).as_object().cloned()
+            )),
+        )
+        .await
+        .unwrap();
         agent.set_auth_method(acp::AuthMethodId::new("provider.api_key"));
         let cwd = std::path::Path::new(&home).join("workspace");
         std::fs::create_dir_all(&cwd).unwrap();
@@ -3732,9 +3854,11 @@ reasoning_efforts = [{value = "max", default = true}, {value = "high"}]
             crate::session::persistence::latest_model_selection(&events)
                 .unwrap_or_else(|error| panic!("before cold resume {phase}: {error}"));
             drop(storage);
-            let load = agent
-                .load_session(acp::LoadSessionRequest::new(sid.clone(), cwd.clone()))
-                .await;
+            let load = cold_recovery_stage(
+                "effort.load",
+                agent.load_session(acp::LoadSessionRequest::new(sid.clone(), cwd.clone())),
+            )
+            .await;
             if case == "unsupported" {
                 let error = load.expect_err("unsupported historical effort must fail before spawn");
                 assert!(
@@ -3780,10 +3904,12 @@ reasoning_efforts = [{value = "max", default = true}, {value = "high"}]
                 expected
             );
             // Reconnect while resident must also keep the live route, including None.
-            agent
-                .load_session(acp::LoadSessionRequest::new(sid.clone(), cwd.clone()))
-                .await
-                .unwrap();
+            cold_recovery_stage(
+                "effort.resident_load",
+                agent.load_session(acp::LoadSessionRequest::new(sid.clone(), cwd.clone())),
+            )
+            .await
+            .unwrap();
             let resident_resume_boundaries = agent
                 .control_session_handle(&sid)
                 .unwrap()
@@ -3826,35 +3952,46 @@ reasoning_efforts = [{value = "max", default = true}, {value = "high"}]
                 "hydration must not append model changes"
             );
             if case == "high" && phase == 2 {
-                let lock = agent.model_reload_lock.lock().await;
-                let enqueued = crate::agent::handlers::model_switch::enqueue(
-                    &agent,
-                    &lock,
-                    agent.control_session_handle(&sid).unwrap(),
-                    crate::agent::handlers::model_switch::ModelSwitchRequest::new(
-                        sid.clone(),
-                        crate::agent::models::ModelId::new("test/default"),
+                cold_recovery_stage("effort.model_finish", async {
+                    let lock = agent.model_reload_lock.lock().await;
+                    let enqueued = crate::agent::handlers::model_switch::enqueue(
+                        &agent,
+                        &lock,
+                        agent.control_session_handle(&sid).unwrap(),
+                        crate::agent::handlers::model_switch::ModelSwitchRequest::new(
+                            sid.clone(),
+                            crate::agent::models::ModelId::new("test/default"),
+                        )
+                        .meta(
+                            serde_json::json!({"reasoningEffort":"max"})
+                                .as_object()
+                                .cloned(),
+                        ),
                     )
-                    .meta(
-                        serde_json::json!({"reasoningEffort":"max"})
-                            .as_object()
-                            .cloned(),
-                    ),
-                )
-                .unwrap();
-                drop(lock);
-                crate::agent::handlers::model_switch::finish(&agent, enqueued)
-                    .await
                     .unwrap();
+                    drop(lock);
+                    crate::agent::handlers::model_switch::finish(&agent, enqueued).await
+                })
+                .await
+                .unwrap();
             }
             if case == "high" && phase == 1 {
                 // A real same-process close must release its persistence lease
                 // before an immediate cold load is admitted.
-                assert!(agent.close_session_explicit(&sid).await.unwrap());
-                agent
-                    .load_session(acp::LoadSessionRequest::new(sid.clone(), cwd.clone()))
+                assert!(
+                    cold_recovery_stage(
+                        "effort.pre_reload_close",
+                        agent.close_session_explicit(&sid)
+                    )
                     .await
-                    .unwrap();
+                    .unwrap()
+                );
+                cold_recovery_stage(
+                    "effort.post_close_load",
+                    agent.load_session(acp::LoadSessionRequest::new(sid.clone(), cwd.clone())),
+                )
+                .await
+                .unwrap();
                 assert_eq!(
                     agent
                         .control_session_handle(&sid)
@@ -3866,13 +4003,19 @@ reasoning_efforts = [{value = "max", default = true}, {value = "high"}]
                     expected
                 );
             }
-            assert!(agent.close_session_explicit(&sid).await.unwrap());
+            assert!(
+                cold_recovery_stage("effort.close", agent.close_session_explicit(&sid))
+                    .await
+                    .unwrap()
+            );
             return;
         }
-        let created = agent
-            .new_session(acp::NewSessionRequest::new(cwd.clone()))
-            .await
-            .unwrap();
+        let created = cold_recovery_stage(
+            "effort.new_session",
+            agent.new_session(acp::NewSessionRequest::new(cwd.clone())),
+        )
+        .await
+        .unwrap();
         let sid = created.session_id;
         if case != "none" {
             let handle = agent.control_session_handle(&sid).unwrap();
@@ -3884,26 +4027,28 @@ reasoning_efforts = [{value = "max", default = true}, {value = "high"}]
                     .reasoning_effort,
                 Some(ReasoningEffort::Max)
             );
-            let lock = agent.model_reload_lock.lock().await;
-            let enqueued = crate::agent::handlers::model_switch::enqueue(
-                &agent,
-                &lock,
-                handle,
-                crate::agent::handlers::model_switch::ModelSwitchRequest::new(
-                    sid.clone(),
-                    crate::agent::models::ModelId::new("test/default"),
+            cold_recovery_stage("effort.model_finish", async {
+                let lock = agent.model_reload_lock.lock().await;
+                let enqueued = crate::agent::handlers::model_switch::enqueue(
+                    &agent,
+                    &lock,
+                    handle,
+                    crate::agent::handlers::model_switch::ModelSwitchRequest::new(
+                        sid.clone(),
+                        crate::agent::models::ModelId::new("test/default"),
+                    )
+                    .meta(
+                        serde_json::json!({"reasoningEffort":"high"})
+                            .as_object()
+                            .cloned(),
+                    ),
                 )
-                .meta(
-                    serde_json::json!({"reasoningEffort":"high"})
-                        .as_object()
-                        .cloned(),
-                ),
-            )
-            .unwrap();
-            drop(lock);
-            crate::agent::handlers::model_switch::finish(&agent, enqueued)
-                .await
                 .unwrap();
+                drop(lock);
+                crate::agent::handlers::model_switch::finish(&agent, enqueued).await
+            })
+            .await
+            .unwrap();
             assert_eq!(
                 agent
                     .control_session_handle(&sid)
@@ -3931,7 +4076,11 @@ reasoning_efforts = [{value = "max", default = true}, {value = "high"}]
             sid.0.as_ref(),
         )
         .unwrap();
-        assert!(agent.close_session_explicit(&sid).await.unwrap());
+        assert!(
+            cold_recovery_stage("effort.close", agent.close_session_explicit(&sid))
+                .await
+                .unwrap()
+        );
     });
 }
 
@@ -3968,6 +4117,7 @@ fn cold_resume_records_catalog_route_rebind() {
             .unwrap()
             .parse()
             .unwrap();
+        eprintln!("[cold-recovery] route phase={phase}");
         let base_url = if phase == 0 {
             "http://127.0.0.1:1/v1"
         } else {
@@ -3993,35 +4143,42 @@ context_window = 128000
                 .unwrap();
         cfg.default_model_override = None;
         cfg.remote_settings = Some(crate::util::config::RemoteSettings::default());
-        let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        drain_test_gateway_completions(rx);
         let agent = MvpAgent::new(GatewaySender::new(tx), &cfg).unwrap();
-        agent
-            .initialize(
+        cold_recovery_stage(
+            "route.initialize",
+            agent.initialize(
                 acp::InitializeRequest::new(acp::ProtocolVersion::V1).meta(
                     serde_json::json!({"startupHints":{"nonInteractive":true,"skipGitStatus":true,"skipProjectLayout":true}})
                         .as_object()
                         .cloned(),
                 ),
-            )
-            .await
-            .unwrap();
+            ),
+        )
+        .await
+        .unwrap();
         agent.set_auth_method(acp::AuthMethodId::new("provider.api_key"));
         let cwd = root.join("workspace");
         std::fs::create_dir_all(&cwd).unwrap();
         let sid = if phase == 0 {
-            let created = agent
-                .new_session(acp::NewSessionRequest::new(cwd.clone()))
-                .await
-                .unwrap();
+            let created = cold_recovery_stage(
+                "route.new_session",
+                agent.new_session(acp::NewSessionRequest::new(cwd.clone())),
+            )
+            .await
+            .unwrap();
             std::fs::write(root.join("test-session-id"), created.session_id.0.as_ref()).unwrap();
             created.session_id
         } else {
             let sid =
                 acp::SessionId::new(std::fs::read_to_string(root.join("test-session-id")).unwrap());
-            agent
-                .load_session(acp::LoadSessionRequest::new(sid.clone(), cwd.clone()))
-                .await
-                .unwrap();
+            cold_recovery_stage(
+                "route.load",
+                agent.load_session(acp::LoadSessionRequest::new(sid.clone(), cwd.clone())),
+            )
+            .await
+            .unwrap();
             sid
         };
         let handle = agent.control_session_handle(&sid).unwrap();
@@ -4081,10 +4238,12 @@ context_window = 128000
                 bridge["to_model_transport"],
                 serde_json::to_value(&current_transport).unwrap()
             );
-            agent
-                .load_session(acp::LoadSessionRequest::new(sid.clone(), cwd.clone()))
-                .await
-                .unwrap();
+            cold_recovery_stage(
+                "route.resident_load",
+                agent.load_session(acp::LoadSessionRequest::new(sid.clone(), cwd.clone())),
+            )
+            .await
+            .unwrap();
             let resident = agent
                 .control_session_handle(&sid)
                 .unwrap()
@@ -4097,23 +4256,29 @@ context_window = 128000
                 events.len(),
                 "resident reconnect must not rebind"
             );
-            let lock = agent.model_reload_lock.lock().await;
-            let enqueued = crate::agent::handlers::model_switch::enqueue(
-                &agent,
-                &lock,
-                agent.control_session_handle(&sid).unwrap(),
-                crate::agent::handlers::model_switch::ModelSwitchRequest::new(
-                    sid.clone(),
-                    crate::agent::models::ModelId::new("test/default"),
-                ),
-            )
-            .unwrap();
-            drop(lock);
-            crate::agent::handlers::model_switch::finish(&agent, enqueued)
-                .await
+            cold_recovery_stage("route.model_finish", async {
+                let lock = agent.model_reload_lock.lock().await;
+                let enqueued = crate::agent::handlers::model_switch::enqueue(
+                    &agent,
+                    &lock,
+                    agent.control_session_handle(&sid).unwrap(),
+                    crate::agent::handlers::model_switch::ModelSwitchRequest::new(
+                        sid.clone(),
+                        crate::agent::models::ModelId::new("test/default"),
+                    ),
+                )
                 .unwrap();
+                drop(lock);
+                crate::agent::handlers::model_switch::finish(&agent, enqueued).await
+            })
+            .await
+            .unwrap();
         }
-        assert!(agent.close_session_explicit(&sid).await.unwrap());
+        assert!(
+            cold_recovery_stage("route.close", agent.close_session_explicit(&sid))
+                .await
+                .unwrap()
+        );
         if phase == 2 {
             let no_route_sid = acp::SessionId::new("route-free-baseline");
             let info = crate::session::info::Info {
@@ -4139,10 +4304,12 @@ context_window = 128000
                 .await
                 .unwrap();
             drop(storage);
-            agent
-                .load_session(acp::LoadSessionRequest::new(no_route_sid.clone(), cwd))
-                .await
-                .unwrap();
+            cold_recovery_stage(
+                "route.no_baseline_load",
+                agent.load_session(acp::LoadSessionRequest::new(no_route_sid.clone(), cwd)),
+            )
+            .await
+            .unwrap();
             let events = agent
                 .control_session_handle(&no_route_sid)
                 .unwrap()
@@ -4158,7 +4325,14 @@ context_window = 128000
                             .and_then(serde_json::Value::as_str)
                             == Some("cold_load_route_baseline")
             )));
-            assert!(agent.close_session_explicit(&no_route_sid).await.unwrap());
+            assert!(
+                cold_recovery_stage(
+                    "route.no_baseline_close",
+                    agent.close_session_explicit(&no_route_sid),
+                )
+                .await
+                .unwrap()
+            );
         }
     });
 }
@@ -4203,6 +4377,7 @@ fn replay_frontier_timeline(
     timeline
         .record(chat_state::TimelineEventKind::Turn(
             chat_state::TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity: chat_state::TurnIdentity {

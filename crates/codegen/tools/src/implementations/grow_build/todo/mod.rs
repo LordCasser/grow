@@ -1,17 +1,19 @@
 //! TodoWrite — new-architecture implementation.
 //!
-//! Reuses the core logic (`validate_no_duplicate_ids`, `apply_replace`,
-//! `apply_merge`, `summarize_todo_state`) from the old `implementations::todo`
-//! module. State is stored as `State<TodoState>` in Resources instead of
-//! `ToolState.todo_state`.
+//! Writes are commands to the owning SessionActor. `TodoState` remains only
+//! as a compatibility projection for existing tool output consumers.
 
 use std::fmt::Write;
 
 use crate::types::output::{TodoWriteOutput, TodoWriteSuccess};
 use crate::types::requirements::{Expr, ToolRequirement};
-#[allow(unused_imports)]
-use crate::types::resources::{SharedResources, State};
 use crate::types::tool::{ToolKind, ToolNamespace};
+use tool_types::{DependencyKind, LocalPlan, PlanPriority, PlanStepStatus};
+#[cfg(test)]
+use tool_types::{WaitCondition, WaitDependency};
+
+pub mod runtime;
+pub use runtime::{LocalPlanProjection, PlanningAction, PlanningCommand, PlanningRuntimeHandle};
 
 #[derive(thiserror::Error, Debug)]
 pub enum TodoError {
@@ -37,6 +39,7 @@ pub(crate) fn validate_no_duplicate_ids(updates: &[TodoUpdate]) -> Result<(), To
 /// `merge=false`: the incoming list fully replaces the existing todo state.
 /// If `content` is omitted for an item, the `id` is used as a fallback.
 /// If `status` is omitted, it defaults to `Pending`.
+#[cfg(test)]
 pub(crate) fn apply_replace(
     state: &mut TodoState,
     updates: &[TodoUpdate],
@@ -69,6 +72,7 @@ pub(crate) fn apply_replace(
 /// - **New items** (id not yet in state): if `content` is omitted the `id`
 ///   is used as a fallback so the tool never errors on a merge call. This
 ///   makes the tool resilient to state being lost between calls.
+#[cfg(test)]
 pub(crate) fn apply_merge(state: &mut TodoState, updates: &[TodoUpdate]) -> Result<(), TodoError> {
     for u in updates {
         if state.update(&u.id, u.content.as_deref(), u.status) {
@@ -158,6 +162,8 @@ pub struct TodoState {
     todos: IndexMap<TodoId, TodoItem>,
 }
 
+// Kept registered for existing read-only projections; TodoWrite no longer
+// obtains or mutates this state.
 crate::register_resource!("grow_build", "Todo", TodoState);
 
 impl TodoState {
@@ -219,10 +225,21 @@ pub struct TodoUpdate {
         description = "The status of the todo item: pending, in_progress, completed, or cancelled"
     )]
     pub status: Option<TodoStatus>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(description = "Optional priority: high, medium, or low")]
+    pub priority: Option<TodoPriority>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requirements: Option<Vec<String>>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub removed: Option<bool>,
 }
 
 impl TodoUpdate {
     /// True when the update carries no meaningful content (None or empty string).
+    #[cfg(test)]
     fn has_no_content(&self) -> bool {
         self.content.as_deref().is_none_or(str::is_empty)
     }
@@ -248,14 +265,19 @@ pub struct TodoWriteInput {
     )]
     pub merge: bool,
 
-    #[schemars(description = "Array of todo items to write to the workspace")]
+    #[serde(default)]
+    #[schemars(description = "Array of todo items to write to the current local plan")]
     pub todos: Vec<TodoUpdate>,
+
+    /// Structured waiting, replan confirmation, review, or scope action to
+    /// commit with this plan update.
+    #[serde(default)]
+    pub actions: Vec<PlanningAction>,
 }
 
 /// New-architecture `TodoWrite` tool.
 ///
-/// State: `State<TodoState>` — persisted across calls via Resources serde.
-/// Params: `()` — no per-tool configuration.
+/// Params: `()` — no per-tool configuration. The SessionActor owns the plan.
 #[derive(Debug, Default)]
 pub struct TodoWriteTool;
 
@@ -311,9 +333,6 @@ impl tool_runtime::Tool for TodoWriteTool {
         ctx: tool_runtime::ToolCallContext,
         input: TodoWriteInput,
     ) -> Result<TodoWriteOutput, tool_runtime::ToolError> {
-        use crate::types::tool_metadata::shared_resources;
-        let resources = shared_resources(&ctx)?;
-
         // Validate IDs upfront — return an error-as-output variant so the
         // Python side can distinguish this from infra errors.
         if let Err(TodoError::DuplicateTodoID(id)) = validate_no_duplicate_ids(&input.todos) {
@@ -322,38 +341,234 @@ impl tool_runtime::Tool for TodoWriteTool {
             )));
         }
 
-        let (summary_for_prompt, todos, state_snapshot);
-        {
-            let mut res = resources.lock().await;
-            let todo_state = res.get_or_default::<State<TodoState>>();
+        let (prompt_id, sender) = planning_runtime(&ctx).await?;
+        let (respond_to, response) = tokio::sync::oneshot::channel();
+        sender
+            .send(PlanningCommand::Write {
+                prompt_id,
+                input,
+                respond_to,
+            })
+            .map_err(|_| planning_channel_error())?;
+        let plan = response
+            .await
+            .map_err(|_| planning_channel_error())?
+            .map_err(|message| tool_runtime::ToolError::custom("planning_rejected", message))?;
+        Ok(TodoWriteOutput::TodosUpdated(todo_write_success(&plan)))
+    }
+}
 
-            // Auto-upgrade to merge when the model forgot `merge: true` but
-            // clearly intended a partial update: state already has items and
-            // every update targets an existing ID without providing content.
-            let effective_merge = input.merge
-                || (!todo_state.0.is_empty()
-                    && !input.todos.is_empty()
-                    && input
-                        .todos
-                        .iter()
-                        .all(|u| u.has_no_content() && todo_state.0.has_id(&u.id)));
+async fn planning_runtime(
+    ctx: &tool_runtime::ToolCallContext,
+) -> Result<(String, tokio::sync::mpsc::UnboundedSender<PlanningCommand>), tool_runtime::ToolError>
+{
+    use crate::implementations::grow_build::task::types::CurrentPromptIdResource;
+    use crate::types::tool_metadata::shared_resources;
 
-            if effective_merge {
-                apply_merge(&mut todo_state.0, &input.todos)?;
-            } else {
-                apply_replace(&mut todo_state.0, &input.todos)?;
-            }
+    let resources = shared_resources(ctx)?;
+    let resources = resources.lock().await;
+    let prompt_id = resources
+        .get::<CurrentPromptIdResource>()
+        .map(|resource| resource.0.clone())
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| {
+            tool_runtime::ToolError::custom(
+                "planning_unavailable",
+                "Current prompt identity is unavailable.",
+            )
+        })?;
+    let sender = resources
+        .get::<PlanningRuntimeHandle>()
+        .map(|handle| handle.0.clone())
+        .ok_or_else(|| {
+            tool_runtime::ToolError::custom(
+                "planning_unavailable",
+                "Planning runtime is unavailable.",
+            )
+        })?;
+    Ok((prompt_id, sender))
+}
 
-            summary_for_prompt = summarize_todo_state(&todo_state.0);
-            todos = todo_state.0.todo_items().cloned().collect::<Vec<_>>();
-            state_snapshot = todo_state.0.clone();
+fn planning_channel_error() -> tool_runtime::ToolError {
+    tool_runtime::ToolError::custom(
+        "planning_channel_closed",
+        "Planning runtime stopped before completing the request.",
+    )
+}
+
+/// Project the actor-owned plan into the legacy TodoState output shape.
+pub fn project_todo_state(plan: &LocalPlan) -> TodoState {
+    const MAX_META_LINKS: usize = 8;
+    const MAX_META_WAITS: usize = 8;
+
+    let mut state = TodoState::default();
+    for step in plan.steps.iter().filter(|step| !step.removed) {
+        let link_count = plan
+            .links
+            .iter()
+            .filter(|link| link.parent_step_id == step.id)
+            .count();
+        let links: Vec<_> = plan
+            .links
+            .iter()
+            .filter(|link| link.parent_step_id == step.id)
+            .take(MAX_META_LINKS)
+            .map(|link| {
+                serde_json::json!({
+                    "id": link.id,
+                    "childSessionId": link.child_session_id,
+                    "terminal": link.terminal,
+                    "required": link.required,
+                })
+            })
+            .collect();
+        let wait_count = plan
+            .waits
+            .iter()
+            .filter(|wait| {
+                wait.dependencies.iter().any(|dependency| {
+                    dependency.kind == DependencyKind::Task
+                        && plan.links.iter().any(|link| {
+                            link.parent_step_id == step.id && link.child_session_id == dependency.id
+                        })
+                })
+            })
+            .count();
+        let wait_ids: Vec<_> = plan
+            .waits
+            .iter()
+            .filter(|wait| {
+                wait.dependencies.iter().any(|dependency| {
+                    dependency.kind == DependencyKind::Task
+                        && plan.links.iter().any(|link| {
+                            link.parent_step_id == step.id && link.child_session_id == dependency.id
+                        })
+                })
+            })
+            .take(MAX_META_WAITS)
+            .map(|wait| wait.id.as_str())
+            .collect();
+        let meta = serde_json::json!({
+            "sessionId": plan.session_id,
+            "scopeId": plan.scope_id,
+            "stepId": step.id,
+            "revision": plan.revision,
+            "links": links,
+            "linkCount": link_count,
+            "linksTruncated": link_count > MAX_META_LINKS,
+            "waitIds": wait_ids,
+            "waitCount": wait_count,
+            "waitIdsTruncated": wait_count > MAX_META_WAITS,
+        });
+        state.push(
+            step.id.clone(),
+            TodoItem {
+                content: step.content.clone(),
+                priority: match step.priority {
+                    PlanPriority::High => TodoPriority::High,
+                    PlanPriority::Normal => TodoPriority::Medium,
+                    PlanPriority::Low => TodoPriority::Low,
+                },
+                status: match step.status {
+                    PlanStepStatus::Pending => TodoStatus::Pending,
+                    PlanStepStatus::InProgress => TodoStatus::InProgress,
+                    PlanStepStatus::Completed => TodoStatus::Completed,
+                    PlanStepStatus::Cancelled => TodoStatus::Cancelled,
+                },
+                meta: Some(meta),
+            },
+        );
+    }
+    state
+}
+
+pub fn todo_write_success(plan: &LocalPlan) -> TodoWriteSuccess {
+    let state = project_todo_state(plan);
+    let mut summary_for_prompt = summarize_todo_state(&state);
+    append_plan_obligations_summary(&mut summary_for_prompt, plan);
+    TodoWriteSuccess {
+        summary_for_prompt,
+        todos: state.todo_items().cloned().collect(),
+        state,
+    }
+}
+
+fn append_plan_obligations_summary(summary: &mut String, plan: &LocalPlan) {
+    const LIMIT: usize = 8;
+    let incoming: Vec<_> = plan
+        .replans
+        .iter()
+        .filter(|change| {
+            matches!(
+                change.progress,
+                tool_types::ReplanProgress::Received | tool_types::ReplanProgress::Consumed
+            )
+        })
+        .collect();
+    let waits = &plan.waits;
+    let required = plan.unresolved_required_deliveries();
+
+    if incoming.is_empty() && waits.is_empty() && required.is_empty() {
+        return;
+    }
+    use std::fmt::Write as _;
+    summary.push_str("\n\nOpen local-plan responsibilities:");
+    if !incoming.is_empty() {
+        write!(summary, "\n- Incoming replans: {}", incoming.len()).ok();
+        for change in incoming.iter().take(LIMIT) {
+            write!(
+                summary,
+                "\n  - {} (step {}, link {}, source revision {})",
+                change.id, change.step_id, change.link_id, change.source_revision
+            )
+            .ok();
         }
-
-        Ok(TodoWriteOutput::TodosUpdated(TodoWriteSuccess {
-            summary_for_prompt,
-            todos,
-            state: state_snapshot,
-        }))
+        if incoming.len() > LIMIT {
+            write!(
+                summary,
+                "\n  - {} additional replan references remain open; do not treat them as handled.",
+                incoming.len() - LIMIT
+            )
+            .ok();
+        }
+    }
+    if !waits.is_empty() {
+        write!(summary, "\n- Declared waits: {}", waits.len()).ok();
+        for wait in waits.iter().take(LIMIT) {
+            write!(summary, "\n  - {} ({:?})", wait.id, wait.condition).ok();
+        }
+        if waits.len() > LIMIT {
+            write!(
+                summary,
+                "\n  - {} additional wait references remain active.",
+                waits.len() - LIMIT
+            )
+            .ok();
+        }
+    }
+    if !required.is_empty() {
+        write!(
+            summary,
+            "\n- Required delivery gates still open: {}",
+            required.len()
+        )
+        .ok();
+        for link in required.iter().take(LIMIT) {
+            write!(
+                summary,
+                "\n  - {} (step {}, child {})",
+                link.id, link.parent_step_id, link.child_session_id
+            )
+            .ok();
+        }
+        if required.len() > LIMIT {
+            write!(
+                summary,
+                "\n  - {} additional required delivery references remain open.",
+                required.len() - LIMIT
+            )
+            .ok();
+        }
     }
 }
 
@@ -371,6 +586,9 @@ mod tests {
             id: id.to_owned(),
             content: content.map(str::to_owned),
             status,
+            priority: None,
+            requirements: None,
+            removed: None,
         }
     }
 
@@ -392,240 +610,233 @@ mod tests {
         assert!(ToolMetadata::description_template(&tool).contains("task list"));
     }
 
-    #[tokio::test]
-    async fn replace_mode_creates_items() {
-        let tool = TodoWriteTool;
-        let resources = Resources::new();
+    fn runtime_context(
+        prompt_id: &str,
+        sender: tokio::sync::mpsc::UnboundedSender<PlanningCommand>,
+    ) -> tool_runtime::ToolCallContext {
+        use crate::implementations::grow_build::task::types::CurrentPromptIdResource;
 
-        let input = TodoWriteInput {
-            merge: false,
-            todos: vec![
-                make_update("1", Some("Task A"), Some(TodoStatus::Pending)),
-                make_update("2", Some("Task B"), Some(TodoStatus::InProgress)),
-            ],
-        };
-
-        let shared = resources.into_shared();
-        let output = expect_success(
-            tool_runtime::Tool::run(&tool, test_ctx(shared.clone()), input)
-                .await
-                .unwrap(),
-        );
-        assert_eq!(output.todos.len(), 2);
-        assert!(output.summary_for_prompt.contains("Task A"));
-        assert!(output.summary_for_prompt.contains("Task B"));
-
-        // State persists in Resources
-        let res = shared.lock().await;
-        let state = res.get::<State<TodoState>>().unwrap();
-        assert_eq!(state.0.todo_items().count(), 2);
+        let mut resources = Resources::new();
+        resources.insert(CurrentPromptIdResource(prompt_id.to_owned()));
+        resources.insert(PlanningRuntimeHandle(sender));
+        test_ctx(resources.into_shared())
     }
 
     #[tokio::test]
-    async fn replace_clears_previous_state() {
+    async fn write_is_sent_to_actor_and_projects_its_response() {
+        use tool_types::PlanStep;
+
         let tool = TodoWriteTool;
-        let resources = Resources::new();
-        let shared = resources.into_shared();
-
-        // Seed initial state
-        let input1 = TodoWriteInput {
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let ctx = runtime_context("prompt-17", sender);
+        let input = TodoWriteInput {
             merge: false,
-            todos: vec![make_update(
-                "old",
-                Some("Old task"),
-                Some(TodoStatus::Completed),
-            )],
+            todos: vec![TodoUpdate {
+                id: "build".into(),
+                content: Some("Build the feature".into()),
+                status: Some(TodoStatus::InProgress),
+                priority: Some(TodoPriority::High),
+                requirements: Some(vec!["tests pass".into()]),
+                removed: Some(false),
+            }],
+            actions: vec![PlanningAction::HandleReplans {
+                ids: vec!["change-1".into()],
+                no_change_reason: Some("existing plan already covers it".into()),
+            }],
         };
-        tool_runtime::Tool::run(&tool, test_ctx(shared.clone()), input1)
-            .await
-            .unwrap();
+        let actor = tokio::spawn(async move {
+            match receiver.recv().await.expect("write command") {
+                PlanningCommand::Write {
+                    prompt_id,
+                    input,
+                    respond_to,
+                } => {
+                    assert_eq!(prompt_id, "prompt-17");
+                    assert_eq!(input.todos[0].priority, Some(TodoPriority::High));
+                    assert_eq!(
+                        input.todos[0].requirements.as_ref().unwrap()[0],
+                        "tests pass"
+                    );
+                    assert_eq!(input.actions.len(), 1);
+                    let mut plan = LocalPlan::new("session-1", "scope-1");
+                    plan.steps.push(PlanStep {
+                        id: "build".into(),
+                        content: "Build the feature".into(),
+                        priority: PlanPriority::High,
+                        status: PlanStepStatus::InProgress,
+                        requirements: Some(vec!["tests pass".into()]),
+                        removed: false,
+                    });
+                    respond_to.send(Ok(plan)).unwrap();
+                }
+                PlanningCommand::Link { .. } => panic!("unexpected link command"),
+                PlanningCommand::Undispatched { .. } => {
+                    panic!("unexpected undispatched command")
+                }
+            }
+        });
 
-        // Replace with new
-        let input2 = TodoWriteInput {
-            merge: false,
-            todos: vec![make_update(
-                "new",
-                Some("New task"),
-                Some(TodoStatus::Pending),
-            )],
-        };
-        let output = expect_success(
-            tool_runtime::Tool::run(&tool, test_ctx(shared.clone()), input2)
-                .await
-                .unwrap(),
-        );
+        let output = expect_success(tool_runtime::Tool::run(&tool, ctx, input).await.unwrap());
+        actor.await.unwrap();
         assert_eq!(output.todos.len(), 1);
-        assert!(output.summary_for_prompt.contains("New task"));
-        assert!(!output.summary_for_prompt.contains("Old task"));
-    }
-
-    #[tokio::test]
-    async fn merge_mode_updates_existing() {
-        let tool = TodoWriteTool;
-        let resources = Resources::new();
-        let shared = resources.into_shared();
-
-        // Create initial items
-        let input1 = TodoWriteInput {
-            merge: false,
-            todos: vec![
-                make_update("1", Some("Build project"), Some(TodoStatus::InProgress)),
-                make_update("2", Some("Run tests"), Some(TodoStatus::Pending)),
-            ],
-        };
-        tool_runtime::Tool::run(&tool, test_ctx(shared.clone()), input1)
-            .await
-            .unwrap();
-
-        // Merge: mark item 1 completed (no content), add item 3
-        let input2 = TodoWriteInput {
-            merge: true,
-            todos: vec![
-                make_update("1", None, Some(TodoStatus::Completed)),
-                make_update("3", Some("Deploy"), Some(TodoStatus::Pending)),
-            ],
-        };
-        let output = expect_success(
-            tool_runtime::Tool::run(&tool, test_ctx(shared.clone()), input2)
-                .await
-                .unwrap(),
-        );
-        assert_eq!(output.todos.len(), 3);
-
-        // Item 1 content preserved, status updated
-        let item1 = output
-            .todos
-            .iter()
-            .find(|t| t.content == "Build project")
-            .unwrap();
-        assert_eq!(item1.status, TodoStatus::Completed);
-    }
-
-    #[tokio::test]
-    async fn merge_with_lost_state_uses_id_fallback() {
-        let tool = TodoWriteTool;
-        let resources = Resources::new();
-
-        // Merge into empty state — should not error
-        let input = TodoWriteInput {
-            merge: true,
-            todos: vec![make_update("explore", None, Some(TodoStatus::Completed))],
-        };
-        let output = expect_success(
-            tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
-                .await
-                .unwrap(),
-        );
-        assert_eq!(output.todos.len(), 1);
-        // Id used as fallback content
-        assert_eq!(output.todos[0].content, "explore");
-        assert_eq!(output.todos[0].status, TodoStatus::Completed);
-    }
-
-    #[tokio::test]
-    async fn duplicate_ids_rejected() {
-        let tool = TodoWriteTool;
-        let resources = Resources::new();
-
-        let input = TodoWriteInput {
-            merge: false,
-            todos: vec![
-                make_update("dup", Some("A"), Some(TodoStatus::Pending)),
-                make_update("dup", Some("B"), Some(TodoStatus::Pending)),
-            ],
-        };
-        let result = tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
-            .await
-            .unwrap();
-        assert!(
-            matches!(result, TodoWriteOutput::DuplicateId(ref msg) if msg.contains("dup")),
-            "expected DuplicateId variant, got {result:?}"
-        );
-    }
-
-    #[tokio::test]
-    async fn empty_todos_shows_no_tasks_message() {
-        let tool = TodoWriteTool;
-        let resources = Resources::new();
-
-        let input = TodoWriteInput {
-            merge: false,
-            todos: vec![],
-        };
-        let output = expect_success(
-            tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
-                .await
-                .unwrap(),
-        );
-        assert!(output.summary_for_prompt.contains("No tasks"));
-        assert!(output.todos.is_empty());
-    }
-
-    #[tokio::test]
-    async fn state_output_includes_snapshot() {
-        let tool = TodoWriteTool;
-        let resources = Resources::new();
-
-        let input = TodoWriteInput {
-            merge: false,
-            todos: vec![make_update("1", Some("Task"), Some(TodoStatus::Pending))],
-        };
-        let output = expect_success(
-            tool_runtime::Tool::run(&tool, test_ctx(resources.into_shared()), input)
-                .await
-                .unwrap(),
-        );
-
-        // state field should match what's in Resources
-        assert!(!output.state.is_empty());
+        assert_eq!(output.todos[0].priority, TodoPriority::High);
+        assert!(output.summary_for_prompt.contains("Build the feature"));
         assert_eq!(output.state.todo_items().count(), 1);
     }
 
     #[tokio::test]
-    async fn state_serialization_roundtrip() {
+    async fn missing_runtime_is_an_explicit_error() {
+        use crate::implementations::grow_build::task::types::CurrentPromptIdResource;
+
         let tool = TodoWriteTool;
         let mut resources = Resources::new();
-        resources.register_state::<TodoState>();
+        resources.insert(CurrentPromptIdResource("prompt-1".into()));
+        let error = tool_runtime::Tool::run(
+            &tool,
+            test_ctx(resources.into_shared()),
+            TodoWriteInput {
+                merge: true,
+                todos: vec![],
+                actions: vec![],
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:?}").contains("Planning runtime is unavailable."));
+    }
 
-        // Create some state
-        let input = TodoWriteInput {
-            merge: false,
-            todos: vec![
-                make_update("1", Some("First"), Some(TodoStatus::Completed)),
-                make_update("2", Some("Second"), Some(TodoStatus::InProgress)),
-            ],
+    #[tokio::test]
+    async fn closed_runtime_channel_is_an_explicit_error() {
+        let tool = TodoWriteTool;
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        drop(receiver);
+        let error = tool_runtime::Tool::run(
+            &tool,
+            runtime_context("prompt-1", sender),
+            TodoWriteInput {
+                merge: true,
+                todos: vec![],
+                actions: vec![],
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(format!("{error:?}").contains("Planning runtime stopped"));
+    }
+
+    #[test]
+    fn projection_omits_tombstones() {
+        let mut plan = LocalPlan::new("session-1", "scope-1");
+        plan.steps.push(tool_types::PlanStep {
+            id: "removed".into(),
+            content: "removed item".into(),
+            priority: PlanPriority::Normal,
+            status: PlanStepStatus::Cancelled,
+            requirements: None,
+            removed: true,
+        });
+        assert!(project_todo_state(&plan).is_empty());
+    }
+
+    #[test]
+    fn projection_meta_carries_bounded_step_identity_links_and_wait_ids() {
+        use tool_types::{PlanLink, PlanStep, PlanWait};
+
+        let mut plan = LocalPlan::new("session-1", "scope-2");
+        plan.revision = 7;
+        plan.steps.push(PlanStep {
+            id: "step-3".into(),
+            content: "Run delegated checks".into(),
+            priority: PlanPriority::Normal,
+            status: PlanStepStatus::InProgress,
+            requirements: None,
+            removed: false,
+        });
+        plan.links.push(PlanLink {
+            id: "link-4".into(),
+            parent_step_id: "step-3".into(),
+            child_session_id: "child-5".into(),
+            terminal: false,
+            required: true,
+            pending_source_revision: Some(7),
+            review_required_revision: 0,
+            result_id: None,
+            dispatch_failure: None,
+        });
+        plan.waits.push(PlanWait {
+            id: "wait-6".into(),
+            step_ids: vec!["step-3".into()],
+            dependencies: vec![WaitDependency {
+                kind: DependencyKind::Task,
+                id: "child-5".into(),
+            }],
+            condition: WaitCondition::All,
+        });
+
+        let state = project_todo_state(&plan);
+        let meta = get_item(&state, "step-3").meta.as_ref().unwrap();
+        assert_eq!(meta["sessionId"], "session-1");
+        assert_eq!(meta["scopeId"], "scope-2");
+        assert_eq!(meta["stepId"], "step-3");
+        assert_eq!(meta["revision"], 7);
+        assert_eq!(meta["links"][0]["id"], "link-4");
+        assert_eq!(meta["links"][0]["childSessionId"], "child-5");
+        assert_eq!(meta["waitIds"][0], "wait-6");
+        assert!(meta.get("resultId").is_none());
+    }
+
+    #[test]
+    fn successful_write_summary_exposes_open_replans_waits_and_required_gates_without_todos() {
+        use tool_types::{PlanLink, PlanWait, ReplanChange, ReplanProgress};
+
+        let mut plan = LocalPlan::new("session-1", "scope-1");
+        let change = ReplanChange {
+            id: "replan-1".into(),
+            link_id: "link-1".into(),
+            child_session_id: "child-1".into(),
+            step_id: "step-1".into(),
+            source_revision: 2,
+            content: "updated request".into(),
+            requirements: None,
+            priority: PlanPriority::Normal,
+            status: PlanStepStatus::InProgress,
+            removed: false,
+            progress: ReplanProgress::Received,
         };
-        let shared = resources.into_shared();
-        tool_runtime::Tool::run(&tool, test_ctx(shared.clone()), input)
-            .await
+        plan.receive_replan(change.clone()).unwrap();
+        plan.advance_replan("replan-1", ReplanProgress::Consumed)
             .unwrap();
-
-        // Serialize
-        let res = shared.lock().await;
-        let snapshot = res.serialize();
-        let state_map = snapshot.get("state").unwrap();
+        plan.links.push(PlanLink {
+            id: "link-required".into(),
+            parent_step_id: "step-required".into(),
+            child_session_id: "child-required".into(),
+            terminal: false,
+            required: true,
+            pending_source_revision: None,
+            review_required_revision: 0,
+            result_id: None,
+            dispatch_failure: None,
+        });
+        plan.waits.push(PlanWait {
+            id: "wait-1".into(),
+            step_ids: vec![],
+            dependencies: vec![],
+            condition: WaitCondition::Any,
+        });
+        let result = todo_write_success(&plan);
+        assert!(result.todos.is_empty());
+        assert!(result.summary_for_prompt.contains("Incoming replans: 1"));
         assert!(
-            state_map.get("grow_build.Todo").is_some(),
-            "TodoState should serialize under 'grow_build.Todo'"
+            result
+                .summary_for_prompt
+                .contains("replan-1 (step step-1, link link-1, source revision 2)")
         );
-
-        // Deserialize into fresh Resources
-        let mut resources2 = Resources::new();
-        resources2.register_state::<TodoState>();
-        let data: std::collections::HashMap<
-            String,
-            std::collections::HashMap<String, serde_json::Value>,
-        > = serde_json::from_value(snapshot).unwrap();
-        resources2.load_from(data);
-
-        // Verify state was restored
-        let restored = resources2.get::<State<TodoState>>().unwrap();
-        assert_eq!(restored.0.todo_items().count(), 2);
-        let items: Vec<_> = restored.0.todo_items().collect();
-        assert_eq!(items[0].content, "First");
-        assert_eq!(items[0].status, TodoStatus::Completed);
-        assert_eq!(items[1].content, "Second");
-        assert_eq!(items[1].status, TodoStatus::InProgress);
+        assert!(result.summary_for_prompt.contains("wait-1 (Any)"));
+        assert!(
+            result
+                .summary_for_prompt
+                .contains("link-required (step step-required, child child-required)")
+        );
     }
 
     fn seed_state(items: &[(&str, &str, TodoStatus)]) -> TodoState {
@@ -830,53 +1041,6 @@ mod tests {
             make_update("b", Some("B"), Some(TodoStatus::Pending)),
         ];
         validate_no_duplicate_ids(&updates).unwrap();
-    }
-
-    // ── regression: missing merge=true auto-upgrade ────────────────────
-
-    #[tokio::test]
-    async fn missing_merge_flag_auto_upgrades_when_status_only() {
-        // Regression: status-only update without merge=true must not wipe content.
-        let tool = TodoWriteTool;
-        let resources = Resources::new();
-        let shared = resources.into_shared();
-
-        // Create todos with content
-        let input1 = TodoWriteInput {
-            merge: false,
-            todos: vec![
-                make_update("1", Some("Explore codebase"), Some(TodoStatus::InProgress)),
-                make_update("2", Some("Review tools"), Some(TodoStatus::Pending)),
-                make_update("3", Some("Write tests"), Some(TodoStatus::Pending)),
-            ],
-        };
-        tool_runtime::Tool::run(&tool, test_ctx(shared.clone()), input1)
-            .await
-            .unwrap();
-
-        // Status-only update without merge=true
-        let input2 = TodoWriteInput {
-            merge: false, // model forgot merge: true
-            todos: vec![
-                make_update("1", None, Some(TodoStatus::Completed)),
-                make_update("2", None, Some(TodoStatus::Completed)),
-                make_update("3", None, Some(TodoStatus::InProgress)),
-            ],
-        };
-        let output = expect_success(
-            tool_runtime::Tool::run(&tool, test_ctx(shared.clone()), input2)
-                .await
-                .unwrap(),
-        );
-
-        // Content must be preserved, not replaced with id fallback.
-        assert_eq!(output.todos.len(), 3);
-        assert_eq!(output.todos[0].content, "Explore codebase");
-        assert_eq!(output.todos[0].status, TodoStatus::Completed);
-        assert_eq!(output.todos[1].content, "Review tools");
-        assert_eq!(output.todos[1].status, TodoStatus::Completed);
-        assert_eq!(output.todos[2].content, "Write tests");
-        assert_eq!(output.todos[2].status, TodoStatus::InProgress);
     }
 
     // ── regression: merge with null content should never error ────────

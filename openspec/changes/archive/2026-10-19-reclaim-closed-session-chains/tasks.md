@@ -1,0 +1,7 @@
+- [x] Add bounded parent/child component discovery and stable-order multi-session writer leases for TTL eligibility.
+- [x] Revalidate all members, exact Timeline links, independent TTL, and delivery/local obligations while retaining every lease.
+- [x] Add a durable reclaim intent and restart recovery that fails closed on malformed or mismatched identity.
+- [x] Reject explicit single-session deletion for cross-session-linked sessions with an actionable reason.
+- [x] Add boundary tests for closed all-stale reclaim, mixed freshness, live writer, missing source, explicit delete refusal, and interrupted intent recovery.
+- [x] Keep read-only session resolution free of reclaim lock/directory creation; fence writer admission by the member lease and recheck committed intent after claiming it, with regression coverage for concurrent maintenance.
+- [x] Run focused storage tests and `openspec validate --all --strict --no-interactive`.

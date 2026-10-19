@@ -167,6 +167,7 @@ async fn request(handle: &PermissionHandle, access: AccessKind, id: &str) -> Dec
             execution_cwd: None,
             classifier_turns: None,
             call_evidence: None,
+            human_interaction: None,
         },
         admission_guard: None,
     };

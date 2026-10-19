@@ -20,6 +20,7 @@ pub use chat_state::compaction_utils::{
 use compaction::reminder::{
     self, ActiveAgentReminderState, BackgroundTask, RunningSubagent, TodoItem, TodoStatus,
 };
+use tool_types::{LocalPlan, ReplanProgress};
 
 /// Resolved model-facing tool names for the MCP usage hint in compaction
 /// reminders.
@@ -237,6 +238,106 @@ fn to_system_reminder_inner(
     reminder::wrap_system_reminder(sections)
 }
 
+/// Format current plan obligations for the durable post-compaction reminder.
+/// The view is bounded and reference-based: it never copies step requirements
+/// or results, and explicitly leaves omitted references open.
+pub fn format_local_plan_reminder(plan: &LocalPlan) -> Option<String> {
+    const LIMIT: usize = 8;
+    let incoming: Vec<_> = plan
+        .replans
+        .iter()
+        .filter(|change| {
+            matches!(
+                change.progress,
+                ReplanProgress::Received | ReplanProgress::Consumed
+            )
+        })
+        .collect();
+    let required = plan.unresolved_required_deliveries();
+    if incoming.is_empty() && plan.waits.is_empty() && required.is_empty() {
+        return None;
+    }
+
+    use std::fmt::Write as _;
+    let mut out = format!(
+        "## Current Local Plan Obligations\nPlan {}/{} at revision {}.",
+        plan.session_id, plan.scope_id, plan.revision
+    );
+    out.push_str("\nThis is a reference-only snapshot; do not claim an obligation handled from its presence here.");
+    if !incoming.is_empty() {
+        write!(
+            out,
+            "\nIncoming replan records requiring handling: {}",
+            incoming.len()
+        )
+        .ok();
+        for change in incoming.iter().take(LIMIT) {
+            write!(
+                out,
+                "\n- {}: step {}, link {}, source revision {} ({:?})",
+                change.id, change.step_id, change.link_id, change.source_revision, change.progress
+            )
+            .ok();
+        }
+        if incoming.len() > LIMIT {
+            write!(
+                out,
+                "\n- {} additional replan references remain open; do not treat omitted records as handled.",
+                incoming.len() - LIMIT
+            )
+            .ok();
+        }
+    }
+    if !plan.waits.is_empty() {
+        write!(out, "\nDeclared waits: {}", plan.waits.len()).ok();
+        for wait in plan.waits.iter().take(LIMIT) {
+            write!(
+                out,
+                "\n- {} ({:?}; steps {:?}; dependencies",
+                wait.id, wait.condition, wait.step_ids
+            )
+            .ok();
+            for dependency in &wait.dependencies {
+                write!(out, " {:?}:{}", dependency.kind, dependency.id).ok();
+            }
+            out.push(')');
+        }
+        if plan.waits.len() > LIMIT {
+            write!(
+                out,
+                "\n- {} additional wait references remain active.",
+                plan.waits.len() - LIMIT
+            )
+            .ok();
+        }
+    }
+    if !required.is_empty() {
+        write!(
+            out,
+            "\nRequired delivery gates still open: {}",
+            required.len()
+        )
+        .ok();
+        for link in required.iter().take(LIMIT) {
+            write!(
+                out,
+                "\n- {} (step {}, child {})",
+                link.id, link.parent_step_id, link.child_session_id
+            )
+            .ok();
+        }
+        if required.len() > LIMIT {
+            write!(
+                out,
+                "\n- {} additional required-delivery references remain open.",
+                required.len() - LIMIT
+            )
+            .ok();
+        }
+    }
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -450,5 +551,60 @@ mod tests {
                 "TODO section should be omitted when nothing is active: {text}"
             );
         }
+    }
+
+    #[test]
+    fn local_plan_reminder_preserves_open_obligation_references_without_copying_payloads() {
+        use tool_types::{
+            DependencyKind, LocalPlan, PlanLink, PlanWait, ReplanChange, ReplanProgress,
+            WaitCondition, WaitDependency,
+        };
+
+        let mut plan = LocalPlan::new("session-a", "scope-b");
+        plan.revision = 9;
+        plan.replans.push(ReplanChange {
+            id: "replan-c".into(),
+            link_id: "link-d".into(),
+            child_session_id: "child-e".into(),
+            step_id: "step-f".into(),
+            source_revision: 8,
+            content: "Do not leak full payload into summary".into(),
+            requirements: Some(vec!["detailed verification requirement".into()]),
+            priority: tool_types::PlanPriority::High,
+            status: tool_types::PlanStepStatus::InProgress,
+            removed: false,
+            progress: ReplanProgress::Consumed,
+        });
+        plan.waits.push(PlanWait {
+            id: "wait-g".into(),
+            step_ids: vec!["step-f".into()],
+            dependencies: vec![WaitDependency {
+                kind: DependencyKind::Task,
+                id: "child-e".into(),
+            }],
+            condition: WaitCondition::All,
+        });
+        plan.links.push(PlanLink {
+            id: "required-h".into(),
+            parent_step_id: "step-f".into(),
+            child_session_id: "child-e".into(),
+            terminal: false,
+            required: true,
+            pending_source_revision: None,
+            review_required_revision: 0,
+            result_id: None,
+            dispatch_failure: None,
+        });
+
+        let reminder = format_local_plan_reminder(&plan).unwrap();
+        assert!(reminder.contains("Plan session-a/scope-b at revision 9"));
+        assert!(
+            reminder.contains("replan-c: step step-f, link link-d, source revision 8 (Consumed)")
+        );
+        assert!(reminder.contains("wait-g (All; steps [\"step-f\"]; dependencies Task:child-e)"));
+        assert!(reminder.contains("required-h (step step-f, child child-e)"));
+        assert!(!reminder.contains("detailed verification requirement"));
+        assert!(!reminder.contains("Do not leak full payload"));
+        assert!(format_local_plan_reminder(&LocalPlan::new("s", "w")).is_none());
     }
 }

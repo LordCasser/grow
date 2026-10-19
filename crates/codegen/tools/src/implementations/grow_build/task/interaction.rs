@@ -5,6 +5,15 @@ use tool_runtime::{ToolCallContext, ToolError};
 
 #[derive(Debug, Clone)]
 pub enum AgentInteraction {
+    /// Host-only guidance, produced from a committed local-plan change.
+    Replan {
+        change: tool_types::ReplanChange,
+    },
+    ReplanHandled {
+        change_id: String,
+        outcome: tool_types::ReplanOutcome,
+        reply_to: sampling_types::AgentMessageRef,
+    },
     Ask {
         question: String,
     },
@@ -160,6 +169,12 @@ async fn interact(
     let body = match &action {
         AgentInteraction::Ask { question } => question,
         AgentInteraction::Send { message, .. } => message,
+        AgentInteraction::Replan { .. } | AgentInteraction::ReplanHandled { .. } => {
+            return Err(ToolError::custom(
+                "invalid_action",
+                "Planning control messages are only available to the session host.",
+            ));
+        }
     };
     if body.trim().is_empty() || body.len() > 16 * 1024 {
         if is_send {

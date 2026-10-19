@@ -33,7 +33,8 @@ use std::sync::Arc;
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 use tools::implementations::grow_build::task::coordinator::{
-    ChildCompletion, ChildControl, ChildReporter, ChildRunOutput, StartedChild, SubagentProgress,
+    ChildCheckpoint, ChildCompletion, ChildControl, ChildReporter, ChildRunOutcome, ChildRunOutput,
+    StartedChild, SubagentProgress,
 };
 use tools::implementations::grow_build::task::types::*;
 use tools::types::tool::ToolKind;
@@ -45,7 +46,7 @@ mod handle_request;
 pub(crate) use finalization::reconcile_shell_child;
 pub(crate) use finalization::refresh_finalization_parent;
 pub(crate) mod resolution;
-pub(crate) use handle_request::run_shell_child;
+pub(crate) use handle_request::{run_shell_child, run_shell_child_with_restore};
 /// How the child session's initial context was bootstrapped.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InitialContextSource {
@@ -206,6 +207,8 @@ pub(crate) struct SubagentSpawnContext {
     /// parent persists (`SubagentSpawned` / `SubagentFinished`) and terminal
     /// usage-ledger folds. Goal accounting uses `goal_usage_window` instead.
     pub parent_cmd_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
+    /// Direct delegator's model-facing result route, separate from lifecycle.
+    pub completion_cmd_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
     /// Root Goal activity/accounting route shared by the complete descendant
     /// tree. Unlike delegation ownership, this charges every model call
     /// settled during an Active Goal window.
@@ -468,6 +471,12 @@ impl ChildControl for ShellChildRuntime {
             trigger: None,
         });
     }
+    fn freeze_admission(&self) -> Result<(), String> {
+        self.child_handle
+            .runtime_suspend
+            .store(true, std::sync::atomic::Ordering::Release);
+        Ok(())
+    }
     fn runner_panicked(&self) {
         self.cancel();
         let _ = self.child_handle.cmd_tx.send(SessionCommand::Shutdown);
@@ -476,13 +485,20 @@ impl ChildControl for ShellChildRuntime {
 #[derive(Default, Clone)]
 pub(crate) struct ShellCompletionData {
     parent_cmd_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
+    completion_cmd_tx: Option<mpsc::UnboundedSender<SessionCommand>>,
+    completion_parent_session_id: Option<String>,
+    completion_is_nested: bool,
     task_output_tool_name: Option<String>,
     goal_loop_active: Arc<std::sync::atomic::AtomicBool>,
     diagnostics_tokens: u64,
+    spawn_admitted: bool,
     spawned_notification_emitted: bool,
     persisted_output_ref: Option<String>,
     terminal_committed: bool,
     execution_outcome_confirmed: bool,
+    planning_result_required: bool,
+    expected_parent_step_id: Option<String>,
+    planning_result_admitted: bool,
     completion_receipt_admitted: bool,
     receipt_required: bool,
     receipt_in_flight: bool,
@@ -499,6 +515,7 @@ pub(crate) struct ShellCompletionData {
     finalization_error: Option<FinalizationFailure>,
     finalization_deadline: Option<tokio::time::Instant>,
     parent_epoch: Option<String>,
+    completion_parent_epoch: Option<String>,
     storage_admission: Option<Arc<crate::session::storage_admission::StorageAdmission>>,
 }
 impl ShellCompletionData {
@@ -509,16 +526,31 @@ impl ShellCompletionData {
         }
     }
 
+    pub(crate) fn completion_parent_session_id(&self) -> Option<&str> {
+        self.completion_parent_session_id.as_deref()
+    }
+
+    pub(crate) fn set_completion_parent_session_id(&mut self, session_id: String) {
+        self.completion_parent_session_id = Some(session_id);
+    }
+
     fn from_context(ctx: &SubagentSpawnContext) -> Self {
         Self {
             parent_cmd_tx: ctx.parent_cmd_tx.clone(),
+            completion_cmd_tx: ctx.completion_cmd_tx.clone(),
+            completion_parent_session_id: Some(ctx.security_parent_session_id.clone()),
+            completion_is_nested: ctx.security_parent_session_id != ctx.parent_session_id,
             task_output_tool_name: ctx.task_output_tool_name.clone(),
             goal_loop_active: Arc::clone(&ctx.goal_loop_active),
             diagnostics_tokens: 0,
+            spawn_admitted: false,
             spawned_notification_emitted: false,
             persisted_output_ref: None,
             terminal_committed: true,
             execution_outcome_confirmed: false,
+            planning_result_required: false,
+            expected_parent_step_id: None,
+            planning_result_admitted: false,
             completion_receipt_admitted: false,
             receipt_required: false,
             receipt_in_flight: false,
@@ -535,11 +567,36 @@ impl ShellCompletionData {
             finalization_error: None,
             finalization_deadline: None,
             parent_epoch: Some(ctx.parent_control_epoch.clone()),
+            completion_parent_epoch: None,
             storage_admission: Some(ctx.storage_admission.clone()),
         }
     }
     pub(crate) fn persisted_output_ref(&self) -> Option<&str> {
         self.persisted_output_ref.as_deref()
+    }
+    pub(crate) fn suspension_retired(&mut self) -> Result<bool, String> {
+        let Some(thread) = self.child_thread.as_ref() else {
+            return Err("suspended child thread handle is unavailable".into());
+        };
+        if !thread.is_finished() {
+            return Ok(false);
+        }
+        thread
+            .clone()
+            .join()
+            .map_err(|_| "suspended child session thread panicked".to_owned())?;
+        // The tree owner polls all children until every writer has retired.
+        // Keep the shared Joined handle as the idempotent acknowledgement;
+        // another child may still be draining on the next poll.
+        Ok(true)
+    }
+    pub(crate) fn has_physical_retirement_owner(&self) -> bool {
+        self.child_thread.is_some()
+    }
+    pub(crate) fn retain_execution_owner(&mut self, control: Option<&ShellChildRuntime>) {
+        if self.child_thread.is_none() {
+            self.child_thread = control.map(|runtime| runtime._child_thread.clone());
+        }
     }
     fn set_persisted_output_ref(&mut self, output_ref: Option<String>) {
         self.persisted_output_ref = output_ref;
@@ -550,7 +607,9 @@ impl ShellCompletionData {
     }
 
     pub(crate) fn terminal_committed(&self) -> bool {
-        self.terminal_committed && (!self.receipt_required || self.completion_receipt_admitted)
+        self.terminal_committed
+            && (!self.planning_result_required || self.planning_result_admitted)
+            && (!self.receipt_required || self.completion_receipt_admitted)
     }
 
     pub(crate) fn finalization_error(&self) -> Option<String> {
@@ -770,15 +829,19 @@ pub(super) async fn admit_completion_receipt_before_result(
     result: &SubagentResult,
     completion_data: &mut ShellCompletionData,
 ) {
+    completion_data.planning_result_required = request.surface_completion;
     completion_data.receipt_required = request.surface_completion && !result.cancelled;
     if !request.surface_completion
-        || result.cancelled
         || !completion_data.terminal_committed
         || completion_data.receipt_in_flight
     {
         return;
     }
-    let Some(cmd_tx) = completion_data.parent_cmd_tx.as_ref() else {
+    let Some(cmd_tx) = completion_data.completion_cmd_tx.as_ref() else {
+        completion_data.finalization_error = Some(FinalizationFailure::observation(
+            FinalizationStage::Receipt,
+            "direct delegator route is unavailable; completion remains pending",
+        ));
         return;
     };
     let deadline = completion_data
@@ -791,6 +854,32 @@ pub(super) async fn admit_completion_receipt_before_result(
         ));
         return;
     }
+    let (planning_tx, planning_rx) = oneshot::channel();
+    if cmd_tx
+        .send(SessionCommand::PlanningTaskResult {
+            task_id: request.id.clone(),
+            expected_parent_step_id: completion_data.expected_parent_step_id.clone(),
+            result_ref: completion_data.child_result_ref.clone(),
+            respond_to: planning_tx,
+        })
+        .is_err()
+        || !matches!(
+            tokio::time::timeout_at(deadline, planning_rx).await,
+            Ok(Ok(Ok(())))
+        )
+    {
+        completion_data.finalization_error = Some(FinalizationFailure::observation(
+            FinalizationStage::Receipt,
+            "local deliverable publication unconfirmed",
+        ));
+        return;
+    }
+    completion_data.planning_result_admitted = true;
+    // Cancellation is still a terminal delivery fact for a linked local
+    // plan, although it must not create the ordinary completion notification.
+    if result.cancelled {
+        return;
+    }
     completion_data.receipt_in_flight = true;
     let summary = tools::implementations::grow_build::task::completion_summary(request, result);
     let body = tools::reminders::task_completion::format_subagent_completion(
@@ -800,7 +889,11 @@ pub(super) async fn admit_completion_receipt_before_result(
     completion_data.completion_receipt_admitted = admit_subagent_completion_receipt_before(
         cmd_tx,
         &request.id,
-        &request.owner,
+        if completion_data.completion_is_nested {
+            &SubagentOwner::Task
+        } else {
+            &request.owner
+        },
         body,
         deadline,
     )
@@ -1978,13 +2071,14 @@ fn cancelled_result(request: &SubagentRequest, error: &str) -> SubagentResult {
     }
 }
 fn child_run_output(
-    result: SubagentResult,
+    mut result: SubagentResult,
     completion_data: ShellCompletionData,
-) -> ChildRunOutput<ShellCompletionData> {
-    ChildRunOutput {
+) -> ChildRunOutcome<ShellCompletionData> {
+    result.not_dispatched = !completion_data.spawn_admitted;
+    ChildRunOutcome::Finished(ChildRunOutput {
         result,
         completion_data,
-    }
+    })
 }
 fn fail_subagent(
     error: &str,
@@ -2025,14 +2119,25 @@ fn subagent_result_fact(
         tokens_used: result.total_tokens_used,
         error: result.error.clone(),
         output_ref,
+        planning_summary: result.planning_summary.clone(),
     }
 }
 
 async fn record_child_result(
     child_chat_state: &chat_state::ChatStateHandle,
-    result: &SubagentResult,
+    result: &mut SubagentResult,
     output_ref: Option<String>,
 ) -> Result<chat_state::TimelineRangeRef, String> {
+    let planning = child_chat_state.planning_state().await?;
+    result.planning_summary = planning
+        .as_ref()
+        .map(|snapshot| {
+            tool_types::planning::SubagentPlanningSummary::from_plan(
+                snapshot.seq.get(),
+                &snapshot.plan,
+            )
+        })
+        .transpose()?;
     let event = child_chat_state
         .record_timeline_event_durably(chat_state::TimelineEventKind::SubagentResult(
             subagent_result_fact(result, output_ref),
@@ -2048,10 +2153,26 @@ async fn record_child_result(
 
 async fn record_child_result_before(
     child_chat_state: &chat_state::ChatStateHandle,
-    result: &SubagentResult,
+    result: &mut SubagentResult,
     output_ref: Option<String>,
     deadline: tokio::time::Instant,
 ) -> Result<chat_state::TimelineRangeRef, chat_state::TimelineWriteError> {
+    let planning = child_chat_state.planning_state().await.map_err(|error| {
+        let _ = error;
+        chat_state::TimelineWriteError::Invalid(chat_state::TimelineError::InvalidSubagent)
+    })?;
+    result.planning_summary = planning
+        .as_ref()
+        .map(|snapshot| {
+            tool_types::planning::SubagentPlanningSummary::from_plan(
+                snapshot.seq.get(),
+                &snapshot.plan,
+            )
+        })
+        .transpose()
+        .map_err(|_| {
+            chat_state::TimelineWriteError::Invalid(chat_state::TimelineError::InvalidSubagent)
+        })?;
     let kind =
         chat_state::TimelineEventKind::SubagentResult(subagent_result_fact(result, output_ref));
     let event = child_chat_state
@@ -2067,10 +2188,19 @@ async fn record_child_result_before(
 async fn record_child_result_with_persistence(
     persistence: &session::persistence::PersistenceHandle,
     timeline_events: Vec<chat_state::TimelineEvent>,
-    result: &SubagentResult,
+    result: &mut SubagentResult,
 ) -> Result<chat_state::TimelineRangeRef, String> {
     let mut timeline = chat_state::Timeline::from_events(timeline_events)
         .map_err(|error| format!("invalid child Timeline: {error}"))?;
+    result.planning_summary = timeline
+        .planning_snapshot()
+        .map(|snapshot| {
+            tool_types::planning::SubagentPlanningSummary::from_plan(
+                snapshot.seq.get(),
+                &snapshot.plan,
+            )
+        })
+        .transpose()?;
     let event = timeline
         .record(chat_state::TimelineEventKind::SubagentResult(
             subagent_result_fact(result, None),
@@ -2530,17 +2660,33 @@ fn validate_child_session_identity(
     spawn: &chat_state::SubagentSpawnEvent,
 ) -> Result<(), String> {
     let summary = opened.summary();
-    if summary.info.id.0.as_ref() != spawn.child_session_id
-        || summary.parent_session_id.as_deref() != Some(parent_session_id)
-        || !summary
-            .session_kind
-            .as_deref()
-            .is_some_and(|kind| kind.starts_with("subagent"))
-    {
-        return Err(format!(
+    validate_child_session_identity_fields(
+        summary.info.id.0.as_ref(),
+        summary.parent_session_id.as_deref(),
+        summary.session_kind.as_deref(),
+        &spawn.child_session_id,
+        parent_session_id,
+    )
+    .map_err(|_| {
+        format!(
             "child session '{}' identity does not match parent spawn",
             spawn.child_session_id
-        ));
+        )
+    })
+}
+
+fn validate_child_session_identity_fields(
+    child_session_id: &str,
+    summary_parent_session_id: Option<&str>,
+    session_kind: Option<&str>,
+    expected_child_session_id: &str,
+    expected_lifecycle_root_session_id: &str,
+) -> Result<(), String> {
+    if child_session_id != expected_child_session_id
+        || summary_parent_session_id != Some(expected_lifecycle_root_session_id)
+        || !session_kind.is_some_and(|kind| kind.starts_with("subagent"))
+    {
+        return Err("child session summary identity mismatch".into());
     }
     Ok(())
 }
@@ -2586,6 +2732,196 @@ pub(crate) enum DurableChildOperation {
     Completed(SubagentResult),
 }
 
+/// Verify that a planning receipt names the canonical result of the exact
+/// child linked by the direct parent's durable spawn and terminal facts.
+pub(crate) async fn validate_planning_result_reference(
+    expected_direct_parent_session_id: &str,
+    subagent_id: &str,
+    child_session_id: &str,
+    result_ref: &chat_state::TimelineRangeRef,
+    parent: &chat_state::ChatStateHandle,
+) -> Result<(), String> {
+    if result_ref.timeline_id != child_session_id {
+        return Err("planning result reference belongs to a different child session".into());
+    }
+    let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
+    let child = storage
+        .open_session_by_id(child_session_id)
+        .map_err(|error| format!("cannot open child session: {error}"))?
+        .ok_or_else(|| "canonical child session is missing".to_string())?;
+    let child_timeline = child
+        .validated_timeline(child_session_id)
+        .map_err(|error| format!("cannot validate child Timeline: {error}"))?
+        .timeline;
+    let seed = child_timeline
+        .events()
+        .iter()
+        .find_map(|event| match &event.kind {
+            chat_state::TimelineEventKind::SubagentSeed(seed)
+                if seed.subagent_id == subagent_id =>
+            {
+                Some(seed)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| "child has no matching lifecycle-root seed".to_string())?;
+    if seed.security_parent_session_id != expected_direct_parent_session_id {
+        return Err("child seed does not match the expected direct parent".into());
+    }
+    let lifecycle_root_session_id = seed.parent_timeline_id.clone();
+    let child_summary = child.summary();
+    validate_child_session_identity_fields(
+        child_summary.info.id.0.as_ref(),
+        child_summary.parent_session_id.as_deref(),
+        child_summary.session_kind.as_deref(),
+        child_session_id,
+        lifecycle_root_session_id.as_str(),
+    )
+    .map_err(|_| "child session identity does not match its lifecycle root".to_string())?;
+    let events = if lifecycle_root_session_id == expected_direct_parent_session_id {
+        parent
+            .timeline_events()
+            .await
+            .ok_or_else(|| "cannot query lifecycle-root Timeline".to_string())?
+    } else {
+        tokio::task::spawn_blocking(move || {
+            let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
+            let root = storage
+                .open_session_by_id(&lifecycle_root_session_id)
+                .map_err(|error| format!("cannot open lifecycle root: {error}"))?
+                .ok_or_else(|| "lifecycle-root session is missing".to_string())?;
+            Ok::<_, String>(
+                root.validated_timeline(&lifecycle_root_session_id)
+                    .map_err(|error| format!("cannot validate lifecycle-root Timeline: {error}"))?
+                    .timeline
+                    .events()
+                    .to_vec(),
+            )
+        })
+        .await
+        .map_err(|error| format!("lifecycle-root read failed: {error}"))??
+    };
+    validate_planning_result_reference_in_events(
+        expected_direct_parent_session_id,
+        subagent_id,
+        child_session_id,
+        result_ref,
+        &events,
+    )
+    .await
+}
+
+pub(crate) async fn validate_planning_result_reference_in_events(
+    expected_direct_parent_session_id: &str,
+    subagent_id: &str,
+    child_session_id: &str,
+    result_ref: &chat_state::TimelineRangeRef,
+    parent_events: &[chat_state::TimelineEvent],
+) -> Result<(), String> {
+    if result_ref.timeline_id != child_session_id {
+        return Err("planning result reference belongs to a different child session".into());
+    }
+    let timeline = chat_state::Timeline::from_events(parent_events.to_vec())
+        .map_err(|error| format!("invalid lifecycle-root Timeline: {error}"))?;
+    let spawn =
+        timeline
+            .events()
+            .iter()
+            .find_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
+                    spawn,
+                )) if spawn.subagent_id == subagent_id => Some(spawn),
+                _ => None,
+            })
+            .ok_or_else(|| "planning result has no matching durable child spawn".to_string())?;
+    if spawn.child_session_id != child_session_id
+        || spawn.security_parent_session_id != expected_direct_parent_session_id
+    {
+        return Err("planning task link does not match the durable child spawn".into());
+    }
+    let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
+    let opened = storage
+        .open_session_by_id(child_session_id)
+        .map_err(|error| format!("cannot open child session: {error}"))?
+        .ok_or_else(|| "canonical child session is missing".to_string())?;
+    let child = opened
+        .validated_timeline(child_session_id)
+        .map_err(|error| format!("cannot validate child Timeline: {error}"))?
+        .timeline;
+    let seed = child
+        .events()
+        .iter()
+        .find_map(|event| match &event.kind {
+            chat_state::TimelineEventKind::SubagentSeed(seed)
+                if seed.subagent_id == subagent_id =>
+            {
+                Some(seed)
+            }
+            _ => None,
+        })
+        .ok_or_else(|| "child has no matching lifecycle-root seed".to_string())?;
+    if seed.security_parent_session_id != expected_direct_parent_session_id {
+        return Err("child seed does not match the expected direct parent".into());
+    }
+    let lifecycle_root_session_id = seed.parent_timeline_id.as_str();
+    validate_child_session_identity(&opened, lifecycle_root_session_id, spawn)?;
+    validate_planning_result_facts(
+        expected_direct_parent_session_id,
+        lifecycle_root_session_id,
+        subagent_id,
+        child_session_id,
+        result_ref,
+        &timeline,
+        &child,
+    )
+}
+
+fn validate_planning_result_facts(
+    expected_direct_parent_session_id: &str,
+    lifecycle_root_session_id: &str,
+    subagent_id: &str,
+    child_session_id: &str,
+    result_ref: &chat_state::TimelineRangeRef,
+    parent_timeline: &chat_state::Timeline,
+    child_timeline: &chat_state::Timeline,
+) -> Result<(), String> {
+    let (spawn_seq, spawn) =
+        parent_timeline
+            .events()
+            .iter()
+            .find_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
+                    spawn,
+                )) if spawn.subagent_id == subagent_id => Some((event.seq, spawn)),
+                _ => None,
+            })
+            .ok_or_else(|| "planning result has no matching durable child spawn".to_string())?;
+    if spawn.child_session_id != child_session_id
+        || spawn.security_parent_session_id != expected_direct_parent_session_id
+    {
+        return Err("planning task link does not match the durable child spawn".into());
+    }
+    let terminal =
+        parent_timeline
+            .events()
+            .iter()
+            .find_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(
+                    terminal,
+                )) if terminal.subagent_id == subagent_id => Some(terminal),
+                _ => None,
+            })
+            .ok_or_else(|| "planning result has no durable child terminal".to_string())?;
+    if terminal.result_ref.as_ref() != Some(result_ref) {
+        return Err("planning result reference does not match the child terminal".into());
+    }
+
+    child_timeline
+        .validate_subagent_result_link(lifecycle_root_session_id, spawn_seq, spawn, terminal)
+        .map_err(|error| format!("invalid canonical child result: {error}"))?;
+    Ok(())
+}
+
 pub(crate) async fn durable_child_operation(
     parent_timeline_id: &str,
     subagent_id: &str,
@@ -2595,6 +2931,14 @@ pub(crate) async fn durable_child_operation(
         .timeline_events()
         .await
         .ok_or_else(|| "cannot query parent Timeline".to_string())?;
+    durable_child_operation_in_events(parent_timeline_id, subagent_id, events)
+}
+
+pub(crate) fn durable_child_operation_in_events(
+    parent_timeline_id: &str,
+    subagent_id: &str,
+    events: Vec<chat_state::TimelineEvent>,
+) -> Result<DurableChildOperation, String> {
     let timeline = chat_state::Timeline::from_events(events)
         .map_err(|error| format!("invalid parent Timeline: {error}"))?;
     let Some((spawn_seq, spawn)) =
@@ -2624,46 +2968,49 @@ pub(crate) async fn durable_child_operation(
         return Ok(DurableChildOperation::Open);
     };
 
-    let (output, outcome, error, output_unavailable) = if terminal.result_ref.is_some() {
-        let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
-        let child = storage
-            .open_session_by_id(&spawn.child_session_id)
-            .map_err(|error| format!("cannot resolve child session: {error}"))?
-            .ok_or_else(|| "canonical child session is missing".to_string())?;
-        validate_child_session_identity(&child, parent_timeline_id, spawn)?;
-        let child_timeline = child
-            .validated_timeline(&spawn.child_session_id)
-            .map_err(|error| format!("invalid child session entity: {error}"))?
-            .timeline;
-        let result = child_timeline
-            .validate_subagent_result_link(parent_timeline_id, spawn_seq, spawn, terminal)
-            .map_err(|error| format!("invalid child result link: {error}"))?;
-        let output = result
-            .output_ref
-            .as_deref()
-            .map(|output_ref| {
-                load_subagent_output_ref_from_directory(child.directory(), output_ref)
-            })
-            .transpose()
-            .ok()
-            .flatten();
-        (
-            output.clone().unwrap_or_default(),
-            result.outcome,
-            result.error.clone(),
-            result.output_ref.is_some() && output.is_none(),
-        )
-    } else {
-        if terminal.outcome == chat_state::SubagentOutcome::Completed {
-            return Err("completed child terminal has no canonical result reference".into());
-        }
-        (
-            String::new(),
-            terminal.outcome,
-            terminal.error.clone(),
-            false,
-        )
-    };
+    let (output, outcome, error, output_unavailable, planning_summary) =
+        if terminal.result_ref.is_some() {
+            let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
+            let child = storage
+                .open_session_by_id(&spawn.child_session_id)
+                .map_err(|error| format!("cannot resolve child session: {error}"))?
+                .ok_or_else(|| "canonical child session is missing".to_string())?;
+            validate_child_session_identity(&child, parent_timeline_id, spawn)?;
+            let child_timeline = child
+                .validated_timeline(&spawn.child_session_id)
+                .map_err(|error| format!("invalid child session entity: {error}"))?
+                .timeline;
+            let result = child_timeline
+                .validate_subagent_result_link(parent_timeline_id, spawn_seq, spawn, terminal)
+                .map_err(|error| format!("invalid child result link: {error}"))?;
+            let output = result
+                .output_ref
+                .as_deref()
+                .map(|output_ref| {
+                    load_subagent_output_ref_from_directory(child.directory(), output_ref)
+                })
+                .transpose()
+                .ok()
+                .flatten();
+            (
+                output.clone().unwrap_or_default(),
+                result.outcome,
+                result.error.clone(),
+                result.output_ref.is_some() && output.is_none(),
+                result.planning_summary.clone(),
+            )
+        } else {
+            if terminal.outcome == chat_state::SubagentOutcome::Completed {
+                return Err("completed child terminal has no canonical result reference".into());
+            }
+            (
+                String::new(),
+                terminal.outcome,
+                terminal.error.clone(),
+                false,
+                None,
+            )
+        };
     Ok(DurableChildOperation::Completed(SubagentResult {
         output_unavailable,
         success: outcome == chat_state::SubagentOutcome::Completed,
@@ -2677,6 +3024,7 @@ pub(crate) async fn durable_child_operation(
         duration_ms: terminal.duration_ms,
         tokens_used: terminal.tokens_used,
         total_tokens_used: terminal.tokens_used,
+        planning_summary,
         ..Default::default()
     }))
 }
@@ -2795,7 +3143,10 @@ fn result_from_inspection(
                 *tokens_used,
                 None,
             ),
-            Some(SubagentSnapshotStatus::FinalizationPending { .. }) => return None,
+            Some(
+                SubagentSnapshotStatus::FinalizationPending { .. }
+                | SubagentSnapshotStatus::Suspended { .. },
+            ) => return None,
             Some(SubagentSnapshotStatus::Failed { error }) => (
                 chat_state::SubagentOutcome::Failed,
                 Some(error.clone()),
@@ -2838,6 +3189,7 @@ fn result_from_inspection(
             tokens_used,
             error,
             output_ref: None,
+            planning_summary: None,
         },
         output,
     })
@@ -3027,6 +3379,16 @@ async fn ensure_recovered_child_result_with_opened(
             .await
             .map_err(|error| ChildResultRecoveryError::Invalid(error.to_string()))?;
     }
+    fallback_event.planning_summary = timeline
+        .planning_snapshot()
+        .map(|snapshot| {
+            tool_types::planning::SubagentPlanningSummary::from_plan(
+                snapshot.seq.get(),
+                &snapshot.plan,
+            )
+        })
+        .transpose()
+        .map_err(ChildResultRecoveryError::Invalid)?;
     let usage = chat_state::actor::state::project_timeline_usage(&timeline)
         .map_err(|error| ChildResultRecoveryError::Invalid(error.to_string()))?;
     // Verified runtime metadata can retain a larger known lower bound than
@@ -3149,7 +3511,7 @@ async fn append_recovery_event(
     }
 }
 
-fn subagent_notification_owner(
+pub(crate) fn subagent_notification_owner(
     spawn: &chat_state::SubagentSpawnEvent,
 ) -> chat_state::NotificationOwner {
     match (spawn.goal_id.as_ref(), spawn.goal_definition_revision) {
@@ -3164,7 +3526,7 @@ fn subagent_notification_owner(
     }
 }
 
-fn completion_receipt_body_from_durable_facts(
+pub(crate) fn completion_receipt_body_from_durable_facts(
     parent_timeline_id: &str,
     spawn_seq: chat_state::EventSeq,
     spawn: &chat_state::SubagentSpawnEvent,
@@ -3174,6 +3536,7 @@ fn completion_receipt_body_from_durable_facts(
     let SessionUpdate::SubagentFinished { output, .. } = update else {
         unreachable!("durable subagent facts must produce a finished update");
     };
+    let planning_summary = durable_child_planning_summary(spawn, terminal)?;
     let summary = tools::implementations::grow_build::task::types::SubagentCompletionSummary {
         subagent_id: terminal.subagent_id.clone(),
         subagent_type: spawn.subagent_type.clone(),
@@ -3183,8 +3546,42 @@ fn completion_receipt_body_from_durable_facts(
         tool_calls: terminal.tool_calls,
         turns: terminal.turns,
         output: std::sync::Arc::from(output.unwrap_or_default()),
+        planning_summary,
     };
     Ok(tools::reminders::task_completion::format_subagent_completion(&summary, None))
+}
+
+pub(crate) fn durable_child_planning_summary(
+    spawn: &chat_state::SubagentSpawnEvent,
+    terminal: &chat_state::SubagentTerminalEvent,
+) -> Result<Option<tool_types::planning::SubagentPlanningSummary>, String> {
+    let Some(result_ref) = &terminal.result_ref else {
+        return Ok(None);
+    };
+    if result_ref.timeline_id != spawn.child_session_id {
+        return Err("canonical planning summary belongs to a different child".into());
+    }
+    let storage = crate::session::storage::jsonl::JsonlStorageAdapter::new();
+    let opened = storage
+        .open_session_by_id(&spawn.child_session_id)
+        .map_err(|error| format!("cannot resolve child session: {error}"))?
+        .ok_or_else(|| "cannot resolve child session: session is missing".to_string())?;
+    let timeline = opened
+        .validated_timeline(&spawn.child_session_id)
+        .map_err(|error| format!("cannot validate child session entity: {error}"))?
+        .timeline;
+    let index = usize::try_from(result_ref.first_seq)
+        .map_err(|_| "canonical child result sequence is invalid".to_string())?;
+    let Some(event) = timeline.events().get(index) else {
+        return Err("canonical child result is missing".into());
+    };
+    if event.seq.get() != result_ref.first_seq {
+        return Err("canonical child result sequence does not match its reference".into());
+    }
+    let chat_state::TimelineEventKind::SubagentResult(result) = &event.kind else {
+        return Err("canonical child result reference names another event".into());
+    };
+    Ok(result.planning_summary.clone())
 }
 
 /// Repair the crash window between the durable parent terminal and the
@@ -3194,7 +3591,7 @@ fn completion_receipt_body_from_durable_facts(
 async fn repair_subagent_completion_receipt(
     parent_session_id: &str,
     parent_chat_state: &chat_state::ChatStateHandle,
-    parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
+    completion_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
     spawn_seq: chat_state::EventSeq,
     spawn: &chat_state::SubagentSpawnEvent,
     terminal: &chat_state::SubagentTerminalEvent,
@@ -3202,10 +3599,14 @@ async fn repair_subagent_completion_receipt(
     if !spawn.surface_completion || terminal.outcome == chat_state::SubagentOutcome::Cancelled {
         return;
     }
-    let Some(cmd_tx) = parent_cmd_tx else {
+    let Some(cmd_tx) = completion_cmd_tx else {
         return;
     };
-    let owner = subagent_notification_owner(spawn);
+    let owner = if spawn.security_parent_session_id != parent_session_id {
+        chat_state::NotificationOwner::Session
+    } else {
+        subagent_notification_owner(spawn)
+    };
     let source = chat_state::NotificationSource::SubagentCompleted {
         subagent_id: terminal.subagent_id.clone(),
         owner: owner.clone(),
@@ -3243,11 +3644,78 @@ async fn repair_subagent_completion_receipt(
     }
 }
 
+async fn repair_subagent_planning_result(
+    completion_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
+    spawn: &chat_state::SubagentSpawnEvent,
+    terminal: &chat_state::SubagentTerminalEvent,
+) -> bool {
+    if !spawn.surface_completion {
+        return true;
+    }
+    let Some(cmd_tx) = completion_cmd_tx else {
+        return false;
+    };
+    let (respond_to, response) = oneshot::channel();
+    if cmd_tx
+        .send(SessionCommand::PlanningTaskResult {
+            task_id: spawn.subagent_id.clone(),
+            expected_parent_step_id: spawn.parent_step_id.clone(),
+            result_ref: terminal.result_ref.clone(),
+            respond_to,
+        })
+        .is_err()
+    {
+        return false;
+    }
+    matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(30), response).await,
+        Ok(Ok(Ok(())))
+    )
+}
+
+fn completion_command_route<'a>(
+    lifecycle_parent_session_id: &str,
+    spawn: &chat_state::SubagentSpawnEvent,
+    lifecycle_parent_cmd_tx: Option<&'a mpsc::UnboundedSender<SessionCommand>>,
+    direct_parent_cmd_txs: &'a std::collections::HashMap<
+        String,
+        mpsc::UnboundedSender<SessionCommand>,
+    >,
+) -> Option<&'a mpsc::UnboundedSender<SessionCommand>> {
+    direct_parent_cmd_txs
+        .get(&spawn.security_parent_session_id)
+        .or_else(|| {
+            (spawn.security_parent_session_id == lifecycle_parent_session_id)
+                .then_some(lifecycle_parent_cmd_tx)
+                .flatten()
+        })
+}
+
 /// Reconcile parent spawn facts that have no terminal. The backend is merely
 /// an observation source: recovery first commits a child result (when the child
 /// entity exists), then closes the parent spawn, and only then emits UI state.
 /// `cold_recovery` is true only for a newly claimed writer. A resident viewer
 /// reconnect must not close that writer's still-active turn.
+fn released_child_matches_restore(
+    root: &chat_state::session_runtime::RuntimeLifecycle,
+    child_session_id: &str,
+    child: &chat_state::session_runtime::RuntimeLifecycle,
+) -> bool {
+    use chat_state::session_runtime::RuntimePhase;
+    root.phase == RuntimePhase::Restoring
+        && root.resume_committed
+        && child.phase == RuntimePhase::Running
+        && child.resume_committed
+        && root.operation_id.is_some()
+        && root.instance_id.is_some()
+        && child.operation_id == root.operation_id
+        && child.instance_id == root.instance_id
+        && child.root_session_id == root.root_session_id
+        && root.tree.iter().any(|node| {
+            node.session_id == child_session_id && child.checkpoint_seq == Some(node.checkpoint_seq)
+        })
+}
+
 pub(crate) async fn reconcile_orphaned_subagents_with_backend(
     projections: &crate::session::storage::SubagentProjectionState,
     emit_replay_projections: bool,
@@ -3260,6 +3728,10 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
     >,
     gateway: &GatewaySender,
     parent_cmd_tx: Option<&mpsc::UnboundedSender<SessionCommand>>,
+    direct_parent_cmd_txs: &std::collections::HashMap<
+        String,
+        mpsc::UnboundedSender<SessionCommand>,
+    >,
 ) {
     let Some(events) = parent_chat_state.timeline_events().await else {
         tracing::error!(%parent_session_id, "cannot query parent Timeline during subagent recovery");
@@ -3331,10 +3803,34 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
             tracing::error!(%subagent_id, "parent terminal has no spawn fact");
             continue;
         };
+        if let Err(error) =
+            finish_from_durable_facts(parent_session_id, *spawn_seq, spawn, terminal)
+        {
+            tracing::error!(
+                %subagent_id,
+                %error,
+                "refusing to publish an unverified local planning result"
+            );
+            continue;
+        }
+        let direct_cmd_tx = completion_command_route(
+            parent_session_id,
+            spawn,
+            parent_cmd_tx,
+            direct_parent_cmd_txs,
+        );
+        if !repair_subagent_planning_result(direct_cmd_tx, spawn, terminal).await {
+            tracing::warn!(
+                %subagent_id,
+                direct_parent_session_id = %spawn.security_parent_session_id,
+                "direct parent is unavailable; local plan result remains pending"
+            );
+            continue;
+        }
         repair_subagent_completion_receipt(
             parent_session_id,
             parent_chat_state,
-            parent_cmd_tx,
+            direct_cmd_tx,
             *spawn_seq,
             spawn,
             terminal,
@@ -3378,6 +3874,35 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
         if inspection.is_none() && !cold_recovery {
             tracing::debug!(%subagent_id, "child absence is not actionable outside cold recovery");
             continue;
+        }
+        if cold_recovery
+            && timeline.runtime_lifecycle().phase
+                == chat_state::session_runtime::RuntimePhase::Restoring
+        {
+            let child_id = spawn.child_session_id.clone();
+            let child_runtime = tokio::task::spawn_blocking(move || {
+                crate::session::storage::jsonl::JsonlStorageAdapter::new()
+                    .open_session_by_id_shared_read(&child_id)
+                    .ok()
+                    .flatten()
+                    .and_then(|opened| opened.validated_timeline(&child_id).ok())
+                    .map(|validated| validated.timeline.runtime_lifecycle().clone())
+            })
+            .await
+            .ok()
+            .flatten();
+            if !child_runtime.as_ref().is_some_and(|child| {
+                released_child_matches_restore(
+                    timeline.runtime_lifecycle(),
+                    &spawn.child_session_id,
+                    child,
+                )
+            }) {
+                // An unused checkpoint still belongs to tree adoption. Cold
+                // interruption may consume only a right already released by
+                // this exact restore instance, never a suspended sibling.
+                continue;
+            }
         }
         let duration_ms = chrono::Utc::now()
             .timestamp_millis()
@@ -3446,15 +3971,29 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
             .await
         {
             Ok(_) => {
-                repair_subagent_completion_receipt(
+                let direct_cmd_tx = completion_command_route(
                     parent_session_id,
-                    parent_chat_state,
-                    parent_cmd_tx,
-                    spawn_seq,
                     &spawn,
-                    &terminal,
-                )
-                .await;
+                    parent_cmd_tx,
+                    direct_parent_cmd_txs,
+                );
+                if !repair_subagent_planning_result(direct_cmd_tx, &spawn, &terminal).await {
+                    tracing::warn!(
+                        %subagent_id,
+                        direct_parent_session_id = %spawn.security_parent_session_id,
+                        "direct parent is unavailable; local plan result remains pending"
+                    );
+                } else {
+                    repair_subagent_completion_receipt(
+                        parent_session_id,
+                        parent_chat_state,
+                        direct_cmd_tx,
+                        spawn_seq,
+                        &spawn,
+                        &terminal,
+                    )
+                    .await;
+                }
                 if emit_replay_projections {
                     emit_subagent_notification(
                         gateway,

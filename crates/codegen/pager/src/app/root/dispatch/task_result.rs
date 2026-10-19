@@ -68,6 +68,157 @@ fn queue_control_reason(reason: &str) -> &'static str {
         _ => "queue operation failed",
     }
 }
+
+fn is_runtime_suspended_prompt_response(result: &Result<acp::PromptResponse, String>) -> bool {
+    let Ok(response) = result else {
+        return false;
+    };
+    if response.stop_reason != acp::StopReason::Cancelled {
+        return false;
+    }
+    response
+        .meta
+        .as_ref()
+        .and_then(|meta| meta.get("grow/runtimeSuspended"))
+        .and_then(serde_json::Value::as_object)
+        .is_some_and(|suspension| {
+            suspension
+                .get("operationId")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|operation_id| !operation_id.is_empty())
+                && suspension
+                    .get("checkpointSeq")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some()
+        })
+}
+
+#[cfg(test)]
+mod plan_decision_receipt_tests {
+    use super::plan_decision_receipt_matches;
+    use crate::views::plan_approval_view::{
+        PendingPlanApprovalDecision, PlanApprovalExtResponse, PlanApprovalOutcome,
+    };
+
+    fn pending() -> PendingPlanApprovalDecision {
+        PendingPlanApprovalDecision {
+            session_id: "session-1".into(),
+            binding_epoch: 3,
+            response: PlanApprovalExtResponse {
+                outcome: PlanApprovalOutcome::Cancelled,
+                feedback: Some("please revise".into()),
+                submission_id: 8,
+                decision_id: "decision-8".into(),
+            },
+            artifact_revision: 4,
+            artifact_hash: "a".repeat(64),
+            comments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn only_exact_receipt_confirms_plan_decision() {
+        let pending = pending();
+        let receipt = serde_json::json!({
+            "status": "accepted",
+            "receipt": {
+                "decision_id": "decision-8",
+                "submission_id": 8,
+                "action": "revise",
+                "feedback": "please revise"
+            }
+        });
+        assert!(plan_decision_receipt_matches(&pending, &receipt));
+
+        let wrong_id = serde_json::json!({
+            "receipt": {
+                "decision_id": "decision-other",
+                "submission_id": 8,
+                "action": "revise",
+                "feedback": "please revise"
+            }
+        });
+        assert!(!plan_decision_receipt_matches(&pending, &wrong_id));
+
+        let wrong_payload = serde_json::json!({
+            "receipt": {
+                "decision_id": "decision-8",
+                "submission_id": 8,
+                "action": "approve",
+                "feedback": "please revise"
+            }
+        });
+        assert!(!plan_decision_receipt_matches(&pending, &wrong_payload));
+    }
+}
+
+fn plan_decision_receipt_matches(
+    pending: &crate::views::plan_approval_view::PendingPlanApprovalDecision,
+    value: &serde_json::Value,
+) -> bool {
+    let expected = &pending.response;
+    let Some(receipt) = value.get("receipt") else {
+        return false;
+    };
+    let expected_action = match expected.outcome {
+        tools::implementations::grow_build::plan_control::PlanApprovalOutcome::Approved => {
+            "approve"
+        }
+        tools::implementations::grow_build::plan_control::PlanApprovalOutcome::Cancelled => {
+            "revise"
+        }
+        tools::implementations::grow_build::plan_control::PlanApprovalOutcome::Abandoned => {
+            "abandon"
+        }
+        tools::implementations::grow_build::plan_control::PlanApprovalOutcome::Deferred => "defer",
+    };
+    let receipt_feedback = receipt.get("feedback").and_then(serde_json::Value::as_str);
+    receipt
+        .get("decision_id")
+        .and_then(serde_json::Value::as_str)
+        == Some(expected.decision_id.as_str())
+        && receipt
+            .get("submission_id")
+            .and_then(serde_json::Value::as_u64)
+            == Some(expected.submission_id)
+        && receipt.get("action").and_then(serde_json::Value::as_str) == Some(expected_action)
+        && receipt_feedback.map(str::trim) == expected.feedback.as_deref().map(str::trim)
+}
+
+fn close_confirmed_plan_decision(
+    agent: &mut crate::app::agent_view::AgentView,
+    pending: &crate::views::plan_approval_view::PendingPlanApprovalDecision,
+) {
+    let closes_live_view = agent.plan_approval_view.as_ref().is_some_and(|pav| {
+        pav.submission_id == pending.response.submission_id
+            && pav
+                .decision_response
+                .as_ref()
+                .is_some_and(|response| response.decision_id == pending.response.decision_id)
+    });
+    if closes_live_view && let Some(pav) = agent.plan_approval_view.take() {
+        agent.plan_next_comment_id = pav.next_comment_id;
+        agent.prompt.restore(pav.stashed_prompt);
+        agent.line_viewer = None;
+        agent.prompt.textarea.cancel_undo_group();
+        agent.casual_commenting_range = None;
+        agent.casual_editing_comment_id = None;
+    }
+    if agent
+        .plan_comments_artifact
+        .as_ref()
+        .is_some_and(|artifact| {
+            artifact.session_id == pending.session_id
+                && artifact.binding_epoch == pending.binding_epoch
+                && artifact.submission_id == pending.response.submission_id
+                && artifact.artifact_hash == pending.artifact_hash
+                && artifact.artifact_revision == pending.artifact_revision
+        })
+    {
+        agent.plan_comments.clear();
+        agent.plan_comments_artifact = None;
+    }
+}
 pub(super) fn unregister_session_effect(session_id: Option<acp::SessionId>) -> Vec<Effect> {
     session_id
         .map(|sid| Effect::UnregisterActiveSession { session_id: sid })
@@ -299,6 +450,136 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
         return vec![];
     }
     match result {
+        TaskResult::ExitSuspensionResolved { exit_id, result } => {
+            let Some(exit) = app.exit_suspension.as_ref() else {
+                return vec![];
+            };
+            if exit.exit_id != exit_id
+                || !matches!(&exit.phase, crate::app::root::ExitSuspensionPhase::Pending)
+            {
+                return vec![];
+            }
+            let restart_for_update = exit.restart_for_update;
+            match result {
+                Ok(()) => {
+                    app.exit_suspension = None;
+                    app.restart_for_update = restart_for_update;
+                    let mut effects = unregister_all_active_sessions(app);
+                    effects.push(Effect::Quit);
+                    effects
+                }
+                Err(error) => {
+                    if let Some(exit) = app.exit_suspension.as_mut() {
+                        exit.phase = crate::app::root::ExitSuspensionPhase::Unconfirmed {
+                            error: scrub_error_for_toast(&error),
+                        };
+                    }
+                    vec![]
+                }
+            }
+        }
+        TaskResult::PlanApprovalDecisionStatusResolved {
+            agent_id,
+            session_id,
+            binding_epoch,
+            submission_id,
+            decision_id,
+            result,
+        } => {
+            let Some(agent) = app.agents.get_mut(&agent_id) else {
+                return vec![];
+            };
+            if agent.session.session_id.as_ref() != Some(&session_id)
+                || agent.session_binding_epoch != binding_epoch
+            {
+                return vec![];
+            }
+            let Some(pending) = agent.pending_plan_approval_decision.as_ref() else {
+                return vec![];
+            };
+            if pending.response.submission_id != submission_id
+                || pending.response.decision_id != decision_id
+                || pending.binding_epoch != binding_epoch
+                || pending.session_id.as_str() != session_id.0.as_ref()
+            {
+                return vec![];
+            }
+            let pending = pending.clone();
+            match result {
+                Ok(value)
+                    if value.get("status").and_then(serde_json::Value::as_str)
+                        == Some("accepted")
+                        && plan_decision_receipt_matches(&pending, &value) =>
+                {
+                    close_confirmed_plan_decision(agent, &pending);
+                    agent.pending_plan_approval_decision = None;
+                    agent.show_toast("Plan decision confirmed.");
+                }
+                Ok(value)
+                    if value.get("status").and_then(serde_json::Value::as_str)
+                        == Some("unconfirmed") =>
+                {
+                    agent.show_toast("Plan decision is still awaiting confirmation.");
+                }
+                Ok(_) => {
+                    agent.show_toast(
+                        "Plan decision receipt did not match; confirmation is pending.",
+                    );
+                }
+                Err(error) => {
+                    agent.show_toast(&format!("Plan decision confirmation unavailable: {error}"));
+                }
+            }
+            vec![]
+        }
+        TaskResult::RetainedPlanReviewed {
+            agent_id,
+            session_id,
+            binding_epoch,
+            result,
+        } => {
+            let Some(agent) = app.agents.get_mut(&agent_id) else {
+                return vec![];
+            };
+            if agent.session.session_id.as_ref() != Some(&session_id)
+                || agent.session_binding_epoch != binding_epoch
+            {
+                return vec![];
+            }
+            match result {
+                Ok(status) if status == "accepted" => { agent.plan_review_pending = None; agent.show_toast("Plan review opened."); }
+                Ok(_) => agent.show_toast("Plan review acknowledgement is unknown. Retry review to reconcile the same decision."),
+                Err(error) => agent.show_toast(&format!("Plan review was not confirmed: {error}")),
+            }
+            vec![]
+        }
+        TaskResult::PlanArtifactResolved {
+            agent_id,
+            session_id,
+            binding_epoch,
+            request_id,
+            result,
+        } => {
+            let Some(agent) = app.agents.get_mut(&agent_id) else {
+                return vec![];
+            };
+            if agent.session.id != agent_id
+                || agent.session.session_id.as_ref() != Some(&session_id)
+                || agent.session_binding_epoch != binding_epoch
+                || agent.plan_preview_request_id != request_id
+            {
+                return vec![];
+            }
+            match result {
+                Ok(response) => {
+                    if let Err(error) = agent.resolve_plan_preview(response) {
+                        agent.show_toast(error);
+                    }
+                }
+                Err(error) => agent.show_toast(&format!("Plan preview unavailable: {error}")),
+            }
+            vec![]
+        }
         TaskResult::TranscriptFileWritten {
             id,
             agent_id,
@@ -492,7 +773,17 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             result,
             http_status,
             prompt_id,
-        } => handle_prompt_response(app, agent_id, result, http_status, prompt_id),
+        } => {
+            if is_runtime_suspended_prompt_response(&result) {
+                // The RPC has resolved, but a runtime suspension is not a
+                // logical turn terminal. Keep the foreground identity, queue,
+                // permission state, and activity projection for resume.
+                // This also makes a late suspension response harmless after a
+                // newer prompt or session binding has taken ownership.
+                return vec![];
+            }
+            handle_prompt_response(app, agent_id, result, http_status, prompt_id)
+        }
         TaskResult::QueueControlResolved {
             agent_id,
             session_id,
@@ -968,19 +1259,57 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             send,
             result,
         } => {
-            let send_matches = send.prompt_rpc_identity().is_some_and(
+            let send_identity = send.prompt_rpc_identity().map(
                 |(expected_agent, expected_session, expected_prompt, _)| {
-                    expected_agent == agent_id
-                        && expected_session == &session_id
-                        && expected_prompt == prompt_id.as_str()
+                    (
+                        expected_agent,
+                        expected_session.0.to_string(),
+                        expected_prompt.to_owned(),
+                    )
                 },
             );
-            let binding_matches = app.agents.get(&agent_id).is_some_and(|agent| {
-                agent.session_binding_epoch == binding_epoch
-                    && agent.session.session_id.as_ref() == Some(&session_id)
+            let send_matches = send_identity.as_ref().is_some_and(
+                |(expected_agent, expected_session, expected_prompt)| {
+                    *expected_agent == agent_id
+                        && expected_session.as_str() == session_id.0.as_ref()
+                        && expected_prompt.as_str() == prompt_id.as_str()
+                },
+            );
+            let current_binding = app.agents.get(&agent_id).map(|agent| {
+                (
+                    agent.session_binding_epoch,
+                    agent
+                        .session
+                        .session_id
+                        .as_ref()
+                        .map(|session| session.0.to_string()),
+                )
             });
+            let binding_matches =
+                current_binding
+                    .as_ref()
+                    .is_some_and(|(current_epoch, current_session)| {
+                        *current_epoch == binding_epoch
+                            && current_session.as_deref() == Some(session_id.0.as_ref())
+                    });
             if !send_matches || !binding_matches {
-                tracing::warn!(%prompt_id, "input intent checkpoint response identity mismatch");
+                crate::unified_log::warn(
+                    "input_intent.checkpoint.identity_mismatch",
+                    Some(&session_id.0),
+                    Some(serde_json::json!({
+                        "agent_id": agent_id.0,
+                        "expected_session_id": session_id.0,
+                        "expected_prompt_id": prompt_id,
+                        "expected_binding_epoch": binding_epoch,
+                        "send_agent_id": send_identity.as_ref().map(|(id, _, _)| id.0),
+                        "send_session_id": send_identity.as_ref().map(|(_, session, _)| session),
+                        "send_prompt_id": send_identity.as_ref().map(|(_, _, prompt)| prompt),
+                        "current_binding_epoch": current_binding.as_ref().map(|(epoch, _)| epoch),
+                        "current_session_id": current_binding.as_ref().and_then(|(_, session)| session.as_deref()),
+                        "send_matches": send_matches,
+                        "binding_matches": binding_matches,
+                    })),
+                );
                 return vec![];
             }
             match result {

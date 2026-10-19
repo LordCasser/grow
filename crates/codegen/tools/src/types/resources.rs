@@ -751,7 +751,8 @@ pub use tool_types::ModelImageInputKey;
 /// Session-local negative capability cache for model image input.
 ///
 /// Missing entries remain optimistic: Grow tries image input until an API 400
-/// explicitly proves that this canonical provider/model pair only accepts text.
+/// explicitly proves that the resolved model transport only accepts text.
+/// Shell encodes its `ModelImageInputKey` as a JSON string at this boundary.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ModelImageInputState {
     #[serde(default)]

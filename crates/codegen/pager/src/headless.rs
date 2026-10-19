@@ -516,8 +516,12 @@ async fn open_session(
         )
         .await;
         if let Ok(resp) = try_load {
+            let requested_session_id = acp::SessionId::new(sid.to_string());
             return Ok(OpenedSession {
-                session_id: acp::SessionId::new(sid.to_string()),
+                session_id: crate::acp::meta::session_load_identity(
+                    resp.meta.as_ref(),
+                    &requested_session_id,
+                ),
                 models: ModelState::from(
                     shell::agent::models::SessionModelState::from_config_options(
                         resp.config_options,

@@ -5,8 +5,8 @@
 //! Child module of the session actor so this `impl SessionActor` block retains
 //! access to the actor's private fields and the parent module's helpers.
 use super::*;
-mod authorization;
-mod dispatch;
+pub(super) mod authorization;
+pub(super) mod dispatch;
 mod parse;
 mod preparation;
 mod result;
@@ -147,12 +147,6 @@ impl SessionActor {
     ) -> Result<(), acp::Error> {
         let mut approved: Vec<PreparedToolCall> = Vec::new();
         for call in tool_calls.into_iter() {
-            if let Some(gate) = self.tool_context.storage_admission.as_ref()
-                && let Err(reason) = gate.check(self.session_info.id.0.as_ref())
-            {
-                self.events.cancel_active_tool();
-                return Err(acp::Error::internal_error().data(reason));
-            }
             let frozen_input = serde_json::from_str::<serde_json::Value>(
                 crate::session::helpers::tool_input_parsing::normalize_empty_arguments(
                     &call.function.arguments,
@@ -161,18 +155,32 @@ impl SessionActor {
             .unwrap_or_else(
                 |_| serde_json::json!({ "raw_arguments": call.function.arguments.clone() }),
             );
-            if let Err(error) = self
-                .events
-                .tool_started(
-                    call.function.name.clone(),
-                    call.id.clone(),
-                    Some(frozen_input),
-                )
+            let recovered_hook_decision = self
+                .recovered_pre_tool_hook_decision(&call.id, &call.function.name, &frozen_input)
                 .await
+                .map_err(|error| acp::Error::internal_error().data(error))?;
+            if let Some(gate) = self.tool_context.storage_admission.as_ref()
+                && let Err(reason) = gate.check(self.session_info.id.0.as_ref())
             {
-                self.events.cancel_active_tool();
-                return Err(acp::Error::internal_error()
-                    .data(format!("tool call was not durably recorded: {error}")));
+                if recovered_hook_decision.is_none() {
+                    self.events.cancel_active_tool();
+                }
+                return Err(acp::Error::internal_error().data(reason));
+            }
+            if recovered_hook_decision.is_none() {
+                if let Err(error) = self
+                    .events
+                    .tool_started(
+                        call.function.name.clone(),
+                        call.id.clone(),
+                        Some(frozen_input),
+                    )
+                    .await
+                {
+                    self.events.cancel_active_tool();
+                    return Err(acp::Error::internal_error()
+                        .data(format!("tool call was not durably recorded: {error}")));
+                }
             }
             if final_result.is_some() {
                 let message = match &*final_result {
@@ -226,7 +234,14 @@ impl SessionActor {
             let call_id = call.id.clone();
             let call_name = call.function.name.clone();
             let tool_call_id = acp::ToolCallId::new(Arc::from(call_id.clone()));
-            let prepared = match self.prepare_tool_call(call, deferred_followups).await {
+            let prepared = match self
+                .prepare_tool_call_with_hook_decision(
+                    call,
+                    deferred_followups,
+                    recovered_hook_decision,
+                )
+                .await
+            {
                 Ok(prepared) => prepared,
                 Err(error) => {
                     self.handle_tool_not_executed(
@@ -356,10 +371,12 @@ impl SessionActor {
             }
             map
         };
+        let runtime_suspend = self.state.lock().await.runtime_suspend.clone();
         let dispatch_authority = ToolDispatchAuthority {
             bridge: self.agent.borrow().tool_bridge().clone(),
             subagent: self.subagent_capabilities.clone(),
             mcp_state: Arc::clone(&self.mcp_state),
+            runtime_suspend,
             cwd: self.tool_context.cwd.as_path().to_path_buf(),
             actor_source: if self.startup_hints.is_subagent {
                 format!("child:{}", self.session_info.id.0)
@@ -539,6 +556,11 @@ impl SessionActor {
             let prepared = approved_slots[idx]
                 .take()
                 .expect("dispatch index should match an approved slot exactly once");
+            if prepared.skill_selection.is_some() {
+                self.signals_handle().record_tool_call(&prepared.tool_name);
+                self.finish_model_skill_load(&prepared, result).await?;
+                continue;
+            }
             if result
                 .as_ref()
                 .is_ok_and(|tool_result| !tool_result.output.is_error())
@@ -781,10 +803,19 @@ impl SessionActor {
         use tools::implementations::grow_build::plan_control::{
             PlanApprovalExtRequest, PlanApprovalExtResponse,
         };
+        let runtime_suspend = self.state.lock().await.runtime_suspend.clone();
+        let snapshot = self.behavior.lock().snapshot();
         let ext_req = PlanApprovalExtRequest {
             session_id: self.session_id_string(),
             tool_call_id: tool_call_id.to_string(),
             plan_content,
+            submission_id: snapshot.plan_submission_id.ok_or_else(|| {
+                acp::Error::internal_error().data("Plan has no submission identity")
+            })?,
+            artifact_revision: snapshot.plan_artifact_revision,
+            artifact_hash: snapshot.plan_artifact_hash.ok_or_else(|| {
+                acp::Error::internal_error().data("Plan has no artifact identity")
+            })?,
         };
         debug_assert!(
             !ext_req.session_id.is_empty(),
@@ -809,26 +840,277 @@ impl SessionActor {
             ))
         })?;
         debug_assert!(self.behavior.lock().approval_pending());
-        let resp = {
-            let _pending_guard = crate::session::pending_interaction::PendingInteractionGuard::new(
-                self.pending_interactions.clone(),
-                self.notifications.gateway.clone(),
-                self.session_info.id.clone(),
-                tool_call_id.to_string(),
-                crate::session::pending_interaction::PendingKind::PlanApproval,
-            );
-            self.notifications.gateway.ext_method(ext_request).await
-        };
-        let raw = match resp {
+        let mut pending_guard = crate::session::pending_interaction::PendingInteractionGuard::new(
+            self.pending_interactions.clone(),
+            self.notifications.gateway.clone(),
+            self.session_info.id.clone(),
+            tool_call_id.to_string(),
+            crate::session::pending_interaction::PendingKind::PlanApproval,
+        );
+        pending_guard
+            .open_durably(&self.chat_state_handle)
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!(
+                    "plan approval interaction could not be opened: {error}"
+                ))
+            })?;
+        let raw = match self.notifications.gateway.ext_method(ext_request).await {
             Ok(raw) => raw,
-            Err(err) => {
-                return Err(err);
+            Err(error) => {
+                pending_guard
+                    .resolve_durably(
+                        &self.chat_state_handle,
+                        if runtime_suspend.load(std::sync::atomic::Ordering::Acquire) {
+                            chat_state::InteractionResolution::Suspended
+                        } else {
+                            chat_state::InteractionResolution::Failed
+                        },
+                    )
+                    .await
+                    .map_err(|persist| {
+                        acp::Error::internal_error().data(format!(
+                            "plan approval interaction could not be resolved after transport failure: {persist}"
+                        ))
+                    })?;
+                return Err(error);
             }
         };
-        serde_json::from_str::<PlanApprovalExtResponse>(raw.0.get()).map_err(|error| {
-            acp::Error::invalid_params()
-                .data(format!("invalid grow/plan_approval response: {error}"))
-        })
+        let response = match serde_json::from_str::<PlanApprovalExtResponse>(raw.0.get()) {
+            Ok(response) => response,
+            Err(error) => {
+                pending_guard
+                    .resolve_durably(
+                        &self.chat_state_handle,
+                        chat_state::InteractionResolution::Failed,
+                    )
+                    .await
+                    .map_err(|persist| {
+                        acp::Error::internal_error().data(format!(
+                            "plan approval interaction could not be resolved after malformed response: {persist}"
+                        ))
+                    })?;
+                return Err(acp::Error::invalid_params()
+                    .data(format!("invalid grow/plan_approval response: {error}")));
+            }
+        };
+        let resolution = match response.outcome {
+            PlanApprovalOutcome::Approved | PlanApprovalOutcome::Deferred => {
+                chat_state::InteractionResolution::Answered
+            }
+            PlanApprovalOutcome::Cancelled | PlanApprovalOutcome::Abandoned => {
+                chat_state::InteractionResolution::Cancelled
+            }
+        };
+        pending_guard
+            .resolve_durably(&self.chat_state_handle, resolution)
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!(
+                    "plan approval interaction could not be durably resolved: {error}"
+                ))
+            })?;
+        Ok(response)
+    }
+
+    /// Decisions are persisted with the candidate in the existing Control
+    /// transaction. Check the immutable receipts before CAS so an uncertain
+    /// acknowledgement can be retried without creating a second handoff.
+    pub(super) async fn accept_plan_decision(
+        &self,
+        expected: &crate::session::behavior::BehaviorSnapshot,
+        response: &tools::implementations::grow_build::plan_control::PlanApprovalExtResponse,
+    ) -> Result<bool, String> {
+        use crate::session::behavior::{RetainedPlanAction, RetainedPlanDecisionOutcome};
+        let action = match response.outcome {
+            PlanApprovalOutcome::Approved => RetainedPlanAction::Approve,
+            PlanApprovalOutcome::Cancelled => RetainedPlanAction::Revise,
+            PlanApprovalOutcome::Abandoned => RetainedPlanAction::Abandon,
+            PlanApprovalOutcome::Deferred => RetainedPlanAction::Defer,
+        };
+        if response.decision_id.trim().is_empty() || response.decision_id.len() > 128 {
+            return Err("invalid Plan decision identity".into());
+        }
+        let feedback = response
+            .feedback
+            .as_deref()
+            .map(str::trim)
+            .filter(|text| !text.is_empty())
+            .map(str::to_owned);
+        // Old candidate receipts stay in Control history after replacement.
+        // Reusing their identity with a different submission/action is a conflict.
+        let events = self
+            .chat_state_handle
+            .timeline_events()
+            .await
+            .ok_or("Plan receipt history unavailable")?;
+        for event in events.iter().rev() {
+            let chat_state::TimelineEventKind::Control(control) = &event.kind else {
+                continue;
+            };
+            let Some(value) = control.snapshot.get("behavior") else {
+                continue;
+            };
+            let snapshot: crate::session::behavior::BehaviorSnapshot =
+                serde_json::from_value(value.clone()).map_err(|error| error.to_string())?;
+            if let Some(receipt) = snapshot.retained_plan.as_ref().and_then(|candidate| {
+                candidate
+                    .decisions
+                    .iter()
+                    .find(|receipt| receipt.decision_id == response.decision_id)
+            }) {
+                return if receipt.submission_id == response.submission_id
+                    && receipt.action == action
+                    && receipt.feedback == feedback
+                {
+                    Ok(false)
+                } else {
+                    Err("Plan decision identity conflicts with its accepted payload".into())
+                };
+            }
+        }
+        let previous = self.behavior.lock().snapshot();
+        let outcome = self.behavior.lock().decide_submitted_plan_if(
+            expected,
+            response.submission_id,
+            &response.decision_id,
+            action,
+            feedback,
+        );
+        match outcome {
+            RetainedPlanDecisionOutcome::Applied(_) => {
+                if response.outcome == PlanApprovalOutcome::Abandoned {
+                    self.behavior.lock().finish_plan();
+                }
+                self.commit_behavior_mutation_or_restore(previous).await?;
+                Ok(true)
+            }
+            RetainedPlanDecisionOutcome::Duplicate(_) => Ok(false),
+            other => Err(format!("Plan decision was rejected: {other:?}")),
+        }
+    }
+
+    pub(super) async fn review_retained_plan(
+        &self,
+        submission_id: u64,
+        decision_id: &str,
+    ) -> Result<(), String> {
+        use crate::session::behavior::{RetainedPlanAction, RetainedPlanDecisionOutcome};
+        if decision_id.trim().is_empty() || decision_id.len() > 128 {
+            return Err("invalid Plan review identity".into());
+        }
+        let expected = self.behavior.lock().snapshot();
+        let candidate = expected.retained_plan.as_ref().ok_or("no retained Plan")?;
+        if candidate.submission_id != submission_id {
+            return Err("retained Plan was replaced".into());
+        }
+        if let Some(prior) = candidate
+            .decisions
+            .iter()
+            .find(|receipt| receipt.decision_id == decision_id)
+        {
+            return if prior.action == RetainedPlanAction::Review {
+                Ok(())
+            } else {
+                Err("Plan decision identity conflict".into())
+            };
+        }
+        read_plan_artifact_async(
+            self.session_directory.clone(),
+            candidate.artifact_hash.clone(),
+        )
+        .await
+        .map_err(|error| format!("retained Plan artifact unavailable: {error}"))?;
+        // Keep the same admission lock held by Workflow launch and Behavior
+        // switching until the new Plan selection is durable. Otherwise a
+        // launch that already passed its Behavior check can create an Active
+        // run after this guard observes an empty tracker.
+        let _boundary = self.step_control_gate.lock().await;
+        let _goal_transaction = self.goal_transaction_gate.lock().await;
+        let workflow_admission = self.workflow_manager.lock().await;
+        {
+            let mut state = self.state.lock().await;
+            let execution_open = state.execution_open();
+            let foreground_idle = state.foreground.is_idle();
+            let pending_input_count = state.pending_inputs.len();
+            let pending_step_control_count = state.pending_step_controls.len();
+            let has_pending_behavior_control = state.pending_behavior_control.is_some();
+            if !execution_open {
+                return Err("session execution is not open for Plan review".into());
+            }
+            if !foreground_idle {
+                return Err(
+                    "finish current foreground work before reviewing the retained Plan".into(),
+                );
+            }
+            if pending_input_count != 0 {
+                return Err(
+                    "wait for queued input to finish before reviewing the retained Plan".into(),
+                );
+            }
+            if pending_step_control_count != 0 {
+                return Err(
+                    "wait for queued step controls to finish before reviewing the retained Plan"
+                        .into(),
+                );
+            }
+            if has_pending_behavior_control {
+                return Err(
+                    "wait for queued behavior control to finish before reviewing the retained Plan"
+                        .into(),
+                );
+            }
+            let active_goal = self.goal_tracker.lock().status()
+                == Some(crate::session::goal_tracker::GoalStatus::Active);
+            let active_workflow = workflow_admission.tracker().lock().has_active_run();
+            if active_goal || active_workflow {
+                return Err(
+                    "finish the active Goal or Workflow before reviewing a retained Plan".into(),
+                );
+            }
+            let previous = self.behavior.lock().snapshot();
+            let outcome = self.behavior.lock().review_retained_plan_if(
+                &expected,
+                submission_id,
+                decision_id,
+                None,
+            );
+            if !matches!(
+                outcome,
+                RetainedPlanDecisionOutcome::Applied(_) | RetainedPlanDecisionOutcome::Duplicate(_)
+            ) {
+                return Err(format!("Plan review rejected: {outcome:?}"));
+            }
+            state.foreground = ForegroundState::ApplyingControl;
+            drop(state);
+
+            let next = self.behavior.lock().snapshot();
+            let goal = self.goal_tracker.lock().snapshot().cloned();
+            let persisted = if previous.behavior() != next.behavior() {
+                self.persist_behavior_transition_durably(next, goal).await
+            } else if next.behavior() == tool_types::BehaviorId::Plan && previous != next {
+                self.persist_plan_phase_transition_durably(next, goal).await
+            } else {
+                self.persist_control_snapshot_durably(next, goal).await
+            };
+            if let Err(error) = persisted {
+                *self.behavior.lock() =
+                    crate::session::behavior::BehaviorCoordinator::from_snapshot(previous);
+                self.state.lock().await.foreground = ForegroundState::Idle;
+                return Err(format!("Behavior control state was not persisted: {error}"));
+            }
+            self.state.lock().await.foreground = ForegroundState::Idle;
+        }
+        // The workflow admission lock and step/Goal gates have remained held
+        // through persistence, so no competing owner can enter the gap.
+        drop(workflow_admission);
+        drop(_goal_transaction);
+        drop(_boundary);
+        self.enqueue_current_mode_update(acp::SessionModeId::new(
+            tool_types::BehaviorId::Plan.as_id(),
+        ));
+        self.send_available_commands_update().await;
+        Ok(())
     }
     /// Leave Plan and tell the client to show Normal.
     async fn finish_plan_to_default(&self) -> Result<(), String> {
@@ -866,7 +1148,7 @@ impl SessionActor {
         }
         self.commit_behavior_mutation_or_restore(previous_behavior)
             .await?;
-        if self.behavior.lock().snapshot() != crate::session::behavior::BehaviorSnapshot::normal() {
+        if self.behavior.lock().behavior() != tool_types::BehaviorId::Normal {
             return Ok(false);
         }
         self.enqueue_current_mode_update(acp::SessionModeId::new(
@@ -929,13 +1211,16 @@ impl SessionActor {
         let Some(handoff) = snapshot.last_plan_handoff.as_ref() else {
             return Ok(());
         };
+        let submission_id = handoff
+            .submission_id
+            .ok_or_else(|| "Plan handoff is missing its submission identity".to_owned())?;
         let source = chat_state::NotificationSource::PlanHandoff {
             artifact_hash: handoff.artifact_hash.clone(),
             artifact_revision: handoff.artifact_revision,
             handoff: handoff.kind,
         };
         let source_version = chat_state::NotificationSourceVersion::Ordinal {
-            value: handoff.artifact_revision,
+            value: submission_id,
         };
         match self
             .chat_state_handle
@@ -1029,68 +1314,27 @@ impl SessionActor {
                 return;
             }
         };
-        let decision_feedback = parsed.feedback;
+        if let Err(error) = self.accept_plan_decision(&approval_snapshot, &parsed).await {
+            tracing::warn!(%error, "resumed Plan decision was not accepted");
+            return;
+        }
         match parsed.outcome {
+            PlanApprovalOutcome::Approved | PlanApprovalOutcome::Cancelled => {
+                let next = self.behavior.lock().snapshot();
+                if let Err(error) = self.admit_plan_handoff_notification(&next).await {
+                    tracing::warn!(%error, "Plan handoff remains recoverable");
+                    return;
+                }
+                SessionActor::maybe_drain_notifications(self.clone(), completion_tx).await;
+            }
             PlanApprovalOutcome::Abandoned => {
-                tracing::info!("plan_control resume: user abandoned Plan");
-                match self.finish_plan_to_default_if(&approval_snapshot).await {
-                    Ok(true) => {}
-                    Ok(false) => {
-                        tracing::info!("plan_control resume: dropping stale abandon decision")
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "failed to persist abandoned Plan on resume")
-                    }
-                }
+                self.enqueue_current_mode_update(acp::SessionModeId::new(
+                    tool_types::BehaviorId::Normal.as_id(),
+                ));
+                self.send_available_commands_update().await;
             }
-            PlanApprovalOutcome::Cancelled => {
-                tracing::info!("plan_control resume: user requested changes");
-                let previous_behavior = self.behavior.lock().snapshot();
-                let transitioned = self.behavior.lock().reject_submitted_plan_if_with_feedback(
-                    &approval_snapshot,
-                    decision_feedback.clone(),
-                );
-                if !transitioned {
-                    tracing::info!("plan_control resume: dropping stale request-changes decision");
-                    return;
-                }
-                if self
-                    .commit_behavior_mutation_or_restore(previous_behavior)
-                    .await
-                    .is_ok()
-                {
-                    let next = self.behavior.lock().snapshot();
-                    if let Err(error) = self.admit_plan_handoff_notification(&next).await {
-                        tracing::warn!(%error, "Plan revision handoff receipt will be reconciled after restore");
-                    }
-                    SessionActor::maybe_drain_notifications(self.clone(), completion_tx).await;
-                }
-            }
-            PlanApprovalOutcome::Approved => {
-                tracing::info!("plan_control resume: user approved Plan");
-                let previous_behavior = self.behavior.lock().snapshot();
-                let transitioned = self
-                    .behavior
-                    .lock()
-                    .approve_submitted_plan_if_with_feedback(
-                        &approval_snapshot,
-                        decision_feedback.clone(),
-                    );
-                if !transitioned {
-                    tracing::info!("plan_control resume: dropping stale approval decision");
-                    return;
-                }
-                if self
-                    .commit_behavior_mutation_or_restore(previous_behavior)
-                    .await
-                    .is_ok()
-                {
-                    let next = self.behavior.lock().snapshot();
-                    if let Err(error) = self.admit_plan_handoff_notification(&next).await {
-                        tracing::warn!(%error, "Plan execution handoff receipt will be reconciled after restore");
-                    }
-                    SessionActor::maybe_drain_notifications(self.clone(), completion_tx).await;
-                }
+            PlanApprovalOutcome::Deferred => {
+                // Durable candidate persists without a waiter or executable handoff.
             }
         }
     }
@@ -1353,6 +1597,8 @@ mod rwx_projection_tests {
             cwd: None,
             model: None,
             task_id: None,
+            parent_step_id: None,
+            required_deliverable: false,
         });
         let read_only = ToolInput::Task(TaskToolInput {
             capability_mode: Some(tool_types::SubagentCapabilityMode::ReadOnly),
@@ -1976,6 +2222,1586 @@ mod plan_finish_projection_tests {
             .await;
     }
 }
+
+#[cfg(test)]
+mod retained_plan_review_gate_tests {
+    use super::*;
+    use crate::session::behavior::{
+        BehaviorSnapshot, RetainedPlanAction, RetainedPlanDecisionOutcome, RetainedPlanStatus,
+    };
+
+    async fn actor_with_retained_plan() -> (Arc<SessionActor>, u64) {
+        let (gateway_tx, _gateway_rx) =
+            tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+        let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (actor, _event_rx) = crate::session::actor::tests::support::create_test_actor_ex(
+            0,
+            256_000,
+            85,
+            gateway_tx,
+            persistence_tx,
+        )
+        .await;
+        let content = "# retained plan";
+        crate::session::behavior::write_plan_artifact(&actor.session_directory, content).unwrap();
+        let submission_id = {
+            let mut behavior = actor.behavior.lock();
+            behavior.select_behavior(tool_types::BehaviorId::Plan);
+            behavior.record_plan_artifact(content);
+            assert!(behavior.submit_initial_plan());
+            let submission_id = behavior.plan_submission_id().unwrap();
+            let expected = behavior.snapshot();
+            assert_eq!(
+                behavior.decide_submitted_plan_if(
+                    &expected,
+                    submission_id,
+                    "defer-retained",
+                    RetainedPlanAction::Defer,
+                    None,
+                ),
+                RetainedPlanDecisionOutcome::Applied(
+                    crate::session::behavior::RetainedPlanStatus::Deferred
+                )
+            );
+            assert!(behavior.finish_plan());
+            submission_id
+        };
+        (Arc::new(actor), submission_id)
+    }
+
+    fn behavior_from_latest_control(events: &[chat_state::TimelineEvent]) -> BehaviorSnapshot {
+        events
+            .iter()
+            .rev()
+            .find_map(|event| {
+                let chat_state::TimelineEventKind::Control(control) = &event.kind else {
+                    return None;
+                };
+                control.snapshot.get("behavior").cloned()
+            })
+            .map(|value| serde_json::from_value(value).expect("valid Behavior Control"))
+            .expect("durable Behavior Control")
+    }
+
+    fn plan_handoff_count(events: &[chat_state::TimelineEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    &event.kind,
+                    chat_state::TimelineEventKind::Notification(
+                        chat_state::NotificationEvent::Received {
+                            source: chat_state::NotificationSource::PlanHandoff { .. },
+                            ..
+                        }
+                    )
+                )
+            })
+            .count()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn idle_resume_receiving_deferred_keeps_plan_draft_without_starting_a_turn() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use tools::implementations::grow_build::plan_control::PlanApprovalExtRequest;
+
+                let (gateway_tx, mut gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (actor, _event_rx) =
+                    crate::session::actor::tests::support::create_test_actor_ex(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await;
+                let actor = Arc::new(actor);
+                let content = "# defer during idle resume";
+                crate::session::behavior::write_plan_artifact(&actor.session_directory, content)
+                    .unwrap();
+                let submitted = {
+                    let mut behavior = actor.behavior.lock();
+                    behavior.select_behavior(tool_types::BehaviorId::Plan);
+                    behavior.record_plan_artifact(content);
+                    assert!(behavior.submit_initial_plan());
+                    behavior.snapshot()
+                };
+                let submission_id = submitted.plan_submission_id.unwrap();
+                actor
+                    .persist_control_snapshot_durably(submitted.clone(), None)
+                    .await
+                    .expect("submitted Plan Control");
+                let before = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("read pre-resume Timeline");
+                let expected_session = actor.session_id_string();
+                let requests = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let request_count = requests.clone();
+                tokio::task::spawn_local(async move {
+                    while let Some(message) = gateway_rx.recv().await {
+                        if let acp_transport::AcpClientMessage::ExtMethod(args) = message
+                            && args.request.method.as_ref() == "grow/plan_approval"
+                        {
+                            let request: PlanApprovalExtRequest =
+                                serde_json::from_str(args.request.params.get())
+                                    .expect("approval request schema");
+                            assert_eq!(request.session_id, expected_session);
+                            assert_eq!(request.submission_id, submission_id);
+                            request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                            let raw = serde_json::value::to_raw_value(&serde_json::json!({
+                                "outcome": "deferred",
+                                "feedback": "review later",
+                                "submissionId": submission_id,
+                                "decisionId": "idle-resume-defer"
+                            }))
+                            .unwrap();
+                            let _ = args
+                                .response_tx
+                                .send(Ok(acp_transport::protocol::ExtResponse::new(raw.into())));
+                            break;
+                        }
+                    }
+                });
+
+                let (completion_tx, mut completion_rx) = tokio::sync::mpsc::unbounded_channel();
+                actor.clone().resume_plan_approval(completion_tx).await;
+
+                assert_eq!(requests.load(std::sync::atomic::Ordering::SeqCst), 1);
+                assert!(completion_rx.try_recv().is_err(), "Deferred starts no turn");
+                assert!(actor.state.lock().await.foreground.is_idle());
+                let after = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("read deferred Control");
+                let accepted = behavior_from_latest_control(&after);
+                let candidate = accepted.retained_plan.as_ref().unwrap();
+                assert_eq!(candidate.submission_id, submission_id);
+                assert_eq!(candidate.status, RetainedPlanStatus::Deferred);
+                assert_eq!(candidate.decisions.len(), 1);
+                assert_eq!(candidate.decisions[0].decision_id, "idle-resume-defer");
+                assert!(accepted.last_plan_handoff.is_none());
+                assert_eq!(plan_handoff_count(&after), 0);
+                let started_turns = |events: &[chat_state::TimelineEvent]| {
+                    events
+                        .iter()
+                        .filter(|event| {
+                            matches!(
+                                &event.kind,
+                                chat_state::TimelineEventKind::Turn(
+                                    chat_state::TurnEvent::Started { .. }
+                                )
+                            )
+                        })
+                        .count()
+                };
+                assert_eq!(started_turns(&after), started_turns(&before));
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn active_goal_blocks_retained_plan_review_without_mutation() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, submission_id) = actor_with_retained_plan().await;
+                actor
+                    .goal_tracker
+                    .lock()
+                    .create_goal("goal-1".into(), "finish task".into(), None, "now".into())
+                    .unwrap();
+                let before = actor.behavior.lock().snapshot();
+
+                let result = actor
+                    .review_retained_plan(submission_id, "review-blocked-by-goal")
+                    .await;
+
+                assert!(result.unwrap_err().contains("active Goal or Workflow"));
+                assert_eq!(actor.behavior.lock().snapshot(), before);
+                assert_eq!(
+                    actor.goal_tracker.lock().status(),
+                    Some(crate::session::goal_tracker::GoalStatus::Active)
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn active_workflow_blocks_retained_plan_review_without_mutation() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, submission_id) = actor_with_retained_plan().await;
+                actor.workflow_tracker().await.lock().start_run(
+                    "workflow-1".into(),
+                    "active run".into(),
+                    "finish task".into(),
+                    Vec::new(),
+                    None,
+                    None,
+                    crate::session::workflow::tracker::test_runtime_route(),
+                );
+                let before = actor.behavior.lock().snapshot();
+
+                let result = actor
+                    .review_retained_plan(submission_id, "review-blocked-by-workflow")
+                    .await;
+
+                assert!(result.unwrap_err().contains("active Goal or Workflow"));
+                assert_eq!(actor.behavior.lock().snapshot(), before);
+                assert!(actor.workflow_tracker().await.lock().has_active_run());
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retained_plan_review_rejects_foreground_queued_input_and_held_control() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                enum Blocker {
+                    Foreground,
+                    QueuedInput,
+                    HeldStepControl,
+                }
+
+                for (name, blocker, expected_error) in [
+                    (
+                        "foreground",
+                        Blocker::Foreground,
+                        "finish current foreground work",
+                    ),
+                    (
+                        "queued input",
+                        Blocker::QueuedInput,
+                        "wait for queued input",
+                    ),
+                    (
+                        "held step control",
+                        Blocker::HeldStepControl,
+                        "wait for queued step controls",
+                    ),
+                ] {
+                    let (actor, submission_id) = actor_with_retained_plan().await;
+                    let before = actor.behavior.lock().snapshot();
+                    actor
+                        .persist_control_snapshot_durably(before.clone(), None)
+                        .await
+                        .expect("persist Deferred candidate before review");
+                    match blocker {
+                        Blocker::Foreground => {
+                            actor.state.lock().await.foreground = ForegroundState::RegularTurn(
+                                crate::session::actor::tests::support::running_task_stub(
+                                    "review-blocked-turn",
+                                ),
+                            );
+                        }
+                        Blocker::QueuedInput => {
+                            actor.state.lock().await.pending_inputs.push_back(
+                                crate::session::actor::tests::support::user_item(
+                                    "review-blocked-input",
+                                    "test-client",
+                                ),
+                            );
+                        }
+                        Blocker::HeldStepControl => {
+                            let (responds_to, _response) = tokio::sync::oneshot::channel();
+                            actor
+                                .state
+                                .lock()
+                                .await
+                                .pending_step_controls
+                                .admit_sampling(
+                                    SessionActor::selection_route_for_test(
+                                        crate::agent::models::ModelId::new("next/model"),
+                                        sampler::SamplerConfig::default(),
+                                        85,
+                                    ),
+                                    None,
+                                    None,
+                                    responds_to,
+                                );
+                        }
+                    }
+
+                    let error = actor
+                        .review_retained_plan(submission_id, &format!("review-{name}"))
+                        .await
+                        .expect_err("review cannot pass an active admission blocker");
+                    assert!(error.contains(expected_error), "{name}: {error}");
+                    assert_eq!(actor.behavior.lock().snapshot(), before, "{name}");
+                    let events = actor
+                        .chat_state_handle
+                        .timeline_events()
+                        .await
+                        .expect("read candidate after rejected review");
+                    assert_eq!(
+                        behavior_from_latest_control(&events),
+                        before,
+                        "{name} must not commit Reviewing"
+                    );
+                    assert_eq!(plan_handoff_count(&events), 0, "{name}");
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_control_write_keeps_submitted_plan_candidate_unaccepted() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use tools::implementations::grow_build::plan_control::{
+                    PlanApprovalExtResponse, PlanApprovalOutcome,
+                };
+
+                struct RejectControlPersistence {
+                    events: Arc<std::sync::Mutex<Vec<chat_state::TimelineEvent>>>,
+                    reject_controls: Arc<std::sync::atomic::AtomicBool>,
+                }
+
+                impl chat_state::TimelinePersistence for RejectControlPersistence {
+                    fn persist_timeline_event_and_ack(
+                        &mut self,
+                        event: &chat_state::TimelineEvent,
+                    ) -> tokio::sync::oneshot::Receiver<std::io::Result<()>> {
+                        let reject =
+                            matches!(&event.kind, chat_state::TimelineEventKind::Control(_))
+                                && self
+                                    .reject_controls
+                                    .load(std::sync::atomic::Ordering::SeqCst);
+                        if !reject {
+                            self.events
+                                .lock()
+                                .expect("test event log remains available")
+                                .push(event.clone());
+                        }
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let result = if reject {
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::StorageFull,
+                                "injected permanent Control failure",
+                            ))
+                        } else {
+                            Ok(())
+                        };
+                        let _ = tx.send(result);
+                        rx
+                    }
+
+                    fn flush(&mut self) {}
+                }
+
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (mut actor, _event_rx) =
+                    crate::session::actor::tests::support::create_test_actor_ex(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await;
+                let content = "# rejected durable decision";
+                crate::session::behavior::write_plan_artifact(&actor.session_directory, content)
+                    .unwrap();
+                let submitted = {
+                    let mut behavior = actor.behavior.lock();
+                    behavior.select_behavior(tool_types::BehaviorId::Plan);
+                    behavior.record_plan_artifact(content);
+                    assert!(behavior.submit_initial_plan());
+                    behavior.snapshot()
+                };
+
+                let sampling_config = actor
+                    .chat_state_handle
+                    .get_sampling_config()
+                    .await
+                    .expect("read sampling config");
+                let initial_events = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("read seed Timeline");
+                let events = Arc::new(std::sync::Mutex::new(initial_events.clone()));
+                let reject_controls = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+                actor.chat_state_handle = chat_state::ChatStateActor::spawn_from_timeline(
+                    initial_events,
+                    sampling_config,
+                    Box::new(RejectControlPersistence {
+                        events: events.clone(),
+                        reject_controls: reject_controls.clone(),
+                    }),
+                    event_tx,
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .expect("start fault-injecting durable owner");
+                actor.events =
+                    crate::session::events::EventTracker::new(actor.chat_state_handle.clone());
+                actor
+                    .persist_control_snapshot_durably(submitted.clone(), None)
+                    .await
+                    .expect("initial submitted snapshot commits");
+
+                reject_controls.store(true, std::sync::atomic::Ordering::SeqCst);
+                let response = PlanApprovalExtResponse {
+                    outcome: PlanApprovalOutcome::Deferred,
+                    feedback: Some("later".into()),
+                    submission_id: submitted.plan_submission_id.unwrap(),
+                    decision_id: "rejected-defer-write".into(),
+                };
+                let error = actor
+                    .accept_plan_decision(&submitted, &response)
+                    .await
+                    .expect_err("permanent Control failure must not accept the decision");
+                assert!(error.contains("not persisted"), "{error}");
+                assert_eq!(actor.behavior.lock().snapshot(), submitted);
+
+                let committed = events
+                    .lock()
+                    .expect("durable event log remains readable")
+                    .clone();
+                let canonical = behavior_from_latest_control(&committed);
+                assert_eq!(canonical, submitted);
+                assert_eq!(plan_handoff_count(&committed), 0);
+                let candidate = canonical.retained_plan.as_ref();
+                assert!(candidate.is_none_or(|candidate| {
+                    candidate
+                        .decisions
+                        .iter()
+                        .all(|receipt| receipt.decision_id != "rejected-defer-write")
+                }));
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn late_v1_decision_cannot_mutate_replacement_v2_submission() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use tools::implementations::grow_build::plan_control::{
+                    PlanApprovalExtResponse, PlanApprovalOutcome,
+                };
+
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (actor, _event_rx) =
+                    crate::session::actor::tests::support::create_test_actor_ex(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await;
+                let actor = Arc::new(actor);
+                let v1_content = "# first submitted Plan";
+                crate::session::behavior::write_plan_artifact(&actor.session_directory, v1_content)
+                    .unwrap();
+                let v1 = {
+                    let mut behavior = actor.behavior.lock();
+                    behavior.select_behavior(tool_types::BehaviorId::Plan);
+                    behavior.record_plan_artifact(v1_content);
+                    assert!(behavior.submit_initial_plan());
+                    behavior.snapshot()
+                };
+                actor
+                    .persist_control_snapshot_durably(v1.clone(), None)
+                    .await
+                    .expect("persist v1 submission");
+                let v1_id = v1.plan_submission_id.unwrap();
+                let defer_v1 = PlanApprovalExtResponse {
+                    outcome: PlanApprovalOutcome::Deferred,
+                    feedback: Some("replace this plan".into()),
+                    submission_id: v1_id,
+                    decision_id: "v1-defer-before-replacement".into(),
+                };
+                assert!(
+                    actor
+                        .accept_plan_decision(&v1, &defer_v1)
+                        .await
+                        .expect("defer v1")
+                );
+                actor
+                    .finish_plan_to_default()
+                    .await
+                    .expect("close v1 Plan before replacement");
+
+                let v2_content = "# replacement Plan";
+                crate::session::behavior::write_plan_artifact(&actor.session_directory, v2_content)
+                    .unwrap();
+                let v2 = {
+                    let mut behavior = actor.behavior.lock();
+                    behavior.select_behavior(tool_types::BehaviorId::Plan);
+                    behavior.record_plan_artifact(v2_content);
+                    assert!(behavior.submit_initial_plan());
+                    behavior.snapshot()
+                };
+                let v2_id = v2.plan_submission_id.unwrap();
+                assert!(v2_id > v1_id);
+                actor
+                    .persist_control_snapshot_durably(v2.clone(), None)
+                    .await
+                    .expect("persist v2 submission");
+
+                let delayed_v1 = PlanApprovalExtResponse {
+                    outcome: PlanApprovalOutcome::Approved,
+                    feedback: None,
+                    submission_id: v1_id,
+                    decision_id: "late-v1-approval".into(),
+                };
+                assert!(actor.accept_plan_decision(&v1, &delayed_v1).await.is_err());
+
+                assert_eq!(actor.behavior.lock().snapshot(), v2);
+                let events = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("read v2 and rejected late-decision history");
+                assert_eq!(behavior_from_latest_control(&events), v2);
+                assert_eq!(plan_handoff_count(&events), 0);
+                assert!(events.iter().all(|event| {
+                    !matches!(
+                        &event.kind,
+                        chat_state::TimelineEventKind::Notification(
+                            chat_state::NotificationEvent::Received {
+                                source: chat_state::NotificationSource::PlanHandoff { .. },
+                                ..
+                            }
+                        )
+                    )
+                }));
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn missing_retained_plan_artifact_keeps_candidate_available_for_review() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, submission_id) = actor_with_retained_plan().await;
+                let before = actor.behavior.lock().snapshot();
+                let candidate = before.retained_plan.as_ref().unwrap();
+                actor
+                    .persist_control_snapshot_durably(before.clone(), None)
+                    .await
+                    .expect("deferred candidate Control");
+                let artifact_path = actor
+                    .session_directory
+                    .display_path()
+                    .join("artifacts/plan")
+                    .join(format!("{}.md", candidate.artifact_hash));
+                std::fs::remove_file(&artifact_path).expect("remove retained artifact");
+
+                let result = actor
+                    .review_retained_plan(submission_id, "review-missing-artifact")
+                    .await;
+
+                assert!(
+                    result
+                        .unwrap_err()
+                        .contains("retained Plan artifact unavailable")
+                );
+                assert_eq!(actor.behavior.lock().snapshot(), before);
+                let events = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("read durable Control after rejected review");
+                let after = events
+                    .iter()
+                    .rev()
+                    .find_map(|event| {
+                        let chat_state::TimelineEventKind::Control(control) = &event.kind else {
+                            return None;
+                        };
+                        control.snapshot.get("behavior").cloned()
+                    })
+                    .map(|value| serde_json::from_value::<BehaviorSnapshot>(value).unwrap())
+                    .expect("retained candidate remains durable");
+                let candidate = after.retained_plan.as_ref().unwrap();
+                assert_eq!(candidate.submission_id, submission_id);
+                assert_eq!(candidate.status, RetainedPlanStatus::Deferred);
+                assert_eq!(candidate.decisions.len(), 1);
+                assert!(after.last_plan_handoff.is_none());
+                assert!(events.iter().all(|event| {
+                    !matches!(
+                        &event.kind,
+                        chat_state::TimelineEventKind::Notification(
+                            chat_state::NotificationEvent::Received {
+                                source: chat_state::NotificationSource::PlanHandoff { .. },
+                                ..
+                            }
+                        )
+                    )
+                }));
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn invalid_retained_plan_artifacts_keep_candidate_available_for_review() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let oversized_bytes =
+                    vec![b'x'; crate::session::behavior::MAX_PLAN_ARTIFACT_BYTES as usize + 1];
+                let invalid_utf8_bytes = vec![0xff, 0xfe, 0xfd];
+                let cases = [
+                    ("hash mismatch", None, b"# altered retained plan".to_vec()),
+                    (
+                        "invalid UTF-8",
+                        Some(blake3::hash(&invalid_utf8_bytes).to_hex().to_string()),
+                        invalid_utf8_bytes,
+                    ),
+                    (
+                        "over-limit bytes",
+                        Some(blake3::hash(&oversized_bytes).to_hex().to_string()),
+                        oversized_bytes,
+                    ),
+                ];
+
+                for (case, replacement_hash, bytes) in cases {
+                    let (actor, submission_id) = actor_with_retained_plan().await;
+                    if let Some(hash) = replacement_hash {
+                        let mut snapshot = actor.behavior.lock().snapshot();
+                        snapshot.retained_plan.as_mut().unwrap().artifact_hash = hash;
+                        *actor.behavior.lock() =
+                            crate::session::behavior::BehaviorCoordinator::from_snapshot(snapshot);
+                    }
+                    let before = actor.behavior.lock().snapshot();
+                    let candidate = before.retained_plan.as_ref().unwrap();
+                    actor
+                        .persist_control_snapshot_durably(before.clone(), None)
+                        .await
+                        .expect("deferred candidate Control");
+                    let artifact_path = actor
+                        .session_directory
+                        .display_path()
+                        .join("artifacts/plan")
+                        .join(format!("{}.md", candidate.artifact_hash));
+                    std::fs::write(&artifact_path, bytes)
+                        .unwrap_or_else(|error| panic!("write {case} artifact: {error}"));
+
+                    let result = actor
+                        .review_retained_plan(
+                            submission_id,
+                            &format!("review-{}", case.replace(' ', "_")),
+                        )
+                        .await;
+
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .contains("retained Plan artifact unavailable"),
+                        "{case} artifact must not authorize review"
+                    );
+                    assert_eq!(actor.behavior.lock().snapshot(), before, "{case}");
+                    let events = actor
+                        .chat_state_handle
+                        .timeline_events()
+                        .await
+                        .expect("read durable Control after rejected review");
+                    let after = events
+                        .iter()
+                        .rev()
+                        .find_map(|event| {
+                            let chat_state::TimelineEventKind::Control(control) = &event.kind
+                            else {
+                                return None;
+                            };
+                            control.snapshot.get("behavior").cloned()
+                        })
+                        .map(|value| serde_json::from_value::<BehaviorSnapshot>(value).unwrap())
+                        .expect("retained candidate remains durable");
+                    let candidate = after.retained_plan.as_ref().unwrap();
+                    assert_eq!(candidate.submission_id, submission_id, "{case}");
+                    assert_eq!(candidate.status, RetainedPlanStatus::Deferred, "{case}");
+                    assert_eq!(candidate.decisions.len(), 1, "{case}");
+                    assert!(after.last_plan_handoff.is_none(), "{case}");
+                    assert!(
+                        events.iter().all(|event| {
+                            !matches!(
+                                &event.kind,
+                                chat_state::TimelineEventKind::Notification(
+                                    chat_state::NotificationEvent::Received {
+                                        source: chat_state::NotificationSource::PlanHandoff { .. },
+                                        ..
+                                    }
+                                )
+                            )
+                        }),
+                        "{case}"
+                    );
+                }
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn concurrent_conflicting_plan_decisions_commit_at_most_one_handoff() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use crate::session::behavior::BehaviorSnapshot;
+                use tools::implementations::grow_build::plan_control::{
+                    PlanApprovalExtResponse, PlanApprovalOutcome,
+                };
+
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (actor, _event_rx) =
+                    crate::session::actor::tests::support::create_test_actor_ex(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await;
+                let actor = Arc::new(actor);
+                let content = "# concurrent decision";
+                crate::session::behavior::write_plan_artifact(&actor.session_directory, content)
+                    .unwrap();
+                let submitted = {
+                    let mut behavior = actor.behavior.lock();
+                    behavior.select_behavior(tool_types::BehaviorId::Plan);
+                    behavior.record_plan_artifact(content);
+                    assert!(behavior.submit_initial_plan());
+                    behavior.snapshot()
+                };
+                actor
+                    .persist_control_snapshot_durably(submitted.clone(), None)
+                    .await
+                    .expect("submitted Plan Control");
+                let submission_id = submitted.plan_submission_id.unwrap();
+                let deferred = PlanApprovalExtResponse {
+                    outcome: PlanApprovalOutcome::Deferred,
+                    feedback: Some("later".into()),
+                    submission_id,
+                    decision_id: "race-defer".into(),
+                };
+                let approved = PlanApprovalExtResponse {
+                    outcome: PlanApprovalOutcome::Approved,
+                    feedback: None,
+                    submission_id,
+                    decision_id: "race-approve".into(),
+                };
+
+                let (deferred_result, approved_result) = tokio::join!(
+                    actor.accept_plan_decision(&submitted, &deferred),
+                    actor.accept_plan_decision(&submitted, &approved),
+                );
+                let accepted_count = [&deferred_result, &approved_result]
+                    .into_iter()
+                    .filter(|result| matches!(result, Ok(true)))
+                    .count();
+                assert_eq!(accepted_count, 1, "only one conflicting decision may win");
+
+                let events = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("read canonical decision receipt");
+                let behavior = events
+                    .iter()
+                    .rev()
+                    .find_map(|event| {
+                        let chat_state::TimelineEventKind::Control(control) = &event.kind else {
+                            return None;
+                        };
+                        control.snapshot.get("behavior").cloned()
+                    })
+                    .map(|value| serde_json::from_value::<BehaviorSnapshot>(value).unwrap())
+                    .expect("accepted decision must be in Control");
+                let candidate = behavior.retained_plan.as_ref().unwrap();
+                assert_eq!(candidate.decisions.len(), 1);
+                assert!(
+                    candidate.decisions[0].decision_id == deferred.decision_id
+                        || candidate.decisions[0].decision_id == approved.decision_id
+                );
+                // The decision commits execution eligibility in Control;
+                // the ordinary caller then publishes/reconciles its receipt.
+                actor
+                    .admit_plan_handoff_notification(&behavior)
+                    .await
+                    .expect("publish the accepted decision's handoff");
+                actor
+                    .admit_plan_handoff_notification(&behavior)
+                    .await
+                    .expect("the same handoff reconciliation is idempotent");
+                let events = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("read reconciled handoff");
+                let handoffs = events
+                    .iter()
+                    .filter(|event| {
+                        matches!(
+                            &event.kind,
+                            chat_state::TimelineEventKind::Notification(
+                                chat_state::NotificationEvent::Received {
+                                    source: chat_state::NotificationSource::PlanHandoff { .. },
+                                    ..
+                                }
+                            )
+                        )
+                    })
+                    .count();
+                assert_eq!(
+                    handoffs,
+                    usize::from(candidate.status == RetainedPlanStatus::Approved)
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ambiguous_defer_control_ack_recovers_receipt_without_a_second_write() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use crate::session::behavior::{BehaviorCoordinator, BehaviorSnapshot};
+                use tools::implementations::grow_build::plan_control::{
+                    PlanApprovalExtResponse, PlanApprovalOutcome,
+                };
+
+                struct AmbiguousControlPersistence {
+                    events: Arc<std::sync::Mutex<Vec<chat_state::TimelineEvent>>>,
+                    cancel_on_next_control: Arc<std::sync::atomic::AtomicBool>,
+                    cancellation_token: tokio_util::sync::CancellationToken,
+                }
+
+                impl chat_state::TimelinePersistence for AmbiguousControlPersistence {
+                    fn persist_timeline_event_and_ack(
+                        &mut self,
+                        event: &chat_state::TimelineEvent,
+                    ) -> tokio::sync::oneshot::Receiver<std::io::Result<()>> {
+                        let committed = self
+                            .events
+                            .lock()
+                            .expect("test persistence remains available");
+                        let cancel_after_commit =
+                            matches!(&event.kind, chat_state::TimelineEventKind::Control(_))
+                                && self
+                                    .cancel_on_next_control
+                                    .swap(false, std::sync::atomic::Ordering::SeqCst);
+                        let mut committed = committed;
+                        committed.push(event.clone());
+                        drop(committed);
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        if cancel_after_commit {
+                            // The durable owner accepted the event, then its
+                            // writer epoch ended before the ACK arrived.
+                            drop(tx);
+                            self.cancellation_token.cancel();
+                        } else {
+                            let _ = tx.send(Ok(()));
+                        }
+                        rx
+                    }
+
+                    fn flush(&mut self) {}
+                }
+
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (mut actor, _event_rx) =
+                    crate::session::actor::tests::support::create_test_actor_ex(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await;
+                let content = "# ambiguous defer ACK";
+                crate::session::behavior::write_plan_artifact(&actor.session_directory, content)
+                    .unwrap();
+                let submitted = {
+                    let mut behavior = actor.behavior.lock();
+                    behavior.select_behavior(tool_types::BehaviorId::Plan);
+                    behavior.record_plan_artifact(content);
+                    assert!(behavior.submit_initial_plan());
+                    behavior.snapshot()
+                };
+
+                let sampling_config = actor
+                    .chat_state_handle
+                    .get_sampling_config()
+                    .await
+                    .expect("read test sampling config");
+                let initial_events = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("read test seed Timeline");
+                let durable_events = Arc::new(std::sync::Mutex::new(initial_events.clone()));
+                let cancel_on_next_control = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let old_writer_token = tokio_util::sync::CancellationToken::new();
+                let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+                actor.chat_state_handle = chat_state::ChatStateActor::spawn_from_timeline(
+                    initial_events,
+                    sampling_config.clone(),
+                    Box::new(AmbiguousControlPersistence {
+                        events: durable_events.clone(),
+                        cancel_on_next_control: cancel_on_next_control.clone(),
+                        cancellation_token: old_writer_token.clone(),
+                    }),
+                    event_tx,
+                    old_writer_token,
+                )
+                .await
+                .expect("restore test ChatState with fault-injecting persistence");
+                actor.events =
+                    crate::session::events::EventTracker::new(actor.chat_state_handle.clone());
+                actor
+                    .persist_control_snapshot_durably(submitted.clone(), None)
+                    .await
+                    .expect("persist initial submitted candidate");
+
+                let response = PlanApprovalExtResponse {
+                    outcome: PlanApprovalOutcome::Deferred,
+                    feedback: Some("review later".into()),
+                    submission_id: submitted.plan_submission_id.unwrap(),
+                    decision_id: "ambiguous-defer-ack".into(),
+                };
+                cancel_on_next_control.store(true, std::sync::atomic::Ordering::SeqCst);
+                assert!(
+                    actor
+                        .accept_plan_decision(&submitted, &response)
+                        .await
+                        .is_err()
+                );
+
+                let durable_after_unknown_ack = durable_events
+                    .lock()
+                    .expect("durable event log remains available")
+                    .clone();
+                let count_controls = |events: &[chat_state::TimelineEvent]| {
+                    events
+                        .iter()
+                        .filter(|event| {
+                            matches!(&event.kind, chat_state::TimelineEventKind::Control(_))
+                        })
+                        .count()
+                };
+                let controls_before_retry = count_controls(&durable_after_unknown_ack);
+                let recovered_behavior = durable_after_unknown_ack
+                    .iter()
+                    .rev()
+                    .find_map(|event| {
+                        let chat_state::TimelineEventKind::Control(control) = &event.kind else {
+                            return None;
+                        };
+                        control.snapshot.get("behavior").cloned()
+                    })
+                    .map(|value| serde_json::from_value::<BehaviorSnapshot>(value).unwrap())
+                    .expect("committed defer receipt survives the lost ACK");
+                let candidate = recovered_behavior.retained_plan.as_ref().unwrap();
+                assert_eq!(candidate.status, RetainedPlanStatus::Deferred);
+                assert_eq!(candidate.decisions.len(), 1);
+                assert_eq!(candidate.decisions[0].decision_id, response.decision_id);
+
+                let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+                actor.chat_state_handle = chat_state::ChatStateActor::spawn_from_timeline(
+                    durable_after_unknown_ack,
+                    sampling_config,
+                    Box::new(chat_state::NullTimelinePersistence),
+                    event_tx,
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .expect("cold-rebuild ChatState from the committed owner facts");
+                actor.events =
+                    crate::session::events::EventTracker::new(actor.chat_state_handle.clone());
+                *actor.behavior.lock() = BehaviorCoordinator::from_snapshot(recovered_behavior);
+                assert!(
+                    !actor
+                        .accept_plan_decision(&submitted, &response)
+                        .await
+                        .expect("exact retry finds the committed receipt")
+                );
+                let after_retry = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("read cold-rebuilt Timeline");
+                assert_eq!(count_controls(&after_retry), controls_before_retry);
+                let canonical = after_retry
+                    .iter()
+                    .rev()
+                    .find_map(|event| {
+                        let chat_state::TimelineEventKind::Control(control) = &event.kind else {
+                            return None;
+                        };
+                        control.snapshot.get("behavior").cloned()
+                    })
+                    .map(|value| serde_json::from_value::<BehaviorSnapshot>(value).unwrap())
+                    .unwrap();
+                assert!(canonical.last_plan_handoff.is_none());
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn retained_plan_review_waits_for_workflow_admission_before_switching() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, submission_id) = actor_with_retained_plan().await;
+                actor
+                    .behavior
+                    .lock()
+                    .select_behavior(tool_types::BehaviorId::Workflow);
+                let before = actor.behavior.lock().snapshot();
+
+                // Hold the same admission lock a launch holds from its final
+                // Behavior check until the Workflow run is registered.
+                let mut manager = actor.workflow_manager.lock().await;
+                let review_actor = actor.clone();
+                let mut review = tokio::task::spawn_local(async move {
+                    review_actor
+                        .review_retained_plan(submission_id, "review-workflow-admission-race")
+                        .await
+                });
+                assert!(
+                    tokio::time::timeout(std::time::Duration::from_millis(10), &mut review)
+                        .await
+                        .is_err(),
+                    "review must wait while Workflow admission is in its launch critical section"
+                );
+
+                manager.tracker().lock().start_run(
+                    "workflow-admitted-during-review".into(),
+                    "active run".into(),
+                    "finish task".into(),
+                    Vec::new(),
+                    None,
+                    None,
+                    crate::session::workflow::tracker::test_runtime_route(),
+                );
+                drop(manager);
+
+                let result = review.await.expect("review task");
+                assert!(result.unwrap_err().contains("active Goal or Workflow"));
+                assert_eq!(actor.behavior.lock().snapshot(), before);
+                assert_eq!(
+                    actor.behavior.lock().behavior(),
+                    tool_types::BehaviorId::Workflow
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn deferred_plan_decision_is_recovered_and_reapproved_from_control_before_tool_terminal()
+    {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use crate::session::behavior::{
+                    BehaviorCoordinator, BehaviorSnapshot, RetainedPlanAction, RetainedPlanStatus,
+                };
+                use tools::implementations::grow_build::plan_control::{
+                    PlanApprovalExtRequest, PlanApprovalExtResponse, PlanApprovalOutcome,
+                };
+
+                let (gateway_tx, mut gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (actor, _event_rx) =
+                    crate::session::actor::tests::support::create_test_actor_ex(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await;
+
+                let actor = std::sync::Arc::new(actor);
+                let content = "# Keep this plan for later";
+                crate::session::behavior::write_plan_artifact(&actor.session_directory, content)
+                    .unwrap();
+                let submitted = {
+                    let mut behavior = actor.behavior.lock();
+                    behavior.select_behavior(tool_types::BehaviorId::Plan);
+                    behavior.record_plan_artifact(content);
+                    assert!(behavior.submit_initial_plan());
+                    behavior.snapshot()
+                };
+                let submission_id = submitted.plan_submission_id.unwrap();
+                let submitted_hash = submitted.plan_artifact_hash.clone().unwrap();
+                let submitted_revision = submitted.plan_artifact_revision;
+                actor
+                    .persist_control_snapshot_durably(submitted.clone(), None)
+                    .await
+                    .expect("submitted Plan must have an authoritative Control snapshot");
+
+                let decision = PlanApprovalExtResponse {
+                    outcome: PlanApprovalOutcome::Deferred,
+                    feedback: Some("review after the release meeting".into()),
+                    submission_id,
+                    decision_id: "defer-before-tool-terminal".into(),
+                };
+                assert!(
+                    actor
+                        .accept_plan_decision(&submitted, &decision)
+                        .await
+                        .expect("first defer decision must commit")
+                );
+
+                let read_control_behavior =
+                    |events: &[chat_state::TimelineEvent]| -> BehaviorSnapshot {
+                        events
+                            .iter()
+                            .rev()
+                            .find_map(|event| {
+                                let chat_state::TimelineEventKind::Control(control) = &event.kind
+                                else {
+                                    return None;
+                                };
+                                control.snapshot.get("behavior").cloned()
+                            })
+                            .map(|value| serde_json::from_value::<BehaviorSnapshot>(value).unwrap())
+                            .expect("persisted Control must contain Behavior")
+                    };
+                let after_first = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("read authoritative Timeline");
+                let persisted = read_control_behavior(&after_first);
+                let candidate = persisted.retained_plan.as_ref().unwrap();
+                assert_eq!(candidate.submission_id, submission_id);
+                assert_eq!(candidate.status, RetainedPlanStatus::Deferred);
+                assert_eq!(candidate.decisions.len(), 1);
+                assert_eq!(candidate.decisions[0].decision_id, decision.decision_id);
+                assert_eq!(candidate.decisions[0].action, RetainedPlanAction::Defer);
+                assert_eq!(
+                    candidate.decisions[0].feedback.as_deref(),
+                    decision.feedback.as_deref()
+                );
+                assert!(persisted.last_plan_handoff.is_none());
+
+                // Rebuild the actor's mutable coordinator from the durable
+                // Control owner before replaying the client's lost ACK.
+                *actor.behavior.lock() = BehaviorCoordinator::from_snapshot(persisted);
+                let control_count_before_retry = after_first
+                    .iter()
+                    .filter(|event| {
+                        matches!(&event.kind, chat_state::TimelineEventKind::Control(_))
+                    })
+                    .count();
+                assert!(
+                    !actor
+                        .accept_plan_decision(&submitted, &decision)
+                        .await
+                        .expect("an exact retry must return the already accepted receipt")
+                );
+
+                let changed_feedback = PlanApprovalExtResponse {
+                    feedback: Some("different feedback".into()),
+                    ..decision.clone()
+                };
+                assert!(
+                    actor
+                        .accept_plan_decision(&submitted, &changed_feedback)
+                        .await
+                        .unwrap_err()
+                        .contains("conflicts")
+                );
+                let changed_action = PlanApprovalExtResponse {
+                    outcome: PlanApprovalOutcome::Approved,
+                    ..decision.clone()
+                };
+                assert!(
+                    actor
+                        .accept_plan_decision(&submitted, &changed_action)
+                        .await
+                        .unwrap_err()
+                        .contains("conflicts")
+                );
+
+                let after_retry = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("read retry history");
+                assert_eq!(
+                    after_retry
+                        .iter()
+                        .filter(|event| {
+                            matches!(&event.kind, chat_state::TimelineEventKind::Control(_))
+                        })
+                        .count(),
+                    control_count_before_retry,
+                    "duplicate or conflicting ACKs must not append another Control decision"
+                );
+                let canonical = read_control_behavior(&after_retry);
+                let candidate = canonical.retained_plan.as_ref().unwrap();
+                assert_eq!(candidate.decisions.len(), 1);
+                assert_eq!(candidate.decisions[0].decision_id, decision.decision_id);
+                assert!(canonical.last_plan_handoff.is_none());
+                assert!(after_retry.iter().all(|event| {
+                    !matches!(
+                        &event.kind,
+                        chat_state::TimelineEventKind::Notification(
+                            chat_state::NotificationEvent::Received {
+                                source: chat_state::NotificationSource::PlanHandoff { .. },
+                                ..
+                            }
+                        )
+                    )
+                }));
+
+                // Re-enter review through the actor against the durable
+                // retained candidate. Merely restoring Control must not
+                // create execution eligibility or a PlanHandoff.
+                actor
+                    .review_retained_plan(submission_id, "review-after-reopen")
+                    .await
+                    .expect("review must bind the exact deferred artifact again");
+                let after_review = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("read reviewed candidate");
+                let reviewed = read_control_behavior(&after_review);
+                let candidate = reviewed.retained_plan.as_ref().unwrap();
+                assert_eq!(candidate.submission_id, submission_id);
+                assert_eq!(candidate.artifact_hash, submitted_hash);
+                assert_eq!(candidate.artifact_revision, submitted_revision);
+                assert_eq!(candidate.status, RetainedPlanStatus::Reviewing);
+                assert!(reviewed.last_plan_handoff.is_none());
+                assert!(after_review.iter().all(|event| {
+                    !matches!(
+                        &event.kind,
+                        chat_state::TimelineEventKind::Notification(
+                            chat_state::NotificationEvent::Received {
+                                source: chat_state::NotificationSource::PlanHandoff { .. },
+                                ..
+                            }
+                        )
+                    )
+                }));
+
+                // Drive the actual resumed approval waiter as a connected
+                // ACP client would: inspect the new request and approve this
+                // exact submission once. This is an actor/durable-Timeline
+                // integration test, not a Pager/PTY test.
+                let approval_requests = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+                let request_count = approval_requests.clone();
+                let expected_session = actor.session_id_string();
+                let candidate_hash_for_resume = submitted_hash.clone();
+                let candidate_revision_for_resume = submitted_revision;
+                tokio::task::spawn_local(async move {
+                    while let Some(message) = gateway_rx.recv().await {
+                        match message {
+                            acp_transport::AcpClientMessage::ExtMethod(args)
+                                if args.request.method.as_ref() == "grow/plan_approval" =>
+                            {
+                                let request: PlanApprovalExtRequest =
+                                    serde_json::from_str(args.request.params.get())
+                                        .expect("resumed approval request must decode");
+                                assert_eq!(request.session_id, expected_session);
+                                assert_eq!(request.submission_id, submission_id);
+                                assert_eq!(request.artifact_hash, candidate_hash_for_resume);
+                                assert_eq!(
+                                    request.artifact_revision,
+                                    candidate_revision_for_resume
+                                );
+                                request_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                                let raw = serde_json::value::to_raw_value(&serde_json::json!({
+                                    "outcome": "approved",
+                                    "submissionId": request.submission_id,
+                                    "decisionId": "approve-after-retained-review"
+                                }))
+                                .unwrap();
+                                let _ = args.response_tx.send(Ok(
+                                    acp_transport::protocol::ExtResponse::new(raw.into()),
+                                ));
+                            }
+                            _ => {}
+                        }
+                    }
+                });
+                let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+                actor.clone().resume_plan_approval(completion_tx).await;
+                assert_eq!(
+                    approval_requests.load(std::sync::atomic::Ordering::SeqCst),
+                    1
+                );
+
+                let after_approval = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("read approved handoff");
+                let approved = read_control_behavior(&after_approval);
+                let candidate = approved.retained_plan.as_ref().unwrap();
+                assert_eq!(candidate.submission_id, submission_id);
+                assert_eq!(candidate.status, RetainedPlanStatus::Approved);
+                assert!(candidate.decisions.iter().any(|receipt| {
+                    receipt.decision_id == "approve-after-retained-review"
+                        && receipt.action == RetainedPlanAction::Approve
+                }));
+                let handoff = approved.last_plan_handoff.as_ref().unwrap();
+                assert_eq!(handoff.submission_id, Some(submission_id));
+                assert_eq!(handoff.artifact_hash, submitted_hash);
+                assert_eq!(handoff.artifact_revision, submitted_revision);
+                assert_eq!(handoff.kind, chat_state::PlanHandoffKind::Execute);
+                let handoff_count = after_approval
+                    .iter()
+                    .filter(|event| {
+                        matches!(
+                            &event.kind,
+                            chat_state::TimelineEventKind::Notification(
+                                chat_state::NotificationEvent::Received {
+                                    source: chat_state::NotificationSource::PlanHandoff { .. },
+                                    ..
+                                }
+                            )
+                        )
+                    })
+                    .count();
+                assert_eq!(handoff_count, 1, "approval must create one handoff receipt");
+
+                actor
+                    .admit_plan_handoff_notification(&approved)
+                    .await
+                    .expect("reconciling the same handoff must be idempotent");
+                let after_reconcile = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("read reconciled handoff");
+                assert_eq!(
+                    after_reconcile
+                        .iter()
+                        .filter(|event| matches!(
+                            &event.kind,
+                            chat_state::TimelineEventKind::Notification(
+                                chat_state::NotificationEvent::Received {
+                                    source: chat_state::NotificationSource::PlanHandoff { .. },
+                                    ..
+                                }
+                            )
+                        ))
+                        .count(),
+                    1,
+                    "reconciliation must not duplicate the execute handoff"
+                );
+            })
+            .await;
+    }
+}
+
+#[cfg(test)]
+mod deferred_plan_tool_terminal_tests {
+    use super::{ControlDisposition, ToolLoop};
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn defer_ack_retry_after_control_rebuild_keeps_one_terminal_and_never_resamples() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use crate::session::behavior::{BehaviorCoordinator, BehaviorSnapshot};
+                use tools::implementations::grow_build::plan_control::{
+                    PlanApprovalExtRequest, PlanApprovalExtResponse, PlanApprovalOutcome,
+                };
+
+                let (gateway_tx, mut gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (actor, _event_rx) =
+                    crate::session::actor::tests::support::create_test_actor_ex(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await;
+                *actor.agent.borrow_mut() =
+                    crate::session::actor::tests::support::test_agent_with_plan_tools().await;
+                actor
+                    .behavior
+                    .lock()
+                    .select_behavior(tool_types::BehaviorId::Plan);
+                let actor = std::sync::Arc::new(actor);
+                crate::session::actor::tests::support::begin_test_active_causal_turn(&actor).await;
+                let call_id = "defer-p17-tool-call";
+                let decision_id = "defer-p17-decision";
+                let feedback = "review this after the release meeting";
+                let (submitted_tx, submitted_rx) = tokio::sync::oneshot::channel();
+                let approval_actor = actor.clone();
+                tokio::task::spawn_local(async move {
+                    while let Some(message) = gateway_rx.recv().await {
+                        let acp_transport::AcpClientMessage::ExtMethod(args) = message else {
+                            continue;
+                        };
+                        if args.request.method.as_ref() != "grow/plan_approval" {
+                            continue;
+                        }
+                        let request: PlanApprovalExtRequest =
+                            serde_json::from_str(args.request.params.get())
+                                .expect("defer request must decode");
+                        assert_eq!(request.tool_call_id, call_id);
+                        let submitted = approval_actor.behavior.lock().snapshot();
+                        assert_eq!(submitted.plan_submission_id, Some(request.submission_id));
+                        submitted_tx
+                            .send(submitted)
+                            .expect("test retains submitted Plan snapshot");
+                        let response = serde_json::value::to_raw_value(&serde_json::json!({
+                            "outcome": "deferred",
+                            "feedback": feedback,
+                            "submissionId": request.submission_id,
+                            "decisionId": decision_id,
+                        }))
+                        .expect("serialize exact defer receipt");
+                        let _ =
+                            args.response_tx
+                                .send(Ok(acp_transport::protocol::ExtResponse::new(
+                                    response.into(),
+                                )));
+                        break;
+                    }
+                });
+
+                let arguments = serde_json::json!({
+                    "action": "submit",
+                    "plan": "# Keep this plan for later review",
+                })
+                .to_string();
+                actor.chat_state_handle.push_assistant_response(
+                    crate::sampling::ConversationItem::assistant_tool_calls(vec![
+                        crate::sampling::ToolCall {
+                            id: call_id.into(),
+                            name: "plan_control".into(),
+                            arguments: arguments.as_str().into(),
+                        },
+                    ]),
+                );
+                let call = crate::sampling::types::ToolCallResponse {
+                    id: call_id.into(),
+                    kind: "function".into(),
+                    function: crate::sampling::types::ToolCallFunction::new(
+                        "plan_control",
+                        arguments,
+                    ),
+                };
+                let outcome = actor
+                    .execute_tool_calls(vec![call])
+                    .await
+                    .expect("defer should complete the Plan control call");
+                assert!(matches!(
+                    outcome,
+                    ToolLoop::Control(ControlDisposition::EndTurn)
+                ));
+
+                let submitted = submitted_rx.await.expect("submitted snapshot");
+                let decision = PlanApprovalExtResponse {
+                    outcome: PlanApprovalOutcome::Deferred,
+                    feedback: Some(feedback.into()),
+                    submission_id: submitted.plan_submission_id.unwrap(),
+                    decision_id: decision_id.into(),
+                };
+                let events_before_retry = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("durable decision and tool result");
+                let read_control_behavior = |events: &[chat_state::TimelineEvent]| {
+                    events
+                        .iter()
+                        .rev()
+                        .find_map(|event| {
+                            let chat_state::TimelineEventKind::Control(control) = &event.kind
+                            else {
+                                return None;
+                            };
+                            control.snapshot.get("behavior").cloned()
+                        })
+                        .map(|value| serde_json::from_value::<BehaviorSnapshot>(value).unwrap())
+                        .expect("durable Control snapshot")
+                };
+                let control_count_before_retry = events_before_retry
+                    .iter()
+                    .filter(|event| {
+                        matches!(&event.kind, chat_state::TimelineEventKind::Control(_))
+                    })
+                    .count();
+                *actor.behavior.lock() =
+                    BehaviorCoordinator::from_snapshot(read_control_behavior(&events_before_retry));
+
+                assert!(
+                    !actor
+                        .accept_plan_decision(&submitted, &decision)
+                        .await
+                        .expect("same receipt after lost ACK must be accepted idempotently")
+                );
+                let events_after_retry = actor
+                    .chat_state_handle
+                    .timeline_events()
+                    .await
+                    .expect("read retry history");
+                assert_eq!(
+                    events_after_retry
+                        .iter()
+                        .filter(|event| {
+                            matches!(&event.kind, chat_state::TimelineEventKind::Control(_))
+                        })
+                        .count(),
+                    control_count_before_retry,
+                    "retry must not append another durable decision"
+                );
+                let canonical = read_control_behavior(&events_after_retry);
+                assert!(canonical.last_plan_handoff.is_none());
+                assert!(events_after_retry.iter().all(|event| {
+                    !matches!(
+                        &event.kind,
+                        chat_state::TimelineEventKind::Notification(
+                            chat_state::NotificationEvent::Received {
+                                source: chat_state::NotificationSource::PlanHandoff { .. },
+                                ..
+                            }
+                        )
+                    )
+                }));
+
+                let materialized = actor
+                    .chat_state_handle
+                    .materialize_timeline(actor.session_id_string())
+                    .await
+                    .expect("materialize canonical tool result");
+                let terminal_count = |surface: &[crate::sampling::ConversationItem]| {
+                    surface
+                        .iter()
+                        .filter(|item| {
+                            matches!(
+                                item,
+                                crate::sampling::ConversationItem::ToolResult(result)
+                                    if result.tool_call_id == call_id
+                            )
+                        })
+                        .count()
+                };
+                assert_eq!(
+                    terminal_count(&materialized.surface),
+                    1,
+                    "the original deferred tool call has one durable terminal result"
+                );
+            })
+            .await;
+    }
+}
+
 #[cfg(test)]
 mod wait_interrupt_tests {
     use super::{

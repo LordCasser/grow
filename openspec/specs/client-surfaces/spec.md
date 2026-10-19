@@ -1497,19 +1497,21 @@ Pager SHALL show a diagnostic for the current content search when the index is d
 - **THEN** the old results and errors are ignored even if the reopened picker has the same query.
 
 ### Requirement: Interjection display preserves user text across resume
-Mid-turn user input SHALL persist its user-facing text separately from model-only interjection instructions and skill expansion. Resume SHALL display that persisted user text without exposing the runtime envelope. Literal markup authored by the user SHALL remain intact; display SHALL NOT be recovered by parsing model prompt tags.
+运行中用户输入 SHALL 将用户可见文本与模型专用插话指令分开持久化。显式技能正文 SHALL 来自关联的独立加载结果，不再追加到用户输入或其插话信封。恢复 SHALL 展示保存的用户文本；用户自己写入的标记 SHALL 保留，显示文本 SHALL NOT 通过解析模型提示标签恢复。
 
 #### Scenario: Resume after accepted steering
-- **WHEN** accepted mid-turn user input is consumed and its display update is replayed
-- **THEN** the display text is the sanitized original input while model context retains its interjection envelope.
+- **WHEN** 运行中输入在加载前提满足后被消费，显示更新随后被回放
+- **THEN** 显示清理后的原始输入，模型上下文保留适用的插话指令与独立技能结果，不把 Runtime 信封显示为用户文字。
 
 #### Scenario: Direct interjection injection
-- **WHEN** an interjection without queued input identities is injected
-- **THEN** the same display/model separation applies and image blocks remain available.
+- **WHEN** 没有队列输入身份的直接插话被接纳
+- **THEN** 同样保留显示与模型内容的分离以及图片块；含技能引用时，先建立 Runtime 持有的稳定关联身份，再执行相同加载前提。
 
 #### Scenario: User authors prompt-like markup
-- **WHEN** the user input includes literal user_query tags
-- **THEN** those tags remain part of the user text and are not parsed or removed as runtime framing.
+- **WHEN** 用户输入包含字面的 user_query 标签
+- **THEN** 标签作为用户文字保留，不被当作 Runtime 包装解析或删除。
+
+证据入口：`crates/codegen/shell/src/session/actor/interjection.rs` 的直接注入与 consume_steer_inputs、`crates/codegen/pager/src/acp/tracker.rs` 的持久显示文本回放。
 
 ### Requirement: Paste collection preserves input-batch boundaries
 A detected unbracketed multiline paste SHALL remain one pending insertion across bounded input collection passes. Reaching an event budget SHALL yield without committing the paste prefix. The existing idle boundary SHALL flush the complete insertion even without a subsequent input event. A completed bracketed `Event::Paste` SHALL retain its own boundary and SHALL NOT absorb or discard later events merely because they were collected in the same input batch.
@@ -2063,8 +2065,8 @@ Grow 在正常终端退出中 SHALL 先确认输入 reader 不再消费 TTY，�
 - **THEN** 不与 reader 并发读 stdin，不执行不可靠的回复读取；仍执行可行的终端恢复并记录降级原因，退出不因 fence 增加无界等待。
 
 #### Scenario: Forced exit remains fast
-- **WHEN** 首次受控退出信号转为正常 quit，或 panic/第二次信号走强制退出
-- **THEN** 前者在条件满足时经过正常 fence；后者只做快速 best-effort teardown，不等待 reader、writer 或 DA1。
+- **WHEN** 首次受控 OS 退出信号请求挂起退出，或 panic、显式紧急强退、第二次外部 OS 信号要求立即退出
+- **THEN** 前者在成功挂起且条件满足时经过正常 fence；后者只做快速 best-effort teardown，不等待 reader、writer 或 DA1，且不声称挂起成功；普通重复 Ctrl+C 键盘事件不属于该强退路径。
 
 ### Requirement: Slash MRU snapshot writes obey the encoded input allowance
 Slash MRU persistence SHALL reject encoded snapshots larger than 1,048,576 bytes before background handoff and before filesystem publication. Rejected snapshots SHALL leave the destination unchanged; a rejected handoff SHALL be reported to the controller so its store remains dirty for retry. Snapshots at or below the allowance SHALL retain atomic publication behavior.
@@ -2269,15 +2271,20 @@ When a visible session picker remains loading after another view supersedes its 
 - **THEN** its entries remain available without an unnecessary refetch.
 
 ### Requirement: Agent teardown retires its session writers
-When an `MvpAgent` is destroyed while its process runtime continues, it SHALL request shutdown of every primary and active child session actor it owns. A replacement agent SHALL not load the same session until the old writer has released its lease.
+
+When an `MvpAgent` is destroyed while its process runtime continues, it SHALL retire every primary and active child session actor it owns. Controlled suspension exit SHALL first confirm the tree's suspension boundary, then retire runtime resources without producing cancellation terminals or dismissing saved inputs. Other teardown SHALL retain its existing shutdown/failure meaning. A replacement agent SHALL not load the same session until the old writer has released its lease.
 
 #### Scenario: Agent owner ends with resident sessions
-- **WHEN** the Agent owner is dropped while primary or child session actors remain resident
-- **THEN** each actor receives the existing shutdown command and the owner releases its handles without blocking the local event loop.
+- **WHEN** the Agent owner is dropped without a completed suspension handoff while primary or child session actors remain resident
+- **THEN** each actor receives the existing shutdown command and the owner releases its handles without blocking the local event loop; this fallback does not claim a successful suspension.
 
 #### Scenario: In-process leader replacement
 - **WHEN** a leader generation is stopped and a replacement generation will load the same session
 - **THEN** the replacement waits until the old session writer lease is released before loading; it does not overlap writers or treat an active lease as a successful load.
+
+#### Scenario: Owner exits after suspension handoff
+- **WHEN** the owned tree has a confirmed suspension boundary
+- **THEN** guard/coordinator teardown releases resources without turning suspended children into cancelled tasks or starting new lifecycle Hook effects.
 
 ### Requirement: List layout queries respect cached item bounds
 The Pager list layout cache SHALL report per-item geometry only for indexes represented by the cache, and SHALL support appending items to either fixed-height or variable-height layouts without panicking.
@@ -2432,8 +2439,8 @@ Pager SHALL let the user edit or remove a still-pending queued message while Goa
 - **THEN** Pager keeps the editing draft and shows a failure; it does not silently return to normal composer mode or send the old text as the edit result.
 
 #### Scenario: Turn-stop shortcut remains distinct
-- **WHEN** the user invokes Ctrl+C without selecting a queued item action
-- **THEN** the existing current-turn／Goal interruption semantics remain unchanged; queued-message withdrawal is not inferred from a turn-stop gesture.
+- **WHEN** the user invokes the global Ctrl+C exit gesture without selecting a queued item action
+- **THEN** Pager requests session-tree suspension, preserves admitted queued messages, and does not infer queue withdrawal or a Goal/turn cancellation; explicit Stop Turn/Stop Goal actions remain separate.
 
 ### Requirement: Minimal frames render the selected Agent view
 
@@ -2867,19 +2874,20 @@ macOS clipboard AppleScript subprocesses SHALL inherit a regular-file size limit
 Pager SHALL perform local-draft cwd resolution, load, rekey, write, remove, and quarantine I/O outside its input and paint event loop. A stalled draft filesystem operation SHALL NOT delay key handling or drawing. Ordered worker commands SHALL preserve prompt-RPC invalidation before a later local draft write. A recovered draft SHALL apply only to its still-current agent/session/cwd binding and only when live unsent input has not superseded the load. Normal quit SHALL wait for a checkpoint of the latest eligible draft and pending invalidations; a filesystem failure SHALL retain retry intent without a busy loop.
 
 #### Scenario: Slow draft store during editing
-
 - **WHEN** a draft read or write is held by a controlled slow filesystem operation while the user types
 - **THEN** Pager continues to handle and draw the new input, and the eventual disk completion cannot replace that newer input.
 
 #### Scenario: Prompt ownership changes while disk work is pending
-
 - **WHEN** a prompt RPC transfers draft ownership while an older write or load is in flight
 - **THEN** invalidation is ordered after old work, a stale recovery cannot restore submitted text, and a subsequent new draft can persist without being deleted by the old invalidation.
 
 #### Scenario: Quit with pending draft work
-
 - **WHEN** Pager quits while the latest eligible draft or invalidation is still pending
 - **THEN** its checkpoint waits for the ordered worker outcome and does not report a successful normal exit before the attempt completes.
+
+#### Scenario: Session binding races the first input checkpoint
+- **WHEN** an input queued before session creation is dequeued during cwd-to-session draft binding and its prompt RPC has not been sent
+- **THEN** the current input identity and exact snapshot survive the binding; older draft restoration cannot replace them, and sending remains conditional on their successful local checkpoint.
 
 ### Requirement: Independent notifications bypass retractable candidate buffering
 
@@ -3707,3 +3715,284 @@ Pager 对未确认发送恢复的草稿 SHALL 保留原 session/prompt identity�
 - **THEN** 显示正文保全限制及已有持久证据的位置，不伪造内容已保存或任务仍在执行。
 
 证据与实施入口：`crates/codegen/shell/src/session/storage/jsonl/mod.rs::cleanup_stale_sessions_sync`、`crates/codegen/workspace/src/worktree/mod.rs`、第一项新增的运行健康展示。
+
+### Requirement: Search-cache recovery epochs are scoped to index identity
+Search-cache recovery SHALL associate quarantine and recreation epoch changes with the effective search-index path. Query and bootstrap work SHALL observe changes only for the index they use. Healing one index SHALL NOT trigger rebootstrap or invalidate the completed-bootstrap marker for a distinct root. Replacing an index at the same effective path SHALL invalidate work already in progress for that index.
+
+#### Scenario: One root is healed while another root bootstraps
+- **WHEN** the cache for root A is quarantined or recreated while root B has an active query or bootstrap
+- **THEN** root A observes its epoch change and root B's epoch and completion decision remain unchanged.
+
+#### Scenario: Same-root replacement during bootstrap
+- **WHEN** an index at root A's effective path is replaced while root A is bootstrapping
+- **THEN** that bootstrap withholds or clears its stale completion marker and retries through the existing bootstrap path.
+
+#### Scenario: Two roots heal concurrently
+- **WHEN** separate roots undergo cache recovery concurrently
+- **THEN** each recovery advances only its own index identity, and both roots can complete using their own bootstrap lease and marker.
+
+### Requirement: Live turn terminals classify stop reasons explicitly
+Pager SHALL treat only known successful terminal stop reasons as successful completion. Unknown or missing stop reasons SHALL NOT produce a completion marker or success notification; they SHALL be surfaced as a failure. Existing cancellation, provider error, and rate-limit handling remains distinct.
+
+#### Scenario: Unknown or interrupted stop reason
+- **WHEN** a live durable terminal has an unknown reason or `interrupted`
+- **THEN** Pager finalizes the matching prompt as a failure and emits no success notification.
+
+#### Scenario: Known successful stop reason
+- **WHEN** a live durable terminal has `end_turn`, `max_tokens`, `max_turn_requests`, or `refusal`
+- **THEN** Pager emits the existing completion behavior.
+
+#### Scenario: Duplicate terminal
+- **WHEN** a terminal for the already-finalized prompt is delivered again
+- **THEN** it does not add another marker or repeat teardown/notification.
+
+### Requirement: Live Workflow clears obey revision ordering
+The live Workflow projection SHALL reject a positive-revision update whose revision is not newer than the accepted revision for that same run, including `cleared` updates. A revisionless clear SHALL retain the existing compatibility behavior; a revisionless non-clear update SHALL NOT resurrect a cleared run.
+
+#### Scenario: Stale positive-revision clear
+- **WHEN** a newer Workflow revision for a run has been accepted and an older positive-revision clear arrives
+- **THEN** the clear is ignored without changing the run, revision high-water mark, tombstone, or running block.
+
+#### Scenario: Newer positive-revision clear
+- **WHEN** a clear arrives with a positive revision newer than the accepted revision
+- **THEN** the run is removed and its clear tombstone and revision are recorded.
+
+#### Scenario: Revisionless clear compatibility and stale replay
+- **WHEN** a revisionless clear arrives, followed by a revisionless snapshot for the same run
+- **THEN** the clear applies under the existing compatibility rule and the later snapshot cannot resurrect the run.
+
+### Requirement: Plan interview partial actions preserve freeform notes
+Plan-mode `Chat about this` and `Skip interview` responses SHALL preserve non-empty selected freeform text in the existing per-question `annotations.notes` field. Their `partial_answers` SHALL continue to contain selected option labels, or `Other` when the answer has only freeform text. The tool result shown to the model SHALL include both the partial answer and its notes. Empty or unselected freeform input SHALL NOT be sent.
+
+#### Scenario: Chat about this includes a freeform-only answer
+- **WHEN** the user enters non-empty freeform text for a Plan question and chooses “Chat about this”
+- **THEN** the response carries `Other` in `partial_answers` and the exact text in that question's `annotations.notes`, and the model-facing tool result includes the text.
+
+#### Scenario: Skip interview includes option and freeform notes
+- **WHEN** the user selects an option, enters non-empty freeform text, and chooses “Skip interview”
+- **THEN** the response preserves the option label and exact text separately, and the model-facing tool result includes both.
+
+#### Scenario: Unselected freeform input is omitted
+- **WHEN** freeform input is empty or not selected when either partial action is submitted
+- **THEN** no notes annotation is emitted for that question.
+
+### Requirement: Offline transcript reads detect missing committed user echoes
+The offline transcript reader MUST detect when the selected Timeline branch contains a committed user item with a persisted prompt index but the rewind-filtered display ledger contains no complete ACP user echo for that input's exact message identity. Completeness includes the ordered block count and digest committed with the consumed input. It MUST fail the read with an explicit incomplete-cache error and MUST NOT assign a nearby update by timestamp or synthesize a replacement row.
+
+For each eligible durably ended Timeline turn, the offline transcript reader MUST find a cached `TurnCompleted` with the exact ACP prompt identity persisted on `TurnStarted`. If the mapping or row is absent, it MUST report an incomplete cache and MUST NOT invent a completion result or stop reason. Recovery-only terminal records that do not represent a user-facing completion are excluded.
+
+#### Scenario: A committed user echo is missing
+- **WHEN** an offline read contains a current-branch committed user item with prompt index `n`
+- **AND** the captured display ledger has no ACP user chunk with prompt index `n`
+- **THEN** the read fails with an explicit incomplete-cache error naming `n`
+
+#### Scenario: A matching complete echo exists
+- **WHEN** the captured display ledger contains all ACP user chunks for the exact committed message identity
+- **AND** their ordered block count and digest match the consumed input's display fingerprint
+- **THEN** the offline read proceeds without changing the source ledger
+
+#### Scenario: A user echo is truncated or missing a block
+- **WHEN** a matching prompt identity exists in the display ledger
+- **AND** its ordered chunks are truncated or do not match the committed block count or digest
+- **THEN** the read fails with an explicit incomplete-cache error
+
+#### Scenario: A terminal row is missing
+- **WHEN** an eligible Timeline turn has a durable `TurnStarted` prompt identity and a durable terminal event
+- **AND** the display ledger has no `TurnCompleted` with that exact prompt identity
+- **THEN** the read fails with an explicit incomplete-cache error without synthesizing a completion
+
+#### Scenario: A prompt was removed by rewind
+- **WHEN** a committed user item exists only on a discarded branch
+- **THEN** its absent display echo does not fail the selected-branch read
+
+### Requirement: Offline transcript reads detect missing durable Workflow and Control projections
+Before publishing a durable Workflow, Goal, Control, or CurrentMode display row, the producer MUST durably record a bounded Timeline expectation that binds the exact UI event identity, source family and identity, source revision captured with the update, and serialized payload digest. Offline transcript reads MUST compare each expectation visible through the captured Timeline frontier with the captured display-ledger frontier and fail with an explicit incomplete-cache error if the row is absent or its digest differs. Expectations MUST NOT contain display bodies or grant execution authority. Ephemeral updates and updates coalesced before durable publication MUST NOT create expectations. Readers MUST NOT infer a missing row from timestamps, mutable manifests, neighboring rows, or current runtime state, and MUST NOT rewrite the cache.
+
+#### Scenario: Durable Workflow row is missing
+- **WHEN** the captured Timeline contains a Workflow projection expectation for event ID `e`
+- **AND** the captured display ledger contains no row with event ID `e`
+- **THEN** the offline read fails with an incomplete-cache error identifying the missing projection
+
+#### Scenario: Durable Control row has changed
+- **WHEN** the captured display ledger contains the expected event ID but its serialized payload digest differs from the Timeline expectation
+- **THEN** the offline read fails with an incomplete-cache error and does not use a nearby revision as a replacement
+
+#### Scenario: Ephemeral Workflow or Control snapshot
+- **WHEN** a Workflow or Control snapshot is sent only as an ephemeral or coalesced update
+- **THEN** no durable projection expectation is required and its absence from the captured display ledger does not fail the read
+
+#### Scenario: Durable Goal or CurrentMode row is missing
+- **WHEN** the captured Timeline contains a Goal or CurrentMode projection expectation
+- **AND** the captured display ledger contains no row with that exact event ID
+- **THEN** the offline read fails with an incomplete-cache error naming the missing projection
+
+#### Scenario: Captured frontiers exclude a later projection
+- **WHEN** a projection expectation or display row is appended after the read's captured Timeline or display-ledger frontier
+- **THEN** the read does not mix that later fact into its fixed snapshot
+
+#### Scenario: A cache-missing expectation still reserves its event identity
+- **WHEN** a cold load has a validated Timeline expectation whose cache append was interrupted, or whose row belongs to a rewind-discarded branch
+- **THEN** the process event counter is seeded past that expectation before the session actor can publish another row, so the missing identity is not reused
+
+#### Scenario: Existing history has no projection expectation
+- **WHEN** a current-format history contains Workflow or Control rows but predates projection expectation facts
+- **THEN** the reader does not infer missing expectations or reconstruct absent rows; unsupported older Timeline formats follow schema-version rejection
+
+### Requirement: Ctrl C requests bounded session tree suspension
+
+执行会话界面的全局 Ctrl+C SHALL 请求整树快速挂起并在成功后退出，第一次按键不得先取消 turn、暂停 Goal 或清除已接纳队列；重复按键 SHALL 合并到同一请求，不变为强退。挂起等待默认 SHALL 使用总计五秒的绝对期限，取消、保存、ACK 核对和退出准备共享该期限；期限只约束调用方等待，不证明操作或 I/O 已结束。挂起失败或超时 SHALL 展示未确认及可重试/显式强退选择，不显示保存成功、不无限等待。显式任务取消与紧急强退 SHALL 保持可区分入口。
+
+#### Scenario: Running root receives Ctrl C
+- **WHEN** root 正在执行且有活跃 child，用户触发全局 Ctrl+C
+- **THEN** 显示正在挂起，发起同一次树级挂起，在持久边界和 writer 退出确认后正常恢复终端并退出。
+
+#### Scenario: Repeated Ctrl C while acknowledgments are pending
+- **WHEN** 用户在保存期间再次触发 Ctrl+C
+- **THEN** 不重复挂起、不重置期限、不先取消任务，也不调用强制进程退出。
+
+#### Scenario: Suspension cannot finish within the deadline
+- **WHEN** 任一所需确认在五秒期限内无法完成
+- **THEN** 交互界面恢复可响应并显示挂起未完成；若用户明确强退，仅保留已提交证据并说明本次不能保证完整恢复，不记录 Suspended 成功。
+
+#### Scenario: A child view or multiple roots are open
+- **WHEN** 用户从 child view 请求退出，或退出将销毁本进程拥有的多个 root
+- **THEN** child 请求归属其 root；将被该退出销毁的每棵树分别完成挂起，不能只保存当前可见节点；不控制其他 owner 的独立会话。
+
+#### Scenario: Local UI and readonly views
+- **WHEN** Ctrl+C 被局部复制等既有局部操作消费，或用户处于只读 replay、无 session 的 Welcome
+- **THEN** 沿局部操作或只读退出语义处理，不新增执行；进入执行会话的全局退出路径后不得再走 CancelTurn。
+
+目标入口：`crates/codegen/pager/src/app/root/{mod,event_loop}.rs`、`root/dispatch/router.rs`、`app/signal_handler.rs`、`acp/spawn.rs`。
+
+### Requirement: Resume displays and restores suspended work
+
+执行型 resume SHALL 自动恢复所选挂起 root 的任务树，显示恢复中、已运行或具体受阻原因。挂起的 child SHALL 显示为挂起而非取消；操作中断与 Agent 任务状态 SHALL 分别展示。普通历史浏览 SHALL 不启动 child、provider 或工具。恢复提示 SHALL 不冒充新的用户任务、授权或重复完成通知。
+
+#### Scenario: Resume after terminal application update
+- **WHEN** 用户退出后更新 Terminal app，再通过 `grow resume` 打开挂起会话
+- **THEN** 原任务树自动续接，已完成结果仍可见，未完成 child 无需逐个手动重启，原父等待关系保持。
+
+#### Scenario: A command could not be confirmed stopped
+- **WHEN** 挂起记录包含 OutcomeUnknown 命令
+- **THEN** 同时显示任务可恢复与该操作结果未知，不用“已冻结”暗示外部命令已经停止。
+
+目标入口：`crates/codegen/pager/src/app/acp_handler/`、`crates/codegen/shell/src/agent/mvp_agent/acp_agent.rs::load_session`。
+
+### Requirement: Plan presentation preserves actual progress and waiting
+
+客户端 SHALL 区分计划业务状态、执行活动、等待依据、结果交付及验收。turn 结束 SHALL NOT 把未完成的 in_progress 显示成 completed。Grow 投影 SHALL 携带 session/工作范围/步骤与执行关联的稳定身份；仅支持粗粒度 ACP 的客户端 SHALL 保守呈现，不靠显示完成消除 spinner。
+
+#### Scenario: CS-01 Turn ends with unfinished TODOs
+- **WHEN** 模型回合结束但计划项仍未完成，或工作已结构化等待 child/命令/用户
+- **THEN** 页面显示真实未完成/等待状态，等待有可查看依据；刷新、headless 和恢复不出现先完成后回退的假状态。
+
+#### Scenario: CS-02 Generic ACP cannot express waiting
+- **WHEN** 客户端只能表示 pending/in_progress/completed
+- **THEN** 未完成等待保留保守的 in_progress 及支持的说明，不映射为 completed；Grow 客户端通过稳定引用显示完整状态。
+
+证据与实施入口：`crates/codegen/shell/src/session/actor/turn/settlement.rs::emit_turn_end_plan_cleanup`、`crates/codegen/shell/src/session/acp_conversion.rs::acp_plan_update`、`crates/codegen/pager/src/{app/acp_handler,headless/reducer}`。
+
+### Requirement: Linked plans and unapplied changes are inspectable
+
+用户 SHALL 能从父项查看关联执行及 child 自己的计划，区分待重规划、已处理、已交付待验收、要求变更待复核和终态未应用。父子列表 SHALL 保持各自所有权，不以子项数生成假总进度。查看、恢复展示和 replay SHALL 只投影已有事实，不触发模型工作。
+
+#### Scenario: CS-03 Parent changes a step with active and completed children
+- **WHEN** 同一父项关联一个活跃 child 和一个已结束 child 后被修改
+- **THEN** 活跃 child 显示待检查/处理结果，已结束 child 显示变更未应用且原结果仍可查看；父级可明确决定复用或另委派。
+
+#### Scenario: CS-04 Inspect a nested plan during replay
+- **WHEN** 用户展开 grandchild 或播放导出的会话树
+- **THEN** 只显示已交付历史中的本地计划/关联/等待，无模型调用、通知消费或旧任务复活；不同 session 的同名 step 不合并。
+
+证据与实施入口：`crates/codegen/pager/src/app/agent_view`、`crates/codegen/pager/src/headless/reducer`、现有 session/child 状态核对与 transcript replay 投影。
+
+### Requirement: Plan previews resolve the canonical reviewed artifact
+/view-plan 和计划预览 SHALL 从后端候选引用解析不可变正文与版本，不依赖 legacy plan.md 或残留审批缓存决定当前内容。引用变化 SHALL 使旧审阅决定失效并提示重新审阅。
+
+查询 SHALL 使用有界异步读取，不阻塞 Pager render/输入路径；返回值与评论 SHALL 绑定 session、当前查看请求和候选版本。
+
+#### Scenario: Only the immutable artifact exists
+- **WHEN** 审批 view 已不存在且没有 legacy plan.md，但候选 artifact 有效
+- **THEN** 仍能查看正确版本，界面展示与后端审批依据一致。
+
+#### Scenario: Preview returns after session or version changes
+- **WHEN** v1 正文请求尚未返回时用户切换会话、关闭重开预览或当前候选替换为 v2
+- **THEN** 旧返回不覆盖当前展示，v1 评论被保留并标记原版本，不自动套用到 v2 相同行号。
+
+实施入口：`crates/codegen/pager/src/app/agent_view/plan.rs::plan_body_for_preview`、`slash/commands/view_plan.rs`。
+
+### Requirement: Plan dismissal and defer expose different decisions
+客户端 SHALL 区分收起、保留稍后审阅、批准并执行、要求修改和放弃，保留可发现入口、用户草稿及相关评论。收起仅改变展示；保留是否成功以后台接纳为准。界面 SHALL 保留 Grow 最顶部 task 布局，不依赖统一 Dock。
+
+#### Scenario: Collapse and reopen review
+- **WHEN** 用户收起 v1 后重新打开
+- **THEN** 查看同一版本且未产生批准/拒绝/执行，输入草稿不丢失。
+
+#### Scenario: Defer request is not acknowledged
+- **WHEN** 保留请求的接纳结果未确认
+- **THEN** 显示未确认并保留内容，不以本地关闭卡片宣称持久保留成功。
+
+#### Scenario: Retained preview review shortcut reaches its action
+- **WHEN** retained Plan preview 显示 `r review`，同时存在尚未结束的行为切换确认提示
+- **THEN** `r` 仍 dispatch 此预览的 Review action，并沿用当前 session/submission binding；行为确认提示不得在根输入路由中吞掉该快捷键。
+
+实施入口：Pager Plan view、原焦点/草稿 owner、Shell typed control response。
+
+### Requirement: Plan execution feedback waits for authoritative admission
+批准执行后客户端 SHALL 区分接纳处理中、已接纳、明确拒绝和状态未确认；在决定未获权威确认前保留候选与评论，不允许相互冲突的决定被乐观视为成功。
+
+#### Scenario: Storage admission is closed
+- **WHEN** 后端因准入或持久化故障未接受执行
+- **THEN** 候选保持可审阅，展示受阻/未确认原因，不清空或再次作为普通 prompt 提交。
+
+#### Scenario: Review waits for suspended session restoration
+- **WHEN** retained Plan 的查看或 Review 请求与 `session/load` 的 suspended-tree 恢复并发，且 Actor 已注册但恢复屏障尚未完成
+- **THEN** 请求等待 load 完成后再读取或决定候选，不把仍关闭的 runtime execution gate 当作 Plan review 拒绝。
+
+实施入口：Pager Plan action/response、现有 Shell approval/Control ACK。
+
+### Requirement: Explicit skill loads reuse visible Skill interactions
+主窗口 SHALL 使用现有 Skill 行的折叠、展开和正文查看交互呈现显式加载，以结构化身份和实际状态驱动，不以路径或模型文字推断成功。用户与模型来源 SHALL 沿同一 ACP 工具行投影与回放管线关联真实加载身份。行 SHALL 显示技能名称、来源及加载中、已加载、失败或取消结果；准备完成但未发布 SHALL 保持加载中，提交未知 SHALL 明确可见，Loaded SHALL 晚于权威发布。终态 SHALL 更新原行。
+
+#### Scenario: Forced load becomes visible
+- **WHEN** 用户技能输入开始实际加载并随后成功提交
+- **THEN** 主窗口显示对应名称的加载中行，提交确认后原行变为已加载，不需要额外模型文字确认。
+
+#### Scenario: Failure and cancellation
+- **WHEN** 加载被拒绝、正文读取失败或明确取消
+- **THEN** 原 Skill 行显示真实结果和可展开原因，不显示成功标记；尚未派发的引用不冒充已加载。
+
+#### Scenario: Multiple skills collapse
+- **WHEN** 多个显式 Skill 行出现且用户折叠正文
+- **THEN** 每行仍保留名称和结果，显式 Skill 不参加匿名数量合并；无需新分组器或面板。
+
+#### Scenario: Expand resolved snapshot
+- **WHEN** 用户展开已提交 Skill 行
+- **THEN** 展示真实来源、调用参数及实际提交正文快照，不读取最新文件来替换显示内容。
+
+#### Scenario: Group fails after some bodies are prepared
+- **WHEN** 用户组的一些正文已准备，但另一项失败导致整组未发布
+- **THEN** 出错项显示失败，已开始的其余项显示取消及未注入原因，未派发项只作未执行说明；没有任何项提前显示 Loaded。
+
+#### Scenario: Execution terminates after a confirmed load
+- **WHEN** 加载已确认发布，但首次关联模型步骤尚未获得已接纳响应就终止
+- **THEN** 历史 Skill 行保留当时的 Loaded，所属输入或回合明确显示后续执行未完成；不能把该行解释为内容已被模型成功处理。
+
+证据入口：`crates/codegen/pager/src/scrollback/blocks/tool/read.rs` 的 Skill 标题和内容查看、`tool/mod.rs` 的 VerbGroupKind，以及 `crates/codegen/pager/src/acp/tracker.rs` 的状态和回放接收。
+
+### Requirement: Skill display distinguishes file reads and historical results
+普通文件读取 SHALL 保持 Read 语义，初始化预加载 SHALL 不伪造显式调用行。normal、minimal、恢复回放与 headless SHALL 从相同加载事实呈现名称、来源及结果；历史成功 SHALL 不表示技能永久生效。
+
+#### Scenario: Review SKILL.md as a file
+- **WHEN** 文件工具读取名为 SKILL.md 的文件或 skills 目录中的 Markdown
+- **THEN** 显示文件读取，不仅凭路径显示为技能加载成功。
+
+#### Scenario: Replay and headless output
+- **WHEN** 已提交加载结果被 normal/minimal 客户端回放或输出到 headless
+- **THEN** 各入口保持相同身份与结果，headless 提供对应结构化信息，不重复执行加载或追加成功行；历史 replay 将 terminal ToolCall 与其前序 ToolCallUpdate 折叠时，仍保留 Skill 的 canonical tool identity 和 raw output（source / prepared body），并生成与实时 terminal ToolCallUpdate 相同的配对结果。
+
+#### Scenario: Loaded history after compaction
+- **WHEN** 用户查看压缩前的成功加载记录
+- **THEN** 展示当时加载结果，不新增“当前持续生效”的技能状态承诺。
+
+证据入口：`crates/codegen/pager/src/scrollback/blocks/tool/read.rs`、`crates/codegen/tools/src/implementations/skills/types.rs` 的 skill_name_from_path，以及现有 normal/minimal/headless 更新管线。

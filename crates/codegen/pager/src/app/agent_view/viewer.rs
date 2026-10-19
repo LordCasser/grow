@@ -2,6 +2,7 @@
 //! and their key/mouse handlers.
 
 use super::{AgentView, render_char_buttons};
+use crate::app::actions::Action;
 use crate::app::root::InputOutcome;
 use crate::key;
 use crate::scrollback::selection::SelectionBox;
@@ -98,6 +99,25 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
+        let decision_pending = self
+            .plan_approval_view
+            .as_ref()
+            .is_some_and(crate::views::plan_approval_view::PlanApprovalViewState::decision_pending);
+        if self.pending_plan_approval_decision.is_some()
+            && in_plan_approval
+            && key!('r').matches(key)
+        {
+            return InputOutcome::Action(Action::CheckPlanApprovalDecision);
+        }
+        if decision_pending {
+            if key!('r').matches(key) {
+                return InputOutcome::Action(Action::CheckPlanApprovalDecision);
+            }
+            if !key!(Esc).matches(key) && !key!('y').matches(key) {
+                return InputOutcome::Changed;
+            }
+        }
+
         if in_plan_approval && key.code == KeyCode::Tab && key.modifiers.is_empty() {
             if let Some(ref mut pav) = self.plan_approval_view {
                 pav.focus = PlanApprovalFocus::Prompt;
@@ -105,10 +125,28 @@ impl AgentView {
             return InputOutcome::Changed;
         }
 
-        // Plan-approval `Esc` doesn't close the viewer (use `q` / `Ctrl+\`),
-        // but it still clears a transient visual selection or accepted search
-        // matcher first, so the graduated dashboard-overlay back-out (which
-        // declines to fire while a matcher is active) isn't left dead-ended.
+        if in_plan_approval && !decision_pending && key!('l').matches(key) {
+            return self.defer_plan();
+        }
+
+        if !in_plan_approval
+            && self.is_plan_viewer()
+            && key!('r').matches(key)
+            && self.plan_artifact_preview.as_ref().is_some_and(|preview| {
+                preview.retained
+                    && preview.binding_epoch == self.session_binding_epoch
+                    && self
+                        .session
+                        .session_id
+                        .as_ref()
+                        .is_some_and(|session_id| preview.session_id == session_id.0.as_ref())
+            })
+        {
+            return InputOutcome::Action(Action::ReviewRetainedPlan);
+        }
+
+        // Esc first clears transient selection/search state, then locally
+        // collapses the viewer while leaving the live approval waiter intact.
         if in_plan_approval && key!(Esc).matches(key) {
             if let Some(ref mut viewer) = self.line_viewer {
                 if viewer.list_state.visual_mode {
@@ -120,6 +158,7 @@ impl AgentView {
                     return InputOutcome::Changed;
                 }
             }
+            self.cancel_line_viewer();
             return InputOutcome::Changed;
         }
 
@@ -328,10 +367,23 @@ impl AgentView {
 
     /// Cancel line viewer: revert all changes.
     pub(crate) fn cancel_line_viewer(&mut self) {
+        if self.is_plan_viewer() {
+            // Closing the preview also retires reads started for that view.
+            self.plan_preview_request_id = self.plan_preview_request_id.wrapping_add(1);
+        }
         self.line_viewer = None;
         self.prompt.textarea.cancel_undo_group();
         if let Some(ref mut pav) = self.plan_approval_view {
-            pav.focus = PlanApprovalFocus::Preview;
+            if pav.focus == PlanApprovalFocus::Commenting {
+                if let Some(stashed) = pav.stashed_feedback_prompt.take() {
+                    self.prompt.restore(stashed);
+                } else {
+                    self.prompt.set_text("");
+                }
+                pav.commenting_range = None;
+                pav.editing_comment_id = None;
+            }
+            pav.focus = PlanApprovalFocus::Prompt;
         }
         // If a casual plan comment was in progress when the modal
         // closed (via [✗], click-outside, or any other path that
@@ -408,6 +460,8 @@ impl AgentView {
         let send_area = viewer.plan_ref().and_then(|p| p.send_button_area);
         let abandon_area = viewer.plan_ref().and_then(|p| p.abandon_button_area);
         let approve_area = viewer.plan_ref().and_then(|p| p.approve_button_area);
+        let later_area = viewer.plan_ref().and_then(|p| p.later_button_area);
+        let review_area = viewer.plan_ref().and_then(|p| p.review_button_area);
         let comment_btn_area = viewer.plan_ref().and_then(|p| p.comment_button_area);
         let copy_btn_area = viewer.plan_ref().and_then(|p| p.copy_button_area);
         // Cached `is_plan_viewer()` so we don't need to call self while
@@ -417,11 +471,9 @@ impl AgentView {
 
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Left) => {
-                // Click on close button -> cancel.
+                // Close only collapses the viewer; it does not decide the plan.
                 if close_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
-                    if self.plan_approval_view.is_none() {
-                        self.cancel_line_viewer();
-                    }
+                    self.cancel_line_viewer();
                     return InputOutcome::Changed;
                 }
                 // Click on fullscreen button -> toggle fullscreen.
@@ -433,6 +485,12 @@ impl AgentView {
                 }
                 if abandon_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     return self.abandon_plan();
+                }
+                if later_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
+                    return self.defer_plan();
+                }
+                if review_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
+                    return InputOutcome::Action(Action::ReviewRetainedPlan);
                 }
                 if approve_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into())) {
                     if self.plan_approval_view.is_some() {
@@ -526,6 +584,20 @@ impl AgentView {
                 let prev_send = viewer.plan_ref().is_some_and(|p| p.send_hovered);
                 if send_hover != prev_send {
                     viewer.plan_mut().send_hovered = send_hover;
+                    changed = true;
+                }
+                let later_hover =
+                    later_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into()));
+                let prev_later = viewer.plan_ref().is_some_and(|p| p.later_hovered);
+                if later_hover != prev_later {
+                    viewer.plan_mut().later_hovered = later_hover;
+                    changed = true;
+                }
+                let review_hover =
+                    review_area.is_some_and(|a| a.contains((mouse.column, mouse.row).into()));
+                let prev_review = viewer.plan_ref().is_some_and(|p| p.review_hovered);
+                if review_hover != prev_review {
+                    viewer.plan_mut().review_hovered = review_hover;
                     changed = true;
                 }
                 let abandon_hover =

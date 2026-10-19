@@ -299,7 +299,7 @@ impl SessionActor {
         model_id: &str,
         tool_parsed_args: &serde_json::Value,
     ) -> Result<Vec<ConversationItem>, acp::Error> {
-        use crate::session::acp_conversion::{acp_plan_update, acp_tool_update, maybe_rewrite};
+        use crate::session::acp_conversion::{acp_tool_update, maybe_rewrite};
         let consumed_ids =
             tools::reminders::task_completion::consumed_completion_ids(&result.output);
         if !consumed_ids.is_empty() {
@@ -372,10 +372,9 @@ impl SessionActor {
             self.signals_handle()
                 .record_tool_success(requested_tool_name);
         }
-        if let Some(acp_plan) = acp_plan_update(&result.output) {
-            self.send_update(acp::SessionUpdate::Plan(acp_plan), None)
-                .await;
-        }
+        // Todo success is already projected from the Timeline commit by
+        // `hydrate_local_plan`; emitting the tool payload here would duplicate
+        // the same committed plan and create a second projection path.
         let context_recall_coordinates = match &result.output {
             ToolsToolOutput::ContextRecall(output) => Some((
                 output.frozen_surface_revision,
@@ -894,8 +893,13 @@ impl SessionActor {
         );
         self.send_update(acp::SessionUpdate::ToolCallUpdate(tool_update), None)
             .await;
-        let tool_chat = ConversationItem::tool_result(model_call_id.to_owned(), reason);
-        self.chat_state_handle.push_tool_result(tool_chat);
+        // A Runtime skill invocation has no model-issued call on Surface.
+        // Its input owner either publishes the whole typed group or settles
+        // the input as Handled; do not manufacture an orphan tool result.
+        if super::super::skill_loading::user_skill_selection().is_none() {
+            let tool_chat = ConversationItem::tool_result(model_call_id.to_owned(), reason);
+            self.chat_state_handle.push_tool_result(tool_chat);
+        }
         Ok(())
     }
 }

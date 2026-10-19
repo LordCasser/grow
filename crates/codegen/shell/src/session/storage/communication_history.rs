@@ -7,9 +7,13 @@ use chat_state::{InputEvent, TimelineEvent, TimelineEventKind, ToolEvent};
 use std::collections::{HashMap, HashSet};
 
 fn notice_identity(notice: &UiNotice) -> (String, Option<String>, Option<String>) {
-    let peer = crate::coordination::IncomingInquiryAudit::from_notice(notice)
-        .map(|audit| audit.source_peer_id);
-    (notice.correlation_id.clone(), notice.subject.clone(), peer)
+    let source = crate::coordination::IncomingInquiryAudit::from_notice(notice)
+        .map(|audit| audit.source_session_id);
+    (
+        notice.correlation_id.clone(),
+        notice.subject.clone(),
+        source,
+    )
 }
 
 pub(crate) fn read_notice(

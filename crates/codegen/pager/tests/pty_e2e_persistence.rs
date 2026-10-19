@@ -13,6 +13,8 @@ mod common;
 mod background_task_reaped_on_quit;
 #[path = "pty_e2e/continue_resumes_session_with_history.rs"]
 mod continue_resumes_session_with_history;
+#[path = "pty_e2e/ctrl_c_suspend_and_continue.rs"]
+mod ctrl_c_suspend_and_continue;
 #[path = "pty_e2e/endline_park_is_markerless.rs"]
 mod endline_park_is_markerless;
 #[path = "pty_e2e/endline_wakeups_close_with_markers.rs"]
@@ -25,3 +27,5 @@ mod rename_title_shows_in_prompt_border;
 mod reparked_wait_stays_markerless;
 #[path = "pty_e2e/spinner_reappears_after_wait_resumes.rs"]
 mod spinner_reappears_after_wait_resumes;
+#[path = "pty_e2e/suspend_nested_task_tree.rs"]
+mod suspend_nested_task_tree;

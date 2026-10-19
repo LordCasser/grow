@@ -12,7 +12,7 @@ use crate::session::persistence::PersistenceMsg;
 
 use super::tracker::WorkflowRunState;
 
-pub(crate) const WORKFLOW_RUN_MANIFEST_VERSION: u8 = 6;
+pub(crate) const WORKFLOW_RUN_MANIFEST_VERSION: u8 = 7;
 pub(crate) const MAX_RESTORED_WORKFLOW_RUNS: usize = 128;
 pub(crate) const MAX_WORKFLOW_MANIFEST_BYTES: u64 =
     chat_state::MAX_WORKFLOW_INITIAL_MANIFEST_BYTES as u64;
@@ -500,6 +500,7 @@ fn reconcile_workflow_lifecycle(
         turn_handoff,
         message,
         execution_was_open,
+        lifecycle.execution_suspended,
     )
 }
 
@@ -1244,6 +1245,7 @@ mod tests {
                     run_id: "wf_attention".into(),
                     execution_epoch: 0,
                     status: chat_state::WorkflowExecutionStatus::BackOffPaused,
+                    execution_suspended: false,
                     handoff: chat_state::WorkflowTurnHandoff::AttentionRequired,
                     duration_ms: 1,
                     message: Some("review".into()),
@@ -1298,6 +1300,7 @@ mod tests {
                     run_id: "wf_resume".into(),
                     execution_epoch: 0,
                     status: chat_state::WorkflowExecutionStatus::Failed,
+                    execution_suspended: false,
                     handoff: chat_state::WorkflowTurnHandoff::Completion,
                     duration_ms: 1,
                     message: Some("retry".into()),
@@ -1505,6 +1508,7 @@ mod tests {
                     run_id: "wf_done".into(),
                     execution_epoch: 0,
                     status: chat_state::WorkflowExecutionStatus::Complete,
+                    execution_suspended: false,
                     handoff: chat_state::WorkflowTurnHandoff::Completion,
                     duration_ms: 1,
                     message: None,
@@ -1604,7 +1608,7 @@ mod tests {
     }
 
     #[test]
-    fn legacy_manifest_reports_version_before_decoding_the_v6_body() {
+    fn legacy_manifest_reports_version_before_decoding_the_v7_body() {
         let error = decode_workflow_manifest(
             br#"{"version":5,"state":{"run_id":"wf_legacy"},"script_revision":0}"#,
         )
@@ -1613,6 +1617,6 @@ mod tests {
         let mismatch = crate::session::persistence::session_version_mismatch_from(&error).unwrap();
         assert_eq!(mismatch.component, "Workflow run manifest");
         assert_eq!(mismatch.persisted, 5);
-        assert_eq!(mismatch.current, 6);
+        assert_eq!(mismatch.current, 7);
     }
 }

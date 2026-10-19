@@ -1,0 +1,3 @@
+- [x] Fan out internal config reload to active children using cwd filtering and policy-only command input.
+- [x] Add a handler-to-child-command regression test and verify actor policy application path.
+- [x] Record focused test results and validate the change.

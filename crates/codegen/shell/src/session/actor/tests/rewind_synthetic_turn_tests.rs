@@ -118,6 +118,123 @@ async fn rewind_removes_turn_after_synthetic_auto_wake_marked() {
     local.run_until(run_rewind_over_synthetic_turn(true)).await;
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn rewind_keeps_an_unconsumed_plan_handoff_with_its_existing_owner() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            use crate::session::behavior::{
+                BehaviorCoordinator, RetainedPlanAction, RetainedPlanDecisionOutcome,
+                RetainedPlanStatus,
+            };
+
+            let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+            let actor = create_test_actor(0, 200_000, 80, gateway_tx, persistence_tx).await;
+            let prompt = |text: &str, index: usize| {
+                let mut user = ConversationItem::user(text);
+                user.set_prompt_index(index);
+                user
+            };
+            seed_test_timeline(
+                &actor,
+                vec![
+                    ConversationItem::system("test system prompt"),
+                    prompt("P0", 0),
+                    ConversationItem::assistant("A0"),
+                    prompt("P1", 1),
+                    ConversationItem::assistant("A1"),
+                ],
+                &["P0", "P1"],
+            )
+            .await;
+
+            let mut behavior = BehaviorCoordinator::new();
+            behavior.select_behavior(tools::types::BehaviorId::Plan);
+            let plan_body = "# approved Plan";
+            crate::session::behavior::write_plan_artifact(&actor.session_directory, plan_body)
+                .expect("write approved Plan artifact");
+            behavior.record_plan_artifact(plan_body);
+            assert!(behavior.submit_initial_plan());
+            let submission_id = behavior.plan_submission_id().unwrap();
+            let submitted = behavior.snapshot();
+            assert_eq!(
+                behavior.decide_submitted_plan_if(
+                    &submitted,
+                    submission_id,
+                    "rewind-owner-approval",
+                    RetainedPlanAction::Approve,
+                    None,
+                ),
+                RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Approved)
+            );
+            let approved = behavior.snapshot();
+            *actor.behavior.lock() = BehaviorCoordinator::from_snapshot(approved.clone());
+            actor
+                .persist_control_snapshot_durably(approved.clone(), None)
+                .await
+                .expect("approved Plan Control");
+            let handoff = approved.last_plan_handoff.as_ref().unwrap();
+            let notification_id = actor
+                .receive_notification(
+                    chat_state::NotificationSource::PlanHandoff {
+                        artifact_hash: handoff.artifact_hash.clone(),
+                        artifact_revision: handoff.artifact_revision,
+                        handoff: handoff.kind,
+                    },
+                    chat_state::NotificationSourceVersion::Ordinal {
+                        value: submission_id,
+                    },
+                    "approved Plan is ready to execute".into(),
+                )
+                .await
+                .expect("durable current-owner handoff");
+
+            let before = actor
+                .chat_state_handle
+                .pending_notifications()
+                .await
+                .expect("Timeline before rewind");
+            assert_eq!(before.len(), 1);
+            assert_eq!(before[0].id, notification_id);
+
+            let response = actor
+                .handle_rewind(RewindRequest {
+                    target_prompt_index: 1,
+                    force: true,
+                    mode: RewindMode::ConversationOnly,
+                })
+                .await
+                .expect("same-owner rewind");
+            assert!(response.success, "{response:?}");
+
+            let after = actor
+                .chat_state_handle
+                .pending_notifications()
+                .await
+                .expect("Timeline after rewind");
+            assert_eq!(after.len(), 1, "rewind must retain undelivered owner work");
+            assert_eq!(after[0].id, notification_id);
+            let events = actor
+                .chat_state_handle
+                .timeline_events()
+                .await
+                .expect("canonical Timeline after rewind");
+            let restored_control =
+                crate::session::control::SessionControlSnapshot::latest_from_timeline(&events)
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(
+                restored_control.behavior.last_plan_handoff,
+                approved.last_plan_handoff
+            );
+            assert_eq!(
+                restored_control.behavior.retained_plan,
+                approved.retained_plan
+            );
+        })
+        .await;
+}
+
 /// Rewind on a session with no prompts: the picker has nothing to offer and
 /// an execute request is rejected (no silent no-op "success").
 #[tokio::test(flavor = "current_thread")]

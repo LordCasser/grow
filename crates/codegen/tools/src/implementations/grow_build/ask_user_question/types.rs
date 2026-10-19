@@ -21,9 +21,9 @@ use crate::register_resource;
 
 // ── ACP wire-format types ────────────────────────────────────────────────
 
-/// Annotation on a single question's answer.
+/// Annotation on a single question's answer or partial answer.
 ///
-/// Carried inside the `accepted` response alongside the selected label.
+/// Carried inside the response alongside the selected label.
 /// - `preview`: verbatim `Option.preview` of the selected option (single-select only).
 /// - `notes`: free-text the user typed in the freeform input.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -80,16 +80,21 @@ pub enum AskUserQuestionExtResponse {
     },
     /// User chose "Chat about this" (Path B, plan mode only).
     ChatAboutThis {
-        /// Partial answers: answered questions only, label only (no notes).
-        /// Freeform-only => `"Other"` (notes dropped in plan-mode paths).
+        /// Partial answers: answered questions only, with labels in this map.
+        /// Freeform-only => `"Other"`; exact text is carried in annotations.
         #[serde(default)]
         partial_answers: HashMap<String, String>,
+        /// Freeform text associated with partial answers.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        annotations: Option<HashMap<String, QuestionAnnotation>>,
     },
     /// User chose "Skip interview and plan immediately" (Path C, plan mode only).
     SkipInterview {
-        /// Same partial-answer rules as `ChatAboutThis`.
+        /// Same partial-answer and annotation rules as `ChatAboutThis`.
         #[serde(default)]
         partial_answers: HashMap<String, String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        annotations: Option<HashMap<String, QuestionAnnotation>>,
     },
     /// User cancelled / dismissed (Path D). NOT an error.
     Cancelled,
@@ -121,12 +126,14 @@ pub enum UserQuestionResponse {
     ChatAboutThis {
         questions: Vec<Question>,
         partial_answers: HashMap<String, String>,
+        annotations: Option<HashMap<String, QuestionAnnotation>>,
     },
     /// User chose "Skip interview" (Path C, plan mode only).
     /// Carries the original questions so the formatter can iterate all of them.
     SkipInterview {
         questions: Vec<Question>,
         partial_answers: HashMap<String, String>,
+        annotations: Option<HashMap<String, QuestionAnnotation>>,
     },
     /// User explicitly dismissed (Esc). NOT an error.
     Cancelled,
@@ -154,6 +161,8 @@ pub enum UserQuestionError {
 pub struct UserQuestionRequest {
     pub tool_call_id: String,
     pub questions: Vec<Question>,
+    /// The tool and worker share one deadline, including time in the queue.
+    pub deadline: Option<tokio::time::Instant>,
     #[educe(Debug(ignore))]
     pub result_tx: oneshot::Sender<UserQuestionResult>,
 }
@@ -191,13 +200,21 @@ impl AskUserQuestionExtResponse {
                 answers,
                 annotations,
             },
-            Self::ChatAboutThis { partial_answers } => UserQuestionResponse::ChatAboutThis {
+            Self::ChatAboutThis {
+                partial_answers,
+                annotations,
+            } => UserQuestionResponse::ChatAboutThis {
                 questions,
                 partial_answers,
+                annotations,
             },
-            Self::SkipInterview { partial_answers } => UserQuestionResponse::SkipInterview {
+            Self::SkipInterview {
+                partial_answers,
+                annotations,
+            } => UserQuestionResponse::SkipInterview {
                 questions,
                 partial_answers,
+                annotations,
             },
             Self::Cancelled => UserQuestionResponse::Cancelled,
         }
@@ -358,6 +375,7 @@ mod tests {
 
         let resp = AskUserQuestionExtResponse::ChatAboutThis {
             partial_answers: partial,
+            annotations: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["outcome"], "chat_about_this");
@@ -368,9 +386,47 @@ mod tests {
     fn ext_response_skip_interview_serializes() {
         let resp = AskUserQuestionExtResponse::SkipInterview {
             partial_answers: HashMap::new(),
+            annotations: None,
         };
         let json = serde_json::to_value(&resp).unwrap();
         assert_eq!(json["outcome"], "skip_interview");
+    }
+
+    #[test]
+    fn plan_partial_response_round_trip_preserves_notes() {
+        let mut annotations = HashMap::new();
+        annotations.insert(
+            "Which database?".to_string(),
+            QuestionAnnotation {
+                preview: None,
+                notes: Some("Use the embedded deployment".to_string()),
+            },
+        );
+        let response = AskUserQuestionExtResponse::ChatAboutThis {
+            partial_answers: HashMap::from([("Which database?".into(), "Other".into())]),
+            annotations: Some(annotations),
+        };
+
+        let json = serde_json::to_string(&response).unwrap();
+        let decoded: AskUserQuestionExtResponse = serde_json::from_str(&json).unwrap();
+        match decoded {
+            AskUserQuestionExtResponse::ChatAboutThis {
+                partial_answers,
+                annotations,
+            } => {
+                assert_eq!(partial_answers.get("Which database?").unwrap(), "Other");
+                assert_eq!(
+                    annotations
+                        .unwrap()
+                        .get("Which database?")
+                        .unwrap()
+                        .notes
+                        .as_deref(),
+                    Some("Use the embedded deployment")
+                );
+            }
+            other => panic!("expected ChatAboutThis, got {other:?}"),
+        }
     }
 
     #[test]
@@ -396,6 +452,7 @@ mod tests {
         // ChatAboutThis
         let chat = AskUserQuestionExtResponse::ChatAboutThis {
             partial_answers: HashMap::new(),
+            annotations: None,
         };
         let json = serde_json::to_string(&chat).unwrap();
         let back: AskUserQuestionExtResponse = serde_json::from_str(&json).unwrap();
@@ -407,6 +464,7 @@ mod tests {
         // SkipInterview
         let skip = AskUserQuestionExtResponse::SkipInterview {
             partial_answers: HashMap::new(),
+            annotations: None,
         };
         let json = serde_json::to_string(&skip).unwrap();
         let back: AskUserQuestionExtResponse = serde_json::from_str(&json).unwrap();
@@ -466,6 +524,7 @@ mod tests {
         let questions = sample_questions();
         let ext = AskUserQuestionExtResponse::ChatAboutThis {
             partial_answers: partial.clone(),
+            annotations: None,
         };
         let resp = ext.into_response(questions.clone());
 
@@ -473,6 +532,7 @@ mod tests {
             UserQuestionResponse::ChatAboutThis {
                 questions: q,
                 partial_answers: p,
+                annotations: None,
             } => {
                 assert_eq!(q.len(), questions.len());
                 assert_eq!(p, partial);
@@ -486,6 +546,7 @@ mod tests {
         let questions = sample_questions();
         let ext = AskUserQuestionExtResponse::SkipInterview {
             partial_answers: HashMap::new(),
+            annotations: None,
         };
         let resp = ext.into_response(questions.clone());
 
@@ -493,6 +554,7 @@ mod tests {
             UserQuestionResponse::SkipInterview {
                 questions: q,
                 partial_answers: p,
+                annotations: None,
             } => {
                 assert_eq!(q.len(), questions.len());
                 assert!(p.is_empty());
@@ -598,7 +660,9 @@ mod tests {
         let raw = r#"{"outcome": "chat_about_this"}"#;
         let resp: AskUserQuestionExtResponse = serde_json::from_str(raw).unwrap();
         match resp {
-            AskUserQuestionExtResponse::ChatAboutThis { partial_answers } => {
+            AskUserQuestionExtResponse::ChatAboutThis {
+                partial_answers, ..
+            } => {
                 assert!(partial_answers.is_empty());
             }
             other => panic!("Expected ChatAboutThis, got {:?}", other),

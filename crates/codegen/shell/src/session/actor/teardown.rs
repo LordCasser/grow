@@ -119,6 +119,7 @@ pub(super) async fn stop_session_background_services(
             &session.notification_reconciliation_worker,
         ),
         ("initial memory reindex", &session.memory_reindex_worker),
+        ("planning delivery", &session.planning_delivery),
     ] {
         if let Err(error) = join_background_service_exact(slot, label).await {
             tracing::warn!(service = label, %error, "Session storage worker failed while joining");
@@ -419,7 +420,15 @@ pub(super) async fn terminate_failed_timeline_writer(
     session.sideband_cancel.cancel();
     session.finalizer_sideband_cancel.cancel();
     session.sideband_repair_cancel.cancel();
-    let subagents_drained = match cancel_and_drain_session_subagents(session, cmd_rx).await {
+    let foreground_stopped = regular_task.as_ref().map(|task| task.stopped.clone());
+    let subagents_drained = match cancel_and_drain_session_subagents(
+        session,
+        cmd_rx,
+        "session_teardown",
+        foreground_stopped,
+    )
+    .await
+    {
         Ok(()) => true,
         Err(error) => {
             tracing::warn!(%error, "fatal teardown timed out draining non-Workflow subagents");

@@ -111,6 +111,245 @@ async fn child_bash_request(manager: &PermissionHandle, child_id: &str) -> Decis
         .await
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum InteractionTrace {
+    Opened,
+    Resolved(crate::permission::types::HumanInteractionResolution),
+}
+
+#[derive(Debug, Default)]
+struct RecordingInteractionObserver {
+    trace: tokio::sync::Mutex<Vec<InteractionTrace>>,
+    fail_open: bool,
+}
+
+#[async_trait::async_trait]
+impl crate::permission::types::HumanPermissionInteractionObserver for RecordingInteractionObserver {
+    async fn opened(&self) -> Result<(), String> {
+        self.trace.lock().await.push(InteractionTrace::Opened);
+        if self.fail_open {
+            Err("test open ACK failure".into())
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn resolved(
+        &self,
+        outcome: crate::permission::types::HumanInteractionResolution,
+    ) -> Result<(), String> {
+        self.trace
+            .lock()
+            .await
+            .push(InteractionTrace::Resolved(outcome));
+        Ok(())
+    }
+}
+
+fn permission_context(
+    observer: Arc<dyn crate::permission::types::HumanPermissionInteractionObserver>,
+    request_mode: RequestPermissionMode,
+) -> PermissionRequestContext {
+    PermissionRequestContext {
+        source: crate::permission::types::PermissionRequestSource::Primary { session_id: None },
+        request_mode: Some(request_mode),
+        within_capability_fence: false,
+        execution_cwd: None,
+        classifier_turns: None,
+        call_evidence: None,
+        human_interaction: Some(observer),
+    }
+}
+
+struct TransportFailureClient;
+
+#[async_trait::async_trait(?Send)]
+impl acp_transport::AcpClientHandler for TransportFailureClient {
+    async fn request_permission(
+        &self,
+        _: acp::RequestPermissionRequest,
+    ) -> acp::Result<acp::RequestPermissionResponse> {
+        Err(acp::Error::internal_error().data("test transport failure"))
+    }
+
+    async fn session_notification(&self, _: acp::SessionNotification) -> acp::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn permission_interaction_observer_matches_real_prompt_boundaries() {
+    use crate::permission::types::{
+        HumanInteractionResolution, PatternMode, PermissionConfig, PermissionRule, RuleAction,
+        ToolFilter,
+    };
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let tmp = tempfile::tempdir().unwrap();
+            let cwd = AbsPathBuf::new(tmp.path().to_path_buf()).unwrap();
+            let (manager, mut prompts, _events) = controlled_prompt_manager(&cwd);
+
+            // A local fast-path allow has no client-visible wait to record.
+            let auto = Arc::new(RecordingInteractionObserver::default());
+            let decision = manager
+                .request_with_context(
+                    AccessKind::Read(None),
+                    tool_call(),
+                    None,
+                    permission_context(auto.clone(), RequestPermissionMode::AlwaysApprove),
+                )
+                .await;
+            assert!(matches!(decision, Decision::Allow));
+            assert!(auto.trace.lock().await.is_empty());
+
+            // A managed deny is also local and must not emit Opened.
+            let deny_config = PermissionConfig::new(vec![PermissionRule {
+                action: RuleAction::Deny,
+                tool: ToolFilter::Read,
+                pattern: Some("**/secret".into()),
+                pattern_mode: PatternMode::Glob,
+            }]);
+            let (deny_prompt_tx, mut denied_prompts) = mpsc::unbounded_channel();
+            let (denying, _events) = manager_with_recording_client_remember(
+                &cwd,
+                Some(deny_config),
+                ControlledPromptClient {
+                    pending: deny_prompt_tx,
+                },
+                ClientType::Generic,
+                true,
+            );
+            let denied = Arc::new(RecordingInteractionObserver::default());
+            let decision = denying
+                .request_with_context(
+                    AccessKind::Read(Some("/tmp/secret".into())),
+                    tool_call(),
+                    None,
+                    permission_context(denied.clone(), RequestPermissionMode::Ask),
+                )
+                .await;
+            assert!(matches!(decision, Decision::PolicyDeny(_)));
+            assert!(denied.trace.lock().await.is_empty());
+            assert!(denied_prompts.try_recv().is_err());
+
+            // The open durability callback completes before ACP can observe
+            // the request, then every response category resolves the same
+            // attempt through the observer.
+            for (option, expected) in [
+                ("allow-once", HumanInteractionResolution::Allowed),
+                ("reject-once", HumanInteractionResolution::Rejected),
+            ] {
+                let observer = Arc::new(RecordingInteractionObserver::default());
+                let handle = manager.clone();
+                let observer_trait: Arc<
+                    dyn crate::permission::types::HumanPermissionInteractionObserver,
+                > = observer.clone();
+                let request = tokio::task::spawn_local(async move {
+                    handle
+                        .request_with_context(
+                            AccessKind::Bash("curl https://permission.example.test".into()),
+                            tool_call(),
+                            None,
+                            permission_context(observer_trait, RequestPermissionMode::Ask),
+                        )
+                        .await
+                });
+                let prompt = next_prompt(&mut prompts).await;
+                assert_eq!(*observer.trace.lock().await, vec![InteractionTrace::Opened]);
+                response_sender(prompt, option)
+                    .send(acp::PermissionOptionId::new(option))
+                    .unwrap();
+                let _decision = request.await.unwrap();
+                assert_eq!(
+                    *observer.trace.lock().await,
+                    vec![
+                        InteractionTrace::Opened,
+                        InteractionTrace::Resolved(expected)
+                    ]
+                );
+            }
+
+            let cancelled = Arc::new(RecordingInteractionObserver::default());
+            let handle = manager.clone();
+            let observer_trait: Arc<
+                dyn crate::permission::types::HumanPermissionInteractionObserver,
+            > = cancelled.clone();
+            let request = tokio::task::spawn_local(async move {
+                handle
+                    .request_with_context(
+                        AccessKind::Bash("curl https://cancel.example.test".into()),
+                        tool_call(),
+                        None,
+                        permission_context(observer_trait, RequestPermissionMode::Ask),
+                    )
+                    .await
+            });
+            let prompt = next_prompt(&mut prompts).await;
+            assert_eq!(
+                *cancelled.trace.lock().await,
+                vec![InteractionTrace::Opened]
+            );
+            drop(prompt.respond);
+            let _decision = request.await.unwrap();
+            assert_eq!(
+                *cancelled.trace.lock().await,
+                vec![
+                    InteractionTrace::Opened,
+                    InteractionTrace::Resolved(HumanInteractionResolution::Cancelled)
+                ]
+            );
+
+            // A failed Opened ACK must prevent the ACP request entirely.
+            let failed_open = Arc::new(RecordingInteractionObserver {
+                trace: tokio::sync::Mutex::new(Vec::new()),
+                fail_open: true,
+            });
+            let decision = manager
+                .request_with_context(
+                    AccessKind::Bash("curl https://open-ack.example.test".into()),
+                    tool_call(),
+                    None,
+                    permission_context(failed_open.clone(), RequestPermissionMode::Ask),
+                )
+                .await;
+            assert!(matches!(decision, Decision::Reject(_)));
+            assert_eq!(
+                *failed_open.trace.lock().await,
+                vec![InteractionTrace::Opened]
+            );
+            assert!(prompts.try_recv().is_err());
+
+            // A transport error after the request was sent closes the attempt
+            // as Failed rather than leaving a false completed wait.
+            let (transport_manager, _events) = manager_with_recording_client_remember(
+                &cwd,
+                None,
+                TransportFailureClient,
+                ClientType::Generic,
+                true,
+            );
+            let failed_transport = Arc::new(RecordingInteractionObserver::default());
+            let decision = transport_manager
+                .request_with_context(
+                    AccessKind::Bash("curl https://transport.example.test".into()),
+                    tool_call(),
+                    None,
+                    permission_context(failed_transport.clone(), RequestPermissionMode::Ask),
+                )
+                .await;
+            assert!(matches!(decision, Decision::Reject(_)));
+            assert_eq!(
+                *failed_transport.trace.lock().await,
+                vec![
+                    InteractionTrace::Opened,
+                    InteractionTrace::Resolved(HumanInteractionResolution::Failed)
+                ]
+            );
+        })
+        .await;
+}
+
 #[tokio::test]
 #[should_panic(expected = "test permission request requires an explicit child identity")]
 async fn test_shorthand_rejects_partial_child_identity() {
@@ -151,6 +390,7 @@ async fn typed_child_without_display_type_keeps_its_release_boundary() {
                             execution_cwd: None,
                             classifier_turns: None,
                             call_evidence: None,
+                            human_interaction: None,
                         },
                     )
                     .await
@@ -213,8 +453,7 @@ async fn manager_admission_saturates_without_blocking_control_and_releases_on_ca
                 Decision::PolicyDeny(PERMISSION_REQUEST_OVERLOADED.into())
             );
 
-            for index in MAX_IN_FLIGHT_PERMISSION_REQUESTS
-                ..MAX_TOTAL_IN_FLIGHT_PERMISSION_REQUESTS
+            for index in MAX_IN_FLIGHT_PERMISSION_REQUESTS..MAX_TOTAL_IN_FLIGHT_PERMISSION_REQUESTS
             {
                 let handle = manager.clone();
                 requests.push(tokio::task::spawn_local(async move {
@@ -229,9 +468,7 @@ async fn manager_admission_saturates_without_blocking_control_and_releases_on_ca
                         .await
                 }));
             }
-            for _ in MAX_IN_FLIGHT_PERMISSION_REQUESTS
-                ..MAX_TOTAL_IN_FLIGHT_PERMISSION_REQUESTS
-            {
+            for _ in MAX_IN_FLIGHT_PERMISSION_REQUESTS..MAX_TOTAL_IN_FLIGHT_PERMISSION_REQUESTS {
                 held_prompts.push(next_prompt(&mut pending).await);
             }
             let primary_overloaded = tokio::time::timeout(
@@ -287,7 +524,10 @@ async fn cancelled_request_keeps_admission_until_actor_discards_its_command() {
                 Some("explore".into()),
                 None,
             ));
-            assert!(matches!(futures::poll!(request.as_mut()), std::task::Poll::Pending));
+            assert!(matches!(
+                futures::poll!(request.as_mut()),
+                std::task::Poll::Pending
+            ));
             drop(request);
             assert_eq!(in_flight.load(Ordering::Relaxed), 1);
             tokio::time::timeout(std::time::Duration::from_secs(2), async {

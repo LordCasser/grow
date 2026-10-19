@@ -23,6 +23,7 @@ uuid = { workspace = true, features = ["v7"] }
 compaction = { path = "../../common/compaction" }
 sampling-types = { path = "../sampling-types" }
 token-estimation = { workspace = true }
+tool-types = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["full", "test-util"] }

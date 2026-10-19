@@ -404,6 +404,9 @@ pub(super) fn make_exit_plan_ext_with_tool_call_id(
             "sessionId": "sess-1",
             "toolCallId": tool_call_id,
             "planContent": plan_content,
+            "submissionId": 1,
+            "artifactRevision": 2,
+            "artifactHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         }),
         )
         .unwrap();
@@ -1172,10 +1175,13 @@ pub(super) fn write_subagent_spawn_timeline(
             chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
                 subagent_id: subagent_id.into(),
                 child_session_id: subagent_id.into(),
+                origin_tool_call_id: None,
                 security_parent_session_id: parent_sid.into(),
+                parent_step_id: None,
                 subagent_type: "general-purpose".into(),
                 description: "task".into(),
                 prompt: prompt.into(),
+                execution_recipe: serde_json::json!({}),
                 context_source: chat_state::SubagentContextSource::New,
                 source_ref: None,
                 context_normalized: false,

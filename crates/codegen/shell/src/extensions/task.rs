@@ -294,6 +294,9 @@ impl SubagentSnapshotDto {
                 dto.tools_used = Some(tools_used);
                 dto.error_count = Some(error_count);
             }
+            SubagentSnapshotStatus::Suspended { .. } => {
+                dto.status = "suspended".into();
+            }
             SubagentSnapshotStatus::Completed {
                 output,
                 tool_calls,

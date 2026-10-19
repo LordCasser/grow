@@ -30,6 +30,8 @@ use shell::session::{ExtMethodResult, SessionInfoResponse};
 
 static AGENT_CATALOG_SLOT: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
     std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(1)));
+static PLAN_ARTIFACT_QUERY_SLOTS: std::sync::LazyLock<std::sync::Arc<tokio::sync::Semaphore>> =
+    std::sync::LazyLock::new(|| std::sync::Arc::new(tokio::sync::Semaphore::new(4)));
 
 async fn run_agent_catalog_discovery<T: Send + 'static>(
     slot: std::sync::Arc<tokio::sync::Semaphore>,
@@ -145,6 +147,122 @@ pub(crate) fn execute(
 ) -> (bool, EffectMeta) {
     let meta = EffectMeta;
     match effect {
+        Effect::ReviewRetainedPlan { agent_id, session_id, binding_epoch, submission_id, decision_id } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = tools::implementations::grow_build::plan_control::types::PlanReviewRequest {
+                    session_id: session_id.0.to_string(), submission_id, decision_id,
+                };
+                let request = acp::ExtRequest::new("grow/plan/review", serde_json::value::to_raw_value(&params).expect("serialize retained Plan review").into());
+                let result = match tokio::time::timeout(std::time::Duration::from_secs(5), acp_send(request, &tx)).await {
+                    Ok(Ok(response)) => serde_json::from_str::<serde_json::Value>(response.0.get()).map_err(|error| error.to_string()).and_then(|wrapper| {
+                        if let Some(error) = wrapper.get("error") { return Err(error.to_string()); }
+                        let body = wrapper.get("result").unwrap_or(&wrapper);
+                        Ok(body.get("status").and_then(serde_json::Value::as_str).unwrap_or("unconfirmed").to_string())
+                    }),
+                    Ok(Err(error)) => Err(error.to_string()),
+                    Err(_) => Ok("unconfirmed".into()),
+                };
+                TaskResult::RetainedPlanReviewed { agent_id, session_id, binding_epoch, result }
+            });
+            return (false, meta);
+        }
+        Effect::QueryPlanDecisionStatus { agent_id, session_id, binding_epoch, submission_id, decision_id } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = tools::implementations::grow_build::plan_control::types::PlanDecisionQuery {
+                    session_id: session_id.0.to_string(),
+                    decision_id: decision_id.clone(),
+                };
+                let request = acp::ExtRequest::new(
+                    "grow/plan/decision_status",
+                    serde_json::value::to_raw_value(&params).expect("serialize Plan decision query").into(),
+                );
+                let result = match tokio::time::timeout(std::time::Duration::from_secs(5), acp_send(request, &tx)).await {
+                    Ok(Ok(response)) => serde_json::from_str::<serde_json::Value>(response.0.get()).map_err(|error| error.to_string()).and_then(|wrapper| {
+                        if let Some(error) = wrapper.get("error") { return Err(error.to_string()); }
+                        Ok(wrapper.get("result").unwrap_or(&wrapper).clone())
+                    }),
+                    Ok(Err(error)) => Err(error.to_string()),
+                    Err(_) => Ok(serde_json::json!({"status": "unconfirmed"})),
+                };
+                TaskResult::PlanApprovalDecisionStatusResolved {
+                    agent_id,
+                    session_id,
+                    binding_epoch,
+                    submission_id,
+                    decision_id,
+                    result,
+                }
+            });
+            return (false, meta);
+        }
+        Effect::QueryPlanArtifact {
+            agent_id,
+            session_id,
+            binding_epoch,
+            request_id,
+        } => {
+            let permit = std::sync::Arc::clone(&PLAN_ARTIFACT_QUERY_SLOTS).try_acquire_owned();
+            let Ok(permit) = permit else {
+                tasks.spawn(async move {
+                    TaskResult::PlanArtifactResolved {
+                        agent_id,
+                        session_id,
+                        binding_epoch,
+                        request_id,
+                        result: Err("Plan preview query capacity is full".to_string()),
+                    }
+                });
+                return (false, meta);
+            };
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let _permit = permit;
+                use tools::implementations::grow_build::plan_control::{
+                    PlanArtifactQueryRequest, PlanArtifactQueryResponse,
+                };
+                let params = PlanArtifactQueryRequest {
+                    session_id: session_id.0.to_string(),
+                };
+                let request = acp::ExtRequest::new(
+                    "grow/plan/artifact",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize Plan artifact query")
+                        .into(),
+                );
+                let result = match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    acp_send(request, &tx),
+                )
+                .await
+                {
+                    Err(_) => Err("Plan preview query timed out".to_string()),
+                    Ok(Err(error)) => Err(error.to_string()),
+                    Ok(Ok(response)) => {
+                        let parsed = serde_json::from_str::<serde_json::Value>(response.0.get())
+                            .map_err(|error| error.to_string())
+                            .and_then(|wrapper| {
+                                if let Some(error) = wrapper.get("error") {
+                                    return Err(error.to_string());
+                                }
+                                serde_json::from_value::<PlanArtifactQueryResponse>(
+                                    wrapper.get("result").cloned().unwrap_or(wrapper),
+                                )
+                                .map_err(|error| error.to_string())
+                            });
+                        parsed
+                    }
+                };
+                TaskResult::PlanArtifactResolved {
+                    agent_id,
+                    session_id,
+                    binding_epoch,
+                    request_id,
+                    result,
+                }
+            });
+        }
         Effect::WriteTranscriptFile { id, request } => {
             tasks.spawn(crate::app::transcript_file_writes::execute(id, request));
         }
@@ -177,6 +295,52 @@ pub(crate) fn execute(
         Effect::UnregisterActiveSession { session_id } => {
             crate::app::signal_handler::set_current_session_id(None);
             unregister_active_session_best_effort(&session_id);
+        }
+        Effect::SuspendForExit { exit_id } => {
+            let tx = acp_tx.clone();
+            tasks.spawn(async move {
+                let params = serde_json::json!({ "exit_id": exit_id });
+                let request = acp::ExtRequest::new(
+                    "grow/session/suspend_for_exit",
+                    serde_json::value::to_raw_value(&params)
+                        .expect("serialize session exit suspension request")
+                        .into(),
+                );
+                let result = match tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    acp_send(request, &tx),
+                )
+                .await
+                {
+                    Ok(Ok(response)) => {
+                        match serde_json::from_str::<serde_json::Value>(response.0.get()) {
+                            Ok(wrapper) => {
+                                let body = wrapper.get("result").unwrap_or(&wrapper);
+                                if body.get("status").and_then(serde_json::Value::as_str)
+                                    == Some("suspended")
+                                {
+                                    Ok(())
+                                } else {
+                                    Err(body
+                                        .get("error")
+                                        .and_then(serde_json::Value::as_str)
+                                        .unwrap_or("session suspension was not confirmed")
+                                        .to_owned())
+                                }
+                            }
+                            Err(error) => Err(format!(
+                                "invalid session suspension response: {error}"
+                            )),
+                        }
+                    }
+                    Ok(Err(error)) => Err(sanitize_user_error(&error.to_string())),
+                    Err(_) => Err(
+                        "session suspension was not confirmed before the 5-second deadline; the writer may still be saving".into(),
+                    ),
+                };
+                TaskResult::ExitSuspensionResolved { exit_id, result }
+            });
+            return (false, meta);
         }
         Effect::Quit => {
             ulog::info("pager quit", None, None);
@@ -763,10 +927,14 @@ pub(crate) fn execute(
                             let (code_restored, restore_summary, _restore_degree) = parse_session_load_restore_meta(
                                 resp.meta.as_ref(),
                             );
+                            let loaded_session_id = crate::acp::meta::session_load_identity(
+                                resp.meta.as_ref(),
+                                &acp_session_id,
+                            );
                             let foreground = parse_session_load_foreground(resp.meta.as_ref());
                             TaskResult::SessionLoaded {
                                 agent_id,
-                                session_id: acp_session_id,
+                                session_id: loaded_session_id,
                                 models: shell::agent::models::SessionModelState::from_config_options(
                                     resp.config_options,
                                 ),

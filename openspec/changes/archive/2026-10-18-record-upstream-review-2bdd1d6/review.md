@@ -14,7 +14,7 @@
 | 方向 | 决策 | 落点/限制 |
 | --- | --- | --- |
 | MCP Form/URL 与 MRTR | 已评审、已立项、未实现 | [add-mcp-multi-round-elicitation](../../add-mcp-multi-round-elicitation/proposal.md) |
-| 保留、重新审阅、稍后批准执行计划 | 已评审、已立项、未实现 | [retain-plan-for-later-review](../../retain-plan-for-later-review/proposal.md) |
+| 保留、重新审阅、稍后批准执行计划 | 已评审、已立项、未实现 | [retain-plan-for-later-review](../2026-10-19-retain-plan-for-later-review/proposal.md) |
 | 最顶部 task 布局 | 保留 | 两项实现均不迁移到统一 Dock |
 | 输入区上方统一 Dock | 不采纳 | 不设实现任务 |
 | Memory | 暂不跟进 | 不设实现任务 |

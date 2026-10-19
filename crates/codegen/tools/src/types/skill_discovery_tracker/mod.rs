@@ -12,6 +12,7 @@ mod listing;
 use std::collections::HashSet;
 use std::path::PathBuf;
 
+use crate::implementations::skills::skill::format_skill_name;
 use crate::implementations::skills::types::SkillInfo;
 use conditional::ConditionalSkills;
 use listing::{DEFAULT_SKILL_TOOL_NAME, SKILL_BUDGET_CONTEXT_PERCENT, format_announcement};
@@ -437,6 +438,58 @@ impl SkillManager {
         dedupe_by_canonical_path_and_name(&self.discovered_skills, &self.startup_skills)
     }
 
+    /// Return the exact callable names advertised for model skill loading.
+    /// A bare name is used when unique; collisions require the existing
+    /// scope/plugin-qualified skill identity.
+    pub fn model_callable_skills(&self) -> Vec<(String, SkillInfo)> {
+        let skills: Vec<_> = self
+            .slash_skills()
+            .into_iter()
+            .filter(|skill| skill.enabled && !skill.disable_model_invocation)
+            .collect();
+        callable_names(&skills)
+            .into_iter()
+            .map(|(name, skill)| (name, skill.clone()))
+            .collect()
+    }
+
+    /// Resolve the exact invocation identity for a user or model source.
+    /// Qualification and duplicate rejection are shared across both paths;
+    /// each path applies only its own invocation eligibility flag.
+    pub fn resolve_skill(&self, name: &str, user_invocation: bool) -> Result<SkillInfo, String> {
+        let skills: Vec<_> = self
+            .slash_skills()
+            .into_iter()
+            .filter(|skill| {
+                skill.enabled
+                    && if user_invocation {
+                        skill.user_invocable
+                    } else {
+                        !skill.disable_model_invocation
+                    }
+            })
+            .collect();
+        let mut matches = callable_names(&skills)
+            .into_iter()
+            .filter(|(callable_name, _)| callable_name == name);
+        let skill = matches
+            .next()
+            .map(|(_, skill)| skill)
+            .ok_or_else(|| format!("No enabled, callable skill matches the exact name '{name}'"))?;
+        if matches.next().is_some() {
+            return Err(format!(
+                "Skill name '{name}' is ambiguous; use a unique qualified name"
+            ));
+        }
+        Ok(skill.clone())
+    }
+
+    /// Resolve one exact model-callable skill name. Ambiguous qualified names
+    /// fail closed instead of falling back to another source.
+    pub fn resolve_model_callable_skill(&self, name: &str) -> Result<SkillInfo, String> {
+        self.resolve_skill(name, false)
+    }
+
     /// Render the canonical listing for the entire current skill set, for
     /// `/context` accounting. Leaves announce state untouched.
     ///
@@ -508,6 +561,26 @@ impl SkillManager {
         self.startup_skills = self.conditional.rehide(startup);
         self.pending = Some(PendingKind::BaselineChange);
     }
+}
+
+/// Produce callable names for an already-filtered invocation directory.
+/// Ambiguous bare names require the canonical scope/plugin qualification.
+pub(super) fn callable_names(skills: &[SkillInfo]) -> Vec<(String, &SkillInfo)> {
+    skills
+        .iter()
+        .map(|skill| {
+            let collision_count = skills
+                .iter()
+                .filter(|candidate| candidate.name == skill.name)
+                .count();
+            let callable_name = if collision_count == 1 {
+                skill.name.clone()
+            } else {
+                format_skill_name(skill)
+            };
+            (callable_name, skill)
+        })
+        .collect()
 }
 
 /// Test-only reconciliation result with full projection visibility.
@@ -1149,6 +1222,41 @@ mod tests {
         let _ = mgr.take_pending_reconciliation();
 
         assert_eq!(mgr.slash_skills().len(), 2);
+    }
+
+    #[test]
+    fn invocation_resolution_requires_exact_unique_names_and_source_eligibility() {
+        let mut user_skill = make_skill("guide", "/user/guide/SKILL.md");
+        user_skill.scope = crate::implementations::skills::types::SkillScope::User;
+        let mut plugin_skill = make_skill("guide", "/plugins/review/skills/guide/SKILL.md");
+        plugin_skill.scope = crate::implementations::skills::types::SkillScope::Plugin;
+        plugin_skill.plugin_name = Some("review".into());
+        let mut user_only = make_skill("manual", "/user/manual/SKILL.md");
+        user_only.disable_model_invocation = true;
+
+        let mut manager = SkillManager::new();
+        manager.seed(
+            None,
+            None,
+            vec![user_skill, plugin_skill, user_only],
+            None,
+            None,
+        );
+
+        assert!(manager.resolve_skill("guide", false).is_err());
+        assert_eq!(
+            manager.resolve_skill("user:guide", false).unwrap().path,
+            "/user/guide/SKILL.md"
+        );
+        assert_eq!(
+            manager.resolve_skill("review:guide", false).unwrap().path,
+            "/plugins/review/skills/guide/SKILL.md"
+        );
+        assert!(manager.resolve_skill("manual", false).is_err());
+        assert_eq!(
+            manager.resolve_skill("manual", true).unwrap().path,
+            "/user/manual/SKILL.md"
+        );
     }
 
     #[test]

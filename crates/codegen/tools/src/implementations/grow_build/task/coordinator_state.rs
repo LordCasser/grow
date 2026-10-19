@@ -7,6 +7,7 @@ use std::task::{Context, Poll};
 use tokio::sync::{mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
+pub use super::types::ChildCheckpoint;
 use super::types::{
     ActiveSubagentSummary, SubagentCompletionSummary, SubagentInspection, SubagentRequest,
     SubagentResult, SubagentSnapshot, SubagentSnapshotStatus, SubagentValidateTypeOutcome,
@@ -44,6 +45,11 @@ pub trait ChildControl: 'static {
     fn progress_snapshot(&self) -> Option<SubagentProgress>;
     fn security_context(&self) -> Self::SecurityContext;
     fn cancel(&self);
+    /// Close execution admission synchronously, before the host begins any
+    /// asynchronous suspension writes. This does not cancel the logical task.
+    fn freeze_admission(&self) -> Result<(), String> {
+        Err("this child host cannot suspend execution".into())
+    }
     fn runner_panicked(&self) {
         self.cancel();
     }
@@ -70,6 +76,9 @@ pub struct ChildRunRequest<C: ChildControl> {
     /// Immediate spawning child's context, independent of lifecycle reparent.
     pub security_parent: Option<<C as ChildControl>::SecurityContext>,
     pub cancellation: CancellationToken,
+    /// Checkpoint to adopt when restoring a suspended child; ordinary spawns
+    /// carry `None`.
+    pub restore: Option<ChildCheckpoint>,
     pub reporter: ChildReporter<C>,
 }
 
@@ -78,6 +87,21 @@ pub struct ChildRunRequest<C: ChildControl> {
 pub struct ChildRunOutput<D> {
     pub result: SubagentResult,
     pub completion_data: D,
+}
+
+/// A child runner may finish terminally or return a durable suspension point.
+#[derive(Clone)]
+pub enum ChildRunOutcome<D> {
+    Finished(ChildRunOutput<D>),
+    Suspended {
+        checkpoint: ChildCheckpoint,
+        completion_data: D,
+    },
+    RestoreBlocked {
+        checkpoint: ChildCheckpoint,
+        error: String,
+        completion_data: D,
+    },
 }
 
 /// Coordinator-owned delivery decision passed to host presentation.
@@ -117,7 +141,7 @@ pub trait ChildRunner: 'static {
 
     type Control: ChildControl;
     type CompletionData: Default + Clone + 'static;
-    type RunFuture: Future<Output = ChildRunOutput<Self::CompletionData>> + 'static;
+    type RunFuture: Future<Output = ChildRunOutcome<Self::CompletionData>> + 'static;
     type ValidateFuture: Future<Output = SubagentValidateTypeOutcome> + 'static;
 
     fn run(&self, request: ChildRunRequest<Self::Control>) -> Self::RunFuture;
@@ -149,6 +173,30 @@ pub trait ChildRunner: 'static {
     /// chain. A false result is never eligible for successful waiter delivery.
     fn terminal_committed(&self, _completion_data: &Self::CompletionData) -> bool {
         true
+    }
+
+    /// Confirm that a suspended child session's thread and persistence owners
+    /// have both drained. This observation must not restart or cancel the child.
+    fn suspension_retired(
+        &self,
+        _completion_data: &mut Self::CompletionData,
+    ) -> Result<bool, String> {
+        Err("this child host cannot observe suspended retirement".into())
+    }
+
+    /// Whether terminal completion data still owns a runtime thread that must
+    /// be joined before the child can be considered physically retired.
+    fn has_physical_retirement_owner(&self, _completion_data: &Self::CompletionData) -> bool {
+        false
+    }
+
+    /// Transfer a clone of any runtime thread owner into completion data before
+    /// the coordinator releases the active control handle.
+    fn retain_execution_owner(
+        &self,
+        _completion_data: &mut Self::CompletionData,
+        _control: Option<&Self::Control>,
+    ) {
     }
 
     fn finalization_error(&self, _completion_data: &Self::CompletionData) -> Option<String> {
@@ -284,6 +332,8 @@ pub(super) struct PendingChild {
     pub(super) foreground_deadline: Option<tokio::time::Instant>,
     pub(super) handle_only: bool,
     pub(super) explicitly_killed: bool,
+    pub(super) restore: Option<ChildCheckpoint>,
+    pub(super) adoption_reply: Option<oneshot::Sender<Result<(), String>>>,
 }
 
 pub(super) struct ActiveChild<C> {
@@ -303,6 +353,7 @@ pub(super) struct ActiveChild<C> {
     pub(super) explicitly_killed: bool,
     pub(super) child_session_id: String,
     pub(super) resumed_from: Option<String>,
+    pub(super) restore: Option<ChildCheckpoint>,
     pub(super) control: C,
 }
 
@@ -775,6 +826,7 @@ pub fn completion_summary(
         tool_calls: result.tool_calls,
         turns: result.turns,
         output,
+        planning_summary: result.planning_summary.clone(),
     }
 }
 

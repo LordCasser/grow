@@ -603,9 +603,11 @@ mod tests {
             seq: chat_state::EventSeq::new(1),
             at_ms: 0,
             kind: chat_state::TimelineEventKind::Input(chat_state::InputEvent::Consumed {
+                display_echo: None,
                 input_ids: vec!["input-1".into()],
                 turn: chat_state::TurnId(1),
                 item: ConversationItem::user(message),
+                skill_loads: Vec::new(),
             }),
         };
         assert_eq!(

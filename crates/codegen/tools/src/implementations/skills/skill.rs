@@ -5,6 +5,36 @@
 
 use crate::implementations::skills::types::SkillInfo;
 
+/// Maximum expanded body size for an explicit skill preparation.
+pub const MAX_PREPARED_SKILL_BODY_BYTES: usize = 1024 * 1024;
+const SKILL_PREPARATION_CHECK_INTERVAL: usize = 16 * 1024;
+
+/// Failure preparing a skill body for an explicit invocation.
+#[derive(Debug)]
+pub enum SkillPreparationError {
+    /// Loading the source body failed.
+    Load(String),
+    /// The fully substituted body exceeds [`MAX_PREPARED_SKILL_BODY_BYTES`].
+    OutputTooLarge,
+    /// The preparation was cancelled before completion.
+    Cancelled,
+}
+
+impl std::fmt::Display for SkillPreparationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Load(error) => f.write_str(error),
+            Self::OutputTooLarge => write!(
+                f,
+                "Prepared skill body exceeds the maximum of {MAX_PREPARED_SKILL_BODY_BYTES} bytes (1 MiB)"
+            ),
+            Self::Cancelled => f.write_str("Skill body preparation was cancelled"),
+        }
+    }
+}
+
+impl std::error::Error for SkillPreparationError {}
+
 /// Build the formatted skill message shown to the model.
 ///
 /// Canonical formatter for skill content injection. Used by the skill tool
@@ -309,6 +339,258 @@ pub fn apply_substitutions(content: &mut String, args: Option<&str>, ctx: &Subst
     }
 }
 
+/// Prepare an explicitly invoked skill body with a cancellable, byte-bounded
+/// expansion. This is the shared entrypoint for invocation paths; preload
+/// callers continue to use their existing snapshot behavior.
+pub async fn prepare_skill_content<'a>(
+    skill: &SkillInfo,
+    args: Option<&'a str>,
+    ctx: &'a SubstitutionContext<'a>,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Result<String, SkillPreparationError> {
+    let body = tokio::select! {
+        _ = cancellation.cancelled() => return Err(SkillPreparationError::Cancelled),
+        result = load_skill_content(skill) => result.map_err(SkillPreparationError::Load)?,
+    };
+    expand_skill_content_bounded(&body, args, ctx, cancellation)
+}
+
+/// Load a file-backed skill through the configured filesystem boundary, with
+/// the same source size and UTF-8 rules as the local-file loader.
+pub async fn load_skill_content_with_fs(
+    skill: &SkillInfo,
+    fs: &dyn crate::computer::types::AsyncFileSystem,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Result<String, SkillPreparationError> {
+    if let Some(body) = skill.body.as_ref() {
+        return Ok(body.clone());
+    }
+    if skill.path.contains("://") {
+        return Err(SkillPreparationError::Load(format!(
+            "Skill '{}' has no preloaded body (path '{}')",
+            skill.name, skill.path
+        )));
+    }
+    let bytes = tokio::select! {
+        _ = cancellation.cancelled() => return Err(SkillPreparationError::Cancelled),
+        result = fs.read_file_bounded(
+            std::path::Path::new(&skill.path),
+            MAX_SKILL_BODY_FILE_BYTES,
+        ) => result.map_err(|error| SkillPreparationError::Load(format!(
+            "Failed to read skill file '{}': {error}", skill.path
+        )))?,
+    };
+    if bytes.len() > MAX_SKILL_BODY_FILE_BYTES {
+        return Err(SkillPreparationError::Load(format!(
+            "Skill file '{}' exceeds the maximum body file size of {MAX_SKILL_BODY_FILE_BYTES} bytes (1 MiB)",
+            skill.path
+        )));
+    }
+    let source = String::from_utf8(bytes).map_err(|error| {
+        SkillPreparationError::Load(format!(
+            "Skill file '{}' is not valid UTF-8: {error}",
+            skill.path
+        ))
+    })?;
+    if cancellation.is_cancelled() {
+        return Err(SkillPreparationError::Cancelled);
+    }
+    let body = extract_skill_body(&source);
+    Ok(match std::path::Path::new(&skill.path).parent() {
+        Some(skill_dir) => resolve_skill_internal_links(&body, skill_dir),
+        None => body,
+    })
+}
+
+/// Prepare an explicit skill invocation using the runtime's configured
+/// filesystem for cold file-backed sources.
+pub async fn prepare_skill_content_with_fs<'a>(
+    skill: &SkillInfo,
+    fs: &dyn crate::computer::types::AsyncFileSystem,
+    args: Option<&'a str>,
+    ctx: &'a SubstitutionContext<'a>,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Result<String, SkillPreparationError> {
+    let body = load_skill_content_with_fs(skill, fs, cancellation).await?;
+    expand_skill_content_bounded(&body, args, ctx, cancellation)
+}
+
+fn expand_skill_content_bounded<'a>(
+    content: &'a str,
+    args: Option<&'a str>,
+    ctx: &'a SubstitutionContext<'a>,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Result<String, SkillPreparationError> {
+    let args_str = args.unwrap_or("");
+    let argv: Vec<&str> = args_str.split_whitespace().collect();
+    let mut output_len = 0usize;
+    let args_substituted =
+        walk_skill_substitutions(content, &argv, args_str, ctx, cancellation, |part| {
+            output_len = output_len
+                .checked_add(part.len())
+                .ok_or(SkillPreparationError::OutputTooLarge)?;
+            if output_len > MAX_PREPARED_SKILL_BODY_BYTES {
+                return Err(SkillPreparationError::OutputTooLarge);
+            }
+            Ok(())
+        })?;
+
+    let suffix = if !args_substituted && !args_str.is_empty() {
+        "\n\n**ARGUMENTS:** "
+            .len()
+            .checked_add(args_str.len())
+            .ok_or(SkillPreparationError::OutputTooLarge)?
+    } else {
+        0
+    };
+    output_len = output_len
+        .checked_add(suffix)
+        .ok_or(SkillPreparationError::OutputTooLarge)?;
+    if output_len > MAX_PREPARED_SKILL_BODY_BYTES {
+        return Err(SkillPreparationError::OutputTooLarge);
+    }
+
+    let mut output = String::with_capacity(output_len);
+    walk_skill_substitutions(content, &argv, args_str, ctx, cancellation, |part| {
+        push_cancellable(&mut output, part, cancellation)
+    })?;
+    if suffix != 0 {
+        push_cancellable(&mut output, "\n\n**ARGUMENTS:** ", cancellation)?;
+        push_cancellable(&mut output, args_str, cancellation)?;
+    }
+    Ok(output)
+}
+
+fn push_cancellable(
+    output: &mut String,
+    text: &str,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Result<(), SkillPreparationError> {
+    let mut offset = 0usize;
+    while offset < text.len() {
+        if cancellation.is_cancelled() {
+            return Err(SkillPreparationError::Cancelled);
+        }
+        let mut end = (offset + SKILL_PREPARATION_CHECK_INTERVAL).min(text.len());
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        output.push_str(&text[offset..end]);
+        offset = end;
+    }
+    Ok(())
+}
+
+/// Walk literal chunks and single-pass substitutions, checking cancellation
+/// at bounded intervals without creating an intermediate expanded string.
+fn walk_skill_substitutions<'a>(
+    content: &'a str,
+    argv: &[&'a str],
+    args_str: &'a str,
+    ctx: &'a SubstitutionContext<'a>,
+    cancellation: &tokio_util::sync::CancellationToken,
+    mut visit: impl FnMut(&'a str) -> Result<(), SkillPreparationError>,
+) -> Result<bool, SkillPreparationError> {
+    let mut cursor = 0usize;
+    let mut args_substituted = false;
+    while cursor < content.len() {
+        if cancellation.is_cancelled() {
+            return Err(SkillPreparationError::Cancelled);
+        }
+        let Some(dollar) = next_dollar(content, cursor, cancellation)? else {
+            visit(&content[cursor..])?;
+            break;
+        };
+        if dollar > cursor {
+            visit(&content[cursor..dollar])?;
+        }
+        if let Some((end, replacement, consumes_args)) =
+            skill_substitution_at(content, dollar, argv, args_str, ctx)
+        {
+            visit(replacement)?;
+            args_substituted |= consumes_args;
+            cursor = end;
+        } else {
+            visit("$")?;
+            cursor = dollar + 1;
+        }
+    }
+    if cancellation.is_cancelled() {
+        return Err(SkillPreparationError::Cancelled);
+    }
+    Ok(args_substituted)
+}
+
+fn next_dollar(
+    content: &str,
+    mut cursor: usize,
+    cancellation: &tokio_util::sync::CancellationToken,
+) -> Result<Option<usize>, SkillPreparationError> {
+    let bytes = content.as_bytes();
+    while cursor < bytes.len() {
+        if cancellation.is_cancelled() {
+            return Err(SkillPreparationError::Cancelled);
+        }
+        let mut end = (cursor + SKILL_PREPARATION_CHECK_INTERVAL).min(bytes.len());
+        while !content.is_char_boundary(end) {
+            end -= 1;
+        }
+        if let Some(relative) = bytes[cursor..end].iter().position(|byte| *byte == b'$') {
+            return Ok(Some(cursor + relative));
+        }
+        cursor = end;
+    }
+    Ok(None)
+}
+
+fn skill_substitution_at<'a, 'ctx>(
+    content: &'a str,
+    start: usize,
+    argv: &[&'a str],
+    args_str: &'a str,
+    ctx: &'ctx SubstitutionContext<'a>,
+) -> Option<(usize, &'a str, bool)> {
+    let rest = content.get(start..)?;
+    if let Some(after_prefix) = rest.strip_prefix("$ARGUMENTS[") {
+        let digits = after_prefix.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 0 && after_prefix.as_bytes().get(digits) == Some(&b']') {
+            let index = after_prefix[..digits].parse::<usize>().ok();
+            let replacement = index
+                .and_then(|index| argv.get(index).copied())
+                .unwrap_or("");
+            return Some((start + "$ARGUMENTS[".len() + digits + 1, replacement, true));
+        }
+    }
+    if rest.starts_with("$ARGUMENTS") {
+        return Some((start + "$ARGUMENTS".len(), args_str, true));
+    }
+    if let Some(after_dollar) = rest.strip_prefix('$') {
+        let digits = after_dollar.bytes().take_while(u8::is_ascii_digit).count();
+        if digits > 0 {
+            let token = &after_dollar[..digits];
+            let end = start + 1 + digits;
+            if let Ok(index) = token.parse::<usize>()
+                && index < argv.len().max(1).saturating_add(20)
+            {
+                return Some((end, argv.get(index).copied().unwrap_or(""), true));
+            }
+        }
+    }
+    let (token_len, replacement) = if rest.starts_with("${SKILL_DIR}") {
+        ("${SKILL_DIR}".len(), ctx.skill_dir)
+    } else if rest.starts_with("${SESSION_ID}") {
+        ("${SESSION_ID}".len(), ctx.session_id)
+    } else if rest.starts_with("${GROW_PLUGIN_ROOT}") {
+        ("${GROW_PLUGIN_ROOT}".len(), ctx.plugin_root)
+    } else if rest.starts_with("${GROW_PLUGIN_DATA}") {
+        ("${GROW_PLUGIN_DATA}".len(), ctx.plugin_data)
+    } else {
+        return None;
+    };
+    let end = start + token_len;
+    Some((end, replacement.unwrap_or(&content[start..end]), false))
+}
+
 /// Locate the destination after the already-parsed label, preserving source spelling.
 fn skill_link_destination_span(source: &str, reference: bool) -> Option<std::ops::Range<usize>> {
     let after_label = if reference {
@@ -586,6 +868,72 @@ mod tests {
     use crate::implementations::skills::types::SkillScope;
 
     #[test]
+    fn bounded_skill_preparation_counts_suffix_and_replaces_once() {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let context = SubstitutionContext {
+            session_id: Some("session-value"),
+            ..Default::default()
+        };
+        let expanded = expand_skill_content_bounded(
+            "$ARGUMENTS ${SESSION_ID}",
+            Some("${SESSION_ID}"),
+            &context,
+            &cancellation,
+        )
+        .unwrap();
+        assert_eq!(expanded, "${SESSION_ID} session-value");
+        assert_eq!(
+            expand_skill_content_bounded(
+                "x".repeat(MAX_PREPARED_SKILL_BODY_BYTES).as_str(),
+                None,
+                &SubstitutionContext::default(),
+                &cancellation,
+            )
+            .unwrap()
+            .len(),
+            MAX_PREPARED_SKILL_BODY_BYTES
+        );
+
+        let error = expand_skill_content_bounded(
+            "x".repeat(MAX_PREPARED_SKILL_BODY_BYTES - 1).as_str(),
+            Some("x"),
+            &SubstitutionContext::default(),
+            &cancellation,
+        )
+        .unwrap_err();
+        assert!(matches!(error, SkillPreparationError::OutputTooLarge));
+    }
+
+    #[test]
+    fn bounded_skill_preparation_accepts_empty_and_rejects_large_replacement() {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        let context = SubstitutionContext::default();
+        assert_eq!(
+            expand_skill_content_bounded("", None, &context, &cancellation).unwrap(),
+            ""
+        );
+        let large_args = "x".repeat(MAX_PREPARED_SKILL_BODY_BYTES + 1);
+        let error =
+            expand_skill_content_bounded("$ARGUMENTS", Some(&large_args), &context, &cancellation)
+                .unwrap_err();
+        assert!(matches!(error, SkillPreparationError::OutputTooLarge));
+    }
+
+    #[test]
+    fn bounded_skill_preparation_observes_preexisting_cancellation() {
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
+        let error = expand_skill_content_bounded(
+            "body",
+            None,
+            &SubstitutionContext::default(),
+            &cancellation,
+        )
+        .unwrap_err();
+        assert!(matches!(error, SkillPreparationError::Cancelled));
+    }
+
+    #[test]
     fn skill_envelope_escapes_attributes_and_preserves_body() {
         let name = "review\"<&";
         let args = "say \"hello\" <tag> & more";
@@ -727,6 +1075,35 @@ It has multiple lines."#;
         let snapshot_error = load_skill_with_body(&skill).await.unwrap_err();
         assert!(snapshot_error.contains(path.to_string_lossy().as_ref()));
         assert!(snapshot_error.contains("1048576 bytes (1 MiB)"));
+    }
+
+    #[tokio::test]
+    async fn explicit_skill_body_read_rejects_invalid_utf8_file_without_partial_body() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("SKILL.md");
+        std::fs::write(&path, b"valid-prefix\xfftrailing").unwrap();
+        let skill = SkillInfo {
+            name: "invalid-utf8".into(),
+            path: path.to_string_lossy().into_owned(),
+            ..Default::default()
+        };
+
+        let content_error = load_skill_content(&skill).await.unwrap_err();
+        assert!(content_error.contains("not valid UTF-8"), "{content_error}");
+        assert!(
+            !content_error.contains("valid-prefix"),
+            "the read must not expose a valid prefix as partial content: {content_error}"
+        );
+
+        let snapshot_error = load_skill_with_body(&skill).await.unwrap_err();
+        assert!(
+            snapshot_error.contains("not valid UTF-8"),
+            "{snapshot_error}"
+        );
+        assert!(
+            !snapshot_error.contains("valid-prefix"),
+            "the snapshot loader must not expose partial content: {snapshot_error}"
+        );
     }
 
     #[tokio::test]

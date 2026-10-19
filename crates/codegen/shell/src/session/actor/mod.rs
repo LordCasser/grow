@@ -68,6 +68,23 @@ use tools::types::ToolInput;
 use tools::types::output::{
     BashOutput, ReadFileOutput, ToolOutput as ToolsToolOutput, ToolRunResult,
 };
+
+pub(super) fn user_display_echo(
+    message_id: impl Into<String>,
+    prompt_index: usize,
+    blocks: &[acp::ContentBlock],
+) -> chat_state::UserDisplayEcho {
+    let mut canonical_blocks =
+        serde_json::to_value(blocks).expect("ACP content blocks serialize to JSON");
+    canonical_blocks.sort_all_objects();
+    let bytes = serde_json::to_vec(&canonical_blocks).expect("JSON values serialize to JSON");
+    chat_state::UserDisplayEcho {
+        message_id: message_id.into(),
+        prompt_index,
+        block_count: blocks.len(),
+        blake3: blake3::hash(&bytes).to_hex().to_string(),
+    }
+}
 use workspace::file_system::CodebaseIndexManager;
 use workspace::permission::{AccessKind, ClientType, Decision, PermissionHandle};
 use workspace::session::file_state::{FileStateHandle, FileStateTracker};
@@ -85,6 +102,10 @@ use auth_retry::{AuthRetryDecision, AuthRetrySchedule};
 mod completion_delivery;
 mod goal;
 mod interjection;
+mod planning;
+mod runtime_source;
+mod skill_loading;
+mod suspension;
 mod tool;
 use tool::wait_for_pending_interjection;
 use tool::*;
@@ -228,6 +249,9 @@ struct AdmissionState {
     /// new prompt, compaction, notification, Goal continuation, or Control
     /// transaction may be admitted.
     pub(crate) termination: TerminationState,
+    /// Shared runtime-suspension latch. The SessionHandle and tool dispatch
+    /// authority use this exact Arc to close execution admission promptly.
+    pub(crate) runtime_suspend: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// One coalescing manual-compaction request admitted during a running turn.
     pub(crate) pending_manual_compact: Option<Option<String>>,
     /// Controls accepted while a step owns its immutable model-facing state.
@@ -295,6 +319,12 @@ struct AdmissionState {
 }
 
 impl AdmissionState {
+    pub(crate) fn execution_open(&self) -> bool {
+        use std::sync::atomic::Ordering;
+
+        self.termination.is_open() && !self.runtime_suspend.load(Ordering::Acquire)
+    }
+
     fn restore_terminal_control_intent(
         receipts: &mut std::collections::HashMap<
             (crate::extensions::notification::ControlDomain, String),
@@ -1209,7 +1239,7 @@ impl AdmissionState {
     /// step-control gate, so termination and terminal preemption cannot split
     /// those two boundaries into subtly different policies.
     pub(crate) fn can_continue_regular_turn(&self, prompt_id: &str) -> bool {
-        self.termination.is_open()
+        self.execution_open()
             && !self.terminal_preemption_pending
             && matches!(
                 self.foreground.regular(),
@@ -1283,7 +1313,7 @@ impl AdmissionState {
 /// user prompt is queued, and interactive Ctrl+C has not suppressed
 /// notifications pending genuine user re-engagement.
 fn is_session_idle_for_injection(state: &AdmissionState) -> bool {
-    state.termination.is_open()
+    state.execution_open()
         && state.foreground.is_idle()
         && state.pending_inputs.is_empty()
         && !state.notifications_suppressed
@@ -1313,6 +1343,7 @@ fn session_has_work(
 /// Data carried from prepare_tool_call → dispatch_tool → finalize.
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedToolCall {
+    skill_selection: Option<tools::implementations::grow_build::load_skill::SkillLoadSelection>,
     /// The model's tool call ID (for tool_result matching).
     call_id: String,
     /// ACP-internal tool call ID.
@@ -1418,6 +1449,7 @@ pub(crate) struct ToolDispatchAuthority {
     bridge: Arc<tools::bridge::ToolBridge>,
     subagent: Option<crate::session::subagent_capability::SubagentCapabilityState>,
     mcp_state: Arc<TokioMutex<McpState>>,
+    runtime_suspend: std::sync::Arc<std::sync::atomic::AtomicBool>,
     cwd: PathBuf,
     actor_source: String,
 }
@@ -1761,6 +1793,31 @@ pub(crate) struct SessionActor {
     pub(crate) goal_command_tx: tokio::sync::mpsc::UnboundedSender<
         tools::implementations::grow_build::update_goal::GoalCommand,
     >,
+    pub(crate) planning_command_tx: tokio::sync::mpsc::UnboundedSender<
+        tools::implementations::grow_build::todo::runtime::PlanningCommand,
+    >,
+    planning_delivery: TaskSlot<()>,
+    runtime_suspension_worker: TaskSlot<()>,
+    runtime_suspension_fault: std::cell::RefCell<Option<String>>,
+    pub(crate) runtime_suspended_waiters: std::cell::RefCell<
+        Vec<
+            tokio::sync::oneshot::Sender<
+                Result<chat_state::session_runtime::RuntimeNodeRef, String>,
+            >,
+        >,
+    >,
+    planning_delivery_dirty: std::cell::Cell<bool>,
+    runtime_release_waiters: std::cell::RefCell<Vec<(String, oneshot::Sender<Result<(), String>>)>>,
+    restoration_release: std::cell::RefCell<Option<oneshot::Sender<()>>>,
+    runtime_completion_watchers: std::cell::RefCell<Vec<oneshot::Sender<PromptTurnResult>>>,
+    restored_response:
+        std::cell::RefCell<Option<chat_state::session_runtime::AcceptedResponseContinuation>>,
+    /// Exact accepted response identity being replayed on this model task. A
+    /// matching completed Stop gate is reused instead of invoking hooks again.
+    restored_response_for_stop_gate:
+        std::cell::RefCell<Option<chat_state::ResponseAdmissionIdentity>>,
+    turn_continuation: std::cell::RefCell<Option<chat_state::session_runtime::TurnContinuation>>,
+    sampling_continuation: std::cell::RefCell<Option<sampler::RecoveryBudget>>,
     pub(crate) workflow_manager:
         Arc<tokio::sync::Mutex<crate::session::workflow::manager::WorkflowManager>>,
     pub(crate) workflow_tx: tokio::sync::mpsc::UnboundedSender<
@@ -1908,6 +1965,61 @@ pub(crate) struct SessionActor {
     pub(crate) laziness_debug_log: Option<std::sync::Arc<std::path::Path>>,
 }
 impl SessionActor {
+    async fn handle_wait_runtime_suspended(
+        &self,
+        respond_to: tokio::sync::oneshot::Sender<
+            Result<chat_state::session_runtime::RuntimeNodeRef, String>,
+        >,
+    ) {
+        let runtime = match self.chat_state_handle.runtime_state().await {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = respond_to.send(Err(error));
+                return;
+            }
+        };
+        if runtime.phase == chat_state::session_runtime::RuntimePhase::Suspended {
+            let result = runtime
+                .checkpoint_seq
+                .map(
+                    |checkpoint_seq| chat_state::session_runtime::RuntimeNodeRef {
+                        session_id: self.session_id_string(),
+                        checkpoint_seq,
+                    },
+                )
+                .ok_or_else(|| "suspended node has no checkpoint identity".to_string());
+            let _ = respond_to.send(result);
+            return;
+        }
+
+        self.runtime_suspended_waiters.borrow_mut().push(respond_to);
+        // Close the read/register race: the checkpoint may have committed
+        // after the first read but before this waiter was stored.
+        if let Ok(runtime) = self.chat_state_handle.runtime_state().await
+            && runtime.phase == chat_state::session_runtime::RuntimePhase::Suspended
+        {
+            if let Some(checkpoint_seq) = runtime.checkpoint_seq {
+                self.resolve_runtime_suspended_waiters(
+                    chat_state::session_runtime::RuntimeNodeRef {
+                        session_id: self.session_id_string(),
+                        checkpoint_seq,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Resolve initializers only after the checkpoint has crossed the durable
+    /// Runtime barrier. Called by the suspension owner after checkpoint ACK.
+    pub(crate) fn resolve_runtime_suspended_waiters(
+        &self,
+        node: chat_state::session_runtime::RuntimeNodeRef,
+    ) {
+        for waiter in std::mem::take(&mut *self.runtime_suspended_waiters.borrow_mut()) {
+            let _ = waiter.send(Ok(node.clone()));
+        }
+    }
+
     /// Get the signals handle for tracking session events.
     fn signals_handle(&self) -> SessionSignalsHandle {
         self.signals_handle.clone()
@@ -1922,6 +2034,9 @@ impl SessionActor {
         category: Option<crate::session::events::CancellationCategory>,
         context: Option<serde_json::Value>,
     ) -> Result<(), chat_state::TimelineWriteError> {
+        self.chat_state_handle
+            .settle_unconsumed_skill_loads()
+            .await?;
         self.events
             .emit_turn_ended(outcome, terminal, category, context)
             .await
@@ -2151,6 +2266,8 @@ impl SessionActor {
 }
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::support::build_actor as build_actor_for_subagent_test;
 /// Drop guard that records aggregate turn metrics on the current tracing span
 struct TurnMetrics {
     turn_tool_count: u64,

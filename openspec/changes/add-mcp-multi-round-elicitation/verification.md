@@ -52,3 +52,7 @@ M-24 本机依赖/trait/feature 与既有 SSE/取消回归通过，OHOS 交叉�
 - `openspec validate --all --strict --no-interactive`：17 passed，0 failed。
 - 本轮开始时对 6309 个现有文件建立 hash；最终仅 10 个授权文件变化、新增 SDK fixture 和核查记录 2 个文件，无原文件删除。原有 Shell/Pager/Timeline 等在制改动未被本轮修改。
 - 本次独立临时 target 编译产物已清理，已有仓库 target 保留。
+
+## 2.4.0 scope decision — 2026-10-18
+
+用户明确本版暂缓 MCP 交互，保留 SDK 门禁，当前没有真实 Form/URL 服务可供验证。官方 rmcp 3.5.1 及 main 接点复核仍不足以通过 M0；本版不自写 MRTR，不开放入口，不归档本 change。

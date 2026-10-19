@@ -12,6 +12,99 @@ pub(super) async fn run(
     subagent_task_name: String,
 ) {
     let result = match &request.action {
+        AgentInteraction::ReplanHandled {
+            change_id,
+            outcome,
+            reply_to,
+        } => {
+            let verified = match (
+                source.chat_state_handle.planning_state().await,
+                source.chat_state_handle.parent_message_receipts().await,
+            ) {
+                (Ok(Some(snapshot)), Some(receipts)) => {
+                    authorizes_reply(&receipts, &request.source_session_id, reply_to)
+                        && snapshot.plan.replans.iter().any(|change| {
+                            change.id == *change_id
+                                && change.child_session_id == request.source_session_id
+                                && change.progress
+                                    == (tool_types::ReplanProgress::Handled {
+                                        outcome: outcome.clone(),
+                                    })
+                        })
+                }
+                _ => false,
+            };
+            if !verified {
+                Err("Replanning acknowledgment lacks the child's durable handling fact".into())
+            } else if let Some(target) = target.as_ref() {
+                let (respond_to, response) = tokio::sync::oneshot::channel();
+                if target
+                    .cmd_tx
+                    .send(SessionCommand::ReceiveReplanHandled {
+                        child_session_id: request.source_session_id.clone(),
+                        change_id: change_id.clone(),
+                        outcome: outcome.clone(),
+                        respond_to,
+                    })
+                    .is_err()
+                {
+                    Err("Replanning owner is unavailable".into())
+                } else {
+                    match tokio::time::timeout(std::time::Duration::from_secs(5), response).await {
+                        Ok(Ok(Ok(()))) => Ok(AgentInteractionOutput::message_received(
+                            &request.id,
+                            change_id,
+                        )),
+                        _ => Err("Replanning acknowledgment is unconfirmed".into()),
+                    }
+                }
+            } else {
+                Err("Replanning owner is no longer active".into())
+            }
+        }
+        AgentInteraction::Replan { change } => {
+            if request.receipt_only || request.cancellation.is_cancelled() {
+                Ok(AgentInteractionOutput::message_rejected(
+                    &request.id,
+                    "target_inactive",
+                    "Replanning cannot revive a terminal child",
+                ))
+            } else if let Some(target) = target.as_ref() {
+                let (respond_to, mut response) = tokio::sync::oneshot::channel();
+                if target
+                    .cmd_tx
+                    .send(SessionCommand::ReceivePlanGuidance {
+                        parent_session_id: request.source_session_id.clone(),
+                        change: change.clone(),
+                        respond_to,
+                    })
+                    .is_err()
+                {
+                    Ok(AgentInteractionOutput::message_unconfirmed(
+                        &request.id,
+                        "target_unavailable",
+                        "Replanning target is unavailable",
+                    ))
+                } else {
+                    Ok(
+                        match wait_for_message_ack(&mut response, &request.cancellation).await {
+                            Some(result) => delivery_output(&request.id, result),
+                            None => AgentInteractionOutput::message_unconfirmed(
+                                &request.id,
+                                "receipt_unconfirmed",
+                                "Replanning receipt is unconfirmed",
+                            ),
+                        },
+                    )
+                }
+            } else {
+                Ok(AgentInteractionOutput::message_unconfirmed(
+                    &request.id,
+                    "target_unavailable",
+                    "Replanning target is unavailable",
+                ))
+            }
+        }
         AgentInteraction::Ask { question } => match &target {
             Some(target) => ask(&request, &source, target, question, &subagent_task_name).await,
             None => Err("Target agent is no longer running".into()),

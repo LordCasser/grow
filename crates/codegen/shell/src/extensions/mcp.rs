@@ -630,29 +630,26 @@ pub async fn call_mcp_tool(
     let client = {
         let state = mcp_state.lock().await;
 
-        // Resolve: (name + url) > url-only > name-only.
-        let target = if let Some(url) = server_url {
-            let config_name =
-                |c: &acp::McpServer| crate::session::mcp_servers::mcp_server_name(c).to_string();
-            state
-                .configs
-                .iter()
-                .find(|c| {
-                    crate::session::mcp_servers::mcp_server_name(c) == server_name
-                        && mcp_server_url(c) == Some(url)
-                })
-                .map(&config_name)
-                .or_else(|| {
-                    state
-                        .configs
-                        .iter()
-                        .find(|c| mcp_server_url(c) == Some(url))
-                        .map(&config_name)
-                })
-                .unwrap_or_else(|| server_name.to_string())
-        } else {
-            server_name.to_string()
-        };
+        // An explicit endpoint must still exist. A stale app request must not
+        // silently fall back to a same-name replacement at another URL.
+        if state.is_tool_disabled(server_name, tool_name) {
+            return Err(format!(
+                "MCP tool '{}__{}' is disabled",
+                server_name, tool_name
+            ));
+        }
+        if let Some(url) = server_url {
+            if !state.configs.iter().any(|config| {
+                crate::session::mcp_servers::mcp_server_name(config) == server_name
+                    && mcp_server_url(config) == Some(url)
+            }) {
+                return Err(format!(
+                    "server '{}' endpoint no longer configured",
+                    server_name
+                ));
+            }
+        }
+        let target = server_name;
 
         Arc::clone(
             state
@@ -774,6 +771,18 @@ async fn handle_list(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         // bare string as `Some("...")` and diverge from the earlier format.
         if let Some(sid) = req.session_id.as_ref() {
             tracing::debug!(session_id = %sid, "Annotating mcp/list with session state");
+        }
+        // The session's authoritative configuration can override a same-name
+        // disk entry at a different endpoint. List the same endpoint we call.
+        for runtime in build_mcp_catalog(&snapshot.configs) {
+            if let Some(entry) = servers.iter_mut().find(|entry| entry.name == runtime.name) {
+                entry.config = runtime.config;
+                entry.setup = None;
+                entry.setup_values = None;
+                entry.session = None;
+            } else {
+                servers.push(runtime);
+            }
         }
         let catalog_names: std::collections::HashSet<String> =
             servers.iter().map(|s| s.name.clone()).collect();
@@ -1150,9 +1159,28 @@ struct McpSetupResponse {
     ok: bool,
 }
 
+// Configuration mutations commit through the same complete, merged catalog
+// as watcher reloads, rather than installing an isolated disk entry by name.
+async fn apply_session_catalog(
+    handle: &crate::session::SessionHandle,
+    catalog: Vec<acp::McpServer>,
+) -> Result<(), acp::Error> {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    handle
+        .cmd_tx
+        .send(crate::session::SessionCommand::UpdateMcpServers {
+            mcp_servers: catalog,
+            respond_to: tx,
+        })
+        .map_err(|_| acp::Error::internal_error().data("session closed"))?;
+    rx.await
+        .map_err(|_| acp::Error::internal_error().data("session closed"))?
+}
+
 async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let req = parse_params::<McpSetupRequest>(args)?;
     let acp_id = acp::SessionId::new(req.session_id.clone());
+    let _lifecycle_guard = agent.lock_session_lifecycle(&acp_id).await;
     let handle = agent
         .get_session_handle(&acp_id)
         .ok_or_else(|| acp::Error::invalid_params().data("session not found"))?;
@@ -1222,24 +1250,21 @@ async fn handle_setup(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     };
 
     let all_servers = crate::session::mcp_catalog::merge_mcp_servers(
-        vec![],
+        handle.initial_client_mcp_servers.clone(),
         &cwd,
         agent.plugin_registry_snapshot().as_deref(),
     );
-    let found = match all_servers
-        .into_iter()
+    match all_servers
+        .iter()
         .find(|server| crate::session::mcp_servers::mcp_server_name(server) == req.server_name)
     {
-        Some(found) => found,
+        Some(_) => {}
         None => {
             rollback().await;
             return Err(acp::Error::internal_error().data("server did not resolve after setup"));
         }
     };
-    if let Err(e) = handle
-        .toggle_mcp_server(req.server_name.clone(), true, Some(found))
-        .await
-    {
+    if let Err(e) = apply_session_catalog(&handle, all_servers).await {
         rollback().await;
         return Err(acp::Error::internal_error().data(e.to_string()));
     }
@@ -1264,51 +1289,30 @@ struct McpToggleResponse {
 async fn handle_toggle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let req = parse_params::<McpToggleRequest>(args)?;
     let acp_id = acp::SessionId::new(req.session_id.clone());
+    let _lifecycle_guard = agent.lock_session_lifecycle(&acp_id).await;
 
     let handle = agent
         .get_session_handle(&acp_id)
         .ok_or_else(|| acp::Error::invalid_params().data("session not found"))?;
 
-    // Build the server config outside the session actor. The actual mutation happens atomically
-    // inside the session actor via ToggleMcpServer.
-    let server_config = if req.enabled {
-        let cwd = agent
-            .get_session_cwd(&acp_id)
-            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
-        if let Err(e) =
-            crate::util::config::save_mcp_server_enabled_in(&req.server_name, true, &cwd).await
-        {
-            tracing::warn!(
-                server = req.server_name.as_str(),
-                error = %e,
-                "Failed to persist server re-enable before lookup"
-            );
-        }
-
-        let all_servers = crate::session::mcp_catalog::merge_mcp_servers(
-            vec![],
-            &cwd,
-            agent.plugin_registry_snapshot().as_deref(),
-        );
-        let found = all_servers
-            .into_iter()
-            .find(|server| crate::session::mcp_servers::mcp_server_name(server) == req.server_name);
-        match found {
-            None => {
-                return Err(acp::Error::invalid_params()
-                    .data(format!("server '{}' not found in config", req.server_name)));
-            }
-            _ => {}
-        }
-        found
-    } else {
-        None
-    };
-
-    handle
-        .toggle_mcp_server(req.server_name, req.enabled, server_config)
+    let cwd = std::path::Path::new(&handle.info.cwd);
+    crate::util::config::save_mcp_server_enabled_in(&req.server_name, req.enabled, cwd)
         .await
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+        .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
+    let catalog = crate::session::mcp_catalog::merge_mcp_servers(
+        handle.initial_client_mcp_servers.clone(),
+        cwd,
+        agent.plugin_registry_snapshot().as_deref(),
+    );
+    if req.enabled
+        && !catalog
+            .iter()
+            .any(|server| crate::session::mcp_servers::mcp_server_name(server) == req.server_name)
+    {
+        return Err(acp::Error::invalid_params()
+            .data(format!("server '{}' not found in config", req.server_name)));
+    }
+    apply_session_catalog(&handle, catalog).await?;
 
     to_ext_response(Ok(McpToggleResponse { ok: true }))
 }
@@ -1352,27 +1356,25 @@ struct McpUpsertRequest {
 async fn handle_upsert(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let req = parse_params::<McpUpsertRequest>(args)?;
     let acp_id = acp::SessionId::new(req.session_id.clone());
+    let _lifecycle_guard = agent.lock_session_lifecycle(&acp_id).await;
 
     // Persist to config.toml first.
     crate::util::config::save_mcp_server_config(&req.server_name, &req.config)
         .await
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
 
-    // Build the ACP server config for live addition.
-    let server_config = req
-        .config
+    req.config
         .to_acp_mcp_server(&req.server_name)
         .ok_or_else(|| acp::Error::invalid_params().data("server config is disabled"))?;
-
-    // Reuse the toggle path: enable=true with the built config.
     let handle = agent
         .get_session_handle(&acp_id)
         .ok_or_else(|| acp::Error::invalid_params().data("session not found"))?;
-
-    handle
-        .toggle_mcp_server(req.server_name, true, Some(server_config))
-        .await
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
+    let catalog = crate::session::mcp_catalog::merge_mcp_servers(
+        handle.initial_client_mcp_servers.clone(),
+        std::path::Path::new(&handle.info.cwd),
+        agent.plugin_registry_snapshot().as_deref(),
+    );
+    apply_session_catalog(&handle, catalog).await?;
 
     to_ext_response(Ok(McpToggleResponse { ok: true }))
 }
@@ -1388,6 +1390,7 @@ struct McpDeleteRequest {
 async fn handle_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
     let req = parse_params::<McpDeleteRequest>(args)?;
     let acp_id = acp::SessionId::new(req.session_id.clone());
+    let _lifecycle_guard = agent.lock_session_lifecycle(&acp_id).await;
 
     // Verify the server exists in local config (not managed).
     let existed = crate::util::config::delete_mcp_server_config(&req.server_name)
@@ -1401,19 +1404,15 @@ async fn handle_delete(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         )));
     }
 
-    // Live teardown: disable the server in the running session.
     let handle = agent
         .get_session_handle(&acp_id)
         .ok_or_else(|| acp::Error::invalid_params().data("session not found"))?;
-
-    handle
-        .toggle_mcp_server(req.server_name.clone(), false, None)
-        .await
-        .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
-
-    // The toggle path spawns a task that adds the server to
-    // `disabled_mcp_servers`. Clear user list only — do not unstick project.
-    let _ = crate::util::config::save_user_mcp_server_enabled(&req.server_name, true).await;
+    let catalog = crate::session::mcp_catalog::merge_mcp_servers(
+        handle.initial_client_mcp_servers.clone(),
+        std::path::Path::new(&handle.info.cwd),
+        agent.plugin_registry_snapshot().as_deref(),
+    );
+    apply_session_catalog(&handle, catalog).await?;
 
     to_ext_response(Ok(McpToggleResponse { ok: true }))
 }

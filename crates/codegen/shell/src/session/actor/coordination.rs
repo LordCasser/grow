@@ -10,6 +10,20 @@ impl SessionActor {
         self: &Arc<Self>,
         inquiry: crate::coordination::InboundInquiry,
     ) {
+        match self.existing_coordination_outcome(&inquiry).await {
+            Ok(Some(outcome)) => {
+                inquiry
+                    .progress
+                    .send_replace(crate::coordination::InquiryPhase::Finished);
+                let _ = inquiry.respond_to.send(outcome);
+                return;
+            }
+            Err(error) => {
+                reject_inquiry(inquiry, crate::coordination::InquiryStatus::Failed, error);
+                return;
+            }
+            Ok(None) => {}
+        }
         // Receipt is durable before queued/approval/running is observable.
         if let Err(error) = self.record_incoming_coordination_notice(&inquiry).await {
             reject_inquiry(
@@ -74,6 +88,61 @@ impl SessionActor {
         tokio::task::spawn_local(async move {
             session.run_coordination_inquiry_queue().await;
         });
+    }
+
+    async fn existing_coordination_outcome(
+        &self,
+        inquiry: &crate::coordination::InboundInquiry,
+    ) -> Result<Option<crate::coordination::InquiryOutcome>, crate::coordination::CoordinationError>
+    {
+        use crate::coordination::{CoordinationError, CoordinationErrorCode, InquiryEvent};
+        let events = self
+            .chat_state_handle
+            .timeline_events()
+            .await
+            .ok_or_else(|| {
+                CoordinationError::new(
+                    CoordinationErrorCode::AuditFailure,
+                    "Timeline actor unavailable",
+                )
+            })?;
+        let mut received = false;
+        for event in &events {
+            let Some(InquiryEvent::Incoming { inquiry_id, audit }) =
+                InquiryEvent::from_timeline(event).map_err(|error| {
+                    CoordinationError::new(CoordinationErrorCode::AuditFailure, error)
+                })?
+            else {
+                continue;
+            };
+            if inquiry_id != inquiry.inquiry_id
+                || audit.source_session_id != inquiry.source_session_id
+            {
+                continue;
+            }
+            if audit.question != inquiry.question
+                || audit.source_cwd != inquiry.source_cwd
+                || audit.direction != inquiry.direction
+                || audit.delegated_subagent_task_name != inquiry.delegated_subagent_task_name
+            {
+                return Err(CoordinationError::new(
+                    CoordinationErrorCode::Conflict,
+                    "inquiry identity already belongs to a different received request",
+                ));
+            }
+            received = true;
+            if let Some(outcome) = audit.outcome {
+                return Ok(Some(outcome));
+            }
+        }
+        if received {
+            return Err(CoordinationError::retry(
+                CoordinationErrorCode::Busy,
+                "inquiry has an open durable receipt and will not be executed twice",
+                1000,
+            ));
+        }
+        Ok(None)
     }
 
     async fn run_coordination_inquiry_queue(self: Arc<Self>) {
@@ -387,11 +456,68 @@ impl SessionActor {
     pub(super) async fn persist_coordination_inquiry(
         &self,
         event: crate::coordination::InquiryEvent,
-    ) -> Result<(), String> {
+    ) -> Result<(), crate::coordination::CoordinationError> {
+        if let crate::coordination::InquiryEvent::OutgoingStarted {
+            inquiry_id,
+            target_session_id,
+            question,
+        } = &event
+        {
+            let events = self
+                .chat_state_handle
+                .timeline_events()
+                .await
+                .ok_or_else(|| {
+                    crate::coordination::CoordinationError::new(
+                        crate::coordination::CoordinationErrorCode::AuditFailure,
+                        "Timeline actor unavailable while admitting source inquiry",
+                    )
+                })?;
+            for timeline_event in &events {
+                let fact = crate::coordination::InquiryEvent::from_timeline(timeline_event)
+                    .map_err(|error| {
+                        crate::coordination::CoordinationError::new(
+                            crate::coordination::CoordinationErrorCode::AuditFailure,
+                            format!("could not inspect source inquiry Timeline: {error}"),
+                        )
+                    })?;
+                let Some(fact) = fact else {
+                    continue;
+                };
+                let (existing_id, existing_target, existing_question) = match &fact {
+                    crate::coordination::InquiryEvent::OutgoingStarted {
+                        inquiry_id,
+                        target_session_id,
+                        question,
+                    } => (inquiry_id, target_session_id, question),
+                    crate::coordination::InquiryEvent::OutgoingCompleted { audit } => (
+                        &audit.outcome.inquiry_id,
+                        &audit.target_session_id,
+                        &audit.question,
+                    ),
+                    crate::coordination::InquiryEvent::Incoming { .. } => continue,
+                };
+                if existing_id != inquiry_id {
+                    continue;
+                }
+                if existing_target == target_session_id && existing_question == question {
+                    return Ok(());
+                }
+                return Err(crate::coordination::CoordinationError::new(
+                    crate::coordination::CoordinationErrorCode::Conflict,
+                    "inquiry id already belongs to a different durable request",
+                ));
+            }
+        }
         self.chat_state_handle
             .record_timeline_event_durably(event.timeline_kind())
             .await
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| {
+                crate::coordination::CoordinationError::new(
+                    crate::coordination::CoordinationErrorCode::AuditFailure,
+                    error.to_string(),
+                )
+            })?;
         let notice = event.notice();
         let projection = if matches!(event, crate::coordination::InquiryEvent::Incoming { .. }) {
             self.persist_ui_notice(notice).await
@@ -415,6 +541,7 @@ impl SessionActor {
             audit: crate::coordination::IncomingInquiryAudit::received(inquiry),
         })
         .await
+        .map_err(|error| error.to_string())
     }
 
     async fn record_coordination_approval_notice(
@@ -429,6 +556,7 @@ impl SessionActor {
             audit,
         })
         .await
+        .map_err(|error| error.to_string())
     }
 
     async fn record_coordination_terminal_notice(
@@ -443,6 +571,7 @@ impl SessionActor {
             audit,
         })
         .await
+        .map_err(|error| error.to_string())
     }
 
     /// The actor already owns the validated Timeline, including restore facts.
@@ -463,7 +592,7 @@ impl SessionActor {
             else {
                 continue;
             };
-            let key = (audit.source_peer_id.clone(), inquiry_id);
+            let key = (audit.source_session_id.clone(), inquiry_id);
             if latest
                 .get(&key)
                 .is_none_or(|previous| previous.outcome.is_none())
@@ -493,7 +622,8 @@ impl SessionActor {
                 inquiry_id: id,
                 audit,
             })
-            .await?;
+            .await
+            .map_err(|error| error.to_string())?;
         }
         Ok(())
     }
@@ -623,6 +753,61 @@ fn failed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod identity_tests;
+
+    struct JsonlTimelinePersistence {
+        storage: crate::session::storage::JsonlStorageAdapter,
+        info: crate::session::info::Info,
+    }
+
+    impl chat_state::TimelinePersistence for JsonlTimelinePersistence {
+        fn persist_timeline_event_and_ack(
+            &mut self,
+            event: &chat_state::TimelineEvent,
+        ) -> tokio::sync::oneshot::Receiver<std::io::Result<()>> {
+            use crate::session::storage::StorageAdapter as _;
+
+            let storage = self.storage.clone();
+            let info = self.info.clone();
+            let event = event.clone();
+            let (respond_to, receiver) = tokio::sync::oneshot::channel();
+            tokio::spawn(async move {
+                let _ = respond_to.send(storage.append_timeline_event_durable(&info, &event).await);
+            });
+            receiver
+        }
+
+        fn flush(&mut self) {}
+    }
+
+    async fn admit_and_ack_startup(
+        actor: &Arc<SessionActor>,
+        event: crate::coordination::InquiryEvent,
+        updates: &mut tokio::sync::mpsc::UnboundedReceiver<
+            crate::session::persistence::PersistenceMsg,
+        >,
+    ) -> Result<(), crate::coordination::CoordinationError> {
+        let task_actor = Arc::clone(actor);
+        let task = tokio::task::spawn_local(async move {
+            task_actor.persist_coordination_inquiry(event).await
+        });
+        let Some(crate::session::persistence::PersistenceMsg::AppendUpdateDurablyAndAck {
+            update,
+            respond_to,
+        }) = updates.recv().await
+        else {
+            panic!("startup admission must project its first durable notice");
+        };
+        let crate::session::storage::SessionUpdate::Grow(notification) = update else {
+            panic!("source inquiry startup must project a Grow session update");
+        };
+        assert!(matches!(
+            notification.update,
+            crate::extensions::notification::SessionUpdate::UiNotice(_)
+        ));
+        respond_to.send(Ok(())).unwrap();
+        task.await.unwrap()
+    }
 
     fn inquiry(
         id: usize,
@@ -649,6 +834,144 @@ mod tests {
             },
             response,
         )
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn source_startup_admission_survives_rebuild_without_duplicate_append_or_notice() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use crate::session::storage::{JsonlStorageAdapter, StorageAdapter as _};
+
+                let root = tempfile::tempdir().unwrap();
+                let storage = JsonlStorageAdapter::with_root(root.path().to_owned());
+                let (mut actor, _gateway) =
+                    crate::session::actor::tests::support::build_actor().await;
+                let info = actor.session_info.clone();
+                storage
+                    .init_session(&info, crate::session::persistence::default_model_id())
+                    .await
+                    .unwrap();
+
+                let config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
+                Arc::get_mut(&mut actor).unwrap().chat_state_handle =
+                    chat_state::ChatStateActor::spawn_from_timeline(
+                        Vec::new(),
+                        config,
+                        Box::new(JsonlTimelinePersistence {
+                            storage: storage.clone(),
+                            info: info.clone(),
+                        }),
+                        chat_event_tx,
+                        tokio_util::sync::CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap();
+                let (updates_tx, mut updates_rx) = tokio::sync::mpsc::unbounded_channel();
+                Arc::get_mut(&mut actor)
+                    .unwrap()
+                    .notifications
+                    .persistence_tx = updates_tx;
+
+                let event = crate::coordination::InquiryEvent::OutgoingStarted {
+                    inquiry_id: uuid::Uuid::now_v7().to_string(),
+                    target_session_id: "target-session".into(),
+                    question: "exact question".into(),
+                };
+                admit_and_ack_startup(&actor, event.clone(), &mut updates_rx)
+                    .await
+                    .unwrap();
+                assert!(updates_rx.try_recv().is_err());
+
+                let loaded = crate::session::storage::load_timeline_by_id_at(
+                    info.id.0.as_ref(),
+                    root.path(),
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(
+                    loaded
+                        .events()
+                        .iter()
+                        .filter(|event| matches!(
+                            crate::coordination::InquiryEvent::from_timeline(event),
+                            Ok(Some(
+                                crate::coordination::InquiryEvent::OutgoingStarted { .. }
+                            ))
+                        ))
+                        .count(),
+                    1,
+                    "the accepted startup must have one canonical durable fact"
+                );
+
+                let config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+                let (chat_event_tx, _chat_event_rx) = tokio::sync::mpsc::unbounded_channel();
+                Arc::get_mut(&mut actor).unwrap().chat_state_handle =
+                    chat_state::ChatStateActor::spawn_from_timeline(
+                        loaded.events().to_vec(),
+                        config,
+                        Box::new(JsonlTimelinePersistence {
+                            storage: storage.clone(),
+                            info: info.clone(),
+                        }),
+                        chat_event_tx,
+                        tokio_util::sync::CancellationToken::new(),
+                    )
+                    .await
+                    .unwrap();
+
+                assert_eq!(
+                    actor.persist_coordination_inquiry(event.clone()).await,
+                    Ok(())
+                );
+                assert!(
+                    updates_rx.try_recv().is_err(),
+                    "retry must not project a second notice"
+                );
+                for conflict in [
+                    crate::coordination::InquiryEvent::OutgoingStarted {
+                        inquiry_id: match &event {
+                            crate::coordination::InquiryEvent::OutgoingStarted {
+                                inquiry_id,
+                                ..
+                            } => inquiry_id.clone(),
+                            _ => unreachable!(),
+                        },
+                        target_session_id: "different-target".into(),
+                        question: "exact question".into(),
+                    },
+                    crate::coordination::InquiryEvent::OutgoingStarted {
+                        inquiry_id: match &event {
+                            crate::coordination::InquiryEvent::OutgoingStarted {
+                                inquiry_id,
+                                ..
+                            } => inquiry_id.clone(),
+                            _ => unreachable!(),
+                        },
+                        target_session_id: "target-session".into(),
+                        question: "different question".into(),
+                    },
+                ] {
+                    let error = actor
+                        .persist_coordination_inquiry(conflict)
+                        .await
+                        .unwrap_err();
+                    assert_eq!(
+                        error.code,
+                        crate::coordination::CoordinationErrorCode::Conflict
+                    );
+                    assert!(updates_rx.try_recv().is_err());
+                }
+
+                let after = crate::session::storage::load_timeline_by_id_at(
+                    info.id.0.as_ref(),
+                    root.path(),
+                )
+                .unwrap()
+                .unwrap();
+                assert_eq!(after.events().len(), loaded.events().len());
+            })
+            .await;
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -1067,10 +1390,13 @@ mod tests {
                     chat_state::SubagentSpawnEvent {
                         subagent_id: "active-child".into(),
                         child_session_id: "child-session".into(),
+                        origin_tool_call_id: None,
                         security_parent_session_id: actor.session_info.id.to_string(),
+            parent_step_id: None,
                         subagent_type: "explore".into(),
                         description: "keep running in the background".into(),
                         prompt: "inspect the target".into(),
+                        execution_recipe: serde_json::json!({}),
                         context_source: chat_state::SubagentContextSource::New,
                         source_ref: None,
                         context_normalized: false,

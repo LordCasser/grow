@@ -337,13 +337,35 @@ fn viewer_finalize_stop_reason_to_marker_mapping() {
         "rate_limit must not push a marker on a viewer"
     );
 
-    // unknown/other reason → Turn completed (the catch-all).
-    let mut agent = running_viewer("p1");
-    let _ = agent.finalize_turn_from_durable_terminal("p1", Some("max_tokens"), None);
-    assert!(matches!(
-        last_session_event(&agent.scrollback),
-        Some(SessionEvent::TurnCompleted { .. })
-    ));
+    // Known ACP terminal reasons → successful completion.
+    for reason in ["end_turn", "max_tokens", "max_turn_requests", "refusal"] {
+        let mut agent = running_viewer("p1");
+        let outcome = agent.finalize_turn_from_durable_terminal("p1", Some(reason), None);
+        assert!(matches!(
+            last_session_event(&agent.scrollback),
+            Some(SessionEvent::TurnCompleted { .. })
+        ));
+        assert_eq!(
+            outcome.notification.map(|(kind, _)| kind),
+            Some(NotificationEventKind::TurnComplete)
+        );
+    }
+
+    // Unknown and interrupted reasons are not successful terminal evidence.
+    for reason in [Some("interrupted"), Some("future_reason"), None] {
+        let mut agent = running_viewer("p1");
+        let label = reason.unwrap_or("<missing>");
+        let outcome = agent.finalize_turn_from_durable_terminal("p1", reason, None);
+        assert!(matches!(outcome.apply, TerminalApply::ViewerFinalized));
+        assert!(matches!(
+            last_session_event(&agent.scrollback),
+            Some(SessionEvent::TurnFailed { error, .. }) if error.contains(label)
+        ));
+        assert_eq!(
+            outcome.notification.map(|(kind, _)| kind),
+            Some(NotificationEventKind::AgentError)
+        );
+    }
 }
 
 // ── End markers: always the plain event text (work lives in the status row) ──
@@ -520,6 +542,9 @@ fn viewer_finalize_runs_full_teardown_once() {
             session_id: "s1".into(),
             tool_call_id: "plan-1".into(),
             plan_content: "plan text".into(),
+            submission_id: 1,
+            artifact_revision: 2,
+            artifact_hash: "a".repeat(64),
         },
         Default::default(),
         plan_tx,
@@ -555,8 +580,11 @@ fn viewer_finalize_runs_full_teardown_once() {
         "drained permissions answered Cancelled"
     );
     assert!(
-        plan_rx.try_recv().is_ok(),
-        "the dismissed plan approval answered stale-cancel"
+        matches!(
+            plan_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+        ),
+        "turn teardown closes the stale waiter without inventing a Plan decision"
     );
     assert!(
         agent.plan_approval_view.is_none(),

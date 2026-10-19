@@ -995,7 +995,7 @@ impl AgentView {
                 }
             }
             1 if is_plan_tool => {
-                self.show_plan_preview();
+                // The mouse dispatcher issues the asynchronous canonical query.
             }
             2 if is_bg_task => {
                 // Double-click bg task: open block viewer (same as Enter).
@@ -1862,7 +1862,7 @@ mod tests {
         let mut block = OtherToolCallBlock::new("Answered session peer", "")
             .with_output("Inquiry ID: one\nQuestion: status?\nAnswer: working");
         block.coordination = Some(CoordinationRow {
-            source_peer_id: "peer".into(),
+            source_session_id: "peer".into(),
             inquiry_id: "one".into(),
             phase: CoordinationPhase::Terminal,
         });
@@ -1885,7 +1885,7 @@ mod tests {
         let mut block =
             OtherToolCallBlock::new("Answering session peer", "").with_output("Question: status?");
         block.coordination = Some(CoordinationRow {
-            source_peer_id: "peer".into(),
+            source_session_id: "peer".into(),
             inquiry_id: "one".into(),
             phase: CoordinationPhase::Received,
         });

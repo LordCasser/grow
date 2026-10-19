@@ -27,7 +27,16 @@ use tool_types::{SubagentCapabilityMode, SubagentIsolationMode};
 
 use crate::register_resource;
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// Runtime checkpoint identity used to resume a suspended child session.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildCheckpoint {
+    pub session_id: String,
+    pub operation_id: String,
+    pub checkpoint_seq: u64,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SubagentOwner {
     #[default]
     Task,
@@ -90,10 +99,15 @@ impl SubagentOwner {
 pub struct SubagentRequest {
     /// Subagent ID (UUID v7). Same as `TaskToolInput.task_id`; becomes the child session ID.
     pub id: String,
+    /// Tool call that directly requested this child, when model-originated.
+    pub origin_tool_call_id: Option<String>,
     pub prompt: String,
     pub description: String,
     pub subagent_type: String,
     pub parent_session_id: String,
+    /// Local plan step this task was explicitly linked to, when applicable.
+    /// Persisted in the parent Spawn fact for completion reconciliation.
+    pub parent_step_id: Option<String>,
     /// Parent turn/prompt ID that launched this subagent.
     ///
     /// Used to cancel only the subagents spawned by the currently-cancelled turn,
@@ -131,6 +145,49 @@ pub struct SubagentRequest {
     pub cancel_token: CancellationToken,
 }
 
+/// Durable, credential-free execution inputs needed to recreate one child
+/// under the same lifecycle identity after a cold restore.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubagentExecutionRecipe {
+    pub runtime_overrides: SubagentRuntimeOverrides,
+    pub run_in_background: bool,
+    pub await_to_completion: bool,
+    pub fork_context: bool,
+    pub goal_context: Option<crate::implementations::grow_build::update_goal::GoalContextSnapshot>,
+    pub owner: SubagentOwner,
+}
+
+impl SubagentExecutionRecipe {
+    pub const MAX_BYTES: usize = 128 * 1024;
+
+    /// Decode a Timeline recipe with a strict size and object boundary.
+    pub fn from_value(value: &serde_json::Value) -> Result<Self, serde_json::Error> {
+        if !value.is_object() || value.to_string().len() > Self::MAX_BYTES {
+            return Err(<serde_json::Error as serde::de::Error>::custom(
+                "subagent execution recipe must be an object within the byte limit",
+            ));
+        }
+        serde_json::from_value(value.clone())
+    }
+}
+
+impl SubagentRequest {
+    /// Build the complete durable subset of this request, excluding prompt,
+    /// history, cancellation state, and credentials.
+    pub fn execution_recipe(&self) -> serde_json::Value {
+        serde_json::to_value(SubagentExecutionRecipe {
+            runtime_overrides: self.runtime_overrides.clone(),
+            run_in_background: self.run_in_background,
+            await_to_completion: self.await_to_completion,
+            fork_context: self.fork_context,
+            goal_context: self.goal_context.clone(),
+            owner: self.owner.clone(),
+        })
+        .expect("subagent execution recipe fields must be serializable")
+    }
+}
+
 /// Spawn command envelope owned by the coordinator mailbox.
 #[derive(Educe)]
 #[educe(Debug)]
@@ -166,7 +223,8 @@ impl SubagentSpawnRequest {
 ///
 /// Optional values inherit from the parent or role default. Explicit values take
 /// precedence over role defaults.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ModelOverrideProvenance {
     /// Internal harness, role, or config resolution.
     #[default]
@@ -175,7 +233,8 @@ pub enum ModelOverrideProvenance {
     Tool,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SubagentRuntimeOverrides {
     /// Override the model (e.g. "test-model").
     pub model: Option<String>,
@@ -238,6 +297,9 @@ pub fn is_valid_resume_id(s: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct SubagentResult {
     pub success: bool,
+    /// The coordinator rejected admission before creating a child lifecycle.
+    /// Unknown transport outcomes must leave this false.
+    pub not_dispatched: bool,
     /// Execution returned; its durable result/delivery remains unconfirmed.
     /// The original execution outcome is preserved independently.
     pub finalization_pending: bool,
@@ -264,6 +326,7 @@ pub struct SubagentResult {
     pub output_tokens_used: u64,
     pub total_tokens_used: u64,
     pub output_usage_incomplete: bool,
+    pub planning_summary: Option<tool_types::planning::SubagentPlanningSummary>,
     /// Path to the isolated worktree if one was created.
     pub worktree_path: Option<String>,
     /// Set when a blocking subagent exceeded its await budget and was
@@ -277,6 +340,7 @@ impl Default for SubagentResult {
     fn default() -> Self {
         Self {
             success: false,
+            not_dispatched: false,
             finalization_pending: false,
             output_unavailable: false,
             output: Arc::from(""),
@@ -291,6 +355,7 @@ impl Default for SubagentResult {
             output_tokens_used: 0,
             total_tokens_used: 0,
             output_usage_incomplete: false,
+            planning_summary: None,
             worktree_path: None,
             backgrounded: false,
         }
@@ -420,6 +485,13 @@ pub enum SubagentSnapshotStatus {
         /// Number of errors encountered so far.
         error_count: u32,
     },
+    /// Execution is checkpointed and awaits an external resume action.
+    /// The checkpoint identifies a durable handoff; it does not authorize
+    /// the coordinator to start or replay the child.
+    Suspended {
+        operation_id: String,
+        checkpoint_seq: u64,
+    },
     /// Child session completed successfully.
     Completed {
         output: String,
@@ -515,6 +587,7 @@ pub struct SubagentCompletionSummary {
     /// that DO have a polling tool keep the existing metadata-only line +
     /// "Use get_task_output(...)" pointer.
     pub output: Arc<str>,
+    pub planning_summary: Option<tool_types::planning::SubagentPlanningSummary>,
 }
 
 /// Live subagents and whether finished-subagent usage is still missing from the parent bill.
@@ -640,6 +713,28 @@ pub struct SubagentValidateTypeRequest {
 
 /// Coordinator message enum. Kept exhaustive so every actor command is handled.
 pub enum SubagentEvent {
+    FreezeAdmission {
+        root_session_id: String,
+        operation_id: String,
+        respond_to: oneshot::Sender<Result<Vec<FrozenChildRef>, String>>,
+    },
+    AdoptSuspended {
+        request: Box<SubagentRequest>,
+        security_parent_session_id: String,
+        checkpoint: ChildCheckpoint,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    ReleaseRestoredTree {
+        root_session_id: String,
+        operation_id: String,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    CheckSuspendedRetirement {
+        root_session_id: String,
+        operation_id: String,
+        task_ids: Vec<String>,
+        respond_to: oneshot::Sender<Result<bool, String>>,
+    },
     Interact(super::interaction::AgentInteractionRequest),
     Spawn(SubagentSpawnRequest),
     Query(SubagentQueryRequest),
@@ -664,6 +759,15 @@ pub enum SubagentEvent {
     SpawnedRefs(SubagentSpawnedRefsRequest),
     ValidateType(SubagentValidateTypeRequest),
     LoopUnitActive(SubagentLoopUnitActiveRequest),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrozenChildRef {
+    pub task_id: String,
+    pub session_id: String,
+    pub security_parent_session_id: String,
+    pub origin_tool_call_id: Option<String>,
+    pub initializing: bool,
 }
 
 // Resource types
@@ -1064,6 +1168,24 @@ mod tests {
     fn is_terminal_returns_false_for_initializing() {
         let status = super::SubagentSnapshotStatus::Initializing;
         assert!(!status.is_terminal());
+    }
+
+    #[test]
+    fn suspended_is_nonterminal_but_not_running() {
+        let status = super::SubagentSnapshotStatus::Suspended {
+            operation_id: "operation-1".into(),
+            checkpoint_seq: 7,
+        };
+        assert!(!status.is_terminal());
+        let snapshot = super::SubagentSnapshot {
+            subagent_id: "sub-1".into(),
+            description: "checkpointed child".into(),
+            subagent_type: "worker".into(),
+            status,
+            started_at_epoch_ms: 1,
+            duration_ms: 2,
+        };
+        assert!(!snapshot.is_running());
     }
 
     #[test]

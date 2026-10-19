@@ -745,6 +745,7 @@ impl ToolRegistryBuilder {
         };
         b.register_with_params::<grow_build::BashTool, grow_build::bash::BashParams>();
         b.register::<grow_build::ReadFileTool>();
+        b.register::<grow_build::LoadSkillTool>();
         b.register_with_params::<
                 grow_build::SearchReplaceTool,
                 grow_build::search_replace::SearchReplaceParams,
@@ -1068,7 +1069,6 @@ impl ToolRegistryBuilder {
         if has_concise_tools {
             resources.insert(crate::types::resources::SystemRemindersEnabled(false));
         }
-        resources.register_state::<crate::implementations::grow_build::todo::TodoState>();
         resources.register_state::<crate::types::resources::WebCitationCounter>();
         resources.register_state::<crate::types::resources::ModelImageInputState>();
         resources
@@ -1557,6 +1557,47 @@ impl FinalizedToolset {
             match item {
                 tool_runtime::ToolStreamItem::Progress(_) => continue,
                 tool_runtime::ToolStreamItem::Terminal(result) => return result,
+            }
+        }
+        Err(stream_no_terminal_error())
+    }
+
+    /// Dispatch with a host-selected skill identity placed in the call
+    /// context after ordinary dispatch preparation. This shares the standard
+    /// output finalization path and keeps selection metadata out of tool args.
+    pub async fn call_with_skill_selection(
+        self: &Arc<Self>,
+        tool_name: &str,
+        tool_args: serde_json::Value,
+        tool_call_id: &str,
+        selection: crate::implementations::grow_build::load_skill::SkillLoadSelection,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<ToolRunResult, tool_runtime::ToolError> {
+        use futures::StreamExt;
+
+        let parts =
+            self.prepare_dispatch(tool_name, tool_args, tool_call_id, None, Some(cancellation))?;
+        let DispatchParts {
+            lr_handle,
+            mut ctx,
+            canonical_params,
+            output_converter,
+            effective_tool_name,
+        } = parts;
+        ctx.extensions.insert(selection);
+        let mut stream = lr_handle.execute(ctx, canonical_params).await;
+        while let Some(item) = stream.next().await {
+            match item {
+                tool_runtime::ToolStreamItem::Progress(_) => continue,
+                tool_runtime::ToolStreamItem::Terminal(result) => {
+                    return match result {
+                        Ok(typed) => {
+                            self.finalize_output(typed, &output_converter, effective_tool_name)
+                                .await
+                        }
+                        Err(error) => Err(error),
+                    };
+                }
             }
         }
         Err(stream_no_terminal_error())
@@ -3395,10 +3436,7 @@ mod tests {
         let toolset = ToolRegistryBuilder::new()
             .finalize(
                 ToolServerConfig {
-                    tools: vec![
-                        ToolConfig::for_tool::<grow_build::TodoWriteTool>(),
-                        ToolConfig::for_tool::<grow_build::WriteTool>(),
-                    ],
+                    tools: vec![ToolConfig::for_tool::<grow_build::WriteTool>()],
                 },
                 test_session_context(&tmp),
             )
@@ -3416,72 +3454,14 @@ mod tests {
             .collect();
         contracts.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
         let expected: serde_json::Value = serde_json::from_str(
-                r##"
+            r##"
         [
-          {
-            "name": "todo_write",
-            "description": "Create and manage a structured task list. The user sees this list live — it is your primary way to show progress.\n\nUse for any task with 3+ steps. Skip for trivial single-step work.",
-            "parameters": {
-              "$schema": "http://json-schema.org/draft-07/schema#",
-              "required": [
-                "todos"
-              ],
-              "type": "object",
-              "properties": {
-                "merge": {
-                  "description": "Optional. When true (default), merges the provided todos into the existing list by id — send only the items you are changing, and to flip status without changing content send just id + status. When false, the provided todos replace the existing list.",
-                  "type": "boolean",
-                  "default": true
-                },
-                "todos": {
-                  "description": "Array of todo items to write to the workspace",
-                  "type": "array",
-                  "items": {
-                    "type": "object",
-                    "properties": {
-                      "id": {
-                        "description": "Unique identifier for the todo item",
-                        "type": "string"
-                      },
-                      "content": {
-                        "description": "The description/content of the todo item",
-                        "type": [
-                          "string",
-                          "null"
-                        ]
-                      },
-                      "status": {
-                        "description": "The status of the todo item: pending, in_progress, completed, or cancelled",
-                        "type": [
-                          "string",
-                          "null"
-                        ],
-                        "enum": [
-                          "pending",
-                          "in_progress",
-                          "completed",
-                          "cancelled",
-                          null
-                        ]
-                      }
-                    },
-                    "required": [
-                      "id"
-                    ]
-                  }
-                }
-              }
-            }
-          },
           {
             "name": "write",
             "description": "Create or overwrite a file.\n\n- Writing to an existing path replaces the file.\n- Parent directories are created for you.",
             "parameters": {
               "$schema": "http://json-schema.org/draft-07/schema#",
-              "required": [
-                "file_path",
-                "content"
-              ],
+              "required": ["file_path", "content"],
               "properties": {
                 "file_path": {
                   "description": "The path to the file to write, resolved against the current workspace.",
@@ -3497,10 +3477,75 @@ mod tests {
           }
         ]
 "##,
-            )
+        )
             .expect("checked-in snapshot parses");
         assert_eq!(expected, serde_json::Value::Array(contracts));
     }
+
+    #[tokio::test]
+    async fn todo_write_contract_exposes_local_plan_fields_and_actions() {
+        let tmp = TempDir::new().unwrap();
+        let toolset = ToolRegistryBuilder::new()
+            .finalize(
+                ToolServerConfig {
+                    tools: vec![ToolConfig::for_tool::<grow_build::TodoWriteTool>()],
+                },
+                test_session_context(&tmp),
+            )
+            .unwrap();
+        let definition = toolset
+            .tool_definitions()
+            .into_iter()
+            .find(|definition| definition.function.name == "todo_write")
+            .expect("todo_write definition");
+        let parameters = &definition.function.parameters;
+        assert_eq!(
+            parameters["properties"]["todos"]["description"],
+            "Array of todo items to write to the current local plan"
+        );
+        let item_fields = parameters["properties"]["todos"]["items"]["properties"]
+            .as_object()
+            .expect("todo item fields");
+        for field in [
+            "id",
+            "content",
+            "status",
+            "priority",
+            "requirements",
+            "removed",
+        ] {
+            assert!(
+                item_fields.contains_key(field),
+                "missing todo field {field}"
+            );
+        }
+        let action_variants = parameters["properties"]["actions"]["items"]["oneOf"]
+            .as_array()
+            .expect("planning action variants");
+        let action_names: std::collections::BTreeSet<_> = action_variants
+            .iter()
+            .flat_map(|variant| {
+                variant["properties"]
+                    .as_object()
+                    .into_iter()
+                    .flat_map(|properties| properties.keys().cloned())
+            })
+            .collect();
+        assert_eq!(
+            action_names,
+            [
+                "clear_wait",
+                "handle_replans",
+                "review",
+                "select_scope",
+                "wait"
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        );
+    }
+
     #[tokio::test]
     async fn tool_definitions_builtins_only_hides_mcp_tools() {
         let tmp = TempDir::new().unwrap();

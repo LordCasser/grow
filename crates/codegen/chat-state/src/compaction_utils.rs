@@ -28,7 +28,9 @@ pub fn complete_turn_ends<'a>(items: impl IntoIterator<Item = &'a ConversationIt
         while index < items.len()
             && !matches!(
                 items[index],
-                ConversationItem::User(_) | ConversationItem::AgentMessage(_)
+                ConversationItem::User(_)
+                    | ConversationItem::AgentMessage(_)
+                    | ConversationItem::SkillLoad(_)
             )
         {
             index += 1;
@@ -41,7 +43,9 @@ pub fn complete_turn_ends<'a>(items: impl IntoIterator<Item = &'a ConversationIt
         while index < items.len()
             && matches!(
                 items[index],
-                ConversationItem::User(_) | ConversationItem::AgentMessage(_)
+                ConversationItem::User(_)
+                    | ConversationItem::AgentMessage(_)
+                    | ConversationItem::SkillLoad(_)
             )
         {
             let prompt_index = items[index].prompt_index();
@@ -75,6 +79,15 @@ pub fn complete_turn_ends<'a>(items: impl IntoIterator<Item = &'a ConversationIt
                     index += 1;
                     continue;
                 }
+                ConversationItem::SkillLoad(skill)
+                    if matches!(
+                        (turn_prompt_index, skill.prompt_index),
+                        (Some(left), Some(right)) if left == right
+                    ) =>
+                {
+                    index += 1;
+                    continue;
+                }
                 ConversationItem::User(_)
                     if pending_tool_calls.is_empty()
                         && matches!(
@@ -87,6 +100,7 @@ pub fn complete_turn_ends<'a>(items: impl IntoIterator<Item = &'a ConversationIt
                 }
                 ConversationItem::User(_)
                 | ConversationItem::AgentMessage(_)
+                | ConversationItem::SkillLoad(_)
                 | ConversationItem::System(_) => {
                     break;
                 }
@@ -620,6 +634,11 @@ pub fn fit_compaction_range_to_budget(
                     break;
                 }
             }
+            ConversationItem::SkillLoad(_) if !pending_calls.is_empty() => {
+                if is_new_prompt_boundary(surface, index) {
+                    break;
+                }
+            }
             item => {
                 if !pending_calls.is_empty() {
                     break;
@@ -658,6 +677,16 @@ fn is_new_prompt_boundary(surface: &[ConversationItem], index: usize) -> bool {
         ConversationItem::User(_) => true,
         ConversationItem::AgentMessage(batch) => {
             let Some(prompt_index) = batch.prompt_index else {
+                return true;
+            };
+            surface[..index]
+                .iter()
+                .rev()
+                .find_map(ConversationItem::prompt_index)
+                .is_none_or(|previous| previous != prompt_index)
+        }
+        ConversationItem::SkillLoad(skill) => {
+            let Some(prompt_index) = skill.prompt_index else {
                 return true;
             };
             surface[..index]

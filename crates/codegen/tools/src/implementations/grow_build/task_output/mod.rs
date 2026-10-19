@@ -647,6 +647,37 @@ fn format_subagent_snapshot(snap: &SubagentSnapshot, wait_hint: WaitHint) -> Tas
                 raw_output_bytes,
             })
         }
+        SubagentSnapshotStatus::Suspended {
+            operation_id,
+            checkpoint_seq,
+        } => {
+            let output = format!(
+                "Subagent is suspended at a durable checkpoint; it has not completed and no resume was started.\n\
+                 Type: {}\n\
+                 Description: {}\n\
+                 Elapsed: {:.1}s\n\
+                 Operation: {operation_id}\n\
+                 Checkpoint sequence: {checkpoint_seq}",
+                snap.subagent_type,
+                snap.description,
+                snap.duration_ms as f64 / 1000.0,
+            );
+            let raw_output_bytes = output.len();
+            TaskOutputOutput::Result(TaskOutputResult {
+                task_id: snap.subagent_id.clone(),
+                command: format!("[subagent:{}] {}", snap.subagent_type, snap.description),
+                status: "suspended".to_string(),
+                exit_code: None,
+                started,
+                ended: None,
+                duration_secs: snap.duration_ms as f64 / 1000.0,
+                output,
+                output_file: String::new(),
+                truncated: false,
+                truncation_hint: String::new(),
+                raw_output_bytes,
+            })
+        }
         SubagentSnapshotStatus::Completed {
             output,
             tool_calls,
@@ -1869,6 +1900,33 @@ mod tests {
             }
             other => panic!("Expected Result, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn format_suspended_subagent_is_nonterminal_and_shows_checkpoint() {
+        let snap = SubagentSnapshot {
+            subagent_id: "sub-suspended".to_string(),
+            description: "Resume after host approval".to_string(),
+            subagent_type: "worker".to_string(),
+            status: SubagentSnapshotStatus::Suspended {
+                operation_id: "operation-7".to_string(),
+                checkpoint_seq: 19,
+            },
+            started_at_epoch_ms: 1_700_000_000_000,
+            duration_ms: 12_500,
+        };
+        let result = format_subagent_snapshot(&snap, WaitHint::NotRequested);
+        let TaskOutputOutput::Result(result) = result else {
+            panic!("Expected Result")
+        };
+        assert_eq!(result.status, "suspended");
+        assert!(!result.is_terminal());
+        assert!(result.exit_code.is_none());
+        assert!(result.ended.is_none());
+        assert!(result.output.contains("suspended"));
+        assert!(result.output.contains("operation-7"));
+        assert!(result.output.contains("sequence: 19"));
+        assert!(!is_terminal_status(&result.status));
     }
 
     // raw_output_bytes is body-only so identical Running state is stable across WaitHints.

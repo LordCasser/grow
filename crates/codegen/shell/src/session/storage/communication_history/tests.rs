@@ -130,20 +130,23 @@ fn incoming_inquiry(
     approval: Option<&str>,
     outcome: Option<crate::coordination::InquiryOutcome>,
 ) -> chat_state::TimelineEvent {
-    incoming_inquiry_from_peer(timeline, inquiry_id, "parent-peer", approval, outcome)
+    incoming_inquiry_from_peer(timeline, inquiry_id, "parent-peer", None, approval, outcome)
 }
 
 fn incoming_inquiry_from_peer(
     timeline: &mut chat_state::Timeline,
     inquiry_id: &str,
     source_peer_id: &str,
+    source_session_id: Option<&str>,
     approval: Option<&str>,
     outcome: Option<crate::coordination::InquiryOutcome>,
 ) -> chat_state::TimelineEvent {
     let audit = crate::coordination::IncomingInquiryAudit {
         direction: crate::coordination::InquiryDirection::ParentToChild,
         source_peer_id: source_peer_id.into(),
-        source_session_id: format!("session-{source_peer_id}"),
+        source_session_id: source_session_id
+            .map(str::to_owned)
+            .unwrap_or_else(|| format!("session-{source_peer_id}")),
         source_cwd: "/parent/workspace".into(),
         delegated_subagent_task_name: None,
         question: "What changed?".into(),
@@ -413,13 +416,27 @@ fn restores_only_missing_incoming_inquiry_phases_around_existing_anchor_rows() {
 }
 
 #[test]
-fn incoming_phase_identity_includes_source_peer_when_inquiry_ids_collide() {
+fn incoming_phase_identity_distinguishes_source_sessions_when_inquiry_ids_collide() {
     use crate::coordination::InquiryEvent;
 
     let mut timeline = chat_state::Timeline::default();
-    let cached_peer = incoming_inquiry_from_peer(&mut timeline, "shared-id", "peer-a", None, None);
+    let cached_peer = incoming_inquiry_from_peer(
+        &mut timeline,
+        "shared-id",
+        "same-peer",
+        Some("source-session-a"),
+        None,
+        None,
+    );
     let between = marker(&mut timeline, "between-peers");
-    let missing_peer = incoming_inquiry_from_peer(&mut timeline, "shared-id", "peer-b", None, None);
+    let missing_peer = incoming_inquiry_from_peer(
+        &mut timeline,
+        "shared-id",
+        "same-peer",
+        Some("source-session-b"),
+        None,
+        None,
+    );
     let after = marker(&mut timeline, "after-peers");
 
     let cached_fact = InquiryEvent::from_timeline(&cached_peer).unwrap().unwrap();
@@ -466,7 +483,7 @@ fn incoming_phase_identity_includes_source_peer_when_inquiry_ids_collide() {
             let audit = crate::coordination::IncomingInquiryAudit::from_notice(&notice).unwrap();
             Some((
                 position,
-                audit.source_peer_id,
+                audit.source_session_id,
                 notification.meta.unwrap()["timelineEvent"]
                     .as_u64()
                     .unwrap(),
@@ -476,10 +493,59 @@ fn incoming_phase_identity_includes_source_peer_when_inquiry_ids_collide() {
     assert_eq!(
         notices,
         [
-            (0, "peer-a".into(), cached_peer.seq.get()),
-            (2, "peer-b".into(), missing_peer.seq.get()),
+            (0, "source-session-a".into(), cached_peer.seq.get()),
+            (2, "source-session-b".into(), missing_peer.seq.get()),
         ]
     );
+}
+
+#[test]
+fn incoming_phase_restore_does_not_duplicate_when_peer_changes_for_same_source_identity() {
+    use crate::coordination::InquiryEvent;
+
+    let mut timeline = chat_state::Timeline::default();
+    let cached = incoming_inquiry_from_peer(
+        &mut timeline,
+        "same-inquiry",
+        "peer-before-reconnect",
+        Some("stable-source-session"),
+        None,
+        None,
+    );
+    let duplicate_phase = incoming_inquiry_from_peer(
+        &mut timeline,
+        "same-inquiry",
+        "peer-after-reconnect",
+        Some("stable-source-session"),
+        None,
+        None,
+    );
+    let cached_fact = InquiryEvent::from_timeline(&cached).unwrap().unwrap();
+    let cached_row = notice_row(cached_fact.notice(), cached.seq.get());
+    let history = RawReconciliation {
+        lines: vec![ReconciledReplayLine::Borrowed(&cached_row)],
+        changed: false,
+    };
+
+    let restored = restore(&session_id(), &timeline, history, |event| {
+        Ok(InquiryEvent::from_timeline(event)
+            .ok()
+            .flatten()
+            .map(|fact| fact.notice()))
+    })
+    .unwrap();
+
+    assert_eq!(restored.lines.len(), 1);
+    assert_eq!(restored.lines[0].as_str(), cached_row);
+    let envelope: SessionUpdateEnvelope = serde_json::from_str(restored.lines[0].as_str()).unwrap();
+    let notification: SessionNotification = serde_json::from_value(envelope.params).unwrap();
+    let GrowUpdate::UiNotice(notice) = notification.update else {
+        panic!("expected restored inquiry notice");
+    };
+    let audit = crate::coordination::IncomingInquiryAudit::from_notice(&notice).unwrap();
+    assert_eq!(audit.source_session_id, "stable-source-session");
+    assert_eq!(notice.correlation_id, "same-inquiry");
+    assert_eq!(duplicate_phase.seq.get(), cached.seq.get() + 1);
 }
 
 #[test]

@@ -588,7 +588,8 @@ impl SessionActor {
             self.goal_usage_window.close_goal_admission(goal_id);
         }
         self.goal_notify_sender()
-            .emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
+            .emit_goal_updated(self.goal_notification_snapshot(), tokens_used)
+            .await;
         Ok(true)
     }
 
@@ -657,7 +658,8 @@ impl SessionActor {
                 self.commit_goal_stop_or_restore(previous).await?;
                 let tokens_used = self.goal_tokens_used();
                 self.goal_notify_sender()
-                    .emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
+                    .emit_goal_updated(self.goal_notification_snapshot(), tokens_used)
+                    .await;
                 self.retire_goal_owned_work(goal_id, definition_revision, None)
                     .await;
                 return Ok(GoalUsageIncompleteApply::Stopped);
@@ -680,7 +682,8 @@ impl SessionActor {
         self.sync_goal_usage_window();
         let tokens_used = self.goal_tokens_used();
         self.goal_notify_sender()
-            .emit_goal_updated(&self.goal_tracker.lock(), tokens_used);
+            .emit_goal_updated(self.goal_notification_snapshot(), tokens_used)
+            .await;
         Ok(if paused_at_boundary {
             GoalUsageIncompleteApply::Stopped
         } else {
@@ -1014,7 +1017,19 @@ impl SessionActor {
             self.notifications.persistence_tx.clone(),
             self.notifications.preview_gateway_budget.clone(),
             self.sampling_preview.clone(),
+            self.chat_state_handle.clone(),
+            self.control_revision
+                .load(std::sync::atomic::Ordering::Acquire),
         )
+    }
+
+    /// Return owned notification state so no parking_lot guard can survive a
+    /// caller's subsequent durable Timeline await.
+    pub(super) fn goal_notification_snapshot(
+        &self,
+    ) -> Option<(crate::session::goal_tracker::GoalState, u64)> {
+        let tracker = self.goal_tracker.lock();
+        crate::session::goal_notification::GoalNotifySender::snapshot_goal(&tracker)
     }
 
     /// Copy the synchronous Behavior and Goal authorities into owned values.

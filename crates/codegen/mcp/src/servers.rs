@@ -1403,6 +1403,18 @@ pub struct McpServerMetaConfig {
 /// MCP server name → per-server config overrides from `_meta.mcpConfig`.
 pub type McpMetaConfigMap = HashMap<McpServerName, McpServerMetaConfig>;
 
+/// Validate a single client catalog before source merging can hide duplicates.
+pub fn validate_mcp_server_names(servers: &[acp::McpServer]) -> Result<(), String> {
+    let mut names = std::collections::HashSet::new();
+    for server in servers {
+        let name = mcp_server_name(server);
+        if !names.insert(name) {
+            return Err(format!("duplicate MCP server name '{name}'"));
+        }
+    }
+    Ok(())
+}
+
 /// Parse `mcpConfig` from a session request's `_meta`. Empty map if absent/invalid.
 pub fn parse_mcp_meta_config(
     meta: Option<&serde_json::Map<String, serde_json::Value>>,
@@ -1718,6 +1730,12 @@ impl tool_runtime::Tool for McpErasedTool {
         let qualified_name = format!("{}{}{}", server, MCP_TOOL_NAME_DELIMITER, tool);
         let client = {
             let state = self.tool.mcp_state.lock().await;
+            if state.is_tool_disabled(server, tool) {
+                return Err(tool_runtime::ToolError::custom(
+                    "process_manager",
+                    format!("MCP tool '{qualified_name}' is disabled"),
+                ));
+            }
             Arc::clone(state.get_client(&self.tool.server_name).ok_or_else(|| {
                 tool_runtime::ToolError::custom(
                     "process_manager",
@@ -1923,9 +1941,8 @@ fn should_recover_mcp_error(code: i32) -> bool {
     !deterministic_client_error
 }
 
-/// Recovers transport errors, and an HTTP `McpError` once per dispatch except
-/// deterministic client codes and credential rejections. A rebuild would reuse
-/// the same explicit credentials, so rejection is surfaced without a pointless retry.
+/// Invalidate an uncertain originating transport for a later independent call.
+/// This classification never authorizes replay of the failed tool invocation.
 fn should_recover_service_error(
     err: &ServiceError,
     is_http: bool,
@@ -1950,106 +1967,86 @@ impl McpErasedTool {
         reconnect_attempted: &mut bool,
         is_timeout: &mut bool,
     ) -> Result<rmcp::model::CallToolResult, tool_runtime::ToolError> {
-        let mcp_service = client
-            .ensure_initialized()
-            .await
-            .map_err(|e| tool_runtime::ToolError::custom("process_manager", e.to_string()))?;
-        let tool_timeout = client.tool_timeout_for(&self.tool.name);
-        let timeout_duration = std::time::Duration::from_secs(tool_timeout);
-        let mut params = CallToolRequestParams::new(self.tool.name.clone());
-        params.arguments = raw.as_object().cloned();
-
-        let result = call_tool_cancel_aware(&mcp_service, params.clone(), timeout_duration).await;
-
-        match result {
-            Ok(call_result) => Ok(call_result),
-            Err(service_err)
-                if should_recover_service_error(
-                    &service_err,
-                    client.is_http(),
-                    *reconnect_attempted,
-                ) =>
-            {
-                self.recover_and_retry(
-                    client,
-                    &mcp_service,
-                    params,
-                    timeout_duration,
-                    tool_timeout,
-                    service_err,
-                    reconnect_attempted,
-                    is_timeout,
-                )
-                .await
-            }
-            Err(ServiceError::Timeout { .. }) => {
-                *is_timeout = true;
-                // Reset for the next call but don't retry — a slow side-effecting tool must not run twice.
-                if client.is_http() && !*reconnect_attempted {
-                    client.reset_transport(Some(&mcp_service)).await;
-                    *reconnect_attempted = true;
-                }
-                Err(tool_runtime::ToolError::custom(
-                    "process_manager",
-                    format!(
-                        "MCP tool '{}' timed out after {} seconds",
-                        self.tool.name, tool_timeout
-                    ),
-                ))
-            }
-            Err(e) => Err(tool_runtime::ToolError::custom(
-                "process_manager",
-                e.to_string(),
-            )),
-        }
-    }
-
-    /// On `recover()` failure surface the original error, else the retry error.
-    #[allow(clippy::too_many_arguments)]
-    async fn recover_and_retry(
-        &self,
-        client: &Arc<McpClient>,
-        failed_service: &McpService,
-        params: CallToolRequestParams,
-        timeout_duration: std::time::Duration,
-        tool_timeout: u64,
-        original_err: ServiceError,
-        reconnect_attempted: &mut bool,
-        is_timeout: &mut bool,
-    ) -> Result<rmcp::model::CallToolResult, tool_runtime::ToolError> {
-        *reconnect_attempted = true;
-        tracing::warn!(
-            server = self.tool.server_name.as_str(),
-            tool = self.tool.name.as_str(),
-            error = %original_err,
-            "MCP transport error, attempting reconnect"
-        );
-        let mcp_service = match client.recover_from(Some(failed_service)).await {
-            Ok(service) => service,
-            Err(_) => {
+        // Capture this call's policy and deadline at admission. Initialization
+        // can wait on a handshake; a policy refresh during that wait applies to
+        // the next call, not this one.
+        let tool_timeout_secs = client.tool_timeout_for(&self.tool.name);
+        let tool_timeout = std::time::Duration::from_secs(tool_timeout_secs);
+        let deadline = tokio::time::Instant::now() + tool_timeout;
+        let mcp_service = match tokio::time::timeout_at(deadline, client.ensure_initialized()).await
+        {
+            Ok(Ok(service)) => service,
+            Ok(Err(error)) => {
                 return Err(tool_runtime::ToolError::custom(
                     "process_manager",
-                    original_err.to_string(),
+                    error.to_string(),
+                ));
+            }
+            Err(_) => {
+                *is_timeout = true;
+                return Err(tool_runtime::ToolError::custom(
+                    "process_manager",
+                    format!(
+                        "MCP initialization exceeded the admitted tool timeout of {tool_timeout:?}"
+                    ),
                 ));
             }
         };
-        match call_tool_cancel_aware(&mcp_service, params, timeout_duration).await {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            *is_timeout = true;
+            return Err(tool_runtime::ToolError::custom(
+                "process_manager",
+                format!(
+                    "MCP initialization exceeded the admitted tool timeout of {tool_timeout:?}"
+                ),
+            ));
+        }
+        let mut params = CallToolRequestParams::new(self.tool.name.clone());
+        params.arguments = raw.as_object().cloned();
+
+        let result =
+            call_tool_cancel_aware_until(&mcp_service, params, deadline, tool_timeout).await;
+
+        match result {
             Ok(call_result) => Ok(call_result),
-            Err(ServiceError::Timeout { .. }) => {
-                *is_timeout = true;
+            Err(error) => {
+                let timed_out = matches!(error, ServiceError::Timeout { .. });
+                *is_timeout |= timed_out;
+                let reset =
+                    should_recover_service_error(&error, client.is_http(), *reconnect_attempted)
+                        || (timed_out && client.is_http());
+                if reset && !*reconnect_attempted && self.is_current_client(client).await {
+                    *reconnect_attempted = client.reset_transport(Some(&mcp_service)).await;
+                }
+                if timed_out || is_retriable_transport_error(&error) {
+                    let reason = if timed_out {
+                        format!("timed out after {tool_timeout_secs} seconds")
+                    } else {
+                        error.to_string()
+                    };
+                    return Err(tool_runtime::ToolError::custom(
+                        "mcp_outcome_unknown",
+                        format!(
+                            "MCP tool '{}' {reason}. Its outcome is unknown and effects may already have occurred. The call was not replayed; inspect the service state before starting a new operation.",
+                            self.tool.name
+                        ),
+                    ));
+                }
                 Err(tool_runtime::ToolError::custom(
                     "process_manager",
-                    format!(
-                        "MCP tool '{}' timed out after {} seconds",
-                        self.tool.name, tool_timeout
-                    ),
+                    error.to_string(),
                 ))
             }
-            Err(retry_err) => Err(tool_runtime::ToolError::custom(
-                "process_manager",
-                retry_err.to_string(),
-            )),
         }
+    }
+
+    async fn is_current_client(&self, client: &Arc<McpClient>) -> bool {
+        let state = self.tool.mcp_state.lock().await;
+        !state.is_tool_disabled(&self.tool.server_name, &self.tool.name)
+            && state
+                .get_client(&self.tool.server_name)
+                .is_some_and(|current| Arc::ptr_eq(current, client))
     }
 }
 
@@ -2061,6 +2058,15 @@ async fn call_tool_cancel_aware(
     timeout: std::time::Duration,
 ) -> Result<rmcp::model::CallToolResult, ServiceError> {
     let deadline = tokio::time::Instant::now() + timeout;
+    call_tool_cancel_aware_until(service, params, deadline, timeout).await
+}
+
+async fn call_tool_cancel_aware_until(
+    service: &McpService,
+    params: CallToolRequestParams,
+    deadline: tokio::time::Instant,
+    timeout: std::time::Duration,
+) -> Result<rmcp::model::CallToolResult, ServiceError> {
     let handle = tokio::time::timeout_at(
         deadline,
         service.peer().send_cancellable_request(
@@ -2878,13 +2884,9 @@ pub struct McpClient {
     /// first tool dispatch raced the session actor's background
     /// `get_tool_registrations` handshake.
     init_done: Notify,
-    startup_timeout_sec: u64,
-    tool_timeout_sec: u64,
-    /// Per-tool timeout overrides in seconds. Looked up by tool name;
-    /// falls back to `tool_timeout_sec` when a tool isn't listed.
-    tool_timeouts: HashMap<ToolName, u64>,
-    /// See [`McpServerMetaConfig::expose_image_base64`].
-    expose_image_base64: bool,
+    // Policy is independent from transport ownership. Refreshes replace this
+    // value; callers copy their timeout before dispatch, retaining that deadline.
+    policy: Arc<parking_lot::RwLock<McpClientPolicy>>,
     /// Stored for HTTP clients so explicit header changes and transport
     /// recovery can rebuild the connection.
     http_config: Option<HttpConfig>,
@@ -2991,6 +2993,17 @@ pub struct McpClientTimeoutOverrides {
     pub expose_image_base64: Option<bool>,
 }
 
+#[derive(Debug)]
+struct McpClientPolicy {
+    startup_timeout_sec: u64,
+    tool_timeout_sec: u64,
+    tool_timeouts: HashMap<ToolName, u64>,
+    expose_image_base64: bool,
+    // A reverse-RPC backstop must never shorten an already admitted call.
+    // The per-call outer deadline remains authoritative, including reductions.
+    reverse_timeout_ceiling: u64,
+}
+
 impl McpClient {
     fn load_timeouts(
         overrides: Option<&McpClientTimeoutOverrides>,
@@ -3067,10 +3080,16 @@ impl McpClient {
             server_name,
             state: parking_lot::Mutex::new(ClientState::Pending(transport)),
             init_done: Notify::new(),
-            startup_timeout_sec,
-            tool_timeout_sec,
-            tool_timeouts,
-            expose_image_base64,
+            policy: Arc::new(parking_lot::RwLock::new(McpClientPolicy {
+                startup_timeout_sec,
+                tool_timeout_sec,
+                reverse_timeout_ceiling: tool_timeouts
+                    .values()
+                    .copied()
+                    .fold(startup_timeout_sec.max(tool_timeout_sec), u64::max),
+                tool_timeouts,
+                expose_image_base64,
+            })),
             http_config,
             warn_budget: crate::mcp_http_client::WarnBudget::default(),
             reconnect,
@@ -3135,7 +3154,7 @@ impl McpClient {
     ///
     /// The single recovery path for both the proactive HTTP recovery
     /// (`SessionActor::reset_http_client`, gated on [`Self::is_http`]) and the
-    /// lazy `try_call_tool` retry. Rebuilds from the `reconnect` snapshot, so it
+    /// a later independent `try_call_tool` invocation. Rebuilds from the `reconnect` snapshot, so it
     /// covers HTTP/ACP; `arm_liveness_watcher` self-gates for ACP.
     ///
     /// `Err` for a client with no restorable transport (e.g. Stdio — its child
@@ -3276,16 +3295,16 @@ impl McpClient {
     }
 
     pub fn startup_timeout_sec(&self) -> u64 {
-        self.startup_timeout_sec
+        self.policy.read().startup_timeout_sec
     }
 
     pub fn tool_timeout_sec(&self) -> u64 {
-        self.tool_timeout_sec
+        self.policy.read().tool_timeout_sec
     }
 
     /// See [`McpServerMetaConfig::expose_image_base64`].
     pub fn expose_image_base64(&self) -> bool {
-        self.expose_image_base64
+        self.policy.read().expose_image_base64
     }
 
     /// Resolve the timeout for a specific tool.
@@ -3297,13 +3316,38 @@ impl McpClient {
     /// 4. `config.toml [mcp_servers.<server>].tool_timeout_sec`
     /// 5. Default (60s)
     ///
-    /// Steps 1–2 are already merged into `self.tool_timeouts` at construction;
-    /// steps 3–5 are already resolved into `self.tool_timeout_sec`.
+    /// The current policy resolves precedence on construction and each refresh.
     pub fn tool_timeout_for(&self, tool_name: &str) -> u64 {
-        self.tool_timeouts
+        let policy = self.policy.read();
+        policy
+            .tool_timeouts
             .get(tool_name)
             .copied()
-            .unwrap_or(self.tool_timeout_sec)
+            .unwrap_or(policy.tool_timeout_sec)
+    }
+
+    /// Replace effective host policy without resetting the current transport.
+    pub fn refresh_policy(
+        &self,
+        overrides: Option<&McpClientTimeoutOverrides>,
+        meta_config: Option<&McpServerMetaConfig>,
+    ) {
+        let (startup_timeout_sec, tool_timeout_sec, tool_timeouts) =
+            Self::load_timeouts(overrides, meta_config);
+        let mut policy = self.policy.write();
+        *policy = McpClientPolicy {
+            startup_timeout_sec,
+            tool_timeout_sec,
+            reverse_timeout_ceiling: tool_timeouts.values().copied().fold(
+                policy
+                    .reverse_timeout_ceiling
+                    .max(startup_timeout_sec)
+                    .max(tool_timeout_sec),
+                u64::max,
+            ),
+            tool_timeouts,
+            expose_image_base64: Self::load_expose_image_base64(overrides, meta_config),
+        };
     }
 
     /// Drive the MCP handshake to completion (or return the cached
@@ -3343,7 +3387,7 @@ impl McpClient {
         // Bound parked callers even if an invariant violation leaves no holder.
         // Normal handshakes have their own timeout; cancellation restores state.
         let inflight_wait =
-            std::time::Duration::from_secs(self.startup_timeout_sec.saturating_add(1));
+            std::time::Duration::from_secs(self.startup_timeout_sec().saturating_add(1));
 
         // Drive the loop body until we either return directly or break
         // out with an owned `PendingTransport`. We deliberately use a
@@ -3501,7 +3545,7 @@ impl McpClient {
         pending: PendingTransport,
         transport_revision: u64,
     ) -> Result<rmcp::service::RunningService<RoleClient, GrowClientHandler>, McpError> {
-        let timeout = std::time::Duration::from_secs(self.startup_timeout_sec);
+        let timeout = std::time::Duration::from_secs(self.startup_timeout_sec());
         let name = &self.server_name;
 
         match pending {
@@ -3528,17 +3572,14 @@ impl McpClient {
                     })
             }
             PendingTransport::Acp { server_id, invoker } => {
-                // Per-reverse-call backstop on `grow/mcp/sdk_call`: the larger of the
-                // startup and tool timeouts, so it never undercuts the real outer bound
-                // (the handshake `initialize` is bounded by the serve `timeout` below;
-                // tool calls by `tool_timeout_for` in `try_call_tool`). The bridge
-                // forwards raw JSON-RPC without the tool name, so per-TOOL overrides
-                // aren't applied here in v1; the HTTP path still honors them.
-                let invoke_timeout = std::time::Duration::from_secs(
-                    self.startup_timeout_sec.max(self.tool_timeout_sec),
+                let policy = Arc::clone(&self.policy);
+                let transport = crate::acp_transport::acp_bridge_transport(
+                    server_id,
+                    invoker,
+                    Arc::new(move || {
+                        std::time::Duration::from_secs(policy.read().reverse_timeout_ceiling)
+                    }),
                 );
-                let transport =
-                    crate::acp_transport::acp_bridge_transport(server_id, invoker, invoke_timeout);
                 let handler = self.make_client_handler(transport_revision);
                 tokio::time::timeout(timeout, handler.serve(transport))
                     .await
@@ -3958,7 +3999,8 @@ impl McpClient {
 
         // Warn about tool_timeouts keys that don't match any discovered tool.
         // This catches typos like `creat_issue` instead of `create_issue`.
-        if !self.tool_timeouts.is_empty() {
+        let tool_timeouts = self.policy.read().tool_timeouts.clone();
+        if !tool_timeouts.is_empty() {
             // Registration names are qualified ("server__tool"); tool_timeouts
             // keys are raw tool names. Strip the server prefix for comparison.
             let prefix = format!("{}{}", self.server_name, MCP_TOOL_NAME_DELIMITER);
@@ -3967,7 +4009,7 @@ impl McpClient {
                 .map(|r| r.name.strip_prefix(prefix.as_str()).unwrap_or(&r.name))
                 .collect();
             let discovered: std::collections::HashSet<&str> = raw_names.iter().copied().collect();
-            for key in self.tool_timeouts.keys() {
+            for key in tool_timeouts.keys() {
                 if !discovered.contains(key.as_str()) {
                     tracing::info!(
                         server = %self.server_name,
@@ -6300,66 +6342,6 @@ mod tests {
         ));
     }
 
-    #[tokio::test]
-    async fn recover_and_retry_surfaces_original_error_when_recover_fails() {
-        let config = HttpConfig {
-            url: "http://192.0.2.1:1/unreachable".to_string(),
-            headers: vec![],
-        };
-        let overrides = McpClientTimeoutOverrides {
-            startup_timeout_sec: Some(1),
-            ..Default::default()
-        };
-        let client = Arc::new(McpClient::new_http(
-            "wedged".to_string(),
-            config,
-            Some(&overrides),
-            None,
-        ));
-
-        let tool = McpErasedTool {
-            tool: McpTool::new(
-                "do_thing".to_string(),
-                "desc".to_string(),
-                "wedged".to_string(),
-                Arc::new(Mutex::new(McpState::new(vec![]))),
-                serde_json::json!({"type": "object"}),
-                None,
-            ),
-        };
-
-        let original = mcp_service_err(-32603);
-        let expected = original.to_string();
-        let params = CallToolRequestParams::new("do_thing");
-
-        let mut reconnect_attempted = false;
-        let mut is_timeout = false;
-
-        let (working_url, _, _) =
-            spawn_fake_mcp(CallToolBehavior::ErrorThenOk { code: -32603 }).await;
-        let failed_service = fake_http_client(&working_url, 1)
-            .ensure_initialized()
-            .await
-            .unwrap();
-        let err = tool
-            .recover_and_retry(
-                &client,
-                &failed_service,
-                params,
-                std::time::Duration::from_secs(1),
-                1,
-                original,
-                &mut reconnect_attempted,
-                &mut is_timeout,
-            )
-            .await
-            .expect_err("recover must fail against an unreachable host");
-
-        assert_eq!(err.to_string(), expected, "original error must be surfaced");
-        assert!(reconnect_attempted, "reconnect attempt must be flagged");
-        assert!(!is_timeout, "a recover failure is not a tool timeout");
-    }
-
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[derive(Clone)]
@@ -6510,7 +6492,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn late_tool_error_reuses_already_recovered_service() {
+    async fn late_tool_error_does_not_reset_already_recovered_service() {
         let started = Arc::new(tokio::sync::Notify::new());
         let release = Arc::new(tokio::sync::Notify::new());
         let (url, inits, calls) = spawn_fake_mcp(CallToolBehavior::DeferredError {
@@ -6519,7 +6501,7 @@ mod tests {
         })
         .await;
         let client = fake_http_client(&url, 5);
-        let tool = fake_echo_tool();
+        let tool = fake_echo_tool(&client);
         let mut retried = false;
         let mut timed_out = false;
         let raw = serde_json::json!({});
@@ -6533,16 +6515,97 @@ mod tests {
             client.recover().await.unwrap();
             assert_eq!(inits.load(Ordering::Relaxed), 2);
             release.notify_one();
-            assert!(call.await.is_ok());
+            assert!(call.await.is_err(), "the original MCP error is surfaced");
         }
-        assert!(retried);
+        assert!(!retried, "the old invocation is never replayed");
         assert!(!timed_out);
-        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
         assert_eq!(
             inits.load(Ordering::Relaxed),
             2,
-            "late error reset replacement service"
+            "late error leaves the already recovered service intact"
         );
+    }
+
+    #[tokio::test]
+    async fn retired_client_late_tool_error_does_not_recover_or_retry() {
+        for action in ["remove", "replace", "disable"] {
+            let started = Arc::new(tokio::sync::Notify::new());
+            let release = Arc::new(tokio::sync::Notify::new());
+            let (url, inits, calls) = spawn_fake_mcp(CallToolBehavior::DeferredError {
+                started: started.clone(),
+                release: release.clone(),
+            })
+            .await;
+            let client = fake_http_client(&url, 5);
+            let tool = fake_echo_tool(&client);
+            let mut reconnect_attempted = false;
+            let mut timed_out = false;
+            let raw = serde_json::json!({});
+            let replacement_server = if action == "replace" {
+                Some(spawn_fake_mcp(CallToolBehavior::ErrorThenOk { code: -32603 }).await)
+            } else {
+                None
+            };
+
+            let replacement = replacement_server
+                .as_ref()
+                .map(|(url, _, _)| fake_http_client(url, 5));
+            let err = {
+                let call =
+                    tool.try_call_tool(&client, &raw, &mut reconnect_attempted, &mut timed_out);
+                tokio::pin!(call);
+                tokio::select! {
+                    _ = started.notified() => {},
+                    result = &mut call => panic!("call ended before release: {result:?}"),
+                }
+                {
+                    let mut state = tool.tool.mcp_state.lock().await;
+                    if let Some(replacement) = &replacement {
+                        state
+                            .owned_clients
+                            .insert("fake".to_string(), Arc::clone(replacement));
+                    } else if action == "disable" {
+                        state.disabled_tools.insert(
+                            "fake".into(),
+                            std::collections::HashSet::from(["echo".into()]),
+                        );
+                    } else {
+                        state.owned_clients.remove("fake");
+                    }
+                }
+                release.notify_one();
+                call.await
+                    .expect_err("retired dispatch must surface original error")
+            };
+
+            assert!(err.to_string().contains("session expired"), "got: {err}");
+            assert!(
+                !reconnect_attempted,
+                "retired client must not claim that recovery started"
+            );
+            assert!(!timed_out);
+            assert_eq!(
+                calls.load(Ordering::Relaxed),
+                1,
+                "no second old endpoint call"
+            );
+            assert_eq!(
+                inits.load(Ordering::Relaxed),
+                1,
+                "no old endpoint reinitialize"
+            );
+            if let (Some(replacement), Some((_, replacement_inits, replacement_calls))) =
+                (replacement, replacement_server)
+            {
+                assert!(matches!(
+                    replacement.state_kind().await,
+                    ClientStateKind::Pending
+                ));
+                assert_eq!(replacement_inits.load(Ordering::Relaxed), 0);
+                assert_eq!(replacement_calls.load(Ordering::Relaxed), 0);
+            }
+        }
     }
 
     #[tokio::test]
@@ -6555,7 +6618,7 @@ mod tests {
         })
         .await;
         let client = fake_http_client(&url, 1);
-        let tool = fake_echo_tool();
+        let tool = fake_echo_tool(&client);
         let mut retried = false;
         let mut timed_out = false;
         let raw = serde_json::json!({});
@@ -6611,13 +6674,18 @@ mod tests {
         ))
     }
 
-    fn fake_echo_tool() -> McpErasedTool {
+    fn fake_echo_tool(client: &Arc<McpClient>) -> McpErasedTool {
+        let mut state = McpState::new(vec![]);
+        state
+            .owned_clients
+            .insert(client.server_name().to_string(), Arc::clone(client));
+        let mcp_state = Arc::new(Mutex::new(state));
         McpErasedTool {
             tool: McpTool::new(
                 "echo".to_string(),
                 "echo desc".to_string(),
                 "fake".to_string(),
-                Arc::new(Mutex::new(McpState::new(vec![]))),
+                mcp_state,
                 serde_json::json!({"type": "object"}),
                 None,
             ),
@@ -7000,44 +7068,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn try_call_tool_http_mcperror_recovers_then_retry_succeeds() {
+    async fn try_call_tool_http_mcperror_resets_for_next_call_without_replay() {
         let (url, inits, calls) =
             spawn_fake_mcp(CallToolBehavior::ErrorThenOk { code: -32603 }).await;
         let client = fake_http_client(&url, 5);
-        let tool = fake_echo_tool();
-
-        let mut reconnect = false;
-        let mut is_timeout = false;
-        let raw = serde_json::json!({});
-        let out = tool
-            .try_call_tool(&client, &raw, &mut reconnect, &mut is_timeout)
-            .await
-            .expect("recovered call should succeed");
-
-        assert!(
-            !out.is_error.unwrap_or(false),
-            "retry should return a success result"
-        );
-        assert!(reconnect, "reconnect_attempted must be set");
-        assert!(!is_timeout);
-        assert_eq!(
-            calls.load(Ordering::Relaxed),
-            2,
-            "one failed + one retried tools/call"
-        );
-        assert_eq!(
-            inits.load(Ordering::Relaxed),
-            2,
-            "initial handshake + one recovery re-init"
-        );
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn try_call_tool_http_retry_failure_surfaces_retry_error() {
-        let (url, _inits, calls) =
-            spawn_fake_mcp(CallToolBehavior::AlwaysError { code: -32603 }).await;
-        let client = fake_http_client(&url, 5);
-        let tool = fake_echo_tool();
+        let tool = fake_echo_tool(&client);
 
         let mut reconnect = false;
         let mut is_timeout = false;
@@ -7045,21 +7080,61 @@ mod tests {
         let err = tool
             .try_call_tool(&client, &raw, &mut reconnect, &mut is_timeout)
             .await
-            .expect_err("both attempts fail");
+            .expect_err("the original MCP error must be returned");
+        assert!(err.to_string().contains("session expired"), "got: {err}");
+        assert!(reconnect, "reconnect_attempted must be set");
+        assert!(!is_timeout);
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            1,
+            "the original invocation is sent once"
+        );
+        assert_eq!(
+            inits.load(Ordering::Relaxed),
+            1,
+            "the failed invocation does not re-handshake"
+        );
+
+        let mut next_reconnect = false;
+        let mut next_timeout = false;
+        let next = tool
+            .try_call_tool(&client, &raw, &mut next_reconnect, &mut next_timeout)
+            .await
+            .expect("a separate invocation can initialize and succeed");
+        assert!(!next.is_error.unwrap_or(false));
+        assert!(!next_timeout);
+        assert_eq!(calls.load(Ordering::Relaxed), 2);
+        assert_eq!(inits.load(Ordering::Relaxed), 2);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn try_call_tool_http_mcp_error_surfaces_without_second_call() {
+        let (url, _inits, calls) =
+            spawn_fake_mcp(CallToolBehavior::AlwaysError { code: -32603 }).await;
+        let client = fake_http_client(&url, 5);
+        let tool = fake_echo_tool(&client);
+
+        let mut reconnect = false;
+        let mut is_timeout = false;
+        let raw = serde_json::json!({});
+        let err = tool
+            .try_call_tool(&client, &raw, &mut reconnect, &mut is_timeout)
+            .await
+            .expect_err("the one MCP request fails");
 
         let msg = err.to_string();
-        assert!(msg.contains("attempt 2"), "want retry error, got: {msg}");
         assert!(
-            !msg.contains("attempt 1"),
-            "must not surface the original error: {msg}"
+            msg.contains("attempt 1"),
+            "original error should surface: {msg}"
         );
         assert!(reconnect);
         assert!(!is_timeout);
         assert_eq!(
             calls.load(Ordering::Relaxed),
-            2,
-            "one failed + one retried tools/call"
+            1,
+            "an MCP error response never causes a second tools/call"
         );
+        assert_eq!(_inits.load(Ordering::Relaxed), 1);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -7067,7 +7142,7 @@ mod tests {
         let (url, inits, calls) =
             spawn_fake_mcp(CallToolBehavior::AlwaysError { code: -32602 }).await;
         let client = fake_http_client(&url, 5);
-        let tool = fake_echo_tool();
+        let tool = fake_echo_tool(&client);
 
         let mut reconnect = false;
         let mut is_timeout = false;
@@ -7089,7 +7164,7 @@ mod tests {
         let (url, inits, calls) =
             spawn_fake_mcp(CallToolBehavior::HangThenOk { hang_ms: 3000 }).await;
         let client = fake_http_client(&url, 1);
-        let tool = fake_echo_tool();
+        let tool = fake_echo_tool(&client);
 
         let mut reconnect = false;
         let mut is_timeout = false;
@@ -7133,14 +7208,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn try_call_tool_http_retry_timeout_surfaces_timeout() {
+    async fn try_call_tool_http_mcp_error_is_not_reclassified_as_retry_timeout() {
         let (url, inits, calls) = spawn_fake_mcp(CallToolBehavior::ErrorThenHang {
             code: -32603,
             hang_ms: 3000,
         })
         .await;
         let client = fake_http_client(&url, 1);
-        let tool = fake_echo_tool();
+        let tool = fake_echo_tool(&client);
 
         let mut reconnect = false;
         let mut is_timeout = false;
@@ -7148,20 +7223,20 @@ mod tests {
         let err = tool
             .try_call_tool(&client, &raw, &mut reconnect, &mut is_timeout)
             .await
-            .expect_err("the retried call must time out");
+            .expect_err("the original call returns the MCP error");
 
-        assert!(err.to_string().contains("timed out"), "got: {err}");
-        assert!(is_timeout, "retry-timeout must set is_timeout");
-        assert!(reconnect, "recovery was attempted");
+        assert!(err.to_string().contains("session expired"), "got: {err}");
+        assert!(!is_timeout, "an MCP error is not a timeout");
+        assert!(reconnect, "transport is prepared for a later call");
         assert_eq!(
             calls.load(Ordering::Relaxed),
-            2,
-            "the retry tools/call was attempted"
+            1,
+            "there is no retried tools/call"
         );
         assert_eq!(
             inits.load(Ordering::Relaxed),
-            2,
-            "recovery re-initialized before the retry"
+            1,
+            "the failed call does not reinitialize"
         );
     }
 
@@ -7474,27 +7549,11 @@ mod tests {
         );
     }
 
-    /// End-to-end reconnect-THEN-SUCCEED for the `try_call_tool` retry arm: the one
-    /// piece otherwise covered only by its parts (`is_retriable_transport_error`,
-    /// `reset_transport_*`, `ensure_initialized_*`).
-    ///
-    /// Drives the REAL `McpErasedTool::try_call_tool` against a real
-    /// `McpClient`. The first `call_tool` hits a real `RunningService`
-    /// whose transport is already closed, so it returns a genuine,
-    /// retriable `ServiceError::TransportClosed`; the arm must then flag
-    /// `reconnect_attempted`, run the real `reset_transport` +
-    /// `ensure_initialized` re-handshake (rebuilding the ACP transport
-    /// against a working echo server), and return the SECOND attempt's
-    /// `Ok` result.
-    ///
-    /// Why a separately-built dead service instead of failing the initial
-    /// connection: the ACP bridge transport can only be torn down from the
-    /// rmcp side, so a fresh real service is built over a raw duplex whose
-    /// server answers `initialize` then drops — closing the transport so
-    /// the first `call_tool` observes `TransportClosed`. Everything from
-    /// the retriable-error gate through the successful retry is real code.
+    /// A real server records an effect and then drops the response transport.
+    /// The originating tool invocation must return an unknown outcome after
+    /// exactly one request; only a later explicit invocation may reconnect.
     #[tokio::test]
-    async fn try_call_tool_reconnects_then_succeeds_after_retriable_transport_error() {
+    async fn try_call_tool_does_not_replay_after_server_effect_and_lost_reply() {
         use crate::acp_transport::AcpReverseInvoker;
         use std::time::Duration;
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -7538,12 +7597,9 @@ mod tests {
             }
         }
 
-        // A real `RunningService` whose transport is already closed: the
-        // server answers `initialize`, consumes the `initialized`
-        // notification (so the client's handshake send succeeds), then drops
-        // its duplex ends. The next `call_tool` therefore observes a real
-        // `ServiceError::TransportClosed`.
-        async fn dead_service() -> McpService {
+        // A real service initializes normally, records the tool effect, then
+        // closes without returning a response.
+        async fn effect_then_drop_service(effects: Arc<AtomicUsize>) -> McpService {
             let (client_read, server_write) = tokio::io::duplex(64 * 1024); // server -> client
             let (server_read, client_write) = tokio::io::duplex(64 * 1024); // client -> server
             tokio::spawn(async move {
@@ -7569,9 +7625,24 @@ mod tests {
                         encoded.push('\n');
                         let _ = writer.write_all(encoded.as_bytes()).await;
                         let _ = writer.flush().await;
-                        // Drain the `initialized` notification, then drop to close.
+                        // Drain `initialized`, then await the tool request.
                         let _ = reader.read_line(&mut line).await;
-                        return;
+                        loop {
+                            line.clear();
+                            if reader.read_line(&mut line).await.unwrap_or(0) == 0 {
+                                return;
+                            }
+                            let Ok(request) =
+                                serde_json::from_str::<serde_json::Value>(line.trim())
+                            else {
+                                continue;
+                            };
+                            if request.get("method").and_then(|m| m.as_str()) == Some("tools/call")
+                            {
+                                effects.fetch_add(1, Ordering::Relaxed);
+                                return;
+                            }
+                        }
                     }
                 }
             });
@@ -7593,7 +7664,7 @@ mod tests {
             )
         }
 
-        // ACP client whose `reconnect` snapshot rebuilds against the echo server.
+        // ACP client whose next independent call can rebuild against the echo server.
         let client = Arc::new(McpClient::new_acp(
             "sdk".to_string(),
             "srv_0".to_string(),
@@ -7601,8 +7672,13 @@ mod tests {
             None,
             None,
         ));
-        // Inject the closed real service so the FIRST `call_tool` fails retriably.
-        let dead = dead_service().await;
+        let mut state = McpState::new(vec![]);
+        state
+            .owned_clients
+            .insert("sdk".to_string(), Arc::clone(&client));
+        let mcp_state = Arc::new(Mutex::new(state));
+        let effects = Arc::new(AtomicUsize::new(0));
+        let dead = effect_then_drop_service(Arc::clone(&effects)).await;
         *client.state.lock() = ClientState::Ready(dead);
 
         let erased = McpErasedTool {
@@ -7610,7 +7686,7 @@ mod tests {
                 "echo".to_string(),
                 "echo".to_string(),
                 "sdk".to_string(),
-                Arc::new(Mutex::new(McpState::new(vec![]))),
+                mcp_state,
                 serde_json::json!({}),
                 None,
             ),
@@ -7619,26 +7695,37 @@ mod tests {
         let raw = serde_json::json!({ "text": "after reconnect" });
         let mut reconnect_attempted = false;
         let mut is_timeout = false;
-        let result = erased
+        let err = erased
             .try_call_tool(&client, &raw, &mut reconnect_attempted, &mut is_timeout)
             .await
-            .expect("retry after reconnect should succeed");
+            .expect_err("lost reply must remain an unknown tool outcome");
+        assert!(err.to_string().contains("outcome is unknown"), "got: {err}");
+        assert!(err.to_string().contains("was not replayed"), "got: {err}");
+        assert_eq!(effects.load(Ordering::Relaxed), 1);
+        assert!(
+            reconnect_attempted,
+            "the dead transport is reset for later use"
+        );
+        assert!(!is_timeout);
+        assert!(matches!(&*client.state.lock(), ClientState::Pending(_)));
 
-        // The Ok came from the SECOND attempt — the dead service cannot echo,
-        // so this text proves the rebuilt transport served the retry.
+        let mut next_reconnect = false;
+        let mut next_timeout = false;
+        let result = erased
+            .try_call_tool(&client, &raw, &mut next_reconnect, &mut next_timeout)
+            .await
+            .expect("a later independent invocation can reconnect");
         assert_eq!(
             result.content[0].as_text().expect("text content").text,
             "after reconnect"
         );
-        assert!(
-            reconnect_attempted,
-            "retriable transport error must set reconnect_attempted"
+        assert!(!next_reconnect);
+        assert!(!next_timeout);
+        assert_eq!(
+            effects.load(Ordering::Relaxed),
+            1,
+            "the original effect ran once"
         );
-        assert!(
-            !is_timeout,
-            "successful retry must not be flagged as timeout"
-        );
-        // reset_transport + re-handshake replaced the dead service with a live one.
         assert!(matches!(&*client.state.lock(), ClientState::Ready(_)));
     }
 
@@ -8458,3 +8545,7 @@ mod tests {
         assert_eq!(ev.server_name(), Some("srv"));
     }
 }
+
+#[cfg(test)]
+#[path = "servers/policy_tests.rs"]
+mod policy_tests;

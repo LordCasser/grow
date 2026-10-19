@@ -106,6 +106,7 @@ impl ConversationCounts {
                 sampling_types::ConversationItem::ToolResult(_) => counts.tool_result += 1,
                 sampling_types::ConversationItem::System(_)
                 | sampling_types::ConversationItem::AgentMessage(_)
+                | sampling_types::ConversationItem::SkillLoad(_)
                 | sampling_types::ConversationItem::BackendToolCall(_)
                 | sampling_types::ConversationItem::Reasoning(_) => {}
             }

@@ -80,7 +80,9 @@ pub(crate) struct ToolCallEvent {
     tool_kind: Option<String>,
     status: Option<proto::ToolCallStatus>,
     tool_name: String,
+    is_skill: bool,
     raw_input: Value,
+    raw_output: Option<Value>,
     content: Value,
     locations: Value,
 }
@@ -227,6 +229,17 @@ fn tool_kind_from(meta: Option<&proto::Meta>, kind: proto::ToolKind) -> Option<S
 pub(crate) fn tool_call_event(tc: &proto::ToolCall) -> ToolCallEvent {
     let tool_kind = tool_kind_from(tc.meta.as_ref(), tc.kind);
     let tool_name = tool_name_from(tc.meta.as_ref(), &tc.title, tool_kind.as_deref());
+    let is_skill = tc.meta.as_ref().is_some_and(|meta| {
+        let identity = meta.get("grow/tool");
+        identity
+            .and_then(|value| value.get("kind"))
+            .and_then(Value::as_str)
+            == Some("skill")
+            || identity
+                .and_then(|value| value.get("name"))
+                .and_then(Value::as_str)
+                == Some("load_skill")
+    });
     let raw_input = tc.raw_input.clone().unwrap_or(Value::Null);
     ToolCallEvent {
         tool_call_id: tc.tool_call_id.0.to_string(),
@@ -234,7 +247,9 @@ pub(crate) fn tool_call_event(tc: &proto::ToolCall) -> ToolCallEvent {
         tool_kind,
         status: Some(tc.status),
         tool_name,
+        is_skill,
         raw_input,
+        raw_output: tc.raw_output.clone(),
         content: json_array_or_empty(&tc.content),
         locations: json_array_or_empty(&tc.locations),
     }

@@ -43,6 +43,10 @@ impl ChildControl for TestControl {
         self.cancellation.cancel();
     }
 
+    fn freeze_admission(&self) -> Result<(), String> {
+        Ok(())
+    }
+
     fn runner_panicked(&self) {
         self.panic_notified.store(true, Ordering::SeqCst);
         self.cancel();
@@ -126,6 +130,356 @@ async fn execution_returned_query_reports_finalization_pending_without_waiting()
     harness.actor.abort();
 }
 
+#[tokio::test]
+async fn suspended_retirement_checks_the_original_child_and_rejects_unknown_ids() {
+    let mut harness = harness(true, std::time::Duration::from_secs(60));
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move {
+            backend
+                .spawn(request("retired-suspended-child", true))
+                .await
+        }
+    });
+    assert_eq!(
+        harness.requests.recv().await.unwrap().id,
+        "retired-suspended-child"
+    );
+
+    let sender = harness.backend.sender();
+    let (freeze_tx, freeze_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(SubagentEvent::FreezeAdmission {
+            root_session_id: "parent".into(),
+            operation_id: "suspend-retirement".into(),
+            respond_to: freeze_tx,
+        })
+        .unwrap();
+    let frozen = freeze_rx.await.unwrap().unwrap();
+    assert_eq!(frozen.len(), 1);
+    assert!(frozen[0].initializing);
+
+    let _ = harness.start.send(());
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("retired-suspended-child")
+    );
+    loop {
+        if harness.running_counts.recv().await == Some(0) {
+            break;
+        }
+    }
+
+    let (retirement_tx, retirement_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(SubagentEvent::CheckSuspendedRetirement {
+            root_session_id: "parent".into(),
+            operation_id: "suspend-retirement".into(),
+            task_ids: vec!["retired-suspended-child".into()],
+            respond_to: retirement_tx,
+        })
+        .unwrap();
+    assert_eq!(retirement_rx.await.unwrap(), Ok(true));
+
+    let (unknown_tx, unknown_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(SubagentEvent::CheckSuspendedRetirement {
+            root_session_id: "parent".into(),
+            operation_id: "suspend-retirement".into(),
+            task_ids: vec!["unknown-child".into()],
+            respond_to: unknown_tx,
+        })
+        .unwrap();
+    assert!(unknown_rx.await.unwrap().is_err());
+
+    drop(spawn);
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn completed_child_remains_a_retirement_blocker_until_its_owner_is_joined() {
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move {
+            backend
+                .spawn(request("retiring-completed-child", true))
+                .await
+        }
+    });
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("retiring-completed-child")
+    );
+    let _ = harness.finish.send(());
+    assert!(spawn.await.unwrap().unwrap().success);
+    harness.completions.recv().await.unwrap();
+
+    let sender = harness.backend.sender();
+    let (freeze_tx, freeze_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(SubagentEvent::FreezeAdmission {
+            root_session_id: "parent".into(),
+            operation_id: "suspend-completed".into(),
+            respond_to: freeze_tx,
+        })
+        .unwrap();
+    assert!(freeze_rx.await.unwrap().unwrap().is_empty());
+
+    let check = || {
+        let sender = sender.clone();
+        async move {
+            let (respond_to, response) = tokio::sync::oneshot::channel();
+            sender
+                .send(SubagentEvent::CheckSuspendedRetirement {
+                    root_session_id: "parent".into(),
+                    operation_id: "suspend-completed".into(),
+                    task_ids: Vec::new(),
+                    respond_to,
+                })
+                .unwrap();
+            response.await.unwrap()
+        }
+    };
+
+    assert_eq!(check().await, Ok(false));
+    harness.retirement_ready.store(true, Ordering::SeqCst);
+    assert_eq!(check().await, Ok(true));
+    assert_eq!(check().await, Ok(true));
+    harness.actor.abort();
+}
+
+#[path = "coordinator_race_tests.rs"]
+mod race_tests;
+
+#[tokio::test]
+async fn restored_child_adoption_ack_waits_for_started_and_frozen_control() {
+    let mut harness = harness(true, std::time::Duration::from_secs(60));
+    let sender = harness.backend.sender();
+    let checkpoint = ChildCheckpoint {
+        session_id: "adopted-child".into(),
+        operation_id: "restore-op".into(),
+        checkpoint_seq: 41,
+    };
+    let (ack_tx, mut ack_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(SubagentEvent::AdoptSuspended {
+            request: Box::new(request("adopted-child", true)),
+            security_parent_session_id: "parent".into(),
+            checkpoint: checkpoint.clone(),
+            respond_to: ack_tx,
+        })
+        .unwrap();
+    assert_eq!(harness.requests.recv().await.unwrap().id, "adopted-child");
+    assert!(matches!(
+        ack_rx.try_recv(),
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+    ));
+
+    let (duplicate_tx, duplicate_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(SubagentEvent::AdoptSuspended {
+            request: Box::new(request("adopted-child", true)),
+            security_parent_session_id: "parent".into(),
+            checkpoint: checkpoint.clone(),
+            respond_to: duplicate_tx,
+        })
+        .unwrap();
+    assert!(duplicate_rx.await.unwrap().is_err());
+
+    let _ = harness.start.send(());
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("adopted-child")
+    );
+    assert_eq!(ack_rx.await.unwrap(), Ok(()));
+
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(SubagentEvent::ReleaseRestoredTree {
+            root_session_id: "parent".into(),
+            operation_id: "restore-op".into(),
+            respond_to: release_tx,
+        })
+        .unwrap();
+    assert_eq!(release_rx.await.unwrap(), Ok(()));
+
+    let _ = harness.finish.send(());
+    harness.completions.recv().await.unwrap();
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn blocked_restore_without_retirement_owner_can_be_retried() {
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    let sender = harness.backend.sender();
+    let checkpoint = ChildCheckpoint {
+        session_id: "restore-blocked".into(),
+        operation_id: "restore-fail-op".into(),
+        checkpoint_seq: 9,
+    };
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(SubagentEvent::AdoptSuspended {
+            request: Box::new(request("restore-blocked", true)),
+            security_parent_session_id: "parent".into(),
+            checkpoint: checkpoint.clone(),
+            respond_to: ack_tx,
+        })
+        .unwrap();
+    assert_eq!(harness.requests.recv().await.unwrap().id, "restore-blocked");
+    assert_eq!(
+        ack_rx.await.unwrap(),
+        Err("restore state is unavailable".into())
+    );
+    assert!(harness.completions.try_recv().is_err());
+
+    let (retry_tx, retry_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(SubagentEvent::AdoptSuspended {
+            request: Box::new(request("restore-blocked", true)),
+            security_parent_session_id: "parent".into(),
+            checkpoint: checkpoint.clone(),
+            respond_to: retry_tx,
+        })
+        .unwrap();
+    assert_eq!(
+        retry_rx.await.unwrap(),
+        Err("restore state is unavailable".into()),
+        "a blocked restore without a physical thread owner must be retried"
+    );
+    assert_eq!(harness.requests.recv().await.unwrap().id, "restore-blocked");
+    assert!(harness.completions.try_recv().is_err());
+
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(SubagentEvent::ReleaseRestoredTree {
+            root_session_id: "parent".into(),
+            operation_id: "restore-fail-op".into(),
+            respond_to: release_tx,
+        })
+        .unwrap();
+    assert!(release_rx.await.unwrap().is_err());
+
+    let (check_tx, check_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(SubagentEvent::CheckSuspendedRetirement {
+            root_session_id: "parent".into(),
+            operation_id: "restore-fail-op".into(),
+            task_ids: vec!["restore-blocked".into()],
+            respond_to: check_tx,
+        })
+        .unwrap();
+    assert_eq!(check_rx.await.unwrap(), Ok(false));
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn restored_child_rejects_a_nonactive_direct_security_parent() {
+    let mut harness = harness(false, std::time::Duration::from_secs(60));
+    let (respond_to, response) = tokio::sync::oneshot::channel();
+    harness
+        .backend
+        .sender()
+        .send(SubagentEvent::AdoptSuspended {
+            request: Box::new(request("bad-direct-parent", true)),
+            security_parent_session_id: "sibling-child".into(),
+            checkpoint: ChildCheckpoint {
+                session_id: "bad-direct-parent".into(),
+                operation_id: "direct-op".into(),
+                checkpoint_seq: 2,
+            },
+            respond_to,
+        })
+        .unwrap();
+    assert!(response.await.unwrap().is_err());
+    assert!(harness.requests.try_recv().is_err());
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn same_process_suspended_child_requires_exact_request_before_adoption() {
+    let mut harness = harness(true, std::time::Duration::from_secs(60));
+    let spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move {
+            backend
+                .spawn(request("retired-suspended-child", true))
+                .await
+        }
+    });
+    assert_eq!(
+        harness.requests.recv().await.unwrap().id,
+        "retired-suspended-child"
+    );
+    let sender = harness.backend.sender();
+    let (freeze_tx, freeze_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(SubagentEvent::FreezeAdmission {
+            root_session_id: "parent".into(),
+            operation_id: "suspend-retirement".into(),
+            respond_to: freeze_tx,
+        })
+        .unwrap();
+    freeze_rx.await.unwrap().unwrap();
+    let _ = harness.start.send(());
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("retired-suspended-child")
+    );
+    loop {
+        if harness.running_counts.recv().await == Some(0) {
+            break;
+        }
+    }
+
+    let checkpoint = ChildCheckpoint {
+        session_id: "retired-suspended-child".into(),
+        operation_id: "suspend-retirement".into(),
+        checkpoint_seq: 1,
+    };
+    let mut mismatched_request = request("retired-suspended-child", true);
+    mismatched_request.prompt = "different request body".into();
+    let (mismatch_tx, mismatch_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(SubagentEvent::AdoptSuspended {
+            request: Box::new(mismatched_request),
+            security_parent_session_id: "parent".into(),
+            checkpoint: checkpoint.clone(),
+            respond_to: mismatch_tx,
+        })
+        .unwrap();
+    assert!(mismatch_rx.await.unwrap().is_err());
+
+    let (adopt_tx, adopt_rx) = tokio::sync::oneshot::channel();
+    sender
+        .send(SubagentEvent::AdoptSuspended {
+            request: Box::new(request("retired-suspended-child", true)),
+            security_parent_session_id: "parent".into(),
+            checkpoint,
+            respond_to: adopt_tx,
+        })
+        .unwrap();
+    assert_eq!(
+        harness.requests.recv().await.unwrap().id,
+        "retired-suspended-child"
+    );
+    let _ = harness.start.send(());
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("retired-suspended-child")
+    );
+    assert_eq!(adopt_rx.await.unwrap(), Ok(()));
+    assert!(harness.completions.try_recv().is_err());
+    assert!(
+        !spawn.is_finished(),
+        "the original caller remains attached to the suspended child"
+    );
+    spawn.abort();
+    assert!(spawn.await.is_err());
+    harness.actor.abort();
+}
+
 struct TestRunner {
     wait_before_start: bool,
     wait_after_cancel: bool,
@@ -142,6 +496,7 @@ struct TestRunner {
     reconcile_release: Arc<tokio::sync::Notify>,
     panic_notified: Arc<AtomicBool>,
     panic_observations: Arc<parking_lot::Mutex<Vec<PanicObservation>>>,
+    retirement_ready: Arc<AtomicBool>,
 }
 
 impl ChildRunner for TestRunner {
@@ -174,7 +529,7 @@ impl ChildRunner for TestRunner {
 
     type Control = TestControl;
     type CompletionData = String;
-    type RunFuture = SendBoxFuture<ChildRunOutput<String>>;
+    type RunFuture = SendBoxFuture<ChildRunOutcome<String>>;
     type ValidateFuture = SendBoxFuture<SubagentValidateTypeOutcome>;
 
     fn run(&self, run: ChildRunRequest<Self::Control>) -> Self::RunFuture {
@@ -192,21 +547,29 @@ impl ChildRunner for TestRunner {
                 security_parent_session_id: _,
                 security_parent,
                 cancellation,
+                restore,
                 reporter,
             } = run;
             let completion_data = request.id.clone();
             let _ = requests.send(request.clone());
             let _ = security_parents.send(security_parent);
+            if request.id == "restore-blocked" {
+                return ChildRunOutcome::RestoreBlocked {
+                    checkpoint: restore.expect("adoption supplies checkpoint"),
+                    error: "restore state is unavailable".into(),
+                    completion_data,
+                };
+            }
             if wait_before_start {
                 tokio::select! {
                     _ = cancellation.cancelled() => {
                         if wait_after_cancel {
                             let _ = finish.recv().await;
                         }
-                        return ChildRunOutput {
+                        return ChildRunOutcome::Finished(ChildRunOutput {
                             result: cancelled_result(&request),
                             completion_data: completion_data.clone(),
-                        };
+                        });
                     }
                     _ = start.recv() => {}
                 }
@@ -225,15 +588,25 @@ impl ChildRunner for TestRunner {
                 })
                 .await
             {
-                return ChildRunOutput {
+                return ChildRunOutcome::Finished(ChildRunOutput {
                     result: cancelled_result(&request),
                     completion_data: completion_data.clone(),
-                };
+                });
             }
             if request.id == "execution-returned" {
                 reporter.execution_returned("completed");
             }
             let _ = started.send(request.id.clone());
+            if request.id == "retired-suspended-child" {
+                return ChildRunOutcome::Suspended {
+                    checkpoint: ChildCheckpoint {
+                        session_id: request.id.clone(),
+                        operation_id: "suspend-retirement".into(),
+                        checkpoint_seq: 1,
+                    },
+                    completion_data,
+                };
+            }
             if request.id == "panic-after-completed-outcome" {
                 reporter.execution_returned("completed");
                 panic!("injected runner panic after completed outcome was reported");
@@ -260,10 +633,10 @@ impl ChildRunner for TestRunner {
                     ..Default::default()
                 },
             };
-            ChildRunOutput {
+            ChildRunOutcome::Finished(ChildRunOutput {
                 result,
                 completion_data,
-            }
+            })
         })
     }
 
@@ -289,6 +662,19 @@ impl ChildRunner for TestRunner {
 
     fn terminal_committed(&self, _completion_data: &Self::CompletionData) -> bool {
         self.terminal_commit_ready.load(Ordering::SeqCst)
+    }
+
+    fn suspension_retired(
+        &self,
+        completion_data: &mut Self::CompletionData,
+    ) -> Result<bool, String> {
+        Ok(completion_data == "retired-suspended-child"
+            || (completion_data == "retiring-completed-child"
+                && self.retirement_ready.load(Ordering::SeqCst)))
+    }
+
+    fn has_physical_retirement_owner(&self, completion_data: &Self::CompletionData) -> bool {
+        completion_data == "retiring-completed-child"
     }
 
     fn completion_after_panic(
@@ -320,7 +706,7 @@ impl ChildRunner for TestRunner {
                 let release = self.reconcile_release.clone();
                 Ok(Box::pin(async move {
                     release.notified().await;
-                    output
+                    ChildRunOutcome::Finished(output)
                 }))
             }
             _ => Ok(Box::pin(
@@ -344,10 +730,13 @@ fn cancelled_result(request: &SubagentRequest) -> SubagentResult {
 fn request(id: &str, background: bool) -> SubagentRequest {
     SubagentRequest {
         id: id.to_owned(),
+
+        origin_tool_call_id: None,
         prompt: "work".to_owned(),
         description: "test child".to_owned(),
         subagent_type: "explore".to_owned(),
         parent_session_id: "parent".to_owned(),
+        parent_step_id: None,
         parent_prompt_id: Some("prompt".to_owned()),
         resume_from: None,
         cwd: None,
@@ -374,6 +763,51 @@ fn source_liveness_does_not_cross_sibling_security_parents() {
     assert!(!belongs_to_session(&source, "child-a", Some("child-b")));
 }
 
+#[test]
+fn suspension_checkpoint_requires_frozen_root_operation_and_exact_child_session() {
+    let checkpoint = ChildCheckpoint {
+        session_id: "child-session".into(),
+        operation_id: "suspend-1".into(),
+        checkpoint_seq: 7,
+    };
+
+    assert!(super::suspension_matches(
+        Some("root"),
+        Some("suspend-1"),
+        "root",
+        "child-session",
+        &checkpoint,
+    ));
+    assert!(!super::suspension_matches(
+        None,
+        Some("suspend-1"),
+        "root",
+        "child-session",
+        &checkpoint,
+    ));
+    assert!(!super::suspension_matches(
+        Some("other-root"),
+        Some("suspend-1"),
+        "root",
+        "child-session",
+        &checkpoint,
+    ));
+    assert!(!super::suspension_matches(
+        Some("root"),
+        Some("different-operation"),
+        "root",
+        "child-session",
+        &checkpoint,
+    ));
+    assert!(!super::suspension_matches(
+        Some("root"),
+        Some("suspend-1"),
+        "root",
+        "different-session",
+        &checkpoint,
+    ));
+}
+
 struct Harness {
     backend: ChannelBackend,
     start: tokio::sync::broadcast::Sender<()>,
@@ -390,6 +824,7 @@ struct Harness {
     reconcile_release: Arc<tokio::sync::Notify>,
     panic_notified: Arc<AtomicBool>,
     panic_observations: Arc<parking_lot::Mutex<Vec<PanicObservation>>>,
+    retirement_ready: Arc<AtomicBool>,
 }
 
 fn harness(wait_before_start: bool, foreground_budget: std::time::Duration) -> Harness {
@@ -425,6 +860,7 @@ fn harness_with_options(
     let reconcile_release = Arc::new(tokio::sync::Notify::new());
     let panic_notified = Arc::new(AtomicBool::new(false));
     let panic_observations = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let retirement_ready = Arc::new(AtomicBool::new(false));
     let actor = tokio::spawn(
         SubagentCoordinator::new(
             command_rx,
@@ -444,6 +880,7 @@ fn harness_with_options(
                 reconcile_release: reconcile_release.clone(),
                 panic_notified: panic_notified.clone(),
                 panic_observations: panic_observations.clone(),
+                retirement_ready: retirement_ready.clone(),
             },
             config,
         )
@@ -468,6 +905,7 @@ fn harness_with_options(
         reconcile_release,
         panic_notified,
         panic_observations,
+        retirement_ready,
     }
 }
 
@@ -2360,7 +2798,7 @@ async fn loop_tracking_covers_pending_active_and_nested_reparenting() {
     });
     let observed_nested = harness.requests.recv().await.unwrap();
     assert_eq!(observed_nested.parent_session_id, "parent");
-    assert!(!observed_nested.surface_completion);
+    assert!(observed_nested.surface_completion);
     assert_eq!(
         observed_nested.runtime_overrides.loop_task_id.as_deref(),
         Some("loop-task")
@@ -2373,6 +2811,47 @@ async fn loop_tracking_covers_pending_active_and_nested_reparenting() {
     assert!(outer_spawn.await.unwrap().unwrap().success);
     assert!(nested_spawn.await.unwrap().unwrap().success);
     assert!(!loop_unit_active(&harness.backend, "loop-task").await);
+    harness.actor.abort();
+}
+
+#[tokio::test]
+async fn workflow_nested_task_keeps_completion_internal_after_reparenting() {
+    let mut harness = harness(true, std::time::Duration::from_secs(60));
+    let mut workflow_request = request("workflow-parent", true);
+    workflow_request.owner = SubagentOwner::workflow("workflow-run");
+    let workflow_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(workflow_request).await }
+    });
+    assert_eq!(harness.requests.recv().await.unwrap().id, "workflow-parent");
+    let _ = harness.start.send(());
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("workflow-parent")
+    );
+
+    let mut nested_request = request("workflow-nested", true);
+    nested_request.parent_session_id = "workflow-parent".to_owned();
+    let nested_spawn = tokio::spawn({
+        let backend = harness.backend.clone();
+        async move { backend.spawn(nested_request).await }
+    });
+    let observed_nested = harness.requests.recv().await.unwrap();
+    assert_eq!(observed_nested.id, "workflow-nested");
+    assert!(!observed_nested.surface_completion);
+    assert_eq!(
+        observed_nested.owner,
+        SubagentOwner::workflow("workflow-run")
+    );
+
+    let _ = harness.start.send(());
+    assert_eq!(
+        harness.started.recv().await.as_deref(),
+        Some("workflow-nested")
+    );
+    let _ = harness.finish.send(());
+    assert!(workflow_spawn.await.unwrap().unwrap().success);
+    assert!(nested_spawn.await.unwrap().unwrap().success);
     harness.actor.abort();
 }
 

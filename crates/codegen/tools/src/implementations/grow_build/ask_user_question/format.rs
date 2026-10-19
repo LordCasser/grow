@@ -85,16 +85,11 @@ pub fn format_accepted_tool_result(
 pub fn format_chat_about_this(
     questions: &[Question],
     partial_answers: &HashMap<String, String>,
+    annotations: Option<&HashMap<String, QuestionAnnotation>>,
 ) -> String {
     let question_lines: Vec<String> = questions
         .iter()
-        .map(|q| {
-            if let Some(answer) = partial_answers.get(&q.question) {
-                format!("- \"{}\"\n  Answer: {}", q.question, answer)
-            } else {
-                format!("- \"{}\"\n  (No answer provided)", q.question)
-            }
-        })
+        .map(|q| partial_answer_line(q, partial_answers, annotations))
         .collect();
 
     format!(
@@ -117,16 +112,11 @@ pub fn format_chat_about_this(
 pub fn format_skip_interview(
     questions: &[Question],
     partial_answers: &HashMap<String, String>,
+    annotations: Option<&HashMap<String, QuestionAnnotation>>,
 ) -> String {
     let question_lines: Vec<String> = questions
         .iter()
-        .map(|q| {
-            if let Some(answer) = partial_answers.get(&q.question) {
-                format!("- \"{}\"\n  Answer: {}", q.question, answer)
-            } else {
-                format!("- \"{}\"\n  (No answer provided)", q.question)
-            }
-        })
+        .map(|q| partial_answer_line(q, partial_answers, annotations))
         .collect();
 
     format!(
@@ -137,6 +127,26 @@ pub fn format_skip_interview(
          {}",
         question_lines.join("\n")
     )
+}
+
+fn partial_answer_line(
+    question: &Question,
+    partial_answers: &HashMap<String, String>,
+    annotations: Option<&HashMap<String, QuestionAnnotation>>,
+) -> String {
+    let Some(answer) = partial_answers.get(&question.question) else {
+        return format!("- \"{}\"\n  (No answer provided)", question.question);
+    };
+    let mut line = format!("- \"{}\"\n  Answer: {answer}", question.question);
+    if let Some(notes) = annotations
+        .and_then(|annotations| annotations.get(&question.question))
+        .and_then(|annotation| annotation.notes.as_deref())
+        .filter(|notes| !notes.trim().is_empty())
+    {
+        line.push_str("\n  Notes: ");
+        line.push_str(notes);
+    }
+    line
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -322,7 +332,7 @@ mod tests {
         let mut partial = HashMap::new();
         partial.insert("Which database?".to_string(), "Redis".to_string());
 
-        let result = format_chat_about_this(&questions, &partial);
+        let result = format_chat_about_this(&questions, &partial, None);
         let expected = "\
 The user wants to clarify these questions.
     This means they may have additional information, context or questions for you.
@@ -345,16 +355,37 @@ The user wants to clarify these questions.
         let mut partial = HashMap::new();
         partial.insert("Which database?".to_string(), "Redis".to_string());
 
-        let result = format_chat_about_this(&questions, &partial);
+        let result = format_chat_about_this(&questions, &partial, None);
         assert!(result.contains("Answer: Redis"));
         assert!(!result.contains("(No answer provided)"));
+    }
+
+    #[test]
+    fn partial_action_tool_results_include_annotation_notes() {
+        let questions = vec![make_question("Which database?", &["Postgres"])];
+        let mut partial = HashMap::new();
+        partial.insert("Which database?".to_string(), "Other".to_string());
+        let mut annotations = HashMap::new();
+        annotations.insert(
+            "Which database?".to_string(),
+            QuestionAnnotation {
+                preview: None,
+                notes: Some("Use the embedded deployment".to_string()),
+            },
+        );
+
+        let chat = format_chat_about_this(&questions, &partial, Some(&annotations));
+        let skip = format_skip_interview(&questions, &partial, Some(&annotations));
+
+        assert!(chat.contains("Answer: Other\n  Notes: Use the embedded deployment"));
+        assert!(skip.contains("Answer: Other\n  Notes: Use the embedded deployment"));
     }
 
     #[test]
     fn format_chat_about_this_none_answered() {
         let questions = vec![make_question("Q1?", &["A"]), make_question("Q2?", &["B"])];
 
-        let result = format_chat_about_this(&questions, &HashMap::new());
+        let result = format_chat_about_this(&questions, &HashMap::new(), None);
         assert!(result.contains("- \"Q1?\"\n  (No answer provided)"));
         assert!(result.contains("- \"Q2?\"\n  (No answer provided)"));
     }
@@ -372,7 +403,7 @@ The user wants to clarify these questions.
         partial.insert("Which database?".to_string(), "Redis".to_string());
         partial.insert("Which framework?".to_string(), "React".to_string());
 
-        let result = format_skip_interview(&questions, &partial);
+        let result = format_skip_interview(&questions, &partial, None);
         let expected = "\
 The user has indicated they have provided enough answers for the plan interview.
 Stop asking clarifying questions and proceed to finish the plan with the information you have.
@@ -396,7 +427,7 @@ Questions asked and answers provided:
         let mut partial = HashMap::new();
         partial.insert("Which database?".to_string(), "Redis".to_string());
 
-        let result = format_skip_interview(&questions, &partial);
+        let result = format_skip_interview(&questions, &partial, None);
         assert!(result.contains("Answer: Redis"));
         assert!(result.contains("- \"Which framework?\"\n  (No answer provided)"));
     }
@@ -405,7 +436,7 @@ Questions asked and answers provided:
     fn format_skip_interview_no_indentation() {
         // Path C has NO indentation on any header lines (unlike Path B)
         let questions = vec![make_question("Q?", &["A"])];
-        let result = format_skip_interview(&questions, &HashMap::new());
+        let result = format_skip_interview(&questions, &HashMap::new(), None);
 
         // First line has no leading spaces
         let first_line = result.lines().next().unwrap();

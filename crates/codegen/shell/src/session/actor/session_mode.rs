@@ -419,7 +419,7 @@ impl SessionActor {
             }
         };
         crate::session::behavior::BehaviorSwitchFacts {
-            termination_open: admission.termination.is_open(),
+            termination_open: admission.execution_open(),
             pending_step_control: !admission.pending_step_controls.is_empty(),
             foreground,
             ..Default::default()
@@ -548,7 +548,7 @@ impl SessionActor {
         let requested_behavior = tools::types::BehaviorId::try_from_id(session_mode.0.as_ref());
         let (projection, should_start) = {
             let mut admission = self.state.lock().await;
-            if !admission.termination.is_open() {
+            if !admission.execution_open() {
                 let _ = responds_to.send(Err(
                     acp::Error::internal_error().data("session is shutting down")
                 ));
@@ -1085,7 +1085,7 @@ impl SessionActor {
         // cannot prove there is no in-flight route transition.
         let step_control = self.step_control_gate.lock().await;
         let _goal_transaction = self.goal_transaction_gate.lock().await;
-        if !self.state.lock().await.termination.is_open() {
+        if !self.state.lock().await.execution_open() {
             return BehaviorApplication::cancelled_by_shutdown();
         }
 
@@ -1388,7 +1388,7 @@ impl SessionActor {
         previous: crate::session::behavior::BehaviorSnapshot,
     ) -> Result<(), String> {
         let _step_control = self.step_control_gate.lock().await;
-        if !self.state.lock().await.termination.is_open() {
+        if !self.state.lock().await.execution_open() {
             *self.behavior.lock() =
                 crate::session::behavior::BehaviorCoordinator::from_snapshot(previous);
             return Err("session is shutting down".into());

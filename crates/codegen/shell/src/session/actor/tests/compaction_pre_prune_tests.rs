@@ -111,6 +111,11 @@ fn async_compaction_promoted_job_with_incomplete_usage_cannot_commit() {
 }
 
 #[test]
+fn async_compaction_cancelled_promotion_waiter_returns_original_owner() {
+    async_compaction_scenario("promote_waiter_cancelled");
+}
+
+#[test]
 fn async_compaction_rechecks_model_after_promotion_wait() {
     async_compaction_scenario("promote_model");
 }
@@ -164,7 +169,7 @@ fn async_compaction_scenario(action: &'static str) {
         rt.block_on(tokio::task::LocalSet::new().run_until(async {
             use test_support::{InferenceEndpoint, InferenceRequestMatcher};
             let server = MockInferenceServer::start().await.unwrap();
-            let promotes = matches!(action, "promote" | "timeout" | "promote_control" | "promote_incomplete" | "promote_model");
+            let promotes = matches!(action, "promote" | "timeout" | "promote_control" | "promote_incomplete" | "promote_model" | "promote_waiter_cancelled");
             let between_step = action == "between_step";
             let summary = format!("background compacted summary: The old task is complete. No pending tasks; wait for the user. {}", "Old decisions and verified evidence. ".repeat(35));
             let summary_response = if action == "failure" {
@@ -175,12 +180,15 @@ fn async_compaction_scenario(action: &'static str) {
             let mut auxiliary = server.expect_response_blocked("background summary",
                 InferenceRequestMatcher::auxiliary(InferenceEndpoint::Messages),
                 summary_response);
+            let sideband_evidence = matches!(action, "promote_incomplete" | "promote_waiter_cancelled").then(|| {
+                std::sync::Arc::new(std::sync::Mutex::new(Vec::new()))
+            });
             let mut tool = server.expect_response_blocked("foreground executes tool",
                 InferenceRequestMatcher::foreground(InferenceEndpoint::Messages),
                 ScriptedResponse::sse([
                     json!({"type":"message_start","message":{"id":"tool-msg","type":"message","role":"assistant","content":[],"model":"test","usage":{"input_tokens":74_000,"output_tokens":0,"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}),
                     json!({"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"async-todo","name":"todo_write","input":{}}}),
-                    json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"todos\":[{\"id\":\"latest\",\"content\":\"latest todo while summary runs\",\"status\":\"in_progress\"}]}"}}),
+                    json!({"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"actions\":[],\"todos\":[{\"id\":\"latest\",\"content\":\"latest todo while summary runs\",\"status\":\"in_progress\"}]}"}}),
                     json!({"type":"content_block_stop","index":0}),
                     json!({"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"input_tokens":74_000,"output_tokens":5}}),
                     json!({"type":"message_stop"}),
@@ -188,8 +196,39 @@ fn async_compaction_scenario(action: &'static str) {
             let mut foreground = server.expect_response("foreground continues",
                 InferenceRequestMatcher::foreground(InferenceEndpoint::Messages),
                 messages_turn_with_usage(&[("foreground response after freeze", END_TURN)], END_TURN, 74_000));
-            let (actor, mut notifications) = actor_with_sampler_cw_ex(&server, sampling_types::ApiBackend::Messages, 100_000, None, if action == "timeout" { 2 } else { 0 }, true, None).await;
+            let (actor, mut notifications, accounting_inbox) = actor_with_sampler_cw_ex(
+                &server,
+                sampling_types::ApiBackend::Messages,
+                100_000,
+                None,
+                if action == "timeout" { 2 } else { 0 },
+                true,
+                sideband_evidence.clone(),
+                false,
+                !matches!(action, "promote_incomplete" | "budget"),
+            )
+            .await;
+            let test_accounting_tx = accounting_inbox.as_ref().map(|(sender, _)| sender.clone());
+            if let Some((root_cmd_tx, mut root_cmd_rx)) = accounting_inbox {
+                let accounting_actor = actor.clone();
+                tokio::task::spawn_local(async move {
+                    while let Some(command) = root_cmd_rx.recv().await {
+                        if crate::session::actor::run_loop::dispatch_goal_accounting_command(
+                            &accounting_actor,
+                            command,
+                        )
+                        .await
+                        .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    drop(root_cmd_tx);
+                });
+            }
             let mut projected_completion = None;
+            let mut preconsumed_notifications = Vec::new();
+            let mut preconsumed_completions = Vec::new();
             use tools::implementations::{context_recall::ContextRecallImpl, grow_build::{todo::TodoWriteTool, read_file::ReadFileTool}};
             use tools::registry::types::ToolConfig;
             // Two stable tools distinguish foreground requests from the tool-free
@@ -197,7 +236,7 @@ fn async_compaction_scenario(action: &'static str) {
             let mut tools = vec![ToolConfig::for_tool::<TodoWriteTool>(), ToolConfig::for_tool::<ReadFileTool>()];
             if action == "cross_turn" { tools.push(ToolConfig::for_tool::<ContextRecallImpl>()); }
             *actor.agent.borrow_mut() = test_agent_with_tools(tools).await;
-            if matches!(action, "goal" | "budget" | "promote_incomplete") {
+            if matches!(action, "goal" | "budget" | "promote_incomplete" | "promote_waiter_cancelled") {
                 actor.goal_tracker.lock().create_goal("async-goal".into(), "verify concurrent accounting".into(), Some(if action == "budget" { 75_000 } else { 500_000 }), "now".into()).unwrap();
                 actor.behavior.lock().select_behavior(tool_types::BehaviorId::Goal);
                 actor.sync_goal_usage_window();
@@ -227,7 +266,7 @@ fn async_compaction_scenario(action: &'static str) {
                 tokio::time::timeout(std::time::Duration::from_secs(5), foreground.wait_satisfied()).await.expect("foreground expectation consumed");
             }
             if action == "goal" { assert_eq!(actor.goal_tokens_used(), 148_010); }
-            assert_eq!(actor.compaction.background.borrow().is_some(), action != "budget" && !between_step);
+            assert_eq!(actor.compaction.background.borrow().is_some(), !between_step);
             let events = actor.chat_state_handle.timeline_events().await.unwrap();
             assert_eq!(events.iter().any(|event| matches!(event.kind, chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Summary { .. }))), between_step);
             let mut early_notifications = Vec::new();
@@ -244,11 +283,13 @@ fn async_compaction_scenario(action: &'static str) {
                 actor.handle_rewind(request.clone()).await.unwrap();
                 assert!(actor.compaction.background.borrow().is_some(), "read-only rewind preview must not invalidate computation");
                 assert!(actor.handle_rewind(RewindRequest { force: true, ..request }).await.unwrap().success);
-                assert!(actor.compaction.background.borrow().is_none());
+                assert!(actor.compaction.background.borrow().is_some(),
+                    "rewind commit invalidates publication while preserving the worker until drain");
             } else if action == "control" {
                 let (behavior, goal) = actor.capture_control_authorities();
                 actor.persist_behavior_transition_durably(behavior, goal).await.unwrap();
-                assert!(actor.compaction.background.borrow().is_none());
+                assert!(actor.compaction.background.borrow().is_some(),
+                    "ordinary control invalidation signals cancellation but retains the unfinished owner");
             } else if action == "model" {
                 let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
                 config.context_window = std::num::NonZeroU64::new(110_000).unwrap();
@@ -273,8 +314,38 @@ fn async_compaction_scenario(action: &'static str) {
                     let (behavior, goal) = actor.capture_control_authorities();
                     actor.persist_behavior_transition_durably(behavior, goal).await.unwrap();
                 } else if action == "promote_incomplete" {
-                    // The root receives another provider's unmetered outcome
-                    // while the promoted summary still owns the HTTP request.
+                    // The same root accounting inbox serially applies the
+                    // incomplete receipt, then the compaction worker's own
+                    // settlement receipt. A joining invalidation here would
+                    // block the second command behind the first ACK.
+                    let (respond_to, response) = tokio::sync::oneshot::channel();
+                    test_accounting_tx
+                        .as_ref()
+                        .expect("single root accounting inbox")
+                        .send(SessionCommand::RecordGoalUsageIncomplete {
+                            goal_id: "async-goal".into(),
+                            respond_to,
+                        })
+                        .unwrap();
+                    assert!(tokio::time::timeout(std::time::Duration::from_secs(2), response)
+                        .await
+                        .expect("incomplete receipt is handled by the root inbox")
+                        .unwrap()
+                        .unwrap());
+                } else if action == "promote_waiter_cancelled" {
+                    let (kinds, completed) = tokio::time::timeout(
+                        std::time::Duration::from_secs(2),
+                        wait_for_session_update(&mut notifications, "auto_compact_started"),
+                    )
+                    .await
+                    .expect("promotion notification is delivered before cancelling its waiter");
+                    preconsumed_notifications.extend(kinds);
+                    preconsumed_completions.extend(completed);
+                    let waiter = promotion.take().expect("promotion waiter");
+                    waiter.abort();
+                    let _ = waiter.await;
+                    assert!(actor.compaction.background.borrow().is_some(),
+                        "dropping the promotion waiter must return its original worker owner");
                     actor.apply_captured_goal_usage_incomplete("async-goal").await.unwrap();
                 } else if action == "promote_model" {
                     let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
@@ -286,8 +357,50 @@ fn async_compaction_scenario(action: &'static str) {
                 let error = tokio::time::timeout(std::time::Duration::from_millis(1_100), promotion.take().unwrap()).await.expect("promotion must use the original deadline, not a fresh two seconds").unwrap().unwrap_err();
                 assert!(format!("{error:?}").contains("wall-clock budget"));
             }
-            auxiliary.release();
-            if !matches!(action, "cancel" | "budget" | "control" | "timeout" | "rewind" | "promote_control" | "promote_incomplete") {
+            if action != "promote_waiter_cancelled" {
+                auxiliary.release();
+            }
+            if action == "budget" {
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    actor.goal_usage_window.wait_for_owner_settlements_through(
+                        &actor.session_id_string(),
+                        0,
+                    ),
+                )
+                .await
+                .expect("budget-triggered cancellation must settle the summary attempt");
+                assert_eq!(actor.goal_tokens_used(), 148_025);
+                assert!(actor
+                    .goal_usage_window
+                    .begin_model_attempt(
+                        &actor.session_id_string(),
+                        0,
+                        Some("async-goal"),
+                    )
+                    .await
+                    .is_err());
+            }
+            if matches!(action, "budget" | "control" | "rewind") {
+                actor
+                    .cancel_background_compaction_before("test_invalidation_barrier", None)
+                    .await
+                    .expect("explicit owner drain records cancellation after settlement");
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                assert!(events.iter().any(|event| matches!(
+                    event.kind,
+                    chat_state::TimelineEventKind::Compaction(
+                        chat_state::CompactionEvent::Failed { .. }
+                    )
+                )), "the invalidated worker reaches its cancellation terminal");
+                assert!(!events.iter().any(|event| matches!(
+                    event.kind,
+                    chat_state::TimelineEventKind::Compaction(
+                        chat_state::CompactionEvent::Completed { .. }
+                    )
+                )), "invalidated output must never become a completed compaction");
+            }
+            if !matches!(action, "cancel" | "budget" | "control" | "timeout" | "rewind" | "promote_control" | "promote_incomplete" | "promote_waiter_cancelled") {
                 tokio::time::timeout(std::time::Duration::from_secs(5), auxiliary.wait_satisfied()).await.expect("auxiliary expectation completed");
             }
             if let Some(promotion) = promotion {
@@ -309,7 +422,10 @@ fn async_compaction_scenario(action: &'static str) {
                 assert!(requests.last().unwrap()["tools"].as_array().unwrap().iter().any(|tool|
                     tool["name"] == tools::implementations::context_recall::CONTEXT_RECALL_TOOL_NAME
                 ), "the first request after commit must expose Recall");
-            } else if !matches!(action, "cancel" | "budget" | "control" | "timeout" | "rewind") {
+            } else if !matches!(
+                action,
+                "cancel" | "budget" | "control" | "timeout" | "rewind" | "promote_waiter_cancelled"
+            ) {
                 tokio::time::timeout(std::time::Duration::from_secs(10), async {
                     while actor.compaction.background.borrow().is_some() {
                         tokio::task::yield_now().await;
@@ -406,7 +522,42 @@ fn async_compaction_scenario(action: &'static str) {
                 assert!(!wire.contains("Historical tool exchange"));
                 assert_eq!(events.iter().filter(|event| matches!(&event.kind,
                     chat_state::TimelineEventKind::Tool(chat_state::ToolEvent::Completed { call_id, .. }) if call_id == "async-todo")).count(), 1, "compaction cannot execute retained history again");
-                assert!(wire.find(compaction::ASYNC_COMPACTION_CONTINUE_PROMPT).unwrap() > wire.rfind("latest todo while summary runs").unwrap(), "wire handoff must follow the retained tool exchange, not just the old summary");
+                let tool_result_position = messages
+                    .iter()
+                    .enumerate()
+                    .find_map(|(message_index, message)| {
+                        message["content"]
+                            .as_array()?
+                            .iter()
+                            .enumerate()
+                            .find_map(|(block_index, block)| {
+                                (block["type"] == "tool_result"
+                                    && block["tool_use_id"] == "async-todo")
+                                .then_some((message_index, block_index))
+                            })
+                    })
+                    .expect("retained tool result block");
+                let handoff_position = messages
+                    .iter()
+                    .enumerate()
+                    .find_map(|(message_index, message)| {
+                        message["content"]
+                            .as_array()?
+                            .iter()
+                            .enumerate()
+                            .find_map(|(block_index, block)| {
+                                (block["type"] == "text"
+                                    && block["text"].as_str().is_some_and(|text| {
+                                        text.contains(compaction::ASYNC_COMPACTION_CONTINUE_PROMPT)
+                                    }))
+                                .then_some((message_index, block_index))
+                            })
+                    })
+                    .expect("wire continuation handoff block");
+                assert!(
+                    handoff_position > tool_result_position,
+                    "wire handoff must follow the retained tool exchange, not just the old summary"
+                );
                 assert_eq!(server.messages_request_count(), 3, "between-step continuation must not add an extra sample");
                 let auto_continues = surface.iter().filter_map(|item| match item {
                     ConversationItem::User(user) if user.synthetic_reason == Some(sampling_types::SyntheticReason::AutoContinue) => Some(user),
@@ -421,15 +572,62 @@ fn async_compaction_scenario(action: &'static str) {
                 let ended = events.iter().filter(|event| matches!(event.kind, chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended { .. }))).count();
                 assert_eq!(ended, 1, "the continued work remains one turn");
             }
-            let (notifications, mut completions) = drain_session_updates(&mut notifications);
+            let (mut notifications, mut completions) = drain_session_updates(&mut notifications);
+            notifications.extend(preconsumed_notifications);
+            completions.extend(preconsumed_completions);
             completions.extend(projected_completion);
             let should_notify = should_commit && action != "goal";
             assert_eq!(completions.len(), usize::from(should_notify));
             if should_notify { assert_eq!(completions[0]["update"]["async_compact"], action != "promote"); }
             assert_eq!(notifications.iter().filter(|kind| *kind == "auto_compact_started").count(), usize::from(promotes));
-            if action == "promote_incomplete" {
+            if matches!(action, "promote_incomplete" | "promote_waiter_cancelled") {
+                if action == "promote_waiter_cancelled" {
+                    // Keep the provider response blocked until the real drain
+                    // has signalled cancellation and joined the original
+                    // worker. Releasing first can let a successful provider
+                    // response win and produce a Completed Sideband instead.
+                    tokio::time::timeout(
+                        std::time::Duration::from_secs(5),
+                        actor.cancel_background_compaction_before(
+                            "test_waiter_cancelled",
+                            None,
+                        ),
+                    )
+                    .await
+                    .expect("the cancelled provider request is drained")
+                    .expect("the explicit owner barrier records the settled cancellation");
+                    auxiliary.release();
+                }
                 assert_eq!(actor.goal_tracker.lock().status(), Some(crate::session::goal_tracker::GoalStatus::Paused));
                 assert_eq!(actor.behavior.lock().behavior(), tool_types::BehaviorId::Normal);
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(2),
+                    actor.goal_usage_window.wait_for_owner_settlements_through(
+                        &actor.session_id_string(),
+                        0,
+                    ),
+                )
+                .await
+                .expect("the cancelled summary must settle its original Goal usage owner");
+                let timeline = actor.chat_state_handle.timeline_events().await.unwrap();
+                assert!(timeline.iter().any(|event| matches!(event.kind,
+                    chat_state::TimelineEventKind::Compaction(chat_state::CompactionEvent::Failed { .. })
+                )), "cancellation is terminal only after the worker drain");
+                assert!(sideband_evidence
+                    .as_ref()
+                    .expect("capture the original Sideband ledger")
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|event| matches!(event.kind,
+                        chat_state::SidebandEventKind::End(chat_state::SidebandEnd {
+                            outcome: chat_state::SidebandOutcome::Cancelled,
+                            ..
+                        })
+                    )), "the original Sideband attempt must persist its cancellation terminal");
+                let surface = actor.chat_state_handle.get_conversation().await;
+                assert!(surface.iter().all(|item| !format!("{item:?}").contains("background compacted summary")),
+                    "a late generated summary must not reach the visible Surface");
             }
             if action == "failure" {
                 assert!(actor.compaction.background_failed.get());
@@ -445,11 +643,6 @@ fn async_compaction_scenario(action: &'static str) {
                     actor.compaction.pending_async_notice.get().is_some(),
                     "without a later request the async notice must remain pending"
                 );
-            }
-            if action == "budget" {
-                tokio::time::timeout(std::time::Duration::from_secs(2), actor.goal_usage_window.wait_for_owner_settlements_through(&actor.session_id_string(), 0)).await.expect("cancelled summary accounting must settle without a wait cycle");
-                assert_eq!(actor.goal_tokens_used(), 148_025);
-                assert!(actor.goal_usage_window.begin_model_attempt(&actor.session_id_string(), 0, Some("async-goal")).await.is_err());
             }
         }));
     });
@@ -551,7 +744,19 @@ async fn actor_with_sampler_cw(
     std::sync::Arc<SessionActor>,
     mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
 ) {
-    actor_with_sampler_cw_ex(server, api_backend, context_window, None, 0, true, None).await
+    let (actor, gateway, _) = actor_with_sampler_cw_ex(
+        server,
+        api_backend,
+        context_window,
+        None,
+        0,
+        true,
+        None,
+        false,
+        true,
+    )
+    .await;
+    (actor, gateway)
 }
 
 /// [`actor_with_sampler_cw`] variant for fork-scenario tests: sets
@@ -565,13 +770,18 @@ async fn actor_with_sampler_cw_ex(
     wall_clock_budget_secs: u64,
     verbatim_input: bool,
     evidence: Option<std::sync::Arc<std::sync::Mutex<Vec<chat_state::SidebandEvent>>>>,
+    bounded_output_test: bool,
+    drive_goal_usage: bool,
 ) -> (
     std::sync::Arc<SessionActor>,
     mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+    Option<(
+        mpsc::UnboundedSender<SessionCommand>,
+        mpsc::UnboundedReceiver<SessionCommand>,
+    )>,
 ) {
     let (gateway_tx, gateway_rx) = mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
     let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
-    let bounded_output_test = evidence.is_some();
     tokio::task::spawn_local(async move {
         while let Some(message) = persistence_rx.recv().await {
             if let PersistenceMsg::SidebandDurablyAndAck { event, respond_to } = message {
@@ -582,7 +792,9 @@ async fn actor_with_sampler_cw_ex(
             }
         }
     });
-    let mut actor = create_test_actor(0, context_window, 85, gateway_tx, persistence_tx).await;
+    let (mut actor, planning_rx) =
+        create_test_actor_with_planning_receiver(0, context_window, 85, gateway_tx, persistence_tx)
+            .await;
     actor.compaction.wall_clock_budget_secs = wall_clock_budget_secs;
     actor.compaction.verbatim_input = verbatim_input;
     let (goal_usage_tx, mut goal_usage_rx) = mpsc::unbounded_channel();
@@ -629,21 +841,27 @@ async fn actor_with_sampler_cw_ex(
         sampler_event_tx,
     );
     let actor = std::sync::Arc::new(actor);
-    let usage_actor = actor.clone();
-    tokio::task::spawn_local(async move {
-        let _mailbox_owner = goal_usage_tx;
-        while let Some(SessionCommand::SettleGoalUsageAttempt {
-            attempt_id,
-            respond_to,
-        }) = goal_usage_rx.recv().await
-        {
-            let _ = respond_to.send(
-                usage_actor
-                    .settle_claimed_goal_usage_attempt(&attempt_id)
-                    .await,
-            );
-        }
-    });
+    start_test_planning_driver(&actor, planning_rx);
+    let accounting_inbox = if drive_goal_usage {
+        let usage_actor = actor.clone();
+        tokio::task::spawn_local(async move {
+            let _mailbox_owner = goal_usage_tx;
+            while let Some(SessionCommand::SettleGoalUsageAttempt {
+                attempt_id,
+                respond_to,
+            }) = goal_usage_rx.recv().await
+            {
+                let _ = respond_to.send(
+                    usage_actor
+                        .settle_claimed_goal_usage_attempt(&attempt_id)
+                        .await,
+                );
+            }
+        });
+        None
+    } else {
+        Some((goal_usage_tx, goal_usage_rx))
+    };
     let drainer = actor.clone();
     tokio::task::spawn_local(async move {
         let mut sampler_event_rx = sampler_event_rx;
@@ -651,7 +869,7 @@ async fn actor_with_sampler_cw_ex(
             drainer.handle_sampling_event(event).await;
         }
     });
-    (actor, gateway_rx)
+    (actor, gateway_rx, accounting_inbox)
 }
 
 /// Drive one user turn through the real loop, bounded so a broken continue
@@ -660,6 +878,7 @@ async fn run_user_turn(
     actor: &std::sync::Arc<SessionActor>,
     prompt_id: &str,
 ) -> Result<PromptTurnOk, acp::Error> {
+    install_test_planning_resources(actor, prompt_id).await;
     actor.state.lock().await.foreground =
         ForegroundState::RegularTurn(running_task_stub(prompt_id));
     let behavior = actor.behavior.lock().behavior();
@@ -767,21 +986,48 @@ fn drain_session_updates(
     let mut kinds = Vec::new();
     let mut completed = Vec::new();
     while let Ok(msg) = rx.try_recv() {
-        if let acp_transport::AcpClientMessage::ExtNotification(args) = msg
-            && args.request.method.as_ref() == "grow/session_notification"
-            && let Ok(params) = serde_json::from_str::<serde_json::Value>(args.request.params.get())
-            && let Some(kind) = params
-                .get("update")
-                .and_then(|u| u.get("sessionUpdate"))
-                .and_then(|v| v.as_str())
-        {
-            kinds.push(kind.to_string());
+        if let Some((kind, params)) = session_update(&msg) {
+            kinds.push(kind.clone());
             if kind == "auto_compact_completed" {
                 completed.push(params);
             }
         }
     }
     (kinds, completed)
+}
+
+async fn wait_for_session_update(
+    rx: &mut mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+    expected: &str,
+) -> (Vec<String>, Vec<serde_json::Value>) {
+    let mut kinds = Vec::new();
+    let mut completed = Vec::new();
+    while let Some(message) = rx.recv().await {
+        if let Some((kind, params)) = session_update(&message) {
+            kinds.push(kind.clone());
+            if kind == "auto_compact_completed" {
+                completed.push(params);
+            }
+            if kind == expected {
+                return (kinds, completed);
+            }
+        }
+    }
+    panic!("session update channel closed before {expected}");
+}
+
+fn session_update(
+    message: &acp_transport::AcpClientMessage,
+) -> Option<(String, serde_json::Value)> {
+    let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
+        return None;
+    };
+    if args.request.method.as_ref() != "grow/session_notification" {
+        return None;
+    }
+    let params = serde_json::from_str::<serde_json::Value>(args.request.params.get()).ok()?;
+    let kind = params.get("update")?.get("sessionUpdate")?.as_str()?;
+    Some((kind.to_owned(), params))
 }
 
 // ─── Diagnostics capture ───────────────────────────────────────────────────
@@ -1787,7 +2033,7 @@ fn compaction_bounded_requests_preserve_evidence_and_target_on_all_backends() {
                         );
                     }
                     let evidence = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-                    let (actor, _) = actor_with_sampler_cw_ex(
+                    let (actor, _, _) = actor_with_sampler_cw_ex(
                         &server,
                         backend.clone(),
                         100_000,
@@ -1795,6 +2041,8 @@ fn compaction_bounded_requests_preserve_evidence_and_target_on_all_backends() {
                         0,
                         verbatim,
                         Some(evidence.clone()),
+                        true,
+                        true,
                     )
                     .await;
                     actor.compaction.pre_prune.set(false);

@@ -58,8 +58,173 @@ pub async fn handle(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
         "grow/queue/prompt_status" => handle_prompt_status(agent, args).await,
         "grow/input/admission_status" => handle_input_status(agent, args).await,
         "grow/queue/control" => handle_queue_control(agent, args).await,
+        "grow/plan/artifact" => handle_plan_artifact_query(agent, args).await,
+        "grow/plan/review" => handle_plan_review(agent, args).await,
+        "grow/plan/decision_status" => handle_plan_decision_status(agent, args).await,
         _ => Err(acp::Error::method_not_found()),
     }
+}
+
+async fn handle_plan_review(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    let request: tools::implementations::grow_build::plan_control::types::PlanReviewRequest =
+        parse_params(args)?;
+    let handle = agent
+        .control_session_handle_waiting_for_load(&acp::SessionId::new(request.session_id))
+        .await
+        .ok_or_else(|| acp::Error::invalid_params().data("unknown session"))?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    handle
+        .cmd_tx
+        .send(crate::session::SessionCommand::ReviewRetainedPlan {
+            submission_id: request.submission_id,
+            decision_id: request.decision_id,
+            respond_to: tx,
+        })
+        .map_err(|_| acp::Error::internal_error().data("Plan review owner unavailable"))?;
+    match tokio::time::timeout(std::time::Duration::from_secs(5), rx).await {
+        Ok(Ok(Ok(()))) => to_raw_response(&serde_json::json!({ "status": "accepted" })),
+        Ok(Ok(Err(error))) => Err(acp::Error::invalid_params().data(error)),
+        _ => to_raw_response(&serde_json::json!({ "status": "unconfirmed" })),
+    }
+}
+
+async fn handle_plan_decision_status(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    let request: tools::implementations::grow_build::plan_control::types::PlanDecisionQuery =
+        parse_params(args)?;
+    if request.decision_id.is_empty() || request.decision_id.len() > 128 {
+        return Err(acp::Error::invalid_params().data("invalid decision identity"));
+    }
+    let handle = agent
+        .control_session_handle_waiting_for_load(&acp::SessionId::new(request.session_id))
+        .await
+        .ok_or_else(|| acp::Error::invalid_params().data("unknown session"))?;
+    let chat_state = &handle.chat_state_handle;
+    // The Timeline writer accepts an event only after durable ACK. If an ACK
+    // is still pending, even a file that is visible on disk does not prove
+    // this decision committed. Keep the original identity pending for a
+    // later status query instead of queueing behind that write.
+    if chat_state.pending_timeline_commit().is_some() {
+        return to_raw_response(&serde_json::json!({ "status": "unconfirmed" }));
+    }
+    let events = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        chat_state.timeline_events(),
+    )
+    .await
+    {
+        Ok(Some(events)) => events,
+        Ok(None) if chat_state.pending_timeline_commit().is_some() => {
+            return to_raw_response(&serde_json::json!({ "status": "unconfirmed" }));
+        }
+        Ok(None) => {
+            return Err(acp::Error::internal_error().data("Plan receipt history unavailable"));
+        }
+        Err(_) => return to_raw_response(&serde_json::json!({ "status": "unconfirmed" })),
+    };
+    for event in events.iter().rev() {
+        let chat_state::TimelineEventKind::Control(control) = &event.kind else {
+            continue;
+        };
+        let Some(value) = control.snapshot.get("behavior") else {
+            continue;
+        };
+        let snapshot: crate::session::behavior::BehaviorSnapshot =
+            serde_json::from_value(value.clone())
+                .map_err(|error| acp::Error::internal_error().data(error.to_string()))?;
+        if let Some(receipt) = snapshot.retained_plan.as_ref().and_then(|candidate| {
+            candidate
+                .decisions
+                .iter()
+                .find(|receipt| receipt.decision_id == request.decision_id)
+        }) {
+            return to_raw_response(
+                &serde_json::json!({ "status": "accepted", "receipt": receipt }),
+            );
+        }
+    }
+    // A query may overtake the submitted operation. Absence cannot prove rejection.
+    to_raw_response(&serde_json::json!({ "status": "unconfirmed" }))
+}
+
+fn plan_preview_reference(
+    snapshot: &crate::session::behavior::BehaviorSnapshot,
+) -> Option<(u64, u64, String, bool)> {
+    if let Some(candidate) = snapshot.retained_plan.as_ref().filter(|candidate| {
+        matches!(
+            candidate.status,
+            crate::session::behavior::RetainedPlanStatus::Deferred
+                | crate::session::behavior::RetainedPlanStatus::Reviewing
+        )
+    }) {
+        return Some((
+            candidate.submission_id,
+            candidate.artifact_revision,
+            candidate.artifact_hash.clone(),
+            true,
+        ));
+    }
+    Some((
+        snapshot.plan_submission_id?,
+        snapshot.plan_artifact_revision,
+        snapshot.plan_artifact_hash.clone()?,
+        false,
+    ))
+}
+
+async fn handle_plan_artifact_query(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+    use tools::implementations::grow_build::plan_control::{
+        PlanArtifactQueryRequest, PlanArtifactQueryResponse,
+    };
+
+    let request: PlanArtifactQueryRequest = parse_params(args)?;
+    if request.session_id.is_empty() || request.session_id.len() > 1024 {
+        return Err(acp::Error::invalid_params().data("sessionId must contain 1 to 1024 bytes"));
+    }
+    let session_id = acp::SessionId::new(request.session_id.clone());
+    let handle = agent
+        .control_session_handle_waiting_for_load(&session_id)
+        .await
+        .ok_or_else(|| acp::Error::invalid_params().data("unknown session id"))?;
+    if handle.info.id != session_id {
+        return Err(acp::Error::invalid_params().data("session identity changed"));
+    }
+
+    let snapshot = handle.behavior.lock().snapshot();
+    let reference = plan_preview_reference(&snapshot).ok_or_else(|| {
+        acp::Error::invalid_params().data("session has no current Plan candidate")
+    })?;
+    let (submission_id, revision, hash, retained) = reference;
+    let behavior = handle.behavior.clone();
+    let session_directory = handle.session_directory.clone();
+    let response = bounded_shared_read(move || {
+        let content = crate::session::behavior::read_plan_artifact(&session_directory, &hash)?;
+        let current = behavior.lock().snapshot();
+        if plan_preview_reference(&current)
+            != Some((submission_id, revision, hash.clone(), retained))
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Plan artifact changed during query",
+            ));
+        }
+        Ok(PlanArtifactQueryResponse {
+            session_id: request.session_id,
+            submission_id,
+            retained,
+            artifact_revision: revision,
+            artifact_hash: hash,
+            plan_content: content,
+        })
+    })
+    .await
+    .map_err(|error| match error {
+        BoundedSharedReadError::TimedOut => {
+            acp::Error::internal_error().data("Plan artifact query timed out")
+        }
+        BoundedSharedReadError::Io(error) => acp::Error::internal_error().data(error.to_string()),
+        BoundedSharedReadError::Worker(error) => acp::Error::internal_error().data(error),
+    })?;
+    to_raw_response(&response)
 }
 
 #[derive(Debug, Serialize)]
@@ -768,6 +933,7 @@ fn prompt_status_from_subagent_inspection(
                 turn_start_ms: started_at_epoch_ms,
             }
         }
+        SubagentSnapshotStatus::Suspended { .. } => PromptStatus::Settling,
         SubagentSnapshotStatus::FinalizationPending { .. }
         | SubagentSnapshotStatus::Completed { .. }
         | SubagentSnapshotStatus::CompletedOutputUnavailable { .. }
@@ -965,6 +1131,22 @@ mod tests {
     use tempfile::TempDir;
     use tools::implementations::grow_build::task::types::SubagentSnapshotStatus;
 
+    #[cfg(unix)]
+    #[test]
+    fn cwd_matches_resolves_aliases_without_matching_sibling_directories() {
+        let root = TempDir::new().unwrap();
+        let project = root.path().join("project");
+        let alias = root.path().join("alias");
+        let sibling = root.path().join("project-other");
+        std::fs::create_dir_all(project.join("nested")).unwrap();
+        std::fs::create_dir(&sibling).unwrap();
+        std::os::unix::fs::symlink(&project, &alias).unwrap();
+        assert!(cwd_matches(&alias.join("nested"), &project));
+        assert!(cwd_matches(&project.join("nested"), &alias));
+        assert!(!cwd_matches(&sibling, &alias));
+        assert!(!cwd_matches(&sibling, &project));
+    }
+
     #[derive(Clone, Copy)]
     enum InputFixtureState {
         Submitted,
@@ -1016,6 +1198,7 @@ mod tests {
                 prompt_id: prompt_id.into(),
                 requested_route: crate::session::input_inbox::InputRequestRoute::Fifo,
                 prompt_blocks,
+                skill_invocations: Vec::new(),
                 client_identifier: None,
                 screen_mode: None,
                 verbatim: false,
@@ -1167,6 +1350,7 @@ mod tests {
                     let turn = chat_state::TurnId(1);
                     let started = timeline
                         .record(TimelineEventKind::Turn(chat_state::TurnEvent::Started {
+                            prompt_id: "fixture-prompt".into(),
                             id: turn,
                             input_ids: vec![input_id.clone()],
                             identity: chat_state::TurnIdentity {
@@ -1190,9 +1374,11 @@ mod tests {
                         .expect("persist turn start");
                     let terminal_input = match state {
                         InputFixtureState::Consumed => InputEvent::Consumed {
+                            display_echo: None,
                             input_ids: vec![input_id],
                             turn,
                             item: sampling_types::ConversationItem::user("durable prompt"),
+                            skill_loads: Vec::new(),
                         },
                         InputFixtureState::Handled => InputEvent::Handled {
                             input_ids: vec![input_id],
@@ -1323,6 +1509,7 @@ mod tests {
                 prompt_blocks: vec![agent_client_protocol::schema::v1::ContentBlock::Text(
                     agent_client_protocol::schema::v1::TextContent::new("second"),
                 )],
+                skill_invocations: Vec::new(),
                 client_identifier: None,
                 screen_mode: None,
                 verbatim: false,
@@ -1441,6 +1628,16 @@ mod tests {
                 SubagentSnapshotStatus::FinalizationPending {
                     outcome: "completed".into(),
                     error: None,
+                },
+                0,
+            ),
+            crate::session::prompt_queue::PromptStatus::Settling
+        ));
+        assert!(matches!(
+            prompt_status_from_subagent_inspection(
+                SubagentSnapshotStatus::Suspended {
+                    operation_id: "operation-1".into(),
+                    checkpoint_seq: 7,
                 },
                 0,
             ),
@@ -1650,6 +1847,9 @@ async fn handle_update_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequest) -> 
     }
 
     let params: Params = parse_params(args)?;
+    ::mcp::servers::validate_mcp_server_names(&params.mcp_servers)
+        .map_err(|error| acp::Error::invalid_params().data(error))?;
+    let _lifecycle_guard = agent.lock_session_lifecycle(&params.session_id).await;
 
     let (handle, cwd) = {
         let sessions = agent.sessions.borrow();
@@ -1676,19 +1876,16 @@ async fn handle_update_mcp_servers(agent: &MvpAgent, args: &acp::ExtRequest) -> 
         })
         .map_err(|_| acp::Error::internal_error().data("session closed"))?;
 
+    // Command admission and client-source replacement must not yield: a disk
+    // reload during initialization must merge the client's latest intent.
+    if let Some(h) = agent.sessions.borrow_mut().get_mut(&params.session_id) {
+        h.initial_client_mcp_servers = params.mcp_servers;
+    }
+
     // Wait for the session actor to finish MCP re-initialization.
     rx.await
         .map_err(|_| acp::Error::internal_error().data("session closed"))?
         .map_err(|e| acp::Error::internal_error().data(e.to_string()))?;
-
-    // Persist the new client set on the handle so config hot-reloads
-    // (`reload_mcp_catalog`) re-merges from
-    // the client's latest intent rather than the `session/new` snapshot —
-    // otherwise a reload would resurrect servers the client just removed
-    // (or drop ones it just added).
-    if let Some(h) = agent.sessions.borrow_mut().get_mut(&params.session_id) {
-        h.initial_client_mcp_servers = params.mcp_servers;
-    }
 
     ExtMethodResult::success(serde_json::json!({ "ok": true }))
         .to_ext_response()
@@ -1716,7 +1913,10 @@ fn handle_reload_workflows(agent: &MvpAgent) -> ExtResult {
 
 /// Reload the canonical MCP catalog. `project_root = None` targets every
 /// active session; `Some(root)` targets sessions at or beneath that root.
-async fn handle_reload_mcp_catalog(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtResult {
+pub(crate) async fn handle_reload_mcp_catalog(
+    agent: &MvpAgent,
+    args: &acp::ExtRequest,
+) -> ExtResult {
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase", deny_unknown_fields)]
     struct Params {
@@ -1732,44 +1932,88 @@ async fn handle_reload_mcp_catalog(agent: &MvpAgent, args: &acp::ExtRequest) -> 
         }
     };
 
-    // Collect (session_id, cwd) pairs once so we don't hold the
-    // `sessions` RefCell borrow across `.await` points.
-    let session_ids: Vec<(acp::SessionId, std::path::PathBuf)> = agent
+    // Capture both owner sessions and active children before any async send.
+    // Child actors have their own cwd-scoped auxiliary policy, even though
+    // their MCP clients and catalog remain owned by the parent.
+    let matches_scope = |cwd: &std::path::Path| {
+        project_root
+            .as_deref()
+            .is_none_or(|root| cwd_matches(cwd, root))
+    };
+    let mut targets: Vec<(
+        acp::SessionId,
+        std::path::PathBuf,
+        bool,
+        crate::session::SessionHandle,
+    )> = agent
         .sessions
         .borrow()
         .iter()
-        .map(|(sid, h)| (sid.clone(), std::path::PathBuf::from(&h.info.cwd)))
-        .filter(|(_, cwd)| {
-            project_root
-                .as_deref()
-                .is_none_or(|root| cwd_matches(cwd, root))
+        .map(|(sid, handle)| {
+            (
+                sid.clone(),
+                std::path::PathBuf::from(&handle.info.cwd),
+                false,
+                handle.clone(),
+            )
         })
+        .filter(|(_, cwd, _, _)| matches_scope(cwd))
         .collect();
+    targets.extend(
+        agent
+            .active_child_sessions
+            .borrow()
+            .iter()
+            .map(|(sid, handle)| {
+                (
+                    sid.clone(),
+                    std::path::PathBuf::from(&handle.info.cwd),
+                    true,
+                    handle.clone(),
+                )
+            })
+            .filter(|(_, cwd, _, _)| matches_scope(cwd)),
+    );
 
-    if session_ids.is_empty() {
+    // A child can briefly be present in both registries while its lifecycle
+    // handoff completes. One config reload must enqueue at most one refresh.
+    let mut seen = HashSet::new();
+    targets.retain(|(session_id, _, _, _)| seen.insert(session_id.clone()));
+
+    if targets.is_empty() {
         return ExtMethodResult::success(serde_json::json!({ "updated": 0 }))
             .to_ext_response()
             .map_err(|e| acp::Error::internal_error().data(e.to_string()));
     }
 
     let mut updated = 0u32;
-    for (session_id, cwd) in &session_ids {
-        let Some(handle) = agent.sessions.borrow().get(session_id).cloned() else {
-            continue;
+    let plugin_registry = agent.plugin_registry_handle().snapshot();
+    for (_session_id, cwd, is_child, handle) in &targets {
+        let sent = if *is_child {
+            let (respond_to, _response) = tokio::sync::oneshot::channel();
+            handle
+                .cmd_tx
+                .send(SessionCommand::UpdateMcpServers {
+                    mcp_servers: Vec::new(),
+                    respond_to,
+                })
+                .is_ok()
+        } else {
+            crate::session::mcp_catalog::merge_and_send_mcp_update(
+                &handle.cmd_tx,
+                cwd,
+                handle.initial_client_mcp_servers.clone(),
+                plugin_registry.as_deref(),
+            )
         };
-        if crate::session::mcp_catalog::merge_and_send_mcp_update(
-            &handle.cmd_tx,
-            cwd,
-            handle.initial_client_mcp_servers.clone(),
-            agent.plugin_registry_handle().snapshot().as_deref(),
-        ) {
+        if sent {
             updated += 1;
         }
     }
 
     tracing::info!(
         updated,
-        total = session_ids.len(),
+        total = targets.len(),
         project_root = ?project_root,
         "reloaded MCP catalog for matching sessions"
     );
@@ -1782,16 +2026,14 @@ async fn handle_reload_mcp_catalog(agent: &MvpAgent, args: &acp::ExtRequest) -> 
 /// beneath it (so a `<repo>/` edit reloads `<repo>/subdir/` sessions
 /// too).
 ///
-/// This uses `Path::starts_with`, which is
-/// **component-aware** — `/repo-test` does NOT match `/repo` even
-/// though the byte prefix matches. That is the desired behavior
-/// (component-aware avoids the `/foo-bar` ⊂ `/foo` foot-gun). Paths
-/// come from `SessionInfo::cwd` (always absolute) and the watcher's
-/// emitted path (also absolute), so no canonicalization is needed
-/// here. The `==` short-circuit is redundant (`Path::starts_with` is
-/// reflexive) but kept for an explicit zero-allocation fast path.
+/// Resolve directory aliases before component-aware comparison: filesystem
+/// events can use a canonical path while SessionInfo retains a symlink cwd.
+/// Keep the original path if a directory is no longer resolvable.
 fn cwd_matches(session_cwd: &std::path::Path, target_cwd: &std::path::Path) -> bool {
-    session_cwd == target_cwd || session_cwd.starts_with(target_cwd)
+    let session_cwd =
+        dunce::canonicalize(session_cwd).unwrap_or_else(|_| session_cwd.to_path_buf());
+    let target_cwd = dunce::canonicalize(target_cwd).unwrap_or_else(|_| target_cwd.to_path_buf());
+    session_cwd.starts_with(target_cwd)
 }
 
 // internal/reload_models

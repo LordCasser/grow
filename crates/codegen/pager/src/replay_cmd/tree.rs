@@ -11,7 +11,7 @@ use ratatui::{Terminal, backend::CrosstermBackend, buffer::Buffer, layout::Rect}
 use shell::session::storage::transcript::{TranscriptNode, TranscriptSession, capture_tree_at};
 
 use super::browser::{BrowseAction, Browser};
-use super::idle::{GapKind, TimeMap};
+use super::idle::{GapKind, TimeMap, uncovered};
 use super::panel::{Panel, PanelAction, PanelInfo};
 use super::{
     GrowUpdate, MAX_EVENTS_PER_TICK, MAX_SPEED, PlayState, PlaybackClock, Player, ReplayArgs,
@@ -106,6 +106,7 @@ impl Replay {
                 evidence.push((
                     session.activity,
                     session.recovery_gaps,
+                    session.offline_gaps,
                     session.open_activity,
                     session.unknown_activity,
                 ));
@@ -197,11 +198,13 @@ impl Replay {
         let mut markers = Vec::new();
         let mut protected = Vec::<Range<u64>>::new();
         let mut recovery = Vec::<Range<u64>>::new();
-        let mut open_starts = Vec::new();
+        let mut offline = Vec::<Range<u64>>::new();
+        let mut open_starts = Vec::<(u64, Vec<Range<u64>>)>::new();
         let mut last_source = None;
         let mut unknown_global = false;
-        for (index, (active, recovered, open, unknown)) in evidence.into_iter().enumerate() {
-            unknown_global |= unknown;
+        for (index, (active, recovered, offline_gaps, open, unknown)) in
+            evidence.into_iter().enumerate()
+        {
             let first = nodes[index].player.first_source_ms;
             let anchor = anchors[index];
             let shift = anchor
@@ -210,15 +213,24 @@ impl Replay {
             nodes[index].source_shift_ms = shift;
             let move_range =
                 |span: Range<u64>| span.start.saturating_add(shift)..span.end.saturating_add(shift);
+            let owner_offline = offline_gaps
+                .iter()
+                .cloned()
+                .map(move_range)
+                .collect::<Vec<_>>();
             // Even an unseen branch can have occupied execution time, but its
             // hidden display updates do not extend the replay's time bounds.
             protected.extend(active.into_iter().map(move_range));
             recovery.extend(recovered.into_iter().map(move_range));
-            open_starts.extend(open.into_iter().map(|start| start.saturating_add(shift)));
+            offline.extend(owner_offline.iter().cloned());
+            open_starts.extend(
+                open.into_iter()
+                    .map(|start| (start.saturating_add(shift), owner_offline.clone())),
+            );
+            let mut first_effective = None;
+            let mut last_effective = None;
             if nodes[index].playable {
                 if let Some(anchor) = anchor {
-                    let mut first_effective = None;
-                    let mut last_effective = None;
                     for item in &nodes[index].player.queue {
                         let at = anchor.saturating_add(item.due_ms.max(0.0) as u64);
                         first_effective.get_or_insert(at);
@@ -240,21 +252,32 @@ impl Replay {
                     unknown_global = true;
                 }
             }
+            if unknown {
+                if nodes[index].playable
+                    && let (Some(start), Some(end)) = (first_effective, last_effective)
+                    && end > start
+                {
+                    protected.extend(uncovered(start..end, &owner_offline));
+                } else {
+                    // Without this node's own bounded display span, preserve
+                    // the former conservative whole-replay protection.
+                    unknown_global = true;
+                }
+            }
         }
         if let Some(last) = last_source {
-            protected.extend(
-                open_starts
-                    .into_iter()
-                    .filter(|start| *start < last)
-                    .map(|start| start..last),
-            );
+            for (start, owner_offline) in open_starts {
+                if start < last {
+                    protected.extend(uncovered(start..last, &owner_offline));
+                }
+            }
         }
         if unknown_global
             && let (Some(start), Some(end)) = (markers.iter().min(), markers.iter().max())
         {
             protected.push(*start..*end);
         }
-        let mut time_map = TimeMap::new(markers, protected, recovery);
+        let mut time_map = TimeMap::new(markers, protected, recovery, offline);
         for index in 0..nodes.len() {
             let anchor = anchors[index].or(time_map.origin);
             if let Some(anchor) = anchor {
@@ -302,6 +325,7 @@ impl Replay {
             let kind = match gap.kind {
                 GapKind::Idle => "IDLE 时间",
                 GapKind::RecoveryEstimate => "中断空档（估算）",
+                GapKind::SuspendedOffline => "运行时挂起",
             };
             self.last_notice = Some(format!(
                 "跳过 {} {kind} · 按 1s 重放",
@@ -1140,6 +1164,54 @@ mod tests {
     use acp_transport::protocol as acp;
 
     #[test]
+    fn unknown_protection_excludes_only_its_owners_verified_offline_span() {
+        let offline = vec![20_000..80_000];
+        let same_owner_unknown = uncovered(0..100_000, &offline);
+        let same_owner_map = TimeMap::new(
+            vec![0, 100_000],
+            same_owner_unknown,
+            vec![],
+            offline.clone(),
+        );
+        assert!(
+            same_owner_map
+                .gaps
+                .iter()
+                .any(|gap| gap.kind == GapKind::SuspendedOffline && gap.source == offline[0])
+        );
+
+        // A different owner has no authority to subtract this node's offline
+        // interval, so its unknown span remains protective across the overlap.
+        let mut protected = uncovered(0..100_000, &offline);
+        protected.extend(uncovered(0..100_000, &[]));
+        let another_owner_map = TimeMap::new(vec![0, 100_000], protected, vec![], offline);
+        assert!(
+            another_owner_map
+                .gaps
+                .iter()
+                .all(|gap| gap.kind != GapKind::SuspendedOffline)
+        );
+    }
+
+    #[test]
+    fn ctrl_c_exits_read_only_replay_locally() {
+        let start = Instant::now();
+        let mut replay = Replay::new(
+            vec![(
+                node("replay-root", None, None),
+                session("replay-root", vec![], vec![]),
+            )],
+            1.0,
+            start,
+        );
+
+        assert!(replay.handle(
+            Event::Key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL,)),
+            start,
+        ));
+    }
+
+    #[test]
     fn ordinary_task_surfaces_follow_delivery_and_open_children_without_execution_controls() {
         let _theme_guard = crate::theme::cache::pin_theme();
         let start = Instant::now();
@@ -1314,6 +1386,7 @@ mod tests {
             events,
             activity,
             recovery_gaps: vec![],
+            offline_gaps: vec![],
             open_activity: vec![],
             unknown_activity: false,
         }

@@ -528,7 +528,24 @@ impl Reducer for MessagesReducer {
             StreamEvent::ToolCall(tc) => {
                 // Flush a prior tool round's results so rounds interleave on backends without `ResponseStarted`.
                 self.flush_tool_results(&mut out);
+                let replayed_skill_result = (tc.is_skill
+                    && matches!(
+                        tc.status,
+                        Some(acp::ToolCallStatus::Completed | acp::ToolCallStatus::Failed)
+                    )
+                    && tc.raw_output.is_some())
+                .then(|| ToolCallUpdateEvent {
+                    tool_call_id: tc.tool_call_id.clone(),
+                    status: tc.status,
+                    content: tc.content.clone(),
+                    raw_output: tc.raw_output.clone().unwrap_or(Value::Null),
+                    locations: tc.locations.clone(),
+                });
                 self.emit_client_tool_call(&mut out, tc);
+                if let Some(result) = replayed_skill_result {
+                    self.close_and_flush(&mut out, Some("tool_use"));
+                    self.buffer_tool_result(result);
+                }
             }
             StreamEvent::ToolCallUpdate(u) => {
                 let terminal = matches!(

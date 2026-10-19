@@ -8,8 +8,8 @@
 
 use std::sync::Arc;
 
-use crate::computer::types::KillOutcome;
 use crate::computer::types::TerminalBackend;
+use crate::computer::types::{CommandSuspensionEvidence, ComputerError, KillOutcome};
 use crate::registry::types::{
     FinalizedToolset, SessionContext, SessionResourceDomain, ToolRegistryBuilder, ToolServerConfig,
 };
@@ -236,6 +236,35 @@ impl ToolBridge {
     ) -> Result<ToolRunResult, tool_runtime::ToolError> {
         self.registry
             .call(client_function_name, client_params, tool_call_id, None)
+            .await
+    }
+
+    /// Resolve an exact skill invocation identity using the current manager
+    /// state. The caller selects whether this is a user or model invocation.
+    pub async fn resolve_skill(
+        &self,
+        name: &str,
+        user_invocation: bool,
+    ) -> Result<crate::implementations::skills::types::SkillInfo, tool_runtime::ToolError> {
+        let resources = self.registry.resources.lock().await;
+        resources
+            .require::<crate::types::skill_discovery_tracker::SkillManager>()?
+            .resolve_skill(name, user_invocation)
+            .map_err(tool_runtime::ToolError::invalid_arguments)
+    }
+
+    /// Dispatch `load_skill` with a host-selected identity frozen into the
+    /// call context. The selection never enters model-controlled arguments.
+    pub async fn call_skill_with_selection(
+        &self,
+        tool_name: &str,
+        args: serde_json::Value,
+        call_id: &str,
+        selection: crate::implementations::grow_build::load_skill::SkillLoadSelection,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<ToolRunResult, tool_runtime::ToolError> {
+        self.registry
+            .call_with_skill_selection(tool_name, args, call_id, selection, cancellation)
             .await
     }
 
@@ -479,6 +508,21 @@ impl ToolBridge {
         }
     }
 
+    pub async fn background_task(&self, id: &str) -> Option<TaskSnapshot> {
+        self.terminal.as_ref()?.get_task(id).await
+    }
+
+    pub async fn wait_background_task(
+        &self,
+        id: &str,
+        timeout: std::time::Duration,
+    ) -> Option<TaskSnapshot> {
+        self.terminal
+            .as_ref()?
+            .wait_for_completion(id, Some(timeout))
+            .await
+    }
+
     /// Kill all foreground terminal commands.
     pub async fn kill_foreground_commands(&self) {
         if let Some(terminal) = &self.terminal {
@@ -492,6 +536,23 @@ impl ToolBridge {
             terminal
                 .kill_foreground_commands_by_owner(owner_session_id)
                 .await;
+        }
+    }
+
+    /// Stop and reap commands for an owner, returning confirmed snapshots.
+    /// A bridge without a terminal owns no commands, so it has an empty result.
+    pub async fn suspend_owned_commands(
+        &self,
+        owner_session_id: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<Vec<CommandSuspensionEvidence>, ComputerError> {
+        match &self.terminal {
+            Some(terminal) => {
+                terminal
+                    .suspend_owned_commands(owner_session_id, deadline)
+                    .await
+            }
+            None => Ok(Vec::new()),
         }
     }
 
@@ -790,5 +851,18 @@ mod tests {
         assert_eq!(bridge.tool_kind("not_a_registered_tool"), None);
         // Exact client-name lookup is case-sensitive.
         assert_eq!(bridge.tool_kind("write"), None);
+    }
+
+    #[tokio::test]
+    async fn suspension_without_terminal_has_no_commands() {
+        let bridge = ToolBridge::for_test();
+        let evidence = bridge
+            .suspend_owned_commands(
+                "owner",
+                tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+            )
+            .await
+            .expect("bridge without terminal has no owned commands");
+        assert!(evidence.is_empty());
     }
 }

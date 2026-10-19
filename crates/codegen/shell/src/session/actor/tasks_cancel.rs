@@ -79,6 +79,7 @@ impl Drop for TurnActiveGuard {
 }
 
 pub(crate) struct AgentTask {
+    pub(crate) stopped: futures_util::future::Shared<oneshot::Receiver<()>>,
     pub(crate) prompt_id: String,
     pub(crate) origin: PromptOrigin,
     pub(crate) turn_kind: crate::session::TurnKind,
@@ -110,10 +111,12 @@ impl AgentTask {
         persist_ack: Option<oneshot::Sender<()>>,
     ) -> Self {
         let pid = prompt_id.clone();
+        let (stopped_tx, stopped_rx) = oneshot::channel();
         let usage_epoch = session
             .goal_usage_window
             .owner_epoch(&session.session_id_string());
         Self {
+            stopped: stopped_rx.shared(),
             prompt_id,
             origin: origin.clone(),
             turn_kind,
@@ -123,6 +126,7 @@ impl AgentTask {
                 .as_millis() as u64,
             usage_epoch,
             handle: tokio::task::spawn_local(async move {
+                let _stopped = stopped_tx;
                 // Admission can install foreground ownership before async
                 // tool-resource publication. This one-shot keeps the task
                 // dormant until every turn-scoped capability is ready.

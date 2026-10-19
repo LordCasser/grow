@@ -2782,6 +2782,92 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn chat_tool_completion_accepts_nullable_usage_tail() {
+        let chunk = |choices: serde_json::Value, usage: serde_json::Value| {
+            serde_json::json!({
+                "id": "chatcmpl-null-details", "object": "chat.completion.chunk",
+                "created": 0, "model": "test-model", "choices": choices, "usage": usage
+            })
+        };
+        let body = [
+            chunk(serde_json::json!([{"index": 0, "delta": {"tool_calls": [{
+                "index": 0, "id": "call-1", "type": "function",
+                "function": {"name": "test_tool", "arguments": "{}"}
+            }]}, "finish_reason": null}]), serde_json::Value::Null),
+            chunk(serde_json::json!([{"index": 0, "delta": {}, "finish_reason": "tool_calls"}]), serde_json::Value::Null),
+            chunk(serde_json::json!([]), serde_json::json!({
+                "prompt_tokens": 154469, "completion_tokens": 157, "total_tokens": 154626,
+                "prompt_tokens_details": {"audio_tokens": null, "cached_tokens": 147456},
+                "completion_tokens_details": {"accepted_prediction_tokens": null,
+                    "audio_tokens": null, "reasoning_tokens": 74, "rejected_prediction_tokens": null}
+            })),
+        ].into_iter().map(|event| format!("data: {event}\n\n")).collect::<String>();
+        let app = axum::Router::new().route(
+            "/chat/completions",
+            axum::routing::post(|| async move {
+                (
+                    [(axum::http::header::CONTENT_TYPE, "text/event-stream")],
+                    body,
+                )
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut config = minimal_config();
+        config.base_url = format!("http://{}", listener.local_addr().unwrap());
+        config.max_retries = Some(1);
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let charges = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let charge_log = charges.clone();
+        let sink: crate::AttemptUsageSink = std::sync::Arc::new(move |charge| {
+            charge_log.lock().unwrap().push(charge);
+            Box::pin(async { Ok(()) })
+        });
+        let (event_tx, _events) = tokio::sync::mpsc::unbounded_channel();
+        let mut owner = crate::SamplerActor::spawn_owned(config, Default::default(), event_tx);
+        let response = owner
+            .handle()
+            .submit_and_collect_accounted(
+                crate::types::RequestId::from("nullable-details"),
+                ConversationRequest::new(),
+                None,
+                Some(sink),
+                None,
+                Default::default(),
+            )
+            .await;
+        owner.shutdown().await.unwrap();
+        server.abort();
+        let (response, _) = response.unwrap();
+        assert_eq!(
+            response.stop_reason,
+            Some(sampling_types::StopReason::ToolCalls)
+        );
+        assert_eq!(response.tool_calls().len(), 1);
+        assert_eq!(response.tool_calls()[0].name, "test_tool");
+        let usage = response.usage.unwrap();
+        assert_eq!(usage.prompt_tokens, 154469);
+        assert_eq!(usage.completion_tokens, 157);
+        assert_eq!(usage.total_tokens, 154626);
+        assert_eq!(usage.reasoning_tokens, 74);
+        assert_eq!(usage.cache_read_tokens(), Some(147456));
+        let charges = charges.lock().unwrap();
+        assert_eq!(charges.len(), 1);
+        let crate::AttemptUsage::Known {
+            usage: settled,
+            attempt_key,
+            ..
+        } = &charges[0]
+        else {
+            panic!("nullable details must not produce incomplete usage");
+        };
+        assert_eq!(attempt_key, "nullable-details:1");
+        assert_eq!(
+            serde_json::to_value(settled).unwrap(),
+            serde_json::to_value(&usage).unwrap()
+        );
+    }
+
     #[test]
     fn chat_extensions_never_disguise_a_known_chunk_or_error() {
         for data in [

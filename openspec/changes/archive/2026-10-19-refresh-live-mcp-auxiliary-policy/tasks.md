@@ -1,0 +1,6 @@
+- [x] 1.1 Trace policy sources, merge and metadata precedence, session update path, timeout admission, and asynchronous initialization/recovery; record implementation evidence and gaps.
+- [x] 1.2 Apply changes to disabled tools and startup/tool timeout fields to existing applicable sessions; removing an override restores its default.
+- [x] 1.3 Preserve project trust filtering and cwd isolation during policy refresh.
+- [x] 1.4 Prevent stale asynchronous work from restoring a superseded policy; preserve the admitted deadline of in-flight calls.
+- [x] 1.5 Add focused regressions for each scenario and record their results.
+- [x] 1.6 Run strict OpenSpec validation and record validation evidence.

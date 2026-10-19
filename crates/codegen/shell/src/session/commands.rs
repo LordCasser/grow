@@ -179,6 +179,12 @@ pub enum SideQuestionError {
 /// Prompt completion kind returned to the ACP layer.
 #[derive(Debug, Clone)]
 pub enum PromptCompletionKind {
+    /// Transport ownership handed off at a durable checkpoint. This is not a
+    /// logical Turn terminal and must never produce a completion receipt.
+    Suspended {
+        operation_id: String,
+        checkpoint_seq: u64,
+    },
     Completed,
     /// Silent EndTurn after stationarity/true-noop thrash. Distinct from
     /// Completed so a Goal-owned continuation can pause instead of hot-looping.
@@ -310,6 +316,45 @@ mod tests {
     }
 }
 pub enum SessionCommand {
+    /// Hold a child initializer until this session's durable runtime checkpoint
+    /// has a stable node identity.
+    WaitRuntimeSuspended {
+        respond_to: oneshot::Sender<Result<chat_state::session_runtime::RuntimeNodeRef, String>>,
+    },
+    PrepareRuntimeRestore {
+        operation_id: String,
+        instance_id: String,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    CommitRuntimeResume {
+        operation_id: String,
+        instance_id: String,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    ReleaseRuntimeRestore {
+        instance_id: String,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    WaitRuntimeRelease {
+        operation_id: String,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    WatchRuntimeTurn {
+        respond_to: oneshot::Sender<PromptTurnResult>,
+    },
+    SuspendRuntimeNode {
+        operation_id: String,
+        root_session_id: String,
+        deadline: tokio::time::Instant,
+        respond_to: oneshot::Sender<Result<chat_state::session_runtime::RuntimeNodeRef, String>>,
+    },
+    /// Retire a checkpointed runtime without terminalizing its logical work.
+    /// The caller still joins SessionThread before reporting a successful exit.
+    RetireSuspendedRuntime {
+        operation_id: String,
+        deadline: tokio::time::Instant,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
     /// Install an immutable Goal snapshot before a delegated child turn is
     /// admitted. The snapshot is read-only and never follows parent revisions.
     SetGoalContextSnapshot {
@@ -320,6 +365,11 @@ pub enum SessionCommand {
     /// reverse-request so the client re-shows approval chrome over a real live
     /// waiter. Fire-and-forget; the actor spawns the round-trip + decision.
     RestorePlanApproval {
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    ReviewRetainedPlan {
+        submission_id: u64,
+        decision_id: String,
         respond_to: oneshot::Sender<Result<(), String>>,
     },
     QueuePrompt {
@@ -389,6 +439,25 @@ pub enum SessionCommand {
         respond_to:
             oneshot::Sender<Result<String, super::notification_inbox::AgentMessageDeliveryError>>,
     },
+    ReceivePlanGuidance {
+        parent_session_id: String,
+        change: tool_types::ReplanChange,
+        respond_to:
+            oneshot::Sender<Result<String, super::notification_inbox::AgentMessageDeliveryError>>,
+    },
+    ReceiveReplanHandled {
+        child_session_id: String,
+        change_id: String,
+        outcome: tool_types::ReplanOutcome,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
+    ReconcilePlanning,
+    PlanningTaskResult {
+        task_id: String,
+        expected_parent_step_id: Option<String>,
+        result_ref: Option<chat_state::TimelineRangeRef>,
+        respond_to: oneshot::Sender<Result<(), String>>,
+    },
     ReceiveNotification {
         source: chat_state::NotificationSource,
         source_version: chat_state::NotificationSourceVersion,
@@ -410,6 +479,9 @@ pub enum SessionCommand {
     /// adapter; this mailbox remains the sole control-plane writer.
     GoalControl {
         command: tools::implementations::grow_build::update_goal::GoalCommand,
+    },
+    PlanningControl {
+        command: tools::implementations::grow_build::todo::runtime::PlanningCommand,
     },
     /// Charge one model call settled inside the root session's active Goal
     /// usage window. Descendant sessions and sideband runtimes capture the
@@ -802,7 +874,9 @@ pub enum SessionCommand {
     /// Commit a typed inquiry fact to Timeline before remote execution or reply.
     RecordCoordinationInquiry {
         event: crate::coordination::InquiryEvent,
-        respond_to: oneshot::Sender<Result<(), String>>,
+        respond_to: oneshot::Sender<
+            Result<(), tools::implementations::grow_build::coordination::CoordinationError>,
+        >,
     },
     /// Persist a display-only coordination diagnostic.
     RecordCoordinationNotice {

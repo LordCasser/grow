@@ -19,7 +19,10 @@ fn resolve_overrides(
     cwd: Option<&Path>,
 ) -> Option<inner::McpClientTimeoutOverrides> {
     let config = match cwd {
-        Some(cwd) => crate::util::config::get_mcp_server_config_with_project(server_name, cwd),
+        Some(cwd) if crate::agent::folder_trust::project_scope_allowed(cwd) => {
+            crate::util::config::get_mcp_server_config_with_project(server_name, cwd)
+        }
+        Some(_) => crate::util::config::get_mcp_server_config(server_name),
         None => crate::util::config::get_mcp_server_config(server_name),
     };
     // Fall back to the globally-resolved startup timeout so servers without a
@@ -34,6 +37,15 @@ fn resolve_overrides(
         tool_timeouts: config.as_ref().and_then(|c| c.tool_timeouts.clone()),
         expose_image_base64: config.as_ref().and_then(|c| c.expose_image_base64),
     })
+}
+
+pub(crate) fn refresh_client_policy(
+    client: &McpClient,
+    cwd: &Path,
+    meta_config: Option<&McpServerMetaConfig>,
+) {
+    let overrides = resolve_overrides(client.server_name(), Some(cwd));
+    client.refresh_policy(overrides.as_ref(), meta_config);
 }
 
 pub async fn start_mcp_server(

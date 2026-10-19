@@ -18,10 +18,8 @@
 协调协议 SHALL 以 inquiry_id 与 target_session_id 标识询问和取消，并区分进度、结果、取消回执与错误。
 
 #### Scenario: 取消询问
-- **WHEN** 客户端对已知 inquiry_id 发送 Cancel
+- **WHEN** 客户端对已知 inquiry_id 发送 Cancel，并指定 target_session_id
 - **THEN** 响应保留 inquiry_id 和 accepted 状态，不将取消回执伪装成询问答案。
-
-证据：`crates/codegen/shell/src/coordination/protocol.rs` — `Request`。
 
 ### Requirement: Parent-child inquiries use isolated Sideband execution
 A running child SHALL be able to ask its immediate parent a question, and a primary agent SHALL be able to ask a directly-owned running child. Runtime-derived identities SHALL authorize the relationship. Questions SHALL use asynchronous tool-free Sideband execution without entering or interrupting the target foreground context. Children SHALL NOT gain cross-session discovery/inquiry or upward intervention; an explicitly authorized reply to a durably received message SHALL be treated as an attributed opinion, not upward intervention or human permission.
@@ -296,3 +294,73 @@ Grow SHALL 指导 subagent 返回自然语言的完成程度、可定位产物�
 - **THEN** 指引要求重新检查受影响结论和产物，不以旧报告的成功措辞替代当前验证。
 
 证据与实施入口：`crates/codegen/agent/prompts/audience/{primary,subagent}.md`；`crates/codegen/agent/prompts/agents/{general-purpose,explore}.md`。模型实际遵循程度另按 change 的场景评估记录，不由字符串测试推导。
+
+### Requirement: Inquiry identity and replay are durable across session recovery
+协调询问 SHALL 以 `(source_session_id, inquiry_id)` 作为逻辑身份；target session 由接收作用域隐含。peer identity 与 incarnation SHALL 用于连接认证、租约及审计归因，不得替代 source session 成为逻辑询问身份。target Timeline SHALL 防止相同逻辑身份的询问重复执行；source Timeline SHALL 固定首次启动时的目标和问题，并使重试、恢复和响应关联服从该绑定。
+
+#### Scenario: UUID text aliases cannot create another identity
+- **WHEN** 调用方将现有 UUIDv7 改写为大写、无连字符、URN 或带括号的形式来询问、查询或取消
+- **THEN** 请求因不符合 runtime 生成的小写连字符标准形式而被拒绝，不按另一字符串键创建新询问。
+
+#### Scenario: Source reconnects with a new peer incarnation
+- **WHEN** 同一 source session 在 peer incarnation 变化后以相同 inquiry_id 重连并重试相同询问
+- **THEN** target 将其识别为同一逻辑询问并复用已有 receipt/outcome，不因 incarnation 变化再次采样。
+
+#### Scenario: Different source sessions use the same inquiry ID
+- **WHEN** 两个不同 source session 对同一 target 使用相同 inquiry_id
+- **THEN** target 将它们作为两个独立询问处理，各自保持独立 receipt 与 outcome。
+
+#### Scenario: Target replays a completed inquiry
+- **WHEN** target 收到已有 canonical Timeline 终态的相同 source/inquiry identity 与相同 payload
+- **THEN** target 复用已记录 outcome，不再次执行模型询问。
+
+#### Scenario: Target receives an inquiry with an open receipt
+- **WHEN** target 对相同 source/inquiry identity 已有未终结 receipt
+- **THEN** target 拒绝重复执行，不写第二份 receipt 或启动第二次 Sideband。
+
+#### Scenario: Target restores an open inquiry receipt
+- **WHEN** target 冷恢复时发现已有 open receipt 且尚无终态
+- **THEN** target 将该 receipt 收束为 `TargetRestarted`，同身份重试复用该终态且不重新采样。
+
+#### Scenario: Source retries the original operation
+- **WHEN** source 对已有 `OutgoingStarted` 身份使用相同 target 和 question 重试
+- **THEN** source 沿原询问 identity 查询或复用已有结果，不创建新操作。
+
+#### Scenario: Source retries with a changed target or question
+- **WHEN** source 对已有 `OutgoingStarted` identity 更换 target 或 question
+- **THEN** source 拒绝冲突，不覆盖首次绑定或 dispatch 新询问。
+
+#### Scenario: Source restores an inquiry without a terminal outcome
+- **WHEN** source 恢复时发现询问已启动但没有完成 outcome
+- **THEN** 查询返回 `SourceUnavailable`，不自动执行或重发询问；相同 target/question 的显式重试仍受 target durable 去重约束。
+
+#### Scenario: Progress or outcome carries a mismatched inquiry ID
+- **WHEN** 当前询问收到 inquiry_id 与请求身份不符的 progress 或 outcome
+- **THEN** 调用方返回结构化关联失败，不把该响应归入当前询问，也不自动重发。
+
+#### Scenario: Cancel response carries a mismatched inquiry ID
+- **WHEN** 当前取消请求收到 inquiry_id 与请求身份不符的响应
+- **THEN** 调用方返回结构化关联失败，不将其他询问视为已取消或接受取消。
+
+#### Scenario: Cancellation wins before dispatch
+- **WHEN** source 在询问 dispatch 前已为同一逻辑身份登记取消
+- **THEN** 询问不被派发，取消结果按该身份返回。
+
+#### Scenario: Terminal remote inquiry is cancelled
+- **WHEN** source 对已终结的远端询问发送取消
+- **THEN** target 返回 `accepted=false`，不改变已有 outcome。
+
+#### Scenario: Cancellation is scoped to its source and target
+- **WHEN** 调用方尝试以错误 source 或 target scope 取消询问
+- **THEN** 请求拒绝且不影响其他询问的执行或状态。
+
+### Requirement: Source inquiry startup admission is idempotent
+Source SessionActor SHALL serialize outgoing inquiry startup admission against its canonical Timeline. For a `(source_session_id, inquiry_id)` already bound to a target and exact question, a retry SHALL return the existing admission without appending another `OutgoingStarted` fact or projecting another startup notice. A retry with a changed target or question SHALL return `Conflict` without mutation or dispatch. Question text SHALL only be compared as payload under the explicit inquiry identity and SHALL NOT serve as a deduplication key.
+
+#### Scenario: Source retries an admitted startup
+- **WHEN** 同一 source session 对已有 `OutgoingStarted` identity 以相同 target 和 exact question 重试，包括首次持久化 ACK 不明后的重试
+- **THEN** actor 从 canonical Timeline 确认原绑定并返回已接纳，不追加 `OutgoingStarted` 或重复投影启动通知。
+
+#### Scenario: Source retries with a changed target or question
+- **WHEN** 同一 source session 对已有 identity 使用不同 target 或 exact question 重试
+- **THEN** actor 返回 `Conflict`，不覆盖首次绑定、不追加事实或通知，也不 dispatch 冲突请求。

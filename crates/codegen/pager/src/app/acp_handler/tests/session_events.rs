@@ -844,6 +844,7 @@
         session.in_flight_prompt = Some(InFlightPrompt {
             prompt_id: None,
             admission_resolved: None,
+            frozen_skill_selection: None,
             expected_turn_id: None,
             text: "hi".into(),
             images: Vec::new(),
@@ -877,6 +878,7 @@
         session.compact_held_prompt = Some(InFlightPrompt {
             prompt_id: None,
             admission_resolved: None,
+            frozen_skill_selection: None,
             expected_turn_id: None,
             text: "retry after login".into(),
             images: Vec::new(),
@@ -972,6 +974,7 @@
         session.in_flight_prompt = Some(InFlightPrompt {
             prompt_id: None,
             admission_resolved: None,
+            frozen_skill_selection: None,
             expected_turn_id: None,
             text: "retry me".into(),
             images: Vec::new(),
@@ -1134,6 +1137,7 @@
         session.in_flight_prompt = Some(InFlightPrompt {
             prompt_id: None,
             admission_resolved: None,
+            frozen_skill_selection: None,
             expected_turn_id: None,
             text: "failed BYOK request".into(),
             images: Vec::new(),
@@ -1253,6 +1257,7 @@
         session.in_flight_prompt = Some(InFlightPrompt {
             prompt_id: None,
             admission_resolved: None,
+            frozen_skill_selection: None,
             expected_turn_id: None,
             text: "still working".into(),
             images: Vec::new(),

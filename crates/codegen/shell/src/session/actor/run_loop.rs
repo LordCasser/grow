@@ -32,7 +32,7 @@ async fn join_control_worker(
     }
 }
 
-async fn quiesce_control_workers(session: &SessionActor) -> Result<(), String> {
+pub(super) async fn quiesce_control_workers(session: &SessionActor) -> Result<(), String> {
     let mut step = session.step_control_worker.take();
     let mut behavior = session.behavior_control_worker.take();
     let (step_result, behavior_result) = tokio::join!(
@@ -58,6 +58,18 @@ async fn quiesce_control_workers(session: &SessionActor) -> Result<(), String> {
         return Err(errors.join("; "));
     }
     Ok(())
+}
+
+pub(super) async fn refresh_subagent_mcp_auxiliary_policy(
+    session: &SessionActor,
+    _mcp_servers: Vec<acp::McpServer>,
+) {
+    // Subagents inherit the parent's connected clients and cannot replace the
+    // client MCP catalog. Their own disabled-tool gate is still cwd-scoped and
+    // must follow live trusted/global policy changes. The refresh method only
+    // mutates timeout policy on locally owned clients, never inherited clients.
+    session.reseed_mcp_output_cap().await;
+    session.refresh_mcp_auxiliary_policy().await;
 }
 
 struct GracefulShutdown {
@@ -196,71 +208,144 @@ async fn reject_queued_inputs_for_shutdown(session: &SessionActor) {
 pub(super) async fn cancel_and_drain_session_subagents(
     session: &SessionActor,
     cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
+    reason: &str,
+    foreground_stopped: Option<futures_util::future::Shared<tokio::sync::oneshot::Receiver<()>>>,
 ) -> Result<(), String> {
-    let Some(event_tx) = session.tool_context.subagent_event_tx.clone() else {
-        return Ok(());
-    };
-    use tools::implementations::grow_build::task::backend::ChannelBackend;
     use tools::implementations::grow_build::task::types::SubagentCancelOutcome;
-    let backend = ChannelBackend::for_session(event_tx, session.session_id_string());
-    let (respond_to, mut drained) = tokio::sync::oneshot::channel();
-    if !backend.request_cancel_parent_session(respond_to) {
-        return Ok(());
-    }
+    let child_drain = session
+        .tool_context
+        .subagent_event_tx
+        .clone()
+        .and_then(|event_tx| {
+            use tools::implementations::grow_build::task::backend::ChannelBackend;
+            let backend = ChannelBackend::for_session(event_tx, session.session_id_string());
+            let (respond_to, drained) = tokio::sync::oneshot::channel();
+            backend
+                .request_cancel_parent_session(respond_to)
+                .then_some(drained)
+        });
+    let mut children_done = child_drain.is_none();
+    let mut child_drain = Box::pin(async move {
+        match child_drain {
+            Some(receiver) => receiver.await.unwrap_or(SubagentCancelOutcome::NotFound),
+            None => std::future::pending().await,
+        }
+    });
+    let mut compaction_done = false;
+    let mut compaction_drain = Box::pin(async move {
+        // A promoted publisher may still own the worker outside the slot.
+        // Wait for its abort/drop guard to return that owner before inspecting
+        // the slot, while the surrounding loop continues to serve receipts.
+        if let Some(mut stopped) = foreground_stopped {
+            let _ = (&mut stopped).await;
+        }
+        session
+            .cancel_background_compaction_before(reason, None)
+            .await
+            .map_err(|error| error.to_string())
+    });
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        loop {
+        while !(children_done && compaction_done) {
             tokio::select! {
-                outcome = &mut drained => {
-                    return match outcome.unwrap_or(SubagentCancelOutcome::NotFound) {
+                result = &mut compaction_drain, if !compaction_done => {
+                    result?;
+                    compaction_done = true;
+                }
+                outcome = &mut child_drain, if !children_done => {
+                    match outcome {
                         SubagentCancelOutcome::Cancelled
                         | SubagentCancelOutcome::AlreadyFinished { .. }
-                        | SubagentCancelOutcome::NotFound => Ok(()),
+                        | SubagentCancelOutcome::NotFound => {}
                         SubagentCancelOutcome::Unauthorized => {
-                            Err("Subagent cancellation was not authorized".to_string())
+                            return Err("Subagent cancellation was not authorized".to_string());
                         }
-                    };
+                    }
+                    children_done = true;
                 }
                 command = cmd_rx.recv() => {
                     let Some(command) = command else {
-                        let _ = (&mut drained).await;
-                        return Ok(());
+                        return Err("session command inbox closed before drain completed".to_string());
                     };
-                    let _control = session.step_control_gate.lock().await;
-                    let result = match command {
-                        SessionCommand::RecordGoalUsage { goal_id, tokens, respond_to } => {
-                            let result = session.apply_captured_goal_usage(&goal_id, tokens).await;
-                            let _ = respond_to.send(result.clone());
-                            result.map(|_| ())
-                        }
-                        SessionCommand::RecordGoalUsageIncomplete { goal_id, respond_to } => {
-                            let outcome = session
-                                .apply_captured_goal_usage_incomplete_outcome(&goal_id)
-                                .await;
-                            let result = session
-                                .finish_goal_usage_apply_at_step_boundary(outcome)
-                                .await;
-                            let _ = respond_to.send(result.clone());
-                            result.map(|_| ())
-                        }
-                        SessionCommand::SettleGoalUsageAttempt { attempt_id, respond_to } => {
-                            let outcome = session
-                                .settle_claimed_goal_usage_attempt_outcome(&attempt_id)
-                                .await;
-                            let result = session
-                                .finish_goal_usage_apply_at_step_boundary(outcome)
-                                .await;
-                            let _ = respond_to.send(result.clone());
-                            result.map(|_| ())
-                        }
-                        _ => Ok(()),
-                    };
-                    result?;
+                    let _ = dispatch_goal_accounting_command(session, command).await?;
                 }
             }
         }
+        Ok(())
     })
     .await
-    .map_err(|_| "timed out draining non-Workflow subagent sessions".to_string())?
+    .map_err(|_| "timed out draining session compaction and child owners".to_string())?
+}
+
+/// The normal run loop and teardown drain share the same serialized Goal
+/// accounting dispatch, so a worker waiting for a receipt can progress while
+/// shutdown joins that worker.
+pub(super) async fn dispatch_goal_accounting_command(
+    session: &SessionActor,
+    command: SessionCommand,
+) -> Result<bool, String> {
+    match command {
+        SessionCommand::RecordGoalUsage {
+            goal_id,
+            tokens,
+            respond_to,
+        } => {
+            let _control = session.step_control_gate.lock().await;
+            let result = session.apply_captured_goal_usage(&goal_id, tokens).await;
+            let truly_idle = {
+                let admission = session.state.lock().await;
+                admission.foreground.is_idle() && admission.pending_step_controls.is_empty()
+            };
+            if matches!(result, Ok(true)) && truly_idle {
+                let _ = session.enforce_goal_spending_limit().await;
+            }
+            if matches!(result, Ok(false)) {
+                tracing::debug!(
+                    %goal_id,
+                    ?tokens,
+                    "discarded Goal usage for a retired Goal identity"
+                );
+            }
+            let _ = respond_to.send(result.clone());
+            drop(_control);
+            result.map(|_| true)
+        }
+        SessionCommand::RecordGoalUsageIncomplete {
+            goal_id,
+            respond_to,
+        } => {
+            let _control = session.step_control_gate.lock().await;
+            let outcome = session
+                .apply_captured_goal_usage_incomplete_outcome(&goal_id)
+                .await;
+            let result = session
+                .finish_goal_usage_apply_at_step_boundary(outcome)
+                .await;
+            let _ = respond_to.send(result.clone());
+            result.map(|_| true)
+        }
+        SessionCommand::SettleGoalUsageAttempt {
+            attempt_id,
+            respond_to,
+        } => {
+            let _control = session.step_control_gate.lock().await;
+            let outcome = session
+                .settle_claimed_goal_usage_attempt_outcome(&attempt_id)
+                .await;
+            let result = session
+                .finish_goal_usage_apply_at_step_boundary(outcome)
+                .await;
+            let truly_idle = {
+                let admission = session.state.lock().await;
+                admission.foreground.is_idle() && admission.pending_step_controls.is_empty()
+            };
+            if matches!(result, Ok(true)) && truly_idle {
+                let _ = session.enforce_goal_spending_limit().await;
+            }
+            let _ = respond_to.send(result.clone());
+            result.map(|_| true)
+        }
+        _ => Ok(false),
+    }
 }
 
 async fn begin_graceful_shutdown(
@@ -268,6 +353,10 @@ async fn begin_graceful_shutdown(
     replay_buffer: &mut ReplayBuffer,
     cmd_rx: &mut mpsc::UnboundedReceiver<SessionCommand>,
 ) -> Result<(), String> {
+    let foreground_stopped = {
+        let state = session.state.lock().await;
+        state.foreground.regular().map(|task| task.stopped.clone())
+    };
     session.session_activities.close_admission();
     session
         .cancel_background_compaction("session_shutdown")
@@ -305,7 +394,8 @@ async fn begin_graceful_shutdown(
         .await
         .map_err(|error| format!("shutdown foreground cancellation failed: {error:?}"))?;
     shutdown_sampler(session).await?;
-    cancel_and_drain_session_subagents(session, cmd_rx).await?;
+    cancel_and_drain_session_subagents(session, cmd_rx, "session_shutdown", foreground_stopped)
+        .await?;
     cmd_rx.close();
     tokio::time::timeout(
         std::time::Duration::from_secs(10),
@@ -822,14 +912,11 @@ pub(super) async fn run_session(
             crate::util::config::resolve_mcp_auto_restart(user_cfg.as_ref())
         };
         let restart_actions: Option<std::rc::Rc<dyn crate::session::mcp_restart::RestartActions>> =
-            if auto_restart_enabled {
-                Some(std::rc::Rc::new(SessionRestartActions::new(
-                    session.clone(),
-                    Arc::clone(&shutdown_state),
-                )))
-            } else {
-                None
-            };
+            Some(std::rc::Rc::new(SessionRestartActions::new(
+                session.clone(),
+                Arc::clone(&shutdown_state),
+                auto_restart_enabled,
+            )));
         let handle = tokio::task::spawn_local(async move {
             crate::session::mcp_dispatcher::run_dispatcher(
                 dispatcher_session_id,
@@ -871,6 +958,7 @@ pub(super) async fn run_session(
     };
     tokio::pin!(dream_check_sleep);
     let mut pending_shutdown: Option<GracefulShutdown> = None;
+    let runtime_suspend = session.state.lock().await.runtime_suspend.clone();
     let shutdown = loop {
         if pending_shutdown.is_some() && graceful_shutdown_ready(&session).await {
             break pending_shutdown
@@ -887,6 +975,7 @@ pub(super) async fn run_session(
             // Idle flush timer fired — run background flush.
             _ = &mut idle_flush_sleep, if session.idle_flush_timeout.is_some()
                 && pending_shutdown.is_none()
+                && !runtime_suspend.load(std::sync::atomic::Ordering::Acquire)
                 && session.memory.is_enabled()
                 && !session.memory.is_flushing.load(std::sync::atomic::Ordering::Relaxed) => {
                 // Skip if no new messages since last idle flush
@@ -925,6 +1014,7 @@ pub(super) async fn run_session(
             // Dream check timer — periodically run dream consolidation.
             _ = &mut dream_check_sleep, if session.dream_check_timeout.is_some()
                 && pending_shutdown.is_none()
+                && !runtime_suspend.load(std::sync::atomic::Ordering::Acquire)
                 && session.memory.is_enabled() => {
                 tracing::debug!(target: ::diagnostics::memory_log::TARGET,
                     "MEMORY_DREAM_CHECK: timer fired");
@@ -1041,7 +1131,7 @@ pub(super) async fn run_session(
                         SessionEvent::ForegroundWake => {
                             let (terminating, regular) = {
                                 let state = session.state.lock().await;
-                                (!state.termination.is_open(), state.foreground.regular().is_some())
+                                (!state.execution_open(), state.foreground.regular().is_some())
                             };
                             if terminating {
                                 // Teardown continues to service flush and
@@ -1069,7 +1159,7 @@ pub(super) async fn run_session(
                                 if failure.is_some() {
                                     state.termination.request(TerminationState::Fatal);
                                 }
-                                (state.termination.is_open(), failure.is_some())
+                                (state.execution_open(), failure.is_some())
                             };
                             if fatal {
                                 tracing::error!(
@@ -1320,6 +1410,15 @@ pub(super) async fn run_session(
                             )
                             .await;
                     }
+                    SessionCommand::ReviewRetainedPlan { submission_id, decision_id, respond_to } => {
+                        let result = session.review_retained_plan(submission_id, &decision_id).await;
+                        if result.is_ok() && !session.restored_plan_approval.is_running() {
+                            let s = session.clone();
+                            let completion_tx = completion_tx.clone();
+                            session.restored_plan_approval.arm(tokio::task::spawn_local(async move { s.resume_plan_approval(completion_tx).await; }));
+                        }
+                        let _ = respond_to.send(result);
+                    }
                     SessionCommand::RestorePlanApproval { respond_to } => {
                         // Reconcile missing/corrupt artifacts synchronously so
                         // load-session cannot acknowledge a wedged Plan. Only
@@ -1496,6 +1595,24 @@ pub(super) async fn run_session(
                         let _ = respond_to.send(result);
                         if accepted { SessionActor::maybe_drain_notifications(session.clone(), completion_tx.clone()).await; }
                     }
+                    SessionCommand::ReceivePlanGuidance { parent_session_id, change, respond_to } => {
+                        let result = session.receive_plan_guidance(parent_session_id, change).await;
+                        let accepted = result.is_ok();
+                        let _ = respond_to.send(result);
+                        if accepted { SessionActor::maybe_drain_notifications(session.clone(), completion_tx.clone()).await; }
+                    }
+                    SessionCommand::ReceiveReplanHandled { child_session_id, change_id, outcome, respond_to } => {
+                        let result = session.receive_replan_handled(&child_session_id, &change_id, outcome).await;
+                        let _ = respond_to.send(result);
+                    }
+                    SessionCommand::ReconcilePlanning => {
+                        session.schedule_planning_delivery();
+                    }
+                    SessionCommand::PlanningTaskResult { task_id, expected_parent_step_id, result_ref, respond_to } => {
+                        let result = session.accept_planning_task_result(&task_id, expected_parent_step_id.as_deref(), result_ref.as_ref()).await;
+                        let _ = respond_to.send(result);
+                        session.schedule_planning_delivery();
+                    }
                     SessionCommand::ReceiveNotification {
                         source,
                         source_version,
@@ -1606,43 +1723,60 @@ pub(super) async fn run_session(
                     SessionCommand::GoalControl { command } => {
                         session.handle_goal_command(command).await;
                     }
-                    SessionCommand::RecordGoalUsage { goal_id, tokens, respond_to } => {
-                        let _control = session.step_control_gate.lock().await;
-                        let result = session.apply_captured_goal_usage(&goal_id, tokens).await;
-                        let truly_idle = {
-                            let admission = session.state.lock().await;
-                            admission.foreground.is_idle()
-                                && admission.pending_step_controls.is_empty()
-                        };
-                        if matches!(result, Ok(true)) && truly_idle {
-                            let _ = session.enforce_goal_spending_limit().await;
-                        } else if matches!(result, Ok(false)) {
-                            tracing::debug!(
-                                %goal_id,
-                                ?tokens,
-                                "discarded Goal usage for a retired Goal identity"
-                            );
-                        }
-                        let fatal = result.is_err();
+                    SessionCommand::PlanningControl { command } => {
+                        session.handle_planning_command(command).await;
+                    }
+                    SessionCommand::WaitRuntimeSuspended { respond_to } => {
+                        session.handle_wait_runtime_suspended(respond_to).await;
+                    }
+                    SessionCommand::PrepareRuntimeRestore { operation_id, instance_id, respond_to } => {
+                        let result = session.prepare_runtime_restore(&operation_id, &instance_id, completion_tx.clone()).await;
                         let _ = respond_to.send(result);
-                        drop(_control);
-                        if fatal {
+                    }
+                    SessionCommand::CommitRuntimeResume { operation_id, instance_id, respond_to } => {
+                        let result = session.commit_runtime_resume(operation_id, instance_id).await;
+                        let _ = respond_to.send(result);
+                    }
+                    SessionCommand::ReleaseRuntimeRestore { instance_id, respond_to } => {
+                        let result = session.release_runtime_restore(&instance_id).await;
+                        let _ = respond_to.send(result);
+                    }
+                    SessionCommand::WaitRuntimeRelease { operation_id, respond_to } => {
+                        let runtime = session.chat_state_handle.runtime_state().await;
+                        match runtime {
+                            Ok(runtime) if runtime.phase == chat_state::session_runtime::RuntimePhase::Running && runtime.operation_id.as_deref() == Some(&operation_id) => { let _ = respond_to.send(Ok(())); }
+                            Ok(runtime) if runtime.operation_id.as_deref() == Some(&operation_id) => { session.runtime_release_waiters.borrow_mut().push((operation_id, respond_to)); }
+                            _ => { let _ = respond_to.send(Err("original suspension operation is unavailable".into())); }
+                        }
+                    }
+                    SessionCommand::WatchRuntimeTurn { respond_to } => {
+                        session.runtime_completion_watchers.borrow_mut().push(respond_to);
+                    }
+                    SessionCommand::SuspendRuntimeNode { operation_id, root_session_id, deadline, respond_to } => {
+                        session.request_node_suspension(operation_id, root_session_id, deadline, respond_to).await;
+                    }
+                    SessionCommand::RetireSuspendedRuntime { operation_id, deadline, respond_to } => {
+                        let result = session.retire_suspended_runtime(&operation_id, deadline).await;
+                        let retired = result.is_ok();
+                        let _ = respond_to.send(result);
+                        if retired { return; }
+                    }
+                    SessionCommand::RecordGoalUsage { goal_id, tokens, respond_to } => {
+                        let result = dispatch_goal_accounting_command(
+                            &session,
+                            SessionCommand::RecordGoalUsage { goal_id, tokens, respond_to },
+                        ).await;
+                        if result.is_err() {
                             terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                             return;
                         }
                     }
                     SessionCommand::RecordGoalUsageIncomplete { goal_id, respond_to } => {
-                        let _control = session.step_control_gate.lock().await;
-                        let outcome = session
-                            .apply_captured_goal_usage_incomplete_outcome(&goal_id)
-                            .await;
-                        let result = session
-                            .finish_goal_usage_apply_at_step_boundary(outcome)
-                            .await;
-                        let fatal = result.is_err();
-                        let _ = respond_to.send(result);
-                        drop(_control);
-                        if fatal {
+                        let result = dispatch_goal_accounting_command(
+                            &session,
+                            SessionCommand::RecordGoalUsageIncomplete { goal_id, respond_to },
+                        ).await;
+                        if result.is_err() {
                             terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                             return;
                         }
@@ -1651,25 +1785,11 @@ pub(super) async fn run_session(
                         attempt_id,
                         respond_to,
                     } => {
-                        let _control = session.step_control_gate.lock().await;
-                        let outcome = session
-                            .settle_claimed_goal_usage_attempt_outcome(&attempt_id)
-                            .await;
-                        let result = session
-                            .finish_goal_usage_apply_at_step_boundary(outcome)
-                            .await;
-                        let truly_idle = {
-                            let admission = session.state.lock().await;
-                            admission.foreground.is_idle()
-                                && admission.pending_step_controls.is_empty()
-                        };
-                        if matches!(result, Ok(true)) && truly_idle {
-                            let _ = session.enforce_goal_spending_limit().await;
-                        }
-                        let fatal = result.is_err();
-                        let _ = respond_to.send(result);
-                        drop(_control);
-                        if fatal {
+                        let result = dispatch_goal_accounting_command(
+                            &session,
+                            SessionCommand::SettleGoalUsageAttempt { attempt_id, respond_to },
+                        ).await;
+                        if result.is_err() {
                             terminate_failed_timeline_writer(&session, &mut cmd_rx).await;
                             return;
                         }
@@ -2207,8 +2327,9 @@ pub(super) async fn run_session(
                         if session.startup_hints.is_subagent {
                             tracing::debug!(
                                 session_id = %session.session_info.id.0,
-                                "Skipping UpdateMcpServers for subagent session",
+                                "Refreshing subagent MCP auxiliary policy without accepting client catalog",
                             );
+                            refresh_subagent_mcp_auxiliary_policy(&session, mcp_servers).await;
                             let _ = respond_to.send(Ok(()));
                             continue;
                         }
@@ -2224,6 +2345,7 @@ pub(super) async fn run_session(
                         // also fires for `<cwd>/.grow/config.toml` edits,
                         // and a cap-only edit changes no server configs.
                         session.reseed_mcp_output_cap().await;
+                        session.refresh_mcp_auxiliary_policy().await;
 
                         // Commit the config transition and publish its typed
                         // config-origin event while the same state snapshot is
@@ -2252,23 +2374,11 @@ pub(super) async fn run_session(
                         // off or the session has shut down; the
                         // tool-bridge tear-down and re-init below
                         // still happen.
+                        session.mcp_initialization_worker.cancel();
                         for name in &diff.removed {
-                            let prefix = format!(
-                                "{}{}",
-                                name,
-                                workspace_types::MCP_TOOL_NAME_DELIMITER
-                            );
-                            let removed_count = session
-                                .agent
-                                .borrow()
-                                .tool_bridge()
-                                .unregister_tools_by_prefix(&prefix);
-                            tracing::info!(
-                                server = name.as_str(),
-                                tools_removed = removed_count,
-                                "Unregistered tools for removed MCP server"
-                            );
+                            session.unregister_server_tools(name);
                         }
+                        session.refresh_mcp_snapshot_and_schedule_reminder().await;
 
                         let session_for_mcp = session.clone();
                         let activity = session
@@ -2326,23 +2436,11 @@ pub(super) async fn run_session(
                         // status via the dispatcher (`ConfigAdded`
                         // / `ConfigRemoved` reason codes on
                         // `mcp/server_status`).
+                        session.mcp_initialization_worker.cancel();
                         for name in &diff.removed {
-                            let prefix = format!(
-                                "{}{}",
-                                name,
-                                workspace_types::MCP_TOOL_NAME_DELIMITER
-                            );
-                            let removed_count = session
-                                .agent
-                                .borrow()
-                                .tool_bridge()
-                                .unregister_tools_by_prefix(&prefix);
-                            tracing::info!(
-                                server = name.as_str(),
-                                tools_removed = removed_count,
-                                "Unregistered tools for toggled MCP server"
-                            );
+                            session.unregister_server_tools(name);
                         }
+                        session.refresh_mcp_snapshot_and_schedule_reminder().await;
 
                         let session_for_mcp = session.clone();
                         let sname = server_name.clone();
@@ -2601,6 +2699,9 @@ pub(super) async fn run_session(
                         });
                     }
                     SessionCommand::DispatchSessionStartHook { source } => {
+                        if runtime_suspend.load(std::sync::atomic::Ordering::Acquire) {
+                            continue;
+                        }
                         if let Err(error) = session.dispatch_observe_hook(
                             ::hooks::event::HookEventName::SessionStart,
                             chat_state::HookCause::Session {
@@ -2779,6 +2880,14 @@ pub(super) async fn run_session(
                     }
                     command @ (SessionCommand::Shutdown
                     | SessionCommand::UnloadIfIdle { .. }) => {
+                        if runtime_suspend.load(std::sync::atomic::Ordering::Acquire) {
+                            if let SessionCommand::UnloadIfIdle { respond_to } = command {
+                                let _ = respond_to.send(false);
+                            }
+                            // A physical handoff owns its exact resource drain.
+                            // Ordinary handle Drop must never convert it to Stop.
+                            continue;
+                        }
                         let is_shutdown = matches!(&command, SessionCommand::Shutdown);
                         let mut unload_respond_to = None;
                         let mut termination_latched = false;

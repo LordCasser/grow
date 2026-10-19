@@ -26,6 +26,7 @@ pub(crate) const WORKFLOW_DEFAULT_AGENT_BUDGET: u64 = workflow::DEFAULT_AGENT_BU
 struct ActiveRun {
     cancel: CancellationToken,
     pause_intent: Arc<AtomicBool>,
+    suspend_intent: Arc<AtomicBool>,
     /// Resolves only after the watcher has settled the terminal state and
     /// committed the matching authoritative Timeline boundary. Control callers
     /// await this receiver instead of sampling the tracker while the watcher is
@@ -153,6 +154,283 @@ pub(crate) struct WorkflowManager {
 }
 
 impl WorkflowManager {
+    /// Re-open Workflow admission after the root session has committed its
+    /// complete runtime-resume barrier. Startup must keep admission closed
+    /// until the whole restored tree is ready.
+    pub(crate) fn reopen_after_runtime_restore(&mut self) {
+        if !self.admission_open {
+            self.admission_open = true;
+            self.admission_generation = self.admission_generation.saturating_add(1);
+        }
+    }
+
+    /// Preflight every physically suspended, business-active Run without
+    /// mutating its journal, manifest, tracker, or Timeline. A single invalid
+    /// Run rejects the batch so the caller can validate the complete set
+    /// before launching any member of it.
+    pub(crate) fn validate_suspended_executions(&self) -> Result<Vec<String>, String> {
+        let candidates = self
+            .tracker
+            .lock()
+            .list()
+            .into_iter()
+            .filter(|run| run.execution_suspended && run.status == WorkflowRunStatus::Active)
+            .collect::<Vec<_>>();
+        let mut run_ids = Vec::with_capacity(candidates.len());
+        for state in candidates {
+            self.validate_suspended_run(&state)
+                .map_err(|error| format!("workflow {}: {error}", state.run_id))?;
+            run_ids.push(state.run_id);
+        }
+        Ok(run_ids)
+    }
+
+    /// Start every physically suspended, business-active Workflow under the
+    /// current root restore owner. The caller keeps the Session execution gate
+    /// closed until this whole batch has crossed its durable Resumed boundary.
+    pub(crate) async fn restore_suspended_executions(&mut self) -> Result<(), String> {
+        let run_ids = self.validate_suspended_executions()?;
+        for run_id in run_ids {
+            let (_, outcome) = self
+                .restore_suspended_execution(&run_id)
+                .await
+                .map_err(|error| format!("workflow {run_id}: {error}"))?;
+            tokio::task::spawn_local(async move {
+                let _ = outcome.await;
+            });
+        }
+        Ok(())
+    }
+
+    /// A cold process can observe a released root while an active Workflow
+    /// still has only its old suspended lifecycle. The tree checkpoint has
+    /// already been consumed, so do not auto-run journal work: create an
+    /// explicit resumable infrastructure pause for the same Run instead.
+    pub(crate) async fn pause_released_suspended_runs_for_manual_resume(
+        &mut self,
+    ) -> Result<(), String> {
+        let candidates = self
+            .tracker
+            .lock()
+            .list()
+            .into_iter()
+            .filter(|run| run.status == WorkflowRunStatus::Active && run.execution_suspended)
+            .collect::<Vec<_>>();
+        for candidate in candidates {
+            let run_id = candidate.run_id.clone();
+            let desired_epoch = candidate
+                .execution_epoch
+                .checked_add(1)
+                .ok_or_else(|| format!("workflow {run_id} execution epoch is exhausted"))?;
+            let mut lifecycle = self.workflow_lifecycle(&run_id).await?;
+            if lifecycle.execution_epoch == candidate.execution_epoch
+                && !lifecycle.open
+                && !lifecycle.closed
+                && lifecycle.execution_suspended
+                && lifecycle.status == Some(chat_state::WorkflowExecutionStatus::Suspended)
+            {
+                let event =
+                    chat_state::TimelineEventKind::Workflow(chat_state::WorkflowEvent::Resumed {
+                        run_id: run_id.clone(),
+                        execution_epoch: desired_epoch,
+                    });
+                if let Err(error) = self.timeline.record_timeline_event_durably(event).await {
+                    lifecycle = self.workflow_lifecycle(&run_id).await?;
+                    if !workflow_lifecycle_is_open_at(&lifecycle, desired_epoch) {
+                        return Err(format!(
+                            "workflow {run_id} recovery admission was not confirmed: {error}"
+                        ));
+                    }
+                } else {
+                    lifecycle = self.workflow_lifecycle(&run_id).await?;
+                }
+            }
+            let already_paused = workflow_lifecycle_is_infra_paused_at(&lifecycle, desired_epoch);
+            if !already_paused && !workflow_lifecycle_is_open_at(&lifecycle, desired_epoch) {
+                return Err(format!(
+                    "workflow {run_id} has no exact released-suspension lifecycle to reconcile"
+                ));
+            }
+            let paused = self
+                .tracker
+                .lock()
+                .pause_released_suspended_for_recovery(
+                    &run_id,
+                    desired_epoch,
+                    "The session restore was released before this Workflow executor started. Resume this Run explicitly after reviewing its pending operations.".into(),
+                )
+                .ok_or_else(|| format!("workflow {run_id} changed during recovery pause"))?;
+            self.store
+                .persist_ack(&paused)
+                .await
+                .map_err(|error| format!("workflow {run_id} recovery pause manifest: {error}"))?;
+            if !already_paused {
+                let event =
+                    chat_state::TimelineEventKind::Workflow(chat_state::WorkflowEvent::Ended {
+                        run_id: run_id.clone(),
+                        execution_epoch: desired_epoch,
+                        status: chat_state::WorkflowExecutionStatus::InfraPaused,
+                        execution_suspended: false,
+                        handoff: chat_state::WorkflowTurnHandoff::None,
+                        duration_ms: paused.elapsed_ms_floor,
+                        message: paused.pause_message.clone(),
+                    });
+                if let Err(error) = self.timeline.record_timeline_event_durably(event).await {
+                    lifecycle = self.workflow_lifecycle(&run_id).await?;
+                    if !workflow_lifecycle_is_infra_paused_at(&lifecycle, desired_epoch) {
+                        return Err(format!(
+                            "workflow {run_id} recovery pause was not confirmed: {error}"
+                        ));
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn workflow_lifecycle(
+        &self,
+        run_id: &str,
+    ) -> Result<chat_state::WorkflowLifecycle, String> {
+        let events = self
+            .timeline
+            .timeline_events()
+            .await
+            .ok_or_else(|| "Workflow Timeline is unavailable".to_owned())?;
+        chat_state::Timeline::from_events(events)
+            .map_err(|error| error.to_string())?
+            .workflow_lifecycle(run_id)
+            .ok_or_else(|| format!("workflow {run_id} has no Timeline lifecycle"))
+    }
+
+    /// Restore one Run after the root has passed the complete runtime-resume
+    /// barrier and explicitly reopened admission. The existing Run source,
+    /// args, route, budget, concurrency, and identity remain authoritative.
+    pub(crate) async fn restore_suspended_execution(
+        &mut self,
+        run_id: &str,
+    ) -> Result<(String, oneshot::Receiver<WorkflowOutcome>), LaunchError> {
+        self.admission_snapshot()?;
+        let state = self
+            .tracker
+            .lock()
+            .get(run_id)
+            .ok_or_else(|| LaunchError::UnknownRun(run_id.to_owned()))?;
+        let resolved = self
+            .validate_suspended_run(&state)
+            .map_err(LaunchError::Store)?;
+        let args = self
+            .store
+            .args_for(run_id)
+            .ok_or_else(|| LaunchError::Store("immutable launch args are missing".into()))?;
+        self.launch(
+            resolved,
+            LaunchSpec {
+                objective: state.objective,
+                args,
+                agent_budget: None,
+                max_concurrency: None,
+                resume_run_id: Some(run_id.to_owned()),
+            },
+        )
+        .await
+    }
+
+    fn validate_suspended_run(&self, state: &WorkflowRunState) -> Result<ResolvedWorkflow, String> {
+        if !state.execution_suspended || state.status != WorkflowRunStatus::Active {
+            return Err("only an execution-suspended active Run can be auto-restored".into());
+        }
+        state
+            .validate_restored_projection()
+            .map_err(str::to_owned)?;
+        let definition_id = state
+            .definition_id
+            .clone()
+            .ok_or_else(|| "frozen Workflow definition identity is missing".to_owned())?;
+        let definition_scope = state
+            .definition_scope
+            .ok_or_else(|| "frozen Workflow definition scope is missing".to_owned())?;
+        let definition_hash = state
+            .definition_hash
+            .clone()
+            .ok_or_else(|| "frozen Workflow source hash is missing".to_owned())?;
+        let script = self
+            .store
+            .script_for(&state.run_id)
+            .ok_or_else(|| "immutable Workflow script is missing".to_owned())?;
+        if script.len() as u64 > super::registry::MAX_WORKFLOW_SOURCE_BYTES {
+            return Err("immutable Workflow script exceeds its source limit".into());
+        }
+        if super::registry::content_hash(&script) != definition_hash {
+            return Err("immutable Workflow script does not match its frozen source hash".into());
+        }
+        let args = self
+            .store
+            .args_for(&state.run_id)
+            .ok_or_else(|| "immutable launch args are missing".to_owned())?;
+        let encoded_args = serde_json::to_vec(&args)
+            .map_err(|error| format!("immutable launch args cannot be encoded: {error}"))?;
+        if encoded_args.len() as u64 > super::store::MAX_WORKFLOW_ARGS_BYTES {
+            return Err("immutable launch args exceed their size limit".into());
+        }
+        let meta = super::registry::parse_workflow(&script, None)
+            .map_err(|error| format!("immutable Workflow source is invalid: {error}"))?;
+        if meta.name != state.name {
+            return Err("immutable Workflow source name differs from the frozen Run".into());
+        }
+        self.store
+            .validate_persistable(state)
+            .map_err(|error| format!("Workflow manifest cannot be restored: {error}"))?;
+        self.validate_suspended_journal(state)?;
+        Ok(ResolvedWorkflow {
+            definition_id,
+            scope: definition_scope,
+            content_hash: definition_hash,
+            meta,
+            script,
+            source: super::registry::WorkflowSource::Inline,
+        })
+    }
+
+    fn validate_suspended_journal(&self, state: &WorkflowRunState) -> Result<(), String> {
+        let Some(relative) = state.journal_path.as_deref() else {
+            if self.session_directory.is_some() {
+                return Err("persisted Workflow journal path is missing".into());
+            }
+            return Ok(());
+        };
+        let expected = format!("workflows/{}/journal.jsonl", state.run_id);
+        if relative != expected {
+            return Err("persisted Workflow journal path does not match its Run".into());
+        }
+        let storage = self
+            .journal_storage(&state.run_id)
+            .map_err(|error| error.to_string())?
+            .ok_or_else(|| "persisted Workflow journal has no session authority".to_owned())?;
+        let bytes = match storage.read_bounded(workflow::journal::MAX_JOURNAL_BYTES) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+            Err(error) => return Err(format!("Workflow journal cannot be read: {error}")),
+        };
+        if !bytes.is_empty() && !bytes.ends_with(b"\n") {
+            return Err("Workflow journal has an unterminated tail".into());
+        }
+        let mut projection = Journal::memory();
+        for (index, line) in bytes.split(|byte| *byte == b'\n').enumerate() {
+            if line.iter().all(u8::is_ascii_whitespace) {
+                continue;
+            }
+            let entry =
+                serde_json::from_slice::<workflow::JournalEntry>(line).map_err(|error| {
+                    format!("Workflow journal line {} is invalid: {error}", index + 1)
+                })?;
+            projection
+                .project_physical_entry(entry)
+                .map_err(|error| format!("Workflow journal is inconsistent: {error}"))?;
+        }
+        Ok(())
+    }
+
     fn journal_storage(
         &self,
         run_id: &str,
@@ -293,6 +571,7 @@ impl WorkflowManager {
                     run_id: run_id.to_owned(),
                     execution_epoch,
                     status: chat_state::WorkflowExecutionStatus::Interrupted,
+                    execution_suspended: false,
                     handoff: interrupted.turn_handoff,
                     duration_ms: elapsed,
                     message: interrupted.pause_message.clone(),
@@ -300,7 +579,7 @@ impl WorkflowManager {
             ))
             .await
         {
-            Ok(_) => self.notify.broadcast(&interrupted, elapsed, 0, true),
+            Ok(_) => self.notify.broadcast(&interrupted, elapsed, 0, true).await,
             Err(error) => {
                 tracing::error!(%run_id, %error, "failed to close rejected Workflow launch in Timeline");
                 self.signal_terminal_failure(
@@ -322,7 +601,7 @@ impl WorkflowManager {
                 .tracker
                 .lock()
                 .get(run_id)
-                .is_some_and(|run| run.status.is_resumable())
+                .is_some_and(|run| run.status.is_resumable() || run.execution_suspended)
             && let Some(active) = self.active.get_mut(run_id)
         {
             // The watcher projects a stopped state before persisting Ended.
@@ -355,7 +634,7 @@ impl WorkflowManager {
                     .lock()
                     .get(run_id)
                     .ok_or_else(|| LaunchError::UnknownRun(run_id.clone()))?;
-                if !existing.status.is_resumable() {
+                if !existing.status.is_resumable() && !existing.execution_suspended {
                     return Err(LaunchError::NotResumable(
                         existing.status.as_str().to_string(),
                     ));
@@ -583,6 +862,7 @@ impl WorkflowManager {
                         run_id: run_id.clone(),
                         execution_epoch,
                         status: chat_state::WorkflowExecutionStatus::Interrupted,
+                        execution_suspended: false,
                         handoff: turn_handoff,
                         duration_ms: 0,
                         message: Some(message.clone()),
@@ -614,6 +894,7 @@ impl WorkflowManager {
                             run_id: run_id.clone(),
                             execution_epoch,
                             status: chat_state::WorkflowExecutionStatus::Interrupted,
+                            execution_suspended: false,
                             handoff: interrupted.turn_handoff,
                             duration_ms: 0,
                             message: Some(error.to_string()),
@@ -634,7 +915,8 @@ impl WorkflowManager {
         }
         self.check_admission(admission_generation)?;
         self.notify
-            .emit(&state, self.tracker.lock().elapsed_ms(&run_id), 0);
+            .emit(&state, self.tracker.lock().elapsed_ms(&run_id), 0)
+            .await;
 
         let (host_tx, host_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();
@@ -690,6 +972,7 @@ impl WorkflowManager {
 
         self.check_admission(admission_generation)?;
 
+        let suspend_intent = Arc::new(AtomicBool::new(false));
         let (host_service, host_drained) = spawn_workflow_host_service(
             WorkflowHostParams {
                 run_id: run_id.clone(),
@@ -705,6 +988,7 @@ impl WorkflowManager {
                 templates: self.templates.clone(),
                 diagnostics: self.diagnostics.clone(),
                 cancel: cancel.clone(),
+                suspend_intent: suspend_intent.clone(),
                 max_concurrency: state.max_concurrency,
                 runtime_route: state.runtime_route.clone(),
             },
@@ -732,6 +1016,7 @@ impl WorkflowManager {
             ActiveRun {
                 cancel: cancel.clone(),
                 pause_intent: pause_intent.clone(),
+                suspend_intent: suspend_intent.clone(),
                 done: done_rx,
             },
         );
@@ -753,9 +1038,16 @@ impl WorkflowManager {
             if !host_service.is_finished() {
                 watcher_cancel.cancel();
             }
-            let host_drain =
-                tokio::time::timeout(std::time::Duration::from_secs(25), host_drained).await;
-            let drain_failed = !matches!(host_drain, Ok(Ok(HostDrainOutcome::Drained)));
+            let drain_failed = if suspend_intent.load(Ordering::Acquire) {
+                // The caller's shared exit deadline may expire, but the Run
+                // keeps owning its actual host workers until they join.
+                !matches!(host_drained.await, Ok(HostDrainOutcome::Drained))
+            } else {
+                !matches!(
+                    tokio::time::timeout(std::time::Duration::from_secs(25), host_drained).await,
+                    Ok(Ok(HostDrainOutcome::Drained))
+                )
+            };
             if drain_failed {
                 host_service.abort();
             }
@@ -777,6 +1069,11 @@ impl WorkflowManager {
                         &watcher_run_id,
                         "workflow cleanup timed out or could not be acknowledged; start a new run",
                     )
+                } else if suspend_intent.load(Ordering::Acquire)
+                    && matches!(outcome, WorkflowOutcome::Cancelled)
+                    && !pause_intent.load(Ordering::Acquire)
+                {
+                    tracker.suspend_execution(&watcher_run_id)
                 } else if pause_intent.load(Ordering::Relaxed)
                     && matches!(
                         outcome,
@@ -791,6 +1088,15 @@ impl WorkflowManager {
                 }
             };
             if let Some(mut state) = state {
+                if suspend_intent.load(Ordering::Acquire)
+                    && !state.status.is_terminal()
+                    && !state.execution_suspended
+                {
+                    state = tracker
+                        .lock()
+                        .suspend_execution(&watcher_run_id)
+                        .unwrap_or(state);
+                }
                 let mut manifest_persisted = true;
                 if let Err(error) = store.persist_ack(&state).await {
                     tracing::warn!(run_id = %watcher_run_id, %error, "workflow terminal manifest was not durably written");
@@ -856,7 +1162,16 @@ impl WorkflowManager {
                         chat_state::WorkflowEvent::Ended {
                             run_id: watcher_run_id.clone(),
                             execution_epoch,
-                            status: state.status.to_timeline(),
+                            execution_suspended: state.execution_suspended,
+                            status: if state.execution_suspended {
+                                if state.status == WorkflowRunStatus::Active {
+                                    chat_state::WorkflowExecutionStatus::Suspended
+                                } else {
+                                    state.status.to_timeline()
+                                }
+                            } else {
+                                state.status.to_timeline()
+                            },
                             handoff: state.turn_handoff,
                             duration_ms: elapsed,
                             message: state.pause_message.clone(),
@@ -877,7 +1192,7 @@ impl WorkflowManager {
                     let _ = outcome_tx.send(WorkflowOutcome::Failed { error: message });
                     return;
                 }
-                notify.broadcast(&state, elapsed, 0, true);
+                notify.broadcast(&state, elapsed, 0, true).await;
                 if state.turn_handoff != chat_state::WorkflowTurnHandoff::None {
                     tokio::spawn(deliver_workflow_handoff_acknowledged(
                         session_cmd_tx.clone(),
@@ -906,6 +1221,165 @@ impl WorkflowManager {
     }
 
     #[cfg(test)]
+    pub(crate) fn test_bundle_with_timeline(
+        timeline: chat_state::ChatStateHandle,
+        session_id: String,
+        session_directory: Arc<crate::session::storage::ContainedDirectory>,
+    ) -> (
+        Arc<tokio::sync::Mutex<WorkflowManager>>,
+        Arc<parking_lot::Mutex<WorkflowTracker>>,
+        mpsc::UnboundedReceiver<tools::implementations::grow_build::task::types::SubagentEvent>,
+    ) {
+        let tracker = Arc::new(parking_lot::Mutex::new(WorkflowTracker::default()));
+        let (gateway_tx, _gateway_rx) = mpsc::unbounded_channel();
+        let (subagent_tx, mut subagent_rx) = mpsc::unbounded_channel();
+        let (observed_subagent_tx, observed_subagent_rx) = mpsc::unbounded_channel();
+        tokio::task::spawn_local(async move {
+            while let Some(event) = subagent_rx.recv().await {
+                match event {
+                    tools::implementations::grow_build::task::types::SubagentEvent::Cancel(
+                        request,
+                    ) => {
+                        let _ = request.respond_to.send(
+                            tools::implementations::grow_build::task::types::SubagentCancelOutcome::Cancelled,
+                        );
+                    }
+                    event => {
+                        if observed_subagent_tx.send(event).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+        let (persist_tx, mut persist_rx) = mpsc::unbounded_channel();
+        tokio::task::spawn_local(async move {
+            while let Some(message) = persist_rx.recv().await {
+                if let crate::session::persistence::PersistenceMsg::WorkflowRunStateAndAck {
+                    respond_to,
+                    ..
+                } = message
+                {
+                    let _ = respond_to.send(Ok(()));
+                }
+            }
+        });
+        let store = WorkflowRunStore::new(Some(session_directory.clone()), persist_tx.clone());
+        let notify = super::notify::WorkflowNotifySender::new(
+            agent_client_protocol::schema::v1::SessionId::new(session_id.clone()),
+            acp_transport::AcpAgentGatewaySender::new(gateway_tx),
+            persist_tx,
+            sampler::PreviewEventBudget::default(),
+            Arc::new(parking_lot::Mutex::new(None)),
+            store.clone(),
+            timeline.clone(),
+        );
+        let manager = Arc::new(tokio::sync::Mutex::new(WorkflowManager::new(
+            session_id,
+            Some(session_directory),
+            std::env::temp_dir(),
+            tracker.clone(),
+            store,
+            notify,
+            subagent_tx,
+            Arc::new(|_, _, _| {}),
+            mpsc::unbounded_channel().0,
+            timeline,
+            HashMap::new(),
+            crate::session::workflow::tracker::test_runtime_route(),
+            crate::session::workflow::tracker::WorkflowAgentCatalogSource::for_test(
+                std::env::temp_dir(),
+            ),
+        )));
+        (manager, tracker, observed_subagent_rx)
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn test_seed_workflow_run(
+        &mut self,
+        run_id: &str,
+        script: &str,
+    ) -> WorkflowRunState {
+        use tools::implementations::grow_build::workflow::{WorkflowDefinitionId, WorkflowScope};
+
+        let args = serde_json::json!({"fixed": true});
+        self.store.register(run_id, script, &args).unwrap();
+        let journal_path = self
+            .session_directory
+            .as_ref()
+            .map(|_| format!("workflows/{run_id}/journal.jsonl"));
+        if let Some(storage) = self.journal_storage(run_id).unwrap() {
+            // Restoration requires the same durable journal shape that launch
+            // would create; keep missing-journal rejection meaningful.
+            let mut journal = Journal::with_storage(storage);
+            journal
+                .record(
+                    0,
+                    "fixture_seed",
+                    "fixture-seed".into(),
+                    serde_json::json!({}),
+                )
+                .unwrap();
+        }
+        let initial_state = {
+            let mut tracker = self.tracker.lock();
+            tracker.start_run(
+                run_id.to_owned(),
+                "restore-test".into(),
+                "restore the same Run".into(),
+                Vec::new(),
+                Some(41),
+                journal_path,
+                crate::session::workflow::tracker::test_runtime_route(),
+            );
+            tracker.set_definition_provenance(
+                run_id,
+                WorkflowDefinitionId::new("session:restore-test"),
+                WorkflowScope::Session,
+                super::registry::content_hash(script),
+            );
+            tracker.set_max_concurrency(run_id, 2).unwrap()
+        };
+        let initial_manifest =
+            serde_json::to_value(self.store.initial_manifest(&initial_state).unwrap()).unwrap();
+        self.timeline
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Spawned {
+                    run_id: run_id.to_owned(),
+                    execution_epoch: 0,
+                    name: initial_state.name.clone(),
+                    objective: initial_state.objective.clone(),
+                    script_hash: super::store::workflow_script_hash(script),
+                    args_hash: super::store::workflow_args_hash(&args).unwrap(),
+                    initial_manifest,
+                },
+            ))
+            .await
+            .unwrap();
+        initial_state
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn test_suspend_seeded_run(&self, run_id: &str) -> WorkflowRunState {
+        let suspended = self.tracker.lock().suspend_execution(run_id).unwrap();
+        self.timeline
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Ended {
+                    run_id: run_id.to_owned(),
+                    execution_epoch: 0,
+                    status: chat_state::WorkflowExecutionStatus::Suspended,
+                    execution_suspended: true,
+                    handoff: chat_state::WorkflowTurnHandoff::None,
+                    duration_ms: 0,
+                    message: None,
+                },
+            ))
+            .await
+            .unwrap();
+        suspended
+    }
+
+    #[cfg(test)]
     pub(crate) fn test_bundle_with_session_dir(
         session_dir: Option<PathBuf>,
     ) -> (
@@ -924,6 +1398,7 @@ impl WorkflowManager {
             sampler::PreviewEventBudget::default(),
             Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
+            test_timeline(),
         );
         let manager = Arc::new(tokio::sync::Mutex::new(WorkflowManager::new(
             "test-session".into(),
@@ -1077,7 +1552,7 @@ impl WorkflowManager {
                         tracker.elapsed_ms(run_id),
                     )
                 };
-                self.notify.emit(&state, elapsed, 0);
+                self.notify.emit(&state, elapsed, 0).await;
                 if state.turn_handoff != chat_state::WorkflowTurnHandoff::None {
                     tokio::spawn(deliver_workflow_handoff_acknowledged(
                         self.session_cmd_tx.clone(),
@@ -1165,6 +1640,7 @@ impl WorkflowManager {
                             run_id: run_id.clone(),
                             execution_epoch: state.execution_epoch,
                             status: chat_state::WorkflowExecutionStatus::Interrupted,
+                            execution_suspended: false,
                             handoff: state.turn_handoff,
                             duration_ms: elapsed,
                             message: state.pause_message.clone(),
@@ -1178,10 +1654,35 @@ impl WorkflowManager {
                         format!("workflow terminal Timeline could not be committed: {error}"),
                     );
                 }
-                self.notify.broadcast(&state, elapsed, 0, true);
+                self.notify.broadcast(&state, elapsed, 0, true).await;
             }
         }
         Err(failures)
+    }
+
+    pub(crate) async fn suspend_all_and_drain(
+        &mut self,
+        deadline: tokio::time::Instant,
+    ) -> Result<(), String> {
+        self.close_admission();
+        for run in self.active.values() {
+            run.suspend_intent.store(true, Ordering::Release);
+            run.cancel.cancel();
+        }
+        let ids: Vec<_> = self.active.keys().cloned().collect();
+        for id in ids {
+            let run = self
+                .active
+                .get_mut(&id)
+                .expect("owned Run remains registered");
+            // Borrow the receiver so a timeout cannot discard the owner/ACK.
+            tokio::time::timeout_at(deadline, &mut run.done)
+                .await
+                .map_err(|_| format!("Workflow {id} suspension is still settling"))?
+                .map_err(|_| format!("Workflow {id} lost its suspension acknowledgement"))??;
+            self.active.remove(&id);
+        }
+        Ok(())
     }
 
     /// Bounded fail-stop cancellation used when a session owner did not
@@ -1190,6 +1691,9 @@ impl WorkflowManager {
     /// revokes execution and child admission without claiming durability.
     pub(crate) fn request_cancel_all(&self) {
         for (run_id, run) in &self.active {
+            if run.suspend_intent.load(Ordering::Acquire) {
+                continue;
+            }
             run.cancel.cancel();
             let _ = self.cancel_children_for_run(run_id);
         }
@@ -1206,6 +1710,7 @@ impl WorkflowManager {
             ActiveRun {
                 cancel: CancellationToken::new(),
                 pause_intent: Arc::new(AtomicBool::new(false)),
+                suspend_intent: Arc::new(AtomicBool::new(false)),
                 done,
             },
         );
@@ -1268,6 +1773,24 @@ async fn deliver_workflow_handoff_acknowledged(
     }
 }
 
+fn workflow_lifecycle_is_open_at(
+    lifecycle: &chat_state::WorkflowLifecycle,
+    execution_epoch: u64,
+) -> bool {
+    lifecycle.execution_epoch == execution_epoch && lifecycle.open && !lifecycle.closed
+}
+
+fn workflow_lifecycle_is_infra_paused_at(
+    lifecycle: &chat_state::WorkflowLifecycle,
+    execution_epoch: u64,
+) -> bool {
+    lifecycle.execution_epoch == execution_epoch
+        && !lifecycle.open
+        && !lifecycle.closed
+        && !lifecycle.execution_suspended
+        && lifecycle.status == Some(chat_state::WorkflowExecutionStatus::InfraPaused)
+}
+
 #[cfg(test)]
 fn test_session_directory(
     path: Option<PathBuf>,
@@ -1286,7 +1809,7 @@ fn test_session_directory(
 }
 
 #[cfg(test)]
-fn test_timeline() -> chat_state::ChatStateHandle {
+pub(super) fn test_timeline() -> chat_state::ChatStateHandle {
     test_timeline_with_persistence(
         Box::new(chat_state::NullTimelinePersistence),
         CancellationToken::new(),
@@ -1399,6 +1922,7 @@ mod tests {
             sampler::PreviewEventBudget::default(),
             Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
+            test_timeline(),
         );
         let tracker = Arc::new(parking_lot::Mutex::new(WorkflowTracker::default()));
         let manager = WorkflowManager::new(
@@ -1429,6 +1953,402 @@ mod tests {
             max_concurrency: None,
             resume_run_id: None,
         }
+    }
+
+    fn insert_suspended_workflow(
+        manager: &WorkflowManager,
+        run_id: &str,
+        script: &str,
+        status: WorkflowRunStatus,
+    ) -> WorkflowRunState {
+        use tools::implementations::grow_build::workflow::{WorkflowDefinitionId, WorkflowScope};
+
+        manager
+            .store
+            .register(run_id, script, &serde_json::json!({"fixed": true}))
+            .unwrap();
+        let journal_path = manager
+            .session_directory
+            .as_ref()
+            .map(|_| format!("workflows/{run_id}/journal.jsonl"));
+        manager.tracker.lock().start_run(
+            run_id.to_owned(),
+            "restore-test".into(),
+            "restore the same Run".into(),
+            Vec::new(),
+            Some(41),
+            journal_path,
+            crate::session::workflow::tracker::test_runtime_route(),
+        );
+        let hash = super::super::registry::content_hash(script);
+        manager.tracker.lock().set_definition_provenance(
+            run_id,
+            WorkflowDefinitionId::new("session:restore-test"),
+            WorkflowScope::Session,
+            hash,
+        );
+        manager
+            .tracker
+            .lock()
+            .set_max_concurrency(run_id, 2)
+            .expect("inserted workflow remains tracked");
+        if status != WorkflowRunStatus::Active {
+            assert_eq!(status, WorkflowRunStatus::UserPaused);
+            manager
+                .tracker
+                .lock()
+                .pause_user(run_id, Some("paused".into()))
+                .expect("inserted workflow remains tracked");
+        }
+        manager
+            .tracker
+            .lock()
+            .suspend_execution(run_id)
+            .expect("workflow can be suspended")
+    }
+
+    #[tokio::test]
+    async fn suspended_restore_reuses_run_source_route_budget_and_epoch() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut manager, _rx) = test_manager(Some(dir.path().to_path_buf()));
+        let script = r#"let meta = #{ name: "restore-test", description: "d" };
+complete("restored");"#;
+        let args = serde_json::json!({"fixed": true});
+        let run_id = "wf_restore_same_run";
+        manager.store.register(run_id, script, &args).unwrap();
+        // This test seeds a suspended Run directly instead of creating it via
+        // `launch`; persist a real initial journal row so its fixture matches
+        // the durable state that a launched Run would restore.
+        let journal_storage = manager.journal_storage(run_id).unwrap().unwrap();
+        let mut seeded_journal = Journal::with_storage(journal_storage);
+        seeded_journal
+            .record(
+                0,
+                "fixture_seed",
+                "fixture-seed".into(),
+                serde_json::json!({}),
+            )
+            .unwrap();
+        let initial_state = {
+            let mut tracker = manager.tracker.lock();
+            tracker.start_run(
+                run_id.to_owned(),
+                "restore-test".into(),
+                "restore the same Run".into(),
+                Vec::new(),
+                Some(41),
+                Some(format!("workflows/{run_id}/journal.jsonl")),
+                crate::session::workflow::tracker::test_runtime_route(),
+            );
+            tracker.set_definition_provenance(
+                run_id,
+                tools::implementations::grow_build::workflow::WorkflowDefinitionId::new(
+                    "session:restore-test",
+                ),
+                tools::implementations::grow_build::workflow::WorkflowScope::Session,
+                super::super::registry::content_hash(script),
+            );
+            tracker.set_max_concurrency(run_id, 2).unwrap()
+        };
+        let initial_manifest =
+            serde_json::to_value(manager.store.initial_manifest(&initial_state).unwrap()).unwrap();
+        manager
+            .timeline
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Spawned {
+                    run_id: run_id.into(),
+                    execution_epoch: 0,
+                    name: initial_state.name.clone(),
+                    objective: initial_state.objective.clone(),
+                    script_hash: super::super::store::workflow_script_hash(script),
+                    args_hash: super::super::store::workflow_args_hash(&args).unwrap(),
+                    initial_manifest,
+                },
+            ))
+            .await
+            .unwrap();
+        let suspended = manager.tracker.lock().suspend_execution(run_id).unwrap();
+        manager
+            .timeline
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Runtime(
+                chat_state::session_runtime::SessionRuntimeEvent::SuspendRequested {
+                    operation_id: "suspend-restore-op".into(),
+                    root_session_id: "test-session".into(),
+                },
+            ))
+            .await
+            .unwrap();
+        manager
+            .timeline
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Ended {
+                    run_id: run_id.into(),
+                    execution_epoch: 0,
+                    status: chat_state::WorkflowExecutionStatus::Suspended,
+                    execution_suspended: true,
+                    handoff: chat_state::WorkflowTurnHandoff::None,
+                    duration_ms: 0,
+                    message: None,
+                },
+            ))
+            .await
+            .unwrap();
+        manager.close_admission();
+        assert_eq!(
+            manager.validate_suspended_executions().unwrap(),
+            vec![run_id.to_owned()]
+        );
+        manager.reopen_after_runtime_restore();
+
+        let (restored_id, outcome) = manager.restore_suspended_execution(run_id).await.unwrap();
+        assert_eq!(restored_id, run_id);
+        assert!(matches!(
+            outcome.await.unwrap(),
+            WorkflowOutcome::Completed { .. }
+        ));
+        let restored = manager.tracker.lock().get(run_id).unwrap();
+        assert_eq!(restored.execution_epoch, 1);
+        assert_eq!(restored.status, WorkflowRunStatus::Complete);
+        assert_eq!(restored.agent_budget, suspended.agent_budget);
+        assert_eq!(restored.max_concurrency, suspended.max_concurrency);
+        assert_eq!(restored.runtime_route, suspended.runtime_route);
+        assert_eq!(restored.definition_id, suspended.definition_id);
+        assert_eq!(restored.definition_scope, suspended.definition_scope);
+        assert_eq!(restored.definition_hash, suspended.definition_hash);
+        assert_eq!(manager.store.script_for(run_id).as_deref(), Some(script));
+        assert_eq!(manager.store.args_for(run_id), Some(args));
+        assert_eq!(restored.agents, suspended.agents);
+        assert!(
+            dir.path()
+                .join("workflows")
+                .join(run_id)
+                .join("journal.jsonl")
+                .exists()
+        );
+    }
+
+    #[tokio::test]
+    async fn suspended_restore_preflight_excludes_business_paused_runs() {
+        let (manager, _rx) = test_manager(None);
+        let script = r#"let meta = #{ name: "restore-test", description: "d" };
+complete("done");"#;
+        let paused = insert_suspended_workflow(
+            &manager,
+            "wf_paused_suspended",
+            script,
+            WorkflowRunStatus::UserPaused,
+        );
+        assert!(manager.validate_suspended_executions().unwrap().is_empty());
+        assert_eq!(paused.status, WorkflowRunStatus::UserPaused);
+        assert!(paused.execution_suspended);
+        assert!(manager.active.is_empty());
+    }
+
+    #[tokio::test]
+    async fn released_root_cold_start_pauses_unstarted_workflow_for_explicit_same_run_resume() {
+        let (mut manager, _rx) = test_manager(None);
+        let script = r#"let meta = #{ name: "restore-test", description: "d" };
+complete("restored after explicit resume");"#;
+        let args = serde_json::json!({"fixed": true});
+        let run_id = "wf_released_root_recovery";
+        let operation_id = "root-released-before-workflow";
+        let root_session_id = "test-session";
+        manager.store.register(run_id, script, &args).unwrap();
+        let initial_state = {
+            let mut tracker = manager.tracker.lock();
+            tracker.start_run(
+                run_id.into(),
+                "restore-test".into(),
+                "restore the same Run".into(),
+                Vec::new(),
+                Some(41),
+                None,
+                crate::session::workflow::tracker::test_runtime_route(),
+            );
+            tracker.set_definition_provenance(
+                run_id,
+                tools::implementations::grow_build::workflow::WorkflowDefinitionId::new(
+                    "session:restore-test",
+                ),
+                tools::implementations::grow_build::workflow::WorkflowScope::Session,
+                super::super::registry::content_hash(script),
+            );
+            tracker.set_max_concurrency(run_id, 2).unwrap()
+        };
+        let initial_manifest =
+            serde_json::to_value(manager.store.initial_manifest(&initial_state).unwrap()).unwrap();
+        manager
+            .timeline
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Spawned {
+                    run_id: run_id.into(),
+                    execution_epoch: 0,
+                    name: initial_state.name.clone(),
+                    objective: initial_state.objective.clone(),
+                    script_hash: super::super::store::workflow_script_hash(script),
+                    args_hash: super::super::store::workflow_args_hash(&args).unwrap(),
+                    initial_manifest,
+                },
+            ))
+            .await
+            .unwrap();
+        manager
+            .timeline
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Runtime(
+                chat_state::session_runtime::SessionRuntimeEvent::SuspendRequested {
+                    operation_id: operation_id.into(),
+                    root_session_id: root_session_id.into(),
+                },
+            ))
+            .await
+            .unwrap();
+        manager.tracker.lock().suspend_execution(run_id).unwrap();
+        manager
+            .timeline
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Workflow(
+                chat_state::WorkflowEvent::Ended {
+                    run_id: run_id.into(),
+                    execution_epoch: 0,
+                    status: chat_state::WorkflowExecutionStatus::Suspended,
+                    execution_suspended: true,
+                    handoff: chat_state::WorkflowTurnHandoff::None,
+                    duration_ms: 0,
+                    message: None,
+                },
+            ))
+            .await
+            .unwrap();
+        manager
+            .timeline
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Runtime(
+                chat_state::session_runtime::SessionRuntimeEvent::CommandsSettled {
+                    operation_id: operation_id.into(),
+                    commands: Vec::new(),
+                },
+            ))
+            .await
+            .unwrap();
+        let checkpoint = manager
+            .timeline
+            .checkpoint_runtime(
+                operation_id.into(),
+                "a".repeat(64),
+                None,
+                None,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+        manager
+            .timeline
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Runtime(
+                chat_state::session_runtime::SessionRuntimeEvent::TreeSuspended {
+                    operation_id: operation_id.into(),
+                    nodes: vec![chat_state::session_runtime::RuntimeNodeRef {
+                        session_id: root_session_id.into(),
+                        checkpoint_seq: checkpoint.seq,
+                    }],
+                },
+            ))
+            .await
+            .unwrap();
+        manager
+            .timeline
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Runtime(
+                chat_state::session_runtime::SessionRuntimeEvent::RestorePrepared {
+                    operation_id: operation_id.into(),
+                    instance_id: "recovery-instance".into(),
+                },
+            ))
+            .await
+            .unwrap();
+        manager
+            .timeline
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Runtime(
+                chat_state::session_runtime::SessionRuntimeEvent::Resumed {
+                    operation_id: operation_id.into(),
+                    instance_id: "recovery-instance".into(),
+                },
+            ))
+            .await
+            .unwrap();
+        manager
+            .timeline
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Runtime(
+                chat_state::session_runtime::SessionRuntimeEvent::ExecutionReleased {
+                    operation_id: operation_id.into(),
+                    instance_id: "recovery-instance".into(),
+                },
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.timeline.runtime_state().await.unwrap().phase,
+            chat_state::session_runtime::RuntimePhase::Running
+        );
+
+        manager
+            .pause_released_suspended_runs_for_manual_resume()
+            .await
+            .unwrap();
+        let paused = manager.tracker.lock().get(run_id).unwrap();
+        assert_eq!(paused.status, WorkflowRunStatus::InfraPaused);
+        assert!(!paused.execution_suspended);
+        assert_eq!(paused.execution_epoch, 1);
+        assert!(
+            manager.active.is_empty(),
+            "cold reconciliation must not dispatch host work"
+        );
+        let timeline =
+            chat_state::Timeline::from_events(manager.timeline.timeline_events().await.unwrap())
+                .unwrap();
+        let lifecycle = timeline.workflow_lifecycle(run_id).unwrap();
+        assert_eq!(lifecycle.execution_epoch, 1);
+        assert_eq!(
+            lifecycle.status,
+            Some(chat_state::WorkflowExecutionStatus::InfraPaused)
+        );
+        assert!(!lifecycle.execution_suspended);
+        assert!(!lifecycle.open && !lifecycle.closed);
+        assert!(manager.store.script_for(run_id).is_some());
+        assert_eq!(manager.store.args_for(run_id), Some(args.clone()));
+
+        let paused_revision = paused.revision;
+        let event_count = manager.timeline.timeline_events().await.unwrap().len();
+        manager
+            .pause_released_suspended_runs_for_manual_resume()
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.tracker.lock().get(run_id).unwrap().revision,
+            paused_revision
+        );
+        assert_eq!(
+            manager.timeline.timeline_events().await.unwrap().len(),
+            event_count
+        );
+
+        let (_, outcome) = manager
+            .launch(
+                resolve_inline(script.into()).unwrap(),
+                LaunchSpec {
+                    objective: "restore the same Run".into(),
+                    args,
+                    agent_budget: None,
+                    max_concurrency: Some(2),
+                    resume_run_id: Some(run_id.into()),
+                },
+            )
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome.await.unwrap(),
+            WorkflowOutcome::Completed { .. }
+        ));
+        assert_eq!(manager.tracker.lock().list().len(), 1);
+        let resumed = manager.tracker.lock().get(run_id).unwrap();
+        assert_eq!(resumed.status, WorkflowRunStatus::Complete);
+        assert_eq!(resumed.execution_epoch, 2);
     }
 
     #[tokio::test(start_paused = true)]
@@ -1761,6 +2681,7 @@ mod tests {
             sampler::PreviewEventBudget::default(),
             Arc::new(parking_lot::Mutex::new(None)),
             store.clone(),
+            test_timeline(),
         );
         let mut manager = WorkflowManager::new(
             "scratch-failure-test".into(),

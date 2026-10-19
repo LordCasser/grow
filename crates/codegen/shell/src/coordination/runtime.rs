@@ -33,7 +33,6 @@ const CANCEL_SETTLE_GRACE: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct InquiryPayload {
-    source_incarnation: String,
     source_session_id: String,
     source_cwd: String,
     target_session_id: String,
@@ -423,7 +422,6 @@ impl CoordinationHandle {
             ));
         }
         let payload = InquiryPayload {
-            source_incarnation: self.shared.incarnation.clone(),
             source_session_id: source_session_id.to_owned(),
             source_cwd: self
                 .shared
@@ -449,16 +447,34 @@ impl CoordinationHandle {
             }
             Arc::clone(record)
         } else {
-            if let Some(audit) = self.durable_inquiry(inquiry_id, source_session_id).await? {
-                if audit.target_session_id != target_session_id || audit.question != question {
+            if let Some(fact) = self.durable_inquiry(inquiry_id, source_session_id).await? {
+                let (target, original_question, outcome) = match fact {
+                    super::InquiryEvent::OutgoingStarted {
+                        target_session_id,
+                        question,
+                        ..
+                    } => (target_session_id, question, None),
+                    super::InquiryEvent::OutgoingCompleted { audit } => {
+                        (audit.target_session_id, audit.question, Some(audit.outcome))
+                    }
+                    _ => unreachable!("durable outgoing inquiry"),
+                };
+                if target != target_session_id || original_question != question {
                     return Err(CoordinationError::new(
                         CoordinationErrorCode::Conflict,
                         "inquiry id already belongs to a different durable request",
                     ));
                 }
-                return Ok(audit.outcome);
+                if let Some(outcome) = outcome {
+                    return Ok(outcome);
+                }
             }
             let record = Arc::new(InquiryRecord::new(payload, InquiryPhase::Discovering));
+            if cancellation.is_cancelled() {
+                record
+                    .cancellation
+                    .cancel(InquiryCancellationReason::Explicit);
+            }
             outgoing.insert(key, Arc::clone(&record));
             let sender = self.clone();
             let task_record = Arc::clone(&record);
@@ -636,7 +652,7 @@ impl CoordinationHandle {
             });
         }
         drop(outgoing);
-        let audit = self
+        let fact = self
             .durable_inquiry(inquiry_id, source_session_id)
             .await?
             .ok_or_else(|| {
@@ -645,6 +661,12 @@ impl CoordinationHandle {
                     "inquiry not found in this source session",
                 )
             })?;
+        let super::InquiryEvent::OutgoingCompleted { audit } = fact else {
+            return Err(CoordinationError::new(
+                CoordinationErrorCode::SourceUnavailable,
+                "source restarted before recording the inquiry outcome; only an explicit retry of the same request can resume it",
+            ));
+        };
         Ok(InquiryState {
             inquiry_id: inquiry_id.to_owned(),
             phase: InquiryPhase::Finished,
@@ -669,7 +691,7 @@ impl CoordinationHandle {
         &self,
         id: &str,
         source: &str,
-    ) -> Result<Option<super::inquiry::InquiryAudit>, CoordinationError> {
+    ) -> Result<Option<super::InquiryEvent>, CoordinationError> {
         let id = id.to_owned();
         let source = source.to_owned();
         let home = self.shared.grow_home.clone();
@@ -685,11 +707,40 @@ impl CoordinationHandle {
                         super::inquiry::InquiryEvent::from_timeline(event).map_err(|error| {
                             CoordinationError::new(CoordinationErrorCode::AuditFailure, error)
                         })?;
-                    if let Some(super::inquiry::InquiryEvent::OutgoingCompleted { audit }) = fact
-                        && audit.outcome.inquiry_id == id
-                        && found.is_none()
-                    {
-                        found = Some(audit);
+                    match fact {
+                        Some(super::InquiryEvent::OutgoingStarted {
+                            inquiry_id,
+                            target_session_id,
+                            question,
+                        }) if inquiry_id == id && found.is_none() => {
+                            found = Some(super::InquiryEvent::OutgoingStarted {
+                                inquiry_id,
+                                target_session_id,
+                                question,
+                            });
+                        }
+                        Some(super::InquiryEvent::OutgoingCompleted { audit })
+                            if audit.outcome.inquiry_id == id =>
+                        {
+                            if let Some(super::InquiryEvent::OutgoingStarted {
+                                target_session_id,
+                                question,
+                                ..
+                            }) = &found
+                                && (target_session_id != &audit.target_session_id
+                                    || question != &audit.question)
+                            {
+                                return Err(CoordinationError::new(
+                                    CoordinationErrorCode::AuditFailure,
+                                    "inquiry completion conflicts with its first durable request",
+                                ));
+                            }
+                            if !matches!(found, Some(super::InquiryEvent::OutgoingCompleted { .. }))
+                            {
+                                found = Some(super::InquiryEvent::OutgoingCompleted { audit });
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -733,6 +784,24 @@ impl CoordinationHandle {
                 return Ok(true);
             }
         }
+        if let Some(fact) = self.durable_inquiry(inquiry_id, source_session_id).await? {
+            let target = match &fact {
+                super::InquiryEvent::OutgoingStarted {
+                    target_session_id, ..
+                } => target_session_id,
+                super::InquiryEvent::OutgoingCompleted { audit } => &audit.target_session_id,
+                _ => unreachable!("durable outgoing inquiry"),
+            };
+            if target != target_session_id {
+                return Err(CoordinationError::new(
+                    CoordinationErrorCode::Conflict,
+                    "inquiry target does not match its durable request",
+                ));
+            }
+            if matches!(fact, super::InquiryEvent::OutgoingCompleted { .. }) {
+                return Ok(false);
+            }
+        }
         self.require_ready()?;
         let target = self
             .resolve_target(source_session_id, target_session_id)
@@ -748,7 +817,10 @@ impl CoordinationHandle {
         )
         .await?
         {
-            Response::Cancellation { accepted, .. } => Ok(accepted),
+            Response::Cancellation {
+                inquiry_id: response_id,
+                accepted,
+            } if response_id == inquiry_id => Ok(accepted),
             Response::Error { code, message } => Err(remote_error(&code, message)),
             _ => Err(CoordinationError::new(
                 CoordinationErrorCode::TransportError,
@@ -945,7 +1017,6 @@ async fn serve_connection(mut stream: LocalStream, shared: Arc<Shared>) -> Resul
                 Arc::clone(&shared),
                 source,
                 InquiryPayload {
-                    source_incarnation: hello.incarnation,
                     source_session_id: hello.source_session_id,
                     source_cwd,
                     target_session_id,
@@ -997,9 +1068,18 @@ async fn serve_connection(mut stream: LocalStream, shared: Arc<Shared>) -> Resul
             inquiry_id,
             target_session_id,
         } => {
+            if let Err(message) = validate_inquiry_id(&inquiry_id) {
+                return write_response(
+                    &mut stream,
+                    Response::Error {
+                        code: "invalid_inquiry_id".into(),
+                        message,
+                    },
+                )
+                .await;
+            }
             let accepted = cancel_inquiry(
                 &shared,
-                &hello.peer_id,
                 &hello.source_session_id,
                 &inquiry_id,
                 &target_session_id,
@@ -1080,7 +1160,7 @@ async fn accept_inquiry(
         ));
     }
 
-    let key = (source.peer_id.clone(), inquiry_id.clone());
+    let key = (payload.source_session_id.clone(), inquiry_id.clone());
     let mut inquiries = shared.inquiries.lock().await;
     inquiries.retain(|_, record| {
         record
@@ -1223,7 +1303,6 @@ async fn wait_for_terminal(mut result: watch::Receiver<Option<InquiryOutcome>>) 
 
 async fn cancel_inquiry(
     shared: &Shared,
-    source_peer_id: &str,
     source_session_id: &str,
     inquiry_id: &str,
     target_session_id: &str,
@@ -1236,12 +1315,10 @@ async fn cancel_inquiry(
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .is_none_or(|terminal_at| terminal_at.elapsed() < TERMINAL_CACHE_TTL)
     });
-    let Some(record) = inquiries.get(&(source_peer_id.to_owned(), inquiry_id.to_owned())) else {
+    let Some(record) = inquiries.get(&(source_session_id.to_owned(), inquiry_id.to_owned())) else {
         return false;
     };
-    if record.payload.source_session_id != source_session_id
-        || record.payload.target_session_id != target_session_id
-    {
+    if record.payload.target_session_id != target_session_id || record.result.borrow().is_some() {
         return false;
     }
     record
@@ -1255,6 +1332,9 @@ fn validate_inquiry_id(inquiry_id: &str) -> Result<(), String> {
         uuid::Uuid::parse_str(inquiry_id).map_err(|_| "inquiryId must be a UUIDv7".to_owned())?;
     if parsed.get_version() != Some(uuid::Version::SortRand) {
         return Err("inquiryId must be a UUIDv7".to_owned());
+    }
+    if parsed.to_string() != inquiry_id {
+        return Err("inquiryId must be a canonical lowercase hyphenated UUIDv7".to_owned());
     }
     Ok(())
 }
@@ -1317,6 +1397,9 @@ async fn request_inquiry(
     request: &Request,
     progress: Option<&mpsc::UnboundedSender<InquiryPhase>>,
 ) -> Result<InquiryOutcome, InquiryRequestError> {
+    let Request::Ask { inquiry_id, .. } = request else {
+        unreachable!("inquiry RPC requires an Ask request");
+    };
     let mut stream = connect_peer(source, target, source_session_id)
         .await
         .map_err(InquiryRequestError::Transport)?;
@@ -1329,12 +1412,23 @@ async fn request_inquiry(
             .await
             .map_err(|error| InquiryRequestError::Transport(transport_error(error)))?;
         match response {
-            Response::Progress { phase, .. } => {
+            Response::Progress {
+                inquiry_id: response_id,
+                phase,
+            } if &response_id == inquiry_id => {
                 if let Some(progress) = progress {
                     let _ = progress.send(phase);
                 }
             }
-            Response::Inquiry { outcome } => return Ok(outcome),
+            Response::Inquiry { outcome } if &outcome.inquiry_id == inquiry_id => {
+                return Ok(outcome);
+            }
+            Response::Progress { .. } | Response::Inquiry { .. } => {
+                return Err(InquiryRequestError::Transport(CoordinationError::new(
+                    CoordinationErrorCode::TransportError,
+                    "inquiry response identity does not match the request",
+                )));
+            }
             Response::Error { code, message } => {
                 return Err(InquiryRequestError::Remote(remote_error(&code, message)));
             }
@@ -1441,6 +1535,7 @@ fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod identity_tests;
 
     fn snapshot(id: &str, cwd: &str) -> LocalSessionSnapshot {
         LocalSessionSnapshot {
@@ -1514,6 +1609,20 @@ mod tests {
         assert_eq!(
             reused, outcome,
             "durable result must not dispatch the absent target again"
+        );
+        assert!(
+            !runtime
+                .cancel_session(&id, "source", "target")
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            runtime
+                .cancel_session(&id, "source", "other-target")
+                .await
+                .unwrap_err()
+                .code,
+            CoordinationErrorCode::Conflict
         );
     }
 
@@ -1767,7 +1876,6 @@ mod tests {
             Arc::clone(&target.shared),
             identity.clone(),
             InquiryPayload {
-                source_incarnation: identity.incarnation,
                 source_session_id: "source".into(),
                 source_cwd: "/repo".into(),
                 target_session_id: "target".into(),

@@ -79,6 +79,157 @@ fn format_stop_feedback(blocks: &[dispatcher::StopBlock], additional_context: &[
     feedback
 }
 
+fn restored_stop_gate_decision(
+    events: &[chat_state::TimelineEvent],
+    response_seq: chat_state::EventSeq,
+    turn: chat_state::TurnId,
+    expected_event: chat_state::HookEventType,
+    expected_subagent_id: Option<&str>,
+) -> Result<Option<StopGateDecision>, String> {
+    let triggers = events
+        .iter()
+        .filter_map(|entry| {
+            if entry.seq <= response_seq {
+                return None;
+            }
+            let chat_state::TimelineEventKind::Hook(chat_state::HookEvent::Triggered {
+                occurrence_id,
+                event,
+                gate,
+                cause,
+                ..
+            }) = &entry.kind
+            else {
+                return None;
+            };
+            let matching_cause = match (expected_event, cause) {
+                (
+                    chat_state::HookEventType::Stop,
+                    chat_state::HookCause::Turn { turn: cause_turn },
+                ) => *cause_turn == turn,
+                (
+                    chat_state::HookEventType::SubagentStop,
+                    chat_state::HookCause::Subagent { subagent_id },
+                ) => expected_subagent_id.is_some_and(|id| id == subagent_id),
+                _ => false,
+            };
+            (*event == expected_event && *gate == chat_state::HookGateKind::Stop && matching_cause)
+                .then(|| (entry.seq, occurrence_id.clone()))
+        })
+        .collect::<Vec<_>>();
+    if triggers.is_empty() {
+        // The accepted response may have been checkpointed before the Stop
+        // gate started. In that case the normal gate still needs to run once.
+        return Ok(None);
+    }
+    let [(trigger_seq, occurrence_id)] = triggers.as_slice() else {
+        return Err(format!(
+            "expected one completed {expected_event:?} occurrence after the accepted response, found {}",
+            triggers.len()
+        ));
+    };
+
+    let mut started = std::collections::BTreeSet::new();
+    let mut completed_decisions = Vec::new();
+    for entry in events.iter().filter(|entry| entry.seq > *trigger_seq) {
+        let chat_state::TimelineEventKind::Hook(hook) = &entry.kind else {
+            continue;
+        };
+        match hook {
+            chat_state::HookEvent::RunStarted {
+                occurrence_id: run_occurrence,
+                run_id,
+                handler_index,
+            } if run_occurrence == occurrence_id => {
+                started.insert((run_id.clone(), *handler_index));
+            }
+            chat_state::HookEvent::RunFinished {
+                occurrence_id: run_occurrence,
+                run_id,
+                handler_index,
+                outcome,
+                ..
+            } if run_occurrence == occurrence_id => {
+                if *outcome == chat_state::HookRunOutcome::InterruptedOutcomeUnknown {
+                    return Err(format!(
+                        "{expected_event:?} handler outcome is unknown after suspension"
+                    ));
+                }
+                started.remove(&(run_id.clone(), *handler_index));
+            }
+            chat_state::HookEvent::RunSkipped {
+                occurrence_id: run_occurrence,
+                run_id,
+                handler_index,
+                ..
+            } if run_occurrence == occurrence_id => {
+                started.remove(&(run_id.clone(), *handler_index));
+            }
+            chat_state::HookEvent::Completed {
+                occurrence_id: completed_occurrence,
+                decision,
+            } if completed_occurrence == occurrence_id => {
+                if !started.is_empty() {
+                    return Err(format!(
+                        "{expected_event:?} completed while a handler run remained unresolved"
+                    ));
+                }
+                completed_decisions.push(decision.clone());
+            }
+            _ => {}
+        }
+    }
+    let [decision] = completed_decisions.as_slice() else {
+        return Err(format!(
+            "{expected_event:?} occurrence has no unique durable completion"
+        ));
+    };
+    match decision {
+        chat_state::HookAggregateDecision::Stop {
+            decision:
+                chat_state::HookStopDecision::AllowStop | chat_state::HookStopDecision::ForceStop { .. },
+        } => Ok(Some(StopGateDecision::AllowStop)),
+        chat_state::HookAggregateDecision::Stop {
+            decision:
+                chat_state::HookStopDecision::KeepWorking {
+                    reasons,
+                    additional_context,
+                },
+        } => {
+            let blocks = reasons
+                .iter()
+                .map(|reason| dispatcher::StopBlock {
+                    hook_name: String::new(),
+                    reason: reason.clone(),
+                })
+                .collect::<Vec<_>>();
+            Ok(Some(StopGateDecision::KeepWorking {
+                feedback: format_stop_feedback(&blocks, additional_context),
+            }))
+        }
+        _ => Err(format!(
+            "completed {expected_event:?} occurrence has a non-Stop decision"
+        )),
+    }
+}
+
+pub(super) fn validate_restored_stop_gate(
+    events: &[chat_state::TimelineEvent],
+    response_seq: chat_state::EventSeq,
+    turn: chat_state::TurnId,
+    expected_event: chat_state::HookEventType,
+    expected_subagent_id: Option<&str>,
+) -> Result<(), String> {
+    restored_stop_gate_decision(
+        events,
+        response_seq,
+        turn,
+        expected_event,
+        expected_subagent_id,
+    )
+    .map(|_| ())
+}
+
 impl SessionActor {
     pub(crate) async fn list_active_subagents(
         &self,
@@ -252,6 +403,42 @@ impl SessionActor {
         StopGateDecision::KeepWorking {
             feedback: format_stop_feedback(&result.blocks, &result.additional_context),
         }
+    }
+
+    pub(super) async fn restore_completed_stop_gate(
+        &self,
+        identity: chat_state::ResponseAdmissionIdentity,
+    ) -> Result<Option<StopGateDecision>, String> {
+        let accepted = self
+            .chat_state_handle
+            .admitted_response(identity)
+            .await
+            .ok_or_else(|| "checkpoint response is absent from the canonical branch".to_owned())?;
+        let turn = self
+            .events
+            .current_turn()
+            .ok_or_else(|| "restored accepted response has no active Turn".to_owned())?;
+        let expected_event = if self.startup_hints.is_subagent {
+            chat_state::HookEventType::SubagentStop
+        } else {
+            chat_state::HookEventType::Stop
+        };
+        let events = self
+            .chat_state_handle
+            .timeline_events()
+            .await
+            .ok_or_else(|| "could not read Timeline to verify restored Stop gate".to_owned())?;
+        let subagent_id = self
+            .startup_hints
+            .is_subagent
+            .then(|| self.session_id_string());
+        restored_stop_gate_decision(
+            &events,
+            accepted.event_seq,
+            turn,
+            expected_event,
+            subagent_id.as_deref(),
+        )
     }
 }
 
@@ -486,5 +673,135 @@ mod stop_gate_snapshot_tests {
                 );
             })
             .await;
+    }
+}
+
+#[cfg(test)]
+mod restored_stop_gate_tests {
+    use super::*;
+
+    fn hook_event(seq: u64, event: chat_state::HookEvent) -> chat_state::TimelineEvent {
+        chat_state::TimelineEvent {
+            version: 1,
+            seq: chat_state::EventSeq::new(seq),
+            at_ms: 0,
+            kind: chat_state::TimelineEventKind::Hook(event),
+        }
+    }
+
+    fn trigger(turn: chat_state::TurnId) -> chat_state::HookEvent {
+        chat_state::HookEvent::Triggered {
+            occurrence_id: "stop-occurrence".into(),
+            event: chat_state::HookEventType::Stop,
+            gate: chat_state::HookGateKind::Stop,
+            cause: chat_state::HookCause::Turn { turn },
+            config_generation: 1,
+            handlers: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn restored_stop_gate_reuses_completed_feedback() {
+        let turn = chat_state::TurnId(9);
+        let events = vec![
+            hook_event(2, trigger(turn)),
+            hook_event(
+                3,
+                chat_state::HookEvent::Completed {
+                    occurrence_id: "stop-occurrence".into(),
+                    decision: chat_state::HookAggregateDecision::Stop {
+                        decision: chat_state::HookStopDecision::KeepWorking {
+                            reasons: vec!["review this detail".into()],
+                            additional_context: vec!["keep this context".into()],
+                        },
+                    },
+                },
+            ),
+        ];
+        let decision = restored_stop_gate_decision(
+            &events,
+            chat_state::EventSeq::new(1),
+            turn,
+            chat_state::HookEventType::Stop,
+            None,
+        )
+        .unwrap()
+        .expect("completed stop gate is present");
+        let StopGateDecision::KeepWorking { feedback } = decision else {
+            panic!("expected stored KeepWorking decision, got {decision:?}");
+        };
+        assert!(feedback.contains("review this detail"));
+        assert!(feedback.contains("keep this context"));
+    }
+
+    #[test]
+    fn restored_stop_gate_refuses_unknown_or_incomplete_hook_runs() {
+        let turn = chat_state::TurnId(9);
+        let events = vec![
+            hook_event(2, trigger(turn)),
+            hook_event(
+                3,
+                chat_state::HookEvent::RunStarted {
+                    occurrence_id: "stop-occurrence".into(),
+                    run_id: "handler-run".into(),
+                    handler_index: 0,
+                },
+            ),
+            hook_event(
+                4,
+                chat_state::HookEvent::RunFinished {
+                    occurrence_id: "stop-occurrence".into(),
+                    run_id: "handler-run".into(),
+                    handler_index: 0,
+                    elapsed_ms: 1,
+                    outcome: chat_state::HookRunOutcome::InterruptedOutcomeUnknown,
+                    control: chat_state::HookRunControl::None,
+                },
+            ),
+            hook_event(
+                5,
+                chat_state::HookEvent::Completed {
+                    occurrence_id: "stop-occurrence".into(),
+                    decision: chat_state::HookAggregateDecision::Stop {
+                        decision: chat_state::HookStopDecision::AllowStop,
+                    },
+                },
+            ),
+        ];
+        assert!(
+            restored_stop_gate_decision(
+                &events,
+                chat_state::EventSeq::new(1),
+                turn,
+                chat_state::HookEventType::Stop,
+                None,
+            )
+            .is_err()
+        );
+        assert!(
+            restored_stop_gate_decision(
+                &events[..1],
+                chat_state::EventSeq::new(1),
+                turn,
+                chat_state::HookEventType::Stop,
+                None,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn accepted_response_without_started_stop_gate_runs_normal_gate() {
+        assert!(matches!(
+            restored_stop_gate_decision(
+                &[],
+                chat_state::EventSeq::new(1),
+                chat_state::TurnId(9),
+                chat_state::HookEventType::Stop,
+                None,
+            )
+            .unwrap(),
+            None
+        ));
     }
 }

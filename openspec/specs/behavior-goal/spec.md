@@ -238,3 +238,134 @@ Goal 用量准入 SHALL 允许独立后台权限 Sideband 与同 owner 当前 ep
 - **THEN** 回执不会作为新 revision 的依赖完成或续跑信号，按既有失效 owner 规则持久收敛。
 
 证据与实施入口：`crates/codegen/shell/src/session/actor/notification_drain.rs`、`crates/codegen/shell/src/session/goal_tracker.rs`、`crates/codegen/shell/src/agent/subagent/mod.rs::admit_subagent_completion_receipt`。
+
+### Requirement: Session suspension gates Goal execution without changing its status
+
+会话挂起 SHALL 关闭该树的执行准入但保留 Goal identity、definition revision、业务状态、预算与累计用量。恢复 SHALL 只重新开放挂起前仍 Active 且满足既有预算、权限和存储条件的 Goal；Paused、Blocked、BudgetLimited、Complete SHALL 不被挂起恢复激活。挂起离线时间 SHALL 不计入实际运行耗时，已有与迟到用量仍按原 attempt/Goal 身份结算。
+
+#### Scenario: Active Goal and descendants are suspended
+- **WHEN** Active Goal 所属 root 及 child 因退出而挂起
+- **THEN** Goal 保持 Active 的业务状态但无新执行，恢复后先续接原工作再进入既有自动续轮，不重复计量。
+
+#### Scenario: Goal is already stopped or loses admission
+- **WHEN** Goal 原本 Paused/Blocked/BudgetLimited/Complete，或恢复核对发现预算耗尽、用量不完整阻止精确预算准入
+- **THEN** 恢复保持相应限制，不将会话恢复视为 Goal restart 或预算重置。
+
+#### Scenario: Explicit cancellation competes with suspension
+- **WHEN** 用户明确 Stop Goal/Cancel task 的决定已持久接纳后又触发挂起
+- **THEN** 保存真正停止的状态，后续 resume 不撤销该决定。
+
+目标入口：`crates/codegen/shell/src/session/actor/goal_support.rs`、`goal_tracker.rs` 与现有共享 Goal admission window。
+
+### Requirement: Goal continuation respects explicit readiness
+
+Goal continuation SHALL 在既有身份/预算/控制 gate 下检查当前工作等待意图。所有当前可推进工作均明确等待时，内层准入与外层 idle 重排 SHALL 都保持事件等待，不产生重复模型调用或忙循环。存在其他可推进步骤时 MAY 继续。等待 SHALL NOT 自动变成 Goal paused/blocked，也不得累计 blocked 的连续 turn 审计。
+
+#### Scenario: BG-01 Active Goal has only waiting work
+- **WHEN** Goal Active，当前所有可推进工作都等待真实依赖，且没有新输入
+- **THEN** 不采样、不持续重新调度 idle；相关依赖变化后重新核对准入，等待时间不算一次 blocked turn。
+
+#### Scenario: BG-02 Another step can proceed
+- **WHEN** 一个步骤等待 child，但同一 Goal 还有可推进的独立步骤
+- **THEN** 可继续处理该步骤，不因某处有 child 在运行就冻结整个 Goal；没有显式计划时继续原全目标审计逻辑。
+
+#### Scenario: BG-03 User control wins over readiness
+- **WHEN** 依赖变为就绪时已有用户输入、Stop、挂起、权限/用户等待或预算关闭
+- **THEN** 按原控制与输入优先级处理并重新核对；就绪事件不能自动回答问题、授予权限或越过关闭的执行 gate。
+
+#### Scenario: BG-09 Update arrives while Goal or request admission is closed
+- **WHEN** Goal Paused 或预算关闭，或 child 正等待真实用户/权限请求，此时父项变化和依赖结果到达
+- **THEN** 只保存交付与处理责任，无新采样或自动批准；恢复/回答/授权仍由原控制与请求 owner 接纳，TODO 通知不替代它们。
+
+证据与实施入口：`crates/codegen/shell/src/session/actor/goal.rs::{schedule_goal_on_idle,drive_goal_on_idle,start_goal_internal_turn}`、`idle_arbitration.rs`。
+
+### Requirement: Goal completion audits explicit obligations and the whole objective
+
+Goal complete SHALL 保留原目标整体完成审计，并检查当前范围内显式必需交付、有效等待、影响这些交付的未处理要求变化及必要收尾。未闭合时 SHALL 返回可操作的引用与原因。普通局部 TODO 或无关后代步骤 SHALL NOT 自动成为硬门槛，全部勾选 SHALL NOT 自动完成 Goal。有理由地解除某项义务 SHALL NOT 改写原目标已经达成的判断。
+
+#### Scenario: BG-04 Checked TODOs hide unfinished mandatory work
+- **WHEN** 父 TODO 都显示 completed，但必需 child 尚未交付、验收或处理影响交付的要求变化
+- **THEN** complete 被拒绝并指出未闭合义务，直到接受或明确处置；旧清单状态不能代替全目标审计。
+
+#### Scenario: BG-05 Unrelated local TODO is still open
+- **WHEN** 原目标与必需交付已通过审计，某 child 留有不属于当前必需交付的局部探索项
+- **THEN** 不仅因该复选框未勾选就阻止完成；仍活跃的执行和真实收尾责任按现有 owner 规则处置，不能隐藏副作用。
+
+#### Scenario: BG-08 Three-level delegation preserves local acceptance and root authority
+- **WHEN** root Goal 的必需交付由普通 Task child 承担，child 又委派 grandchild 并作局部验收
+- **THEN** child 不获得 Goal mutation authority；root 依据 child 的结果及局部交付摘要作自己的验收，检查 root 必需义务和原目标，不要求 root 消费 grandchild 第二份回执或勾完所有后代 TODO。
+
+证据与实施入口：`crates/codegen/shell/src/session/actor/goal.rs::{render_goal_continuation_from,handle_goal_command}`、`crates/codegen/tools/src/implementations/grow_build/update_goal/mod.rs`。
+
+### Requirement: Local planning never substitutes for Goal or Plan authority
+
+TODO 变化、重规划及验收 SHALL NOT 自动创建 Goal、更新 Goal definition revision、恢复暂停 Goal 或修改已批准 Plan artifact。真正 Goal 定义变更、Plan 越界和 Workflow 执行 SHALL 继续遵守原 authority 与审批协议；弱 TODO 版本不能替代 Goal revision fence。
+
+#### Scenario: BG-06 TODO update preserves the active Goal identity
+- **WHEN** 活动 Goal 内父 TODO 修改并触发 child 重规划
+- **THEN** 原 Goal identity/revision、预算归属和 child admission 保持原含义，不因 TODO 版本改变失效；真正旧 Goal revision 的迟到结果仍遵守原失效 owner 规则。
+
+#### Scenario: BG-07 Plan refinement exceeds approved scope
+- **WHEN** 局部计划调整只是执行细化，或实际超出了已批准 Plan 的工作范围
+- **THEN** 前者不生成新的审批 artifact，后者遵循原重新审批路径；不能以 TODO 调整名义绕过审批或 Goal/Plan 互斥。
+
+证据与实施入口：`crates/codegen/shell/src/session/actor/{goal.rs,behavior.rs}`、`crates/codegen/shell/src/session/goal_tracker.rs`。
+
+### Requirement: Retained plans remain under the existing session owner
+会话 SHALL 在既有 SessionActor/Behavior owner 下保留一个当前计划候选的不可变引用，并区分候选内容、Plan 执行阶段及 UI 展开状态。保留 SHALL NOT 批准、拒绝、放弃或执行计划，不新增 workflow owner；approval_pending 不得被无区别复用为所有保留文档的状态。
+
+#### Scenario: Defer an unapproved plan
+- **WHEN** 用户明确选择保留稍后审阅
+- **THEN** 先确认持久候选引用，再释放当前交互占用，候选仍未批准且不会自动实施。
+
+#### Scenario: Defer resolves a live or resumed waiter
+- **WHEN** 保留决定已持久接纳，原交互为 live plan_control 或 idle 恢复审批
+- **THEN** 清除 approval_pending，不产生 Execute/Revise handoff；live 路径仅结算一次延后结果并沿 EndTurn 结束，idle 路径只结束 waiter，不重新采样、重弹审批或恢复旧版本实施。
+
+#### Scenario: Leave Plan with a retained candidate
+- **WHEN** 用户按既有规则切换到其他 Behavior
+- **THEN** 保留候选仍可只读发现，但不能自动抢占新 owner；再次实施需重新接纳。
+
+#### Scenario: Select another Behavior then reload
+- **WHEN** 有保留候选的会话切换到 Normal/Goal/Workflow 后保存并恢复
+- **THEN** 候选按独立于 Plan runtime 的生命周期通过同一 Control snapshot 校验；不携带伪造的活跃 Plan phase，也不放宽其他跨 runtime 非法字段校验。
+
+实施入口：`crates/codegen/shell/src/session/behavior.rs::PlanRuntime/select_behavior/finish_plan` 和 SessionActor；保留资格是新增契约，四阶段不是新增能力。
+
+### Requirement: Later plan approval binds the reviewed submission
+重新审阅后的批准 SHALL 绑定确切候选提交、artifact revision/hash 和稳定决定身份，在后端冻结快照校验成功且决定持久接纳后才进入既有执行路径。旧决定不得应用于后续提交或另一个计划周期。
+
+#### Scenario: Candidate changes during review
+- **WHEN** 用户审阅 v1 时当前候选变成 v2，随后提交 v1 的批准
+- **THEN** 返回失效/冲突并要求审阅 v2，不批准 v2 或自动执行旧候选。
+
+#### Scenario: Same text is submitted in a new plan cycle
+- **WHEN** 退出 Plan 后重新提交相同正文且旧窗口回答迟到
+- **THEN** 新旧提交身份可区分，旧批准不生效，新决定也不被历史 handoff 错误去重。
+
+#### Scenario: Candidate replacement races an unresolved decision
+- **WHEN** 旧候选的批准/放弃仍在接纳或 ACK 未确认，新提交尝试替换候选
+- **THEN** 在同一 owner 边界先核对原决定，不覆盖其身份或未决证据；已执行/放弃的提交不能再次直接获批，重新执行需要新提交与重审。
+
+实施入口：`behavior.rs::pending_plan_approval_snapshot/approve_submitted_plan_if_with_feedback`、`actor/tool/mod.rs::resume_plan_approval`。
+
+### Requirement: Retained plan execution preserves existing arbitration and revision phases
+批准保留计划 SHALL 复用当前 live ResampleStep 或 idle PlanHandoff，不建立第二条 turn admission；Goal、Rhai Workflow、用户 FIFO hold 和工具权限仍按各自 owner 生效。未批准计划修订 SHALL 回到 Drafting 后 submit，执行中修订 SHALL 经 Amending 和新版本重审。
+
+#### Scenario: Approval without an active turn
+- **WHEN** 合法候选在无活跃 turn 时获批
+- **THEN** 通过原 durable handoff 和空闲仲裁最多启动一次实施，不把已有恢复能力重复实现。
+
+#### Scenario: Existing work prevents immediate execution
+- **WHEN** 当前前台任务、队首 hold 或准入故障阻止执行
+- **THEN** 返回真实等待/拒绝原因，不绕过仲裁或激活 Goal。
+
+#### Scenario: Revision changes implementation requirements
+- **WHEN** 用户反馈改变计划要求
+- **THEN** 形成新 artifact 后重新审批，不继承旧版本批准或暗改被批准正文。
+
+#### Scenario: Approval comments and revision intent differ
+- **WHEN** 用户提交批准说明或明确选择要求修改
+- **THEN** 前者不改变冻结 artifact，后者进入 Drafting/Amending 修订路径；不依靠模型猜测评论语义来绕过重新审批。
+
+实施入口：`actor/tool/preparation.rs`、`actor/notification_drain.rs`；既有执行与授权边界继续适用。

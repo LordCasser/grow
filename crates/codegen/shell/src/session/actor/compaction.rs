@@ -12,7 +12,7 @@ use crate::session::compaction_config::{
 };
 use crate::session::helpers::CompactionStateContext;
 use crate::session::helpers::compaction_context::CompactionInputs;
-use crate::session::helpers::compaction_context::to_system_reminder;
+use crate::session::helpers::compaction_context::{format_local_plan_reminder, to_system_reminder};
 use crate::session::helpers::session_compact::{
     CompactionOutcome, build_compaction_request_surface, compaction_output_limit,
     is_context_length_error,
@@ -100,6 +100,101 @@ pub(crate) struct BackgroundCompaction {
     target: chat_state::SurfaceRange,
     model_key: (String, ApiBackend, u64),
     worker: tokio::task::JoinHandle<Result<GeneratedCompaction, acp::Error>>,
+}
+
+/// Keep the sole background-worker owner reachable if a promotion future is
+/// dropped while awaiting provider or persistence work. Its lease prevents a
+/// replacement generation from occupying the slot before this guard returns.
+struct BackgroundCompactionOwner<'a> {
+    slot: &'a std::cell::RefCell<Option<BackgroundCompaction>>,
+    pending: Option<BackgroundCompaction>,
+    restore_on_drop: bool,
+}
+
+impl<'a> BackgroundCompactionOwner<'a> {
+    fn new(
+        slot: &'a std::cell::RefCell<Option<BackgroundCompaction>>,
+        pending: BackgroundCompaction,
+    ) -> Self {
+        Self {
+            slot,
+            pending: Some(pending),
+            restore_on_drop: true,
+        }
+    }
+
+    fn restore(&mut self) {
+        let pending = self.pending.take().expect("owned compaction job");
+        pending
+            .background
+            .store(true, std::sync::atomic::Ordering::Release);
+        let previous = self.slot.borrow_mut().replace(pending);
+        debug_assert!(previous.is_none(), "compaction owner slot must be vacant");
+        self.restore_on_drop = false;
+    }
+
+    fn disarm_restore(&mut self) {
+        self.restore_on_drop = false;
+    }
+}
+
+impl std::ops::Deref for BackgroundCompactionOwner<'_> {
+    type Target = BackgroundCompaction;
+
+    fn deref(&self) -> &Self::Target {
+        self.pending.as_ref().expect("owned compaction job")
+    }
+}
+
+impl std::ops::DerefMut for BackgroundCompactionOwner<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.pending.as_mut().expect("owned compaction job")
+    }
+}
+
+impl Drop for BackgroundCompactionOwner<'_> {
+    fn drop(&mut self) {
+        if self.restore_on_drop
+            && let Some(pending) = self.pending.take()
+        {
+            pending
+                .background
+                .store(true, std::sync::atomic::Ordering::Release);
+            let previous = self.slot.borrow_mut().replace(pending);
+            debug_assert!(previous.is_none(), "compaction owner slot must be vacant");
+        }
+    }
+}
+
+type BackgroundCompactionJoin =
+    Result<Result<GeneratedCompaction, acp::Error>, tokio::task::JoinError>;
+
+async fn cancel_and_join_background_compaction<'a>(
+    slot: &'a std::cell::RefCell<Option<BackgroundCompaction>>,
+    deadline: Option<tokio::time::Instant>,
+) -> Result<Option<(BackgroundCompactionOwner<'a>, BackgroundCompactionJoin)>, ()> {
+    let Some(pending) = slot.borrow_mut().take() else {
+        return Ok(None);
+    };
+    let mut owner = BackgroundCompactionOwner::new(slot, pending);
+    owner
+        .background
+        .store(false, std::sync::atomic::Ordering::Release);
+    owner.cancel.cancel();
+    let joined = if let Some(deadline) = deadline {
+        match tokio::time::timeout_at(deadline, &mut owner.worker).await {
+            Ok(joined) => joined,
+            Err(_) => {
+                owner
+                    .background
+                    .store(true, std::sync::atomic::Ordering::Release);
+                return Err(());
+            }
+        }
+    } else {
+        (&mut owner.worker).await
+    };
+    Ok(Some((owner, joined)))
 }
 
 impl Drop for BackgroundCompaction {
@@ -522,7 +617,10 @@ impl SessionActor {
         user_context: Option<String>,
     ) -> Result<crate::extensions::notification::SessionUpdate, acp::Error> {
         let started = std::time::Instant::now();
-        self.cancel_background_compaction("manual_compaction")
+        // Manual compaction owns a separate session activity; the root inbox
+        // remains free to acknowledge this worker's Goal receipt while we
+        // wait for its existing generation owner to leave the lease.
+        self.cancel_background_compaction_before("manual_compaction", None)
             .await?;
         let Some(_exclusive) = self
             .compaction
@@ -1732,6 +1830,20 @@ impl SessionActor {
         )
         .await;
         let reminder_wrapper = self.reminder_wrapper_tag();
+        if let Some(snapshot) = self
+            .chat_state_handle
+            .planning_state()
+            .await
+            .map_err(|error| {
+                acp::Error::internal_error().data(format!(
+                    "failed to capture local planning state for compaction: {error}"
+                ))
+            })?
+            && let Some(section) = format_local_plan_reminder(&snapshot.plan)
+        {
+            system_reminder =
+                append_system_reminder_section(system_reminder, reminder_wrapper, &section);
+        }
 
         // Workflow guidance is turn-scoped rather than a Control projection.
         // The current turn's copy sits immediately before its causal prompt,
@@ -1935,38 +2047,93 @@ impl SessionActor {
         }
         Ok(())
     }
-    /// Invalidation never publishes a late result. The independent Sideband
-    /// still owns cancellation accounting and its durable terminal.
+    /// Ordinary authority invalidation is a signal, not a join barrier. The
+    /// root inbox may currently be applying the event that invalidated this
+    /// worker; joining here could block the worker's Sideband settlement ACK
+    /// on that same inbox. Keep an unfinished worker in its existing slot.
     pub(crate) async fn cancel_background_compaction(
         &self,
         reason: &str,
     ) -> Result<(), acp::Error> {
+        self.compaction.cancel.request_background_cancel();
+        let pending = {
+            let mut slot = self.compaction.background.borrow_mut();
+            if slot
+                .as_ref()
+                .is_some_and(|pending| pending.worker.is_finished())
+            {
+                slot.take()
+            } else {
+                None
+            }
+        };
+        if let Some(mut pending) = pending {
+            let joined = (&mut pending.worker).await;
+            let failure = match joined {
+                Ok(Err(error))
+                    if crate::session::commands::is_fatal_turn_boundary_error(&error) =>
+                {
+                    Some(error)
+                }
+                Err(error) => Some(crate::session::commands::fatal_turn_boundary_error(
+                    "background compaction worker",
+                    error.to_string(),
+                )),
+                _ => None,
+            };
+            self.chat_state_handle
+                .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
+                    chat_state::CompactionEvent::Failed {
+                        id: pending.id.clone(),
+                        duration_ms: pending.started.elapsed().as_millis() as u64,
+                        error: reason.to_owned(),
+                    },
+                ))
+                .await
+                .map_err(|error| {
+                    crate::session::commands::fatal_turn_boundary_error(
+                        "background compaction cancellation",
+                        error.to_string(),
+                    )
+                })?;
+            if let Some(error) = failure {
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn cancel_background_compaction_before(
+        &self,
+        reason: &str,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<(), acp::Error> {
         // A foreground publisher may already own the job locally. Its scope
         // retains the same cancellation token until the transaction is closed.
         self.compaction.cancel.request_background_cancel();
-        let pending = self.compaction.background.borrow_mut().take();
-        if let Some(mut pending) = pending {
-            pending
-                .background
-                .store(false, std::sync::atomic::Ordering::Release);
-            pending.cancel.cancel();
+        let drained =
+            cancel_and_join_background_compaction(&self.compaction.background, deadline).await;
+        if let Some((mut pending, joined)) = drained.map_err(|_| {
+            acp::Error::internal_error()
+                .data("background compaction drain was not confirmed before the deadline")
+        })? {
+            // The worker owns Sideband and Goal usage settlement. Keep its
+            // JoinHandle until that owner has closed; publishing Failed first
+            // would let settlement escape the Session persistence barrier.
+            pending.disarm_restore();
             // Discarding a ready result must not hide a durable-write failure
             // behind a subsequent manual compact/control operation.
-            let failure = if pending.worker.is_finished() {
-                match (&mut pending.worker).await {
-                    Ok(Err(error))
-                        if crate::session::commands::is_fatal_turn_boundary_error(&error) =>
-                    {
-                        Some(error)
-                    }
-                    Err(error) => Some(crate::session::commands::fatal_turn_boundary_error(
-                        "background compaction worker",
-                        error.to_string(),
-                    )),
-                    _ => None,
+            let failure = match joined {
+                Ok(Err(error))
+                    if crate::session::commands::is_fatal_turn_boundary_error(&error) =>
+                {
+                    Some(error)
                 }
-            } else {
-                None
+                Err(error) => Some(crate::session::commands::fatal_turn_boundary_error(
+                    "background compaction worker",
+                    error.to_string(),
+                )),
+                _ => None,
             };
             self.chat_state_handle
                 .record_timeline_event_durably(chat_state::TimelineEventKind::Compaction(
@@ -2216,12 +2383,13 @@ impl SessionActor {
             };
             Some(lease)
         };
-        let mut pending = self
+        let pending = self
             .compaction
             .background
             .borrow_mut()
             .take()
             .expect("checked background slot");
+        let mut pending = BackgroundCompactionOwner::new(&self.compaction.background, pending);
         let (cancel, _cancel_scope) = self
             .compaction
             .cancel
@@ -2230,7 +2398,7 @@ impl SessionActor {
             .background_compaction_source_is_current(&pending)
             .await?
         {
-            *self.compaction.background.borrow_mut() = Some(pending);
+            pending.restore();
             self.cancel_background_compaction("compaction_source_invalidated")
                 .await?;
             return Ok(false);
@@ -2275,10 +2443,16 @@ impl SessionActor {
             biased;
             _ = cancel.cancelled() => {
                 pending.cancel.cancel();
-                Err(acp::Error::internal_error().data(crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG))
+                match (&mut pending.worker).await {
+                    Ok(_) => Err(acp::Error::internal_error().data(crate::session::helpers::session_compact::COMPACT_CANCELLED_MSG)),
+                    Err(error) => Err(crate::session::commands::fatal_turn_boundary_error("background compaction worker", error.to_string())),
+                }
             }
             result = &mut pending.worker => result.unwrap_or_else(|error| Err(crate::session::commands::fatal_turn_boundary_error("background compaction worker", error.to_string()))),
         };
+        // The generation owner has now joined and settled Sideband/Goal usage.
+        // A later publication cancellation cannot detach that worker.
+        pending.disarm_restore();
         let mut committed = false;
         let generation_failed = generated.is_err();
         let result = match generated {
@@ -2951,8 +3125,219 @@ impl SessionActor {
 }
 
 #[cfg(test)]
+mod cancelled_compaction_owner_tests {
+    use super::*;
+
+    #[test]
+    fn cancelled_drain_future_returns_the_same_unjoined_worker_owner() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            let cancellation = tokio_util::sync::CancellationToken::new();
+            let worker_cancellation = cancellation.clone();
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let worker = tokio::task::spawn_local(async move {
+                worker_cancellation.cancelled().await;
+                let _ = entered_tx.send(());
+                std::future::pending::<Result<GeneratedCompaction, acp::Error>>().await
+            });
+            let id = uuid::Uuid::now_v7().to_string();
+            let surface_id = chat_state::SurfaceId {
+                event: chat_state::EventSeq::new(1),
+                item: 0,
+            };
+            let background = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let slot = std::cell::RefCell::new(Some(BackgroundCompaction {
+                id,
+                source_items: 0,
+                started: std::time::Instant::now(),
+                cancel: cancellation.clone(),
+                background: background.clone(),
+                authority: Vec::new(),
+                target: chat_state::SurfaceRange {
+                    start: surface_id,
+                    end: surface_id,
+                    shadowed: vec![surface_id],
+                },
+                model_key: ("model".into(), ApiBackend::Messages, 1),
+                worker,
+            }));
+
+            let mut drain = Box::pin(cancel_and_join_background_compaction(&slot, None));
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                tokio::select! {
+                    _ = entered_rx => {},
+                    _result = &mut drain => panic!("drain unexpectedly completed"),
+                }
+            })
+            .await
+            .expect("drain cancels the owned worker");
+            drop(drain);
+
+            let mut restored = slot.borrow_mut().take().expect("owner returned to slot");
+            assert!(cancellation.is_cancelled());
+            assert!(background.load(std::sync::atomic::Ordering::Acquire));
+            assert!(
+                !restored.worker.is_finished(),
+                "the original worker remains joinable"
+            );
+            restored.worker.abort();
+            let _ = (&mut restored.worker).await;
+        }));
+    }
+
+    #[test]
+    fn expired_drain_deadline_returns_the_same_unjoined_worker_owner() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(tokio::task::LocalSet::new().run_until(async {
+            let cancellation = tokio_util::sync::CancellationToken::new();
+            let worker_cancellation = cancellation.clone();
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let worker = tokio::task::spawn_local(async move {
+                worker_cancellation.cancelled().await;
+                let _ = entered_tx.send(());
+                std::future::pending::<Result<GeneratedCompaction, acp::Error>>().await
+            });
+            let surface_id = chat_state::SurfaceId {
+                event: chat_state::EventSeq::new(1),
+                item: 0,
+            };
+            let background = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+            let slot = std::cell::RefCell::new(Some(BackgroundCompaction {
+                id: uuid::Uuid::now_v7().to_string(),
+                source_items: 0,
+                started: std::time::Instant::now(),
+                cancel: cancellation.clone(),
+                background: background.clone(),
+                authority: Vec::new(),
+                target: chat_state::SurfaceRange {
+                    start: surface_id,
+                    end: surface_id,
+                    shadowed: vec![surface_id],
+                },
+                model_key: ("model".into(), ApiBackend::Messages, 1),
+                worker,
+            }));
+
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(10);
+            assert!(
+                cancel_and_join_background_compaction(&slot, Some(deadline))
+                    .await
+                    .is_err()
+            );
+            entered_rx
+                .await
+                .expect("the cancelled worker reached its pending state before the deadline");
+
+            let mut restored = slot.borrow_mut().take().expect("owner returned to slot");
+            assert!(cancellation.is_cancelled());
+            assert!(background.load(std::sync::atomic::Ordering::Acquire));
+            assert!(
+                !restored.worker.is_finished(),
+                "an expired drain leaves the original worker joinable"
+            );
+            restored.worker.abort();
+            let _ = (&mut restored.worker).await;
+        }));
+    }
+}
+
+#[cfg(test)]
 mod context_recall_tests {
     use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compaction_reminder_uses_current_timeline_plan_references() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use tool_types::planning::{
+                    DependencyKind, LocalPlan, PlanLink, PlanPriority, PlanStep, PlanStepStatus,
+                    PlanWait, ReplanChange, ReplanProgress, WaitCondition, WaitDependency,
+                };
+
+                let (actor, _notifications) =
+                    crate::session::actor::tests::support::build_actor().await;
+                let mut plan = LocalPlan::new(actor.session_id_string(), "work:prompt-1");
+                plan.revision = 7;
+                plan.steps.push(PlanStep {
+                    id: "step-current".into(),
+                    content: "finish linked child work".into(),
+                    priority: PlanPriority::High,
+                    status: PlanStepStatus::InProgress,
+                    requirements: None,
+                    removed: false,
+                });
+                plan.links.push(PlanLink {
+                    id: "link-current".into(),
+                    parent_step_id: "step-current".into(),
+                    child_session_id: "child-current".into(),
+                    terminal: false,
+                    required: true,
+                    pending_source_revision: Some(6),
+                    review_required_revision: 0,
+                    result_id: None,
+                    dispatch_failure: None,
+                });
+                plan.waits.push(PlanWait {
+                    id: "wait-current".into(),
+                    step_ids: vec!["step-current".into()],
+                    dependencies: vec![WaitDependency {
+                        kind: DependencyKind::Task,
+                        id: "child-current".into(),
+                    }],
+                    condition: WaitCondition::All,
+                });
+                plan.replans.push(ReplanChange {
+                    id: "replan-current".into(),
+                    link_id: "link-current".into(),
+                    child_session_id: "child-current".into(),
+                    step_id: "step-current".into(),
+                    source_revision: 6,
+                    content: "full replan payload remains in Timeline".into(),
+                    requirements: Some(vec!["detailed child requirement".into()]),
+                    priority: PlanPriority::High,
+                    status: PlanStepStatus::InProgress,
+                    removed: false,
+                    progress: ReplanProgress::Consumed,
+                });
+                actor
+                    .chat_state_handle
+                    .record_timeline_event_durably(chat_state::TimelineEventKind::Planning(
+                        chat_state::timeline::PlanningEvent {
+                            previous: None,
+                            plan: Box::new(plan),
+                        },
+                    ))
+                    .await
+                    .expect("the current plan is durable before compaction reads it");
+
+                // Compaction captures planning_state from the live Timeline immediately before
+                // formatting its reminder. Read through that same actor boundary so the test
+                // exercises rematerialization instead of constructing the reminder input itself.
+                let snapshot = actor
+                    .chat_state_handle
+                    .planning_state()
+                    .await
+                    .expect("read live planning state")
+                    .expect("current plan remains in Timeline");
+                let reminder = format_local_plan_reminder(&snapshot.plan)
+                    .expect("open planning obligations belong in the compaction reminder");
+
+                assert!(reminder.contains("Plan "));
+                assert!(reminder.contains("replan-current"));
+                assert!(reminder.contains("wait-current"));
+                assert!(reminder.contains("link-current"));
+                assert!(reminder.contains("child-current"));
+                assert!(!reminder.contains("full replan payload"));
+                assert!(!reminder.contains("detailed child requirement"));
+            })
+            .await;
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn goal_settlement_stays_unique_when_background_cancellation_fails() {

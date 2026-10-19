@@ -626,7 +626,7 @@ impl SessionActor {
     ) {
         let gate = self.step_control_gate.lock().await;
         let mut admission = self.state.lock().await;
-        if !admission.termination.is_open() {
+        if !admission.execution_open() {
             let _ = responds_to.send(Err(
                 acp::Error::internal_error().data("session is shutting down")
             ));
@@ -656,7 +656,7 @@ impl SessionActor {
         let should_drain = {
             let _gate = self.step_control_gate.lock().await;
             let mut admission = self.state.lock().await;
-            if !admission.termination.is_open()
+            if !admission.execution_open()
                 || !admission.foreground.is_idle()
                 || admission.pending_step_controls.is_empty()
             {
@@ -854,7 +854,7 @@ impl SessionActor {
             >,
         >,
     ) -> Option<tokio::sync::MutexGuard<'a, AdmissionState>> {
-        if !admission.termination.is_open() {
+        if !admission.execution_open() {
             let _ = responds_to
                 .take()
                 .expect("Sampling responder is available")
@@ -1174,7 +1174,7 @@ impl SessionActor {
     ) {
         let gate = self.step_control_gate.lock().await;
         let mut admission = self.state.lock().await;
-        if !admission.termination.is_open() {
+        if !admission.execution_open() {
             let _ = responds_to.send(Err(
                 acp::Error::internal_error().data("session is shutting down")
             ));
@@ -1325,7 +1325,7 @@ impl SessionActor {
     ) -> Result<Option<bool>, String> {
         let gate = self.step_control_gate.lock().await;
         let mut admission = self.state.lock().await;
-        if !admission.termination.is_open() {
+        if !admission.execution_open() {
             return Err("session is shutting down".to_string());
         }
         let should_drain = admission.foreground.is_idle();
@@ -1873,7 +1873,7 @@ impl SessionActor {
             };
             let _gate = self.step_control_gate.lock().await;
             let mut admission = self.state.lock().await;
-            if !admission.termination.is_open() {
+            if !admission.execution_open() {
                 let cancelled = admission.pending_step_controls.cancel_for_shutdown();
                 admission.applying_step_control = None;
                 if matches!(admission.foreground, ForegroundState::ApplyingControl) {

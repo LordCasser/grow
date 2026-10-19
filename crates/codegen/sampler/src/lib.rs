@@ -48,7 +48,7 @@ pub use handle::{
     AttemptAdmission, AttemptScopeCapture, AttemptUsage, AttemptUsageSink, SamplerHandle,
 };
 pub use metrics::{InferenceLatencyStats, compute_percentiles};
-pub use recovery::{OutputDelivery, RecoveryBudget};
+pub use recovery::{OutputDelivery, RecoveryBudget, RecoveryBudgetSnapshot};
 pub use retry::{
     DEFAULT_MAX_RETRIES, RATE_LIMIT_RETRY_THRESHOLD, RetryDecision, classify_error,
     format_sampling_error, resolve_max_retries, retry_backoff_with_jitter,

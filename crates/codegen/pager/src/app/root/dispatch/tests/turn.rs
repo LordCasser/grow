@@ -1569,6 +1569,7 @@ fn queued_prompt_status_resolves_submitting_state() {
         agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
             prompt_id: None,
             admission_resolved: None,
+            frozen_skill_selection: None,
             expected_turn_id: None,
             text: "hello".into(),
             images: vec![],
@@ -2048,6 +2049,75 @@ fn prompt_response_clears_cancel_turn_panel() {
 }
 
 #[test]
+fn runtime_suspended_prompt_response_preserves_turn_and_stale_response_is_inert() {
+    let mut app = test_app_with_agent();
+    let id = AgentId(0);
+    let effects = dispatch(Action::SendPrompt("keep running".into()), &mut app);
+    let prompt_id = match &effects[0] {
+        Effect::SendPrompt { prompt_id, .. } => prompt_id.clone(),
+        other => panic!("expected SendPrompt, got {other:?}"),
+    };
+    {
+        let session = &mut app.agents.get_mut(&id).unwrap().session;
+        session.enqueue_prompt("queued FIFO prompt".into());
+        session.pending_permission_count = 1;
+    }
+    let queue_before = app.agents[&id]
+        .session
+        .pending_prompts
+        .iter()
+        .map(|prompt| (prompt.id, prompt.text.clone()))
+        .collect::<Vec<_>>();
+    let scrollback_before = app.agents[&id].scrollback.len();
+
+    let suspended_response = |response_prompt_id: &str| {
+        acp::PromptResponse::new(acp::StopReason::Cancelled).meta(
+            serde_json::json!({
+                "sessionId": "test-session",
+                "promptId": response_prompt_id,
+                "grow/runtimeSuspended": {
+                    "operationId": "suspend-op-1",
+                    "checkpointSeq": 42
+                }
+            })
+            .as_object()
+            .cloned(),
+        )
+    };
+
+    for response_prompt_id in [prompt_id.as_str(), "expired-prompt"] {
+        let effects = dispatch(
+            Action::TaskComplete(TaskResult::PromptResponse {
+                agent_id: id,
+                result: Ok(suspended_response(response_prompt_id)),
+                http_status: None,
+                prompt_id: Some(response_prompt_id.into()),
+            }),
+            &mut app,
+        );
+        assert!(effects.is_empty(), "suspension must not drain or finalize");
+        let agent = &app.agents[&id];
+        assert!(agent.session.state.is_turn_running());
+        assert_eq!(
+            agent.session.current_prompt_id.as_deref(),
+            Some(prompt_id.as_str())
+        );
+        assert_eq!(
+            agent
+                .session
+                .pending_prompts
+                .iter()
+                .map(|prompt| (prompt.id, prompt.text.clone()))
+                .collect::<Vec<_>>(),
+            queue_before,
+            "queued FIFO work remains pending"
+        );
+        assert_eq!(agent.session.pending_permission_count, 1);
+        assert_eq!(agent.scrollback.len(), scrollback_before);
+    }
+}
+
+#[test]
 fn cancel_after_first_activity_does_not_restore() {
     let mut app = test_app_with_agent();
     let id = AgentId(0);
@@ -2111,6 +2181,7 @@ fn cancel_rewind_removes_all_combined_segment_blocks() {
         agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
             prompt_id: None,
             admission_resolved: None,
+            frozen_skill_selection: None,
             expected_turn_id: None,
             text: "first\n\nsecond".into(),
             images: Vec::new(),
@@ -2158,6 +2229,7 @@ fn cancel_with_newer_draft_skips_pristine_rewind_and_keeps_draft() {
         agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
             prompt_id: None,
             admission_resolved: None,
+            frozen_skill_selection: None,
             expected_turn_id: None,
             text: "sent prompt".into(),
             images: Vec::new(),

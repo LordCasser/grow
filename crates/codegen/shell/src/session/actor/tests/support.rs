@@ -4,15 +4,16 @@ use super::*;
 #[cfg(test)]
 pub(crate) async fn admit_test_human_input(actor: &SessionActor, label: &str) -> Vec<String> {
     let input_id = format!("test-input-{label}");
+    let payload = crate::session::input_inbox::tests::text_payload(label, label);
+    let payload_ref =
+        crate::session::input_inbox::write_payload(&actor.session_directory, &payload)
+            .expect("test input payload must be persisted before admission");
     actor
         .chat_state_handle
         .submit_input_durably(
             input_id.clone(),
             chat_state::InputIntent::Prompt,
-            chat_state::InputPayloadRef {
-                blake3: blake3::hash(label.as_bytes()).to_hex().to_string(),
-                bytes: label.len().max(1) as u64,
-            },
+            payload_ref,
         )
         .await
         .unwrap();
@@ -96,6 +97,7 @@ async fn begin_test_causal_turn_with_identity(
     actor
         .events
         .start_turn(crate::session::events::Event::TurnStarted {
+            prompt_id: "fixture-prompt".into(),
             session_id: actor.session_id_string(),
             turn_number: 1,
             input_ids,
@@ -202,6 +204,7 @@ pub(crate) async fn record_test_prompt(actor: &SessionActor, prompt_text: &str) 
         .record_timeline_event(chat_state::TimelineEventKind::Turn(
             chat_state::TurnEvent::Started {
                 id,
+                prompt_id: format!("test-prompt-{}", id.0),
                 input_ids: Vec::new(),
                 identity: chat_state::TurnIdentity {
                     origin: "user".into(),
@@ -349,7 +352,7 @@ pub(crate) async fn create_test_actor_ex(
     SessionActor,
     tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
 ) {
-    create_test_actor_ex_inner(
+    let (actor, events, _) = create_test_actor_ex_inner(
         total_tokens,
         context_window,
         threshold_percent,
@@ -358,8 +361,104 @@ pub(crate) async fn create_test_actor_ex(
         false,
         ProjectionBarrier::Inject(None),
         None,
+        None,
     )
-    .await
+    .await;
+    (actor, events)
+}
+
+#[cfg(test)]
+pub(crate) async fn create_test_actor_with_planning_driver(
+    total_tokens: u64,
+    context_window: u64,
+    threshold_percent: u8,
+    gateway_tx: tokio::sync::mpsc::UnboundedSender<acp_transport::AcpClientMessage>,
+    persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
+) -> std::sync::Arc<SessionActor> {
+    let (actor, planning_rx) = create_test_actor_with_planning_receiver(
+        total_tokens,
+        context_window,
+        threshold_percent,
+        gateway_tx,
+        persistence_tx,
+    )
+    .await;
+    let actor = std::sync::Arc::new(actor);
+    start_test_planning_driver(&actor, planning_rx);
+    actor
+}
+
+#[cfg(test)]
+pub(crate) async fn create_test_actor_with_planning_receiver(
+    total_tokens: u64,
+    context_window: u64,
+    threshold_percent: u8,
+    gateway_tx: tokio::sync::mpsc::UnboundedSender<acp_transport::AcpClientMessage>,
+    persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
+) -> (
+    SessionActor,
+    tokio::sync::mpsc::UnboundedReceiver<
+        tools::implementations::grow_build::todo::runtime::PlanningCommand,
+    >,
+) {
+    let (actor, _events, planning_rx) = create_test_actor_ex_inner(
+        total_tokens,
+        context_window,
+        threshold_percent,
+        gateway_tx,
+        persistence_tx,
+        true,
+        ProjectionBarrier::Inject(None),
+        None,
+        None,
+    )
+    .await;
+    (actor, planning_rx)
+}
+
+#[cfg(test)]
+pub(crate) fn start_test_planning_driver(
+    actor: &std::sync::Arc<SessionActor>,
+    mut planning_rx: tokio::sync::mpsc::UnboundedReceiver<
+        tools::implementations::grow_build::todo::runtime::PlanningCommand,
+    >,
+) {
+    let weak_actor = std::sync::Arc::downgrade(&actor);
+    tokio::task::spawn_local(async move {
+        while let Some(command) = planning_rx.recv().await {
+            let Some(actor) = weak_actor.upgrade() else {
+                break;
+            };
+            actor.handle_planning_command(command).await;
+        }
+    });
+}
+
+#[cfg(test)]
+pub(crate) async fn install_test_planning_resources(
+    actor: &std::sync::Arc<SessionActor>,
+    prompt_id: &str,
+) {
+    actor
+        .agent
+        .borrow()
+        .tool_bridge()
+        .update_resource(
+            tools::implementations::grow_build::todo::runtime::PlanningRuntimeHandle(
+                actor.planning_command_tx.clone(),
+            ),
+        )
+        .await;
+    actor
+        .agent
+        .borrow()
+        .tool_bridge()
+        .update_resource(
+            tools::implementations::grow_build::task::types::CurrentPromptIdResource(
+                prompt_id.to_owned(),
+            ),
+        )
+        .await;
 }
 
 /// Test-only `TimelinePersistence` for chat-state whose acknowledgement of
@@ -459,7 +558,7 @@ pub(crate) async fn create_test_actor_with_image_projection_persistence(
     persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
 ) -> (SessionActor, ImageProjectionPersistence) {
     let image_projection_persistence = ImageProjectionPersistence::default();
-    let actor = create_test_actor_ex_inner(
+    let (actor, _, _) = create_test_actor_ex_inner(
         total_tokens,
         context_window,
         threshold_percent,
@@ -468,9 +567,9 @@ pub(crate) async fn create_test_actor_with_image_projection_persistence(
         true,
         ProjectionBarrier::Inject(None),
         Some(image_projection_persistence.clone()),
+        None,
     )
-    .await
-    .0;
+    .await;
     (actor, image_projection_persistence)
 }
 
@@ -486,7 +585,7 @@ pub(crate) async fn create_test_actor_ex_with_projection_error(
     SessionActor,
     tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
 ) {
-    create_test_actor_ex_inner(
+    let (actor, events, _) = create_test_actor_ex_inner(
         total_tokens,
         context_window,
         threshold_percent,
@@ -495,8 +594,10 @@ pub(crate) async fn create_test_actor_ex_with_projection_error(
         true,
         ProjectionBarrier::Inject(projection_error),
         None,
+        None,
     )
-    .await
+    .await;
+    (actor, events)
 }
 
 #[cfg(test)]
@@ -510,7 +611,7 @@ pub(crate) async fn create_test_actor_ex_with_physical_projection(
     SessionActor,
     tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
 ) {
-    create_test_actor_ex_inner(
+    let (actor, events, _) = create_test_actor_ex_inner(
         total_tokens,
         context_window,
         threshold_percent,
@@ -519,14 +620,139 @@ pub(crate) async fn create_test_actor_ex_with_physical_projection(
         true,
         ProjectionBarrier::Forward,
         None,
+        None,
     )
-    .await
+    .await;
+    (actor, events)
 }
 
 #[cfg(test)]
 enum ProjectionBarrier {
     Inject(Option<crate::session::storage::AppendUpdateError>),
     Forward,
+}
+
+#[cfg(test)]
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum SkillCommitAckFault {
+    None,
+    FailPermanent,
+    PersistThenCancel,
+}
+
+#[cfg(test)]
+struct SkillCommitAckPersistence {
+    fault: std::sync::Mutex<SkillCommitAckFault>,
+    injected: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    durable_events: std::sync::Arc<std::sync::Mutex<Vec<chat_state::TimelineEvent>>>,
+    cancellation_token: tokio_util::sync::CancellationToken,
+}
+
+#[cfg(test)]
+pub(crate) struct SkillCommitAckProbe {
+    pub(crate) injected: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub(crate) durable_events: std::sync::Arc<std::sync::Mutex<Vec<chat_state::TimelineEvent>>>,
+}
+
+#[cfg(test)]
+impl chat_state::TimelinePersistence for SkillCommitAckPersistence {
+    fn persist_timeline_event_and_ack(
+        &mut self,
+        event: &chat_state::TimelineEvent,
+    ) -> tokio::sync::oneshot::Receiver<std::io::Result<()>> {
+        let (respond_to, receiver) = tokio::sync::oneshot::channel();
+        let is_skill_group = matches!(
+            &event.kind,
+            chat_state::TimelineEventKind::Input(chat_state::InputEvent::Consumed {
+                skill_loads,
+                ..
+            }) if !skill_loads.is_empty()
+        );
+        if is_skill_group {
+            match std::mem::replace(
+                &mut *self.fault.lock().expect("skill ACK fault mutex poisoned"),
+                SkillCommitAckFault::None,
+            ) {
+                SkillCommitAckFault::None => {
+                    self.durable_events
+                        .lock()
+                        .expect("skill durable event mutex poisoned")
+                        .push(event.clone());
+                    let _ = respond_to.send(Ok(()));
+                }
+                SkillCommitAckFault::FailPermanent => {
+                    self.injected
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    let _ = respond_to.send(Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "injected permanent user skill group persistence failure",
+                    )));
+                }
+                SkillCommitAckFault::PersistThenCancel => {
+                    self.injected
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    self.durable_events
+                        .lock()
+                        .expect("skill durable event mutex poisoned")
+                        .push(event.clone());
+                    drop(respond_to);
+                    self.cancellation_token.cancel();
+                }
+            }
+        } else {
+            self.durable_events
+                .lock()
+                .expect("skill durable event mutex poisoned")
+                .push(event.clone());
+            let _ = respond_to.send(Ok(()));
+        }
+        receiver
+    }
+
+    fn flush(&mut self) {}
+}
+
+#[cfg(test)]
+pub(crate) async fn create_test_actor_ex_with_skill_commit_ack_fault(
+    total_tokens: u64,
+    context_window: u64,
+    threshold_percent: u8,
+    gateway_tx: tokio::sync::mpsc::UnboundedSender<acp_transport::AcpClientMessage>,
+    persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
+    fault: SkillCommitAckFault,
+) -> (
+    SessionActor,
+    tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
+    std::sync::Arc<SkillCommitAckProbe>,
+) {
+    let injected = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let durable_events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let cancellation_token = tokio_util::sync::CancellationToken::new();
+    let (actor, events, _) = create_test_actor_ex_inner(
+        total_tokens,
+        context_window,
+        threshold_percent,
+        gateway_tx,
+        persistence_tx,
+        false,
+        ProjectionBarrier::Inject(None),
+        None,
+        Some((
+            fault,
+            injected.clone(),
+            durable_events.clone(),
+            cancellation_token,
+        )),
+    )
+    .await;
+    (
+        actor,
+        events,
+        std::sync::Arc::new(SkillCommitAckProbe {
+            injected,
+            durable_events,
+        }),
+    )
 }
 
 #[cfg(test)]
@@ -539,15 +765,25 @@ async fn create_test_actor_ex_inner(
     bridge_projection_events: bool,
     mut projection_barrier: ProjectionBarrier,
     image_projection_persistence: Option<ImageProjectionPersistence>,
+    skill_commit_ack: Option<(
+        SkillCommitAckFault,
+        std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        std::sync::Arc<std::sync::Mutex<Vec<chat_state::TimelineEvent>>>,
+        tokio_util::sync::CancellationToken,
+    )>,
 ) -> (
     SessionActor,
     tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
+    tokio::sync::mpsc::UnboundedReceiver<
+        tools::implementations::grow_build::todo::runtime::PlanningCommand,
+    >,
 ) {
     // Production owns a persistence actor that acknowledges durable terminal
     // appends. Unit tests pass an observation channel instead, so bridge the
     // durable envelope to the historical `Update` shape while completing the
     // barrier. Tests that care about ordering still observe the exact record.
     let response_projection_persistence_tx = persistence_tx.clone();
+    let (planning_command_tx, planning_command_rx) = tokio::sync::mpsc::unbounded_channel();
     let (actor_persistence_tx, mut actor_persistence_rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(async move {
         while let Some(message) = actor_persistence_rx.recv().await {
@@ -605,6 +841,7 @@ async fn create_test_actor_ex_inner(
     let state = TokioMutex::new(AdmissionState {
         foreground: ForegroundState::Idle,
         termination: TerminationState::Open,
+        runtime_suspend: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pending_manual_compact: None,
         pending_step_controls: PendingStepControls::default(),
         applying_step_control: None,
@@ -683,10 +920,24 @@ async fn create_test_actor_ex_inner(
     } else {
         raw_event_rx
     };
+    let chat_state_cancellation_token = skill_commit_ack
+        .as_ref()
+        .map(|(_, _, _, cancellation_token)| cancellation_token.clone())
+        .unwrap_or_else(tokio_util::sync::CancellationToken::new);
     let timeline_persistence: Box<dyn chat_state::TimelinePersistence> =
         match image_projection_persistence {
             Some(persistence) => Box::new(persistence),
-            None => Box::new(chat_state::NullTimelinePersistence),
+            None => match skill_commit_ack {
+                None => Box::new(chat_state::NullTimelinePersistence),
+                Some((fault, injected, durable_events, cancellation_token)) => {
+                    Box::new(SkillCommitAckPersistence {
+                        fault: std::sync::Mutex::new(fault),
+                        injected,
+                        durable_events,
+                        cancellation_token,
+                    })
+                }
+            },
         };
     let chat_state_handle = chat_state::ChatStateActor::spawn(
         vec![sampling_types::ConversationItem::system(
@@ -709,7 +960,7 @@ async fn create_test_actor_ex_inner(
         },
         timeline_persistence,
         chat_event_tx,
-        tokio_util::sync::CancellationToken::new(),
+        chat_state_cancellation_token,
     );
     chat_state_handle.record_provider_context_anchor(total_tokens);
     let events = crate::session::events::EventTracker::new(chat_state_handle.clone());
@@ -785,9 +1036,7 @@ async fn create_test_actor_ex_inner(
         chat_state_handle,
         unattributed_background_usage: std::sync::atomic::AtomicBool::new(false),
         current_prompt_id: std::sync::Arc::new(std::sync::Mutex::new(None)),
-        pending_interactions: std::sync::Arc::new(std::sync::Mutex::new(
-            std::collections::HashMap::new(),
-        )),
+        pending_interactions: crate::session::pending_interaction::PendingInteractions::new(),
         compactions_remaining: std::cell::Cell::new(None),
         compaction_at_tokens: std::cell::Cell::new(None),
         doom_loop_recovery: None,
@@ -916,6 +1165,19 @@ async fn create_test_actor_ex_inner(
         goal_turn_task_ids: parking_lot::Mutex::new(std::collections::HashMap::new()),
         goal_command_rx: std::cell::RefCell::new(Some(goal_command_rx)),
         goal_command_tx,
+        planning_command_tx,
+        planning_delivery: TaskSlot::new(),
+        runtime_suspension_worker: TaskSlot::new(),
+        runtime_suspension_fault: std::cell::RefCell::new(None),
+        runtime_suspended_waiters: std::cell::RefCell::new(Vec::new()),
+        planning_delivery_dirty: std::cell::Cell::new(false),
+        runtime_release_waiters: std::cell::RefCell::new(Vec::new()),
+        restoration_release: std::cell::RefCell::new(None),
+        runtime_completion_watchers: std::cell::RefCell::new(Vec::new()),
+        restored_response: std::cell::RefCell::new(None),
+        restored_response_for_stop_gate: std::cell::RefCell::new(None),
+        turn_continuation: std::cell::RefCell::new(None),
+        sampling_continuation: std::cell::RefCell::new(None),
         workflow_manager: crate::session::workflow::manager::WorkflowManager::test_bundle().0,
         workflow_tx: tokio::sync::mpsc::unbounded_channel().0,
         workflow_worker: TaskSlot::new(),
@@ -961,7 +1223,7 @@ async fn create_test_actor_ex_inner(
         .activate_resource_domain(&actor.rebuild_spec.resource_domain)
         .await
         .expect("test actor resource domain must be active before Agent rebuilds");
-    (actor, observed_event_rx)
+    (actor, observed_event_rx, planning_command_rx)
 }
 #[cfg(test)]
 pub(crate) async fn create_test_actor(
@@ -971,7 +1233,7 @@ pub(crate) async fn create_test_actor(
     gateway_tx: tokio::sync::mpsc::UnboundedSender<acp_transport::AcpClientMessage>,
     persistence_tx: tokio::sync::mpsc::UnboundedSender<PersistenceMsg>,
 ) -> SessionActor {
-    create_test_actor_ex_with_projection_error(
+    let (actor, _) = create_test_actor_ex_with_projection_error(
         total_tokens,
         context_window,
         threshold_percent,
@@ -979,8 +1241,8 @@ pub(crate) async fn create_test_actor(
         persistence_tx,
         None,
     )
-    .await
-    .0
+    .await;
+    actor
 }
 /// Build a user-originated `InputItem` carrying queue metadata, returning the
 /// completion receiver so a test can assert the prompt's in-flight RPC is
@@ -1057,13 +1319,16 @@ pub(crate) fn input_with_origin_rx(
 /// in flight until aborted. Requires a `LocalSet` (`spawn_local`).
 #[cfg(test)]
 pub(crate) fn running_task_stub(prompt_id: &str) -> AgentTask {
+    let (stopped_tx, stopped_rx) = tokio::sync::oneshot::channel();
     AgentTask {
+        stopped: futures_util::FutureExt::shared(stopped_rx),
         prompt_id: prompt_id.to_string(),
         origin: crate::session::PromptOrigin::User,
         turn_kind: crate::session::TurnKind::User,
         turn_start_ms: 0,
         usage_epoch: 0,
-        handle: tokio::task::spawn_local(async {
+        handle: tokio::task::spawn_local(async move {
+            let _stopped = stopped_tx;
             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
         })
         .abort_handle(),
@@ -1094,8 +1359,22 @@ pub(crate) async fn build_actor() -> (
     let (persistence_tx, mut persistence_rx) =
         tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
     tokio::spawn(async move { while persistence_rx.recv().await.is_some() {} });
+    let (actor, _) = create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
+    (std::sync::Arc::new(actor), gateway_rx)
+}
+
+#[cfg(test)]
+pub(crate) async fn build_actor_with_planning_driver() -> (
+    std::sync::Arc<SessionActor>,
+    tokio::sync::mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+) {
+    let (gateway_tx, gateway_rx) =
+        tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+    let (persistence_tx, mut persistence_rx) =
+        tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+    tokio::spawn(async move { while persistence_rx.recv().await.is_some() {} });
     let actor =
-        std::sync::Arc::new(create_test_actor(0, 256_000, 85, gateway_tx, persistence_tx).await);
+        create_test_actor_with_planning_driver(0, 256_000, 85, gateway_tx, persistence_tx).await;
     (actor, gateway_rx)
 }
 /// A small valid inline PNG content block (survives normalization —

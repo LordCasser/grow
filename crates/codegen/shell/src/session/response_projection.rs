@@ -564,6 +564,7 @@ mod tests {
         timeline
             .record(chat_state::TimelineEventKind::Turn(
                 chat_state::TurnEvent::Started {
+                    prompt_id: "fixture-prompt".into(),
                     id: turn,
                     input_ids: Vec::new(),
                     identity: chat_state::TurnIdentity {

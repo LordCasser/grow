@@ -24,6 +24,75 @@ fn behavior_picker_selection_changes_behavior_without_touching_permission() {
     ));
 }
 
+#[test]
+fn retained_plan_review_key_reaches_bound_dispatch_during_behavior_confirmation() {
+    use crate::app::root::InputOutcome;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    let mut app = test_app_with_agent();
+    let action = {
+        let agent = app.agents.get_mut(&AgentId(0)).unwrap();
+        agent.session.behavior_mode = tools::types::BehaviorId::Plan;
+        agent.session.session_id = Some(acp::SessionId::new("retained-plan-session"));
+        agent.show_behavior_switch_warning(tools::types::BehaviorId::Normal, 8_000);
+        let content = "# retained Plan".to_owned();
+        agent
+            .resolve_plan_preview(
+                tools::implementations::grow_build::plan_control::PlanArtifactQueryResponse {
+                    session_id: "retained-plan-session".into(),
+                    submission_id: 7,
+                    retained: true,
+                    artifact_revision: 3,
+                    artifact_hash: blake3::hash(content.as_bytes()).to_hex().to_string(),
+                    plan_content: content,
+                },
+            )
+            .unwrap();
+        agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+            &crate::actions::ActionRegistry::defaults(),
+            &mut Vec::new(),
+        )
+    };
+    assert!(matches!(
+        action,
+        InputOutcome::Action(Action::ReviewRetainedPlan)
+    ));
+
+    let effects = dispatch(Action::ReviewRetainedPlan, &mut app);
+    let [
+        Effect::ReviewRetainedPlan {
+            session_id,
+            binding_epoch,
+            submission_id,
+            decision_id,
+            ..
+        },
+    ] = effects.as_slice()
+    else {
+        panic!("review shortcut must dispatch its retained candidate: {effects:?}");
+    };
+    assert_eq!(session_id.0.as_ref(), "retained-plan-session");
+    assert_eq!(*submission_id, 7);
+    assert_eq!(
+        *binding_epoch,
+        app.agents[&AgentId(0)].session_binding_epoch
+    );
+    assert!(!decision_id.is_empty());
+
+    let retry = dispatch(Action::ReviewRetainedPlan, &mut app);
+    let [
+        Effect::ReviewRetainedPlan {
+            decision_id: retry_id,
+            ..
+        },
+    ] = retry.as_slice()
+    else {
+        panic!("retry must keep the original review operation: {retry:?}");
+    };
+    assert_eq!(retry_id, decision_id);
+}
+
 /// `ShowPlanNudge` is a no-op when its per-tip gate is off: no tip shown,
 /// no count burned, even on a drawable agent.
 #[test]

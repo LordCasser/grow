@@ -1,0 +1,7 @@
+- [x] 1.1 Audit identity flow from configuration/plugin/client inputs through catalog, client, tool prefixes, direct calls, recovery, and replacement; confirm duplicate-name behavior and record evidence/gaps.
+- [x] 1.2 Enforce one session identity so directory entry, client, and tool prefix use the same name and authoritative source.
+- [x] 1.3 Preserve config-over-plugin and applicable client precedence while deterministically resolving same-name entries across distinct endpoints.
+- [x] 1.4 Reject duplicate names within one client-provided array with a clear validation error.
+- [x] 1.5 Require explicit name and URL to match the same current authoritative entry; prevent cross-name URL redirection.
+- [x] 1.6 Verify identity consistency during cold recovery and hot replacement, including stale asynchronous completion.
+- [x] 1.7 Add focused regressions and run strict OpenSpec validation; record evidence before completing tasks.

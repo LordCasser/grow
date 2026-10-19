@@ -395,8 +395,8 @@ pub fn build_payload(
             McpServerStatusReason::ConfigChanged,
             None,
         ),
-        // `Ready` is only emitted from the first-time
-        // `ensure_initialized` path. Map it to `Initialized`, NOT
+        // `Ready` comes from `ensure_initialized`, including in-place
+        // transport recovery. Map it to `Initialized`, NOT
         // `RestartSucceeded` (which is reserved for the
         // auto-restart code path).
         (McpClientEventKind::Ready, _) => (
@@ -709,7 +709,19 @@ pub async fn run_dispatcher(
     // Fatal teardown and timeout aborts skip the normal cancel/drain below.
     // Keep cancellation owned by this future, not by its detached recoveries.
     let _cancel_on_exit = restart_cancel.clone().drop_guard();
+    // The dispatcher owns catalog discovery, including tasks that have not
+    // been polled yet. A newer event replaces only that server's job.
+    let mut catalog_tasks = tokio::task::JoinSet::new();
+    let mut catalog_aborts: HashMap<String, tokio::task::AbortHandle> = HashMap::new();
     loop {
+        while let Some(result) = catalog_tasks.try_join_next() {
+            if let Err(error) = result
+                && !error.is_cancelled()
+            {
+                tracing::warn!(%error, "MCP catalog refresh task failed");
+            }
+        }
+        catalog_aborts.retain(|_, handle| !handle.is_finished());
         let Some(mut win) = collect_window(&mut rx, COALESCE_WINDOW).await else {
             tracing::debug!(
                 session_id = %session_id,
@@ -775,7 +787,10 @@ pub async fn run_dispatcher(
         // consumes `buf` so we don't need to clone events.
         //
         // stdio respawn: `TransportClosed` (non-HTTP) + `HandshakeFailed`.
-        let restart_keys: Vec<(McpServerName, McpClientEventKind)> = if restart_actions.is_some() {
+        let auto_restart = restart_actions
+            .as_ref()
+            .is_some_and(|actions| actions.auto_restart_enabled());
+        let restart_keys: Vec<(McpServerName, McpClientEventKind)> = if auto_restart {
             buf.keys()
                 .filter(|(server, k)| match k {
                     McpClientEventKind::TransportClosed => !http_servers.contains(server),
@@ -788,7 +803,7 @@ pub async fn run_dispatcher(
             Vec::new()
         };
         // in-place HTTP recovery: `TransportClosed` for HTTP servers.
-        let http_recover: Vec<McpServerName> = if restart_actions.is_some() {
+        let http_recover: Vec<McpServerName> = if auto_restart {
             collect_http_transport_closed(&buf, &http_servers)
         } else {
             Vec::new()
@@ -815,8 +830,33 @@ pub async fn run_dispatcher(
                 }
             }
         }
+        let mut catalog_refreshes = HashMap::new();
+        for event in buf.values() {
+            match event {
+                McpClientEvent::ConfigRemoved { server, .. } => {
+                    if let Some(handle) = catalog_aborts.remove(server) {
+                        handle.abort();
+                    }
+                }
+                McpClientEvent::ToolsChanged { server, episode }
+                | McpClientEvent::Ready { server, episode } => {
+                    catalog_refreshes.insert(server.clone(), *episode);
+                }
+                _ => {}
+            }
+        }
         flush_window(&session_id, buf, &shutdown, &gateway);
         if let Some(actions) = restart_actions.as_ref() {
+            for (server, episode) in catalog_refreshes {
+                let actions = Rc::clone(actions);
+                let server_for_task = server.clone();
+                let handle = catalog_tasks.spawn_local(async move {
+                    actions.refresh_tools(&server_for_task, episode).await;
+                });
+                if let Some(old) = catalog_aborts.insert(server, handle) {
+                    old.abort();
+                }
+            }
             for (server, kind) in restart_keys {
                 let _ = crate::session::mcp_restart::maybe_schedule_restart(
                     Rc::clone(actions),
@@ -1568,6 +1608,10 @@ mod tests {
     /// reads from the same Arc.
     struct CountingActions {
         claimed: tokio::sync::Notify,
+        refresh_started: tokio::sync::Notify,
+        refresh_cancelled: tokio::sync::Notify,
+        release_refresh: tokio::sync::Notify,
+        refresh_completed: std::cell::Cell<usize>,
         configured: std::cell::RefCell<HashSet<String>>,
         respawn_calls: std::cell::RefCell<Vec<String>>,
         shutdown: SharedShutdownState,
@@ -1577,6 +1621,10 @@ mod tests {
         fn new(shutdown: SharedShutdownState) -> Self {
             Self {
                 claimed: tokio::sync::Notify::new(),
+                refresh_started: tokio::sync::Notify::new(),
+                refresh_cancelled: tokio::sync::Notify::new(),
+                release_refresh: tokio::sync::Notify::new(),
+                refresh_completed: std::cell::Cell::new(0),
                 configured: std::cell::RefCell::new(HashSet::new()),
                 respawn_calls: std::cell::RefCell::new(Vec::new()),
                 shutdown,
@@ -1619,6 +1667,29 @@ mod tests {
             Ok(())
         }
         fn push_status(&self, _payload: &crate::session::mcp_dispatcher::McpServerStatusPayload) {}
+
+        async fn refresh_tools(&self, _server: &str, _episode: McpClientEpisode) {
+            struct CancellationNotice<'a> {
+                notify: &'a tokio::sync::Notify,
+                completed: bool,
+            }
+            impl Drop for CancellationNotice<'_> {
+                fn drop(&mut self) {
+                    if !self.completed {
+                        self.notify.notify_one();
+                    }
+                }
+            }
+
+            let mut cancellation = CancellationNotice {
+                notify: &self.refresh_cancelled,
+                completed: false,
+            };
+            self.refresh_started.notify_one();
+            self.release_refresh.notified().await;
+            self.refresh_completed.set(self.refresh_completed.get() + 1);
+            cancellation.completed = true;
+        }
     }
 
     #[tokio::test(start_paused = true)]
@@ -1663,6 +1734,54 @@ mod tests {
                     actions.respawn_calls().is_empty(),
                     "aborted dispatcher left recovery running"
                 );
+            })
+            .await;
+    }
+
+    #[tokio::test(start_paused = true, flavor = "current_thread")]
+    async fn aborted_dispatcher_cancels_in_flight_catalog_refresh() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let client = Arc::new(::mcp::servers::McpClient::stub("svr"));
+                let mut state = McpState::new(vec![]);
+                let episode = state.bind_client_events(&client);
+                state.owned_clients.insert("svr".into(), client);
+                let shutdown = new_shutdown_state();
+                let actions = Rc::new(CountingActions::new(shutdown.clone()));
+                let (tx, rx) = unbounded_channel();
+                let dispatcher = tokio::task::spawn_local(run_dispatcher(
+                    "session".into(),
+                    rx,
+                    discard_gateway(),
+                    Arc::new(TokioMutex::new(state)),
+                    shutdown,
+                    Some(actions.clone()),
+                    std::path::PathBuf::from("."),
+                ));
+
+                tx.send(McpClientEvent::ToolsChanged {
+                    server: "svr".into(),
+                    episode,
+                })
+                .unwrap();
+                tokio::task::yield_now().await;
+                tokio::time::advance(COALESCE_WINDOW + Duration::from_millis(1)).await;
+                tokio::time::timeout(Duration::from_secs(1), actions.refresh_started.notified())
+                    .await
+                    .expect("catalog refresh did not start");
+
+                dispatcher.abort();
+                assert!(dispatcher.await.unwrap_err().is_cancelled());
+                tokio::time::timeout(Duration::from_secs(1), actions.refresh_cancelled.notified())
+                    .await
+                    .expect("dispatcher drop did not cancel the in-flight refresh");
+
+                // The suspended remote-discovery step must not resume and
+                // complete after the dispatcher has been dropped.
+                actions.release_refresh.notify_one();
+                tokio::task::yield_now().await;
+                assert_eq!(actions.refresh_completed.get(), 0);
             })
             .await;
     }

@@ -1,6 +1,5 @@
 //! Behavior, permission, and plan-view transitions.
 
-use super::ctx::with_active_agent;
 use super::queue::enqueue_behavior_control;
 use super::session::lifecycle::skip_picker_and_create_session;
 use super::settings::ui::{refresh_open_settings_modals, save_success_toast};
@@ -8,20 +7,109 @@ use crate::app::actions::Effect;
 use crate::app::root::{ActiveView, AppView};
 use acp_transport::protocol as acp;
 
-/// Show the current plan: if a plan file exists, open it in the preview
-/// overlay popover. If no plan has been written yet, show a toast.
-///
-/// Delegates to `AgentView::show_plan_preview()` which reads the session artifact
-/// from `~/.grow/sessions/<urlencoded_cwd>/<session_id>/plan.md`.
+/// Show the current plan through the Shell's canonical immutable artifact query.
 pub(super) fn dispatch_show_plan(app: &mut AppView) -> Vec<Effect> {
-    with_active_agent(app, |agent| {
-        if agent.plan_approval_view.is_some() {
-            agent.reopen_plan_approval();
-        } else {
-            agent.show_plan_preview();
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    if agent.plan_approval_view.is_some() {
+        agent.reopen_plan_approval();
+        return vec![];
+    }
+    if let Some(pending) = agent.pending_plan_approval_decision.as_ref() {
+        let Some(session_id) = agent.session.session_id.clone() else {
+            return vec![];
+        };
+        if agent.session_binding_epoch != pending.binding_epoch
+            || session_id.0.as_ref() != pending.session_id.as_str()
+        {
+            return vec![];
         }
-    });
-    vec![]
+        return vec![Effect::QueryPlanDecisionStatus {
+            agent_id: id,
+            session_id,
+            binding_epoch: agent.session_binding_epoch,
+            submission_id: pending.response.submission_id,
+            decision_id: pending.response.decision_id.clone(),
+        }];
+    }
+    let Some(session_id) = agent.session.session_id.clone() else {
+        agent.show_toast("No active session");
+        return vec![];
+    };
+    agent.plan_preview_request_id = agent.plan_preview_request_id.wrapping_add(1);
+    vec![Effect::QueryPlanArtifact {
+        agent_id: id,
+        session_id,
+        binding_epoch: agent.session_binding_epoch,
+        request_id: agent.plan_preview_request_id,
+    }]
+}
+
+pub(super) fn dispatch_check_plan_approval_decision(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let Some(pending) = agent.pending_plan_approval_decision.as_ref() else {
+        return vec![];
+    };
+    let Some(session_id) = agent.session.session_id.clone() else {
+        return vec![];
+    };
+    if agent.session_binding_epoch != pending.binding_epoch
+        || session_id.0.as_ref() != pending.session_id.as_str()
+    {
+        return vec![];
+    }
+    vec![Effect::QueryPlanDecisionStatus {
+        agent_id: id,
+        session_id,
+        binding_epoch: agent.session_binding_epoch,
+        submission_id: pending.response.submission_id,
+        decision_id: pending.response.decision_id.clone(),
+    }]
+}
+
+pub(super) fn dispatch_review_retained_plan(app: &mut AppView) -> Vec<Effect> {
+    let ActiveView::Agent(id) = app.active_view else {
+        return vec![];
+    };
+    let Some(agent) = app.agents.get_mut(&id) else {
+        return vec![];
+    };
+    let Some(preview) = agent
+        .plan_artifact_preview
+        .as_ref()
+        .filter(|preview| preview.retained)
+    else {
+        return vec![];
+    };
+    let Some(session_id) = agent.session.session_id.clone() else {
+        return vec![];
+    };
+    if let Some((pending, _)) = agent.plan_review_pending.as_ref() {
+        if *pending != preview.submission_id {
+            agent.show_toast("Resolve the pending Plan review before replacing it.");
+            return vec![];
+        }
+    }
+    let submission_id = preview.submission_id;
+    let (_, decision_id) = agent
+        .plan_review_pending
+        .get_or_insert_with(|| (submission_id, uuid::Uuid::new_v4().to_string()));
+    vec![Effect::ReviewRetainedPlan {
+        agent_id: id,
+        session_id,
+        binding_epoch: agent.session_binding_epoch,
+        submission_id,
+        decision_id: decision_id.clone(),
+    }]
 }
 
 /// Select a Behavior and optionally stage its first prompt. Behavior has an

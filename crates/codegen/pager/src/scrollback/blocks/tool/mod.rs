@@ -84,8 +84,6 @@ impl fmt::Display for LineRange {
 pub enum VerbGroupKind {
     /// Plain file reads.
     File,
-    /// Skill reads and `Skill` invocations (distinct noun from plain files).
-    Skill,
     /// Pattern searches (grep/glob).
     Search,
     /// Directory listings.
@@ -110,11 +108,31 @@ pub enum VerbGroupKind {
     OtherTool,
 }
 
+/// Visible state of a structured `grow` skill invocation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SkillDisplayStatus {
+    Loading,
+    Loaded,
+    Failed,
+    Cancelled,
+}
+
+impl SkillDisplayStatus {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Loading => "Loading",
+            Self::Loaded => "Loaded",
+            Self::Failed => "Failed",
+            Self::Cancelled => "Cancelled",
+        }
+    }
+}
+
 impl VerbGroupKind {
     /// Verb-group row verb: present tense while running, past otherwise.
     pub fn verb(self, running: bool) -> &'static str {
         let (past, present) = match self {
-            VerbGroupKind::File | VerbGroupKind::Skill => ("Read", "Reading"),
+            VerbGroupKind::File => ("Read", "Reading"),
             VerbGroupKind::Search
             | VerbGroupKind::MemorySearch
             | VerbGroupKind::IntegrationSearch => ("Searched", "Searching"),
@@ -133,7 +151,6 @@ impl VerbGroupKind {
     pub fn noun(self, count: usize) -> &'static str {
         let (one, many) = match self {
             VerbGroupKind::File | VerbGroupKind::EditFile => ("file", "files"),
-            VerbGroupKind::Skill => ("skill", "skills"),
             VerbGroupKind::Search => ("pattern", "patterns"),
             VerbGroupKind::Dir => ("dir", "dirs"),
             VerbGroupKind::WebFetch => ("website", "websites"),
@@ -286,6 +303,53 @@ impl BlockContent for ToolCallBlock {
 }
 
 impl ToolCallBlock {
+    /// Project the structured `grow/load_skill` input and output into the
+    /// expandable skill row. Skill identity comes from the tool kind; the
+    /// name, arguments, source and prepared body come only from protocol data.
+    pub(crate) fn skill_call(
+        name: Option<&str>,
+        args: Option<&str>,
+        source: Option<&str>,
+        prepared_body: Option<&str>,
+        status: SkillDisplayStatus,
+        error: Option<String>,
+    ) -> Self {
+        let name = name.filter(|name| !name.trim().is_empty());
+        let title = name.map_or_else(|| "Skill".to_owned(), |name| format!("Skill: {name}"));
+        let mut summary = status.label().to_owned();
+        if let Some(args) = args.filter(|args| !args.is_empty()) {
+            summary.push_str(" · args: ");
+            summary.push_str(args);
+        }
+
+        let mut details = Vec::new();
+        if let Some(source) = source.filter(|source| !source.is_empty()) {
+            details.push(format!("Source: {source}"));
+        }
+        if let Some(body) = prepared_body {
+            details.push(format!("Prepared body:\n{body}"));
+        }
+
+        let mut block = OtherToolCallBlock::new(title, summary);
+        if !details.is_empty() {
+            block = block.with_output(details.join("\n\n"));
+        }
+        match status {
+            SkillDisplayStatus::Failed => {
+                block.error = Some(error.unwrap_or_else(|| "Skill load failed".into()));
+            }
+            SkillDisplayStatus::Cancelled => {
+                block.error = Some(error.unwrap_or_else(|| "Skill load cancelled".into()));
+            }
+            SkillDisplayStatus::Loading | SkillDisplayStatus::Loaded => {
+                if let Some(error) = error {
+                    block.error = Some(error);
+                }
+            }
+        }
+        Self::Skill(block)
+    }
+
     /// Transfer timing data from another block of the same variant.
     ///
     /// Used when a running block is replaced with its completed version
@@ -459,7 +523,6 @@ impl ToolCallBlock {
                 ToolCallBlock::IntegrationSearch(IntegrationSearchToolCallBlock::new(summary))
             }
             "use_tool" => ToolCallBlock::UseTool(UseToolCallBlock::new(summary)),
-            "skill" => ToolCallBlock::Skill(OtherToolCallBlock::new("Skill", summary)),
             _ => ToolCallBlock::Other(OtherToolCallBlock::new(name, summary)),
         }
     }
@@ -537,17 +600,14 @@ impl ToolCallBlock {
     /// (still dense-packs via `is_groupable`).
     pub fn verb_group_kind(&self) -> Option<VerbGroupKind> {
         match self {
-            ToolCallBlock::Read(b) => Some(if b.is_skill_read() {
-                VerbGroupKind::Skill
-            } else {
-                VerbGroupKind::File
-            }),
+            ToolCallBlock::Read(_) => Some(VerbGroupKind::File),
             ToolCallBlock::ListDir(_) => Some(VerbGroupKind::Dir),
             ToolCallBlock::Search(_) => Some(VerbGroupKind::Search),
             ToolCallBlock::WebFetch(_) => Some(VerbGroupKind::WebFetch),
             ToolCallBlock::IntegrationSearch(_) => Some(VerbGroupKind::IntegrationSearch),
             ToolCallBlock::MemorySearch(_) => Some(VerbGroupKind::MemorySearch),
-            ToolCallBlock::Skill(_) => Some(VerbGroupKind::Skill),
+            // Preserve each skill's identity, status, and expandable body.
+            ToolCallBlock::Skill(_) => None,
             ToolCallBlock::Execute(_)
             | ToolCallBlock::Edit(_)
             | ToolCallBlock::UseTool(_)
@@ -585,10 +645,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn explicit_skill_rows_keep_status_and_are_not_aggregated() {
+        let cases = [
+            (SkillDisplayStatus::Loading, "Loading", true),
+            (SkillDisplayStatus::Loaded, "Loaded", true),
+            (SkillDisplayStatus::Failed, "Failed", false),
+            (SkillDisplayStatus::Cancelled, "Cancelled", false),
+        ];
+        for (status, label, success) in cases {
+            let ToolCallBlock::Skill(block) = ToolCallBlock::skill_call(
+                Some("user:commit"),
+                Some("--amend"),
+                Some("/skills/commit/SKILL.md"),
+                Some("prepared"),
+                status,
+                None,
+            ) else {
+                unreachable!();
+            };
+            assert!(block.summary.starts_with(label));
+            assert_eq!(block.is_success(), success);
+            assert!(block.output.as_deref().unwrap().contains("prepared"));
+            assert_eq!(ToolCallBlock::Skill(block).verb_group_kind(), None);
+        }
+    }
+
+    #[test]
     fn verb_is_tense_aware() {
         assert_eq!(VerbGroupKind::File.verb(false), "Read");
         assert_eq!(VerbGroupKind::File.verb(true), "Reading");
-        assert_eq!(VerbGroupKind::Skill.verb(false), "Read");
         assert_eq!(VerbGroupKind::Search.verb(false), "Searched");
         assert_eq!(VerbGroupKind::Search.verb(true), "Searching");
         assert_eq!(VerbGroupKind::Dir.verb(false), "Listed");
@@ -612,7 +697,6 @@ mod tests {
     fn noun_pluralizes_by_count() {
         assert_eq!(VerbGroupKind::File.noun(1), "file");
         assert_eq!(VerbGroupKind::File.noun(2), "files");
-        assert_eq!(VerbGroupKind::Skill.noun(2), "skills");
         assert_eq!(VerbGroupKind::Search.noun(1), "pattern");
         assert_eq!(VerbGroupKind::Dir.noun(2), "dirs");
         assert_eq!(VerbGroupKind::WebFetch.noun(1), "website");
@@ -652,14 +736,13 @@ mod tests {
             // Exhaustive on purpose: a new variant fails compilation here
             // until it gets an explicit verb-grouping decision.
             let expected = match block {
-                ToolCallBlock::Read(b) if b.is_skill_read() => Some(VerbGroupKind::Skill),
                 ToolCallBlock::Read(_) => Some(VerbGroupKind::File),
                 ToolCallBlock::ListDir(_) => Some(VerbGroupKind::Dir),
                 ToolCallBlock::Search(_) => Some(VerbGroupKind::Search),
                 ToolCallBlock::WebFetch(_) => Some(VerbGroupKind::WebFetch),
                 ToolCallBlock::IntegrationSearch(_) => Some(VerbGroupKind::IntegrationSearch),
                 ToolCallBlock::MemorySearch(_) => Some(VerbGroupKind::MemorySearch),
-                ToolCallBlock::Skill(_) => Some(VerbGroupKind::Skill),
+                ToolCallBlock::Skill(_) => None,
                 ToolCallBlock::Execute(_)
                 | ToolCallBlock::Edit(_)
                 | ToolCallBlock::UseTool(_)
@@ -699,7 +782,7 @@ mod tests {
         );
         assert_eq!(
             ToolCallBlock::Read(ReadToolCallBlock::new("/x/skills/deploy/SKILL.md")).label_kind(),
-            Some(VerbGroupKind::Skill)
+            Some(VerbGroupKind::File)
         );
     }
 }

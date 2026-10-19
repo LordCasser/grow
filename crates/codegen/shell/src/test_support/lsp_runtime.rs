@@ -79,6 +79,7 @@ pub(crate) fn ctx_with_toggle(toggle: HashMap<String, bool>) -> SubagentSpawnCon
         background_workflows_enabled: false,
         ask_user_question_enabled: true,
         parent_cmd_tx: None,
+        completion_cmd_tx: None,
         goal_usage_window: crate::session::actor::goal_support::GoalUsageWindow::new(goal_tx, None),
         parent_session_info: None,
         delegation_session_info: None,

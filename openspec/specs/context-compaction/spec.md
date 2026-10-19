@@ -169,3 +169,79 @@
 
 - **WHEN** 待发布期间同步压缩、手动压缩或 rewind 在下一普通请求前替换上下文
 - **THEN** 丢弃旧异步压缩的待发布通知，不把新 replacement 的 token 数归因给旧异步事务。
+
+### Requirement: Cancellation preserves and drains the compaction generation owner
+When ordinary authority invalidation cancels a background compaction generation, the Session SHALL signal cancellation without joining an unfinished worker from inside the root command handler, and SHALL retain the worker in its existing owner slot. An explicit suspension or teardown barrier SHALL keep the root accounting inbox able to process the worker's Goal settlement receipt while it joins the worker; it SHALL publish the cancellation terminal only after that drain. A runtime freeze SHALL use the existing shared deadline for this drain and SHALL fail without claiming a settled checkpoint when the worker has not joined by that deadline. Cancelled or late generation output SHALL NOT be committed to the visible Surface.
+
+#### Scenario: Goal usage invalidation and Sideband settlement share the root inbox
+- **WHEN** a promoted summary is still running and `RecordGoalUsageIncomplete` is processed by the root accounting inbox
+- **THEN** invalidation signals cancellation and returns from the current inbox command, allowing the same inbox to process the worker's `SettleGoalUsageAttempt` before a later explicit drain records cancellation.
+
+#### Scenario: Promoted generation is cancelled after incomplete Goal usage
+- **WHEN** a promoted summary is still running as the Goal usage window becomes incomplete
+- **THEN** the same worker is cancelled and joined, its Sideband attempt reaches a terminal settlement, the Goal settlement is not detached, and the generated summary is not committed.
+
+#### Scenario: Suspension deadline expires during generation drain
+- **WHEN** runtime suspension cancels a background summary but its owner has not joined by the shared deadline
+- **THEN** suspension returns an unconfirmed result and retains the worker owner for retry; it does not publish a completed frozen checkpoint.
+
+#### Scenario: Teardown drains with the accounting inbox active
+- **WHEN** graceful or fatal teardown has an unfinished cancelled compaction worker
+- **THEN** its existing drain loop continues dispatching Goal usage and settlement commands until the compaction worker and non-Workflow children finish, or teardown fails without publishing a final persistence frontier.
+
+#### Scenario: Manual compaction waits for the existing generation owner
+- **WHEN** a manual compaction starts while an asynchronous summary still owns the compaction lease
+- **THEN** manual compaction signals cancellation, leaves the root Goal inbox available while it joins that worker, and acquires the lease only after the original worker has settled.
+
+### Requirement: Planning context projects current local obligations
+
+模型上下文 SHALL 从权威投影提供当前局部计划、直接相关变化、有效等待与未验收交付的有界摘要及必要引用，不在每轮复制整棵 Agent 树。完成细节 MAY 压缩；继承 transcript 或旧 summary SHALL NOT 覆盖当前 owner 和计划。压缩自身 SHALL NOT 触发额外模型续跑。
+
+#### Scenario: CC-01 Large child tree has a small local context
+- **WHEN** root 有多个 child 和大量已完成步骤，当前只等待一个必需结果
+- **THEN** 当前上下文保留该等待、相关局部计划和结果引用，其他已完成细节可摘要；不因压缩自动规划或加载整个后代列表。
+
+#### Scenario: CC-02 Inherited history mentions a parent plan
+- **WHEN** child 的 fork 历史或压缩摘要含父 TODO，child 已有自己的当前计划
+- **THEN** 历史保留为来源，模型得到明确的当前 child 投影；旧文本不成为可写父计划或当前列表。
+
+证据与实施入口：`crates/codegen/shell/src/session/actor/compaction.rs`、`crates/codegen/shell/src/session/helpers/compaction_context.rs`。
+
+### Requirement: Compaction cannot acknowledge or erase pending replanning
+
+压缩发布及下一安全执行边界 SHALL 重新核对当前计划和未闭合责任。并发到达的重规划、Consumed 但未 Handled 的变化及新结果 SHALL 保留；压缩摘要 SHALL NOT 冒充处理确认或重新消费旧消息。
+
+#### Scenario: CC-03 Parent update arrives during compaction
+- **WHEN** 压缩开始后父项变化或 child 结果到达
+- **THEN** 发布后的当前投影仍含新责任，旧摘要不能覆盖它，也不能将其标为已处理。
+
+#### Scenario: CC-04 Consumed update survives a compacted history
+- **WHEN** 已消费的重规划消息进入被压缩范围，但 child 尚未提交处理确认
+- **THEN** 未处理引用和所需要求仍可获得；同一历史消息不重复注入，处理确认只能由合法 child 计划命令产生。
+
+证据与实施入口：`crates/codegen/shell/src/session/actor/compaction.rs` 的 boundary publication、`crates/codegen/chat-state/src/timeline.rs` 的通知与 context identity。
+
+### Requirement: Fresh skill results remain complete until their first consuming step settles
+显式技能结果从上下文发布到首次关联模型步骤获得已接纳响应之间，SHALL 作为完整必需内容保留。pre-prune、前后台压缩与请求重建 SHALL 不裁剪、摘要替换或丢弃这些结果；用户来源的所属输入 SHALL 与结果保持关联。该保护 SHALL 基于已有 Surface identity 与请求 / 响应事实，首次消费完成或执行明确终止并结算后解除，不形成永久技能状态。
+
+#### Scenario: Pre-prune selects a fresh oversized result
+- **WHEN** 新技能结果超过普通单项裁剪预算，但尚未获得首次关联模型响应
+- **THEN** pre-prune 保留该结果全文，只能选择其他可裁剪历史；预算无法满足时明确失败，不带截断结果继续采样。
+
+#### Scenario: Async compaction publication overlaps fresh content
+- **WHEN** 后台压缩准备后，新加载内容进入 Surface，发布时选区与尚未首次消费的内容冲突
+- **THEN** 在现有 authority / revision 边界重新校验并拒绝冲突发布，不覆盖新输入或技能正文。
+
+#### Scenario: First consuming step completes
+- **WHEN** 包含完整加载内容的请求获得已接纳响应
+- **THEN** 该加载结果可按普通历史参与后续压缩，历史 Loaded 不承诺正文常驻。
+
+#### Scenario: Execution ends before consumption
+- **WHEN** 首次消费前执行明确终止或取消
+- **THEN** 先确认撤下用户组或为模型结果提交配对的交付错误，再解除保护；原始历史保留，后续独立请求不重新激活已终止内容。
+
+#### Scenario: Cold interruption closes an unconsumed execution
+- **WHEN** 技能组已持久化而首次响应尚未接纳，进程退出且没有有效的挂起 checkpoint
+- **THEN** 普通中断恢复在关闭原 Turn 前结算未消费正文，保留原输入和 Hook 身份，不让正文进入下一独立 Turn；有效挂起仍保留原 Turn 的正文和首次消费保护。
+
+证据入口：`crates/common/compaction/src/prune.rs` 的 plan_tool_result_pruning、`crates/codegen/shell/src/session/actor/compaction.rs` 的 maybe_pre_prune_at / 后台发布，以及 `crates/codegen/chat-state/src/actor/mutations.rs` 的 Surface 修改。本条只增加首次消费所需的短期约束。

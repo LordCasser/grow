@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::SidebandSpawnEvent;
 
-pub const TIMELINE_SCHEMA_VERSION: u8 = 25;
+pub const TIMELINE_SCHEMA_VERSION: u8 = 27;
 pub const MAX_WORKFLOW_RUN_ID_BYTES: usize = 128;
 pub const MAX_WORKFLOW_INITIAL_MANIFEST_BYTES: usize = 512 * 1024;
 pub const MAX_NOTIFICATION_ID_BYTES: usize = 128;
@@ -23,6 +23,7 @@ pub const MAX_HOOK_HANDLER_NAME_BYTES: usize = 256;
 pub const MAX_HOOK_CONTROL_TEXT_BYTES: usize = 4 * 1024;
 pub const MAX_HOOK_HANDLERS: usize = 256;
 pub const MAX_INPUT_PAYLOAD_BYTES: u64 = 1024 * 1024;
+pub const MAX_INPUT_SKILL_LOAD_BODY_BYTES: usize = 1024 * 1024;
 pub const MAX_TURN_INPUTS: usize = 256;
 /// A busy turn can accumulate monitor ticks faster than the model can consume
 /// them. Preserve a useful recent window per monitor while the task output
@@ -160,12 +161,50 @@ pub enum MessageCause {
     User,
     Assistant,
     ToolResult,
+    SkillLoadModel,
+    SkillLoadSettlement,
     IntegrityRepair,
     Compaction,
     ToolResultPrune,
     MemoryContext,
     ContextRebuild,
     Rewind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionKind {
+    Question,
+    Permission,
+    PlanApproval,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InteractionResolution {
+    Answered,
+    Allowed,
+    Rejected,
+    Cancelled,
+    TimedOut,
+    Failed,
+    Suspended,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum InteractionEvent {
+    Opened {
+        tool_call_id: String,
+        attempt_id: String,
+        kind: InteractionKind,
+    },
+    Resolved {
+        tool_call_id: String,
+        attempt_id: String,
+        kind: InteractionKind,
+        resolution: InteractionResolution,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -274,6 +313,7 @@ pub struct PromptRecord {
 pub enum TurnEvent {
     Started {
         id: TurnId,
+        prompt_id: String,
         input_ids: Vec<String>,
         identity: TurnIdentity,
         model_id: String,
@@ -416,6 +456,7 @@ pub enum WorkflowEvent {
         run_id: String,
         execution_epoch: u64,
         status: WorkflowExecutionStatus,
+        execution_suspended: bool,
         handoff: WorkflowTurnHandoff,
         duration_ms: u64,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -437,6 +478,7 @@ pub enum WorkflowEvent {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WorkflowExecutionStatus {
+    Suspended,
     UserPaused,
     BackOffPaused,
     NoProgressPaused,
@@ -465,6 +507,7 @@ pub enum WorkflowTurnHandoff {
 impl WorkflowExecutionStatus {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Suspended => "suspended",
             Self::UserPaused => "user_paused",
             Self::BackOffPaused => "back_off_paused",
             Self::NoProgressPaused => "no_progress_paused",
@@ -545,6 +588,28 @@ pub struct ObservationEvent {
     pub step: Option<StepId>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub data: Option<serde_json::Value>,
+}
+
+/// A durable identity for one UI projection that must be present in the
+/// display ledger. The payload itself stays in that ledger; Timeline records
+/// only bounded provenance and a digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DisplayProjectionExpectation {
+    pub event_id: String,
+    pub kind: DisplayProjectionKind,
+    pub source_id: String,
+    pub source_revision: u64,
+    pub payload_digest: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplayProjectionKind {
+    WorkflowUpdated,
+    GoalUpdated,
+    ControlStateUpdate,
+    CurrentModeUpdate,
 }
 
 /// Durable session control-plane state.
@@ -639,12 +704,21 @@ pub enum SubagentContextSource {
 pub struct SubagentSpawnEvent {
     pub subagent_id: String,
     pub child_session_id: String,
+    /// Parent tool call that directly requested this child, when available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_tool_call_id: Option<String>,
     /// Immediate security parent. Lifecycle ownership may independently be
     /// rooted at the primary Session for presentation and cancellation.
     pub security_parent_session_id: String,
+    /// Local plan step explicitly associated with this spawned task.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_step_id: Option<String>,
     pub subagent_type: String,
     pub description: String,
     pub prompt: String,
+    /// Non-secret runtime inputs required to recreate this child. The tools
+    /// crate owns the recipe schema; Timeline only bounds its wire value.
+    pub execution_recipe: serde_json::Value,
     pub context_source: SubagentContextSource,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_ref: Option<crate::TimelineRangeRef>,
@@ -751,6 +825,8 @@ pub struct SubagentResultEvent {
     pub error: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_ref: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub planning_summary: Option<tool_types::planning::SubagentPlanningSummary>,
 }
 
 /// Domain identity of a signal delivered to this session.
@@ -1379,6 +1455,10 @@ pub enum InputEvent {
         input_ids: Vec<String>,
         turn: TurnId,
         item: ConversationItem,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        display_echo: Option<UserDisplayEcho>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skill_loads: Vec<sampling_types::SkillLoadItem>,
     },
     Handled {
         input_ids: Vec<String>,
@@ -1388,6 +1468,18 @@ pub enum InputEvent {
         input_ids: Vec<String>,
         reason: InputDismissReason,
     },
+}
+
+/// Exact ACP user-visible blocks emitted for one committed input. The digest
+/// covers the ordered serialized ACP content blocks, not normalized model
+/// context; `message_id` and `prompt_index` bind the proof to its display row.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UserDisplayEcho {
+    pub message_id: String,
+    pub prompt_index: usize,
+    pub block_count: usize,
+    pub blake3: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1475,6 +1567,9 @@ pub fn notification_id(
     deny_unknown_fields
 )]
 pub enum TimelineEventKind {
+    Runtime(crate::session_runtime::SessionRuntimeEvent),
+    Interaction(InteractionEvent),
+    Planning(PlanningEvent),
     Messages(MessageEvent),
     Input(InputEvent),
     Hook(HookEvent),
@@ -1487,6 +1582,7 @@ pub enum TimelineEventKind {
     ImageProjection(ImageProjectionEvent),
     Recovery(RecoveryEvent),
     Observation(ObservationEvent),
+    DisplayProjectionExpected(DisplayProjectionExpectation),
     Control(ControlEvent),
     SessionTitle(SessionTitleEvent),
     Sideband(SidebandSpawnEvent),
@@ -1494,6 +1590,21 @@ pub enum TimelineEventKind {
     SubagentSeed(SubagentSeedEvent),
     SubagentResult(SubagentResultEvent),
     Notification(NotificationEvent),
+}
+
+/// CAS boundary for all local planning facts, including delivery obligations.
+/// The semantic source revision inside the plan is independent of this commit.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PlanningEvent {
+    pub previous: Option<EventSeq>,
+    pub plan: Box<tool_types::planning::LocalPlan>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PlanningSnapshot {
+    pub seq: EventSeq,
+    pub plan: tool_types::planning::LocalPlan,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1578,6 +1689,8 @@ struct LifecycleFold {
     workflows: BTreeMap<String, WorkflowFold>,
     open_subagents: BTreeMap<String, OpenSubagent>,
     open_requests: BTreeMap<String, (TurnId, StepId)>,
+    open_interactions: BTreeMap<(String, String), InteractionKind>,
+    seen_interaction_attempts: BTreeSet<(String, String)>,
     open_tools: BTreeMap<String, (TurnId, StepId, String)>,
     open_compaction: Option<OpenCompaction>,
     control_revision: Option<u64>,
@@ -1589,6 +1702,7 @@ struct LifecycleFold {
     seen_hook_notification_causes: BTreeSet<String>,
     hook_session_id: Option<String>,
     subagent_seed_id: Option<String>,
+    display_projection_expectations: BTreeMap<String, DisplayProjectionExpectation>,
 }
 
 #[derive(Debug, Clone)]
@@ -1629,6 +1743,7 @@ pub struct WorkflowLifecycle {
     pub initial_manifest: serde_json::Value,
     pub execution_epoch: u64,
     pub status: Option<WorkflowExecutionStatus>,
+    pub execution_suspended: bool,
     pub handoff: Option<WorkflowTurnHandoff>,
     pub message: Option<String>,
     pub open: bool,
@@ -1658,6 +1773,8 @@ impl OpenCompaction {
 
 #[derive(Debug, Clone, Default)]
 pub struct Timeline {
+    runtime: crate::session_runtime::RuntimeLifecycle,
+    planning: Option<PlanningSnapshot>,
     events: Vec<TimelineEvent>,
     surface: Vec<ConversationItem>,
     surface_ids: Vec<SurfaceId>,
@@ -1679,6 +1796,14 @@ pub struct Timeline {
 
 #[derive(Debug, thiserror::Error)]
 pub enum TimelineError {
+    #[error("invalid runtime handoff: {0}")]
+    InvalidRuntime(String),
+    #[error("invalid local planning commit: {0}")]
+    InvalidPlanning(String),
+    #[error("invalid human interaction attempt")]
+    InvalidInteraction,
+    #[error("invalid display projection expectation")]
+    InvalidDisplayProjection,
     #[error("unsupported timeline schema version {actual}; expected {expected}")]
     UnsupportedVersion { expected: u8, actual: u8 },
     #[error("timeline event seq {actual} is not the expected contiguous seq {expected}")]
@@ -1709,6 +1834,10 @@ pub enum TimelineError {
     MissingPromptMarker(usize),
     #[error("tool-result prune must replace exactly one tool result")]
     InvalidToolResultPrune,
+    #[error("model skill load does not match a unique current load_skill call")]
+    InvalidModelSkillLoad,
+    #[error("replacement would remove or change an unconsumed skill load")]
+    UnconsumedSkillLoadProtected,
     #[error("tool-result prune changed fields other than content")]
     ToolResultIdentityChanged,
     #[error("image projection does not match the current Surface or its Sideband provenance")]
@@ -1866,6 +1995,29 @@ pub enum TimelineError {
 }
 
 impl Timeline {
+    pub fn planning_snapshot(&self) -> Option<&PlanningSnapshot> {
+        self.planning.as_ref()
+    }
+
+    pub fn consumed_agent_messages(&self, ids: &[String]) -> BTreeSet<String> {
+        let requested: BTreeSet<_> = ids.iter().map(String::as_str).collect();
+        self.events
+            .iter()
+            .filter_map(|event| match &event.kind {
+                TimelineEventKind::Notification(NotificationEvent::Consumed {
+                    input: Some(ConversationItem::AgentMessage(batch)),
+                    ..
+                }) => Some(batch),
+                _ => None,
+            })
+            .flat_map(|batch| &batch.messages)
+            .filter(|message| requested.contains(message.message_id.as_str()))
+            .map(|message| message.message_id.clone())
+            .collect()
+    }
+    pub fn runtime_lifecycle(&self) -> &crate::session_runtime::RuntimeLifecycle {
+        &self.runtime
+    }
     pub fn from_events(events: Vec<TimelineEvent>) -> Result<Self, TimelineError> {
         let mut timeline = Self::default();
         for event in events {
@@ -2121,7 +2273,9 @@ impl Timeline {
                     TimelineEventKind::Messages(messages) => {
                         item.is_some_and(|item| item < messages.items.len())
                     }
-                    TimelineEventKind::Input(InputEvent::Consumed { .. }) => id.item == 0,
+                    TimelineEventKind::Input(InputEvent::Consumed { skill_loads, .. }) => {
+                        item.is_some_and(|item| item <= skill_loads.len())
+                    }
                     TimelineEventKind::Notification(NotificationEvent::Consumed {
                         input: Some(_),
                         ..
@@ -2364,6 +2518,7 @@ impl Timeline {
                         .iter()
                         .filter_map(|item| match item {
                             ConversationItem::User(user) => user.prompt_index,
+                            ConversationItem::SkillLoad(skill) => skill.prompt_index,
                             _ => None,
                         })
                         .max()
@@ -2452,6 +2607,7 @@ impl Timeline {
                     .iter()
                     .filter_map(|item| match item {
                         ConversationItem::User(user) => user.prompt_index,
+                        ConversationItem::SkillLoad(skill) => skill.prompt_index,
                         _ => None,
                     })
                     .max()
@@ -2688,6 +2844,24 @@ impl Timeline {
             initial_manifest,
             execution_epoch: fold.execution_epoch,
             status,
+            execution_suspended: !fold.open
+                && self
+                    .events
+                    .iter()
+                    .rev()
+                    .find_map(|event| match &event.kind {
+                        TimelineEventKind::Workflow(WorkflowEvent::Ended {
+                            run_id: candidate,
+                            execution_suspended,
+                            ..
+                        }) if candidate == run_id => Some(*execution_suspended),
+                        TimelineEventKind::Workflow(WorkflowEvent::Closed {
+                            run_id: candidate,
+                            ..
+                        }) if candidate == run_id => Some(false),
+                        _ => None,
+                    })
+                    .unwrap_or(false),
             handoff,
             message,
             open: fold.open,
@@ -2724,6 +2898,9 @@ impl Timeline {
     }
 
     pub fn recover_interrupted(&mut self) -> Result<Vec<TimelineEvent>, TimelineError> {
+        if self.runtime.preserves_open_turn() {
+            return Ok(Vec::new());
+        }
         // Subagents are independently durable entities whose backend may
         // still be running after this process restarts. Only the backend-aware
         // reconciler may close them. Workflows that own an open child must
@@ -2793,62 +2970,7 @@ impl Timeline {
                 "inputs": &inputs,
             })),
         }))?;
-        for occurrence_id in hooks {
-            let projection = self
-                .hook_projection(&occurrence_id)
-                .ok_or_else(|| TimelineError::HookNotFound(occurrence_id.clone()))?;
-            for (index, (handler, run)) in
-                projection.handlers.iter().zip(&projection.runs).enumerate()
-            {
-                match run {
-                    HookHandlerLifecycle::Pending => {
-                        let reason = match handler.action {
-                            HookHandlerPlanAction::Skip { reason } => reason,
-                            HookHandlerPlanAction::Execute => {
-                                if self
-                                    .lifecycle
-                                    .hooks
-                                    .get(&occurrence_id)
-                                    .is_some_and(|hook| hook.decisive_before(index))
-                                {
-                                    HookRunSkipReason::PriorBlock
-                                } else {
-                                    HookRunSkipReason::ProcessInterrupted
-                                }
-                            }
-                        };
-                        self.record(TimelineEventKind::Hook(HookEvent::RunSkipped {
-                            occurrence_id: occurrence_id.clone(),
-                            run_id: handler.run_id.clone(),
-                            handler_index: handler.index,
-                            reason,
-                        }))?;
-                    }
-                    HookHandlerLifecycle::Started => {
-                        self.record(TimelineEventKind::Hook(HookEvent::RunFinished {
-                            occurrence_id: occurrence_id.clone(),
-                            run_id: handler.run_id.clone(),
-                            handler_index: handler.index,
-                            elapsed_ms: 0,
-                            outcome: HookRunOutcome::InterruptedOutcomeUnknown,
-                            control: HookRunControl::None,
-                        }))?;
-                    }
-                    HookHandlerLifecycle::Finished { .. }
-                    | HookHandlerLifecycle::Skipped { .. } => {}
-                }
-            }
-            let decision = self
-                .lifecycle
-                .hooks
-                .get(&occurrence_id)
-                .ok_or_else(|| TimelineError::HookNotFound(occurrence_id.clone()))?
-                .derived_decision()?;
-            self.record(TimelineEventKind::Hook(HookEvent::Completed {
-                occurrence_id,
-                decision,
-            }))?;
-        }
+        self.settle_interrupted_hooks()?;
         for input_id in inputs {
             if !self.lifecycle.user_prompt_hooks.contains_key(&input_id) {
                 let occurrence_id = format!(
@@ -2947,11 +3069,13 @@ impl Timeline {
                 run_id,
                 execution_epoch,
                 status: WorkflowExecutionStatus::Interrupted,
+                execution_suspended: false,
                 handoff: WorkflowTurnHandoff::Completion,
                 duration_ms,
                 message: Some("process_interrupted".into()),
             }))?;
         }
+        self.settle_unconsumed_skill_loads()?;
         if let Some((step, started)) = self
             .lifecycle
             .active_step
@@ -2985,10 +3109,87 @@ impl Timeline {
         Ok(self.events[start..].to_vec())
     }
 
+    /// Settle only unfinished Hook executions after their workers have
+    /// stopped. Other open runtime work remains untouched for its owner.
+    pub fn settle_interrupted_hooks(&mut self) -> Result<Vec<TimelineEvent>, TimelineError> {
+        let hooks = self
+            .lifecycle
+            .hooks
+            .iter()
+            .filter_map(|(occurrence_id, hook)| {
+                hook.decision.is_none().then_some(occurrence_id.clone())
+            })
+            .collect::<Vec<_>>();
+        let start = self.events.len();
+        for occurrence_id in hooks {
+            let projection = self
+                .hook_projection(&occurrence_id)
+                .ok_or_else(|| TimelineError::HookNotFound(occurrence_id.clone()))?;
+            for (index, (handler, run)) in
+                projection.handlers.iter().zip(&projection.runs).enumerate()
+            {
+                match run {
+                    HookHandlerLifecycle::Pending => {
+                        let reason = match handler.action {
+                            HookHandlerPlanAction::Skip { reason } => reason,
+                            HookHandlerPlanAction::Execute => {
+                                if self
+                                    .lifecycle
+                                    .hooks
+                                    .get(&occurrence_id)
+                                    .is_some_and(|hook| hook.decisive_before(index))
+                                {
+                                    HookRunSkipReason::PriorBlock
+                                } else {
+                                    HookRunSkipReason::ProcessInterrupted
+                                }
+                            }
+                        };
+                        self.record(TimelineEventKind::Hook(HookEvent::RunSkipped {
+                            occurrence_id: occurrence_id.clone(),
+                            run_id: handler.run_id.clone(),
+                            handler_index: handler.index,
+                            reason,
+                        }))?;
+                    }
+                    HookHandlerLifecycle::Started => {
+                        self.record(TimelineEventKind::Hook(HookEvent::RunFinished {
+                            occurrence_id: occurrence_id.clone(),
+                            run_id: handler.run_id.clone(),
+                            handler_index: handler.index,
+                            elapsed_ms: 0,
+                            outcome: HookRunOutcome::InterruptedOutcomeUnknown,
+                            control: HookRunControl::None,
+                        }))?;
+                    }
+                    HookHandlerLifecycle::Finished { .. }
+                    | HookHandlerLifecycle::Skipped { .. } => {}
+                }
+            }
+            let decision = self
+                .lifecycle
+                .hooks
+                .get(&occurrence_id)
+                .ok_or_else(|| TimelineError::HookNotFound(occurrence_id.clone()))?
+                .derived_decision()?;
+            self.record(TimelineEventKind::Hook(HookEvent::Completed {
+                occurrence_id,
+                decision,
+            }))?;
+        }
+        Ok(self.events[start..].to_vec())
+    }
+
     /// Repair message-level tool pairing after process interruption. Lifecycle
     /// terminals alone cannot satisfy provider protocols: every assistant tool
     /// declaration also needs one adjacent `ToolResult` in the Surface.
     pub fn recover_surface_integrity(&mut self) -> Result<Vec<TimelineEvent>, TimelineError> {
+        if self.runtime.preserves_open_turn() {
+            // These are live calls owned by the suspended continuation. Their
+            // real results arrive after the tree is rebound; an interruption
+            // placeholder would falsely satisfy AwaitChild/AwaitUser.
+            return Ok(Vec::new());
+        }
         let mut repaired_surface = self.surface.clone();
         let report = crate::compaction_utils::repair_history_with_reason(
             &mut repaired_surface,
@@ -3194,6 +3395,18 @@ impl Timeline {
         self.replace_range(0, self.surface.len() - 1, items, cause)
     }
 
+    /// Remove unconsumed skill bodies from the current model-facing Surface.
+    /// The append-only Timeline keeps the original SkillLoad facts intact.
+    pub fn settle_unconsumed_skill_loads(
+        &mut self,
+    ) -> Result<Option<TimelineEvent>, TimelineError> {
+        let Some(items) = self.settled_skill_load_surface() else {
+            return Ok(None);
+        };
+        self.replace_all(items, MessageCause::SkillLoadSettlement)
+            .map(Some)
+    }
+
     pub fn replace_range(
         &mut self,
         start_index: usize,
@@ -3273,6 +3486,24 @@ impl Timeline {
         active_step: bool,
     ) {
         match &event.kind {
+            TimelineEventKind::Planning(planning) => {
+                self.planning = Some(PlanningSnapshot {
+                    seq: event.seq,
+                    plan: (*planning.plan).clone(),
+                });
+            }
+            TimelineEventKind::Runtime(runtime) => {
+                self.runtime = self
+                    .runtime
+                    .transition(
+                        runtime,
+                        event.seq,
+                        self.lifecycle.active_turn,
+                        self.lifecycle.active_step,
+                        !self.lifecycle.open_requests.is_empty(),
+                    )
+                    .expect("runtime event was validated before publication");
+            }
             TimelineEventKind::Messages(messages) => self.apply_messages(event.seq, messages),
             TimelineEventKind::ImageProjection(projection) => {
                 let branch = fold_branch_provenance(self);
@@ -3386,8 +3617,13 @@ impl Timeline {
                 input: Some(input),
                 ..
             }) => self.append_surface_items(event.seq, std::slice::from_ref(input)),
-            TimelineEventKind::Input(InputEvent::Consumed { item, .. }) => {
-                self.append_surface_items(event.seq, std::slice::from_ref(item))
+            TimelineEventKind::Input(InputEvent::Consumed {
+                item, skill_loads, ..
+            }) => {
+                let mut surface_items = Vec::with_capacity(skill_loads.len() + 1);
+                surface_items.push(item.clone());
+                surface_items.extend(skill_loads.iter().cloned().map(ConversationItem::SkillLoad));
+                self.append_surface_items(event.seq, &surface_items)
             }
             TimelineEventKind::Notification(NotificationEvent::Consumed {
                 input: None, ..
@@ -3574,7 +3810,12 @@ impl Timeline {
         if event.at_ms < 0 {
             return Err(TimelineError::InvalidTimestamp);
         }
-        if let TimelineEventKind::Turn(TurnEvent::Started { identity, .. }) = &event.kind {
+        if let TimelineEventKind::Turn(TurnEvent::Started {
+            identity,
+            prompt_id,
+            ..
+        }) = &event.kind
+        {
             let goal_owner_is_valid = match (
                 identity.goal_id.as_deref(),
                 identity.goal_definition_revision,
@@ -3585,7 +3826,11 @@ impl Timeline {
                 }
                 _ => false,
             };
-            if !goal_owner_is_valid {
+            if !goal_owner_is_valid
+                || prompt_id.trim().is_empty()
+                || prompt_id.len() > 512
+                || prompt_id.chars().any(char::is_control)
+            {
                 return Err(TimelineError::InvalidTurnIdentity);
             }
         }
@@ -3594,6 +3839,115 @@ impl Timeline {
     }
 
     fn validate_content(&self, event: &TimelineEvent) -> Result<(), TimelineError> {
+        if let TimelineEventKind::DisplayProjectionExpected(expectation) = &event.kind {
+            let identifier_is_valid = |value: &str, max: usize| {
+                !value.trim().is_empty()
+                    && value.len() <= max
+                    && !value.chars().any(char::is_control)
+            };
+            if !identifier_is_valid(&expectation.event_id, 128)
+                || !identifier_is_valid(&expectation.source_id, 512)
+                || expectation.payload_digest.len() != 64
+                || !expectation
+                    .payload_digest
+                    .bytes()
+                    .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+                || serde_json::to_vec(expectation).map_or(true, |bytes| bytes.len() > 4096)
+            {
+                return Err(TimelineError::InvalidDisplayProjection);
+            }
+        }
+        if matches!(
+            &event.kind,
+            TimelineEventKind::Workflow(WorkflowEvent::Ended {
+                execution_suspended: true,
+                ..
+            })
+        ) && self.runtime.phase != crate::session_runtime::RuntimePhase::Suspending
+        {
+            return Err(TimelineError::InvalidRuntime(
+                "Workflow suspension requires its session handoff".into(),
+            ));
+        }
+        if self.runtime.phase != crate::session_runtime::RuntimePhase::Running
+            && matches!(
+                &event.kind,
+                TimelineEventKind::Turn(TurnEvent::Started { .. })
+                    | TimelineEventKind::Step(StepEvent::Started { .. })
+                    | TimelineEventKind::Request(RequestEvent::Started { .. })
+                    | TimelineEventKind::Tool(ToolEvent::Started { .. })
+                    | TimelineEventKind::Subagent(SubagentEvent::Spawned(_))
+            )
+        {
+            return Err(TimelineError::InvalidRuntime(
+                "execution admission is closed during runtime handoff".into(),
+            ));
+        }
+        if let TimelineEventKind::Planning(planning) = &event.kind {
+            if planning.previous != self.planning.as_ref().map(|current| current.seq) {
+                return Err(TimelineError::InvalidPlanning(
+                    "planning compare-and-swap reference is stale".into(),
+                ));
+            }
+            let validation = match self.planning.as_ref() {
+                Some(current) => planning.plan.validate_transition_from(&current.plan),
+                None => planning.plan.validate(),
+            };
+            validation.map_err(TimelineError::InvalidPlanning)?;
+            if serde_json::to_vec(planning).map_or(true, |bytes| bytes.len() > 1024 * 1024) {
+                return Err(TimelineError::InvalidPlanning(
+                    "planning snapshot exceeds its storage bound".into(),
+                ));
+            }
+        }
+        if let TimelineEventKind::Runtime(runtime) = &event.kind {
+            if let crate::session_runtime::SessionRuntimeEvent::Checkpoint { checkpoint, .. } =
+                runtime
+            {
+                if let Some(continuation) = checkpoint.turn.as_ref() {
+                    let started_prompt_id =
+                        self.events.iter().find_map(|event| match &event.kind {
+                            TimelineEventKind::Turn(TurnEvent::Started {
+                                id, prompt_id, ..
+                            }) if *id == continuation.turn_id => Some(prompt_id.as_str()),
+                            _ => None,
+                        });
+                    if started_prompt_id != Some(continuation.prompt_id.as_str()) {
+                        return Err(TimelineError::InvalidRuntime(
+                            "checkpoint continuation prompt_id does not match TurnStarted".into(),
+                        ));
+                    }
+                }
+                if let Some(accepted) = checkpoint
+                    .turn
+                    .as_ref()
+                    .and_then(|turn| turn.accepted_response.as_ref())
+                {
+                    if self.admitted_response(&accepted.identity).is_none() {
+                        return Err(TimelineError::InvalidRuntime(
+                            "checkpoint accepted response is absent from the current branch".into(),
+                        ));
+                    }
+                    if !self.events.iter().any(|event| matches!(&event.kind,
+                        TimelineEventKind::Request(RequestEvent::Started { id, turn, .. })
+                            if id == &accepted.identity.request_id
+                                && checkpoint.turn.as_ref().is_some_and(|cursor| cursor.turn_id == *turn))) {
+                        return Err(TimelineError::InvalidRuntime(
+                            "checkpoint accepted response belongs to another Turn".into(),
+                        ));
+                    }
+                }
+            }
+            self.runtime
+                .transition(
+                    runtime,
+                    event.seq,
+                    self.lifecycle.active_turn,
+                    self.lifecycle.active_step,
+                    !self.lifecycle.open_requests.is_empty(),
+                )
+                .map_err(TimelineError::InvalidRuntime)?;
+        }
         if let TimelineEventKind::Compaction(CompactionEvent::Summary {
             id,
             input_ref,
@@ -3903,6 +4257,9 @@ impl Timeline {
                         || spawn.subagent_type.trim().is_empty()
                         || spawn.description.trim().is_empty()
                         || spawn.prompt.trim().is_empty()
+                        || !spawn.execution_recipe.is_object()
+                        || serde_json::to_vec(&spawn.execution_recipe)
+                            .map_or(true, |bytes| bytes.len() > 128 * 1024)
                         || spawn.child_cwd.trim().is_empty()
                         || spawn.effective_model_id.trim().is_empty()
                         || !spawn.model_transport_key.is_valid()
@@ -4058,7 +4415,20 @@ impl Timeline {
                         hash.len() == 64 && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
                     })
             });
-            if !error_valid || !output_valid {
+            if !error_valid
+                || !output_valid
+                || result
+                    .planning_summary
+                    .as_ref()
+                    .is_some_and(|summary| summary.validate().is_err())
+                || result.planning_summary.as_ref().is_some_and(|summary| {
+                    self.planning.as_ref().is_none_or(|snapshot| {
+                        summary.planning_seq != snapshot.seq.get()
+                            || summary.scope_id != snapshot.plan.scope_id
+                            || summary.revision != snapshot.plan.revision
+                    })
+                })
+            {
                 return Err(TimelineError::InvalidSubagent);
             }
         }
@@ -4273,6 +4643,11 @@ impl Timeline {
 
     fn validate_messages(&self, messages: &MessageEvent) -> Result<(), TimelineError> {
         let _ = u32::try_from(messages.items.len()).map_err(|_| TimelineError::TooManyItems)?;
+        if messages.cause == MessageCause::SkillLoadModel
+            && !self.valid_model_skill_load(&messages.items)
+        {
+            return Err(TimelineError::InvalidModelSkillLoad);
+        }
         if let Some(admission) = &messages.response_admission {
             if messages.cause != MessageCause::Assistant
                 || !matches!(messages.surface, SurfaceOp::Append)
@@ -4372,11 +4747,13 @@ impl Timeline {
                         .items
                         .iter()
                         .all(|item| matches!(item, ConversationItem::ToolResult(_))),
+                    MessageCause::SkillLoadModel => true,
                     MessageCause::ContextRebuild => {
                         self.surface.is_empty() && valid_system_layout(&messages.items)
                     }
                     MessageCause::IntegrityRepair
                     | MessageCause::Compaction
+                    | MessageCause::SkillLoadSettlement
                     | MessageCause::ToolResultPrune
                     | MessageCause::Rewind => false,
                 };
@@ -4407,12 +4784,32 @@ impl Timeline {
                     return Err(TimelineError::InvalidMessageShape);
                 }
                 match messages.cause {
-                    MessageCause::Compaction
-                        if !messages.items.is_empty()
-                            && valid_compaction_replacement(&messages.items) => {}
+                    MessageCause::Compaction => {
+                        if !self.replacement_preserves_unconsumed_skill_loads(
+                            start_index,
+                            end_index,
+                            &messages.items,
+                        ) {
+                            return Err(TimelineError::UnconsumedSkillLoadProtected);
+                        }
+                        if messages.items.is_empty()
+                            || !valid_compaction_replacement(&messages.items)
+                        {
+                            return Err(TimelineError::InvalidMessageShape);
+                        }
+                    }
                     MessageCause::ToolResultPrune if replaces_all => {
+                        if !self.replacement_preserves_unconsumed_skill_loads(
+                            start_index,
+                            end_index,
+                            &messages.items,
+                        ) {
+                            return Err(TimelineError::UnconsumedSkillLoadProtected);
+                        }
                         validate_tool_result_prune(replaced, messages)?;
                     }
+                    MessageCause::SkillLoadSettlement
+                        if replaces_all && self.valid_skill_load_settlement(&messages.items) => {}
                     MessageCause::ContextRebuild if replaces_all => {}
                     MessageCause::IntegrityRepair
                         if replaces_all
@@ -4425,8 +4822,9 @@ impl Timeline {
                     | MessageCause::User
                     | MessageCause::Assistant
                     | MessageCause::ToolResult
+                    | MessageCause::SkillLoadModel
+                    | MessageCause::SkillLoadSettlement
                     | MessageCause::IntegrityRepair
-                    | MessageCause::Compaction
                     | MessageCause::ToolResultPrune
                     | MessageCause::MemoryContext
                     | MessageCause::ContextRebuild
@@ -4437,6 +4835,223 @@ impl Timeline {
             }
         }
         Ok(())
+    }
+
+    fn valid_model_skill_load(&self, items: &[ConversationItem]) -> bool {
+        let [
+            ConversationItem::ToolResult(result),
+            ConversationItem::SkillLoad(skill),
+        ] = items
+        else {
+            return false;
+        };
+        if skill.source != sampling_types::SkillLoadSource::Model
+            || skill.call_id.trim().is_empty()
+            || skill.skill_name.trim().is_empty()
+            || skill.prepared_body.len() > MAX_INPUT_SKILL_LOAD_BODY_BYTES
+            || skill.prompt_index != self.current_prompt_index()
+            || result.tool_call_id != skill.call_id
+            || !result.images.is_empty()
+            || result.content.as_ref() != sampling_types::skill_load_result_content(skill)
+            || self.surface.iter().any(|item| match item {
+                ConversationItem::ToolResult(result) => result.tool_call_id == skill.call_id,
+                ConversationItem::SkillLoad(existing) => existing.call_id == skill.call_id,
+                _ => false,
+            })
+        {
+            return false;
+        }
+
+        let current_calls = self
+            .surface
+            .iter()
+            .filter_map(|item| match item {
+                ConversationItem::Assistant(assistant) => Some(assistant.tool_calls.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .filter(|call| call.id.as_ref() == skill.call_id)
+            .collect::<Vec<_>>();
+        let admitted_calls = self
+            .admitted_responses()
+            .into_iter()
+            .flat_map(|response| response.items)
+            .filter_map(|item| match item {
+                ConversationItem::Assistant(assistant) => Some(assistant.tool_calls),
+                _ => None,
+            })
+            .flatten()
+            .filter(|call| call.id.as_ref() == skill.call_id)
+            .collect::<Vec<_>>();
+        current_calls.len() == 1
+            && admitted_calls.len() == 1
+            && valid_model_skill_call(current_calls[0], skill)
+            && valid_model_skill_call(&admitted_calls[0], skill)
+    }
+
+    fn unconsumed_skill_load_indices(&self) -> BTreeSet<usize> {
+        let fold = fold_branch_provenance(self);
+        let latest_response = fold.admitted_response_events.iter().max().copied();
+        self.surface
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                let ConversationItem::SkillLoad(skill) = item else {
+                    return None;
+                };
+                let origin = fold
+                    .surface
+                    .get(index)
+                    .and_then(|entry| {
+                        entry
+                            .leaves
+                            .iter()
+                            .filter_map(|leaf| match fold.leaf_values.get(leaf) {
+                                Some(ConversationItem::SkillLoad(original))
+                                    if original.call_id == skill.call_id
+                                        && conversation_items_match(
+                                            &ConversationItem::SkillLoad(original.clone()),
+                                            item,
+                                        ) =>
+                                {
+                                    Some(leaf.event)
+                                }
+                                _ => None,
+                            })
+                            .min()
+                    })
+                    .or_else(|| self.surface_ids.get(index).map(|id| id.event));
+                latest_response
+                    .is_none_or(|response| origin.is_some_and(|origin| response < origin))
+                    .then_some(index)
+            })
+            .collect()
+    }
+
+    fn replacement_preserves_unconsumed_skill_loads(
+        &self,
+        start_index: usize,
+        end_index: usize,
+        replacement: &[ConversationItem],
+    ) -> bool {
+        self.unconsumed_skill_load_indices()
+            .into_iter()
+            .filter(|index| (start_index..=end_index).contains(index))
+            .all(|index| {
+                let ConversationItem::SkillLoad(skill) = &self.surface[index] else {
+                    return false;
+                };
+                if !replacement
+                    .iter()
+                    .any(|candidate| conversation_items_match(candidate, &self.surface[index]))
+                {
+                    return false;
+                }
+                if skill.source != sampling_types::SkillLoadSource::Model {
+                    return true;
+                }
+
+                let original_calls = self
+                    .surface
+                    .iter()
+                    .filter_map(|item| match item {
+                        ConversationItem::Assistant(assistant) => {
+                            Some(assistant.tool_calls.as_slice())
+                        }
+                        _ => None,
+                    })
+                    .flatten()
+                    .filter(|call| call.id.as_ref() == skill.call_id)
+                    .collect::<Vec<_>>();
+                let original_results = self
+                    .surface
+                    .iter()
+                    .filter_map(|item| match item {
+                        ConversationItem::ToolResult(result)
+                            if result.tool_call_id == skill.call_id =>
+                        {
+                            Some(item)
+                        }
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let calls_preserved = original_calls.iter().all(|original| {
+                    let call_in_range = self.surface[start_index..=end_index].iter().any(|item| {
+                        matches!(item, ConversationItem::Assistant(assistant)
+                        if assistant.tool_calls.iter().any(|existing| existing.id == original.id))
+                    });
+                    !call_in_range
+                        || replacement.iter().any(|item| match item {
+                            ConversationItem::Assistant(assistant) => {
+                                assistant.tool_calls.iter().any(|candidate| {
+                                    candidate.id == original.id
+                                        && candidate.name == original.name
+                                        && candidate.arguments == original.arguments
+                                })
+                            }
+                            _ => false,
+                        })
+                });
+                let results_preserved = original_results.iter().all(|result| {
+                    let result_in_range =
+                        self.surface[start_index..=end_index]
+                            .iter()
+                            .any(|item| match item {
+                                ConversationItem::ToolResult(existing) => {
+                                    existing.tool_call_id == skill.call_id
+                                }
+                                _ => false,
+                            });
+                    !result_in_range
+                        || replacement
+                            .iter()
+                            .any(|candidate| conversation_items_match(candidate, result))
+                });
+                original_calls.len() == 1
+                    && original_results.len() == 1
+                    && calls_preserved
+                    && results_preserved
+            })
+    }
+
+    fn settled_skill_load_surface(&self) -> Option<Vec<ConversationItem>> {
+        let indices = self.unconsumed_skill_load_indices();
+        if indices.is_empty() {
+            return None;
+        }
+        let mut replacement = self.surface.clone();
+        for index in &indices {
+            let ConversationItem::SkillLoad(skill) = &self.surface[*index] else {
+                continue;
+            };
+            if skill.source == sampling_types::SkillLoadSource::Model {
+                for item in &mut replacement {
+                    if let ConversationItem::ToolResult(result) = item {
+                        if result.tool_call_id == skill.call_id {
+                            result.content = std::sync::Arc::from(
+                                "Loaded skill content was not consumed before execution ended",
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        replacement = replacement
+            .into_iter()
+            .enumerate()
+            .filter_map(|(index, item)| (!indices.contains(&index)).then_some(item))
+            .collect();
+        Some(replacement)
+    }
+
+    fn valid_skill_load_settlement(&self, replacement: &[ConversationItem]) -> bool {
+        self.settled_skill_load_surface().is_some_and(|expected| {
+            expected.len() == replacement.len()
+                && expected
+                    .iter()
+                    .zip(replacement)
+                    .all(|(left, right)| conversation_items_match(left, right))
+        })
     }
 
     fn valid_direct_user_append(&self, items: &[ConversationItem]) -> bool {
@@ -4803,6 +5418,45 @@ impl LifecycleFold {
 
     fn accept(&mut self, kind: &TimelineEventKind) -> Result<(), TimelineError> {
         match kind {
+            TimelineEventKind::DisplayProjectionExpected(expectation) => {
+                match self
+                    .display_projection_expectations
+                    .get(&expectation.event_id)
+                {
+                    Some(previous) if previous == expectation => {}
+                    Some(_) => return Err(TimelineError::InvalidDisplayProjection),
+                    None => {
+                        self.display_projection_expectations
+                            .insert(expectation.event_id.clone(), expectation.clone());
+                    }
+                }
+            }
+            TimelineEventKind::Interaction(InteractionEvent::Opened {
+                tool_call_id,
+                attempt_id,
+                kind,
+            }) => {
+                let key = (tool_call_id.clone(), attempt_id.clone());
+                if !valid_hook_identifier(tool_call_id)
+                    || !valid_hook_identifier(attempt_id)
+                    || !self.seen_interaction_attempts.insert(key.clone())
+                {
+                    return Err(TimelineError::InvalidInteraction);
+                }
+                self.open_interactions.insert(key, *kind);
+            }
+            TimelineEventKind::Interaction(InteractionEvent::Resolved {
+                tool_call_id,
+                attempt_id,
+                kind,
+                ..
+            }) => {
+                let key = (tool_call_id.clone(), attempt_id.clone());
+                if self.open_interactions.get(&key) != Some(kind) {
+                    return Err(TimelineError::InvalidInteraction);
+                }
+                self.open_interactions.remove(&key);
+            }
             TimelineEventKind::Input(InputEvent::Submitted {
                 input_id,
                 intent,
@@ -4934,8 +5588,13 @@ impl LifecycleFold {
                 input_ids,
                 turn,
                 item,
+                display_echo,
+                skill_loads,
             }) => {
-                if !valid_input_id_batch(input_ids) {
+                if !valid_input_id_batch(input_ids)
+                    || !valid_consumed_skill_loads(input_ids, item, skill_loads)
+                    || !valid_user_display_echo(item, display_echo.as_ref())
+                {
                     return Err(TimelineError::InvalidInput);
                 }
                 for input_id in input_ids {
@@ -4984,12 +5643,18 @@ impl LifecycleFold {
                         .inputs
                         .get(input_id)
                         .ok_or_else(|| TimelineError::InputNotFound(input_id.clone()))?;
+                    let route_matches = match input.route.as_ref() {
+                        Some(InputRoute::Fifo) => input.reserved_turn == Some(*turn),
+                        Some(InputRoute::Steer { target_turn }) => {
+                            *target_turn == *turn && input.reserved_turn.is_none()
+                        }
+                        None => false,
+                    };
                     if input.consumed
                         || input.dismissed.is_some()
-                        || input.reserved_turn != Some(*turn)
+                        || !route_matches
                         || self.active_turn != Some(*turn)
                         || !matches!(input.admission, Some(InputAdmissionDecision::Allow))
-                        || !matches!(input.route, Some(InputRoute::Fifo))
                     {
                         return Err(TimelineError::InvalidInput);
                     }
@@ -5492,6 +6157,7 @@ impl LifecycleFold {
                 run_id,
                 execution_epoch,
                 status,
+                execution_suspended,
                 handoff,
                 message,
                 ..
@@ -5504,10 +6170,10 @@ impl LifecycleFold {
                 {
                     return Err(TimelineError::InvalidWorkflow);
                 }
-                if self
-                    .open_subagents
-                    .values()
-                    .any(|subagent| subagent.workflow_run_id.as_deref() == Some(run_id.as_str()))
+                if !execution_suspended
+                    && self.open_subagents.values().any(|subagent| {
+                        subagent.workflow_run_id.as_deref() == Some(run_id.as_str())
+                    })
                 {
                     return Err(TimelineError::OpenChildren {
                         boundary: "workflow",
@@ -5751,6 +6417,8 @@ impl LifecycleFold {
                 self.subagent_seed_id = Some(seed.subagent_id.clone());
             }
             TimelineEventKind::Messages(_)
+            | TimelineEventKind::Runtime(_)
+            | TimelineEventKind::Planning(_)
             | TimelineEventKind::ImageProjection(_)
             | TimelineEventKind::Recovery(_)
             | TimelineEventKind::Observation(_)
@@ -6023,6 +6691,101 @@ fn valid_input_id_batch(input_ids: &[String]) -> bool {
 
 fn valid_consumed_input_item(item: &ConversationItem) -> bool {
     matches!(item, ConversationItem::User(user) if !user.content.is_empty())
+}
+
+fn valid_user_display_echo(
+    item: &ConversationItem,
+    display_echo: Option<&UserDisplayEcho>,
+) -> bool {
+    match item {
+        ConversationItem::User(user) => match (user.prompt_index, display_echo) {
+            (Some(prompt_index), Some(echo)) => {
+                !echo.message_id.trim().is_empty()
+                    && echo.message_id.len() <= 512
+                    && !echo.message_id.chars().any(char::is_control)
+                    && echo.prompt_index == prompt_index
+                    && echo.block_count > 0
+                    && echo.blake3.len() == 64
+                    && echo
+                        .blake3
+                        .bytes()
+                        .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                    && blake3::Hash::from_hex(&echo.blake3).is_ok()
+            }
+            (None, None) => true,
+            _ => false,
+        },
+        _ => display_echo.is_none(),
+    }
+}
+
+fn valid_consumed_skill_loads(
+    input_ids: &[String],
+    item: &ConversationItem,
+    skill_loads: &[sampling_types::SkillLoadItem],
+) -> bool {
+    if skill_loads
+        .len()
+        .checked_add(1)
+        .and_then(|count| u32::try_from(count).ok())
+        .is_none()
+    {
+        return false;
+    }
+    let ConversationItem::User(user) = item else {
+        return false;
+    };
+
+    let mut call_ids = BTreeSet::new();
+    let mut reference_counts = BTreeMap::<&str, usize>::new();
+    let mut body_bytes = 0usize;
+    for skill in skill_loads {
+        if skill.source != sampling_types::SkillLoadSource::User
+            || !input_ids.iter().any(|input_id| input_id == &skill.input_id)
+            || skill.call_id.trim().is_empty()
+            || skill.skill_name.trim().is_empty()
+            || skill.prompt_index != user.prompt_index
+            || !call_ids.insert(skill.call_id.as_str())
+        {
+            return false;
+        }
+        let next_reference = reference_counts.entry(skill.input_id.as_str()).or_default();
+        if skill.reference_index != *next_reference {
+            return false;
+        }
+        let Some(next_reference_count) = next_reference.checked_add(1) else {
+            return false;
+        };
+        *next_reference = next_reference_count;
+
+        let Some(next_body_bytes) = body_bytes.checked_add(skill.prepared_body.len()) else {
+            return false;
+        };
+        if next_body_bytes > MAX_INPUT_SKILL_LOAD_BODY_BYTES {
+            return false;
+        }
+        body_bytes = next_body_bytes;
+    }
+    true
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ModelLoadSkillArguments {
+    name: String,
+    #[serde(default)]
+    args: String,
+}
+
+fn valid_model_skill_call(
+    call: &sampling_types::ToolCall,
+    skill: &sampling_types::SkillLoadItem,
+) -> bool {
+    if call.name != sampling_types::LOAD_SKILL_TOOL_NAME {
+        return false;
+    }
+    serde_json::from_str::<ModelLoadSkillArguments>(&call.arguments)
+        .is_ok_and(|arguments| arguments.name == skill.skill_name && arguments.args == skill.args)
 }
 
 fn valid_compaction_replacement(items: &[ConversationItem]) -> bool {
@@ -6387,6 +7150,15 @@ fn fold_branch_provenance(timeline: &Timeline) -> BranchFold {
     let mut pending_control_contexts = BTreeMap::new();
 
     for event in &timeline.events {
+        if let TimelineEventKind::Input(InputEvent::Consumed {
+            item, skill_loads, ..
+        }) = &event.kind
+        {
+            let mut items = vec![item.clone()];
+            items.extend(skill_loads.iter().cloned().map(ConversationItem::SkillLoad));
+            append_branch_leaves(&mut fold, event.seq, &items, true);
+            continue;
+        }
         if let Some(items) = event.appended_message_items() {
             append_branch_leaves(&mut fold, event.seq, items, true);
             if matches!(
@@ -6458,6 +7230,8 @@ fn fold_branch_provenance(timeline: &Timeline) -> BranchFold {
                     fold.surface.splice(start_index..=end_index, replacement);
                     if messages.cause == MessageCause::IntegrityRepair {
                         rebuild_integrity_branch(&mut fold, event.seq, &messages.items, &replaced);
+                    } else if messages.cause == MessageCause::SkillLoadSettlement {
+                        rebuild_skill_settlement_branch(&mut fold, &messages.items, &replaced);
                     }
                 }
             },
@@ -6796,6 +7570,56 @@ fn rebuild_integrity_branch(
     fold.unloaded.retain(|id| referenced.contains(id));
 }
 
+fn rebuild_skill_settlement_branch(
+    fold: &mut BranchFold,
+    replacement: &[ConversationItem],
+    previous: &[BranchProvenance],
+) {
+    let settled_skill_ids = previous
+        .iter()
+        .filter_map(|entry| match &entry.value {
+            ConversationItem::SkillLoad(skill) => Some(skill.call_id.clone()),
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let removed_leaves = previous
+        .iter()
+        .filter(|entry| {
+            matches!(&entry.value, ConversationItem::SkillLoad(skill)
+                if settled_skill_ids.contains(&skill.call_id))
+        })
+        .flat_map(|entry| entry.leaves.iter().copied())
+        .collect::<BTreeSet<_>>();
+    fold.leaf_order
+        .retain(|leaf| !removed_leaves.contains(leaf));
+    for leaf in &removed_leaves {
+        fold.leaf_values.remove(leaf);
+        fold.leaf_birth.remove(leaf);
+        fold.leaf_is_message.remove(leaf);
+    }
+    for entry in &mut fold.surface {
+        entry.leaves.retain(|leaf| !removed_leaves.contains(leaf));
+    }
+
+    for (call_id, leaves) in previous.iter().filter_map(|entry| match &entry.value {
+        ConversationItem::ToolResult(result)
+            if settled_skill_ids.contains(&result.tool_call_id) =>
+        {
+            Some((result.tool_call_id.as_str(), entry.leaves.clone()))
+        }
+        _ => None,
+    }) {
+        let Some(settled) = replacement.iter().find(|item| {
+            matches!(item, ConversationItem::ToolResult(result) if result.tool_call_id == call_id)
+        }) else {
+            continue;
+        };
+        for leaf in leaves {
+            fold.leaf_values.insert(leaf, settled.clone());
+        }
+    }
+}
+
 fn replace_branch_leaves(
     fold: &mut BranchFold,
     replaced: &[SurfaceId],
@@ -6871,12 +7695,42 @@ fn replacement_branch_leaves(
                 })
                 .collect()
         }
+        MessageCause::SkillLoadSettlement => {
+            let mut next_previous = 0;
+            replacement
+                .iter()
+                .enumerate()
+                .map(|(item, value)| {
+                    let matched = previous[next_previous..]
+                        .iter()
+                        .position(|entry| {
+                            conversation_items_match(&entry.value, value)
+                                || matches!(
+                                    (&entry.value, value),
+                                    (
+                                        ConversationItem::ToolResult(before),
+                                        ConversationItem::ToolResult(after)
+                                    ) if before.tool_call_id == after.tool_call_id
+                                )
+                        })
+                        .map(|offset| next_previous + offset);
+                    matched.map_or_else(
+                        || own_leaf(item),
+                        |index| {
+                            next_previous = index + 1;
+                            previous[index].leaves.clone()
+                        },
+                    )
+                })
+                .collect()
+        }
         MessageCause::Seed
         | MessageCause::DirectUser
         | MessageCause::Interjection
         | MessageCause::User
         | MessageCause::Assistant
         | MessageCause::ToolResult
+        | MessageCause::SkillLoadModel
         | MessageCause::MemoryContext
         | MessageCause::ToolResultPrune
         | MessageCause::ContextRebuild
@@ -6938,6 +7792,7 @@ fn valid_workflow_turn_handoff(
         WorkflowTurnHandoff::None => matches!(
             status,
             WorkflowExecutionStatus::UserPaused
+                | WorkflowExecutionStatus::Suspended
                 | WorkflowExecutionStatus::BackOffPaused
                 | WorkflowExecutionStatus::NoProgressPaused
                 | WorkflowExecutionStatus::InfraPaused
@@ -7112,6 +7967,65 @@ mod tests {
     }
 
     #[test]
+    fn interaction_attempts_require_exact_single_open_resolution_pairs() {
+        let opened = || {
+            TimelineEventKind::Interaction(InteractionEvent::Opened {
+                tool_call_id: "tool-1".into(),
+                attempt_id: "attempt-1".into(),
+                kind: InteractionKind::Question,
+            })
+        };
+        let rebound = || {
+            TimelineEventKind::Interaction(InteractionEvent::Opened {
+                tool_call_id: "tool-1".into(),
+                attempt_id: "attempt-2".into(),
+                kind: InteractionKind::Question,
+            })
+        };
+        let resolved = |tool_call_id: &str, attempt_id: &str, kind| {
+            TimelineEventKind::Interaction(InteractionEvent::Resolved {
+                tool_call_id: tool_call_id.into(),
+                attempt_id: attempt_id.into(),
+                kind,
+                resolution: InteractionResolution::Answered,
+            })
+        };
+
+        let mut timeline = Timeline::default();
+        timeline.record(opened()).unwrap();
+        // A crash may leave the old attempt unresolved. A rebound request
+        // remains independently resolvable by its fresh attempt identity.
+        timeline.record(rebound()).unwrap();
+        timeline
+            .record(resolved("tool-1", "attempt-2", InteractionKind::Question))
+            .unwrap();
+        assert!(matches!(
+            timeline.record(resolved("tool-2", "attempt-1", InteractionKind::Question)),
+            Err(TimelineError::InvalidInteraction)
+        ));
+        assert!(matches!(
+            timeline.record(resolved("tool-1", "attempt-1", InteractionKind::Permission)),
+            Err(TimelineError::InvalidInteraction)
+        ));
+        timeline
+            .record(resolved("tool-1", "attempt-1", InteractionKind::Question))
+            .unwrap();
+        assert!(matches!(
+            timeline.record(resolved("tool-1", "attempt-1", InteractionKind::Question)),
+            Err(TimelineError::InvalidInteraction)
+        ));
+
+        let replay = Timeline::from_events(timeline.events.clone()).unwrap();
+        assert_same_fold(&replay, &timeline);
+        let mut duplicate = Timeline::default();
+        duplicate.record(opened()).unwrap();
+        assert!(matches!(
+            duplicate.prepare(opened()),
+            Err(TimelineError::InvalidInteraction)
+        ));
+    }
+
+    #[test]
     fn provider_terminal_source_requires_this_turns_completed_request() {
         let native = sampling_types::ProviderTerminal::ChatCompletions {
             finish_reason: "stop".into(),
@@ -7266,6 +8180,7 @@ mod tests {
         let step = StepId { turn, index: 0 };
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: vec![],
                 identity: user_identity(),
@@ -7396,6 +8311,7 @@ mod tests {
             let step = StepId { turn, index: 0 };
             timeline
                 .record(TimelineEventKind::Turn(TurnEvent::Started {
+                    prompt_id: "fixture-prompt".into(),
                     id: turn,
                     input_ids: vec![],
                     identity: user_identity(),
@@ -7610,6 +8526,7 @@ mod tests {
         let turn = TurnId(id);
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity,
@@ -7652,6 +8569,7 @@ mod tests {
         let turn = TurnId(id);
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity: user_identity(),
@@ -7744,6 +8662,255 @@ mod tests {
 
     fn allow_input(timeline: &mut Timeline, input_id: &str) {
         allow_input_with(timeline, input_id, InputRoute::Fifo, Vec::new());
+    }
+
+    fn start_input_turn(timeline: &mut Timeline, input_ids: Vec<String>) -> TurnId {
+        let turn = TurnId(1);
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
+                id: turn,
+                input_ids,
+                identity: TurnIdentity {
+                    origin: "user".into(),
+                    turn_kind: "user".into(),
+                    goal_id: None,
+                    goal_definition_revision: None,
+                    stage_id: None,
+                },
+                model_id: "model".into(),
+                input_message_count: 0,
+                prompt_index: 0,
+                prompt_text: "hello".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        turn
+    }
+
+    fn user_skill_load(
+        input_id: &str,
+        reference_index: usize,
+        call_id: &str,
+        skill_name: &str,
+        prepared_body: &str,
+        prompt_index: Option<usize>,
+    ) -> sampling_types::SkillLoadItem {
+        sampling_types::SkillLoadItem {
+            input_id: input_id.into(),
+            reference_index,
+            call_id: call_id.into(),
+            skill_name: skill_name.into(),
+            source: sampling_types::SkillLoadSource::User,
+            args: String::new(),
+            prepared_body: std::sync::Arc::from(prepared_body),
+            prompt_index,
+        }
+    }
+
+    fn user_at_prompt_index(content: &str, prompt_index: usize) -> ConversationItem {
+        let mut item = ConversationItem::user(content);
+        item.set_prompt_index(prompt_index);
+        item
+    }
+
+    fn display_echo_for_user(message_id: &str, prompt_index: usize, text: &str) -> UserDisplayEcho {
+        let mut blocks = serde_json::json!([{"type": "text", "text": text}]);
+        blocks.sort_all_objects();
+        UserDisplayEcho {
+            message_id: message_id.into(),
+            prompt_index,
+            block_count: 1,
+            blake3: blake3::hash(&serde_json::to_vec(&blocks).unwrap())
+                .to_hex()
+                .to_string(),
+        }
+    }
+
+    fn append_unconsumed_model_skill(timeline: &mut Timeline) -> sampling_types::SkillLoadItem {
+        let skill = sampling_types::SkillLoadItem {
+            input_id: "input-model".into(),
+            reference_index: 0,
+            call_id: "load-call".into(),
+            skill_name: "review".into(),
+            source: sampling_types::SkillLoadSource::Model,
+            args: "focus".into(),
+            prepared_body: std::sync::Arc::from("private skill body"),
+            prompt_index: Some(0),
+        };
+        let call = sampling_types::ToolCall {
+            id: skill.call_id.clone().into(),
+            name: sampling_types::LOAD_SKILL_TOOL_NAME.into(),
+            arguments: serde_json::json!({ "name": skill.skill_name, "args": skill.args })
+                .to_string()
+                .into(),
+        };
+        record_admitted_response(
+            timeline,
+            88,
+            vec![ConversationItem::assistant_tool_calls(vec![call])],
+            0,
+        );
+        timeline
+            .record(TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::SkillLoadModel,
+                items: vec![
+                    ConversationItem::tool_result(
+                        skill.call_id.clone(),
+                        sampling_types::skill_load_result_content(&skill),
+                    ),
+                    ConversationItem::SkillLoad(skill.clone()),
+                ],
+                surface: SurfaceOp::Append,
+                response_admission: None,
+            }))
+            .unwrap();
+        skill
+    }
+
+    #[test]
+    fn consumed_input_publishes_user_and_ordered_skill_loads_together() {
+        let mut timeline = Timeline::default();
+        submit_human_input(&mut timeline, "input-1", InputIntent::Prompt);
+        submit_human_input(&mut timeline, "input-2", InputIntent::Prompt);
+        allow_input(&mut timeline, "input-1");
+        allow_input(&mut timeline, "input-2");
+        let turn = start_input_turn(&mut timeline, vec!["input-1".into(), "input-2".into()]);
+        let input = vec!["input-1".into(), "input-2".into()];
+        let mut user = ConversationItem::user("hello");
+        user.set_prompt_index(0);
+        let loads = vec![
+            user_skill_load(
+                "input-1",
+                0,
+                "skill-call-1",
+                "review",
+                "review body",
+                Some(0),
+            ),
+            user_skill_load(
+                "input-2",
+                0,
+                "skill-call-2",
+                "format",
+                "format body",
+                Some(0),
+            ),
+        ];
+
+        let event = timeline
+            .record(TimelineEventKind::Input(InputEvent::Consumed {
+                display_echo: Some(display_echo_for_user("prompt-0", 0, "hello")),
+                input_ids: input.clone(),
+                turn,
+                item: user.clone(),
+                skill_loads: loads.clone(),
+            }))
+            .unwrap();
+
+        assert_eq!(
+            serde_json::to_value(timeline.surface()).unwrap(),
+            serde_json::to_value(&[
+                user.clone(),
+                ConversationItem::SkillLoad(loads[0].clone()),
+                ConversationItem::SkillLoad(loads[1].clone())
+            ])
+            .unwrap()
+        );
+        assert_eq!(timeline.surface_ids().len(), 3);
+        assert!(
+            timeline
+                .surface_ids()
+                .iter()
+                .enumerate()
+                .all(|(index, id)| { id.event == event.seq && id.item == index as u32 })
+        );
+        assert!(matches!(
+            timeline.input_state("input-1").unwrap().state,
+            InputState::Consumed { .. }
+        ));
+        assert_eq!(
+            timeline.unconsumed_skill_load_indices(),
+            BTreeSet::from([1, 2])
+        );
+
+        let before = timeline.surface().to_vec();
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Input(InputEvent::Consumed {
+                display_echo: None,
+                input_ids: input,
+                turn,
+                item: user,
+                skill_loads: loads,
+            })),
+            Err(TimelineError::InvalidInput)
+        ));
+        assert_eq!(
+            serde_json::to_value(timeline.surface()).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+    }
+
+    #[test]
+    fn invalid_consumed_skill_group_does_not_consume_input_or_change_surface() {
+        let mut timeline = Timeline::default();
+        submit_human_input(&mut timeline, "input-1", InputIntent::Prompt);
+        allow_input(&mut timeline, "input-1");
+        let turn = start_input_turn(&mut timeline, vec!["input-1".into()]);
+        let duplicate_call_id = vec![
+            user_skill_load("input-1", 0, "same-call", "review", "body", Some(0)),
+            user_skill_load("input-1", 1, "same-call", "format", "body", Some(0)),
+        ];
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Input(InputEvent::Consumed {
+                display_echo: None,
+                input_ids: vec!["input-1".into()],
+                turn,
+                item: user_at_prompt_index("hello", 0),
+                skill_loads: duplicate_call_id,
+            })),
+            Err(TimelineError::InvalidInput)
+        ));
+        assert!(timeline.surface().is_empty());
+        assert!(matches!(
+            timeline.input_state("input-1").unwrap().state,
+            InputState::Allowed { .. }
+        ));
+
+        let oversized = vec![
+            user_skill_load(
+                "input-1",
+                0,
+                "call-1",
+                "review",
+                &"x".repeat(600 * 1024),
+                Some(0),
+            ),
+            user_skill_load(
+                "input-1",
+                1,
+                "call-2",
+                "format",
+                &"y".repeat(600 * 1024),
+                Some(0),
+            ),
+        ];
+        assert!(matches!(
+            timeline.record(TimelineEventKind::Input(InputEvent::Consumed {
+                display_echo: None,
+                input_ids: vec!["input-1".into()],
+                turn,
+                item: user_at_prompt_index("hello", 0),
+                skill_loads: oversized,
+            })),
+            Err(TimelineError::InvalidInput)
+        ));
+        assert!(timeline.surface().is_empty());
+        assert!(matches!(
+            timeline.input_state("input-1").unwrap().state,
+            InputState::Allowed { .. }
+        ));
     }
 
     fn command_handler(index: u32, run_id: &str) -> HookHandlerPlan {
@@ -8835,6 +10002,7 @@ mod tests {
         let turn = TurnId(9);
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity: TurnIdentity {
@@ -8890,6 +10058,7 @@ mod tests {
         let turn = TurnId(1);
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity: user_identity(),
@@ -8910,9 +10079,11 @@ mod tests {
         let item = ConversationItem::user("steered");
         timeline
             .record(TimelineEventKind::Input(InputEvent::Consumed {
+                display_echo: None,
                 input_ids: vec!["input-steer".into()],
                 turn,
                 item: item.clone(),
+                skill_loads: Vec::new(),
             }))
             .unwrap();
         assert_eq!(timeline.surface().len(), 1);
@@ -8987,6 +10158,7 @@ mod tests {
         }
         assert!(matches!(
             timeline.record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: TurnId(1),
                 input_ids: vec!["input-first".into(), "input-missing".into()],
                 identity: TurnIdentity {
@@ -9013,6 +10185,7 @@ mod tests {
         ));
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: TurnId(1),
                 input_ids: vec!["input-first".into(), "input-follower".into()],
                 identity: TurnIdentity {
@@ -9041,9 +10214,11 @@ mod tests {
         assert!(timeline.pending_allowed_inputs().is_empty());
         timeline
             .record(TimelineEventKind::Input(InputEvent::Consumed {
+                display_echo: None,
                 input_ids: vec!["input-first".into(), "input-follower".into()],
                 turn: TurnId(1),
                 item: ConversationItem::user("hello"),
+                skill_loads: Vec::new(),
             }))
             .unwrap();
         for input_id in ["input-first", "input-follower"] {
@@ -9056,6 +10231,7 @@ mod tests {
         }
         assert!(matches!(
             Timeline::default().record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: TurnId(2),
                 input_ids: Vec::new(),
                 identity: TurnIdentity {
@@ -9083,6 +10259,7 @@ mod tests {
         allow_input(&mut timeline, "input-crash");
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: TurnId(11),
                 input_ids: vec!["input-crash".into()],
                 identity: TurnIdentity {
@@ -9175,6 +10352,7 @@ mod tests {
         let turn = TurnId(7);
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity: user_identity(),
@@ -9210,9 +10388,11 @@ mod tests {
         let item = ConversationItem::user("combined steer");
         assert!(matches!(
             timeline.record(TimelineEventKind::Input(InputEvent::Consumed {
+                display_echo: None,
                 input_ids: vec!["input-first".into(), "input-missing".into()],
                 turn,
                 item: item.clone(),
+                skill_loads: Vec::new(),
             })),
             Err(TimelineError::InputNotFound(_))
         ));
@@ -9226,9 +10406,11 @@ mod tests {
         }
         timeline
             .record(TimelineEventKind::Input(InputEvent::Consumed {
+                display_echo: None,
                 input_ids: vec!["input-first".into(), "input-second".into()],
                 turn,
                 item,
+                skill_loads: Vec::new(),
             }))
             .unwrap();
         assert_eq!(timeline.surface().len(), 1);
@@ -9264,6 +10446,49 @@ mod tests {
                 }
             ));
         }
+    }
+
+    #[test]
+    fn handled_accepts_active_steer_without_surface_injection() {
+        let mut steer_timeline = Timeline::default();
+        let turn = start_internal_turn(&mut steer_timeline, 91);
+        submit_human_input(
+            &mut steer_timeline,
+            "input-steer-failed",
+            InputIntent::Steer,
+        );
+        allow_input_with(
+            &mut steer_timeline,
+            "input-steer-failed",
+            InputRoute::Steer { target_turn: turn },
+            Vec::new(),
+        );
+        steer_timeline
+            .record(TimelineEventKind::Input(InputEvent::Handled {
+                input_ids: vec!["input-steer-failed".into()],
+                turn,
+            }))
+            .unwrap();
+        assert!(matches!(
+            steer_timeline.input_state("input-steer-failed").unwrap().state,
+            InputState::Consumed {
+                route: InputRoute::Steer { target_turn }
+            } if target_turn == turn
+        ));
+        assert!(steer_timeline.surface().is_empty());
+        assert_eq!(steer_timeline.lifecycle.active_turn, Some(turn));
+
+        let mut fifo_timeline = Timeline::default();
+        submit_human_input(&mut fifo_timeline, "input-fifo", InputIntent::Prompt);
+        allow_input(&mut fifo_timeline, "input-fifo");
+        let fifo_turn = start_input_turn(&mut fifo_timeline, vec!["input-fifo".into()]);
+        fifo_timeline
+            .record(TimelineEventKind::Input(InputEvent::Handled {
+                input_ids: vec!["input-fifo".into()],
+                turn: fifo_turn,
+            }))
+            .unwrap();
+        assert!(fifo_timeline.surface().is_empty());
     }
 
     #[test]
@@ -9360,6 +10585,7 @@ mod tests {
             seq: EventSeq(0),
             at_ms: 1,
             kind: TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: TurnId(1),
                 input_ids: Vec::new(),
                 identity: user_identity(),
@@ -9665,6 +10891,7 @@ mod tests {
         let turn = TurnId(42);
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity: user_identity(),
@@ -9776,6 +11003,7 @@ mod tests {
         let turn = TurnId(43);
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity: user_identity(),
@@ -9884,6 +11112,7 @@ mod tests {
         let turn = TurnId(44);
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity: user_identity(),
@@ -9949,6 +11178,7 @@ mod tests {
         let turn = TurnId(44);
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity: user_identity(),
@@ -10056,6 +11286,7 @@ mod tests {
             .unwrap();
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: TurnId(77),
                 input_ids: Vec::new(),
                 identity: user_identity(),
@@ -10265,6 +11496,7 @@ mod tests {
                 initial_manifest: serde_json::json!({}),
                 execution_epoch: 0,
                 status: None,
+                execution_suspended: false,
                 handoff: None,
                 message: None,
                 open: true,
@@ -10276,6 +11508,7 @@ mod tests {
                 run_id: "wf_1".into(),
                 execution_epoch: 0,
                 status: WorkflowExecutionStatus::Failed,
+                execution_suspended: false,
                 handoff: WorkflowTurnHandoff::Completion,
                 duration_ms: 8,
                 message: Some("host failed".into()),
@@ -10293,6 +11526,7 @@ mod tests {
                 run_id: "wf_1".into(),
                 execution_epoch: 0,
                 status: WorkflowExecutionStatus::Complete,
+                execution_suspended: false,
                 handoff: WorkflowTurnHandoff::Completion,
                 duration_ms: 1,
                 message: None,
@@ -10304,6 +11538,7 @@ mod tests {
                 run_id: "wf_1".into(),
                 execution_epoch: 1,
                 status: WorkflowExecutionStatus::Complete,
+                execution_suspended: false,
                 handoff: WorkflowTurnHandoff::Completion,
                 duration_ms: 1,
                 message: None,
@@ -10400,6 +11635,7 @@ mod tests {
                 run_id: "wf_pause".into(),
                 execution_epoch: 0,
                 status: WorkflowExecutionStatus::UserPaused,
+                execution_suspended: false,
                 handoff: WorkflowTurnHandoff::None,
                 duration_ms: 2,
                 message: None,
@@ -10479,6 +11715,7 @@ mod tests {
                 run_id: "wf_children".into(),
                 execution_epoch: 0,
                 status: WorkflowExecutionStatus::Failed,
+                execution_suspended: false,
                 handoff: WorkflowTurnHandoff::Completion,
                 duration_ms: 1,
                 message: Some("child still running".into()),
@@ -10508,6 +11745,7 @@ mod tests {
                 run_id: "wf_children".into(),
                 execution_epoch: 0,
                 status: WorkflowExecutionStatus::Failed,
+                execution_suspended: false,
                 handoff: WorkflowTurnHandoff::Completion,
                 duration_ms: 1,
                 message: Some("child cancelled".into()),
@@ -10562,6 +11800,7 @@ mod tests {
         let step = StepId { turn, index: 0 };
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity: user_identity(),
@@ -10602,6 +11841,7 @@ mod tests {
         let turn = TurnId(7);
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity: user_identity(),
@@ -10627,6 +11867,7 @@ mod tests {
 
         assert!(matches!(
             timeline.record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity: user_identity(),
@@ -10711,6 +11952,7 @@ mod tests {
         let step = StepId { turn, index: 0 };
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity: user_identity(),
@@ -11248,6 +12490,7 @@ mod tests {
         let mut timeline = Timeline::default();
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: TurnId(1),
                 input_ids: Vec::new(),
                 identity: user_identity(),
@@ -11292,6 +12535,7 @@ mod tests {
         let mut timeline = Timeline::default();
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: TurnId(1),
                 input_ids: Vec::new(),
                 identity: user_identity(),
@@ -12270,6 +13514,7 @@ mod tests {
         let mut timeline = Timeline::default();
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: TurnId(40),
                 input_ids: Vec::new(),
                 identity: user_identity(),
@@ -12790,6 +14035,7 @@ mod tests {
         let turn = TurnId(turn_id);
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity: user_identity(),
@@ -13176,10 +14422,13 @@ mod tests {
         SubagentSpawnEvent {
             subagent_id: id.into(),
             child_session_id: child.into(),
+            origin_tool_call_id: None,
             security_parent_session_id: "parent-session".into(),
+            parent_step_id: None,
             subagent_type: "explore".into(),
             description: "inspect architecture".into(),
             prompt: "trace the canonical state".into(),
+            execution_recipe: serde_json::json!({}),
             context_source: SubagentContextSource::Forked,
             source_ref: None,
             context_normalized: false,
@@ -13202,6 +14451,16 @@ mod tests {
             ),
             reasoning_effort: None,
         }
+    }
+
+    #[test]
+    fn subagent_spawn_preserves_local_plan_step_association() {
+        let mut spawn = subagent_spawn("task-1", "child-1");
+        spawn.parent_step_id = Some("step-1".into());
+        let encoded = serde_json::to_vec(&spawn).expect("serialize spawn fact");
+        let decoded: SubagentSpawnEvent =
+            serde_json::from_slice(&encoded).expect("deserialize spawn fact");
+        assert_eq!(decoded.parent_step_id.as_deref(), Some("step-1"));
     }
 
     #[test]
@@ -13262,6 +14521,7 @@ mod tests {
                     "artifact:subagent-output:blake3:{}",
                     "a".repeat(64)
                 )),
+                planning_summary: None,
             }))
             .unwrap();
         let terminal = SubagentTerminalEvent {
@@ -13428,6 +14688,7 @@ mod tests {
                 tokens_used: 8,
                 error: None,
                 output_ref: None,
+                planning_summary: None,
             }))
             .unwrap();
         let mut terminal = SubagentTerminalEvent {
@@ -13473,6 +14734,7 @@ mod tests {
                 tokens_used: 8,
                 error: None,
                 output_ref: None,
+                planning_summary: None,
             }))
             .unwrap();
         terminal.result_ref = Some(crate::TimelineRangeRef {
@@ -13519,6 +14781,7 @@ mod tests {
             tokens_used: 0,
             error: Some("cancelled".into()),
             output_ref: None,
+            planning_summary: None,
         };
         let mut child = Timeline::default();
         assert!(matches!(
@@ -13615,6 +14878,7 @@ mod tests {
         timeline
             .record(TimelineEventKind::Turn(TurnEvent::Started {
                 id,
+                prompt_id: format!("notification-prompt-{}", id.0),
                 input_ids: Vec::new(),
                 identity: TurnIdentity {
                     origin: "notification_drain".into(),
@@ -13829,6 +15093,7 @@ mod tests {
         let input_turn = TurnId(1);
         parent
             .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: input_turn,
                 input_ids: vec!["input-1".into()],
                 identity: TurnIdentity {
@@ -13848,9 +15113,11 @@ mod tests {
             .unwrap();
         parent
             .record(TimelineEventKind::Input(InputEvent::Consumed {
+                display_echo: None,
                 input_ids: vec!["input-1".into()],
                 turn: input_turn,
                 item: ConversationItem::user("hello"),
+                skill_loads: Vec::new(),
             }))
             .unwrap();
         let consumed_input = *parent.surface_ids().last().unwrap();
@@ -14136,6 +15403,7 @@ mod tests {
             timeline
                 .record(TimelineEventKind::Turn(TurnEvent::Started {
                     id,
+                    prompt_id: format!("goal-prompt-{}", id.0),
                     input_ids: Vec::new(),
                     identity: TurnIdentity {
                         origin: "goal_continuation".into(),
@@ -14252,6 +15520,7 @@ mod tests {
             timeline
                 .record(TimelineEventKind::Turn(TurnEvent::Started {
                     id,
+                    prompt_id: format!("plan-prompt-{}", id.0),
                     input_ids: Vec::new(),
                     identity: TurnIdentity {
                         origin: origin.into(),
@@ -14912,6 +16181,171 @@ mod tests {
     }
 
     #[test]
+    fn model_skill_load_requires_one_current_admitted_matching_tool_call() {
+        fn skill() -> sampling_types::SkillLoadItem {
+            sampling_types::SkillLoadItem {
+                input_id: "input-1".into(),
+                reference_index: 0,
+                call_id: "load-call".into(),
+                skill_name: "review".into(),
+                source: sampling_types::SkillLoadSource::Model,
+                args: "focus on safety".into(),
+                prepared_body: std::sync::Arc::from("skill body"),
+                prompt_index: Some(0),
+            }
+        }
+        fn timeline_for(arguments: String) -> Timeline {
+            let mut timeline = Timeline::default();
+            record_admitted_response(
+                &mut timeline,
+                77,
+                vec![ConversationItem::assistant_tool_calls(vec![
+                    sampling_types::ToolCall {
+                        id: "load-call".into(),
+                        name: sampling_types::LOAD_SKILL_TOOL_NAME.into(),
+                        arguments: arguments.into(),
+                    },
+                ])],
+                0,
+            );
+            timeline
+        }
+
+        let skill = skill();
+        let arguments = serde_json::json!({
+            "name": skill.skill_name,
+            "args": skill.args,
+        })
+        .to_string();
+        let result = ConversationItem::tool_result(
+            skill.call_id.clone(),
+            sampling_types::skill_load_result_content(&skill),
+        );
+        let mut timeline = timeline_for(arguments.clone());
+        timeline
+            .record(TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::SkillLoadModel,
+                items: vec![result, ConversationItem::SkillLoad(skill.clone())],
+                surface: SurfaceOp::Append,
+                response_admission: None,
+            }))
+            .unwrap();
+        assert!(matches!(
+            timeline.surface().last(),
+            Some(ConversationItem::SkillLoad(_))
+        ));
+
+        let bad_args = serde_json::json!({ "name": "review", "args": "different" }).to_string();
+        let mismatched = timeline_for(bad_args);
+        assert!(matches!(
+            mismatched.prepare(TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::SkillLoadModel,
+                items: vec![
+                    ConversationItem::tool_result(
+                        skill.call_id.clone(),
+                        sampling_types::skill_load_result_content(&skill),
+                    ),
+                    ConversationItem::SkillLoad(skill),
+                ],
+                surface: SurfaceOp::Append,
+                response_admission: None,
+            })),
+            Err(TimelineError::InvalidModelSkillLoad)
+        ));
+    }
+
+    #[test]
+    fn unconsumed_skill_load_is_pinned_until_settled() {
+        let mut timeline = Timeline::default();
+        append_unconsumed_model_skill(&mut timeline);
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
+                id: "skill-pin".into(),
+                source_items: timeline.surface_len(),
+                prompt_index: 0,
+            }))
+            .unwrap();
+        let full_range = record_compaction_summary(&mut timeline, "skill-pin");
+        assert!(matches!(
+            timeline.replace_compaction_range(
+                full_range.clone(),
+                vec![ConversationItem::user_meta("summary")],
+            ),
+            Err(TimelineError::UnconsumedSkillLoadProtected)
+        ));
+        timeline
+            .record(TimelineEventKind::Compaction(CompactionEvent::Failed {
+                id: "skill-pin".into(),
+                duration_ms: 1,
+                error: "unconsumed skill load is pinned".into(),
+            }))
+            .unwrap();
+        let prune_replacement = vec![
+            timeline.surface()[0].clone(),
+            timeline.surface()[1].clone(),
+            ConversationItem::user("rewritten load"),
+        ];
+        assert!(matches!(
+            timeline.replace_all(prune_replacement, MessageCause::ToolResultPrune),
+            Err(TimelineError::UnconsumedSkillLoadProtected)
+        ));
+
+        let settled = timeline
+            .settle_unconsumed_skill_loads()
+            .unwrap()
+            .expect("one unconsumed model SkillLoad should settle");
+        assert!(matches!(
+            &settled.kind,
+            TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::SkillLoadSettlement,
+                ..
+            })
+        ));
+        assert!(
+            timeline
+                .surface()
+                .iter()
+                .all(|item| !matches!(item, ConversationItem::SkillLoad(_)))
+        );
+        let result = timeline.surface().iter().find_map(|item| match item {
+            ConversationItem::ToolResult(result) => Some(result),
+            _ => None,
+        });
+        assert_eq!(
+            result.map(|result| result.content.as_ref()),
+            Some("Loaded skill content was not consumed before execution ended")
+        );
+        assert!(timeline.branch_transcript().iter().all(|item| {
+            !matches!(item, ConversationItem::SkillLoad(_))
+                && item.text_content() != "private skill body"
+        }));
+        assert!(timeline.events().iter().any(|event| matches!(
+            &event.kind,
+            TimelineEventKind::Messages(MessageEvent {
+                cause: MessageCause::SkillLoadModel,
+                ..
+            })
+        )));
+        assert!(timeline.settle_unconsumed_skill_loads().unwrap().is_none());
+
+        let mut consumed = Timeline::default();
+        append_unconsumed_model_skill(&mut consumed);
+        assert_eq!(
+            consumed.unconsumed_skill_load_indices(),
+            BTreeSet::from([2])
+        );
+        record_admitted_response(
+            &mut consumed,
+            89,
+            vec![ConversationItem::assistant("skill was used")],
+            0,
+        );
+        assert!(consumed.unconsumed_skill_load_indices().is_empty());
+        assert!(consumed.settle_unconsumed_skill_loads().unwrap().is_none());
+    }
+
+    #[test]
     fn pending_monitor_progress_keeps_a_bounded_recent_window() {
         let mut timeline = Timeline::default();
         for index in 0..(MAX_PENDING_MONITOR_PROGRESS_PER_TASK + 5) {
@@ -15000,6 +16434,300 @@ mod tests {
                 .windows(2)
                 .all(|pair| { pair[0].received_seq.get() < pair[1].received_seq.get() })
         );
+    }
+
+    fn commit_test_plan(
+        timeline: &mut Timeline,
+        plan: tool_types::planning::LocalPlan,
+        previous: Option<EventSeq>,
+    ) -> Result<TimelineEvent, TimelineError> {
+        timeline.record(TimelineEventKind::Planning(PlanningEvent {
+            previous,
+            plan: Box::new(plan),
+        }))
+    }
+
+    fn test_parent_plan() -> tool_types::planning::LocalPlan {
+        use tool_types::planning::{LocalPlan, PlanLink, PlanPriority, PlanStep, PlanStepStatus};
+
+        let mut plan = LocalPlan::new("parent", "work");
+        plan.steps.push(PlanStep {
+            id: "step-1".into(),
+            content: "initial".into(),
+            priority: PlanPriority::Normal,
+            status: PlanStepStatus::Pending,
+            requirements: None,
+            removed: false,
+        });
+        plan.links.push(PlanLink {
+            id: "link-1".into(),
+            parent_step_id: "step-1".into(),
+            child_session_id: "child-1".into(),
+            terminal: false,
+            required: true,
+            pending_source_revision: None,
+            review_required_revision: 0,
+            result_id: None,
+            dispatch_failure: None,
+        });
+        plan
+    }
+
+    #[test]
+    fn canonical_child_result_retains_the_original_bounded_planning_summary() {
+        use tool_types::planning::{
+            LocalPlan, PlanLink, PlanPriority, PlanStep, PlanStepStatus, SubagentPlanningSummary,
+        };
+
+        let mut child = Timeline::default();
+        child
+            .record(TimelineEventKind::SubagentSeed(SubagentSeedEvent {
+                parent_timeline_id: "parent-session".into(),
+                parent_spawn_seq: 0,
+                subagent_id: "child-session".into(),
+                security_parent_session_id: "parent-session".into(),
+                context_source: SubagentContextSource::New,
+                source_ref: None,
+                normalized: false,
+            }))
+            .unwrap();
+        let mut plan = LocalPlan::new("child-session", "child-scope");
+        plan.steps.push(PlanStep {
+            id: "local-step".into(),
+            content: "inspect dependency".into(),
+            priority: PlanPriority::Normal,
+            status: PlanStepStatus::InProgress,
+            requirements: None,
+            removed: false,
+        });
+        plan.links.push(PlanLink {
+            id: "nested-task".into(),
+            parent_step_id: "local-step".into(),
+            child_session_id: "grandchild-session".into(),
+            terminal: false,
+            required: true,
+            pending_source_revision: None,
+            review_required_revision: 0,
+            result_id: None,
+            dispatch_failure: None,
+        });
+        let plan_event = child
+            .record(TimelineEventKind::Planning(PlanningEvent {
+                previous: None,
+                plan: Box::new(plan.clone()),
+            }))
+            .unwrap();
+        let summary = SubagentPlanningSummary::from_plan(plan_event.seq.get(), &plan).unwrap();
+        let result_event = child
+            .record(TimelineEventKind::SubagentResult(SubagentResultEvent {
+                subagent_id: "child-session".into(),
+                outcome: SubagentOutcome::Completed,
+                duration_ms: 10,
+                tool_calls: 1,
+                turns: 1,
+                tokens_used: 5,
+                error: None,
+                output_ref: None,
+                planning_summary: Some(summary.clone()),
+            }))
+            .unwrap();
+
+        let durable: Vec<TimelineEvent> =
+            serde_json::from_slice(&serde_json::to_vec(child.events()).unwrap()).unwrap();
+        let restored = Timeline::from_events(durable).unwrap();
+        let TimelineEventKind::SubagentResult(canonical) = result_event.kind else {
+            unreachable!();
+        };
+        assert_eq!(canonical.planning_summary, Some(summary.clone()));
+        let recovered = restored
+            .events()
+            .iter()
+            .find_map(|event| match &event.kind {
+                TimelineEventKind::SubagentResult(result) => result.planning_summary.as_ref(),
+                _ => None,
+            });
+        assert_eq!(recovered, Some(&summary));
+        assert_eq!(summary.planning_seq, plan_event.seq.get());
+        assert_eq!(summary.unresolved_required_delivery_count, 1);
+        assert_eq!(
+            summary.unresolved_required_deliveries[0].link_id,
+            "nested-task"
+        );
+    }
+
+    #[test]
+    fn planning_timeline_preserves_delete_and_replan_identity_transitions() {
+        use tool_types::planning::{PlanStep, PlanStepStatus, PlanUpdateMode, ReplanProgress};
+
+        let mut timeline = Timeline::default();
+        let mut plan = test_parent_plan();
+        let first = commit_test_plan(&mut timeline, plan.clone(), None).unwrap();
+
+        plan.update_steps(
+            PlanUpdateMode::Merge,
+            vec![PlanStep {
+                id: "step-1".into(),
+                content: "changed".into(),
+                priority: tool_types::planning::PlanPriority::Normal,
+                status: PlanStepStatus::Pending,
+                requirements: None,
+                removed: false,
+            }],
+        )
+        .unwrap();
+        let edit = commit_test_plan(&mut timeline, plan.clone(), Some(first.seq)).unwrap();
+        let dispatched_id = plan.replans[0].id.clone();
+        plan.advance_replan(&dispatched_id, ReplanProgress::Dispatching)
+            .unwrap();
+        let dispatched = commit_test_plan(&mut timeline, plan.clone(), Some(edit.seq)).unwrap();
+
+        let mut rewritten = plan.clone();
+        rewritten.replans[0].content = "tampered after dispatch".into();
+        assert!(commit_test_plan(&mut timeline, rewritten, Some(dispatched.seq)).is_err());
+        assert_eq!(timeline.planning_snapshot().unwrap().plan, plan);
+
+        plan.update_steps(
+            PlanUpdateMode::Merge,
+            vec![PlanStep {
+                id: "step-1".into(),
+                content: "newer change".into(),
+                priority: tool_types::planning::PlanPriority::Normal,
+                status: PlanStepStatus::Pending,
+                requirements: None,
+                removed: false,
+            }],
+        )
+        .unwrap();
+        let latest = commit_test_plan(&mut timeline, plan.clone(), Some(dispatched.seq)).unwrap();
+        assert_eq!(plan.replans[0].content, "changed");
+        assert_eq!(plan.replans[0].progress, ReplanProgress::Dispatching);
+        assert_eq!(plan.replans[1].content, "newer change");
+
+        plan.update_steps(PlanUpdateMode::Replace, Vec::new())
+            .unwrap();
+        let deleted = commit_test_plan(&mut timeline, plan.clone(), Some(latest.seq)).unwrap();
+        assert!(
+            plan.steps
+                .iter()
+                .any(|step| step.id == "step-1" && step.removed)
+        );
+        assert_eq!(plan.links[0].parent_step_id, "step-1");
+        assert!(plan.replans.iter().any(|change| change.removed));
+
+        plan.mark_link_terminal("link-1", "child finished before applying changes")
+            .unwrap();
+        commit_test_plan(&mut timeline, plan, Some(deleted.seq)).unwrap();
+    }
+
+    #[test]
+    fn planning_timeline_accepts_completion_only_revision() {
+        use tool_types::planning::{PlanStep, PlanStepStatus, PlanUpdateMode};
+
+        let mut timeline = Timeline::default();
+        let mut plan = test_parent_plan();
+        let first = commit_test_plan(&mut timeline, plan.clone(), None).unwrap();
+        let update = plan
+            .update_steps(
+                PlanUpdateMode::Merge,
+                vec![PlanStep {
+                    id: "step-1".into(),
+                    content: "initial".into(),
+                    priority: tool_types::planning::PlanPriority::Normal,
+                    status: PlanStepStatus::Completed,
+                    requirements: None,
+                    removed: false,
+                }],
+            )
+            .unwrap();
+        assert!(update.source_changes.is_empty());
+        assert!(plan.replans.is_empty());
+        commit_test_plan(&mut timeline, plan, Some(first.seq)).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod runtime_checkpoint_prompt_identity_tests {
+    use super::*;
+    use crate::session_runtime::{
+        RuntimeCheckpoint, SessionRuntimeEvent, TurnContinuation, TurnResumePoint,
+    };
+
+    #[test]
+    fn checkpoint_rejects_prompt_id_conflicting_with_started_turn() {
+        let mut timeline = Timeline::default();
+        let turn_id = TurnId(1);
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                id: turn_id,
+                prompt_id: "original-prompt".into(),
+                input_ids: Vec::new(),
+                identity: TurnIdentity {
+                    origin: "internal".into(),
+                    turn_kind: "internal".into(),
+                    goal_id: None,
+                    goal_definition_revision: None,
+                    stage_id: None,
+                },
+                model_id: "model".into(),
+                input_message_count: 0,
+                prompt_index: 0,
+                prompt_text: "hello".into(),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Runtime(
+                SessionRuntimeEvent::SuspendRequested {
+                    operation_id: "suspend-1".into(),
+                    root_session_id: "session-1".into(),
+                },
+            ))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Runtime(
+                SessionRuntimeEvent::CommandsSettled {
+                    operation_id: "suspend-1".into(),
+                    commands: Vec::new(),
+                },
+            ))
+            .unwrap();
+        let frontier = timeline.events().last().unwrap().seq;
+        let continuation = TurnContinuation {
+            turn_id,
+            prompt_id: "different-prompt".into(),
+            prompt_index: 0,
+            origin: "internal".into(),
+            next_step_index: 0,
+            tool_turns_used: 0,
+            tool_calls_used: 0,
+            stop_continuations_used: 0,
+            output_schema: None,
+            resume_point: TurnResumePoint::Input,
+            task_output_usage: None,
+            accepted_response: None,
+            structured_output_retries: 0,
+            sampling_attempts_used: 0,
+            sampling_max_attempts: None,
+            sampling_replay_safe: true,
+            sampling_deadline_ms: None,
+            operations: Vec::new(),
+        };
+        let error = timeline
+            .record(TimelineEventKind::Runtime(
+                SessionRuntimeEvent::Checkpoint {
+                    operation_id: "suspend-1".into(),
+                    checkpoint: RuntimeCheckpoint {
+                        frontier,
+                        runtime_source_hash: "a".repeat(64),
+                        turn: Some(continuation),
+                        step: None,
+                    },
+                },
+            ))
+            .unwrap_err();
+        assert!(matches!(error, TimelineError::InvalidRuntime(_)));
+        assert!(timeline.runtime_lifecycle().checkpoint.is_none());
     }
 }
 

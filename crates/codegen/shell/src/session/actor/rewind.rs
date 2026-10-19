@@ -239,6 +239,7 @@ impl SessionActor {
         }
 
         // ── Commit mode (force=true): execute the rewind ─────────────
+        self.ensure_runtime_handoff_allows_rewind().await?;
         self.cancel_background_compaction("rewind")
             .await
             .map_err(|error| anyhow::anyhow!(error))?;
@@ -433,6 +434,7 @@ impl SessionActor {
     /// the intent clear was lost. Otherwise the old typed points still contain
     /// everything needed to replay the idempotent forward steps.
     pub(super) async fn recover_pending_rewind(&self) -> anyhow::Result<()> {
+        self.ensure_runtime_handoff_allows_rewind().await?;
         let Some(transaction) = self.load_rewind_transaction()? else {
             return Ok(());
         };
@@ -503,6 +505,24 @@ impl SessionActor {
             .await;
         self.clear_rewind_transaction().await?;
         self.signals_handle().mark_reverted();
+        Ok(())
+    }
+
+    async fn ensure_runtime_handoff_allows_rewind(&self) -> anyhow::Result<()> {
+        let runtime = self
+            .chat_state_handle
+            .runtime_state()
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!("cannot verify runtime checkpoint before rewind: {error}")
+            })?;
+        if runtime.phase != chat_state::session_runtime::RuntimePhase::Running
+            && (runtime.checkpoint.is_some() || runtime.operation_id.is_some())
+        {
+            anyhow::bail!(
+                "cannot rewind a session with an unfinished runtime handoff; resume or resolve it first"
+            );
+        }
         Ok(())
     }
 

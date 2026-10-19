@@ -499,19 +499,19 @@ pub struct PromptTokensDetails {
     #[serde(default)]
     pub cached_tokens: Option<u32>,
     #[serde(default)]
-    pub audio_tokens: u32,
+    pub audio_tokens: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Default)]
 pub struct CompletionTokensDetails {
     #[serde(default)]
-    pub reasoning_tokens: u32,
+    pub reasoning_tokens: Option<u32>,
     #[serde(default)]
-    pub audio_tokens: u32,
+    pub audio_tokens: Option<u32>,
     #[serde(default)]
-    pub accepted_prediction_tokens: u32,
+    pub accepted_prediction_tokens: Option<u32>,
     #[serde(default)]
-    pub rejected_prediction_tokens: u32,
+    pub rejected_prediction_tokens: Option<u32>,
 }
 // ============ Streaming types ============
 
@@ -979,6 +979,107 @@ impl From<crate::rs::CreateResponse> for CreateResponseWrapper {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    fn nullable_chat_usage() -> Value {
+        json!({
+            "prompt_tokens": 154469,
+            "completion_tokens": 157,
+            "total_tokens": 154626,
+            "prompt_tokens_details": {"audio_tokens": null, "cached_tokens": 147456},
+            "completion_tokens_details": {
+                "accepted_prediction_tokens": null,
+                "audio_tokens": null,
+                "reasoning_tokens": 74,
+                "rejected_prediction_tokens": null
+            }
+        })
+    }
+
+    #[test]
+    fn chat_responses_accept_null_usage_details() {
+        let mut wire = json!({
+            "id": "chatcmpl-test",
+            "object": "chat.completion.chunk",
+            "created": 0,
+            "model": "test-model",
+            "choices": [],
+            "usage": nullable_chat_usage()
+        });
+        let chunk: ChatCompletionChunk = serde_json::from_value(wire.clone()).unwrap();
+        wire["object"] = json!("chat.completion");
+        let response: ChatCompletionResponse = serde_json::from_value(wire).unwrap();
+        for usage in [chunk.usage.unwrap(), response.usage.unwrap()] {
+            let normalized = crate::TokenUsage::from(usage);
+            assert_eq!(normalized.prompt_tokens, 154469);
+            assert_eq!(normalized.completion_tokens, 157);
+            assert_eq!(normalized.total_tokens, 154626);
+            assert_eq!(normalized.reasoning_tokens, 74);
+            assert_eq!(normalized.cache_read_tokens(), Some(147456));
+        }
+    }
+
+    #[test]
+    fn chat_usage_details_preserve_unknown_zero_and_counts() {
+        for (details, field) in [
+            ("prompt_tokens_details", "audio_tokens"),
+            ("prompt_tokens_details", "cached_tokens"),
+            ("completion_tokens_details", "reasoning_tokens"),
+            ("completion_tokens_details", "audio_tokens"),
+            ("completion_tokens_details", "accepted_prediction_tokens"),
+            ("completion_tokens_details", "rejected_prediction_tokens"),
+        ] {
+            for count in [
+                None,
+                Some(Value::Null),
+                Some(json!(0)),
+                Some(json!(7)),
+                Some(json!(u32::MAX)),
+            ] {
+                let mut wire = nullable_chat_usage();
+                wire[details].as_object_mut().unwrap().remove(field);
+                if let Some(count) = &count {
+                    wire[details][field] = count.clone();
+                }
+                let usage: Usage = serde_json::from_value(wire).unwrap();
+                let encoded = serde_json::to_value(&usage).unwrap();
+                assert_eq!(
+                    encoded[details][field],
+                    count.unwrap_or(Value::Null),
+                    "{details}.{field}"
+                );
+                if field == "reasoning_tokens" {
+                    assert_eq!(
+                        crate::TokenUsage::from(usage).reasoning_tokens,
+                        encoded[details][field].as_u64().unwrap_or(0) as u32
+                    );
+                }
+            }
+            for count in [
+                json!(-1),
+                json!("0"),
+                json!(1.5),
+                json!(4294967296_u64),
+                json!(true),
+            ] {
+                let mut wire = nullable_chat_usage();
+                wire[details][field] = count;
+                assert!(
+                    serde_json::from_value::<Usage>(wire).is_err(),
+                    "{details}.{field}"
+                );
+            }
+        }
+        for field in ["prompt_tokens", "completion_tokens", "total_tokens"] {
+            let mut wire = nullable_chat_usage();
+            wire[field] = Value::Null;
+            assert!(
+                serde_json::from_value::<Usage>(wire.clone()).is_err(),
+                "{field}"
+            );
+            wire.as_object_mut().unwrap().remove(field);
+            assert!(serde_json::from_value::<Usage>(wire).is_err(), "{field}");
+        }
+    }
 
     #[test]
     fn finish_reason_preserves_provider_extensions() {

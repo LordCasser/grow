@@ -9,6 +9,7 @@
 | [session-timeline](specs/session-timeline/spec.md) | 会话事实、模型可见上下文和恢复边界。 |
 | [input-admission](specs/input-admission/spec.md) | 用户输入的持久化接纳、排队与恢复。 |
 | [behavior-goal](specs/behavior-goal/spec.md) | 协作协议切换与跨 turn Goal 生命周期。 |
+| [task-planning](specs/task-planning/spec.md) | 局部 TODO、父子弱关联、依赖等待与交付验收。 |
 | [context-compaction](specs/context-compaction/spec.md) | 模型上下文压缩与异步结果提交。 |
 | [workflow-execution](specs/workflow-execution/spec.md) | Rhai Workflow Definition、Run 与 journal 恢复。 |
 | [tool-authorization](specs/tool-authorization/spec.md) | 工具调用的权限判定与子 Agent 能力上限。 |

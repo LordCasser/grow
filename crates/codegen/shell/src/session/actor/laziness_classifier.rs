@@ -363,6 +363,15 @@ pub(crate) fn flatten_transcript_for_classifier(
                     );
                 }
             }
+            ConversationItem::SkillLoad(skill) => {
+                let _ = writeln!(
+                    out,
+                    "[historical skill load: {} args={}] {}",
+                    skill.skill_name,
+                    skill.args,
+                    truncate(&skill.prepared_body),
+                );
+            }
             ConversationItem::BackendToolCall(btc) => {
                 let _ = writeln!(out, "[backend_tool_call] {}", btc.text_summary());
             }

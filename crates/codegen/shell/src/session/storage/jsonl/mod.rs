@@ -24,6 +24,10 @@ const BOUNDED_VALIDATION_MAX_REFERENCES: usize = 4_096;
 const TTL_DISCOVERY_MAX_CANDIDATES: usize = 4_096;
 const TTL_DISCOVERY_MAX_DIRECTORY_ENTRIES: usize = 8_192;
 const BOUNDED_SESSION_ID_SCAN_ENTRIES: usize = 4_096;
+const RECLAIM_INTENT_DIRECTORY: &str = ".reclaim-intents";
+const RECLAIM_GATE_FILE: &str = ".reclaim-gate.lock";
+const RECLAIM_INTENT_MAX_BYTES: u64 = 1024 * 1024;
+const RECLAIM_INTENT_MAX_FILES: usize = 256;
 
 fn bounded_read_exhausted(description: &str) -> io::Error {
     io::Error::new(
@@ -87,6 +91,42 @@ enum RawExactStatus {
     Missing,
     Exact,
     Conflict,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionReclaimIntent {
+    version: u32,
+    id: String,
+    members: Vec<SessionReclaimMember>,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionReclaimMember {
+    session_id: String,
+    cwd: String,
+    entity_volume: u64,
+    entity_index: u64,
+    quarantine_name: String,
+}
+
+struct SessionReclaimGate {
+    intents: super::ContainedDirectory,
+    _lock: std::fs::File,
+}
+
+impl SessionReclaimMember {
+    fn info(&self) -> Info {
+        Info {
+            id: acp::SessionId::new(self.session_id.clone()),
+            cwd: self.cwd.clone(),
+        }
+    }
+
+    fn matches_info(&self, info: &Info) -> bool {
+        self.session_id == info.id.0.as_ref() && self.cwd == info.cwd
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -563,6 +603,25 @@ impl JsonlStorageAdapter {
         let summary = opened.summary().clone();
         let validated = opened.validated_timeline(&info.id.to_string())?;
         let timeline = validated.timeline;
+        // Keep the already parsed complete physical snapshot alive through
+        // load reconciliation. Its ids remain occupied even when client
+        // replay later hides rows by cursor or rewind.
+        let physical_updates = if restore_for_write {
+            Some(Self::read_updates_from_directory(opened.directory())?)
+        } else {
+            None
+        };
+        let max_event_id_suffix = physical_updates
+            .as_deref()
+            .and_then(super::max_event_id_suffix);
+        if restore_for_write {
+            // Reconcile helpers may append durable facts during load, so seed
+            // before they can emit any new event identity.
+            super::reseed_event_counter_from_projection_expectations(&timeline);
+            if let Some(max_suffix) = max_event_id_suffix {
+                crate::util::event_id::ensure_event_counter_at_least(max_suffix.saturating_add(1));
+            }
+        }
         // Only the explicit new-writer load owns crash reconciliation. Merely
         // reading a live Session cannot end its still-running sidebands.
         if restore_for_write {
@@ -576,7 +635,9 @@ impl JsonlStorageAdapter {
             .reconcile_model_projection(info, summary, &timeline, restore_for_write)
             .await?;
         if restore_for_write {
-            let existing = Self::read_updates_from_directory(opened.directory())?;
+            let existing = physical_updates
+                .as_ref()
+                .expect("writer load captured physical updates");
             let reconciled = crate::session::response_projection::reconcile_response_projections(
                 &info.id,
                 &timeline,
@@ -1275,7 +1336,7 @@ impl JsonlStorageAdapter {
         cwd: Option<&str>,
         project: impl FnMut(OpenedSession) -> T,
     ) -> io::Result<Vec<T>> {
-        self.scan_opened_sessions_with_policy(cwd, false, None, project)
+        self.scan_opened_sessions_with_policy(cwd, false, None, false, project)
     }
 
     fn scan_opened_sessions_with_policy<T>(
@@ -1283,6 +1344,7 @@ impl JsonlStorageAdapter {
         cwd: Option<&str>,
         fail_on_invalid_candidate: bool,
         max_directory_entries: Option<usize>,
+        include_hidden: bool,
         mut project: impl FnMut(OpenedSession) -> T,
     ) -> io::Result<Vec<T>> {
         if !matches!(&self.dir_mode, SessionDirMode::FromRoot(_)) {
@@ -1374,7 +1436,15 @@ impl JsonlStorageAdapter {
                     }
                     continue;
                 }
-                if summary.is_hidden() || cwd.is_some_and(|expected| expected != summary.info.cwd) {
+                if let Err(error) = self.ensure_not_pending_reclaim(&summary.info) {
+                    if !fail_on_invalid_candidate && error.kind() == io::ErrorKind::WouldBlock {
+                        continue;
+                    }
+                    return Err(error);
+                }
+                if (!include_hidden && summary.is_hidden())
+                    || cwd.is_some_and(|expected| expected != summary.info.cwd)
+                {
                     continue;
                 }
                 if !ids.insert(summary.info.id.to_string()) {
@@ -1432,7 +1502,9 @@ impl JsonlStorageAdapter {
 
     fn list_sessions_for_search_sync(&self) -> io::Result<Vec<Summary>> {
         let mut summaries =
-            self.scan_opened_sessions_with_policy(None, true, None, |opened| opened.summary)?;
+            self.scan_opened_sessions_with_policy(None, true, None, false, |opened| {
+                opened.summary
+            })?;
         Self::sort_session_summaries(&mut summaries);
         Ok(summaries)
     }
@@ -2904,6 +2976,7 @@ impl JsonlStorageAdapter {
     }
 
     pub(crate) fn open_session(&self, info: &Info) -> io::Result<OpenedSession> {
+        self.ensure_not_pending_reclaim(info)?;
         let key = format!("{}\0{}", info.id, info.cwd);
         let mut cache = self
             .opened_sessions
@@ -2927,6 +3000,7 @@ impl JsonlStorageAdapter {
     }
 
     fn open_session_for_observation(&self, info: &Info) -> io::Result<OpenedSession> {
+        self.ensure_not_pending_reclaim(info)?;
         let key = format!("{}\0{}", info.id, info.cwd);
         let has_pinned_entity = self
             .opened_sessions
@@ -3060,6 +3134,7 @@ impl JsonlStorageAdapter {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
                 Err(error) => return Err(error),
             };
+            self.ensure_not_pending_reclaim(&summary.info)?;
             Self::validate_physical_session_identity(
                 &cwd_name,
                 &cwd_dir,
@@ -3152,6 +3227,18 @@ impl JsonlStorageAdapter {
     fn delete_opened_session(&self, opened: OpenedSession) -> io::Result<()> {
         let info = opened.summary.info.clone();
         self.ensure_writer_lease(&info)?;
+        self.reject_linked_single_session_delete(&opened)?;
+        let timeline_id = info.id.to_string();
+        let timeline = opened.bounded_validated_timeline(&timeline_id)?.timeline;
+        let runtime = timeline.runtime_lifecycle();
+        if runtime.phase != chat_state::session_runtime::RuntimePhase::Running
+            && (runtime.checkpoint.is_some() || runtime.operation_id.is_some())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "session has an unfinished runtime handoff; resolve it before deleting history",
+            ));
+        }
         let parent = self.open_session_parent(&info)?;
         let name_string = info.id.to_string();
         let name = std::ffi::OsStr::new(&name_string);
@@ -3223,13 +3310,454 @@ impl JsonlStorageAdapter {
         Ok(())
     }
 
+    fn reject_linked_single_session_delete(&self, opened: &OpenedSession) -> io::Result<()> {
+        let info = &opened.summary.info;
+        let timeline = opened
+            .bounded_validated_timeline(&info.id.to_string())?
+            .timeline;
+        let mut linked = std::collections::BTreeSet::new();
+        if let Some(parent_id) = &opened.summary.parent_session_id {
+            linked.insert(parent_id.clone());
+        }
+        for event in timeline.events() {
+            match &event.kind {
+                chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
+                    spawn,
+                )) => {
+                    linked.insert(spawn.child_session_id.clone());
+                }
+                chat_state::TimelineEventKind::SubagentSeed(seed) => {
+                    linked.insert(seed.parent_timeline_id.clone());
+                }
+                _ => {}
+            }
+        }
+        for child in self.scan_opened_sessions_with_policy(
+            None,
+            true,
+            Some(TTL_DISCOVERY_MAX_DIRECTORY_ENTRIES),
+            true,
+            |candidate| {
+                let child_id = candidate.summary().info.id.0.to_string();
+                let is_child = candidate.timeline_events()?.iter().any(|event| {
+                    matches!(
+                        &event.kind,
+                        chat_state::TimelineEventKind::SubagentSeed(seed)
+                            if seed.parent_timeline_id == info.id.0.as_ref()
+                    )
+                });
+                Ok::<_, io::Error>((child_id, is_child))
+            },
+        )? {
+            let (child_id, is_child) = child?;
+            if child_id != info.id.0.as_ref() && is_child {
+                linked.insert(child_id);
+            }
+        }
+        linked.remove(info.id.0.as_ref());
+        if linked.is_empty() {
+            return Ok(());
+        }
+        let identities = linked.into_iter().collect::<Vec<_>>().join(", ");
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "session {} is linked to parent or child session(s) {identities}; single-session deletion would remove recovery evidence. Automatic cleanup can reclaim the linked sessions together after all members are stale and eligible",
+                info.id
+            ),
+        ))
+    }
+
     fn ensure_writer_lease(&self, info: &Info) -> io::Result<()> {
         if !self.try_acquire_writer_lease(info)? {
             return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("session {} already has an active writer", info.id),
+                io::ErrorKind::WouldBlock,
+                format!(
+                    "session {} is being written or is part of an unfinished session reclaim",
+                    info.id
+                ),
             ));
         }
+        Ok(())
+    }
+
+    fn ensure_not_pending_reclaim(&self, info: &Info) -> io::Result<()> {
+        let Some(intents) = self.open_reclaim_intent_directory(false)? else {
+            return Ok(());
+        };
+        // Reads only inspect atomically published intent files. They do not
+        // participate in the global mutation lock: an unrelated cleanup must
+        // never make an ordinary session load fail just because it is
+        // recording or finishing a decision. Writer admission is fenced by
+        // the per-session lease below, which cleanup must hold for every
+        // member before it can publish an intent or rename any entity.
+        if Self::has_pending_reclaim_for(&intents, info)? {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                format!(
+                    "session {} is part of an unfinished committed cleanup; retry after recovery",
+                    info.id
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn open_reclaim_intent_directory(
+        &self,
+        create_missing: bool,
+    ) -> io::Result<Option<super::ContainedDirectory>> {
+        let SessionDirMode::FromRoot(_) = &self.dir_mode else {
+            return Ok(None);
+        };
+        let authority = match self.authority(create_missing) {
+            Ok(authority) => authority,
+            Err(error) if !create_missing && error.kind() == io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let sessions = match if create_missing {
+            authority.open_relative(Path::new("sessions"), "sessions directory", true)
+        } else {
+            authority.open_relative_shared_read(Path::new("sessions"), "sessions directory")
+        } {
+            Ok(sessions) => sessions,
+            Err(error) if !create_missing && error.kind() == io::ErrorKind::NotFound => {
+                return Ok(None);
+            }
+            Err(error) => return Err(error),
+        };
+        let intents = if create_missing {
+            sessions.open_relative(
+                Path::new(RECLAIM_INTENT_DIRECTORY),
+                "session reclaim intent directory",
+                true,
+            )
+        } else {
+            sessions.open_relative_shared_read(
+                Path::new(RECLAIM_INTENT_DIRECTORY),
+                "session reclaim intent directory",
+            )
+        };
+        match intents {
+            Ok(intents) => Ok(Some(intents)),
+            Err(error) if !create_missing && error.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn acquire_reclaim_gate(&self) -> io::Result<Option<SessionReclaimGate>> {
+        let Some(intents) = self.open_reclaim_intent_directory(true)? else {
+            return Ok(None);
+        };
+        let authority = self.authority(true)?;
+        let sessions =
+            authority.open_relative(Path::new("sessions"), "sessions directory", true)?;
+        let lock = sessions.open_read_write_create(std::ffi::OsStr::new(RECLAIM_GATE_FILE))?;
+        match lock.try_lock_exclusive() {
+            Ok(()) => Ok(Some(SessionReclaimGate {
+                intents,
+                _lock: lock,
+            })),
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "session reclaim decision is owned by another process",
+            )),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn read_reclaim_intents(
+        directory: &super::ContainedDirectory,
+    ) -> io::Result<Vec<(std::ffi::OsString, SessionReclaimIntent)>> {
+        let mut discovered = 0usize;
+        let mut names = Vec::new();
+        directory.visit_names(|name| {
+            discovered = discovered.saturating_add(1);
+            if discovered > RECLAIM_INTENT_MAX_FILES.saturating_mul(2) {
+                return Err(bounded_read_exhausted("session reclaim intent directory"));
+            }
+            names.push(name.to_os_string());
+            Ok(())
+        })?;
+        names.sort();
+        let mut intents = Vec::new();
+        for name in names {
+            if name.to_string_lossy().starts_with('.')
+                || Path::new(&name).extension() != Some(std::ffi::OsStr::new("json"))
+            {
+                continue;
+            }
+            if intents.len() >= RECLAIM_INTENT_MAX_FILES {
+                return Err(bounded_read_exhausted("session reclaim intents"));
+            }
+            let bytes = directory.read_bounded(
+                &name,
+                "session reclaim intent",
+                RECLAIM_INTENT_MAX_BYTES,
+            )?;
+            let intent: SessionReclaimIntent = serde_json::from_slice(&bytes).map_err(|error| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("session reclaim intent is invalid: {error}"),
+                )
+            })?;
+            if intent.version != 1
+                || intent.members.is_empty()
+                || intent.members.len() > TTL_DISCOVERY_MAX_CANDIDATES
+                || uuid::Uuid::parse_str(&intent.id)
+                    .map_or(true, |id| id.simple().to_string() != intent.id)
+                || name != std::ffi::OsString::from(format!("{}.json", intent.id))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "session reclaim intent has invalid identity or member count",
+                ));
+            }
+            Self::validate_reclaim_intent(&intent)?;
+            intents.push((name, intent));
+        }
+        Ok(intents)
+    }
+
+    fn has_pending_reclaim_for(
+        directory: &super::ContainedDirectory,
+        info: &Info,
+    ) -> io::Result<bool> {
+        Ok(Self::read_reclaim_intents(directory)?
+            .iter()
+            .any(|(_, intent)| {
+                intent
+                    .members
+                    .iter()
+                    .any(|member| member.matches_info(info))
+            }))
+    }
+
+    fn persist_reclaim_intent(
+        &self,
+        intent: &SessionReclaimIntent,
+    ) -> io::Result<std::ffi::OsString> {
+        let gate = self.acquire_reclaim_gate()?.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "session reclaim requires the canonical storage root",
+            )
+        })?;
+        let existing = Self::read_reclaim_intents(&gate.intents)?;
+        if existing.iter().any(|(_, current)| {
+            current.members.iter().any(|member| {
+                intent
+                    .members
+                    .iter()
+                    .any(|candidate| candidate.matches_info(&member.info()))
+            })
+        }) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "a session already belongs to an unfinished reclaim decision",
+            ));
+        }
+        if existing.len() >= RECLAIM_INTENT_MAX_FILES {
+            return Err(bounded_read_exhausted("session reclaim intents"));
+        }
+        let bytes = serde_json::to_vec(intent).map_err(io::Error::other)?;
+        if bytes.len() as u64 > RECLAIM_INTENT_MAX_BYTES {
+            return Err(bounded_read_exhausted("session reclaim intent"));
+        }
+        let name = std::ffi::OsString::from(format!("{}.json", intent.id));
+        gate.intents.write_atomic(&name, &bytes, true, false)?;
+        gate.intents.sync()?;
+        Ok(name)
+    }
+
+    fn recover_pending_reclaims_sync(&self) -> io::Result<Vec<Info>> {
+        // A normal cleanup/read with no committed decisions must stay
+        // observational: do not create the reclaim directory or lock file
+        // just to discover that there is nothing to recover.
+        let Some(intents) = self.open_reclaim_intent_directory(false)? else {
+            return Ok(Vec::new());
+        };
+        if Self::read_reclaim_intents(&intents)?.is_empty() {
+            return Ok(Vec::new());
+        }
+        let Some(gate) = self.acquire_reclaim_gate()? else {
+            return Ok(Vec::new());
+        };
+        let intents = Self::read_reclaim_intents(&gate.intents)?;
+        let mut removed = Vec::new();
+        for (intent_name, intent) in intents {
+            for member in &intent.members {
+                if !self.try_acquire_writer_lease_raw(&member.info())? {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        format!(
+                            "cannot resume session reclaim {} while session {} has a writer",
+                            intent.id, member.session_id
+                        ),
+                    ));
+                }
+            }
+            // Validate every remaining namespace entry before deleting any of
+            // them. A replacement entity keeps the whole intent pending.
+            for member in &intent.members {
+                self.validate_reclaim_member_location(member)?;
+            }
+            for member in &intent.members {
+                self.finish_reclaim_member(member)?;
+                removed.push(member.info());
+            }
+            gate.intents.remove_file(&intent_name, true)?;
+            gate.intents.sync()?;
+        }
+        Ok(removed)
+    }
+
+    fn validate_reclaim_intent(intent: &SessionReclaimIntent) -> io::Result<()> {
+        let mut previous: Option<(&str, &str)> = None;
+        let mut identities = std::collections::BTreeSet::new();
+        for (index, member) in intent.members.iter().enumerate() {
+            let identity = (member.cwd.as_str(), member.session_id.as_str());
+            let mut path_components = Path::new(&member.session_id).components();
+            let session_name_is_single_component = matches!(
+                path_components.next(),
+                Some(std::path::Component::Normal(_))
+            ) && path_components.next().is_none();
+            if member.session_id.is_empty()
+                || member.cwd.is_empty()
+                || !session_name_is_single_component
+                || previous.is_some_and(|last| last >= identity)
+                || !identities.insert(member.session_id.as_str())
+                || member.quarantine_name.is_empty()
+                || member.quarantine_name.contains('/')
+                || member.quarantine_name.contains('\\')
+                || member.quarantine_name != format!(".reclaim-{}-{index}", intent.id)
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "session reclaim intent has invalid or unordered members",
+                ));
+            }
+            previous = Some(identity);
+        }
+        Ok(())
+    }
+
+    fn validate_reclaim_member_location(&self, member: &SessionReclaimMember) -> io::Result<()> {
+        let info = member.info();
+        let parent = self.open_session_parent(&info)?;
+        let original_name = std::ffi::OsStr::new(&member.session_id);
+        let original = match parent.open_relative(
+            Path::new(original_name),
+            "reclaim candidate session directory",
+            false,
+        ) {
+            Ok(directory) => Some(directory),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let quarantined = match parent.open_relative(
+            Path::new(&member.quarantine_name),
+            "reclaim quarantine directory",
+            false,
+        ) {
+            Ok(directory) => Some(directory),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        if original.is_some() && quarantined.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "session {} has both its canonical and reclaim quarantine directories",
+                    member.session_id
+                ),
+            ));
+        }
+        if original
+            .as_ref()
+            .or(quarantined.as_ref())
+            .is_some_and(|directory| {
+                directory.entity_identity().ok()
+                    != Some((member.entity_volume, member.entity_index))
+            })
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "session {} changed identity during a committed reclaim",
+                    member.session_id
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    fn finish_reclaim_member(&self, member: &SessionReclaimMember) -> io::Result<()> {
+        let info = member.info();
+        let parent = self.open_session_parent(&info)?;
+        let original_name = std::ffi::OsStr::new(&member.session_id);
+        let original = match parent.open_relative(
+            Path::new(original_name),
+            "reclaim candidate session directory",
+            false,
+        ) {
+            Ok(directory) => Some(directory),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error),
+        };
+        let quarantine_name = std::ffi::OsStr::new(&member.quarantine_name);
+        if let Some(directory) = original {
+            if directory.entity_identity()? != (member.entity_volume, member.entity_index) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "session {} changed identity during reclaim",
+                        member.session_id
+                    ),
+                ));
+            }
+            parent.rename_child_no_replace(original_name, quarantine_name)?;
+            parent.sync()?;
+        }
+        match parent.open_relative(
+            Path::new(quarantine_name),
+            "reclaim quarantine directory",
+            false,
+        ) {
+            Ok(quarantined) => {
+                if quarantined.entity_identity()? != (member.entity_volume, member.entity_index) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("session {} quarantine identity changed", member.session_id),
+                    ));
+                }
+                quarantined.remove_all_contents()?;
+                parent.remove_empty_child(quarantine_name, true)?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        let key = format!("{}\0{}", info.id, info.cwd);
+        self.writer_leases
+            .lock()
+            .map_err(|_| io::Error::other("session writer lease cache poisoned"))?
+            .remove(&key);
+        let lease_name = Self::writer_lease_name(&info.id);
+        match parent.remove_file(std::ffi::OsStr::new(&lease_name), true) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+        self.opened_sessions
+            .lock()
+            .map_err(|_| io::Error::other("session capability cache poisoned"))?
+            .remove(&key);
+        self.timeline_prefixes
+            .lock()
+            .map_err(|_| io::Error::other("Timeline prefix cache poisoned"))?
+            .remove(&key);
         Ok(())
     }
 
@@ -3280,6 +3808,54 @@ impl JsonlStorageAdapter {
         if leases.contains_key(&key) {
             return Ok(true);
         }
+        drop(leases);
+        if self.has_pending_reclaim(info)? {
+            return Ok(false);
+        }
+        if !self.try_acquire_writer_lease_raw(info)? {
+            return Ok(false);
+        }
+        // Cleanup must hold every member's writer lease before publishing its
+        // intent. This post-claim check closes the race where the intent is
+        // published after our first snapshot: if cleanup won, release this
+        // newly acquired lease; if we won, cleanup cannot commit its intent.
+        match self.has_pending_reclaim(info) {
+            Ok(false) => Ok(true),
+            Ok(true) => {
+                self.release_writer_lease(&key)?;
+                Ok(false)
+            }
+            Err(error) => {
+                self.release_writer_lease(&key)?;
+                Err(error)
+            }
+        }
+    }
+
+    fn has_pending_reclaim(&self, info: &Info) -> io::Result<bool> {
+        let Some(intents) = self.open_reclaim_intent_directory(false)? else {
+            return Ok(false);
+        };
+        Self::has_pending_reclaim_for(&intents, info)
+    }
+
+    fn release_writer_lease(&self, key: &str) -> io::Result<()> {
+        self.writer_leases
+            .lock()
+            .map_err(|_| io::Error::other("session writer lease cache poisoned"))?
+            .remove(key);
+        Ok(())
+    }
+
+    fn try_acquire_writer_lease_raw(&self, info: &Info) -> io::Result<bool> {
+        let key = format!("{}\0{}", info.id, info.cwd);
+        let mut leases = self
+            .writer_leases
+            .lock()
+            .map_err(|_| io::Error::other("session writer lease cache poisoned"))?;
+        if leases.contains_key(&key) {
+            return Ok(true);
+        }
         let parent = self.open_session_parent(info)?;
         let lease_name = Self::writer_lease_name(&info.id);
         let lease = parent.open_read_write_create(std::ffi::OsStr::new(&lease_name))?;
@@ -3317,43 +3893,238 @@ impl JsonlStorageAdapter {
             })?;
         let mut deleted = 0u32;
         let mut errors = 0u32;
-        // Finish discovery before mutation, retaining summaries rather than
-        // one directory capability per candidate.
-        for summary in self.scan_opened_sessions_with_policy(
+        for info in self.recover_pending_reclaims_sync()? {
+            deleted = deleted.saturating_add(1);
+            on_deleted(&info);
+        }
+
+        // Finish bounded discovery before mutation. Hidden sessions remain in
+        // the identity map because they can still be endpoints of a visible
+        // session's recovery chain; they are never TTL candidates themselves.
+        let summaries = self.scan_opened_sessions_with_policy(
             None,
             false,
             Some(TTL_DISCOVERY_MAX_DIRECTORY_ENTRIES),
-            |opened| opened.summary,
-        )? {
-            if skip_session_dir.is_some_and(|skip| self.session_dir(&summary.info) == skip) {
+            true,
+            |opened: OpenedSession| opened.summary,
+        )?;
+        let mut known = std::collections::BTreeMap::new();
+        for summary in &summaries {
+            if known
+                .insert(summary.info.id.0.to_string(), summary.info.clone())
+                .is_some()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("duplicate canonical session id {}", summary.info.id),
+                ));
+            }
+        }
+        let stale_candidates: Vec<_> = summaries
+            .into_iter()
+            .filter(|summary| {
+                !summary.is_hidden()
+                    && !skip_session_dir.is_some_and(|skip| self.session_dir(&summary.info) == skip)
+                    && summary.last_active_at.unwrap_or(summary.updated_at) < cutoff
+            })
+            .collect();
+        let mut handled = std::collections::BTreeSet::new();
+        for summary in stale_candidates {
+            let start_id = summary.info.id.0.to_string();
+            if handled.contains(&start_id) {
                 continue;
             }
-            let activity = summary.last_active_at.unwrap_or(summary.updated_at);
-            if activity >= cutoff {
-                continue;
-            }
-            let info = summary.info;
-            // Share the pinned authority, but scope maintenance leases and
-            // directory caches to this candidate, including non-delete paths.
-            // In particular, do not reuse the caller's live writer lease.
             let candidate = Self {
                 opened_sessions: Default::default(),
                 writer_leases: Default::default(),
                 timeline_prefixes: Default::default(),
                 ..self.clone()
             };
-            let result = candidate
-                .open_session(&info)
-                .and_then(|opened| candidate.delete_if_still_stale(opened, cutoff));
-            match result {
-                Ok(true) => {
-                    deleted = deleted.saturating_add(1);
-                    on_deleted(&info);
-                }
-                Ok(false) => {}
+            let initial_members = match candidate.collect_reclaim_component(&summary.info, &known) {
+                Ok(members) => members,
                 Err(error) => {
                     errors = errors.saturating_add(1);
-                    tracing::warn!(%error, "failed to establish or delete stale session entity");
+                    handled.insert(start_id);
+                    tracing::warn!(%error, session_id = %summary.info.id, "failed to validate linked session component");
+                    continue;
+                }
+            };
+            let mut infos: Vec<_> = initial_members
+                .iter()
+                .map(|member| member.summary().info.clone())
+                .collect();
+            infos.sort_by(|left, right| {
+                left.cwd
+                    .cmp(&right.cwd)
+                    .then_with(|| left.id.0.as_ref().cmp(right.id.0.as_ref()))
+            });
+            for info in &infos {
+                handled.insert(info.id.0.to_string());
+            }
+
+            let mut can_reclaim = true;
+            for info in &infos {
+                if skip_session_dir.is_some_and(|skip| self.session_dir(info) == skip) {
+                    can_reclaim = false;
+                    break;
+                }
+                match candidate.try_acquire_writer_lease(info) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        can_reclaim = false;
+                        break;
+                    }
+                    Err(error) => {
+                        errors = errors.saturating_add(1);
+                        tracing::warn!(%error, session_id = %info.id, "failed to claim linked session writer");
+                        can_reclaim = false;
+                        break;
+                    }
+                }
+            }
+            if !can_reclaim {
+                continue;
+            }
+
+            let mut current_members = Vec::with_capacity(initial_members.len());
+            let mut identity_changed = false;
+            for initial in &initial_members {
+                let info = &initial.summary().info;
+                let current = match candidate.open_session_parent(info).and_then(|parent| {
+                    parent.open_relative(
+                        Path::new(info.id.0.as_ref()),
+                        "claimed session directory",
+                        false,
+                    )
+                }) {
+                    Ok(directory) => directory,
+                    Err(error) => {
+                        errors = errors.saturating_add(1);
+                        tracing::warn!(%error, session_id = %info.id, "failed to reopen claimed session");
+                        identity_changed = true;
+                        break;
+                    }
+                };
+                if !initial
+                    .directory()
+                    .is_same_entity(&current)
+                    .unwrap_or(false)
+                {
+                    identity_changed = true;
+                    break;
+                }
+                let current_summary = match Self::read_summary_from_directory(&current) {
+                    Ok(summary) => summary,
+                    Err(error) => {
+                        errors = errors.saturating_add(1);
+                        tracing::warn!(%error, session_id = %info.id, "failed to reread claimed session summary");
+                        identity_changed = true;
+                        break;
+                    }
+                };
+                if Self::validate_session_identity(info, &current_summary).is_err()
+                    || current_summary.validate_current_format().is_err()
+                    || current_summary.is_hidden()
+                    || current_summary
+                        .last_active_at
+                        .unwrap_or(current_summary.updated_at)
+                        >= cutoff
+                {
+                    identity_changed = true;
+                    break;
+                }
+                current_members.push(OpenedSession {
+                    directory: std::sync::Arc::new(current),
+                    summary: current_summary,
+                });
+            }
+            if identity_changed || current_members.len() != infos.len() {
+                continue;
+            }
+            match candidate.reclaim_component_is_closed(&current_members) {
+                Ok(true) => {}
+                Ok(false) => continue,
+                Err(error) => {
+                    errors = errors.saturating_add(1);
+                    tracing::warn!(%error, session_id = %summary.info.id, "linked session result chain could not be validated");
+                    continue;
+                }
+            }
+
+            if current_members.len() == 1 {
+                match candidate.delete_opened_session(current_members.into_iter().next().unwrap()) {
+                    Ok(()) => {
+                        deleted = deleted.saturating_add(1);
+                        on_deleted(&summary.info);
+                    }
+                    Err(error) => {
+                        errors = errors.saturating_add(1);
+                        tracing::warn!(%error, session_id = %summary.info.id, "failed to delete stale unlinked session");
+                    }
+                }
+                continue;
+            }
+
+            let intent_id = uuid::Uuid::now_v7().simple().to_string();
+            current_members.sort_by(|left, right| {
+                left.summary()
+                    .info
+                    .cwd
+                    .cmp(&right.summary().info.cwd)
+                    .then_with(|| {
+                        left.summary()
+                            .info
+                            .id
+                            .0
+                            .as_ref()
+                            .cmp(right.summary().info.id.0.as_ref())
+                    })
+            });
+            let mut members = Vec::with_capacity(current_members.len());
+            for (index, current) in current_members.iter().enumerate() {
+                let (entity_volume, entity_index) = match current.directory().entity_identity() {
+                    Ok(identity) => identity,
+                    Err(error) => {
+                        errors = errors.saturating_add(1);
+                        tracing::warn!(%error, session_id = %current.summary().info.id, "session identity is unavailable for durable reclaim");
+                        members.clear();
+                        break;
+                    }
+                };
+                members.push(SessionReclaimMember {
+                    session_id: current.summary().info.id.0.to_string(),
+                    cwd: current.summary().info.cwd.clone(),
+                    entity_volume,
+                    entity_index,
+                    quarantine_name: format!(".reclaim-{intent_id}-{index}"),
+                });
+            }
+            if members.len() != current_members.len() {
+                continue;
+            }
+            let intent = SessionReclaimIntent {
+                version: 1,
+                id: intent_id,
+                members,
+            };
+            Self::validate_reclaim_intent(&intent)?;
+            if let Err(error) = candidate.persist_reclaim_intent(&intent) {
+                errors = errors.saturating_add(1);
+                tracing::warn!(%error, session_id = %summary.info.id, "failed to commit linked session reclaim");
+                continue;
+            }
+            drop(current_members);
+            drop(candidate);
+            match self.recover_pending_reclaims_sync() {
+                Ok(removed_members) => {
+                    for info in &removed_members {
+                        deleted = deleted.saturating_add(1);
+                        on_deleted(info);
+                    }
+                }
+                Err(error) => {
+                    errors = errors.saturating_add(1);
+                    tracing::warn!(%error, reclaim_id = %intent.id, "committed session reclaim remains pending recovery");
                 }
             }
         }
@@ -3389,6 +4160,202 @@ impl JsonlStorageAdapter {
         Ok(true)
     }
 
+    fn collect_reclaim_component(
+        &self,
+        start: &Info,
+        known: &std::collections::BTreeMap<String, Info>,
+    ) -> io::Result<Vec<OpenedSession>> {
+        let mut pending = std::collections::VecDeque::from([start.id.0.to_string()]);
+        let mut members = std::collections::BTreeMap::<String, OpenedSession>::new();
+        while let Some(session_id) = pending.pop_front() {
+            if members.contains_key(&session_id) {
+                continue;
+            }
+            if members.len() >= BOUNDED_VALIDATION_MAX_REFERENCES {
+                return Err(bounded_read_exhausted("linked session component"));
+            }
+            let info = known.get(&session_id).ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("linked session {session_id} is missing from bounded discovery"),
+                )
+            })?;
+            let opened = self.open_session(info)?;
+            let timeline = opened.bounded_validated_timeline(&session_id)?.timeline;
+            let mut linked = std::collections::BTreeSet::new();
+            for event in timeline.events() {
+                match &event.kind {
+                    chat_state::TimelineEventKind::Subagent(
+                        chat_state::SubagentEvent::Spawned(spawn),
+                    ) => {
+                        // Even an Ended fact without a result ref still names
+                        // a cross-session source. Require that endpoint to be
+                        // present and validate it as part of the same group.
+                        linked.insert(spawn.child_session_id.clone());
+                    }
+                    chat_state::TimelineEventKind::SubagentSeed(seed) => {
+                        linked.insert(seed.parent_timeline_id.clone());
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(parent_id) = &opened.summary().parent_session_id {
+                linked.insert(parent_id.clone());
+            }
+            for linked_id in linked {
+                if !known.contains_key(&linked_id) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("linked session {linked_id} is missing from bounded discovery"),
+                    ));
+                }
+                if !members.contains_key(&linked_id) {
+                    pending.push_back(linked_id);
+                }
+            }
+            members.insert(session_id, opened);
+        }
+        Ok(members.into_values().collect())
+    }
+
+    fn reclaim_component_is_closed(&self, members: &[OpenedSession]) -> io::Result<bool> {
+        let by_id: std::collections::BTreeMap<_, _> = members
+            .iter()
+            .map(|member| (member.summary().info.id.0.to_string(), member))
+            .collect();
+        for member in members {
+            let info = &member.summary().info;
+            let timeline = member
+                .bounded_validated_timeline(&info.id.to_string())?
+                .timeline;
+            if self.timeline_has_local_recovery_dependencies(&timeline)? {
+                return Ok(false);
+            }
+            if let Some(parent_id) = &member.summary().parent_session_id {
+                // Summary parentage points at the lifecycle root, while a
+                // nested child's seed can name its direct lifecycle owner.
+                // Both identities must be present; the seed below validates
+                // the exact direct-parent spawn edge.
+                if !by_id.contains_key(parent_id) {
+                    return Ok(false);
+                }
+            }
+            for event in timeline.events() {
+                match &event.kind {
+                    chat_state::TimelineEventKind::Subagent(
+                        chat_state::SubagentEvent::Spawned(spawn),
+                    ) => {
+                        let terminal =
+                            timeline
+                                .events()
+                                .iter()
+                                .find_map(|candidate| match &candidate.kind {
+                                    chat_state::TimelineEventKind::Subagent(
+                                        chat_state::SubagentEvent::Ended(ended),
+                                    ) if ended.subagent_id == spawn.subagent_id => Some(ended),
+                                    _ => None,
+                                });
+                        let Some(terminal) = terminal else {
+                            return Ok(false);
+                        };
+                        if terminal.result_ref.is_some() {
+                            let Some(child) = by_id.get(&spawn.child_session_id) else {
+                                return Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    format!(
+                                        "child {} is outside its reclaim component",
+                                        spawn.child_session_id
+                                    ),
+                                ));
+                            };
+                            let child_timeline = child
+                                .bounded_validated_timeline(&spawn.child_session_id)?
+                                .timeline;
+                            child_timeline
+                                .validate_subagent_result_link(
+                                    &info.id.to_string(),
+                                    event.seq,
+                                    spawn,
+                                    terminal,
+                                )
+                                .map_err(|error| {
+                                    io::Error::new(io::ErrorKind::InvalidData, error)
+                                })?;
+                        } else if by_id.contains_key(&spawn.child_session_id) {
+                            return Ok(false);
+                        }
+                        if Self::subagent_receipt_unresolved(&timeline, spawn, terminal) {
+                            return Ok(false);
+                        }
+                    }
+                    chat_state::TimelineEventKind::SubagentSeed(seed) => {
+                        let Some(parent) = by_id.get(&seed.parent_timeline_id) else {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                format!(
+                                    "parent {} is outside its reclaim component",
+                                    seed.parent_timeline_id
+                                ),
+                            ));
+                        };
+                        let parent_timeline = parent
+                            .bounded_validated_timeline(&seed.parent_timeline_id)?
+                            .timeline;
+                        let Some(spawn_event) = parent_timeline.events().iter().find(|candidate| {
+                            candidate.seq.get() == seed.parent_spawn_seq
+                                && matches!(
+                                    &candidate.kind,
+                                    chat_state::TimelineEventKind::Subagent(
+                                        chat_state::SubagentEvent::Spawned(spawn)
+                                    ) if spawn.subagent_id == seed.subagent_id
+                                )
+                        }) else {
+                            return Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "child seed has no exact parent spawn source",
+                            ));
+                        };
+                        let chat_state::TimelineEventKind::Subagent(
+                            chat_state::SubagentEvent::Spawned(spawn),
+                        ) = &spawn_event.kind
+                        else {
+                            unreachable!("matched parent spawn above")
+                        };
+                        let Some(terminal) =
+                            parent_timeline
+                                .events()
+                                .iter()
+                                .find_map(|candidate| match &candidate.kind {
+                                    chat_state::TimelineEventKind::Subagent(
+                                        chat_state::SubagentEvent::Ended(ended),
+                                    ) if ended.subagent_id == seed.subagent_id => Some(ended),
+                                    _ => None,
+                                })
+                        else {
+                            return Ok(false);
+                        };
+                        if member
+                            .bounded_validated_timeline(&info.id.to_string())?
+                            .timeline
+                            .validate_subagent_result_link(
+                                &seed.parent_timeline_id,
+                                spawn_event.seq,
+                                spawn,
+                                terminal,
+                            )
+                            .is_err()
+                            || Self::subagent_receipt_unresolved(&parent_timeline, spawn, terminal)
+                        {
+                            return Ok(false);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        Ok(true)
+    }
+
     /// Fail closed when Timeline state or a cross-session subagent result
     /// cannot be proven complete. The caller holds this candidate's writer
     /// lease for the entire check and deletion boundary.
@@ -3397,7 +4364,7 @@ impl JsonlStorageAdapter {
         timeline: &Timeline,
         timeline_id: &str,
     ) -> io::Result<bool> {
-        if Self::timeline_has_unresolved_local_dependencies(timeline) {
+        if self.timeline_has_local_recovery_dependencies(timeline)? {
             return Ok(true);
         }
 
@@ -3528,6 +4495,62 @@ impl JsonlStorageAdapter {
                 || Self::timeline_has_unresolved_local_dependencies(&parent_timeline)
                 || Self::subagent_receipt_unresolved(&parent_timeline, spawn, terminal)
             {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn timeline_has_local_recovery_dependencies(&self, timeline: &Timeline) -> io::Result<bool> {
+        if Self::timeline_has_unresolved_local_dependencies(timeline) {
+            return Ok(true);
+        }
+
+        let runtime = timeline.runtime_lifecycle();
+        if runtime.phase != chat_state::session_runtime::RuntimePhase::Running
+            && (runtime.checkpoint.is_some() || runtime.operation_id.is_some())
+        {
+            return Ok(true);
+        }
+        if let Some(planning) = timeline.planning_snapshot() {
+            let plan = &planning.plan;
+            let has_unresolved_replans = plan.replans.iter().any(|replan| {
+                !matches!(
+                    &replan.progress,
+                    tool_types::planning::ReplanProgress::Handled { .. }
+                        | tool_types::planning::ReplanProgress::Unapplied { .. }
+                )
+            });
+            if !plan.waits.is_empty()
+                || !plan.unresolved_required_deliveries().is_empty()
+                || has_unresolved_replans
+                || plan.links.iter().any(|link| !link.terminal)
+            {
+                return Ok(true);
+            }
+        }
+        if let Some(control) =
+            crate::session::control::SessionControlSnapshot::latest_from_timeline(
+                timeline.events(),
+            )?
+        {
+            let planning_is_open = matches!(
+                control.behavior.state,
+                crate::session::behavior::BehaviorState::Plan(_)
+            );
+            let retained_decision_is_open =
+                control
+                    .behavior
+                    .retained_plan
+                    .as_ref()
+                    .is_some_and(|candidate| {
+                        matches!(
+                            candidate.status,
+                            crate::session::behavior::RetainedPlanStatus::Deferred
+                                | crate::session::behavior::RetainedPlanStatus::Reviewing
+                        )
+                    });
+            if planning_is_open || retained_decision_is_open {
                 return Ok(true);
             }
         }
@@ -3813,6 +4836,10 @@ impl JsonlStorageAdapter {
         initial_facts: Vec<chat_state::TimelineEventKind>,
     ) -> io::Result<(Summary, Vec<chat_state::TimelineEvent>)> {
         let parent = self.ensure_session_parent(info)?;
+        // Claim the canonical identity before publishing it. This also makes
+        // initialization contend with a committed reclaim intent rather than
+        // recreating a directory that recovery has not finished removing.
+        self.ensure_writer_lease(info)?;
         let result = self.build_publish_and_cache(info, &parent, |staging| {
             crate::session::persistence::write_initial_prompt_blobs_to_directory(
                 &initial_surface,
@@ -3840,7 +4867,6 @@ impl JsonlStorageAdapter {
             )?;
             Ok((summary, timeline.events().to_vec()))
         })?;
-        self.ensure_writer_lease(info)?;
         Ok(result)
     }
     /// Like [`Self::apply_summary_patch`], but returns whether a
@@ -4226,6 +5252,13 @@ impl JsonlStorageAdapter {
                     );
                     if behavior_normalized {
                         control.behavior = crate::session::behavior::BehaviorSnapshot::normal();
+                    } else {
+                        // Submission identities belong to one session lineage.
+                        // A fork carries the historical projection, not the
+                        // parent's ability to decide an old submission.
+                        control.behavior.retained_plan = None;
+                        control.behavior.last_plan_submission_id = 0;
+                        control.behavior.plan_submission_id = None;
                     }
                     control.control_revision = control.control_revision.saturating_add(1);
                     let control_kind = if behavior_normalized {

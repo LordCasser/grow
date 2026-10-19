@@ -22,7 +22,7 @@ pub enum CoordinationPhase {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoordinationRow {
-    pub source_peer_id: String,
+    pub source_session_id: String,
     pub inquiry_id: String,
     pub phase: CoordinationPhase,
 }
@@ -664,7 +664,7 @@ mod coordination_tests {
                 ));
                 if name.starts_with("Answering") {
                     block.coordination = Some(CoordinationRow {
-                        source_peer_id: "peer".into(),
+                        source_session_id: "peer".into(),
                         inquiry_id: "one".into(),
                         phase: CoordinationPhase::Received,
                     });

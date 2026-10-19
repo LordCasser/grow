@@ -546,6 +546,28 @@ impl GoalTracker {
         }
     }
 
+    /// Account for the active runtime interval and stop the process-local
+    /// clock without changing the durable Goal lifecycle state.
+    pub fn freeze_runtime_clock(&mut self) {
+        if self.active_since.is_some() {
+            self.account_elapsed();
+            self.active_since = None;
+        }
+    }
+
+    /// Resume elapsed-time accounting only for an automatically continuing
+    /// Goal whose runtime clock is currently stopped.
+    pub fn resume_runtime_clock(&mut self) {
+        if self
+            .goal
+            .as_ref()
+            .is_some_and(|goal| goal.status.continues_automatically())
+            && self.active_since.is_none()
+        {
+            self.active_since = Some(Instant::now());
+        }
+    }
+
     pub fn elapsed_ms(&self) -> u64 {
         let persisted = self.goal.as_ref().map_or(0, |goal| goal.elapsed_ms);
         persisted.saturating_add(
@@ -1061,5 +1083,49 @@ mod tests {
         let mut tracker = tracker();
         assert_eq!(tracker.report_blocked("outage".into(), 10, None), Ok(1));
         assert_eq!(tracker.report_blocked("outage".into(), 14, Some(10)), Ok(2));
+    }
+
+    #[test]
+    fn runtime_clock_freezes_elapsed_without_changing_goal_state_and_is_idempotent() {
+        let mut tracker = tracker();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        let before = tracker.snapshot().unwrap().clone();
+
+        tracker.freeze_runtime_clock();
+        let frozen_elapsed = tracker.elapsed_ms();
+        let frozen = tracker.snapshot().unwrap();
+        assert_eq!(frozen.status, before.status);
+        assert_eq!(frozen.goal_id, before.goal_id);
+        assert_eq!(frozen.definition_revision, before.definition_revision);
+        assert_eq!(frozen.token_budget, before.token_budget);
+        assert_eq!(frozen.tokens_used, before.tokens_used);
+        assert_eq!(frozen.usage_breakdown, before.usage_breakdown);
+        assert_eq!(frozen.elapsed_ms, frozen_elapsed);
+        assert!(tracker.active_since.is_none());
+
+        tracker.freeze_runtime_clock();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        assert_eq!(tracker.elapsed_ms(), frozen_elapsed);
+        assert_eq!(tracker.snapshot().unwrap().elapsed_ms, frozen_elapsed);
+
+        tracker.resume_runtime_clock();
+        let resumed_at = tracker.active_since.unwrap();
+        tracker.resume_runtime_clock();
+        assert_eq!(tracker.active_since, Some(resumed_at));
+    }
+
+    #[test]
+    fn stopped_goal_statuses_do_not_resume_runtime_clock() {
+        for status in [GoalStatus::Paused, GoalStatus::Blocked] {
+            let mut tracker = tracker();
+            tracker.goal.as_mut().unwrap().status = status;
+            tracker.active_since = None;
+
+            tracker.resume_runtime_clock();
+            tracker.resume_runtime_clock();
+
+            assert_eq!(tracker.status(), Some(status));
+            assert!(tracker.active_since.is_none());
+        }
     }
 }

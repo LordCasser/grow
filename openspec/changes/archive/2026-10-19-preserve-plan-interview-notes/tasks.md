@@ -1,0 +1,4 @@
+- [x] Add a minimal client-surfaces delta for Plan partial response notes.
+- [x] Carry selected freeform text through existing `annotations.notes` for ChatAboutThis and SkipInterview.
+- [x] Include annotations in the model-facing partial-action tool result.
+- [x] Add focused Pager, wire, and formatting regression tests.

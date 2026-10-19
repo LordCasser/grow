@@ -13,14 +13,286 @@ fn session_dir(home: &Path, id: &str) -> PathBuf {
         .join(id)
 }
 
+#[test]
+fn partial_display_cache_requires_exact_committed_prompt_identity_and_is_read_only() {
+    let home = tempfile::tempdir().unwrap();
+    let timeline = committed_user_timeline(1);
+    write_session(home.path(), "root", "/project", &timeline, false);
+    let updates_path = session_dir(home.path(), "root").join(UPDATES_FILE);
+    let timeline_path = session_dir(home.path(), "root").join(TIMELINE_FILE);
+    write_updates(
+        home.path(),
+        "root",
+        &[
+            user_chunk("root", "wrong", 9),
+            turn_completed("root", "prompt-0", "end_turn"),
+        ],
+    );
+    let updates_before = std::fs::read(&updates_path).unwrap();
+    let timeline_before = std::fs::read(&timeline_path).unwrap();
+
+    let error = read_session_at("root", home.path()).unwrap_err();
+    assert!(error.to_string().contains("promptIndex 0"));
+    assert_eq!(std::fs::read(&updates_path).unwrap(), updates_before);
+    assert_eq!(std::fs::read(&timeline_path).unwrap(), timeline_before);
+
+    write_updates(
+        home.path(),
+        "root",
+        &[
+            user_chunk("root", "prompt-0", 0),
+            turn_completed("root", "prompt-0", "end_turn"),
+        ],
+    );
+    let session = read_session_at("root", home.path()).unwrap();
+    assert!(displayed_messages(&session).contains(&"user:prompt-0".to_owned()));
+}
+
+#[test]
+fn partial_display_cache_uses_rewind_selected_branch() {
+    use chat_state::MessageCause;
+
+    let home = tempfile::tempdir().unwrap();
+    let mut timeline = committed_user_timeline(2);
+    let rewound = timeline.rewind_surface(0).unwrap();
+    timeline.replace_all(rewound, MessageCause::Rewind).unwrap();
+    write_session(home.path(), "root", "/project", &timeline, false);
+    write_updates(home.path(), "root", &[user_chunk("root", "prompt-0", 0)]);
+
+    let session = read_session_at("root", home.path()).unwrap();
+    assert!(displayed_messages(&session).contains(&"user:prompt-0".to_owned()));
+}
+
+#[test]
+fn legacy_workflow_wire_row_without_timeline_identity_is_not_backfilled() {
+    let home = tempfile::tempdir().unwrap();
+    let timeline = chat_state::Timeline::default();
+    write_session(home.path(), "root", "/project", &timeline, false);
+
+    let mut tracker = crate::session::workflow::tracker::WorkflowTracker::default();
+    tracker.start_run(
+        "legacy-run".into(),
+        "legacy workflow".into(),
+        "historical cache row without a Timeline identity".into(),
+        vec![workflow::PhaseMeta {
+            title: "Run".into(),
+            detail: None,
+        }],
+        None,
+        None,
+        crate::session::workflow::tracker::test_runtime_route(),
+    );
+    let update = crate::session::workflow::notify::build_workflow_updated(
+        &tracker.get("legacy-run").unwrap(),
+        0,
+        0,
+    );
+    // Serialize through the same SessionUpdateEnvelope wire fixture used by
+    // updates.jsonl. Older rows have no event ID metadata or Timeline
+    // DisplayProjectionExpected fact from which one could be reconstructed.
+    write_updates(
+        home.path(),
+        "root",
+        &[grow_update("root", update)],
+    );
+    let updates_path = session_dir(home.path(), "root").join(UPDATES_FILE);
+    let timeline_path = session_dir(home.path(), "root").join(TIMELINE_FILE);
+    let updates_before = std::fs::read(&updates_path).unwrap();
+    let timeline_before = std::fs::read(&timeline_path).unwrap();
+
+    let session = read_session_at("root", home.path()).unwrap();
+    assert_eq!(session.events.len(), 1);
+    assert!(matches!(
+        &session.events[0].update,
+        SessionUpdate::Grow(notification)
+            if matches!(&notification.update, GrowUpdate::WorkflowUpdated { run_id, .. }
+                if run_id == "legacy-run")
+    ));
+    assert!(timeline.events().is_empty());
+    assert_eq!(std::fs::read(&updates_path).unwrap(), updates_before);
+    assert_eq!(std::fs::read(&timeline_path).unwrap(), timeline_before);
+}
+
+#[test]
+fn captured_display_frontier_does_not_adopt_a_later_cache_append() {
+    let home = tempfile::tempdir().unwrap();
+    let timeline = committed_user_timeline(1);
+    write_session(home.path(), "root", "/project", &timeline, false);
+    write_updates(
+        home.path(),
+        "root",
+        &[turn_completed("root", "prompt-0", "end_turn")],
+    );
+    let mut snapshot = capture_tree_at("root", home.path()).unwrap();
+    append_bytes(home.path(), "root", &{
+        let mut line = update_line(&user_chunk("root", "prompt-0", 0));
+        line.push(b'\n');
+        line
+    });
+
+    let error = snapshot.read_session("root").unwrap_err();
+    assert!(error.to_string().contains("promptIndex 0"));
+    let fresh = read_session_at("root", home.path()).unwrap();
+    assert!(displayed_messages(&fresh).contains(&"user:prompt-0".to_owned()));
+}
+
+fn committed_user_timeline(count: usize) -> chat_state::Timeline {
+    use chat_state::{
+        HookAggregateDecision, HookCause, HookEvent, HookEventType, HookGateDecision, HookGateKind,
+        InputAdmissionDecision, InputEvent, InputIntent, InputPayloadRef, InputRoute,
+        TimelineEventKind, TurnEvent, TurnId, TurnIdentity, TurnInputKind, TurnTerminal,
+        TurnTerminalSource,
+    };
+
+    let mut timeline = chat_state::Timeline::default();
+    for index in 0..count {
+        let input_id = format!("input-{index}");
+        timeline
+            .record(TimelineEventKind::Input(InputEvent::Submitted {
+                input_id: input_id.clone(),
+                intent: InputIntent::Prompt,
+                payload_ref: InputPayloadRef {
+                    blake3: blake3::hash(input_id.as_bytes()).to_hex().to_string(),
+                    bytes: input_id.len() as u64,
+                },
+            }))
+            .unwrap();
+        let occurrence_id = format!("hook-{input_id}");
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::Triggered {
+                occurrence_id: occurrence_id.clone(),
+                event: HookEventType::UserPromptSubmit,
+                gate: HookGateKind::Prompt,
+                cause: HookCause::Input {
+                    input_id: input_id.clone(),
+                },
+                config_generation: 1,
+                handlers: Vec::new(),
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Hook(HookEvent::Completed {
+                occurrence_id,
+                decision: HookAggregateDecision::Prompt {
+                    decision: HookGateDecision::Allow,
+                },
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Input(InputEvent::AdmissionResolved {
+                input_id: input_id.clone(),
+                decision: InputAdmissionDecision::Allow,
+                route: Some(InputRoute::Fifo),
+                supersedes: Vec::new(),
+            }))
+            .unwrap();
+        let turn = TurnId(index as u64 + 1);
+        let prompt_id = format!("prompt-{index}");
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Started {
+                prompt_id: prompt_id.clone(),
+                id: turn,
+                input_ids: vec![input_id.clone()],
+                identity: TurnIdentity {
+                    origin: "user".into(),
+                    turn_kind: "user".into(),
+                    goal_id: None,
+                    goal_definition_revision: None,
+                    stage_id: None,
+                },
+                model_id: "model".into(),
+                input_message_count: 0,
+                prompt_index: index,
+                prompt_text: format!("prompt-{index}"),
+                input_kind: TurnInputKind::Prompt,
+                redirect_kind: None,
+            }))
+            .unwrap();
+        let text = format!("prompt-{index}");
+        let mut item = sampling_types::ConversationItem::user(text.clone());
+        item.set_prompt_index(index);
+        let blocks = serde_json::json!([{"type": "text", "text": text}]);
+        let mut canonical_blocks = blocks.clone();
+        canonical_blocks.sort_all_objects();
+        timeline
+            .record(TimelineEventKind::Input(InputEvent::Consumed {
+                display_echo: Some(chat_state::UserDisplayEcho {
+                    message_id: prompt_id,
+                    prompt_index: index,
+                    block_count: 1,
+                    blake3: blake3::hash(&serde_json::to_vec(&canonical_blocks).unwrap())
+                        .to_hex()
+                        .to_string(),
+                }),
+                input_ids: vec![input_id],
+                turn,
+                item,
+                skill_loads: Vec::new(),
+            }))
+            .unwrap();
+        timeline
+            .record(TimelineEventKind::Turn(TurnEvent::Ended {
+                id: turn,
+                outcome: "completed".into(),
+                duration_ms: 0,
+                tool_count: 0,
+                terminal: TurnTerminal {
+                    source: TurnTerminalSource::Host,
+                    stop_reason: "end_turn".into(),
+                    completion_kind: "completed".into(),
+                },
+                cancellation_category: None,
+                details: None,
+            }))
+            .unwrap();
+    }
+    timeline
+}
+
 fn update_line(update: &SessionUpdate) -> Vec<u8> {
     let envelope = SessionUpdateEnvelope::from_update(update).unwrap();
     serde_json::to_vec(&envelope).unwrap()
 }
 
 fn write_updates(home: &Path, id: &str, updates: &[SessionUpdate]) {
+    let mut updates = updates.to_vec();
+    let mut prompt_ids = std::collections::BTreeSet::new();
+    let mut completed_ids = std::collections::BTreeSet::new();
+    for update in &updates {
+        let line = update_line(update);
+        let Ok(envelope) = serde_json::from_slice::<serde_json::Value>(&line) else {
+            continue;
+        };
+        let Some(update) = envelope.get("update") else {
+            continue;
+        };
+        match update
+            .get("sessionUpdate")
+            .and_then(serde_json::Value::as_str)
+        {
+            Some("user_message_chunk") => {
+                if let Some(message_id) = update
+                    .get("_meta")
+                    .and_then(|meta| meta.get("messageId"))
+                    .and_then(serde_json::Value::as_str)
+                {
+                    prompt_ids.insert(message_id.to_owned());
+                }
+            }
+            Some("turn_completed") => {
+                if let Some(prompt_id) = update.get("prompt_id").and_then(serde_json::Value::as_str)
+                {
+                    completed_ids.insert(prompt_id.to_owned());
+                }
+            }
+            _ => {}
+        }
+    }
+    for prompt_id in prompt_ids.difference(&completed_ids) {
+        updates.push(turn_completed(id, prompt_id, "end_turn"));
+    }
     let mut contents = Vec::new();
-    for update in updates {
+    for update in &updates {
         contents.extend(update_line(update));
         contents.push(b'\n');
     }
@@ -38,7 +310,7 @@ fn append_bytes(home: &Path, id: &str, bytes: &[u8]) {
 
 fn user_chunk(session_id: &str, text: &str, prompt_index: usize) -> SessionUpdate {
     let chunk = acp::ContentChunk::new(acp::ContentBlock::Text(acp::TextContent::new(text))).meta(
-        serde_json::json!({ "promptIndex": prompt_index })
+        serde_json::json!({ "promptIndex": prompt_index, "messageId": format!("prompt-{prompt_index}") })
             .as_object()
             .cloned(),
     );
@@ -66,16 +338,18 @@ fn grow_update(session_id: &str, update: GrowUpdate) -> SessionUpdate {
 }
 
 fn turn_completed(session_id: &str, prompt_id: &str, stop_reason: &str) -> SessionUpdate {
-    grow_update(
-        session_id,
-        GrowUpdate::TurnCompleted {
-            prompt_id: prompt_id.into(),
-            identity: None,
-            stop_reason: stop_reason.into(),
-            agent_result: None,
-            usage: None,
-        },
-    )
+    let update = crate::session::turn_completion::build_turn_completed(
+        prompt_id.into(),
+        None,
+        serde_json::Value::String(stop_reason.to_owned()),
+        serde_json::Value::Null,
+        None,
+    );
+    SessionUpdate::Grow(Box::new(GrowNotification {
+        session_id: acp::SessionId::new(session_id),
+        update,
+        meta: None,
+    }))
 }
 
 fn rewind_marker(session_id: &str, target_prompt_index: usize) -> SessionUpdate {
@@ -648,6 +922,7 @@ fn admitted_timeline(
     timeline
         .record(chat_state::TimelineEventKind::Turn(
             chat_state::TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
                 id: turn,
                 input_ids: Vec::new(),
                 identity: chat_state::TurnIdentity {

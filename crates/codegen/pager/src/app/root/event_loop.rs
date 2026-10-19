@@ -1603,9 +1603,12 @@ pub(crate) async fn run(
             // Graceful-quit request from the signal handler. Kept high in the
             // biased order so a SIGTERM quit isn't starved by an ACP firehose.
             _ = quit_notify.notified() => {
-                let effs = dispatch::dispatch(Action::Quit, &mut app);
-                let _ = process_effects(effs, &mut tasks, &mut app);
-                break;
+                if dispatch_os_quit(&mut app, &mut tasks) {
+                    break;
+                }
+                // Suspension is asynchronous. Keep the event loop alive so its
+                // TaskResult can confirm suspension (or leave the UI open on
+                // an unconfirmed result) before terminal teardown.
             }
 
             writer_event = writer_event_rx.recv() => {
@@ -3196,8 +3199,8 @@ fn process_effects(
         resume_local_miss: app.resume_local_miss.clone(),
     };
     for eff in effs {
-        let eff = match eff {
-            Effect::ReadyInputIntent { send } => *send,
+        let (eff, ready_input_intent) = match eff {
+            Effect::ReadyInputIntent { send } => (*send, true),
             eff => {
                 if let Some((agent_id, session_id, prompt_id, expected_turn_id)) = eff
                     .prompt_rpc_identity()
@@ -3215,6 +3218,18 @@ fn process_effects(
                         .get(&agent_id)
                         .map(|agent| agent.session_binding_epoch)
                         .unwrap_or_default();
+                    let checkpoint_started = std::time::Instant::now();
+                    crate::unified_log::info(
+                        "input_intent.checkpoint.start",
+                        Some(&session_id.0),
+                        Some(serde_json::json!({
+                            "agent_id": agent_id.0,
+                            "session_id": session_id.0,
+                            "prompt_id": prompt_id,
+                            "binding_epoch": binding_epoch,
+                            "expected_turn_id": expected_turn_id,
+                        })),
+                    );
                     let checkpoint = app.checkpoint_input_intent(
                         agent_id,
                         prompt_id.clone(),
@@ -3229,6 +3244,19 @@ fn process_effects(
                                 .and_then(|result| result.map_err(|error| error.to_string())),
                             Err(error) => Err(error.to_string()),
                         };
+                        crate::unified_log::info(
+                            "input_intent.checkpoint.complete",
+                            Some(&session_id.0),
+                            Some(serde_json::json!({
+                                "agent_id": agent_id.0,
+                                "session_id": session_id.0,
+                                "prompt_id": prompt_id,
+                                "binding_epoch": binding_epoch,
+                                "elapsed_ms": checkpoint_started.elapsed().as_millis(),
+                                "result": if result.is_ok() { "ok" } else { "error" },
+                                "error": result.as_ref().err(),
+                            })),
+                        );
                         TaskResult::InputIntentCheckpointed {
                             agent_id,
                             session_id,
@@ -3240,9 +3268,32 @@ fn process_effects(
                     });
                     continue;
                 }
-                eff
+                (eff, false)
             }
         };
+        if ready_input_intent {
+            if let Some((agent_id, session_id, prompt_id, expected_turn_id)) =
+                eff.prompt_rpc_identity()
+            {
+                let binding_epoch = app
+                    .agents
+                    .get(&agent_id)
+                    .map(|agent| agent.session_binding_epoch);
+                crate::unified_log::info(
+                    "input_intent.ready.execute",
+                    Some(&session_id.0),
+                    Some(serde_json::json!({
+                        "agent_id": agent_id.0,
+                        "session_id": session_id.0,
+                        "prompt_id": prompt_id,
+                        "expected_turn_id": expected_turn_id,
+                        "binding_epoch": binding_epoch,
+                    })),
+                );
+            } else {
+                crate::unified_log::warn("input_intent.ready.invalid_effect", None, None);
+            }
+        }
         // From this point every ACP prompt variant belongs to the request
         // lifecycle, not to the Pager's unsent-draft recovery domain.
         app.transfer_local_draft_ownership(&eff);
@@ -3264,10 +3315,36 @@ fn process_draw_effects(tasks: &mut JoinSet<TaskResult>, app: &mut AppView) -> b
     process_effects(std::mem::take(&mut app.pending_effects), tasks, app)
 }
 
+/// Route the first controlled OS quit signal through the same suspension path
+/// as the keyboard and normal quit actions.
+fn dispatch_os_quit(app: &mut AppView, tasks: &mut JoinSet<TaskResult>) -> bool {
+    let effects = dispatch::dispatch(Action::Quit, app);
+    process_effects(effects, tasks, app)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crossterm::event::{KeyEvent, KeyEventState};
+
+    #[tokio::test]
+    async fn first_os_quit_signal_starts_session_suspension() {
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        app.agents
+            .get_mut(&crate::app::session::AgentId(0))
+            .unwrap()
+            .session
+            .session_id = Some(acp::SessionId::new("os-quit-session"));
+        let mut tasks = JoinSet::new();
+
+        assert!(!dispatch_os_quit(&mut app, &mut tasks));
+        assert!(matches!(
+            app.exit_suspension.as_ref().map(|exit| &exit.phase),
+            Some(crate::app::root::ExitSuspensionPhase::Pending)
+        ));
+        assert_eq!(tasks.len(), 1);
+        tasks.abort_all();
+    }
 
     #[tokio::test]
     async fn draw_queued_minimal_snapshot_starts_without_another_event() {

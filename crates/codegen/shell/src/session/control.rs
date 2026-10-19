@@ -5,7 +5,7 @@
 //! handles, activity projections and UI clocks are intentionally absent and
 //! reconstructed after reload.
 
-pub const SESSION_CONTROL_ARCHITECTURE_VERSION: u32 = 5;
+pub const SESSION_CONTROL_ARCHITECTURE_VERSION: u32 = 6;
 
 /// Client intent whose successful desired-state transition is committed in
 /// the same Timeline fact as the authoritative domain state. This closes the
@@ -142,6 +142,12 @@ impl SessionControlSnapshot {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 "session control Behavior contains cross-runtime state",
+            ));
+        }
+        if !self.behavior.retained_plan_is_valid() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "session control retained Plan candidate is invalid",
             ));
         }
         if !self.behavior.plan_runtime_is_valid() {
@@ -507,6 +513,36 @@ mod tests {
             Some(intent),
         );
         assert!(wrong_behavior.timeline_kind().is_err());
+    }
+
+    #[test]
+    fn control_rejects_malformed_retained_plan_even_outside_plan_behavior() {
+        let mut state = snapshot(1);
+        state.behavior.last_plan_submission_id = 1;
+        state.behavior.retained_plan = Some(crate::session::behavior::RetainedPlanCandidate {
+            submission_id: 1,
+            artifact_revision: 1,
+            artifact_hash: "not-a-blake3-hash".into(),
+            amendment: false,
+            status: crate::session::behavior::RetainedPlanStatus::Deferred,
+            decisions: vec![crate::session::behavior::RetainedPlanDecision {
+                decision_id: "defer-1".into(),
+                submission_id: 1,
+                action: crate::session::behavior::RetainedPlanAction::Defer,
+                feedback: None,
+                resulting_status: crate::session::behavior::RetainedPlanStatus::Deferred,
+            }],
+        });
+        assert!(state.timeline_kind().is_err());
+
+        state.behavior.retained_plan.as_mut().unwrap().artifact_hash =
+            blake3::hash(b"candidate").to_hex().to_string();
+        assert!(state.timeline_kind().is_ok());
+        assert_eq!(
+            state.behavior.behavior(),
+            tool_types::BehaviorId::Normal,
+            "retained candidate ownership is independent from selected Behavior"
+        );
     }
 
     #[test]

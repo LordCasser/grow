@@ -135,6 +135,29 @@ pub enum RepairHistoryError {
 
 /// Commands sent to the ChatStateActor via mpsc channel.
 pub enum ChatStateCommand {
+    CheckpointRuntime {
+        operation_id: String,
+        runtime_source_hash: String,
+        turn: Option<crate::session_runtime::TurnContinuation>,
+        step: Option<crate::StepId>,
+        deadline: tokio::time::Instant,
+        reply: oneshot::Sender<Result<crate::TimelineEvent, TimelineWriteError>>,
+    },
+    SettleHooksForSuspension {
+        operation_id: String,
+        deadline: tokio::time::Instant,
+        reply: oneshot::Sender<Result<Vec<crate::TimelineEvent>, TimelineWriteError>>,
+    },
+    GetPlanningState {
+        reply: oneshot::Sender<Option<crate::timeline::PlanningSnapshot>>,
+    },
+    GetConsumedAgentMessages {
+        ids: Vec<String>,
+        reply: oneshot::Sender<std::collections::BTreeSet<String>>,
+    },
+    GetRuntimeState {
+        reply: oneshot::Sender<crate::session_runtime::RuntimeLifecycle>,
+    },
     // ═══ Mutations (fire-and-forget) ═══
     /// Push a user message into the conversation.
     PushUserMessage { item: ConversationItem },
@@ -171,6 +194,19 @@ pub enum ChatStateCommand {
         intent: crate::InputIntent,
         payload_ref: crate::InputPayloadRef,
         reply: oneshot::Sender<Result<SubmitInputResult, TimelineWriteError>>,
+    },
+
+    /// Consume one input batch and publish its User item plus user-triggered
+    /// skill loads in one revision/headroom checked Timeline event.
+    ConsumeInputGroupConditionally {
+        input_ids: Vec<String>,
+        turn: crate::TurnId,
+        item: ConversationItem,
+        display_echo: Option<crate::UserDisplayEcho>,
+        skill_loads: Vec<sampling_types::SkillLoadItem>,
+        expected_surface_revision: u64,
+        max_context_tokens: u64,
+        reply: oneshot::Sender<Result<ConditionalToolResultOutcome, TimelineWriteError>>,
     },
 
     /// Re-run deterministic local recovery after external entities have been
@@ -230,6 +266,23 @@ pub enum ChatStateCommand {
         max_context_tokens: u64,
         max_result_tokens: u64,
         reply: oneshot::Sender<Result<ConditionalToolResultOutcome, TimelineWriteError>>,
+    },
+
+    /// Commit a model-originated `load_skill` result and context item together
+    /// after revision and token admission; rejection commits only its result.
+    PublishModelSkillConditionally {
+        item: ConversationItem,
+        skill: sampling_types::SkillLoadItem,
+        rejection_item: ConversationItem,
+        expected_surface_revision: u64,
+        max_context_tokens: u64,
+        max_result_tokens: u64,
+        reply: oneshot::Sender<Result<ConditionalToolResultOutcome, TimelineWriteError>>,
+    },
+
+    /// Remove unconsumed loaded-skill bodies from the model-facing Surface.
+    SettleUnconsumedSkillLoads {
+        reply: oneshot::Sender<Result<Option<crate::TimelineEvent>, TimelineWriteError>>,
     },
 
     /// Replace projected context pressure with the provider's canonical

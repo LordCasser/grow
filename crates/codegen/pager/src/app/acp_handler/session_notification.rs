@@ -160,7 +160,7 @@ pub(crate) fn project_ui_notice(
                     CoordinationPhase::Received
                 };
                 let coordination = CoordinationRow {
-                    source_peer_id: audit.source_peer_id.clone(),
+                    source_session_id: audit.source_session_id.clone(),
                     inquiry_id: notice.correlation_id.clone(),
                     phase,
                 };

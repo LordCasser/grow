@@ -2,9 +2,9 @@
 //! unusable file, then quarantine it under a lock so a fresh empty database
 //! can be recreated. The index layer drives the retry.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use rusqlite::ErrorCode;
@@ -12,25 +12,66 @@ use sqlite_journal::JournalMode;
 
 static HEAL_LOCK: Mutex<()> = Mutex::new(());
 
-/// Bumped when quarantine or recreation changes the cache namespace, so callers can tell
-/// they are now looking at a different incarnation of the on-disk index.
-static CACHE_EPOCH: AtomicU64 = AtomicU64::new(0);
+/// Per-index epochs are process-local invalidation tokens. A repair in one
+/// storage root must not invalidate a query or bootstrap for another root.
+static CACHE_EPOCH: LazyLock<Mutex<HashMap<PathBuf, u64>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
 
-pub(super) fn current_epoch() -> u64 {
-    CACHE_EPOCH.load(Ordering::Acquire)
+pub(super) fn cache_identity(db_path: &Path) -> PathBuf {
+    let Some(file_name) = db_path.file_name() else {
+        return db_path.to_path_buf();
+    };
+    let Some(parent) = db_path.parent() else {
+        return db_path.to_path_buf();
+    };
+    let absolute_parent = if parent.is_absolute() {
+        parent.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(parent))
+            .unwrap_or_else(|_| parent.to_path_buf())
+    };
+    let canonical_parent = std::fs::canonicalize(&absolute_parent).unwrap_or(absolute_parent);
+    canonical_parent.join(file_name)
+}
+
+fn epoch_at(identity: &Path) -> u64 {
+    *CACHE_EPOCH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(identity)
+        .unwrap_or(&0)
+}
+
+fn advance_epoch(db_path: &Path) {
+    let identity = cache_identity(db_path);
+    let mut epochs = CACHE_EPOCH
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let epoch = epochs.entry(identity).or_default();
+    *epoch = epoch.saturating_add(1);
+}
+
+pub(super) fn current_epoch(db_path: &Path) -> u64 {
+    epoch_at(&cache_identity(db_path))
 }
 
 /// A snapshot of the [`CACHE_EPOCH`], used to detect whether the cache was
 /// quarantined and recreated between two points in this process.
-pub(super) struct CacheEpoch(u64);
+pub(super) struct CacheEpoch {
+    identity: PathBuf,
+    epoch: u64,
+}
 
 impl CacheEpoch {
-    pub(super) fn now() -> Self {
-        Self(CACHE_EPOCH.load(Ordering::Acquire))
+    pub(super) fn now(db_path: &Path) -> Self {
+        let identity = cache_identity(db_path);
+        let epoch = epoch_at(&identity);
+        Self { identity, epoch }
     }
 
     pub(super) fn changed(&self) -> bool {
-        CACHE_EPOCH.load(Ordering::Acquire) != self.0
+        epoch_at(&self.identity) != self.epoch
     }
 }
 
@@ -94,7 +135,7 @@ pub(super) fn quarantine_db_files(db_path: &Path) -> std::io::Result<Option<Path
     })();
     // A later rename failure does not undo earlier namespace changes.
     if changed {
-        CACHE_EPOCH.fetch_add(1, Ordering::Release);
+        advance_epoch(db_path);
     }
     result
 }
@@ -150,7 +191,7 @@ pub(super) fn heal_unusable(
         return false;
     }
 
-    CACHE_EPOCH.fetch_add(1, Ordering::Release);
+    advance_epoch(&effective);
     tracing::warn!(
         db_path = %effective.display(),
         ?quarantine,
@@ -226,13 +267,89 @@ mod tests {
         let journal = with_suffix(&db, "-journal");
         std::fs::write(&wal, b"wal").unwrap();
         std::fs::write(&journal, b"journal").unwrap();
-        let epoch = CacheEpoch::now();
+        let epoch = CacheEpoch::now(&db);
         assert!(quarantine_db_files(&db).is_err());
         assert!(epoch.changed());
         assert!(!wal.exists());
         assert!(has_corrupt_sibling(tmp.path()));
         assert_eq!(std::fs::read(db).unwrap(), b"main");
         assert_eq!(std::fs::read(journal).unwrap(), b"journal");
+    }
+
+    #[test]
+    fn cache_epochs_follow_one_index_through_quarantine_and_recreation() {
+        let root_a = TempDir::new().unwrap();
+        let root_b = TempDir::new().unwrap();
+        let db_a = root_a.path().join("session_search.sqlite");
+        let db_b = root_b.path().join("session_search.sqlite");
+        std::fs::write(&db_a, b"root a").unwrap();
+        std::fs::write(&db_b, b"root b").unwrap();
+
+        let a_before = CacheEpoch::now(&db_a);
+        let b_before = CacheEpoch::now(&db_b);
+        quarantine_db_files(&db_a).unwrap();
+        assert!(a_before.changed(), "root A's quarantine must invalidate A");
+        assert!(
+            !b_before.changed(),
+            "root A's quarantine must not invalidate B"
+        );
+
+        let a_after_quarantine = CacheEpoch::now(&db_a);
+        let b_after_quarantine = CacheEpoch::now(&db_b);
+        let recreated = heal_unusable(
+            &db_a,
+            &rusqlite::Error::InvalidQuery,
+            |_| Ok(false),
+            |path| {
+                std::fs::write(path, b"rebuilt root a").map_err(|_| rusqlite::Error::InvalidQuery)
+            },
+        );
+        assert!(recreated);
+        assert!(
+            a_after_quarantine.changed(),
+            "recreation must advance A again"
+        );
+        assert!(
+            !b_after_quarantine.changed(),
+            "A's recreation must leave B stable"
+        );
+        assert!(
+            !CacheEpoch::now(&db_a).changed(),
+            "a fresh root A epoch starts from its recreated index"
+        );
+    }
+
+    #[test]
+    fn concurrent_root_repairs_advance_independent_epochs() {
+        let root_a = TempDir::new().unwrap();
+        let root_b = TempDir::new().unwrap();
+        let db_a = root_a.path().join("session_search.sqlite");
+        let db_b = root_b.path().join("session_search.sqlite");
+        std::fs::write(&db_a, b"root a").unwrap();
+        std::fs::write(&db_b, b"root b").unwrap();
+        let a_before = CacheEpoch::now(&db_a);
+        let b_before = CacheEpoch::now(&db_b);
+
+        let repairs = [db_a.clone(), db_b.clone()].map(|path| {
+            std::thread::spawn(move || {
+                heal_unusable(
+                    &path,
+                    &rusqlite::Error::InvalidQuery,
+                    |_| Ok(false),
+                    |path| {
+                        std::fs::write(path, b"rebuilt").map_err(|_| rusqlite::Error::InvalidQuery)
+                    },
+                )
+            })
+        });
+        for repair in repairs {
+            assert!(repair.join().unwrap());
+        }
+
+        assert!(a_before.changed());
+        assert!(b_before.changed());
+        assert_eq!(current_epoch(&db_a), 2);
+        assert_eq!(current_epoch(&db_b), 2);
     }
 
     #[test]

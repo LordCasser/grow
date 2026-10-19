@@ -266,7 +266,7 @@ Timeline restoration SHALL validate all events and expose only a fully validated
 
 ### Requirement: Turn terminals identify their actual authority
 
-新 Turn terminal SHALL 明确区分 provider 响应驱动、宿主控制/错误、用户取消和中断恢复。provider 驱动终态 SHALL 关联相同 Turn 的已完成 request，其原始 provider terminal 由 request/attempt 证据保存。宿主 stop_reason/completion_kind SHALL 仅是本地分类。历史未记录来源的终态 SHALL 保持未知，不据旧字符串猜测或回写。
+新 Turn terminal SHALL 明确区分 provider 响应驱动、宿主控制/错误、用户取消和中断恢复。provider 驱动终态 SHALL 关联相同 Turn 的已完成 request，其原始 provider terminal 由 request/attempt 证据保存。宿主 stop_reason/completion_kind SHALL 仅是本地分类。历史未记录来源的终态 SHALL 保持未知，不据旧字符串猜测或回写。存在未消费的有效挂起意图或 checkpoint 时 SHALL 先核对挂起边界；有效挂起保留原逻辑 Turn，不生成 Recovery terminal。物理 request/工具仍按事实记录中断和结算，不能据此终结所属逻辑 Turn；挂起证据不足时保持恢复受阻。
 
 #### Scenario: Natural response closes the turn
 - **WHEN** 完整正常 provider 响应使普通 Turn 收尾
@@ -277,8 +277,12 @@ Timeline restoration SHALL validate all events and expose only a fully validated
 - **THEN** 保留原始响应证据，同时追加宿主或用户来源的 Turn terminal，不覆盖原始原因。
 
 #### Scenario: Process recovery closes an open turn
-- **WHEN** 重启时发现未闭合生命周期
+- **WHEN** 重启时发现未闭合生命周期，且没有尚可消费的挂起续跑依据
 - **THEN** 追加 Recovery 来源的 interrupted 终态；不伪造 provider 事件或正常成功。
+
+#### Scenario: Suspended logical turn continues under its original identity
+- **WHEN** root 或 child 的原 Turn 具有可验证的挂起续跑位置，且恢复获得合法执行所有权
+- **THEN** 保留该 Turn 和既有已提交前缀，在原位置继续，不重复 TurnStarted 或接纳原 prompt；只有后续真实完成、取消或失败才按实际来源生成一次 Turn terminal。
 
 #### Scenario: Historical source is absent
 - **WHEN** 读取没有记录来源的旧终态
@@ -838,7 +842,7 @@ The subagent spawn Grow projection SHALL carry the effective reasoning effort se
 
 ### Requirement: Recovered child outcomes preserve evidence and availability
 
-已经验证的 child terminal outcome SHALL 保持不变，正文可用性与交付失败分别报告。只有证明原执行实例已结束、合法 writer 已取得所有权且无有效终态时，恢复才可在结算未闭合 scope 后记录 Recovery 来源的 interrupted 结果。未知用量 SHALL 保持 incomplete，未知时间不得以整个离线间隔冒充执行耗时。
+已经验证的 child terminal outcome SHALL 保持不变，正文可用性与交付失败分别报告。只有证明原执行实例已结束、合法 writer 已取得所有权且无有效终态或有效挂起续跑依据时，恢复才可在结算未闭合 scope 后记录 Recovery 来源的 interrupted 结果。存在未消费的挂起意图或节点 checkpoint 时 SHALL 先按挂起协议核对；有效挂起不生成 child terminal，部分挂起证据不足时保持恢复受阻。未知用量 SHALL 保持 incomplete，未知时间不得以整个离线间隔冒充执行耗时。
 
 #### Scenario: Completed child loses its output artifact
 - **WHEN** child terminal 及父子身份可验证，但结果正文文件缺失或校验失败
@@ -849,10 +853,14 @@ The subagent spawn Grow projection SHALL carry the effective reasoning effort se
 - **THEN** 保持收尾待确认，不生成 interrupted/cancelled 结果，也不抢占 writer。
 
 #### Scenario: Cold recovery finds an interrupted child
-- **WHEN** 新 writer 验证原实例已结束、没有有效 child terminal 且还有未闭合执行或结算
+- **WHEN** 新 writer 验证原实例已结束，没有有效 child terminal 或尚可消费的挂起续跑依据，且还有未闭合执行或结算
 - **THEN** 先按既有结算规则恢复这些 scope，再记录明确的恢复中断来源及用量下界；不伪造用户取消或零消费。
 
-证据与实施入口：`crates/codegen/shell/src/agent/subagent/mod.rs::result_from_inspection/finish_from_durable_facts`、`crates/codegen/chat-state/src/timeline.rs::SubagentResultEvent`。
+#### Scenario: Cold recovery finds a suspended child
+- **WHEN** 新 writer 找到与 root 挂起操作匹配的 child 续跑位置
+- **THEN** 分流到挂起核对与同身份恢复，不由孤立 child 修复生成 interrupted terminal。
+
+证据与实施入口：`crates/codegen/shell/src/agent/subagent/mod.rs::result_from_inspection/finish_from_durable_facts/reconcile_orphaned_subagents_with_backend`、`crates/codegen/chat-state/src/timeline.rs::SubagentResultEvent`。
 
 ### Requirement: Finalization wait deadlines preserve durable delivery ownership
 
@@ -937,3 +945,474 @@ The subagent spawn Grow projection SHALL carry the effective reasoning effort se
 - **THEN** 不重开执行；合法 writer 恢复并确认持久屏障后才重新评估准入。
 
 证据与实施入口：`crates/codegen/chat-state/src/persistence.rs::persistence_error_is_permanent`、`crates/codegen/shell/src/session/actor/run_loop.rs`、`crates/codegen/tools/src/implementations/grow_build/task/coordinator.rs`；此处新增故障准入契约，不替代既有 Goal 准入权威。
+
+### Requirement: Linked session history is reclaimed as one durable unit
+
+Automatic TTL cleanup SHALL treat sessions connected by a parent/child result reference as one reclaim component. It SHALL reclaim the component only when every member is independently stale and all parent spawn, child seed, child result, parent terminal, delivery receipt, and local recovery obligations are proven complete while exclusive writer ownership is held for every member. If any member is fresh, active, missing, unreadable, changed, unresolved, or over budget, cleanup SHALL retain the whole component.
+
+Before removing any member, cleanup SHALL durably record the exact validated component and SHALL resume that committed reclaim after restart. An unresolved or unprovable reclaim intent SHALL block admission or deletion of its listed sessions and SHALL retain the evidence for repair. Per-session quarantine alone SHALL NOT be treated as group-atomic.
+
+#### Scenario: Both members of a closed chain are stale
+- **WHEN** a parent and all linked child sessions are stale, no writer is active, and their exact result and delivery chain is complete
+- **THEN** automatic cleanup durably decides the whole component and removes every member, resuming the same decision after a crash if needed.
+
+#### Scenario: One member of a closed chain is still fresh
+- **WHEN** one session in a closed parent/child component is fresh while another member exceeds TTL
+- **THEN** cleanup retains every member and does not remove only the stale endpoint.
+
+#### Scenario: A writer or source cannot be proven
+- **WHEN** a member has a live writer, changed identity, missing or malformed source, unresolved receipt, or exhausted scan budget
+- **THEN** cleanup retains the entire component without writing a reclaim decision.
+
+#### Scenario: Cleanup restarts after committing a component decision
+- **WHEN** process interruption occurs after a durable component reclaim intent but before every listed directory is removed
+- **THEN** cleanup resumes only that exact intent and does not expose a remaining half-chain as an ordinary session.
+
+### Requirement: Explicit deletion preserves cross-session result sources
+
+An explicit single-session delete SHALL reject a target whose canonical Timeline participates in a cross-session parent/child result chain. The refusal SHALL identify the linked session and explain that single-session deletion would remove recovery evidence. It SHALL NOT recursively delete related sessions.
+
+#### Scenario: Explicit delete targets a linked parent or child
+- **WHEN** a user explicitly deletes one session that has a validated cross-session result-chain edge
+- **THEN** deletion is refused with the related session identity and no session directory is removed.
+
+#### Scenario: Explicit delete targets an unlinked session
+- **WHEN** a user explicitly deletes a session with no cross-session result-chain edge and no unfinished runtime handoff
+- **THEN** the existing single-session quarantine and deletion behavior applies.
+
+### Requirement: Human interaction waits have durable attempt boundaries
+
+Timeline SHALL persist typed open and resolution facts for user question, permission, and Plan approval reverse-request attempts. Each fact SHALL identify the original tool call, interaction kind, and unique attempt. The facts SHALL NOT contain question text, user answers, permission option contents, or tool arguments. Timeline SHALL reject duplicate opens, mismatched resolutions, duplicate resolutions, and resolutions without an open. Live dispatch SHALL persist Opened before sending the reverse request and persist a terminal resolution for answer, rejection, cancellation, timeout, transport failure, malformed response, or suspension. A request SHALL NOT be sent when its Opened fact is unconfirmed. Cold recovery SHALL leave an unclosed historical attempt unknown rather than assigning it a synthetic resolution time. A rebound request SHALL use a fresh attempt identity.
+
+#### Scenario: Human question is answered
+
+- **WHEN** a user question reverse request is sent and answered
+- **THEN** Timeline contains one matching Opened/Resolved pair and exposes the interval from their recorded event times without persisting question or answer content in those facts.
+
+#### Scenario: Permission is decided automatically
+
+- **WHEN** local permission policy grants or denies a tool without sending a human reverse request
+- **THEN** Timeline creates no human-wait interval for that decision.
+
+#### Scenario: Request cannot be sent or resolved durably
+
+- **WHEN** Opened cannot be confirmed, or a request returns but its matching Resolved append cannot be confirmed
+- **THEN** the first case does not send the reverse request; the second remains unresolved/unknown and is not projected as a completed wait.
+
+#### Scenario: Restore rebinds an unanswered request
+
+- **WHEN** a suspended unanswered request is reissued after restoration
+- **THEN** the old attempt is closed at the durable suspension boundary and the new reverse request uses a distinct attempt identity; the offline interval is not counted as human response time.
+
+### Requirement: Activity excludes validated suspension offline intervals
+
+Replay activity SHALL exclude time between a validated `TreeSuspended` event and its matching `ExecutionReleased` event for the same operation. `Resumed` alone SHALL NOT end the offline interval. A missing, mismatched, or reversed pair SHALL remain unknown and SHALL NOT be converted into confirmed idle or execution time. Other operation spans that overlap the offline interval SHALL remain protected. Recovered terminal timestamps SHALL continue to use explicit recovery-gap treatment rather than representing the full offline interval as active work. After idle, recovery, and offline ranges are split around one another, only final fragments strictly longer than 30 seconds SHALL be compressed; shorter fragments SHALL retain their recorded duration.
+
+#### Scenario: Runtime resumes after suspension
+
+- **WHEN** an open tool/request spans a valid tree suspension and later execution release
+- **THEN** the suspension-to-release interval is excluded from protected activity while pre-suspend and post-release work remains protected.
+
+#### Scenario: Another operation remains active
+
+- **WHEN** one node is suspended while a separate captured operation remains active outside that suspension owner
+- **THEN** that operation's known activity remains protected.
+
+#### Scenario: Restore commit is not release
+
+- **WHEN** `Resumed` is durable but `ExecutionReleased` is absent
+- **THEN** the runtime remains treated as offline/closed through the captured frontier.
+
+#### Scenario: Short fragments around a long gap
+
+- **WHEN** verified offline ranges split a longer candidate gap into pieces shorter than or equal to 30 seconds
+- **THEN** those short pieces remain at recorded speed, only longer final fragments are compressed, and source-to-playback mapping remains monotone.
+
+### Requirement: Session tree suspension preserves logical work
+
+会话 SHALL 将主动挂起记录为独立于完成、取消和失败的生命周期，覆盖指定 root 拥有的全部未结束递归 child、前后台工作和等待关联。挂起 SHALL 保留逻辑 session/task/prompt 身份、已提交进度、模型路线、工作区与结果交付责任；不得仅因运行实例退出生成 child cancelled/completed 结果。真实完成或已明确取消的任务 SHALL 保留原终态。
+
+#### Scenario: Suspend a root with mixed child states
+- **WHEN** root 等待两个 child，一个已经完成，另一个仍在执行且拥有更深层 child
+- **THEN** 完成结果保持原值，未结束子树进入挂起，原父子等待关联保留；不会把挂起转换成取消或重新委派。
+
+#### Scenario: Spawn competes with suspension
+- **WHEN** 挂起关闭准入时另一个 child spawn 已进入提交或 ACK 不明
+- **THEN** 挂起依据原身份核对该 spawn，纳入所有已准入 child；未准入者不启动，未知者不会被忽略后声称整树挂起成功。
+
+#### Scenario: Child finishes during suspension
+- **WHEN** child 的真实结果与挂起请求竞争
+- **THEN** 已验证完成结果与待交付责任优先保留，不覆盖为 Suspended，也不重复结算结果和用量。
+
+目标入口：`crates/codegen/shell/src/session/actor/run_loop.rs`、`crates/codegen/tools/src/implementations/grow_build/task/coordinator.rs`、`crates/codegen/chat-state/src/timeline.rs`。
+
+### Requirement: Suspension acknowledges a durable tree boundary
+
+挂起 SHALL 在停止后继执行准入后核对参与节点及其持久续跑位置，只在全部必要事实确认后报告 Suspended。重复请求 SHALL 复用同一次挂起身份。ACK 丢失、写入失败、节点不可达或等待期限到达 SHALL 报告未确认，保留恢复依据和仍在途的写入所有权，不推断未写入或虚构成功。部分挂起 SHALL 不自动重启已经停住的节点。
+
+#### Scenario: All participating nodes acknowledge
+- **WHEN** root 和所有参与 child 的续跑位置、结算与依赖引用均已持久确认
+- **THEN** root 可确认整树 Suspended，资源关闭沿原 writer drain 规则完成，随后退出。
+
+#### Scenario: Checkpoint requires command settlement evidence
+- **WHEN** 节点准备提交 checkpoint，且挂起 operation 尚未记录命令结算
+- **THEN** Timeline 拒绝 checkpoint；节点先为同一 operation 持久记录一次 CommandsSettled（没有活跃命令时也记录空集合），相同内容的 ACK 重试幂等，冲突内容或不同 operation 被拒绝。
+
+#### Scenario: Command runtime state was retired after settlement
+- **WHEN** CommandsSettled 已持久确认，命令 runner 已退役或其完成缓存已淘汰，但 checkpoint 写入或 ACK 需要重试
+- **THEN** 从同一 operation 的持久结算复用原 call/command 身份、完成或中断证据、后台属性与有界输出；不再次终止命令，不依赖已退役的内存缓存，不将已有证据改为空集合或 Unknown。
+
+#### Scenario: Root acknowledgment is lost
+- **WHEN** 所有节点已保存，但 root 挂起提交的 ACK 丢失
+- **THEN** 重试或重启核对同一挂起事实，不追加另一份逻辑任务，不重新执行已保存的工作。
+
+#### Scenario: Process exits during partial suspension
+- **WHEN** 挂起意图已提交但只有部分节点保存后进程退出
+- **THEN** 恢复先核对原节点与 writer，补齐可验证的挂起事实；无法证明续跑位置的节点保持恢复受阻，不将整树当作完整 checkpoint 自动启动。
+
+#### Scenario: Checkpoint binds the exact runtime source
+- **WHEN** SessionActor 持久化运行时 checkpoint
+- **THEN** checkpoint 包含工作区、Agent 定义及其跳过序列化的能力源、selector/plugin、role prompt 与模型路线的 64 位十六进制 source hash；原始配置、凭据与 prompt 正文不进入 checkpoint，source hash 格式无效时 Timeline 拒绝写入。
+
+目标入口：`crates/codegen/shell/src/session/timeline_persistence.rs`、`crates/codegen/shell/src/session/actor/spawn.rs`；复用 `session-timeline` 的完整 writer drain、exact ACK 和收尾核对契约。
+
+### Requirement: Suspended trees resume the original identities automatically
+
+用户通过执行型 resume 打开已挂起 root 时，系统 SHALL 先验证并重建原树的全部未结束节点、运行配置、工作区、等待与交付关联，再允许可运行节点继续。不得通过新 child identity、`resume_from` 派生任务或重新接纳原用户 prompt 代替恢复。重复或并发 resume SHALL 不启动重叠 writer、重复 child 或重复结果交付。只读查询、export、replay 和历史 child 查看 SHALL 不触发执行。
+
+#### Scenario: Resume the suspended tree
+- **WHEN** 用户恢复已确认挂起的 root，且全部必要来源与运行环境有效
+- **THEN** 未结束 child 自动以原逻辑身份继续，完成 child 不再执行，父 Agent 按原依赖继续等待或消费原结果，无需模型重新规划或用户逐个恢复。
+
+#### Scenario: A required node cannot be restored
+- **WHEN** child 来源、运行路线、工作区或恢复 artifact 缺失、不匹配，或旧 writer 尚未退出
+- **THEN** 整树保持执行准入关闭并指出受阻节点与原因；不静默换模型、创建空白 child 或先启动部分树。
+
+#### Scenario: Resume is repeated after work has begun
+- **WHEN** 同一挂起状态的 resume 请求重复、ACK 丢失或两个客户端并发恢复
+- **THEN** 复用已接纳的恢复实例或返回其状态，不再次创建执行、消费输入或发出完成通知。
+
+#### Scenario: A resumed runtime crashes without another suspension
+- **WHEN** 挂起恢复资格已消费，节点已重新运行，随后无新的挂起事实就异常退出
+- **THEN** 根据最新执行证据走既有异常恢复，不回退旧 checkpoint 或重发已派发工作；旧挂起记录不授予永久自动重启资格。
+
+目标入口：`crates/codegen/shell/src/agent/mvp_agent/acp_agent.rs::load_session`、`crates/codegen/shell/src/agent/subagent/handle_request.rs`、`crates/codegen/tools/src/implementations/grow_build/task/coordinator.rs`。
+
+### Requirement: Suspended operations retain interruption evidence
+
+快速挂起 SHALL 请求中止活跃工具和后台命令，不等待其业务自然完成。操作结果 SHALL 区分已确认完成、确认终止但未完成的 Interrupted、无法确定执行或副作用的 OutcomeUnknown，以及确认尚未派发。取消信号、超时或断线本身 SHALL NOT 证明操作已终止或未产生副作用。命令中断 SHALL 不终结其所属 Agent 任务。
+
+#### Scenario: Local command termination is confirmed
+- **WHEN** 挂起中确认原命令及受控进程组停止，但命令没有正常完成
+- **THEN** 保存原调用身份、可得输出、终止证据及 Interrupted 结果；所属 child 挂起并可继续，不伪造业务成功。
+
+#### Scenario: Remote operation has an unknown outcome
+- **WHEN** MCP、远程命令或脱离控制的进程无法确认停止或副作用结果
+- **THEN** 保存 OutcomeUnknown 及可核对的原操作信息，明确外部工作可能仍在运行；挂起仅确认 Grow 自身停止推进，不声称外部世界已冻结。
+
+#### Scenario: Resume encounters an interrupted or unknown call
+- **WHEN** 恢复后 Agent 继续处理被中断或结果未知的操作
+- **THEN** 获得对应事实并检查现场；恢复机制不自动重发原调用，也不以“继续”提示指示盲重试。确认中断后的新调用遵循正常授权；未知副作用先核对或取得明确处置决定。
+
+#### Scenario: A batch contains completed and undispatched calls
+- **WHEN** 同一批工具已有完成结果，另一些调用可证明尚未派发
+- **THEN** 复用已保存结果，保留未派发调用及原身份，经当前权限检查后继续；不重新执行整个批次。
+
+目标入口：`crates/codegen/shell/src/session/actor/tool/{mod,dispatch,result}.rs`、命令/task runner 与现有 MCP transport 取消边界。
+
+### Requirement: Suspended waits and deliveries remain attributable
+
+父子等待、人工问题、待交付结果与已挂起的调用 SHALL 保留稳定关联。恢复 SHALL 重建实际等待，不把临时 Future、channel 或 waiter 消失解释为任务完成。每个 tool call SHALL 至多提交一份 tool_result；已提交中断或未知结果的调用，其迟到事实 SHALL 经既有通知或观测路径交付。
+
+#### Scenario: Parent is waiting for a suspended child
+- **WHEN** 父调用正在等待 child，而 child 达到挂起位置
+- **THEN** 父调用保存对原 child 的等待，不要求 child 完成才能挂起；恢复后重新绑定该 child，不收到虚构取消结果。
+
+#### Scenario: Result was committed before delivery
+- **WHEN** child result 已确认而父回执尚未完成时发生挂起
+- **THEN** 恢复只补原身份的交付，保留一次性的用量累计，不重新运行 child。
+
+#### Scenario: A late result follows an unknown tool result
+- **WHEN** 原 call 已提交 OutcomeUnknown tool_result，后续取得可验证最终事实
+- **THEN** 保留原未知事实并追加可归属的新事实，不为同一 call 写入第二份 tool_result。
+
+目标入口：`crates/codegen/shell/src/session/actor/completion_delivery.rs`、`notification_drain.rs`、`crates/codegen/shell/src/agent/subagent/mod.rs`。
+
+### Requirement: Suspended recovery references protect their resources
+
+未恢复或恢复受阻的挂起事实 SHALL 保护必要的 child 存储、worktree、脚本、prompt/result artifact 和交付引用；运行实例退出或完成缓存淘汰 SHALL NOT 授权清理这些依赖。fork、导入副本或 rewind SHALL NOT 复制原树的执行所有权，只有原树的合法 writer 可消费其挂起恢复资格。
+
+#### Scenario: Cleanup sees suspended work
+- **WHEN** 自动 TTL、任务缓存淘汰或工作区清理遇到仍被挂起树引用的资源
+- **THEN** 保留该资源或报告清理受阻，不破坏原任务的恢复依据。
+
+#### Scenario: History is copied or rewound
+- **WHEN** 用户 fork、导入或回退包含挂起记录的历史
+- **THEN** 复制的历史不启动原 child；会破坏当前挂起引用的 destructive 操作须沿现有删除/所有权核对拒绝或先明确终止原工作。
+
+目标入口：`crates/codegen/shell/src/session/storage/`、子 Agent worktree 清理及 `session-timeline` 的恢复引用删除护栏。
+
+### Requirement: Planning changes durably own their delivery obligations
+
+局部计划 SHALL 由 SessionActor 经 Timeline 提交，TODO Resources、模型和 UI SHALL 只读取其投影。产生重规划的来源提交 SHALL 同时包含可重建的目标交付责任；跨 session 投递经既有 inbox 与 reconciliation 推进，不要求跨 session 原子事务。ACK 不明 SHALL 核对原 identity，不重复来源修改或副作用。
+
+#### Scenario: ST-01 Source commits before delivery fails
+- **WHEN** 父项变化已持久提交但投递前进程退出，或 child inbox 暂不可用
+- **THEN** 合法 writer 恢复后可核对原责任并补投递；不会丢失变更或重新提交同一父项修改。
+
+#### Scenario: ST-02 Source write fails or acknowledgment is unknown
+- **WHEN** 来源写入失败或 ACK 不明
+- **THEN** 不先发布成功投影或执行依赖该变更的通知；明确失败可重试，未知状态先核对原事实，不能另造 identity。
+
+#### Scenario: ST-03 Resources or UI contains stale data
+- **WHEN** Resources、UI 缓存与已验证 Timeline 计划不同
+- **THEN** 从 Timeline 重建投影，缓存不能覆盖计划或重新产生变更事件。
+
+证据与实施入口：`crates/codegen/chat-state/src/timeline.rs`、`crates/codegen/tools/src/registry/types.rs`、`crates/codegen/tools/src/persistence.rs`、`crates/codegen/shell/src/session/actor`。
+
+### Requirement: Replanning receipt consumption and handling remain distinct
+
+重规划 SHALL 复用 agent 消息的 durable Received/Consumed 与准确 context 提交；Handled SHALL 是 child 对指定来源集合的独立持久事实，与该次局部计划修改或 no-change 决定一起提交。恢复 SHALL NOT 把已消费消息重新消费/注入，而应保留尚未处理的工作责任；只有合法同身份冻结恢复可以继续原检查，终态执行则明确记录未应用。处理确认与父级交接 SHALL 可按原身份核对。
+
+#### Scenario: ST-04 Consumed update has no handling acknowledgment
+- **WHEN** child 已消费更新，但在提交局部计划/处理确认前完成了可验证的同身份冻结
+- **THEN** 已消费消息仍只出现一次，未处理责任保留；合法树恢复通过当前工作投影继续检查，不伪造 Handled。
+
+#### Scenario: ST-05 Handling commits but parent misses acknowledgment
+- **WHEN** child 已持久确认处理，父级未收到 ACK
+- **THEN** 核对原确认收敛义务，不要求 child 重改 TODO；迟到旧确认不能清除新变化。
+
+#### Scenario: Child and parent plans advance independently
+- **WHEN** child 的 Handled 回执引用其实际局部计划版本，该版本大于父计划的当前版本
+- **THEN** 父级按原委派和来源身份接纳该回执，不比较两个 owner 的版本计数；child 自己仍拒绝引用尚不存在的本地版本，较新的父级变更继续待处理。
+
+#### Scenario: ST-14 Received batch is followed by a newer update
+- **WHEN** A 已 durable Received 但尚未 Consumed，B 在消费边界之前或之后到达
+- **THEN** A 的正文和身份不变；边界前可按顺序消费 A/B 并一次确认覆盖二者，边界后只能先确认 A、保留 B 待处理，不能用发送方失效标记跳过接收方事实。
+
+#### Scenario: ST-15 Unhandled update meets a verified terminal child
+- **WHEN** 已消费未处理的 child 正常完成/取消，或普通崩溃恢复验证旧实例结束并记录 interrupted
+- **THEN** 原消息不重复消费，变更记录为未应用并交父级决定，不复活 child；旧实例状态尚不明时保持未确认，不能提前制造终态来关闭责任。
+
+证据与实施入口：`crates/codegen/shell/src/session/actor/notification_drain.rs`、`crates/codegen/chat-state/src/timeline.rs` 的通知消费事实。既有 “Agent opinion consumption preserves source and exact context” 继续适用。
+
+### Requirement: Delegated task results reach their direct parent once
+
+新接纳的普通 task 委派 SHALL 为直接父 session 保存可恢复结果交付责任，独立于 root lifecycle owner 与 Task/Goal owner。嵌套委派 SHALL NOT 仅因 root 重挂接或展示抑制而跳过直接父级完成回执。等待工具与通知 SHALL 使用同一 canonical result/receipt，最多一次逻辑模型消费，不重复 tool_result。child 最终结果 SHALL 保留本地交付的有界验收摘要/引用与未闭合必需项，不复制整棵后代结果树。Workflow journal 自有交付和真正无模型消费者的内部执行保持原协议；历史无回执记录不凭空生成新工作。
+
+#### Scenario: ST-06 Nested result goes to the delegating child
+- **WHEN** grandchild 完成，其 lifecycle spawn 存于 root，直接委派者为 child
+- **THEN** child 获得原结果回执并可验收，root 保留生命周期观察但不收到第二份需消费的模型交付。
+
+#### Scenario: ST-07 Wait completion races with steering or notification
+- **WHEN** task_output 等待被用户/父指导打断，child 随后完成且通知并发到达
+- **THEN** 原 tool call 至多一份 tool_result；结果按同一回执消费一次，迟到完成不丢失且不重复唤醒。
+
+#### Scenario: ST-08 Result finalization or delivery is unavailable
+- **WHEN** child 已返回，但结果 artifact、严格链接或直接父级 durable 接纳尚未确认
+- **THEN** 分别显示提交/交付未确认或正文不可用，不把执行返回当作已交付，也不改写已验证终态。
+
+#### Scenario: ST-16 Parent result summarizes its local deliverable decisions
+- **WHEN** child 验收自己委派的 grandchild 并产生自身最终结果，或提前结束仍留有必需子交付
+- **THEN** child 的 canonical result 保留可验证局部验收摘要/引用及未闭合项，供直接父级审计；不为 root 再生成一份 grandchild 模型交付，也不赋予 child Goal 修改权。
+
+证据与实施入口：`crates/codegen/tools/src/implementations/grow_build/task/coordinator.rs`、`crates/codegen/shell/src/agent/subagent/{mod.rs,handle_request.rs}`、`crates/codegen/shell/src/session/actor/completion_delivery.rs`。
+
+### Requirement: Planning restoration preserves authority and unresolved work
+
+计划、关联、等待、待处理重规划与未验收结果 SHALL 从持久事实恢复。与 `suspend-session-tree` 联合时 SHALL 在开放执行前恢复原树身份与依赖，遵循原预算、权限及业务暂停状态；Interrupted/OutcomeUnknown SHALL 进入检查而非工具重放。无冻结恢复权威的冷崩溃和历史 fork/rewind/export/replay SHALL NOT 因计划未完成而自动恢复执行。
+
+#### Scenario: ST-09 Frozen tree contains both updates and interrupted commands
+- **WHEN** 合法树级冻结保存了 child 等待、未处理父项变化和中断/未知命令，随后用户 resume
+- **THEN** 先恢复同身份树及原责任，再在允许准入的节点检查最新要求和命令现场；不新建替代 child 或自动重复副作用。
+
+#### Scenario: ST-10 Suspended child cannot currently receive a message
+- **WHEN** 父项已提交变化而目标 child 挂起/正在恢复，原 inbox 不接纳新消息
+- **THEN** 来源责任保留，合法恢复后投递；不为送达消息绕过暂停、用户/权限等待或预算 gate。
+
+#### Scenario: ST-11 Historical state does not resume old work
+- **WHEN** 普通崩溃没有有效冻结 checkpoint，或用户 fork、rewind、resume_from、导出及播放历史
+- **THEN** 按原恢复/历史规则处理；旧 TODO、等待和 transcript 不能授权自动重启 child 或命令，新委派需新的当前 owner 校验。
+
+证据与实施入口：`crates/codegen/shell/src/agent/subagent/mod.rs` 的 orphan reconciliation、`crates/codegen/shell/src/session/storage`、`crates/codegen/chat-state/src/timeline.rs`；冻结协议遵循本规范中的树挂起与恢复条款，本条不替代它。
+
+### Requirement: Planning obligations participate in bounded retention
+
+未闭合通知、处理确认、有效等待和必需结果验收 SHALL 保留所需身份与证据，复用现有回收规则；已处理、被合并覆盖并确认、明确取消或终态无法应用的责任 SHALL 可持久收敛。并发交接与内存排队 SHALL 有界，容量或存储失败 SHALL 可见且不得丢失已提交责任。
+
+#### Scenario: ST-12 Cleanup overlaps pending planning work
+- **WHEN** TTL 到期但变更交付、处理确认或结果验收仍需某 artifact/session
+- **THEN** 必要资源保留；责任收敛后可按原清理条件回收，不靠永久保留全部历史解决交付。
+
+#### Scenario: ST-13 Delivery capacity is exhausted
+- **WHEN** 待交付内存或存储达到边界
+- **THEN** 保留已提交来源责任并有界反压/重试，新接纳失败明确返回；不无限排模型轮次或将未写入变更声称成功。
+
+证据与实施入口：`crates/codegen/shell/src/session/storage/jsonl/mod.rs` 的清理、原 inbox 与 subagent reconciliation。
+
+### Requirement: Retained plan references and decisions are durable facts
+计划候选、其当前资格及影响执行的决定 SHALL 由现有 Timeline/Control owner 持久记录并引用 immutable artifact。稳定决定重试 SHALL 核对原接纳/交接状态，不生成新的执行意图；未知 ACK 不构成未执行证据。feedback SHALL 只消费一次，不附加普通 HumanIntent 副本。
+
+决定身份 SHALL 绑定不可变 action、候选提交和 feedback。同身份同内容 SHALL 返回原状态，同身份不同内容 SHALL 拒绝。只读快照未发现记录 SHALL NOT 单独证明未接纳；负面结论需要原操作明确拒绝或完整旧 writer 退出后合法 owner 的核对证据。
+
+#### Scenario: Approval acknowledgment is lost
+- **WHEN** 决定可能已提交但客户端未取得 ACK
+- **THEN** 以原身份核对或重试，不重新生成 prompt 或第二次 handoff。
+
+#### Scenario: Two clients decide concurrently
+- **WHEN** 不同决定身份对同候选的批准和放弃或两次批准竞争
+- **THEN** 仅一个合法决定改变权威状态，另一方得到明确过期/冲突结果。
+
+#### Scenario: Retry changes feedback or decision
+- **WHEN** 同一决定身份被用于不同 action、feedback 或候选
+- **THEN** 在改变控制状态或消费反馈前返回身份冲突，原决定保持不变。
+
+#### Scenario: Status read overtakes the original decision
+- **WHEN** 查询快照未包含仍可能接纳的原决定，或旧 writer 的在途写入尚未退出
+- **THEN** 返回未确认，不能授权新决定、新 prompt 或第二次 handoff。
+
+#### Scenario: Process exits at the defer commit boundary
+- **WHEN** 候选保留与清除审批 gate 的提交失败、ACK 丢失，或已提交但原工具终态尚未完成时进程退出
+- **THEN** 失败/未确认不乐观释放用户内容；恢复核对原决定和工具记录，已确认保留只补合法收尾，不自动审批、实施或重弹已延后的 waiter。
+
+实施入口：`crates/codegen/chat-state/src/timeline.rs`、`shell/src/session/actor/tool/mod.rs::admit_plan_handoff_notification`、既有 Control 提交；新字段/schema 待实现评审。
+
+### Requirement: Retained plan recovery validates artifacts without starting work
+读取或恢复展示候选 SHALL 校验引用与 artifact 的大小、hash、编码和可用性，不隐式执行、修复 writer 或从模型历史猜正文。恢复执行 SHALL 另行核对决定、handoff 消费和执行 owner。
+
+#### Scenario: Read a retained plan after restart
+- **WHEN** 用户仅打开已保留计划且 artifact 有效
+- **THEN** 显示原版本，不生成实施 turn、writer 修复或审批 waiter；明确再次审阅/执行才可申请新审批关系。
+
+#### Scenario: Artifact is missing or corrupt
+- **WHEN** 候选引用的正文缺失、超限、hash 不符或编码无效
+- **THEN** 明确不可用，不从旧消息拼接并执行替代正文。
+
+实施入口：`shell/src/session/behavior.rs` artifact 读写和 `actor/tool/mod.rs::reconcile_restored_plan_approval`。
+
+### Requirement: Retained plan artifacts participate in existing reclamation checks
+有效保留候选及未确认决定/交接所需 artifact 和承载它们的 session 目录 SHALL 在既有回收所有权边界内受引用保护；UI 收起、进程离线或 TTL 本身不解除保护。放弃候选后仍按剩余历史/恢复引用判定，不直接删除正文。扫描后的引用变化 SHALL 在实际删除边界重新核对。
+
+#### Scenario: Retained candidate outlives the cleanup window
+- **WHEN** 自动清理扫描到仍有有效候选引用的计划 artifact
+- **THEN** 保留正文；只有实际删除边界验证无保护引用时才按既有规则回收。
+
+#### Scenario: Abandoned candidate still has recovery references
+- **WHEN** 候选已放弃，但存在历史/未确认交接引用，或扫描后新候选引用已发布
+- **THEN** artifact 与所属 session 不被旧 GC 候选列表删除；无法验证引用时保持资源并报告资格未确认。
+
+实施入口：`shell/src/session/storage/jsonl/mod.rs` 和计划 artifact 引用；须与当前 working tree 恢复资源保全契约对齐，不另建 GC owner。
+
+### Requirement: Plan history copying does not transfer execution authority
+fork/导入新 session 或 rewind SHALL NOT 复制有效的旧审批关系、重新消费已结算决定或自动启动来源 handoff。可见正文不等于目标会话的执行资格；跨 session 实施 SHALL 以目标新提交和新审批建立关系。无法验证候选来源时 SHALL 拒绝执行，而非从 UI 历史重建授权。
+
+#### Scenario: Fork or import a retained or approved plan
+- **WHEN** 计划正文或控制历史复制到不同 session/workspace
+- **THEN** 目标不复用来源 waiter/批准/handoff；若使用正文，按目标 owner 新提交并重新审批，不启动原工作。
+
+#### Scenario: Import preserves a Plan execution relation
+- **WHEN** `grow/session/import` receives an exact Timeline mirror that still contains a reviewable Deferred/Reviewing Plan candidate, pending approval or unresolved PlanApproval Interaction, AwaitingApproval/Amending/Executing Plan state, a `last_plan_handoff`, or an unconsumed PlanHandoff receipt
+- **THEN** import is rejected before publishing the target session, with an explanation that the target owner must create and approve a new Plan submission; an import containing only closed Plan history and no retained execution relation remains valid.
+
+Closed Approved/Abandoned candidate metadata alone does not grant review or execution authority and remains importable when the current state is Normal and there is no handoff or unconsumed receipt.
+
+#### Scenario: Rewind meets a consumed plan decision
+- **WHEN** rewind 后旧批准窗口或已消费 handoff 再次出现
+- **THEN** 旧操作不能重新获执行资格；候选保留/失效由当前 Control 与来源校验决定，展示回退不复活执行。
+
+实施入口：SessionControl、`shell/src/session/fork.rs`、`actor/rewind.rs` 与现有 Timeline 分支恢复，不建立独立计划历史引擎。
+
+### Requirement: Skill loads persist independent context facts
+加载结果 SHALL 关联真实 session、输入引用和工具调用身份，持久保存来源、调用参数、结果及实际正文快照。用户触发 SHALL 在一次权威发布中消费该输入并追加原用户消息及整组 Runtime 来源的独立结果，不改写原始用户正文或伪造模型响应；模型触发 SHALL 复用真实工具结果，不重复注入正文。Loaded SHALL 只由完整正文及上下文贡献的提交确认派生，准备事实本身 SHALL 不进入模型 Surface。
+
+#### Scenario: User-triggered load commits
+- **WHEN** 用户触发的加载成功完成
+- **THEN** 一次权威发布同时确认输入消费、原始用户消息和有序独立结果，结果关联输入、引用序号及真实 ToolEvent；整组确认后才显示 Loaded，依赖采样还须通过首次消费完整性检查。
+
+#### Scenario: Model-triggered load commits
+- **WHEN** 已接纳模型工具调用发起技能加载
+- **THEN** 结果关联真实 call identity，正文只作为该次工具结果贡献一次，不增加虚假用户输入或 Runtime 副本。
+
+#### Scenario: Prepared body without durable confirmation
+- **WHEN** 正文已准备但提交失败或确认状态不明
+- **THEN** 不宣称 Loaded，不放行依赖采样；确定失败按失败处理，未知结果按权威日志对账。
+
+#### Scenario: Crash at the user group publication boundary
+- **WHEN** 进程在用户输入与多项技能结果发布期间退出，随后恢复
+- **THEN** 权威历史只能确认整组未发布或整组已发布，不出现原输入已进入 Surface 但部分技能缺失的状态；未确认时先对账，不重复消费或执行 Hook。
+
+证据入口：`crates/codegen/chat-state/src/timeline.rs` 的 MessageCause 与事实校验、`crates/codegen/sampling-types/src/conversation.rs` 的 ConversationItem、`crates/codegen/shell/src/session/event_tracker.rs` 的持久工具事件。新增行为不得借用虚假的 sampler response admission。
+
+### Requirement: Runtime skill loading reuses causal tool execution boundaries
+用户加载 SHALL 在真实 Runtime Step 中使用现有工具开始、终态与 Hook 因果关系，不需要前置 provider 请求。工具开始 SHALL 先于对应 PreToolUse 持久化，Post Hook SHALL 晚于工具终态确认。加载失败的输入 SHALL 合法结算且不被重新消费；用户加载 SHALL 不伪造 Request、模型响应或用量。
+
+#### Scenario: First user load without a model step
+- **WHEN** 首条或队列用户技能输入获准执行且尚无模型步骤
+- **THEN** 在所属 turn 的真实 Runtime Step 记录加载工具及合法 Hook cause，结束后再决定是否进入模型步骤；该 Runtime Step 不产生 provider 采样用量。
+
+#### Scenario: Failed FIFO and steering settlement
+- **WHEN** 已被 turn 预留的 FIFO 技能输入失败，或未消费的技能插话失败
+- **THEN** FIFO 沿未送模型的 Handled 语义结算，插话沿适用的 Dismissed / Invalidated 语义结算并保留错误；不对 reserved 输入直接 Dismissed，不关闭原任务来处理失败插话。
+
+证据入口：`crates/codegen/shell/src/session/actor/tool/dispatch.rs` 的 handle_direct_bash_command、`event_tracker.rs` 的 tool_started、`actor/input_admission.rs` 的 complete_unmodeled_fifo_inputs / dismiss_input_ids，以及 `crates/codegen/chat-state/src/timeline.rs` 的 Hook 和 Input fold（Shell 的相对文件均位于 `crates/codegen/shell/src/session/`）。
+
+### Requirement: Skill load identity makes result delivery idempotent
+相同加载 identity 与相同 payload 的重复提交 SHALL 返回原结果，不重新读取正文或执行 Hook；相同 identity 的冲突 payload SHALL 拒绝。再次主动调用 SHALL 使用新的输入或模型调用身份。提交确认不明 SHALL 先对账，不以新执行猜测旧结果。
+
+#### Scenario: Acknowledgement lost after commit
+- **WHEN** 已提交加载结果的确认丢失，调用方重送同一 identity 与 payload
+- **THEN** 返回原正文快照和结果，不重复加载、Hook 或上下文贡献。
+
+#### Scenario: Identity conflict
+- **WHEN** 相同加载 identity 携带不同来源或参数
+- **THEN** 拒绝冲突，不覆盖原结果。
+
+#### Scenario: Intentional repeat
+- **WHEN** 用户再次主动提交相同技能命令
+- **THEN** 新输入身份允许新的加载，不因旧历史成功而跳过。
+
+证据入口：`crates/codegen/chat-state/src/actor/mutations.rs` 与 `timeline.rs` 的持久提交、身份校验，以及现有输入 identity 契约；本条只增加加载所需幂等边界。
+
+### Requirement: Skill history replay is observational
+恢复、导出导入、fork 与 rewind SHALL 根据持久事实和原正文快照投影加载结果，不执行工具、重跑 Hook 或读取当前技能文件。快照损坏 SHALL 明确失败，不以当前文件代替。加载事实及前提 SHALL 遵守既有历史因果边界，不形成全局已加载状态。
+
+#### Scenario: Source edited after loading
+- **WHEN** 技能加载后源文件被修改或删除，随后恢复或导出会话
+- **THEN** 已提交记录仍显示原来源、参数和正文快照，不产生新的加载。
+
+#### Scenario: Missing body artifact
+- **WHEN** 被持久结果引用的正文快照缺失或损坏
+- **THEN** 加载历史明确报告完整性错误，不重新读源文件修补成功记录。
+
+#### Scenario: Fork and rewind
+- **WHEN** 从包含加载结果的历史 fork 或 rewind
+- **THEN** 仅保留因果边界内的加载事实和上下文贡献，不重新执行它们，也不从被截断历史继承 loaded 标记。
+
+#### Scenario: Incomplete operation during replay
+- **WHEN** 历史包含尚未确认终态的加载操作
+- **THEN** replay 显示未确认状态，只有取得执行所有权的恢复路径可以对账或继续，纯历史加载不自行重启它。
+
+#### Scenario: Published content withdrawn before first consumption
+- **WHEN** 已发布加载在首次关联模型步骤获得已接纳响应前因执行终止而从 Surface 撤下，随后恢复、fork 或导出
+- **THEN** 原发布和 Loaded 作为历史保留，当前 Surface 及续跑判断遵守关联到该组的撤下事实，不重新注入正文或改动无关输入 / 工具结果；纯回放不触发执行。
+
+证据入口：`crates/codegen/chat-state/src/timeline.rs`、Shell 会话恢复与 export/fork/rewind 路径，主规范既有只读观察与 Hook 恢复契约。
+
+### Requirement: Cold writer identity recovery is independent of client replay
+
+Cold session load SHALL seed the process event sequence above every valid ACP/Grow event identity in the loaded physical update history and every durable Timeline display expectation before publishing a writer actor or emitting new persistent events. Client noReplay, reconnect cursors, and rewind visibility SHALL NOT lower that bound. Exact append SHALL continue to reject different payloads that reuse an existing identity.
+
+#### Scenario: Headless loads without replay
+
+- **WHEN** a cold noReplay load finds an ordinary persisted update whose sequence exceeds all Timeline display expectations
+- **THEN** new events use a sequence greater than that update and can be persisted without identity conflict.
+
+#### Scenario: Historical row is hidden from replay
+
+- **WHEN** rewind or a reconnect cursor excludes a physical historical row from client display
+- **THEN** its valid event identity still contributes to the writer sequence lower bound.
+
+#### Scenario: Display expectation precedes cache publication
+
+- **WHEN** a durable Timeline expectation has no corresponding update-cache row
+- **THEN** its identity also contributes to the sequence lower bound before writer publication.

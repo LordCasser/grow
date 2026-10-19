@@ -135,8 +135,12 @@ pub struct SessionHandle {
     pub(crate) goal_usage_window: crate::session::actor::goal_support::GoalUsageWindow,
     /// Persistence channel shared with the actor (used by extension handlers).
     pub(crate) persistence_tx: mpsc::UnboundedSender<PersistenceMsg>,
+    /// Identity-pinned storage capability for this exact session directory.
+    pub(crate) session_directory: std::sync::Arc<super::storage::ContainedDirectory>,
     /// Lock-backed runtime facts for non-blocking observation queries.
     pub(crate) runtime_observation: super::actor::runtime_observation::SharedRuntimeObservation,
+    /// Shared admission gate closed while the session tree is suspended.
+    pub(crate) runtime_suspend: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// Current running prompt/turn id, if any.
     ///
     /// Shared with the session actor so external cancellation paths can target

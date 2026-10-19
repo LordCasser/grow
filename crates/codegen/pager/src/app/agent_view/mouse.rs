@@ -101,7 +101,7 @@ impl AgentView {
                     if self.plan_approval_view.is_some() {
                         self.reopen_plan_approval();
                     } else {
-                        self.show_plan_preview();
+                        return InputOutcome::Action(Action::ShowPlan);
                     }
                     return InputOutcome::Changed;
                 }
@@ -112,7 +112,7 @@ impl AgentView {
                     if self.plan_approval_view.is_some() {
                         self.reopen_plan_approval();
                     } else {
-                        self.show_plan_preview();
+                        return InputOutcome::Action(Action::ShowPlan);
                     }
                     return InputOutcome::Changed;
                 }
@@ -890,6 +890,14 @@ impl AgentView {
                                         ),
                                     );
                                 self.last_click = last_click;
+                                if !header_row_click
+                                    && self
+                                        .scrollback
+                                        .entry(idx)
+                                        .is_some_and(|entry| entry.block.is_plan_control_tool())
+                                {
+                                    return InputOutcome::Action(Action::ShowPlan);
+                                }
                                 if show_word_select_tip {
                                     return InputOutcome::Action(Action::ShowWordSelectTip);
                                 }

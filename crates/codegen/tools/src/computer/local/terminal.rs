@@ -19,8 +19,8 @@ use crate::computer::local::cgroup::{
     CgroupGuard, CgroupMemoryConfig, MemoryMonitor, PROCESS_OOM_EXIT_CODE,
 };
 use crate::computer::types::{
-    BackgroundHandle, ComputerError, KillOutcome, TaskSnapshot, TerminalBackend,
-    TerminalRunRequest, TerminalRunResult,
+    BackgroundHandle, CommandSuspensionEvidence, ComputerError, KillOutcome, TaskSnapshot,
+    TerminalBackend, TerminalRunRequest, TerminalRunResult,
 };
 use crate::notification::types::{BashNotificationBase, BashOutputChunk, ToolNotificationHandle};
 
@@ -159,6 +159,14 @@ enum TerminalCommand {
         owner_session_id: String,
     },
 
+    /// Stop and reap every process owned by a session while retaining its
+    /// ProcessState for later result queries.
+    SuspendOwnedCommands {
+        owner_session_id: String,
+        deadline: tokio::time::Instant,
+        reply: oneshot::Sender<Result<Vec<CommandSuspensionEvidence>, ComputerError>>,
+    },
+
     /// Kill all running background tasks owned by a specific session.
     KillTasksByOwner {
         owner_session_id: String,
@@ -294,6 +302,9 @@ struct ProcessState {
     /// Set when the model explicitly killed this task via the kill tool,
     /// or during `kill_all_background_tasks` teardown.
     explicitly_killed: bool,
+    /// Set only when the confirmed session suspension protocol requested a
+    /// stop. It survives partial-batch failures so retries preserve causality.
+    suspension_requested: bool,
 
     /// Join handle for reading the state dump from fd 4 (persistent shell only).
     /// When present, the actor collects the dump on process exit and updates
@@ -451,6 +462,94 @@ impl ProcessState {
             is_backgrounded: self.bg_status.is_backgrounded(),
         }
     }
+
+    /// Build a snapshot without reading an unbounded output file. Used only
+    /// for checkpoint evidence; ordinary task queries retain their old path.
+    async fn to_bounded_task_snapshot(
+        &self,
+        task_id: &str,
+        max_output_bytes: usize,
+    ) -> TaskSnapshot {
+        let mut output_bytes = Vec::with_capacity(max_output_bytes.saturating_add(1));
+        let output_truncated;
+        if self.output_buffer.is_empty() && self.exit_status.is_some() {
+            let mut bytes = Vec::with_capacity(max_output_bytes.saturating_add(1));
+            let read_failed = match tokio::fs::File::open(&self.output_file).await {
+                Ok(file) => file
+                    .take(max_output_bytes.saturating_add(1) as u64)
+                    .read_to_end(&mut bytes)
+                    .await
+                    .is_err(),
+                Err(_) => true,
+            };
+            output_truncated = read_failed || bytes.len() > max_output_bytes;
+            output_bytes.extend_from_slice(&bytes[..bytes.len().min(max_output_bytes)]);
+        } else if let Some(front) = &self.front_buffer {
+            append_bounded(&mut output_bytes, front, max_output_bytes);
+            append_bounded(
+                &mut output_bytes,
+                b"\n\n... (output truncated) ...\n\n",
+                max_output_bytes,
+            );
+            append_bounded(&mut output_bytes, &self.output_buffer, max_output_bytes);
+            output_truncated =
+                front.len().saturating_add(self.output_buffer.len()) > output_bytes.len();
+        } else {
+            append_bounded(&mut output_bytes, &self.output_buffer, max_output_bytes);
+            output_truncated = self.output_buffer.len() > output_bytes.len();
+        }
+        let mut output = String::from_utf8_lossy(&output_bytes).into_owned();
+        let output_truncated = output_truncated || output.len() > max_output_bytes;
+        truncate_utf8(&mut output, max_output_bytes);
+
+        TaskSnapshot {
+            task_id: task_id.to_owned(),
+            command: self.command.clone(),
+            display_command: self.display_command.clone(),
+            cwd: self.cwd.clone(),
+            start_time: self.start_wall_time,
+            end_time: self.exit_status.as_ref().map(|_| {
+                self.end_wall_time
+                    .unwrap_or_else(std::time::SystemTime::now)
+            }),
+            output,
+            output_file: self.output_file.clone(),
+            truncated: self.truncated || output_truncated,
+            exit_code: self
+                .exit_status
+                .as_ref()
+                .and_then(|status| status.exit_code),
+            signal: self
+                .exit_status
+                .as_ref()
+                .and_then(|status| status.signal.clone()),
+            completed: self.exit_status.is_some(),
+            block_waited: self.block_waited,
+            explicitly_killed: self.explicitly_killed,
+            kind: self.kind,
+            owner_session_id: self.owner_session_id.clone(),
+            goal_id: self.goal_id.clone(),
+            goal_definition_revision: self.goal_definition_revision,
+            description: self.description.clone(),
+            is_backgrounded: self.bg_status.is_backgrounded(),
+        }
+    }
+}
+
+fn append_bounded(output: &mut Vec<u8>, source: &[u8], max_bytes: usize) {
+    let remaining = max_bytes.saturating_sub(output.len());
+    output.extend_from_slice(&source[..source.len().min(remaining)]);
+}
+
+fn truncate_utf8(text: &mut String, max_bytes: usize) {
+    if text.len() <= max_bytes {
+        return;
+    }
+    let mut end = max_bytes;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    text.truncate(end);
 }
 
 // ============================================================================
@@ -996,6 +1095,16 @@ impl LocalTerminalActor {
                 self.kill_foreground_commands_by_owner(&owner_session_id)
                     .await;
             }
+            TerminalCommand::SuspendOwnedCommands {
+                owner_session_id,
+                deadline,
+                reply,
+            } => {
+                let result = self
+                    .suspend_owned_commands(&owner_session_id, deadline)
+                    .await;
+                let _ = reply.send(result);
+            }
             TerminalCommand::KillTasksByOwner {
                 owner_session_id,
                 reply,
@@ -1117,6 +1226,7 @@ impl LocalTerminalActor {
             drained: false,
             block_waited: false,
             explicitly_killed: false,
+            suspension_requested: false,
             state_dump_handle,
             owner_session_id: request.owner_session_id.clone(),
             goal_id: request.goal_id.clone(),
@@ -1252,6 +1362,7 @@ impl LocalTerminalActor {
             drained: false,
             block_waited: false,
             explicitly_killed: false,
+            suspension_requested: false,
             // Background commands don't update the canonical shell state —
             // they may run for hours and their env mutations shouldn't leak.
             // Detach the dump reader so its result is discarded (the task
@@ -2044,6 +2155,131 @@ impl LocalTerminalActor {
         }
     }
 
+    async fn suspend_owned_commands(
+        &mut self,
+        owner_session_id: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<Vec<CommandSuspensionEvidence>, ComputerError> {
+        const MAX_EVIDENCE_OUTPUT_BYTES: usize = 64 * 1024;
+        if tokio::time::Instant::now() >= deadline {
+            return Err(ComputerError::io_with_kind(
+                "terminal suspension deadline elapsed before processing began",
+                std::io::ErrorKind::TimedOut,
+            ));
+        }
+
+        let mut owned_ids: Vec<String> = self
+            .processes
+            .iter()
+            .filter(|(_, process)| process.owner_session_id.as_deref() == Some(owner_session_id))
+            .map(|(id, _)| id.clone())
+            .collect();
+        owned_ids.sort();
+
+        // Signal every live process before waiting on any one child so the
+        // batch shares the same absolute deadline instead of serializing kills.
+        for id in &owned_ids {
+            let Some(process) = self.processes.get_mut(id) else {
+                continue;
+            };
+            if process.child.id().is_some() {
+                process.suspension_requested = true;
+                process.explicitly_killed = true;
+                // Several legacy paths optimistically recorded a timeout or
+                // cancellation before the OS child was reaped. Clear that
+                // provisional result until wait supplies the actual status.
+                process.exit_status = None;
+                process.end_wall_time = None;
+                process.completed_at = None;
+                process.drained = false;
+                send_sigkill_to_group(process);
+            }
+        }
+
+        let mut evidence = Vec::with_capacity(owned_ids.len());
+        // Reap the complete owner set first. A slow inherited output pipe must
+        // never consume the deadline needed to join another child.
+        for id in &owned_ids {
+            let Some(process) = self.processes.get_mut(id) else {
+                continue;
+            };
+
+            if process.child.id().is_some() || process.exit_status.is_none() {
+                let status = tokio::time::timeout_at(deadline, process.child.wait())
+                    .await
+                    .map_err(|_| {
+                        ComputerError::io_with_kind(
+                            format!("timed out waiting to reap terminal command {id}"),
+                            std::io::ErrorKind::TimedOut,
+                        )
+                    })?
+                    .map_err(|error| {
+                        ComputerError::io(format!(
+                            "failed waiting to reap terminal command {id}: {error}"
+                        ))
+                    })?;
+                process.exit_status = Some(extract_exit_status(status));
+                process.end_wall_time = Some(std::time::SystemTime::now());
+                process.completed_at = Some(Instant::now());
+            }
+        }
+
+        for id in owned_ids {
+            let Some(process) = self.processes.get_mut(&id) else {
+                continue;
+            };
+            if process.suspension_requested {
+                if let Some(handle) = process.state_dump_handle.take() {
+                    handle.abort();
+                }
+            }
+
+            // A reaped child is the completion guarantee. Output draining is
+            // best-effort under that same deadline; timeout truncates output
+            // and closes the readers without losing the reaped owner.
+            if !process.drained {
+                match tokio::time::timeout_at(deadline, drain_remaining_output(process)).await {
+                    Ok(true) | Err(_) => {
+                        process.truncated = true;
+                        process.child.stdout.take();
+                        process.child.stderr.take();
+                        process.maybe_truncate();
+                    }
+                    Ok(false) => {}
+                }
+                process.drained = true;
+            }
+            if tokio::time::timeout_at(deadline, process.flush_and_truncate_output_file())
+                .await
+                .is_err()
+            {
+                process.truncated = true;
+                process.file_handle.take();
+            }
+
+            let result = Ok(process.to_result());
+            process.notify_waiters(result);
+            let interrupted = process.suspension_requested;
+            let snapshot = tokio::time::timeout_at(
+                deadline,
+                process.to_bounded_task_snapshot(&id, MAX_EVIDENCE_OUTPUT_BYTES),
+            )
+            .await
+            .map_err(|_| {
+                ComputerError::io_with_kind(
+                    format!("timed out building terminal command evidence for {id}"),
+                    std::io::ErrorKind::TimedOut,
+                )
+            })?;
+            evidence.push(CommandSuspensionEvidence {
+                tool_call_id: process.tool_call_id.clone(),
+                snapshot,
+                interrupted,
+            });
+        }
+        Ok(evidence)
+    }
+
     /// Kill all running background tasks owned by a specific session.
     /// Foreground tasks and tasks owned by other sessions are left untouched.
     async fn kill_tasks_by_owner(&mut self, owner_session_id: &str) {
@@ -2588,6 +2824,39 @@ impl TerminalBackend for LocalTerminalBackend {
             .await;
     }
 
+    async fn suspend_owned_commands(
+        &self,
+        owner_session_id: &str,
+        deadline: tokio::time::Instant,
+    ) -> Result<Vec<CommandSuspensionEvidence>, ComputerError> {
+        let (reply_tx, reply_rx) = oneshot::channel();
+        tokio::time::timeout_at(
+            deadline,
+            self.cmd_tx.send(TerminalCommand::SuspendOwnedCommands {
+                owner_session_id: owner_session_id.to_owned(),
+                deadline,
+                reply: reply_tx,
+            }),
+        )
+        .await
+        .map_err(|_| {
+            ComputerError::io_with_kind(
+                "timed out queuing terminal suspension",
+                std::io::ErrorKind::TimedOut,
+            )
+        })?
+        .map_err(|_| ComputerError::io("terminal actor shut down before suspension"))?;
+        tokio::time::timeout_at(deadline, reply_rx)
+            .await
+            .map_err(|_| {
+                ComputerError::io_with_kind(
+                    "timed out waiting for terminal suspension acknowledgement",
+                    std::io::ErrorKind::TimedOut,
+                )
+            })?
+            .map_err(|_| ComputerError::io("terminal actor dropped suspension acknowledgement"))?
+    }
+
     async fn kill_all_background_tasks_by_owner(&self, owner_session_id: &str) {
         let (reply_tx, reply_rx) = oneshot::channel();
         if self
@@ -2712,7 +2981,7 @@ fn send_sigkill_to_group(process: &mut ProcessState) {
 /// Drain remaining stdout/stderr into the output buffer and file.
 /// Bounded by `DRAIN_TIMEOUT` so a backgrounded child holding the
 /// pipe open cannot block the actor loop indefinitely.
-async fn drain_remaining_output(process: &mut ProcessState) {
+async fn drain_remaining_output(process: &mut ProcessState) -> bool {
     let timed_out = tokio::time::timeout(DRAIN_TIMEOUT, async {
         if let Some(stdout) = process.child.stdout.as_mut() {
             let mut buf = [0u8; READ_BUFFER_SIZE];
@@ -2762,6 +3031,7 @@ async fn drain_remaining_output(process: &mut ProcessState) {
     process.child.stderr.take();
 
     process.maybe_truncate();
+    timed_out.is_err()
 }
 
 /// Two-phase kill that synchronously waits for the process to exit.
@@ -5379,6 +5649,100 @@ mod tests {
 
         // Cleanup
         backend.kill_task(&handle.task_id).await;
+    }
+
+    #[tokio::test]
+    async fn suspend_owned_commands_reaps_only_matching_foreground_and_background() {
+        let backend = LocalTerminalBackend::new();
+        let temp = tempfile::TempDir::new().unwrap();
+        let started = temp.path().join("foreground-started");
+
+        let mut foreground = make_owned_request(
+            &format!("echo started > {}; sleep 60", started.display()),
+            "suspend-owner",
+        );
+        foreground.tool_call_id = "suspended-foreground".into();
+        foreground.timeout = Duration::from_secs(300);
+        let foreground_backend = backend.clone();
+        let foreground_run = tokio::spawn(async move { foreground_backend.run(foreground).await });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !started.exists() {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("foreground command started");
+
+        let mut background = make_owned_request("sleep 60", "suspend-owner");
+        background.tool_call_id = "suspended-background".into();
+        let owned_bg = backend.run_background(background).await.unwrap();
+
+        let mut unrelated = make_owned_request("sleep 60", "other-owner");
+        unrelated.tool_call_id = "unrelated-background".into();
+        let unrelated_bg = backend.run_background(unrelated).await.unwrap();
+
+        let evidence = backend
+            .suspend_owned_commands(
+                "suspend-owner",
+                tokio::time::Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("owned commands must be reaped before acknowledgement");
+        assert_eq!(evidence.len(), 2);
+        assert!(evidence.iter().all(|item| item.interrupted));
+        assert!(evidence.iter().all(|item| item.snapshot.completed));
+        assert!(evidence.iter().any(|item| {
+            item.tool_call_id == "suspended-foreground" && item.snapshot.explicitly_killed
+        }));
+        assert!(evidence.iter().any(|item| {
+            item.snapshot.task_id == owned_bg.task_id && item.snapshot.explicitly_killed
+        }));
+        let retry = backend
+            .suspend_owned_commands(
+                "suspend-owner",
+                tokio::time::Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("retry must retain prior suspension facts");
+        assert!(retry.iter().all(|item| item.interrupted));
+        foreground_run
+            .await
+            .expect("foreground task join")
+            .expect("foreground command result");
+
+        let unrelated_snapshot = backend
+            .get_task(&unrelated_bg.task_id)
+            .await
+            .expect("unrelated task retained");
+        assert!(!unrelated_snapshot.completed);
+        backend.kill_task(&unrelated_bg.task_id).await;
+    }
+
+    #[tokio::test]
+    async fn suspend_owned_commands_preserves_precompleted_result() {
+        let backend = LocalTerminalBackend::new();
+        let mut request = make_owned_request("printf preserved", "finished-owner");
+        request.tool_call_id = "finished-command-call".into();
+        let handle = backend.run_background(request).await.unwrap();
+        assert!(poll_until_task_completed(&backend, &handle.task_id, Duration::from_secs(5)).await);
+        let before = backend
+            .get_task(&handle.task_id)
+            .await
+            .expect("completed snapshot");
+
+        let evidence = backend
+            .suspend_owned_commands(
+                "finished-owner",
+                tokio::time::Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .expect("completed command snapshot must be returned");
+        assert_eq!(evidence.len(), 1);
+        assert!(!evidence[0].interrupted);
+        assert_eq!(evidence[0].tool_call_id, "finished-command-call");
+        assert_eq!(evidence[0].snapshot.output, before.output);
+        assert_eq!(evidence[0].snapshot.exit_code, before.exit_code);
+        assert_eq!(evidence[0].snapshot.signal, before.signal);
     }
 
     #[tokio::test]

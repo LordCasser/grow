@@ -1,4 +1,6 @@
-use super::{PromptResponseMetaArgs, build_prompt_response_meta};
+use super::{
+    PromptResponseMetaArgs, build_prompt_response_meta, build_suspended_prompt_response_meta,
+};
 use sampling_types::TokenUsage;
 
 /// Baseline args with no usage, cancellation, or structured output.
@@ -126,6 +128,23 @@ fn cancel_trigger_lands_as_camelcase_meta_key() {
     // Absent for non-cancel completions — the key must not appear.
     let none = build_prompt_response_meta(args("s", "p", 0, "m"));
     assert!(none.get("cancelTrigger").is_none());
+}
+
+#[test]
+fn suspended_prompt_response_meta_carries_operation_and_checkpoint_identity() {
+    let meta = build_suspended_prompt_response_meta(
+        "session-1",
+        "prompt-1",
+        "grow-4.5",
+        "suspend-op-7",
+        42,
+    );
+    assert_eq!(meta["sessionId"], "session-1");
+    assert_eq!(meta["promptId"], "prompt-1");
+    assert_eq!(meta["grow/runtimeSuspended"]["operationId"], "suspend-op-7");
+    assert_eq!(meta["grow/runtimeSuspended"]["checkpointSeq"], 42);
+    assert!(meta.get("cancelTrigger").is_none());
+    assert!(meta.get("cancellationCategory").is_none());
 }
 
 #[test]

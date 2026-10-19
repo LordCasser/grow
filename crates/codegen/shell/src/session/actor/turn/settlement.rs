@@ -4,80 +4,6 @@
 use super::*;
 
 impl SessionActor {
-    /// Emit a cosmetic `Plan` update at turn end to clear stale spinners.
-    ///
-    /// When the model produces its final text response without a cleanup
-    /// `todo_write` call, any remaining `in_progress` items leave stale
-    /// spinners in the UI.
-    ///
-    /// This method **does not mutate** the underlying `TodoState` — the
-    /// persisted resource state and the model's view of the todo list
-    /// are unchanged.  It only emits a transient (non-persisted) `Plan`
-    /// notification where `in_progress` entries are mapped to `completed`
-    /// for display.
-    ///
-    /// Uses the canonical `plan_entry_from_todo_item` helper to preserve
-    /// cancelled metadata, priorities, and other semantics.
-    ///
-    /// No-op if no `in_progress` items exist.
-    pub(super) async fn emit_turn_end_plan_cleanup(&self) {
-        use crate::tools::todo::{TodoState, TodoStatus, plan_entry_from_todo_item};
-        use tools::types::resources::State;
-
-        // Read the current TodoState (no mutation).
-        let (entries, stale_count) = {
-            let res = self
-                .agent
-                .borrow()
-                .tool_bridge()
-                .read_resource::<State<TodoState>>()
-                .await;
-            let Some(state) = res else {
-                return; // No todo state at all.
-            };
-
-            let stale_count = state
-                .0
-                .todo_items()
-                .filter(|t| t.status == TodoStatus::InProgress)
-                .count();
-            if stale_count == 0 {
-                return;
-            }
-
-            // Build plan entries with in_progress → completed for display.
-            // Uses the canonical `plan_entry_from_todo_item` helper to
-            // preserve cancelled metadata, priority, and other semantics.
-            let entries: Vec<_> = state
-                .0
-                .todo_items()
-                .map(|item| {
-                    let mut entry = plan_entry_from_todo_item(item.clone());
-                    if item.status == TodoStatus::InProgress {
-                        entry.status = acp::PlanEntryStatus::Completed;
-                    }
-                    entry
-                })
-                .collect();
-
-            (entries, stale_count)
-        };
-
-        tracing::info!(
-            stale_count,
-            "emitting transient turn-end Plan cleanup — in_progress shown as completed"
-        );
-
-        // Use transient notification — this is a cosmetic UI update that
-        // must NOT be persisted or replayed on session reload.  The real
-        // TodoState in Resources is the source of truth.
-        let notification = acp::SessionNotification::new(
-            self.session_info.id.clone(),
-            acp::SessionUpdate::Plan(acp::Plan::new(entries)),
-        );
-        self.emit_transient_notification(notification);
-    }
-
     /// Emit `grow/git_head_changed` after an edit/shell command that may have
     /// moved HEAD (e.g. `git checkout`), so clients update their status bar
     /// immediately rather than waiting for the debounced fs-watch refresh.
@@ -242,6 +168,9 @@ impl SessionActor {
         self.finish_sampling_failure_notification(&prompt_id, project_terminal && result.is_err())
             .await;
 
+        for watcher in self.runtime_completion_watchers.borrow_mut().drain(..) {
+            let _ = watcher.send(result.clone());
+        }
         if let Some(input) = settled_input {
             let _ = input.respond_to.send(result.clone());
         }

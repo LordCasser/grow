@@ -12,12 +12,24 @@ const BASH_MODE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60
 /// [`ToolBridge`] that issued it. Workspace keeps a reference to this same
 /// finalized toolset for hooks and session lifecycle, but is deliberately not
 /// an execution authority.
-pub(super) async fn dispatch_tool(
+pub(in crate::session::actor) async fn dispatch_tool(
     authority: &ToolDispatchAuthority,
     prepared: &PreparedToolCall,
     session_id: &str,
 ) -> Result<ToolRunResult, tool_runtime::ToolError> {
     validate_tool_call_permit(authority, prepared).await?;
+    if let Some(selection) = prepared.skill_selection.as_ref() {
+        return authority
+            .bridge
+            .call_skill_with_selection(
+                &prepared.tool_name,
+                prepared.parsed_args.clone(),
+                &prepared.tool_call_id.0,
+                selection.clone(),
+                CancellationToken::new(),
+            )
+            .await;
+    }
     tracing::debug!(
         tool = %prepared.tool_name,
         call_id = %prepared.tool_call_id.0,
@@ -47,6 +59,9 @@ async fn validate_tool_call_permit(
             format!("Tool call authorization is no longer valid: {reason}"),
         )
     };
+    if authority.runtime_suspend.load(Ordering::Acquire) {
+        return Err(stale("session runtime is suspended"));
+    }
     prepared
         .permit
         .consumed
@@ -127,6 +142,7 @@ mod permit_tests {
     fn prepared() -> PreparedToolCall {
         let args = serde_json::json!({"path": "README.md"});
         PreparedToolCall {
+            skill_selection: None,
             call_id: "call-1".to_owned(),
             tool_call_id: acp::ToolCallId::new("call-1"),
             tool_name: "fixture".to_owned(),
@@ -160,6 +176,7 @@ mod permit_tests {
             bridge: Arc::new(tools::bridge::ToolBridge::for_test()),
             subagent: None,
             mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
+            runtime_suspend: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cwd: PathBuf::from("/workspace"),
             actor_source: "primary:normal".to_owned(),
         }
@@ -190,6 +207,23 @@ mod permit_tests {
                 .expect_err("a replay must fail before execution"),
             "already consumed",
         );
+    }
+
+    #[tokio::test]
+    async fn suspended_runtime_rejects_dispatch_before_consuming_the_permit() {
+        use std::sync::atomic::Ordering;
+
+        let prepared = prepared();
+        let authority = authority();
+        authority.runtime_suspend.store(true, Ordering::Release);
+
+        assert_stale(
+            validate_tool_call_permit(&authority, &prepared)
+                .await
+                .expect_err("a suspended session must reject pending dispatch"),
+            "session runtime is suspended",
+        );
+        assert!(!prepared.permit.consumed.load(Ordering::Acquire));
     }
 
     #[tokio::test]

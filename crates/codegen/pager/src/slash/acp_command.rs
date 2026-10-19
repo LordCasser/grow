@@ -4,10 +4,10 @@
 //! shell. The wrapper stores `String` fields -- consistent with the `&str`
 //! trait design.
 //!
-//! Skill commands (those with `meta.path` + `meta.scope`) are handled
-//! client-side: pager reads the SKILL.md, applies substitutions, and
-//! sends structured prompt blocks directly. Non-skill ACP commands are
-//! classified for the shell command plane.
+//! Skill commands (those with `meta.path` + `meta.scope`) send the raw slash
+//! invocation plus an explicit source identity. The Shell resolves that
+//! identity against its current skill snapshot before admission. Non-skill ACP
+//! commands are classified for the shell command plane.
 
 use acp_transport::protocol as acp;
 use tools::implementations::skills::types::SkillScope;
@@ -19,8 +19,8 @@ use super::command::{
 
 /// A slash command backed by an ACP `AvailableCommand`.
 ///
-/// For skill commands (has `skill_path` + `skill_scope`), execution reads
-/// the SKILL.md client-side and produces `CommandResult::InjectSkill`.
+/// For skill commands (has `skill_path` + `skill_scope`), execution produces
+/// an `InjectSkill` prompt with a frozen source identity in TextContent meta.
 /// For non-skill commands, execution produces `CommandResult::HostCommand`.
 pub struct AcpSlashCommand {
     name: String,
@@ -31,6 +31,7 @@ pub struct AcpSlashCommand {
     skill_path: Option<String>,
     /// Skill-specific: parsed scope enum. None for shell builtins.
     skill_scope: Option<SkillScope>,
+    plugin_name: Option<String>,
     /// True if the ACP meta had skill-like keys but they were invalid.
     meta_malformed: bool,
     kind: CommandKind,
@@ -180,21 +181,26 @@ impl SlashCommand for AcpSlashCommand {
             ));
         }
 
-        // --- Pass skill through to the shell for expansion ---
-        //
-        // The shell's slash_commands::resolve() handles skill detection,
-        // SKILL.md loading, substitution, and assembly of the
-        // <user_query> + <skill_information> format. The pager just
-        // sends the raw `/skill args` text as a single prompt block.
+        // The shell validates this selected source against its admission-time
+        // skill list and freezes the resolved reference before persistence.
         let display_text = if args.trim().is_empty() {
             format!("/{}", self.name)
         } else {
             format!("/{} {}", self.name, args)
         };
 
-        let prompt_blocks = vec![acp::ContentBlock::Text(acp::TextContent::new(
-            display_text.clone(),
-        ))];
+        let mut text = acp::TextContent::new(display_text.clone());
+        let mut meta = acp::Meta::new();
+        meta.insert(
+            "grow/skillSelection".into(),
+            serde_json::json!({
+                "name": self.name,
+                "path": self.skill_path.as_deref().unwrap_or_default(),
+                "plugin_name": self.plugin_name.as_deref(),
+            }),
+        );
+        text.meta = Some(meta);
+        let prompt_blocks = vec![acp::ContentBlock::Text(text)];
 
         CommandResult::InjectSkill {
             display_text,
@@ -218,8 +224,8 @@ impl From<&acp::AvailableCommand> for AcpSlashCommand {
         //
         // Missing meta → non-skill ACP command (HostCommand).
         // Present but malformed meta → meta_malformed = true (Error on run()).
-        let (skill_path, skill_scope, meta_malformed) = match cmd.meta.as_ref() {
-            None => (None, None, false),
+        let (skill_path, skill_scope, plugin_name, meta_malformed) = match cmd.meta.as_ref() {
+            None => (None, None, None, false),
             Some(m) => {
                 let path = m
                     .get("path")
@@ -228,19 +234,22 @@ impl From<&acp::AvailableCommand> for AcpSlashCommand {
                 let scope: Option<SkillScope> = m
                     .get("scope")
                     .and_then(|v| serde_json::from_value(v.clone()).ok());
+                let plugin_name = m
+                    .get("plugin_name")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_owned);
                 if path.is_some() && scope.is_some() {
-                    (path, scope, false)
+                    (path, scope, plugin_name, false)
                 } else if m.get("scope").is_some() && scope.is_none() {
-                    (None, None, false)
+                    (None, None, None, false)
                 } else if m.get("path").is_some() || m.get("scope").is_some() {
-                    (None, None, true)
+                    (None, None, None, true)
                 } else {
                     // Meta exists but has no skill keys (e.g., other metadata)
-                    (None, None, false)
+                    (None, None, None, false)
                 }
             }
         };
-
         let workflow = cmd
             .meta
             .as_ref()
@@ -284,6 +293,7 @@ impl From<&acp::AvailableCommand> for AcpSlashCommand {
             arg_hint,
             skill_path,
             skill_scope,
+            plugin_name,
             meta_malformed,
             kind,
             source,
@@ -503,6 +513,7 @@ mod tests {
             arg_hint: None,
             skill_path: Some(path.to_string()),
             skill_scope: serde_json::from_value(serde_json::json!(scope)).ok(),
+            plugin_name: None,
             meta_malformed: false,
             kind: CommandKind::Run,
             source: CommandSource::Skill,
@@ -535,6 +546,7 @@ mod tests {
             arg_hint: None,
             skill_path: None,
             skill_scope: None,
+            plugin_name: None,
             meta_malformed: false,
             kind: CommandKind::Extension,
             source: CommandSource::Extension,
@@ -553,6 +565,7 @@ mod tests {
             arg_hint: None,
             skill_path: None,
             skill_scope: None,
+            plugin_name: None,
             meta_malformed: true,
             kind: CommandKind::Extension,
             source: CommandSource::Extension,
@@ -688,6 +701,36 @@ mod tests {
             }
             other => panic!("expected InjectSkill, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn selected_plugin_skill_emits_command_name_and_frozen_source_identity() {
+        let command = make_cmd(
+            "deploy",
+            Some(serde_json::json!({
+                "scope": "plugin",
+                "path": "/plugins/acme/skills/deploy/SKILL.md",
+                "plugin_name": "acme"
+            })),
+        );
+        let cmd = AcpSlashCommand::from(&command);
+        let mut ctx = make_exec_ctx();
+        let CommandResult::InjectSkill { prompt_blocks, .. } = cmd.run(&mut ctx, "prod") else {
+            panic!("expected selected skill invocation");
+        };
+        let acp::ContentBlock::Text(text) = &prompt_blocks[0] else {
+            panic!("expected text block");
+        };
+        assert_eq!(
+            text.meta
+                .as_ref()
+                .and_then(|meta| meta.get("grow/skillSelection")),
+            Some(&serde_json::json!({
+                "name": "deploy",
+                "path": "/plugins/acme/skills/deploy/SKILL.md",
+                "plugin_name": "acme"
+            }))
+        );
     }
 
     #[test]

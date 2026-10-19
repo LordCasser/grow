@@ -408,10 +408,13 @@ mod tests {
         let spawn = chat_state::SubagentSpawnEvent {
             subagent_id: "agent-child".into(),
             child_session_id: "child".into(),
+            origin_tool_call_id: None,
             security_parent_session_id: "root".into(),
+            parent_step_id: None,
             subagent_type: "explore".into(),
             description: "inspect".into(),
             prompt: "inspect".into(),
+            execution_recipe: serde_json::json!({}),
             context_source: chat_state::SubagentContextSource::New,
             source_ref: None,
             context_normalized: false,

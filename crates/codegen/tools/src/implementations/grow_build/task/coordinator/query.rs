@@ -8,7 +8,9 @@ use super::super::coordinator_state::{
     BlockingWaiter, CompletedChild, OutputReadRequest, OutputReadTarget, completed_inspection,
     completed_snapshot, pending_inspection, pending_snapshot, running_inspection, running_seed,
 };
-use super::super::types::{SubagentInspection, SubagentObservationError, SubagentSnapshot};
+use super::super::types::{
+    SubagentInspection, SubagentObservationError, SubagentSnapshot, SubagentSnapshotStatus,
+};
 use super::{ChildControl, ChildRunner, SubagentCoordinator, belongs_to_session};
 
 fn send_output_read_error(target: OutputReadTarget, error: SubagentObservationError) {
@@ -33,6 +35,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
     ) {
         let known = self.completed.contains_key(&id)
             || self.active.contains_key(&id)
+            || self.suspended.contains_key(&id)
             || self.pending.contains_key(&id);
         let authorized = self.completed.get(&id).is_some_and(|child| {
             belongs_to_session(
@@ -47,6 +50,12 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 parent_session_id.as_deref(),
             )
         }) || self.pending.get(&id).is_some_and(|child| {
+            belongs_to_session(
+                &child.request,
+                &child.immediate_parent_session_id,
+                parent_session_id.as_deref(),
+            )
+        }) || self.suspended.get(&id).is_some_and(|child| {
             belongs_to_session(
                 &child.request,
                 &child.immediate_parent_session_id,
@@ -121,6 +130,26 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             }
             return;
         }
+        if let Some(child) = self.suspended.get_mut(&id).filter(|child| {
+            belongs_to_session(
+                &child.request,
+                &child.immediate_parent_session_id,
+                parent_session_id.as_deref(),
+            )
+        }) {
+            if child.request.owner.is_workflow() {
+                let _ = respond_to.send(Err(SubagentObservationError::Unauthorized));
+            } else if block {
+                child.waiters.push(BlockingWaiter {
+                    deadline: tokio::time::Instant::now()
+                        + std::time::Duration::from_millis(timeout_ms.unwrap_or(30_000)),
+                    respond_to,
+                });
+            } else {
+                let _ = respond_to.send(Ok(Some(suspended_snapshot(child))));
+            }
+            return;
+        }
         let _ = respond_to.send(Ok(None));
     }
 
@@ -170,10 +199,23 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 |outcome| Ok(active_finalization_inspection(child, outcome)),
             );
             let _ = respond_to.send(inspection.map(Some));
+        } else if let Some(child) = self.suspended.get(&id).filter(|child| {
+            belongs_to_session(
+                &child.request,
+                &child.immediate_parent_session_id,
+                parent_session_id.as_deref(),
+            )
+        }) {
+            if parent_session_id.is_some() && child.request.owner.is_workflow() {
+                let _ = respond_to.send(Err(SubagentObservationError::Unauthorized));
+            } else {
+                let _ = respond_to.send(Ok(Some(suspended_inspection(child))));
+            }
         } else {
             let exists = self.completed.contains_key(&id)
                 || self.pending.contains_key(&id)
-                || self.active.contains_key(&id);
+                || self.active.contains_key(&id)
+                || self.suspended.contains_key(&id);
             let result = if exists {
                 Err(SubagentObservationError::Unauthorized)
             } else {
@@ -315,6 +357,30 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
             })
             .collect::<Result<Vec<_>, _>>();
         let _ = respond_to.send(inspections);
+    }
+}
+
+pub(super) fn suspended_snapshot<D>(child: &super::SuspendedChild<D>) -> SubagentSnapshot {
+    SubagentSnapshot {
+        subagent_id: child.request.id.clone(),
+        description: child.request.description.clone(),
+        subagent_type: child.request.subagent_type.clone(),
+        status: SubagentSnapshotStatus::Suspended {
+            operation_id: child.checkpoint.operation_id.clone(),
+            checkpoint_seq: child.checkpoint.checkpoint_seq,
+        },
+        started_at_epoch_ms: child.started_at_epoch_ms,
+        duration_ms: child.duration_ms,
+    }
+}
+
+fn suspended_inspection<D>(child: &super::SuspendedChild<D>) -> SubagentInspection {
+    SubagentInspection {
+        snapshot: suspended_snapshot(child),
+        parent_session_id: child.request.parent_session_id.clone(),
+        child_session_id: child.checkpoint.session_id.clone(),
+        fork_parent_prompt_id: child.request.parent_prompt_id.clone(),
+        resumed_from: child.request.resume_from.clone(),
     }
 }
 

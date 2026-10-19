@@ -262,9 +262,15 @@ impl tool_runtime::Tool for AskUserQuestionTool {
         }
 
         // ── Step 2: Obtain UserQuestionSender ───────────────────────────
-        let sender = {
+        let (sender, wait) = {
             let res = resources.lock().await;
-            res.get::<UserQuestionSender>().cloned()
+            (
+                res.get::<UserQuestionSender>().cloned(),
+                res.get::<crate::types::resources::Params<AskUserQuestionParams>>()
+                    .map(|p| p.0)
+                    .unwrap_or_default()
+                    .wait_budget(),
+            )
         };
 
         let sender = sender.ok_or_else(|| {
@@ -273,11 +279,13 @@ impl tool_runtime::Tool for AskUserQuestionTool {
 
         // ── Step 3: Create oneshot ──────────────────────────────────────
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let deadline = wait.and_then(|duration| tokio::time::Instant::now().checked_add(duration));
 
         // ── Step 4: Send UserQuestionRequest ────────────────────────────
         let request = types::UserQuestionRequest {
             tool_call_id: ctx.call_id.as_str().to_owned(),
             questions: input.questions.clone(),
+            deadline,
             result_tx,
         };
 
@@ -288,8 +296,8 @@ impl tool_runtime::Tool for AskUserQuestionTool {
             ));
         }
 
-        // ── Step 5: Emit UserQuestionAsked + read the wait budget ───────
-        let wait = {
+        // ── Step 5: Emit UserQuestionAsked ─────────────────────────────
+        {
             let questions_json = serde_json::to_value(&input.questions)
                 .unwrap_or_else(|_| serde_json::Value::Array(vec![]));
             let res = resources.lock().await;
@@ -299,10 +307,6 @@ impl tool_runtime::Tool for AskUserQuestionTool {
                     questions_json,
                 });
             }
-            res.get::<crate::types::resources::Params<AskUserQuestionParams>>()
-                .map(|p| p.0)
-                .unwrap_or_default()
-                .wait_budget()
         };
         tracing::info!(
             question_count,
@@ -315,8 +319,8 @@ impl tool_runtime::Tool for AskUserQuestionTool {
         // question: N questions in one call share one wait.
         // A `None` budget (`timeout_enabled = false`) runs the same await with
         // no timer, normalized into the timed shape so one match handles both.
-        let outcome = match wait {
-            Some(dur) => tokio::time::timeout(dur, result_rx).await,
+        let outcome = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, result_rx).await,
             None => Ok(result_rx.await),
         };
         let result = match outcome {
@@ -355,15 +359,25 @@ impl tool_runtime::Tool for AskUserQuestionTool {
             Ok(UserQuestionResponse::ChatAboutThis {
                 questions,
                 partial_answers,
+                annotations,
             }) => {
-                let message = format::format_chat_about_this(&questions, &partial_answers);
+                let message = format::format_chat_about_this(
+                    &questions,
+                    &partial_answers,
+                    annotations.as_ref(),
+                );
                 Ok(AskUserQuestionOutput { message })
             }
             Ok(UserQuestionResponse::SkipInterview {
                 questions,
                 partial_answers,
+                annotations,
             }) => {
-                let message = format::format_skip_interview(&questions, &partial_answers);
+                let message = format::format_skip_interview(
+                    &questions,
+                    &partial_answers,
+                    annotations.as_ref(),
+                );
                 Ok(AskUserQuestionOutput { message })
             }
             Ok(UserQuestionResponse::Cancelled) => Ok(AskUserQuestionOutput {

@@ -917,23 +917,37 @@ impl QuestionViewState {
         }
     }
 
-    /// Build the lossy partial-answer shape used by the existing Plan action
-    /// wire contract. Freeform-only answers are represented as `Other`; notes
-    /// are intentionally omitted by that contract.
-    pub fn build_partial_answers(&self) -> std::collections::HashMap<String, String> {
+    /// Build Plan partial answers and carry selected freeform text through the
+    /// existing per-question `annotations.notes` wire field.
+    pub fn build_partial_answers(
+        &self,
+    ) -> (
+        std::collections::HashMap<String, String>,
+        Option<
+            std::collections::HashMap<
+                String,
+                tools::implementations::grow_build::ask_user_question::QuestionAnnotation,
+            >,
+        >,
+    ) {
+        use tools::implementations::grow_build::ask_user_question::QuestionAnnotation;
+
         let mut partial_answers = std::collections::HashMap::new();
+        let mut annotations = std::collections::HashMap::new();
 
         for (i, question) in self.questions.iter().enumerate() {
             let labels = self.selected_labels(i);
+            let freeform_text = self
+                .per_question_freeform
+                .get(i)
+                .cloned()
+                .unwrap_or_default();
             let has_freeform = self
                 .per_question_freeform_selected
                 .get(i)
                 .copied()
                 .unwrap_or(false)
-                && self
-                    .per_question_freeform
-                    .get(i)
-                    .is_some_and(|text| !text.trim().is_empty());
+                && !freeform_text.trim().is_empty();
 
             let answer = if labels.is_empty() {
                 has_freeform.then(|| "Other".to_string())
@@ -943,9 +957,24 @@ impl QuestionViewState {
             if let Some(answer) = answer {
                 partial_answers.insert(question.question.clone(), answer);
             }
+            if has_freeform {
+                annotations.insert(
+                    question.question.clone(),
+                    QuestionAnnotation {
+                        preview: None,
+                        notes: Some(freeform_text),
+                    },
+                );
+            }
         }
 
-        partial_answers
+        let annotations = if annotations.is_empty() {
+            None
+        } else {
+            Some(annotations)
+        };
+
+        (partial_answers, annotations)
     }
 
     /// Send the ACP ext-method response and return `true` if the response
@@ -2774,7 +2803,7 @@ mod tests {
         state.per_question_freeform[1] = "Keep the API small".into();
         state.per_question_freeform_selected[1] = true;
 
-        let partial = state.build_partial_answers();
+        let (partial, annotations) = state.build_partial_answers();
         assert_eq!(
             partial.get("Languages?").map(String::as_str),
             Some("Rust, Zig")
@@ -2783,6 +2812,23 @@ mod tests {
             partial.get("Anything else?").map(String::as_str),
             Some("Other")
         );
+        assert_eq!(
+            annotations
+                .and_then(|annotations| annotations.get("Anything else?").cloned())
+                .and_then(|annotation| annotation.notes),
+            Some("Keep the API small".into())
+        );
+    }
+
+    #[test]
+    fn partial_answers_omit_unselected_freeform_text() {
+        let q = make_question("Anything else?", &["No"], false);
+        let mut state = QuestionViewState::new("tc".into(), vec![q], StashedPrompt::default());
+        state.per_question_freeform[0] = "typed but not selected".into();
+
+        let (partial, annotations) = state.build_partial_answers();
+        assert!(partial.is_empty());
+        assert!(annotations.is_none());
     }
 
     // ── option_visual_height ───────────────────────────────────────────

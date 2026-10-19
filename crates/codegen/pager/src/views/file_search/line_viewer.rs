@@ -545,6 +545,12 @@ pub enum LineViewerKind {
 pub struct PlanViewerExtras {
     pub send_button_area: Option<Rect>,
     pub send_hovered: bool,
+    pub later_button_area: Option<Rect>,
+    pub later_hovered: bool,
+    pub review_button_area: Option<Rect>,
+    pub review_hovered: bool,
+    pub show_review_button: bool,
+    pub decision_pending: bool,
     pub show_action_buttons: bool,
     pub feedback_active: bool,
     pub approve_button_area: Option<Rect>,
@@ -1339,37 +1345,26 @@ pub fn render_line_viewer(
     //    Layout: ... [↗][✗]  (rightmost buttons first; the two abut
     //    flush — see the spacing notes on the close/fullscreen labels
     //    below).
-    //    The close [✗] is omitted in plan-review (feedback) mode because
-    //    the modal is not user-closeable in that state — clicking it
-    //    would be a no-op (see the close-button branch of
-    //    `handle_line_viewer_mouse` in agent_view.rs).
     let mut right_edge = popup_area.x + popup_area.width - 1;
 
-    if !viewer.feedback_active() {
-        let close_text = crate::glyphs::ballot_x(); // ✗ (ASCII on legacy ConHost)
-        // Label is `[✗] ` (trailing space, no leading space). The
-        // fullscreen button's label has no trailing space when the
-        // close is visible, so the two buttons abut flush as `[↗][✗]`,
-        // tucked under the top-right corner with one space inside the
-        // frame on each side: ` [↗][✗] `.
-        let close_w: u16 = 4; // "[✗] "
-        if popup_area.width > close_w + 2 {
-            let close_x = right_edge - close_w;
-            let close_style = if viewer.close_hovered {
-                Style::default()
-                    .fg(theme.text_primary)
-                    .bg(theme.bg_base)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default().fg(theme.gray).bg(theme.bg_base)
-            };
-            let close_span = Span::styled(format!("[{close_text}] "), close_style);
-            buf.set_span(close_x, popup_area.y, &close_span, close_w);
-            viewer.close_button_area = Some(Rect::new(close_x, popup_area.y, close_w, 1));
-            right_edge = close_x;
+    let close_text = crate::glyphs::ballot_x(); // ✗ (ASCII on legacy ConHost)
+    // The local close remains available during live plan review. It only
+    // collapses the viewer and leaves the approval response pending.
+    let close_w: u16 = 4; // "[✗] "
+    if popup_area.width > close_w + 2 {
+        let close_x = right_edge - close_w;
+        let close_style = if viewer.close_hovered {
+            Style::default()
+                .fg(theme.text_primary)
+                .bg(theme.bg_base)
+                .add_modifier(Modifier::BOLD)
         } else {
-            viewer.close_button_area = None;
-        }
+            Style::default().fg(theme.gray).bg(theme.bg_base)
+        };
+        let close_span = Span::styled(format!("[{close_text}] "), close_style);
+        buf.set_span(close_x, popup_area.y, &close_span, close_w);
+        viewer.close_button_area = Some(Rect::new(close_x, popup_area.y, close_w, 1));
+        right_edge = close_x;
     } else {
         viewer.close_button_area = None;
     }
@@ -1492,8 +1487,18 @@ pub fn render_line_viewer(
         let approve_hovered = viewer.plan_ref().is_some_and(|p| p.approve_hovered);
         let copy_hovered = viewer.plan_ref().is_some_and(|p| p.copy_hovered);
         let is_approval = viewer.feedback_active();
+        let decision_pending = viewer.plan_ref().is_some_and(|p| p.decision_pending);
+        let later_hovered = viewer.plan_ref().is_some_and(|p| p.later_hovered);
+        let review_hovered = viewer.plan_ref().is_some_and(|p| p.review_hovered);
 
-        let comment_spans = build_shortcut_button('c', "comment", comment_hovered, theme);
+        let comment_spans = if decision_pending {
+            vec![Span::styled(
+                "waiting for confirmation",
+                Style::default().fg(theme.accent_plan).bg(theme.bg_base),
+            )]
+        } else {
+            build_shortcut_button('c', "comment", comment_hovered, theme)
+        };
         let comment_w: u16 = comment_spans.iter().map(|s| s.width() as u16).sum();
 
         let copy_spans = build_shortcut_button('y', "copy plan", copy_hovered, theme);
@@ -1504,27 +1509,28 @@ pub fn render_line_viewer(
         // In approval mode, show `a approve` (or `a approve w/ comments`
         // when inline comments are pending). In casual mode, show `s send`
         // only when comments exist.
-        let (_action_label, action_w, action_spans): (&str, u16, Option<Vec<Span>>) = if is_approval
-        {
-            let label = if comment_count > 0 {
-                "approve w/ comments"
+        let (_action_label, action_w, action_spans): (&str, u16, Option<Vec<Span>>) =
+            if is_approval && !decision_pending {
+                let label = if comment_count > 0 {
+                    "approve w/ comments"
+                } else {
+                    "approve"
+                };
+                let spans = build_shortcut_button('a', label, approve_hovered, theme);
+                let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
+                (label, w, Some(spans))
+            } else if !is_approval && comment_count > 0 {
+                let spans = build_shortcut_button('s', "send", approve_hovered, theme);
+                let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
+                ("send", w, Some(spans))
             } else {
-                "approve"
+                ("", 0, None)
             };
-            let spans = build_shortcut_button('a', label, approve_hovered, theme);
-            let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
-            (label, w, Some(spans))
-        } else if comment_count > 0 {
-            let spans = build_shortcut_button('s', "send", approve_hovered, theme);
-            let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
-            ("send", w, Some(spans))
-        } else {
-            ("", 0, None)
-        };
 
         // `s revise` button — always visible in approval mode so the
         // user can request changes (switches to prompt for revision notes).
-        let (revise_w, revise_spans): (u16, Option<Vec<Span>>) = if is_approval {
+        let (revise_w, revise_spans): (u16, Option<Vec<Span>>) = if is_approval && !decision_pending
+        {
             let send_hovered = viewer.plan_ref().is_some_and(|p| p.send_hovered);
             let spans = build_shortcut_button('s', "request changes", send_hovered, theme);
             let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
@@ -1533,8 +1539,25 @@ pub fn render_line_viewer(
             (0, None)
         };
 
+        let (later_w, later_spans): (u16, Option<Vec<Span>>) = if is_approval && !decision_pending {
+            let spans = build_shortcut_button('l', "later", later_hovered, theme);
+            let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
+            (w, Some(spans))
+        } else {
+            (0, None)
+        };
+
+        let show_review = viewer.plan_ref().is_some_and(|p| p.show_review_button);
+        let (review_w, review_spans): (u16, Option<Vec<Span>>) = if show_review {
+            let spans = build_shortcut_button('r', "review", review_hovered, theme);
+            let w: u16 = spans.iter().map(|s| s.width() as u16).sum();
+            (w, Some(spans))
+        } else {
+            (0, None)
+        };
+
         // Quit button only renders in approval mode (casual closes via X).
-        let quit_spans = if is_approval {
+        let quit_spans = if is_approval && !decision_pending {
             let s = build_shortcut_button('q', "quit plan", abandon_hovered, theme);
             let w: u16 = s.iter().map(|s| s.width() as u16).sum();
             Some((s, w))
@@ -1563,6 +1586,12 @@ pub fn render_line_viewer(
         }
         if revise_w > 0 {
             base_w = base_w.saturating_add(revise_w).saturating_add(sep_w);
+        }
+        if later_w > 0 {
+            base_w = base_w.saturating_add(later_w).saturating_add(sep_w);
+        }
+        if review_w > 0 {
+            base_w = base_w.saturating_add(review_w).saturating_add(sep_w);
         }
         base_w = base_w.saturating_add(comment_w).saturating_add(badge_w);
         if let Some((_, w)) = &quit_spans {
@@ -1609,6 +1638,36 @@ pub fn render_line_viewer(
                 viewer.plan_mut().send_button_area = None;
             }
 
+            if let Some(spans) = &later_spans {
+                let later_x = x;
+                for span in spans {
+                    let w = span.width() as u16;
+                    buf.set_span(x, bottom_y, span, w);
+                    x += w;
+                }
+                viewer.plan_mut().later_button_area =
+                    Some(Rect::new(later_x, bottom_y, later_w, 1));
+                buf.set_string(x, bottom_y, separator, sep_style);
+                x += sep_w;
+            } else {
+                viewer.plan_mut().later_button_area = None;
+            }
+
+            if let Some(spans) = &review_spans {
+                let review_x = x;
+                for span in spans {
+                    let w = span.width() as u16;
+                    buf.set_span(x, bottom_y, span, w);
+                    x += w;
+                }
+                viewer.plan_mut().review_button_area =
+                    Some(Rect::new(review_x, bottom_y, review_w, 1));
+                buf.set_string(x, bottom_y, separator, sep_style);
+                x += sep_w;
+            } else {
+                viewer.plan_mut().review_button_area = None;
+            }
+
             // Comment button — always present in both modes.
             let comment_x = x;
             for span in &comment_spans {
@@ -1616,8 +1675,11 @@ pub fn render_line_viewer(
                 buf.set_span(x, bottom_y, span, w);
                 x += w;
             }
-            viewer.plan_mut().comment_button_area =
-                Some(Rect::new(comment_x, bottom_y, comment_w, 1));
+            viewer.plan_mut().comment_button_area = if decision_pending {
+                None
+            } else {
+                Some(Rect::new(comment_x, bottom_y, comment_w, 1))
+            };
 
             if badge_w > 0 {
                 buf.set_string(x, bottom_y, &badge_text, badge_style);
@@ -1656,10 +1718,13 @@ pub fn render_line_viewer(
             // Footer too narrow — disable hit-tests so stale rects
             // from a previous render don't fire.
             let plan = viewer.plan_mut();
+            plan.send_button_area = None;
             plan.approve_button_area = None;
             plan.comment_button_area = None;
             plan.copy_button_area = None;
             plan.abandon_button_area = None;
+            plan.later_button_area = None;
+            plan.review_button_area = None;
         }
     }
 }

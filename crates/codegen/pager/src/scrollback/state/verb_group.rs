@@ -480,14 +480,14 @@ mod tests {
     }
 
     #[test]
-    fn skill_reads_bucket_separately_from_files() {
+    fn ordinary_skill_md_reads_are_counted_as_file_reads() {
         let entries = vec![
             read("a.rs"),
             read("/x/skills/deploy/SKILL.md"),
             read("b.rs"),
         ];
         let l = label(&entries);
-        assert_eq!(l.text, "Read 2 files, Read 1 skill");
+        assert_eq!(l.text, "Read 3 files");
     }
 
     #[test]

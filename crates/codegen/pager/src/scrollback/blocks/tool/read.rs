@@ -19,7 +19,6 @@ const FIRST_LINES: usize = 5;
 const LAST_LINES: usize = 3;
 
 use crate::appearance::AppearanceConfig;
-use tools::implementations::skills::types::skill_name_from_path;
 
 /// What kind of non-text media this read produced.
 #[derive(Debug, Clone)]
@@ -102,17 +101,6 @@ impl ReadToolCallBlock {
         self.content.as_ref().is_some_and(|c| !c.is_empty())
     }
 
-    /// Skill name when this read targets a skill definition (`SKILL.md`).
-    /// Single source of truth for skill-read detection.
-    pub fn skill_name(&self) -> Option<&str> {
-        skill_name_from_path(&self.path)
-    }
-
-    /// Whether this read targets a skill definition rather than a plain file.
-    pub fn is_skill_read(&self) -> bool {
-        self.skill_name().is_some()
-    }
-
     /// Set error (mutable) — compute elapsed time if not already set (Phase 2).
     pub fn set_error(&mut self, error: Option<String>) {
         if self.elapsed_ms.is_none()
@@ -173,14 +161,6 @@ impl ReadToolCallBlock {
             theme.muted()
         };
 
-        // SKILL.md reads render as "Skill {skill_name}".
-        if let Some(skill) = self.skill_name() {
-            return Line::from(vec![
-                Span::styled("Skill ", bold_style),
-                Span::styled(skill.to_owned(), path_style),
-            ]);
-        }
-
         let prefix = "Read ";
         let range_suffix = self
             .line_range
@@ -230,18 +210,14 @@ impl ReadToolCallBlock {
         Line::from(spans)
     }
 
-    /// Header line with only the path (or skill name) span selectable.
+    /// Header line with only the path span selectable.
     ///
     /// Spans: `["Read ", path, optional_range_suffix, optional_extra_suffix]`
-    /// or `["Skill ", skill_name]`. Prefix/suffixes excluded (no `selection_text`
-    /// override). Attaches a semantic filesystem target for non-skill paths.
+    /// Prefix/suffixes excluded (no `selection_text` override). Attaches a
+    /// semantic filesystem target for the path.
     fn header_block_line(&self, line: Line<'static>, cwd: Option<&std::path::Path>) -> BlockLine {
         let path_end = 2.min(line.spans.len()).max(1);
-        let link_target = if self.skill_name().is_some() {
-            None
-        } else {
-            crate::render::osc8::tool_path_file_target(&self.path, cwd)
-        };
+        let link_target = crate::render::osc8::tool_path_file_target(&self.path, cwd);
         BlockLine {
             selectable: Selectable::Spans(1..path_end),
             selection_range: Some(TOOL_HEADER_RANGE),
@@ -487,7 +463,7 @@ mod tests {
     }
 
     #[test]
-    fn skill_md_renders_as_skill_label() {
+    fn skill_md_file_read_uses_normal_basename_header() {
         let block = ReadToolCallBlock::new("/home/user/.grow/skills/deploy/SKILL.md");
         let output = block.output(&make_ctx());
         let text: String = output.lines[0]
@@ -496,7 +472,7 @@ mod tests {
             .iter()
             .map(|s| s.content.as_ref())
             .collect();
-        assert_eq!(text, "Skill deploy");
+        assert_eq!(text, "Read SKILL.md");
     }
 
     #[test]
@@ -658,7 +634,7 @@ mod tests {
     }
 
     #[test]
-    fn skill_header_selects_skill_name_only() {
+    fn skill_header_selects_displayed_basename_and_keeps_full_path_target() {
         use crate::scrollback::types::{Selectable, derive_selection_text};
 
         let block = ReadToolCallBlock::new("/home/user/.grow/skills/deploy/SKILL.md");
@@ -666,15 +642,16 @@ mod tests {
         let header = &output.lines[0];
 
         assert!(matches!(&header.selectable, Selectable::Spans(r) if *r == (1..2)));
-        assert_eq!(derive_selection_text(header), "deploy");
-        assert_eq!(header.content.spans[0].content.as_ref(), "Skill ");
-    }
-
-    #[test]
-    fn is_skill_read_only_for_skill_paths() {
-        assert!(ReadToolCallBlock::new("/x/skills/deploy/SKILL.md").is_skill_read());
-        assert!(!ReadToolCallBlock::new("src/main.rs").is_skill_read());
-        assert!(!ReadToolCallBlock::new("/x/skills/deploy/README.md").is_skill_read());
+        assert_eq!(derive_selection_text(header), "SKILL.md");
+        assert_eq!(header.content.spans[0].content.as_ref(), "Read ");
+        assert_eq!(
+            header.link_target.as_ref(),
+            Some(&crate::render::osc8::LinkTarget::File(
+                std::sync::Arc::from(std::path::Path::new(
+                    "/home/user/.grow/skills/deploy/SKILL.md"
+                ))
+            ))
+        );
     }
 
     #[test]

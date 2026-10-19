@@ -30,7 +30,12 @@ pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder_with(
         ServerMetadata, ToolMetadata, extract_parameter_names, split_qualified_name,
     };
 
+    let generation = mcp_state.lock().await.generation();
     let all_defs = tool_bridge.tool_definitions().await;
+    let state = mcp_state.lock().await;
+    if state.generation() != generation {
+        return;
+    }
     let mut seen_tools = std::collections::HashSet::new();
     let mcp_tools: Vec<ToolMetadata> = all_defs
         .iter()
@@ -52,18 +57,14 @@ pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder_with(
         .iter()
         .map(|tool| tool.qualified_name.clone())
         .collect();
-    mcp_state
-        .lock()
-        .await
-        .publish_eligibility(parent_qualified_tools);
+    state.publish_eligibility(parent_qualified_tools);
 
     let servers_with_tools: std::collections::HashSet<&str> =
         mcp_tools.iter().map(|t| t.server_name.as_str()).collect();
 
     let server_metadata: Vec<ServerMetadata> = {
-        let mcp_state = mcp_state.lock().await;
         let mut metadata = Vec::new();
-        for (name, client) in mcp_state.all_clients() {
+        for (name, client) in state.all_clients() {
             if servers_with_tools.contains(name.as_str()) {
                 metadata.push(ServerMetadata {
                     name: name.clone(),
@@ -77,7 +78,7 @@ pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder_with(
     let mut snapshot = tool_metadata_snapshot.lock().unwrap();
     snapshot.tools = mcp_tools;
     snapshot.servers = server_metadata;
-    snapshot.mcp_initialized = mcp_initialized;
+    snapshot.mcp_initialized = mcp_initialized && state.is_initialized();
     drop(snapshot);
 
     mcp_reminder_dirty.store(true, std::sync::atomic::Ordering::Relaxed);

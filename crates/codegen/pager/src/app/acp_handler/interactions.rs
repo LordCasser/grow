@@ -203,13 +203,15 @@ pub(super) fn handle_plan_approval(
         return false;
     };
 
+    // A new authoritative approval retires every older preview request.
+    agent.plan_preview_request_id = agent.plan_preview_request_id.wrapping_add(1);
     if let Some(mut old) = agent.plan_approval_view.take() {
         tracing::warn!(
             old_tool_call_id = %old.tool_call_id,
             new_tool_call_id = %params.tool_call_id,
             "Replacing active plan approval — dismissing previous"
         );
-        old.send_stale_cancel();
+        old.close_stale_waiter();
         agent.plan_next_comment_id = old.next_comment_id;
         agent.prompt.restore(old.stashed_prompt);
         agent.line_viewer = None;
@@ -222,6 +224,9 @@ pub(super) fn handle_plan_approval(
     //   handle_scroll prefers block_viewer, so wheel hits the hidden Edit pane.
     agent.active_modal = None;
     agent.block_viewer = None;
+    // The interactive approval owns keyboard input. A stale behavior-switch
+    // confirmation must not swallow its approve/revise/defer shortcuts.
+    agent.clear_behavior_switch_confirmation();
 
     // If the user was mid-casual-comment when this new plan-approval
     // request arrived, restore the pre-comment prompt first so the
@@ -234,10 +239,21 @@ pub(super) fn handle_plan_approval(
     }
 
     let stashed = agent.prompt.stash();
-    let state = PlanApprovalViewState::new(params, stashed, ext.response_tx);
-
-    agent.plan_comments.clear();
-    agent.plan_next_comment_id = 0;
+    let mut state = PlanApprovalViewState::new(params, stashed, ext.response_tx);
+    if agent
+        .plan_comments_artifact
+        .as_ref()
+        .is_some_and(|artifact| {
+            artifact.session_id == state.source_session_id
+                && artifact.binding_epoch == agent.session_binding_epoch
+                && artifact.submission_id == state.submission_id
+                && artifact.artifact_revision == state.artifact_revision
+                && artifact.artifact_hash == state.artifact_hash
+        })
+    {
+        state.comments = agent.plan_comments.clone();
+        state.next_comment_id = agent.plan_next_comment_id;
+    }
 
     agent.plan_approval_view = Some(state);
     agent.prompt.set_text("");

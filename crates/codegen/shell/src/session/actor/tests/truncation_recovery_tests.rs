@@ -29,6 +29,161 @@ const END_TURN: &str = "end_turn";
 const CONTEXT_WINDOW_EXCEEDED: &str = "model_context_window_exceeded";
 const PAUSE_TURN: &str = "pause_turn";
 
+async fn write_goal_question_wait(
+    actor: &std::sync::Arc<super::super::SessionActor>,
+    prompt_id: &str,
+    wait_id: &str,
+    question_id: &str,
+) {
+    let (respond_to, response) = tokio::sync::oneshot::channel();
+    actor
+        .handle_planning_command(
+            tools::implementations::grow_build::todo::runtime::PlanningCommand::Write {
+                prompt_id: prompt_id.into(),
+                input: tools::implementations::grow_build::todo::TodoWriteInput {
+                    merge: true,
+                    todos: Vec::new(),
+                    actions: vec![
+                        tools::implementations::grow_build::todo::runtime::PlanningAction::Wait {
+                            wait: tool_types::PlanWait {
+                                id: wait_id.into(),
+                                step_ids: Vec::new(),
+                                dependencies: vec![tool_types::WaitDependency {
+                                    kind: tool_types::DependencyKind::Question,
+                                    id: question_id.into(),
+                                }],
+                                condition: tool_types::WaitCondition::All,
+                            },
+                        },
+                    ],
+                },
+                respond_to,
+            },
+        )
+        .await;
+    response
+        .await
+        .expect("planning command must receive an acknowledgement")
+        .expect("the active Goal turn may register its Question wait");
+}
+
+async fn activate_test_goal(
+    actor: &SessionActor,
+    goal_id: &str,
+    objective: &str,
+    token_budget: Option<i64>,
+) -> u64 {
+    actor
+        .goal_tracker
+        .lock()
+        .create_goal(
+            goal_id.into(),
+            objective.into(),
+            token_budget,
+            "2026-10-19T00:00:00Z".into(),
+        )
+        .expect("test Goal must be created");
+    let goal = actor
+        .goal_tracker
+        .lock()
+        .snapshot()
+        .cloned()
+        .expect("created Goal must have an identity");
+    actor
+        .persist_behavior_transition_durably(
+            crate::session::behavior::BehaviorSnapshot::selected(tool_types::BehaviorId::Goal),
+            Some(goal.clone()),
+        )
+        .await
+        .expect("Goal activation must be durable before its turn");
+    actor
+        .behavior
+        .lock()
+        .select_behavior(tool_types::BehaviorId::Goal);
+    actor.sync_goal_usage_window();
+    assert_eq!(
+        actor.goal_usage_window.active_goal_id().as_deref(),
+        Some(goal_id),
+        "provider admission must be bound to the durable active Goal before its turn starts"
+    );
+    goal.definition_revision
+}
+
+async fn assert_goal_wait_stays_quiet<T>(
+    actor: &std::sync::Arc<SessionActor>,
+    server: &MockInferenceServer,
+    turn: &tokio::task::JoinHandle<T>,
+) {
+    use crate::session::goal_tracker::GoalStatus;
+
+    assert!(actor.planning_waits_for_event().await);
+    assert!(
+        !turn.is_finished(),
+        "a live dependency wait must remain parked"
+    );
+    let cursor_before = actor
+        .turn_continuation
+        .borrow()
+        .clone()
+        .expect("parked Goal must retain its admitted cursor");
+    let goal_before = actor
+        .goal_tracker
+        .lock()
+        .snapshot()
+        .cloned()
+        .expect("active Goal must remain present during its wait");
+    assert_eq!(goal_before.status, GoalStatus::Active);
+    assert_eq!(server.messages_request_count(), 1);
+
+    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+
+    assert!(
+        !turn.is_finished(),
+        "an unresolved wait must not spin a Goal turn"
+    );
+    assert_eq!(server.messages_request_count(), 1);
+    let cursor_after = actor
+        .turn_continuation
+        .borrow()
+        .clone()
+        .expect("the original admitted cursor must survive the wait");
+    assert_eq!(
+        cursor_after.tool_turns_used, cursor_before.tool_turns_used,
+        "a parked Goal must not accumulate model turns"
+    );
+    assert_eq!(
+        cursor_after.stop_continuations_used, cursor_before.stop_continuations_used,
+        "a parked Goal must not consume Stop continuations"
+    );
+    assert_eq!(
+        cursor_after.sampling_attempts_used, cursor_before.sampling_attempts_used,
+        "a parked Goal must not consume provider attempts"
+    );
+    let goal_after = actor
+        .goal_tracker
+        .lock()
+        .snapshot()
+        .cloned()
+        .expect("the Goal must remain present during its wait");
+    assert_eq!(goal_after.status, GoalStatus::Active);
+    assert_eq!(
+        goal_after.blocked_audit, goal_before.blocked_audit,
+        "time spent waiting must not count as a model-reported blocked turn"
+    );
+    let timeline = actor.chat_state_handle.timeline_events().await.unwrap();
+    assert_eq!(
+        timeline
+            .iter()
+            .filter(|event| matches!(
+                event.kind,
+                chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started { .. })
+            ))
+            .count(),
+        1,
+        "the waiting Goal must keep one logical Turn"
+    );
+}
+
 // ─── Messages-API SSE builders ────────────────────────────────────────────
 
 /// A text `content_block`.
@@ -272,6 +427,77 @@ async fn actor_with_sampler_delivery(
     mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
     mpsc::UnboundedReceiver<SessionEvent>,
 ) {
+    actor_with_sampler_delivery_with_max_turns(server, api_backend, delivery, None).await
+}
+
+async fn goal_actor_with_sampler_and_max_turns(
+    server: &MockInferenceServer,
+    api_backend: sampling_types::ApiBackend,
+    max_turns: Option<usize>,
+) -> (
+    std::sync::Arc<SessionActor>,
+    mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+) {
+    use tools::implementations::grow_build::{
+        CreateGoalTool, GetGoalTool, UpdateGoalTool, read_file::ReadFileTool, todo::TodoWriteTool,
+    };
+    use tools::registry::types::ToolConfig;
+
+    let (gateway_tx, gateway_rx) = mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+    let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
+    tokio::task::spawn_local(async move {
+        while let Some(message) = persistence_rx.recv().await {
+            if let PersistenceMsg::SidebandDurablyAndAck { respond_to, .. } = message {
+                let _ = respond_to.send(Ok(()));
+            }
+        }
+    });
+    let (mut actor, observer_rx) = create_test_actor_ex_with_projection_error(
+        0,
+        256_000,
+        85,
+        gateway_tx,
+        persistence_tx,
+        None,
+    )
+    .await;
+    actor.goal_enabled = true;
+    *actor.agent.borrow_mut() = test_agent_with_tools(vec![
+        ToolConfig::for_tool::<CreateGoalTool>(),
+        ToolConfig::for_tool::<GetGoalTool>(),
+        ToolConfig::for_tool::<UpdateGoalTool>(),
+        ToolConfig::for_tool::<TodoWriteTool>(),
+        ToolConfig::for_tool::<ReadFileTool>(),
+    ])
+    .await;
+
+    let (actor, gateway, _) = configure_actor_with_sampler(
+        server,
+        api_backend,
+        sampler::OutputDelivery::Irreversible,
+        max_turns,
+        actor,
+        gateway_rx,
+        observer_rx,
+    )
+    .await;
+    assert!(
+        actor.refresh_goal_runtime_availability().await,
+        "Goal runtime must be available through its registered tools"
+    );
+    (actor, gateway)
+}
+
+async fn actor_with_sampler_delivery_with_max_turns(
+    server: &MockInferenceServer,
+    api_backend: sampling_types::ApiBackend,
+    delivery: sampler::OutputDelivery,
+    max_turns: Option<usize>,
+) -> (
+    std::sync::Arc<SessionActor>,
+    mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
+    mpsc::UnboundedReceiver<SessionEvent>,
+) {
     let (gateway_tx, gateway_rx) = mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
     let (persistence_tx, mut persistence_rx) = mpsc::unbounded_channel::<PersistenceMsg>();
     tokio::task::spawn_local(async move {
@@ -290,13 +516,23 @@ async fn actor_with_sampler_delivery(
         None,
     )
     .await;
-    configure_actor_with_sampler(server, api_backend, delivery, actor, gateway_rx, events).await
+    configure_actor_with_sampler(
+        server,
+        api_backend,
+        delivery,
+        max_turns,
+        actor,
+        gateway_rx,
+        events,
+    )
+    .await
 }
 
 async fn configure_actor_with_sampler(
     server: &MockInferenceServer,
     api_backend: sampling_types::ApiBackend,
     delivery: sampler::OutputDelivery,
+    max_turns: Option<usize>,
     mut actor: SessionActor,
     gateway_rx: mpsc::UnboundedReceiver<acp_transport::AcpClientMessage>,
     observer_rx: mpsc::UnboundedReceiver<SessionEvent>,
@@ -306,6 +542,7 @@ async fn configure_actor_with_sampler(
     mpsc::UnboundedReceiver<SessionEvent>,
 ) {
     actor.tool_context.sampling_output_delivery = delivery;
+    actor.max_turns = max_turns;
     // Point the chat-state sampling config at the mock server so BOTH the
     // main turn requests and the compaction client (which rebuilds its
     // config from chat state) hit the same server.
@@ -667,7 +904,7 @@ fn provider_completion_cannot_finish_new_interjections() {
             let server = MockInferenceServer::start().await.unwrap();
             let mut first = server.expect_response_blocked(
                 "first final",
-                test_support::InferenceRequestMatcher::auxiliary(
+                test_support::InferenceRequestMatcher::foreground(
                     test_support::InferenceEndpoint::Messages,
                 ),
                 messages_turn(&[text_block("原请求已完成。")], END_TURN),
@@ -678,7 +915,17 @@ fn provider_completion_cannot_finish_new_interjections() {
             );
             let (actor, _) =
                 actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
-            *actor.agent.borrow_mut() = test_grow_build_agent_with_todo().await;
+            // The mock classifies requests without x-grow-turn-idx as
+            // foreground only when at least two tools are advertised.
+            *actor.agent.borrow_mut() = test_agent_with_tools(vec![
+                tools::registry::types::ToolConfig::for_tool::<
+                    tools::implementations::grow_build::todo::TodoWriteTool,
+                >(),
+                tools::registry::types::ToolConfig::for_tool::<
+                    tools::implementations::grow_build::read_file::ReadFileTool,
+                >(),
+            ])
+            .await;
             let (result, ()) = tokio::join!(run_user_turn(&actor, "completion-steering"), async {
                 tokio::time::timeout(std::time::Duration::from_secs(5), first.wait_blocked())
                     .await
@@ -801,6 +1048,1065 @@ fn provider_completion_respects_schema_refusal_and_goal_budget_terminals() {
             assert!(events.iter().any(|event| matches!(&event.kind,
                 chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended { terminal, .. })
                     if terminal.completion_kind == "goal_spending_stopped")));
+        }));
+    });
+}
+
+#[test]
+fn structured_output_completion_waits_for_live_question_and_permission_without_resampling() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            let schema = json!({
+                "type": "object",
+                "properties": { "answer": { "type": "string" } },
+                "required": ["answer"],
+                "additionalProperties": false
+            });
+            let mut first = server.expect_response_blocked(
+                "first structured output",
+                test_support::InferenceRequestMatcher::auxiliary(
+                    test_support::InferenceEndpoint::Messages,
+                ),
+                messages_turn(
+                    &[tool_use_block(
+                        "structured_wait_first",
+                        "StructuredOutput",
+                        r#"{"answer":"first"}"#,
+                    )],
+                    "tool_use",
+                ),
+            );
+            server.enqueue_response(
+                "/v1/messages",
+                messages_turn(
+                    &[tool_use_block(
+                        "structured_wait_final",
+                        "StructuredOutput",
+                        r#"{"answer":"final"}"#,
+                    )],
+                    "tool_use",
+                ),
+            );
+            let (actor, _) =
+                actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
+
+            let mut plan =
+                tool_types::LocalPlan::new(actor.session_id_string(), "work:structured-wait");
+            plan.waits.push(tool_types::PlanWait {
+                id: "wait-human-owners".into(),
+                step_ids: Vec::new(),
+                dependencies: vec![
+                    tool_types::WaitDependency {
+                        kind: tool_types::DependencyKind::Question,
+                        id: "structured-wait-question".into(),
+                    },
+                    tool_types::WaitDependency {
+                        kind: tool_types::DependencyKind::Permission,
+                        id: "structured-wait-permission".into(),
+                    },
+                ],
+                condition: tool_types::WaitCondition::All,
+            });
+            actor
+                .chat_state_handle
+                .record_timeline_event_durably(chat_state::TimelineEventKind::Planning(
+                    chat_state::timeline::PlanningEvent {
+                        previous: None,
+                        plan: Box::new(plan),
+                    },
+                ))
+                .await
+                .expect("human wait must be durable before the turn starts");
+
+            let (question_gateway, _question_rx) = mpsc::unbounded_channel();
+            let question_guard = crate::session::pending_interaction::PendingInteractionGuard::new(
+                actor.pending_interactions.clone(),
+                acp_transport::AcpAgentGatewaySender::new(question_gateway),
+                actor.session_info.id.clone(),
+                "structured-wait-question".into(),
+                crate::session::pending_interaction::PendingKind::Question,
+            );
+            let (permission_gateway, _permission_rx) = mpsc::unbounded_channel();
+            let permission_guard =
+                crate::session::pending_interaction::PendingInteractionGuard::new(
+                    actor.pending_interactions.clone(),
+                    acp_transport::AcpAgentGatewaySender::new(permission_gateway),
+                    actor.session_info.id.clone(),
+                    "structured-wait-permission".into(),
+                    crate::session::pending_interaction::PendingKind::Permission,
+                );
+
+            install_test_foreground(&actor, "structured-output-wait").await;
+            let input_ids = crate::session::actor::tests::support::admit_test_human_input(
+                &actor,
+                "structured-output-wait",
+            )
+            .await;
+            let turn_actor = actor.clone();
+            let turn = tokio::task::spawn_local(async move {
+                turn_actor
+                    .handle_prompt(
+                        "structured-output-wait",
+                        input_ids,
+                        crate::session::PromptOrigin::User,
+                        Vec::new(),
+                        crate::session::TurnKind::User,
+                        vec![acp::ContentBlock::Text(acp::TextContent::new(
+                            "finish the structured answer",
+                        ))],
+                        tool_types::BehaviorId::Normal,
+                        None,
+                        None,
+                        false,
+                        Some(schema),
+                        None,
+                    )
+                    .await
+            });
+
+            tokio::time::timeout(std::time::Duration::from_secs(5), first.wait_blocked())
+                .await
+                .expect("first StructuredOutput request must reach the mock provider");
+            assert_eq!(server.messages_request_count(), 1);
+            first.release();
+
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let conversation = actor.chat_state_handle.get_conversation().await;
+                    if conversation.iter().any(|item| {
+                        matches!(item, ConversationItem::ToolResult(result)
+                            if result.tool_call_id == "structured_wait_first")
+                    }) {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("first StructuredOutput result must be recorded before waiting");
+
+            assert!(actor.planning_waits_for_event().await);
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+            assert_eq!(
+                server.messages_request_count(),
+                1,
+                "the real runloop must not sample again while either human dependency is live"
+            );
+            assert!(
+                !turn.is_finished(),
+                "the turn remains open while the structured completion is waiting"
+            );
+            let timeline = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert!(!timeline.iter().any(|event| matches!(
+                &event.kind,
+                chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended { .. })
+            )));
+
+            drop(question_guard);
+            drop(permission_guard);
+            let result = tokio::time::timeout(std::time::Duration::from_secs(5), turn)
+                .await
+                .expect("resolved human dependencies must resume the same turn")
+                .expect("turn task must complete")
+                .expect("turn must succeed");
+            let output = result.structured_output.unwrap().unwrap();
+            let request_count = server.messages_request_count();
+            assert_eq!(
+                request_count,
+                2,
+                "a changed human wait must resample after persisting the wake reminder; got output {output} and request log {}",
+                server.request_log_summary()
+            );
+            assert_eq!(output, json!({ "answer": "final" }));
+        }));
+    });
+}
+
+#[test]
+fn stop_wins_when_the_last_planning_dependency_resolves() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            let schema = json!({
+                "type": "object",
+                "properties": { "answer": { "type": "string" } },
+                "required": ["answer"],
+                "additionalProperties": false
+            });
+            let mut first = server.expect_response_blocked(
+                "structured output before stop race",
+                test_support::InferenceRequestMatcher::auxiliary(
+                    test_support::InferenceEndpoint::Messages,
+                ),
+                messages_turn(
+                    &[tool_use_block(
+                        "stop_wait_first",
+                        "StructuredOutput",
+                        r#"{"answer":"candidate"}"#,
+                    )],
+                    "tool_use",
+                ),
+            );
+            server.enqueue_response(
+                "/v1/messages",
+                messages_turn(
+                    &[tool_use_block(
+                        "stop_wait_must_not_run",
+                        "StructuredOutput",
+                        r#"{"answer":"should not be sampled"}"#,
+                    )],
+                    "tool_use",
+                ),
+            );
+            let (actor, _gateway_rx) =
+                actor_with_sampler(&server, sampling_types::ApiBackend::Messages).await;
+            let mut plan = tool_types::LocalPlan::new(actor.session_id_string(), "work:stop-wait");
+            plan.waits.push(tool_types::PlanWait {
+                id: "stop-wait-human-owners".into(),
+                step_ids: Vec::new(),
+                dependencies: vec![
+                    tool_types::WaitDependency {
+                        kind: tool_types::DependencyKind::Question,
+                        id: "stop-wait-question".into(),
+                    },
+                    tool_types::WaitDependency {
+                        kind: tool_types::DependencyKind::Permission,
+                        id: "stop-wait-permission".into(),
+                    },
+                ],
+                condition: tool_types::WaitCondition::All,
+            });
+            actor
+                .chat_state_handle
+                .record_timeline_event_durably(chat_state::TimelineEventKind::Planning(
+                    chat_state::timeline::PlanningEvent {
+                        previous: None,
+                        plan: Box::new(plan),
+                    },
+                ))
+                .await
+                .expect("the wait must be durable before the turn starts");
+
+            let (question_gateway, _question_rx) = mpsc::unbounded_channel();
+            let mut question = crate::session::pending_interaction::PendingInteractionGuard::new(
+                actor.pending_interactions.clone(),
+                acp_transport::AcpAgentGatewaySender::new(question_gateway),
+                actor.session_info.id.clone(),
+                "stop-wait-question".into(),
+                crate::session::pending_interaction::PendingKind::Question,
+            );
+            question
+                .open_durably(&actor.chat_state_handle)
+                .await
+                .expect("Question must be open before the waiter starts");
+            let (permission_gateway, _permission_rx) = mpsc::unbounded_channel();
+            let mut permission = crate::session::pending_interaction::PendingInteractionGuard::new(
+                actor.pending_interactions.clone(),
+                acp_transport::AcpAgentGatewaySender::new(permission_gateway),
+                actor.session_info.id.clone(),
+                "stop-wait-permission".into(),
+                crate::session::pending_interaction::PendingKind::Permission,
+            );
+            permission
+                .open_durably(&actor.chat_state_handle)
+                .await
+                .expect("Permission must be open before the waiter starts");
+
+            let prompt_id = "structured-stop-wait";
+            actor
+                .current_prompt_id
+                .lock()
+                .expect("prompt identity")
+                .replace(prompt_id.into());
+            install_test_foreground(&actor, prompt_id).await;
+            let input_ids =
+                crate::session::actor::tests::support::admit_test_human_input(&actor, prompt_id)
+                    .await;
+            let turn_actor = actor.clone();
+            let turn = tokio::task::spawn_local(async move {
+                turn_actor
+                    .handle_prompt(
+                        prompt_id,
+                        input_ids,
+                        crate::session::PromptOrigin::User,
+                        Vec::new(),
+                        crate::session::TurnKind::User,
+                        vec![acp::ContentBlock::Text(acp::TextContent::new(
+                            "wait for both approvals before finishing",
+                        ))],
+                        tool_types::BehaviorId::Normal,
+                        None,
+                        None,
+                        false,
+                        Some(schema),
+                        None,
+                    )
+                    .await
+            });
+            {
+                let mut state = actor.state.lock().await;
+                let task = state
+                    .foreground
+                    .regular_mut()
+                    .expect("the turn owns the foreground");
+                task.handle.abort();
+                task.handle = turn.abort_handle();
+            }
+
+            tokio::time::timeout(std::time::Duration::from_secs(5), first.wait_blocked())
+                .await
+                .expect("the real provider must receive the first request");
+            assert_eq!(server.messages_request_count(), 1);
+            first.release();
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let conversation = actor.chat_state_handle.get_conversation().await;
+                    if conversation.iter().any(|item| {
+                        matches!(item, ConversationItem::ToolResult(result)
+                            if result.tool_call_id == "stop_wait_first")
+                    }) && actor.planning_waits_for_event().await
+                    {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the original turn must park on its two live human dependencies");
+            assert_eq!(server.messages_request_count(), 1);
+            let cursor_before_stop = actor
+                .turn_continuation
+                .borrow()
+                .clone()
+                .expect("the parked turn must retain its original cursor");
+
+            actor
+                .cancel_running_task(false, false, false, Some("stop-wait-race".into()))
+                .await
+                .expect("Stop must durably close the waiting turn");
+            let stopped = actor.chat_state_handle.timeline_events().await.unwrap();
+            let ended = stopped.iter().find_map(|event| match &event.kind {
+                chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended {
+                    id,
+                    outcome,
+                    terminal,
+                    ..
+                }) if outcome == "cancelled" => Some((*id, terminal.stop_reason.clone())),
+                _ => None,
+            });
+            assert!(
+                ended.is_some_and(|(_, stop_reason)| stop_reason == "cancelled"),
+                "accepted Stop must persist a cancelled TurnEnded"
+            );
+
+            // The final dependency becomes ready only after the Stop terminal
+            // is durable. It may be observed, but must not revive this cursor.
+            assert!(
+                question
+                    .resolve_durably(
+                        &actor.chat_state_handle,
+                        chat_state::InteractionResolution::Answered,
+                    )
+                    .await
+                    .expect("Question resolution must persist")
+            );
+            assert!(
+                permission
+                    .resolve_durably(
+                        &actor.chat_state_handle,
+                        chat_state::InteractionResolution::Allowed,
+                    )
+                    .await
+                    .expect("Permission resolution must persist")
+            );
+            assert!(
+                turn.await
+                    .expect_err("Stop aborts the original producer")
+                    .is_cancelled()
+            );
+
+            let final_events = actor.chat_state_handle.timeline_events().await.unwrap();
+            let started = final_events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        &event.kind,
+                        chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started { .. })
+                    )
+                })
+                .count();
+            let ended = final_events
+                .iter()
+                .filter(|event| {
+                    matches!(
+                        &event.kind,
+                        chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Ended { .. })
+                    )
+                })
+                .count();
+            assert_eq!(
+                (started, ended),
+                (1, 1),
+                "no replacement Turn may be admitted"
+            );
+            assert_eq!(
+                server.messages_request_count(),
+                1,
+                "Stop must prevent resampling"
+            );
+            assert_eq!(
+                actor.turn_continuation.borrow().as_ref(),
+                Some(&cursor_before_stop),
+                "the resolved dependency must not replenish or mutate the stopped cursor"
+            );
+            assert!(final_events.iter().any(|event| matches!(
+                &event.kind,
+                chat_state::TimelineEventKind::Interaction(chat_state::InteractionEvent::Resolved {
+                    tool_call_id,
+                    resolution: chat_state::InteractionResolution::Answered,
+                    ..
+                }) if tool_call_id == "stop-wait-question"
+            )), "the late Question answer remains durably observable");
+            assert!(final_events.iter().any(|event| matches!(
+                &event.kind,
+                chat_state::TimelineEventKind::Interaction(chat_state::InteractionEvent::Resolved {
+                    tool_call_id,
+                    resolution: chat_state::InteractionResolution::Allowed,
+                    ..
+                }) if tool_call_id == "stop-wait-permission"
+            )), "the late Permission answer remains durably observable");
+            assert!(
+                !final_events.iter().any(|event| matches!(
+                    &event.kind,
+                    chat_state::TimelineEventKind::Interaction(
+                        chat_state::InteractionEvent::Opened {
+                            kind: chat_state::InteractionKind::PlanApproval,
+                            ..
+                        }
+                    )
+                )),
+                "the late wake must not enter plan approval"
+            );
+            assert!(
+                actor
+                    .chat_state_handle
+                    .planning_state()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .plan
+                    .waits
+                    .iter()
+                    .any(|wait| wait.id == "stop-wait-human-owners"),
+                "a cancelled turn retains its unresolved planning responsibility"
+            );
+        }));
+    });
+}
+
+#[test]
+fn goal_dependency_wakeup_respects_turn_limit_before_provider_resampling() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            let mut first = server.expect_response_blocked(
+                "Goal answer before dependency wait",
+                test_support::InferenceRequestMatcher::foreground(
+                    test_support::InferenceEndpoint::Messages,
+                ),
+                messages_turn(&[text_block("candidate answer")], END_TURN),
+            );
+            let (actor, _) = goal_actor_with_sampler_and_max_turns(
+                &server,
+                sampling_types::ApiBackend::Messages,
+                Some(1),
+            )
+            .await;
+            let goal_revision = activate_test_goal(
+                &actor,
+                "goal-wait-test",
+                "resume the blocked goal after its question is answered",
+                None,
+            )
+            .await;
+            *actor.current_prompt_id.lock().unwrap() = Some("goal-wait-turn".into());
+
+            let plan = tool_types::LocalPlan::new(actor.session_id_string(), "work:goal-wait");
+            actor
+                .chat_state_handle
+                .record_timeline_event_durably(chat_state::TimelineEventKind::Planning(
+                    chat_state::timeline::PlanningEvent {
+                        previous: None,
+                        plan: Box::new(plan),
+                    },
+                ))
+                .await
+                .expect("Goal plan must be durable before the turn starts");
+            install_test_foreground(&actor, "goal-wait-turn").await;
+            let turn_actor = actor.clone();
+            let turn = tokio::task::spawn_local(async move {
+                turn_actor
+                    .handle_prompt(
+                        "goal-wait-turn",
+                        Vec::new(),
+                        crate::session::PromptOrigin::GoalContinuation {
+                            goal_id: "goal-wait-test".into(),
+                            definition_revision: goal_revision,
+                        },
+                        Vec::new(),
+                        crate::session::TurnKind::Internal,
+                        vec![acp::ContentBlock::Text(acp::TextContent::new(
+                            "continue goal work",
+                        ))],
+                        tool_types::BehaviorId::Goal,
+                        None,
+                        None,
+                        false,
+                        None,
+                        None,
+                    )
+                    .await
+            });
+
+            if tokio::time::timeout(std::time::Duration::from_secs(5), first.wait_blocked())
+                .await
+                .is_err()
+            {
+                if turn.is_finished() {
+                    let outcome = turn.await;
+                    panic!("Goal turn returned before the first provider request: {outcome:?}");
+                }
+                panic!("Goal turn stayed pending but emitted no first provider request; requests: {}", server.request_log_summary());
+            }
+            assert_eq!(server.messages_request_count(), 1);
+            let (gateway, _gateway_rx) = mpsc::unbounded_channel();
+            let guard = crate::session::pending_interaction::PendingInteractionGuard::new(
+                actor.pending_interactions.clone(),
+                acp_transport::AcpAgentGatewaySender::new(gateway),
+                actor.session_info.id.clone(),
+                "goal-wait-question".into(),
+                crate::session::pending_interaction::PendingKind::Question,
+            );
+            write_goal_question_wait(
+                &actor,
+                "goal-wait-turn",
+                "goal-human-wait",
+                "goal-wait-question",
+            )
+            .await;
+            first.release();
+
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let conversation = actor.chat_state_handle.get_conversation().await;
+                    let first_answer_landed = conversation.iter().any(|item| matches!(
+                        item,
+                        ConversationItem::Assistant(message)
+                            if message.content.contains("candidate answer")
+                    ));
+                    if first_answer_landed && actor.planning_waits_for_event().await {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the first Goal response must park on its newly registered Question dependency");
+            assert_goal_wait_stays_quiet(&actor, &server, &turn).await;
+            assert_eq!(server.messages_request_count(), 1);
+            drop(guard);
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), turn)
+                .await
+                .expect("resolved dependency must finish through the Goal limit gate")
+                .expect("Goal turn task must finish")
+                .expect("turn limit is a normal completion outcome");
+            assert!(matches!(
+                outcome.completion_kind,
+                crate::session::commands::PromptCompletionKind::MaxTurnsReached { limit: 1 }
+            ));
+
+            assert_eq!(
+                server.messages_request_count(),
+                1,
+                "the wakeup must check the Goal turn limit before requesting a second provider sample"
+            );
+        }));
+    });
+}
+
+#[test]
+fn idle_goal_with_live_dependency_emits_no_retry_permits_or_provider_requests() {
+    use futures_util::FutureExt as _;
+
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            let (actor, _) = goal_actor_with_sampler_and_max_turns(
+                &server,
+                sampling_types::ApiBackend::Messages,
+                None,
+            )
+            .await;
+            activate_test_goal(&actor, "idle-wait-goal", "wait for the real question", None).await;
+            let (gateway, _gateway_rx) = mpsc::unbounded_channel();
+            let _question = crate::session::pending_interaction::PendingInteractionGuard::new(
+                actor.pending_interactions.clone(),
+                acp_transport::AcpAgentGatewaySender::new(gateway),
+                actor.session_info.id.clone(),
+                "idle-goal-question".into(),
+                crate::session::pending_interaction::PendingKind::Question,
+            );
+            let mut plan = tool_types::LocalPlan::new(actor.session_id_string(), "work:idle");
+            plan.waits.push(tool_types::PlanWait {
+                id: "idle-goal-wait".into(),
+                step_ids: Vec::new(),
+                dependencies: vec![tool_types::WaitDependency {
+                    kind: tool_types::DependencyKind::Question,
+                    id: "idle-goal-question".into(),
+                }],
+                condition: tool_types::WaitCondition::All,
+            });
+            actor
+                .chat_state_handle
+                .record_timeline_event_durably(chat_state::TimelineEventKind::Planning(
+                    chat_state::timeline::PlanningEvent {
+                        previous: None,
+                        plan: Box::new(plan),
+                    },
+                ))
+                .await
+                .expect("the idle wait is owned by Timeline");
+            assert!(actor.planning_waits_for_event().await);
+            assert!(actor.goal_loop_active());
+            assert!(actor.state.lock().await.foreground.is_idle());
+            let before = actor.chat_state_handle.timeline_events().await.unwrap();
+            let goal_before = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+            while actor.idle_arbiter.notified().now_or_never().is_some() {}
+
+            let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+            super::super::idle_arbitration::arbitrate_idle_wake(actor.clone(), completion_tx).await;
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while actor.goal_drive.is_running() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("the real idle driver returns instead of polling its dependency");
+            tokio::time::pause();
+            let mut idle_retry_permits = 0;
+            for _ in 0..4 {
+                tokio::time::advance(std::time::Duration::from_secs(30)).await;
+                tokio::task::yield_now().await;
+                idle_retry_permits +=
+                    usize::from(actor.idle_arbiter.notified().now_or_never().is_some());
+            }
+            assert_eq!(
+                idle_retry_permits, 0,
+                "no self-requeued idle work while waiting"
+            );
+            assert_eq!(server.messages_request_count(), 0);
+            assert!(completion_rx.try_recv().is_err());
+            assert!(actor.state.lock().await.foreground.is_idle());
+            assert_eq!(
+                serde_json::to_value(actor.chat_state_handle.timeline_events().await.unwrap())
+                    .unwrap(),
+                serde_json::to_value(before).unwrap()
+            );
+            let goal_after = actor.goal_tracker.lock().snapshot().cloned().unwrap();
+            assert_eq!(goal_after.tokens_used, goal_before.tokens_used);
+            assert_eq!(goal_after.blocked_audit, goal_before.blocked_audit);
+            assert_eq!(goal_after.status, goal_before.status);
+        }));
+    });
+}
+
+#[test]
+fn budget_limited_goal_wait_does_not_resample_when_dependency_wakes() {
+    assert_closed_goal_wait_does_not_resample(false);
+}
+
+#[test]
+fn paused_goal_wait_does_not_resample_when_dependency_wakes() {
+    assert_closed_goal_wait_does_not_resample(true);
+}
+
+fn assert_closed_goal_wait_does_not_resample(pause: bool) {
+    run_with_session_stack(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            let mut first = server.expect_response_blocked(
+                "Goal answer before budget-limited dependency wake",
+                test_support::InferenceRequestMatcher::foreground(
+                    test_support::InferenceEndpoint::Messages,
+                ),
+                messages_turn(&[text_block("candidate answer")], END_TURN),
+            );
+            let (actor, _) = goal_actor_with_sampler_and_max_turns(
+                &server,
+                sampling_types::ApiBackend::Messages,
+                None,
+            )
+            .await;
+            let goal_id = "goal-budget-wait";
+            let goal_revision = activate_test_goal(
+                &actor,
+                goal_id,
+                "resume only while the Goal budget remains available",
+                Some(100),
+            )
+            .await;
+            *actor.current_prompt_id.lock().unwrap() = Some("goal-budget-turn".into());
+
+            let plan = tool_types::LocalPlan::new(actor.session_id_string(), "work:goal-budget");
+            actor
+                .chat_state_handle
+                .record_timeline_event_durably(chat_state::TimelineEventKind::Planning(
+                    chat_state::timeline::PlanningEvent {
+                        previous: None,
+                        plan: Box::new(plan),
+                    },
+                ))
+                .await
+                .expect("Goal plan must be durable before the turn starts");
+            install_test_foreground(&actor, "goal-budget-turn").await;
+            let turn_actor = actor.clone();
+            let turn = tokio::task::spawn_local(async move {
+                turn_actor
+                    .handle_prompt(
+                        "goal-budget-turn",
+                        Vec::new(),
+                        crate::session::PromptOrigin::GoalContinuation {
+                            goal_id: goal_id.into(),
+                            definition_revision: goal_revision,
+                        },
+                        Vec::new(),
+                        crate::session::TurnKind::Internal,
+                        vec![acp::ContentBlock::Text(acp::TextContent::new(
+                            "continue goal work",
+                        ))],
+                        tool_types::BehaviorId::Goal,
+                        None,
+                        None,
+                        false,
+                        None,
+                        None,
+                    )
+                    .await
+            });
+
+            if tokio::time::timeout(std::time::Duration::from_secs(5), first.wait_blocked())
+                .await
+                .is_err()
+            {
+                if turn.is_finished() {
+                    let outcome = turn.await;
+                    panic!("Goal turn returned before the first provider request: {outcome:?}");
+                }
+                panic!(
+                    "Goal turn stayed pending but emitted no first provider request; requests: {}",
+                    server.request_log_summary()
+                );
+            }
+            let (gateway, _gateway_rx) = mpsc::unbounded_channel();
+            let guard = crate::session::pending_interaction::PendingInteractionGuard::new(
+                actor.pending_interactions.clone(),
+                acp_transport::AcpAgentGatewaySender::new(gateway),
+                actor.session_info.id.clone(),
+                "goal-budget-question".into(),
+                crate::session::pending_interaction::PendingKind::Question,
+            );
+            write_goal_question_wait(
+                &actor,
+                "goal-budget-turn",
+                "goal-budget-dependency",
+                "goal-budget-question",
+            )
+            .await;
+            first.release();
+
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let conversation = actor.chat_state_handle.get_conversation().await;
+                    let first_answer_landed = conversation.iter().any(|item| {
+                        matches!(
+                            item,
+                            ConversationItem::Assistant(message)
+                                if message.content.contains("candidate answer")
+                        )
+                    });
+                    if first_answer_landed && actor.planning_waits_for_event().await {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the first Goal response must park on its Question dependency");
+            assert_goal_wait_stays_quiet(&actor, &server, &turn).await;
+
+            let expected_status = if pause {
+                actor.auto_pause_goal_if_active(
+                    crate::session::goal_tracker::GoalPauseReason::User,
+                ).await;
+                crate::session::goal_tracker::GoalStatus::Paused
+            } else {
+                assert!(actor.goal_tracker.lock().account_tokens(
+                    goal_id,
+                    crate::session::goal_tracker::GoalTokenUsage::new(101, 0, 0)
+                ));
+                assert!(
+                    actor.enforce_goal_spending_limit().await,
+                    "durable usage over the configured budget must close the Goal"
+                );
+                crate::session::goal_tracker::GoalStatus::BudgetLimited
+            };
+            assert_eq!(
+                actor.goal_tracker.lock().status(),
+                Some(expected_status)
+            );
+            drop(guard);
+            let _completion = tokio::time::timeout(std::time::Duration::from_secs(5), turn)
+                .await
+                .expect("a closed Goal waiter must settle without another model turn")
+                .expect("Goal turn task must finish");
+            assert_eq!(
+                server.messages_request_count(),
+                1,
+                "a dependency wake after Goal pause or budget limit must not request another provider sample"
+            );
+            assert_eq!(
+                actor.goal_tracker.lock().status(),
+                Some(expected_status)
+            );
+        }));
+    });
+}
+
+#[test]
+fn goal_dependency_wakeup_yields_to_fifo_input_without_resampling() {
+    run_with_session_stack(|| {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(tokio::task::LocalSet::new().run_until(async {
+            let server = MockInferenceServer::start().await.unwrap();
+            let mut first = server.expect_response_blocked(
+                "Goal answer before FIFO competition",
+                test_support::InferenceRequestMatcher::foreground(
+                    test_support::InferenceEndpoint::Messages,
+                ),
+                messages_turn(&[text_block("candidate answer")], END_TURN),
+            );
+            let (actor, _) = goal_actor_with_sampler_and_max_turns(
+                &server,
+                sampling_types::ApiBackend::Messages,
+                None,
+            )
+            .await;
+            let goal_revision = activate_test_goal(
+                &actor,
+                "goal-fifo-test",
+                "resume the blocked goal after its question is answered",
+                None,
+            )
+            .await;
+            *actor.current_prompt_id.lock().unwrap() = Some("goal-fifo-turn".into());
+
+            let plan = tool_types::LocalPlan::new(actor.session_id_string(), "work:goal-fifo");
+            actor
+                .chat_state_handle
+                .record_timeline_event_durably(chat_state::TimelineEventKind::Planning(
+                    chat_state::timeline::PlanningEvent {
+                        previous: None,
+                        plan: Box::new(plan),
+                    },
+                ))
+                .await
+                .expect("Goal plan must be durable before the turn starts");
+            install_test_foreground(&actor, "goal-fifo-turn").await;
+            let turn_actor = actor.clone();
+            let turn = tokio::task::spawn_local(async move {
+                turn_actor
+                    .handle_prompt(
+                        "goal-fifo-turn",
+                        Vec::new(),
+                        crate::session::PromptOrigin::GoalContinuation {
+                            goal_id: "goal-fifo-test".into(),
+                            definition_revision: goal_revision,
+                        },
+                        Vec::new(),
+                        crate::session::TurnKind::Internal,
+                        vec![acp::ContentBlock::Text(acp::TextContent::new(
+                            "continue goal work",
+                        ))],
+                        tool_types::BehaviorId::Goal,
+                        None,
+                        None,
+                        false,
+                        None,
+                        None,
+                    )
+                    .await
+            });
+
+            if tokio::time::timeout(std::time::Duration::from_secs(5), first.wait_blocked())
+                .await
+                .is_err()
+            {
+                if turn.is_finished() {
+                    let outcome = turn.await;
+                    panic!("Goal turn returned before the first provider request: {outcome:?}");
+                }
+                panic!(
+                    "Goal turn stayed pending but emitted no first provider request; requests: {}",
+                    server.request_log_summary()
+                );
+            }
+            assert_eq!(server.messages_request_count(), 1);
+            let (gateway, _gateway_rx) = mpsc::unbounded_channel();
+            let guard = crate::session::pending_interaction::PendingInteractionGuard::new(
+                actor.pending_interactions.clone(),
+                acp_transport::AcpAgentGatewaySender::new(gateway),
+                actor.session_info.id.clone(),
+                "goal-fifo-question".into(),
+                crate::session::pending_interaction::PendingKind::Question,
+            );
+            write_goal_question_wait(
+                &actor,
+                "goal-fifo-turn",
+                "goal-fifo-wait",
+                "goal-fifo-question",
+            )
+            .await;
+            first.release();
+
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let conversation = actor.chat_state_handle.get_conversation().await;
+                    let first_answer_landed = conversation.iter().any(|item| {
+                        matches!(
+                            item,
+                            ConversationItem::Assistant(message)
+                                if message.content.contains("candidate answer")
+                        )
+                    });
+                    if first_answer_landed && actor.planning_waits_for_event().await {
+                        break;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect(
+                "the first Goal response must park on its newly registered Question dependency",
+            );
+            assert_goal_wait_stays_quiet(&actor, &server, &turn).await;
+            let parked_cursor = actor
+                .turn_continuation
+                .borrow()
+                .clone()
+                .expect("parked Goal must retain its original turn cursor");
+            assert_eq!(parked_cursor.tool_turns_used, 1);
+            assert_eq!(server.messages_request_count(), 1);
+
+            let (respond_to, _response) = tokio::sync::oneshot::channel();
+            let (persist_ack, _ack) = tokio::sync::oneshot::channel();
+            actor
+                .state
+                .lock()
+                .await
+                .pending_inputs
+                .push_back(super::super::InputItem {
+                    input_ids: vec!["queued-after-wait".into()],
+                    prompt_id: "queued-after-wait".into(),
+                    turn_kind: crate::session::TurnKind::User,
+                    prompt_blocks: vec![acp::ContentBlock::Text(acp::TextContent::new(
+                        "next user request",
+                    ))],
+                    client_identifier: None,
+                    screen_mode: None,
+                    verbatim: false,
+                    json_schema: None,
+                    origin: crate::session::PromptOrigin::User,
+                    host_command: None,
+                    notification_ids: Vec::new(),
+                    respond_to,
+                    persist_ack: Some(persist_ack),
+                    queue_meta: None,
+                });
+
+            actor.idle_arbiter.notify_one();
+            let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), turn)
+                .await
+                .expect("resolved dependency must yield at the FIFO boundary")
+                .expect("Goal turn task must finish")
+                .expect("FIFO yield is a normal completion outcome");
+            assert!(matches!(
+                outcome.completion_kind,
+                crate::session::commands::PromptCompletionKind::Completed
+            ));
+            assert_eq!(
+                server.messages_request_count(),
+                1,
+                "the post-wakeup FIFO check must happen before another provider request"
+            );
+            assert_eq!(actor.state.lock().await.pending_inputs.len(), 1);
+            assert!(
+                actor
+                    .pending_interactions
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .contains_key("goal-fifo-question")
+            );
+            let timeline = actor.chat_state_handle.timeline_events().await.unwrap();
+            assert_eq!(
+                timeline
+                    .iter()
+                    .filter(|event| matches!(
+                        event.kind,
+                        chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started { .. })
+                    ))
+                    .count(),
+                1,
+                "FIFO yield must not admit or reset a second Goal turn"
+            );
+            assert_eq!(
+                actor
+                    .chat_state_handle
+                    .planning_state()
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .plan
+                    .waits
+                    .len(),
+                1,
+                "FIFO priority yields the Goal while its still-live human wait remains registered"
+            );
+            assert_eq!(parked_cursor.prompt_id, "goal-fifo-turn");
+            drop(guard);
         }));
     });
 }
@@ -958,6 +2264,7 @@ fn response_projection_fatal_boundary_blocks_tool_dispatch_and_recovery() {
                 &server,
                 sampling_types::ApiBackend::Messages,
                 sampler::OutputDelivery::Irreversible,
+                None,
                 actor,
                 gateway_rx,
                 events,
@@ -1089,6 +2396,7 @@ fn response_projection_physical_ack_loss_blocks_tool_dispatch_and_recovery() {
                 &server,
                 sampling_types::ApiBackend::Messages,
                 sampler::OutputDelivery::Irreversible,
+                None,
                 actor,
                 gateway_rx,
                 events,

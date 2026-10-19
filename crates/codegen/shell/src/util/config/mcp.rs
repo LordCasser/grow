@@ -756,14 +756,30 @@ pub async fn delete_mcp_server_config_at(
     Ok(true)
 }
 
-/// Load disabled_tools for all MCP servers from `[disabled_mcp_tools]` in config.toml.
+/// Load `[disabled_mcp_tools]` by server name, applying trusted project overrides.
 pub fn get_all_mcp_disabled_tools(
-    _cwd: &std::path::Path,
+    cwd: &std::path::Path,
 ) -> std::collections::HashMap<String, std::collections::HashSet<String>> {
-    let root = match crate::config::load_effective_config() {
+    let mut root = match crate::config::load_effective_config() {
         Ok(r) => r,
         Err(_) => return std::collections::HashMap::new(),
     };
+    if crate::agent::folder_trust::project_scope_allowed(cwd) {
+        for path in crate::config::find_project_configs(cwd) {
+            if let Ok(project) = crate::config::load_config_file(&path)
+                && let Some(section) = project.get("disabled_mcp_tools").and_then(|v| v.as_table())
+            {
+                let target = root
+                    .as_table_mut()
+                    .expect("config root is a table")
+                    .entry("disabled_mcp_tools")
+                    .or_insert_with(|| TomlValue::Table(Default::default()));
+                if let Some(target) = target.as_table_mut() {
+                    target.extend(section.clone());
+                }
+            }
+        }
+    }
     let Some(section) = root.get("disabled_mcp_tools").and_then(|v| v.as_table()) else {
         return std::collections::HashMap::new();
     };

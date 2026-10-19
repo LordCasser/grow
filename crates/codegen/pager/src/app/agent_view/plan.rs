@@ -9,22 +9,61 @@ use crate::app::actions::Action;
 use crate::app::root::InputOutcome;
 use crate::views::file_search::line_viewer::LineViewerState;
 use crate::views::list_pane::ListItem;
-use crate::views::plan_approval_view::{PlanApprovalFocus, PlanComment};
+use crate::views::plan_approval_view::{
+    PendingPlanApprovalDecision, PlanApprovalFocus, PlanApprovalViewState, PlanComment,
+};
 use crate::views::prompt_widget::{EnterOutcome, PromptEvent};
 #[cfg(test)]
 use crossterm::event::KeyModifiers;
 use crossterm::event::{KeyCode, KeyEvent};
-impl AgentView {
-    /// Resolve the absolute path to the plan file for this session.
-    fn plan_file_path(&self) -> Option<std::path::PathBuf> {
-        let session_id = self.session.session_id.as_ref()?;
-        let cwd_str = self.session.cwd.to_string_lossy();
-        Some(
-            shell::util::grow_home::sessions_cwd_dir(&cwd_str)
-                .join(session_id.0.as_ref())
-                .join("plan.md"),
-        )
+
+#[derive(Debug, Clone)]
+pub(crate) struct PlanArtifactPreview {
+    pub session_id: String,
+    pub binding_epoch: u32,
+    pub submission_id: u64,
+    pub retained: bool,
+    pub artifact_revision: u64,
+    pub artifact_hash: String,
+    pub plan_content: String,
+}
+
+impl PlanArtifactPreview {
+    pub(crate) fn matches_submission(&self, other: &Self) -> bool {
+        self.session_id == other.session_id
+            && self.binding_epoch == other.binding_epoch
+            && self.submission_id == other.submission_id
+            && self.artifact_revision == other.artifact_revision
+            && self.artifact_hash == other.artifact_hash
     }
+}
+
+fn preserved_plan_comments_note(
+    source: Option<&PlanArtifactPreview>,
+    comments: &[PlanComment],
+) -> String {
+    let body = crate::views::plan_approval_view::format_plan_comments(
+        comments,
+        source.map(|artifact| artifact.plan_content.as_str()),
+    );
+    match source {
+        Some(artifact) => format!(
+            "Unsent Plan notes from submission {} (revision {}, hash {}):\n\n{}",
+            artifact.submission_id, artifact.artifact_revision, artifact.artifact_hash, body
+        ),
+        None => format!("Unsent Plan notes from an unbound earlier submission:\n\n{body}"),
+    }
+}
+
+fn append_draft_text(text: &mut String, cursor: &mut usize, addition: &str) {
+    if !text.is_empty() {
+        text.push_str("\n\n");
+    }
+    text.push_str(addition);
+    *cursor = text.len();
+}
+
+impl AgentView {
     /// Whether the current line viewer is showing a plan preview.
     pub(super) fn is_plan_viewer(&self) -> bool {
         self.line_viewer.as_ref().is_some_and(|v| {
@@ -61,7 +100,12 @@ impl AgentView {
         &self,
         appearance: &crate::appearance::AppearanceConfig,
     ) -> bool {
-        (self.session.plan_mode_active || appearance.show_plan_chip)
+        (self.session.plan_mode_active
+            || appearance.show_plan_chip
+            || self
+                .plan_artifact_preview
+                .as_ref()
+                .is_some_and(|preview| preview.retained))
             && self.plan_preview_available()
     }
     fn inline_plan_content(&self) -> Option<&str> {
@@ -72,8 +116,8 @@ impl AgentView {
     }
     /// Resolve the plan body for the line-viewer preview.
     ///
-    /// Prefers content carried on the approval request, then falls back to the
-    /// session artifact for previews outside the approval flow.
+    /// Prefers content carried on the live approval request, then uses the
+    /// latest artifact resolved by the Shell's canonical read API.
     pub(super) fn plan_body_for_preview(&self) -> Option<String> {
         if let Some(content) = self
             .plan_approval_view
@@ -83,9 +127,17 @@ impl AgentView {
         {
             return Some(content.to_owned());
         }
-        self.plan_file_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .filter(|s| !s.trim().is_empty())
+        let session_id = self.session.session_id.as_ref()?.0.as_ref();
+        self.plan_artifact_preview
+            .as_ref()
+            .filter(|preview| {
+                preview.session_id == session_id
+                    && preview.binding_epoch == self.session_binding_epoch
+                    && preview.artifact_revision > 0
+                    && preview.artifact_hash.len() == 64
+            })
+            .map(|preview| preview.plan_content.clone())
+            .filter(|content| !content.trim().is_empty())
     }
     /// Open the plan preview when content exists.
     pub(crate) fn show_plan_preview_if_available(&mut self) {
@@ -96,14 +148,63 @@ impl AgentView {
     /// Show the plan in the line viewer overlay or a "no plan" toast.
     pub fn show_plan_preview(&mut self) {
         let body = self.plan_body_for_preview();
-        let Some(mut viewer) = (if let Some(content) = body {
-            LineViewerState::open_markdown_content("plan.md", content, None)
-        } else if let Some(plan_path) = self.plan_file_path() {
-            LineViewerState::open_markdown(&plan_path, None)
-        } else {
-            None
-        }) else {
+        let Some(content) = body else {
             self.show_toast("No plan written yet.");
+            return;
+        };
+        self.open_plan_preview_content(content);
+    }
+
+    pub(crate) fn resolve_plan_preview(
+        &mut self,
+        response: tools::implementations::grow_build::plan_control::PlanArtifactQueryResponse,
+    ) -> Result<(), &'static str> {
+        let expected_session_id = self
+            .session
+            .session_id
+            .as_ref()
+            .ok_or("No active session")?
+            .0
+            .as_ref();
+        if response.session_id != expected_session_id {
+            return Err("Plan preview belongs to a different session");
+        }
+        if response.artifact_revision == 0
+            || response.artifact_hash.len() != 64
+            || !response
+                .artifact_hash
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit())
+            || blake3::hash(response.plan_content.as_bytes())
+                .to_hex()
+                .as_str()
+                != response.artifact_hash
+            || response.plan_content.trim().is_empty()
+        {
+            return Err("Plan artifact identity or content is invalid");
+        }
+        let preview = PlanArtifactPreview {
+            session_id: response.session_id,
+            binding_epoch: self.session_binding_epoch,
+            submission_id: response.submission_id,
+            retained: response.retained,
+            artifact_revision: response.artifact_revision,
+            artifact_hash: response.artifact_hash,
+            plan_content: response.plan_content,
+        };
+        self.plan_artifact_preview = Some(preview.clone());
+        self.open_plan_preview_content(preview.plan_content);
+        if let Some(viewer) = self.line_viewer.as_mut() {
+            viewer.title_override =
+                Some(format!("plan.md · revision {}", preview.artifact_revision));
+        }
+        Ok(())
+    }
+
+    fn open_plan_preview_content(&mut self, content: String) {
+        let Some(mut viewer) = LineViewerState::open_markdown_content("plan.md", content, None)
+        else {
+            self.show_toast("Plan preview is unavailable.");
             return;
         };
         viewer.kind = crate::views::file_search::line_viewer::LineViewerKind::PlanPreview;
@@ -113,13 +214,35 @@ impl AgentView {
             let plan = viewer.plan_mut();
             plan.show_action_buttons = self.plan_approval_view.is_none();
             plan.feedback_active = self.plan_approval_view.is_some();
+            plan.show_review_button = self.plan_approval_view.is_none()
+                && self
+                    .plan_artifact_preview
+                    .as_ref()
+                    .is_some_and(|preview| preview.retained);
+            plan.decision_pending = self.pending_plan_approval_decision.is_some();
         }
         if let Some(ref pav) = self.plan_approval_view
             && !pav.comments.is_empty()
         {
             viewer.rebuild_with_comments(&pav.comments);
-        } else if !self.plan_comments.is_empty() {
+        } else if self.plan_approval_view.is_none()
+            && !self.plan_comments.is_empty()
+            && self
+                .plan_comments_artifact
+                .as_ref()
+                .is_some_and(|artifact| {
+                    self.plan_artifact_preview.as_ref().is_some_and(|preview| {
+                        preview.matches_submission(artifact)
+                            && preview.binding_epoch == self.session_binding_epoch
+                            && self.session.session_id.as_ref().is_some_and(|session_id| {
+                                preview.session_id == session_id.0.as_ref()
+                            })
+                    })
+                })
+        {
             viewer.rebuild_with_comments(&self.plan_comments);
+        } else if !self.plan_comments.is_empty() {
+            self.show_toast("Saved comments belong to an earlier plan revision.");
         }
         self.line_viewer = Some(viewer);
     }
@@ -145,7 +268,10 @@ impl AgentView {
         self.casual_commenting_range = Some(0..1);
     }
     pub(crate) fn approve_plan(&mut self) -> InputOutcome {
-        let Some(mut pav) = self.plan_approval_view.take() else {
+        if let Some(outcome) = self.pending_plan_decision_outcome() {
+            return outcome;
+        }
+        let Some(pav) = self.plan_approval_view.as_mut() else {
             return InputOutcome::Changed;
         };
         let review_feedback = if !pav.comments.is_empty() {
@@ -158,12 +284,8 @@ impl AgentView {
         } else {
             None
         };
-        pav.send_approved(review_feedback);
-        self.plan_next_comment_id = pav.next_comment_id;
-        self.prompt.restore(pav.stashed_prompt);
-        self.line_viewer = None;
-        self.casual_commenting_range = None;
-        self.casual_editing_comment_id = None;
+        let response = pav.send_approved(review_feedback);
+        self.capture_pending_plan_decision(response);
         {
             use diagnostics::events::PlanSubmit;
             use diagnostics::session_ctx::log_event;
@@ -171,18 +293,17 @@ impl AgentView {
                 action: "build".to_string(),
             });
         }
-        InputOutcome::Changed
+        InputOutcome::Action(Action::CheckPlanApprovalDecision)
     }
     pub(crate) fn abandon_plan(&mut self) -> InputOutcome {
-        let Some(mut pav) = self.plan_approval_view.take() else {
+        if let Some(outcome) = self.pending_plan_decision_outcome() {
+            return outcome;
+        }
+        let Some(pav) = self.plan_approval_view.as_mut() else {
             return InputOutcome::Changed;
         };
-        pav.send_abandoned();
-        self.plan_next_comment_id = pav.next_comment_id;
-        self.prompt.restore(pav.stashed_prompt);
-        self.line_viewer = None;
-        self.casual_commenting_range = None;
-        self.casual_editing_comment_id = None;
+        let response = pav.send_abandoned();
+        self.capture_pending_plan_decision(response);
         {
             use diagnostics::events::PlanSubmit;
             use diagnostics::session_ctx::log_event;
@@ -190,10 +311,40 @@ impl AgentView {
                 action: "abandon".to_string(),
             });
         }
-        InputOutcome::Changed
+        InputOutcome::Action(Action::CheckPlanApprovalDecision)
+    }
+    pub(crate) fn defer_plan(&mut self) -> InputOutcome {
+        if let Some(outcome) = self.pending_plan_decision_outcome() {
+            return outcome;
+        }
+        let Some(pav) = self.plan_approval_view.as_mut() else {
+            return InputOutcome::Changed;
+        };
+        let freeform = self.prompt.text().to_owned();
+        let formatted = pav.format_feedback(Some(&freeform));
+        let feedback = (!formatted.trim().is_empty()).then_some(formatted);
+        if crate::app::minimal_mode_active()
+            && let Some(msg) = feedback.as_deref().map(str::trim).filter(|s| !s.is_empty())
+        {
+            self.scrollback
+                .push_block(crate::scrollback::RenderBlock::user_prompt(msg.to_string()));
+        }
+        let response = pav.send_deferred(feedback);
+        self.capture_pending_plan_decision(response);
+        {
+            use diagnostics::events::PlanSubmit;
+            use diagnostics::session_ctx::log_event;
+            log_event(PlanSubmit {
+                action: "defer".to_string(),
+            });
+        }
+        InputOutcome::Action(Action::CheckPlanApprovalDecision)
     }
     fn send_plan_feedback(&mut self, feedback: Option<String>) -> InputOutcome {
-        let Some(mut pav) = self.plan_approval_view.take() else {
+        if let Some(outcome) = self.pending_plan_decision_outcome() {
+            return outcome;
+        }
+        let Some(pav) = self.plan_approval_view.as_mut() else {
             return InputOutcome::Changed;
         };
         let formatted = pav.format_feedback(feedback.as_deref());
@@ -208,12 +359,8 @@ impl AgentView {
             self.scrollback
                 .push_block(crate::scrollback::RenderBlock::user_prompt(msg.to_string()));
         }
-        pav.send_cancelled(to_send);
-        self.plan_next_comment_id = pav.next_comment_id;
-        self.prompt.restore(pav.stashed_prompt);
-        self.line_viewer = None;
-        self.prompt.textarea.cancel_undo_group();
-        self.show_toast("Plan revision sent.");
+        let response = pav.send_cancelled(to_send);
+        self.capture_pending_plan_decision(response);
         {
             use diagnostics::events::PlanSubmit;
             use diagnostics::session_ctx::log_event;
@@ -221,14 +368,105 @@ impl AgentView {
                 action: "revise".to_string(),
             });
         }
-        InputOutcome::Changed
+        InputOutcome::Action(Action::CheckPlanApprovalDecision)
+    }
+
+    fn pending_plan_decision_outcome(&mut self) -> Option<InputOutcome> {
+        let pending = self.pending_plan_approval_decision.as_ref()?;
+        let current = self.plan_approval_view.as_ref();
+        if current.is_some_and(PlanApprovalViewState::decision_pending) {
+            return Some(InputOutcome::Action(Action::CheckPlanApprovalDecision));
+        }
+        if current.is_some_and(|pav| pav.submission_id != pending.response.submission_id) {
+            self.show_toast(
+                "Resolve the pending Plan decision before deciding on another submission.",
+            );
+        } else {
+            self.show_toast("This Plan decision is still awaiting confirmation.");
+        }
+        Some(InputOutcome::Action(Action::CheckPlanApprovalDecision))
+    }
+
+    fn capture_pending_plan_decision(
+        &mut self,
+        response: crate::views::plan_approval_view::PlanApprovalExtResponse,
+    ) {
+        let Some(pav) = self.plan_approval_view.as_ref() else {
+            return;
+        };
+        let target = PlanArtifactPreview {
+            session_id: pav.source_session_id.clone(),
+            binding_epoch: self.session_binding_epoch,
+            submission_id: response.submission_id,
+            retained: true,
+            artifact_revision: pav.artifact_revision,
+            artifact_hash: pav.artifact_hash.clone(),
+            plan_content: pav.plan_content.clone(),
+        };
+        let comments_match = self.plan_comments.is_empty()
+            || self
+                .plan_comments_artifact
+                .as_ref()
+                .is_some_and(|source| target.matches_submission(source));
+        if !comments_match {
+            let note = preserved_plan_comments_note(
+                self.plan_comments_artifact.as_ref(),
+                &self.plan_comments,
+            );
+            if let Some(pav) = self.plan_approval_view.as_mut() {
+                append_draft_text(
+                    &mut pav.stashed_prompt.text,
+                    &mut pav.stashed_prompt.cursor,
+                    &note,
+                );
+            }
+            self.plan_comments.clear();
+            self.plan_comments_artifact = None;
+            self.plan_next_comment_id = 0;
+        }
+        let Some(pav) = self.plan_approval_view.as_mut() else {
+            return;
+        };
+        let (session_id, artifact_revision, artifact_hash, comments, next_comment_id) = (
+            pav.source_session_id.clone(),
+            pav.artifact_revision,
+            pav.artifact_hash.clone(),
+            pav.comments.clone(),
+            pav.next_comment_id,
+        );
+        pav.focus = PlanApprovalFocus::Preview;
+        self.plan_next_comment_id = next_comment_id;
+        self.plan_comments = comments.clone();
+        self.plan_comments_artifact = (!comments.is_empty()).then(|| PlanArtifactPreview {
+            session_id: session_id.clone(),
+            binding_epoch: self.session_binding_epoch,
+            submission_id: response.submission_id,
+            retained: true,
+            artifact_revision,
+            artifact_hash: artifact_hash.clone(),
+            plan_content: pav.plan_content.clone(),
+        });
+        self.pending_plan_approval_decision = Some(PendingPlanApprovalDecision {
+            session_id,
+            binding_epoch: self.session_binding_epoch,
+            response,
+            artifact_revision,
+            artifact_hash,
+            comments,
+        });
+        if let Some(viewer) = self.line_viewer.as_mut() {
+            let plan = viewer.plan_mut();
+            plan.feedback_active = true;
+            plan.decision_pending = true;
+        }
+        self.show_toast("Plan decision sent; waiting for confirmation.");
     }
     pub(crate) fn reopen_plan_approval(&mut self) {
         if let Some(ref mut pav) = self.plan_approval_view {
-            pav.stashed_prompt = self.prompt.stash();
             pav.focus = PlanApprovalFocus::Preview;
+        } else {
+            self.prompt.set_text("");
         }
-        self.prompt.set_text("");
         self.show_plan_preview_if_available();
         if self.line_viewer.is_none() {
             if let Some(ref mut pav) = self.plan_approval_view {
@@ -255,6 +493,22 @@ impl AgentView {
             .plan_approval_view
             .as_ref()
             .is_some_and(|pav| pav.focus == PlanApprovalFocus::Commenting);
+        if self.pending_plan_approval_decision.is_some() {
+            if key.code == KeyCode::Char('r')
+                && key.modifiers.is_empty()
+                && !self.prompt.file_search_visible()
+            {
+                return InputOutcome::Action(Action::CheckPlanApprovalDecision);
+            }
+            if key.code == KeyCode::Esc {
+                if self.prompt.file_search_visible() {
+                    self.prompt.file_search.clear_context();
+                } else {
+                    self.cancel_line_viewer();
+                }
+            }
+            return InputOutcome::Changed;
+        }
         if key.code == KeyCode::Tab && key.modifiers.is_empty() {
             let focus = self.plan_approval_view.as_ref().map(|p| p.focus);
             match focus {
@@ -302,9 +556,7 @@ impl AgentView {
                 }
                 return InputOutcome::Changed;
             }
-            if let Some(ref mut pav) = self.plan_approval_view {
-                pav.focus = PlanApprovalFocus::Preview;
-            }
+            self.cancel_line_viewer();
             return InputOutcome::Changed;
         }
         if !is_commenting
@@ -361,6 +613,14 @@ impl AgentView {
         }
     }
     pub(super) fn enter_plan_commenting(&mut self) -> InputOutcome {
+        if self
+            .plan_approval_view
+            .as_ref()
+            .is_some_and(PlanApprovalViewState::decision_pending)
+        {
+            self.show_toast("Plan decision is awaiting confirmation.");
+            return InputOutcome::Changed;
+        }
         let viewer = match self.line_viewer.as_mut() {
             Some(v) => v,
             None => return InputOutcome::Changed,
@@ -512,6 +772,34 @@ impl AgentView {
                 viewer.list_state.exit_visual_mode();
             }
         }
+        let same_artifact = self
+            .plan_comments_artifact
+            .as_ref()
+            .zip(self.plan_artifact_preview.as_ref())
+            .is_some_and(|(comments, preview)| {
+                preview.matches_submission(comments)
+                    && preview.binding_epoch == self.session_binding_epoch
+                    && self
+                        .session
+                        .session_id
+                        .as_ref()
+                        .is_some_and(|session_id| preview.session_id == session_id.0.as_ref())
+            });
+        if !self.plan_comments.is_empty() && !same_artifact {
+            let note = preserved_plan_comments_note(
+                self.plan_comments_artifact.as_ref(),
+                &self.plan_comments,
+            );
+            let addition = if self.prompt.text().is_empty() {
+                note
+            } else {
+                format!("\n\n{note}")
+            };
+            self.prompt.append_text(&addition);
+            self.plan_comments.clear();
+            self.plan_comments_artifact = None;
+            self.plan_next_comment_id = 0;
+        }
         if self.casual_stashed_prompt.is_none() {
             self.casual_stashed_prompt = Some(self.prompt.stash());
         }
@@ -536,6 +824,9 @@ impl AgentView {
                 comment.line_range = range;
             }
         } else {
+            if self.plan_comments.is_empty() {
+                self.plan_comments_artifact = self.plan_artifact_preview.as_ref().cloned();
+            }
             let id = self.plan_next_comment_id;
             self.plan_next_comment_id += 1;
             self.plan_comments.push(PlanComment {
@@ -613,6 +904,9 @@ impl AgentView {
             None => return InputOutcome::Unchanged,
         };
         self.plan_comments.retain(|c| c.id != comment_id);
+        if self.plan_comments.is_empty() {
+            self.plan_comments_artifact = None;
+        }
         let comments = self.plan_comments.clone();
         if let Some(ref mut viewer) = self.line_viewer {
             viewer.rebuild_with_comments(&comments);
@@ -624,16 +918,37 @@ impl AgentView {
             self.show_toast("No comments to send.");
             return InputOutcome::Changed;
         }
-        let plan_content = self.inline_plan_content().map(str::to_owned).or_else(|| {
-            let path = self.plan_file_path()?;
-            std::fs::read_to_string(path).ok()
-        });
+        if self
+            .plan_comments_artifact
+            .as_ref()
+            .is_some_and(|artifact| {
+                !self.plan_artifact_preview.as_ref().is_some_and(|preview| {
+                    preview.matches_submission(artifact)
+                        && preview.binding_epoch == self.session_binding_epoch
+                        && self
+                            .session
+                            .session_id
+                            .as_ref()
+                            .is_some_and(|session_id| preview.session_id == session_id.0.as_ref())
+                })
+            })
+        {
+            self.show_toast(
+                "Comments belong to an earlier plan revision; review them before sending.",
+            );
+            return InputOutcome::Changed;
+        }
+        let plan_content = self
+            .inline_plan_content()
+            .map(str::to_owned)
+            .or_else(|| self.plan_body_for_preview());
         let body = crate::views::plan_approval_view::format_plan_comments(
             &self.plan_comments,
             plan_content.as_deref(),
         );
         let text = format!("Plan feedback:\n\n{body}");
         self.plan_comments.clear();
+        self.plan_comments_artifact = None;
         self.plan_next_comment_id = 0;
         self.cancel_line_viewer();
         self.show_toast("Plan feedback sent.");
@@ -683,18 +998,109 @@ mod plan_chip_tests {
         )
     }
     #[test]
-    fn long_cwd_plan_uses_the_session_storage_namespace() {
+    fn canonical_preview_cache_is_bound_to_its_session_and_revision() {
         let mut agent = make_agent();
-        agent.session.cwd = std::path::PathBuf::from(format!(
-            r"C:\Users\dev\Documents\{}\project",
-            "中文目录\\".repeat(30),
-        ));
         agent.session.session_id = Some(acp_transport::protocol::SessionId::new("plan-session"));
-        let cwd = agent.session.cwd.to_string_lossy();
-        let expected = shell::util::grow_home::sessions_cwd_dir(&cwd)
-            .join("plan-session")
-            .join("plan.md");
-        assert_eq!(agent.plan_file_path(), Some(expected));
+        agent.plan_artifact_preview = Some(PlanArtifactPreview {
+            submission_id: 1,
+            retained: false,
+            session_id: "plan-session".into(),
+            binding_epoch: agent.session_binding_epoch,
+            artifact_revision: 2,
+            artifact_hash: blake3::hash(b"# immutable plan").to_hex().to_string(),
+            plan_content: "# immutable plan".into(),
+        });
+        assert_eq!(
+            agent.plan_body_for_preview().as_deref(),
+            Some("# immutable plan")
+        );
+        agent.session.session_id = Some(acp_transport::protocol::SessionId::new("other-session"));
+        assert!(agent.plan_body_for_preview().is_none());
+    }
+    #[test]
+    fn canonical_query_rejects_hash_mismatch_and_opens_exact_revision() {
+        let mut agent = make_agent();
+        agent.session.session_id = Some(acp_transport::protocol::SessionId::new("plan-session"));
+        let response =
+            tools::implementations::grow_build::plan_control::PlanArtifactQueryResponse {
+                submission_id: 1,
+                retained: false,
+                session_id: "plan-session".into(),
+                artifact_revision: 3,
+                artifact_hash: "0".repeat(64),
+                plan_content: "# immutable plan".into(),
+            };
+        assert!(agent.resolve_plan_preview(response).is_err());
+        assert!(agent.line_viewer.is_none());
+
+        let content = "# immutable plan".to_string();
+        let response =
+            tools::implementations::grow_build::plan_control::PlanArtifactQueryResponse {
+                submission_id: 1,
+                retained: false,
+                session_id: "plan-session".into(),
+                artifact_revision: 3,
+                artifact_hash: blake3::hash(content.as_bytes()).to_hex().to_string(),
+                plan_content: content,
+            };
+        agent.resolve_plan_preview(response).unwrap();
+        assert_eq!(
+            agent
+                .line_viewer
+                .as_ref()
+                .unwrap()
+                .title_override
+                .as_deref(),
+            Some("plan.md · revision 3")
+        );
+    }
+    #[test]
+    fn starting_comments_for_a_new_submission_preserves_prior_notes_in_the_draft() {
+        let mut agent = make_agent();
+        agent.session.session_id = Some(acp_transport::protocol::SessionId::new("plan-session"));
+        let content = "# same plan\n\nStep 1: do something";
+        let hash = blake3::hash(content.as_bytes()).to_hex().to_string();
+        agent.plan_artifact_preview = Some(PlanArtifactPreview {
+            session_id: "plan-session".into(),
+            binding_epoch: agent.session_binding_epoch,
+            submission_id: 9,
+            retained: false,
+            artifact_revision: 4,
+            artifact_hash: hash.clone(),
+            plan_content: content.into(),
+        });
+        agent.plan_comments_artifact = Some(PlanArtifactPreview {
+            session_id: "plan-session".into(),
+            binding_epoch: agent.session_binding_epoch,
+            submission_id: 8,
+            retained: false,
+            artifact_revision: 4,
+            artifact_hash: hash,
+            plan_content: content.into(),
+        });
+        agent.plan_comments.push(PlanComment {
+            id: 0,
+            line_range: 0..1,
+            text: "keep this earlier note".into(),
+        });
+        agent.prompt.set_text("existing composer draft");
+        agent.show_plan_preview();
+        let viewer = agent.line_viewer.as_mut().unwrap();
+        viewer.prepare_layout(80, 24);
+        let first_line = viewer.lines[0].stable_id();
+        viewer.list_state.select_by_id(first_line);
+        viewer.prepare_layout(80, 24);
+
+        assert!(matches!(
+            agent.enter_casual_plan_commenting(),
+            InputOutcome::Changed
+        ));
+        let stashed = agent.casual_stashed_prompt.as_ref().unwrap();
+        assert!(stashed.text.starts_with("existing composer draft\n\n"));
+        assert!(stashed.text.contains("submission 8 (revision 4, hash "));
+        assert!(stashed.text.contains("keep this earlier note"));
+        assert!(agent.plan_comments.is_empty());
+        assert!(agent.plan_comments_artifact.is_none());
     }
     #[test]
     fn plan_chip_hidden_after_exit_by_default() {
@@ -850,6 +1256,9 @@ mod plan_approval_enter_tests {
             session_id: "test-session".into(),
             tool_call_id: "call-1".into(),
             plan_content: "# Plan\n\n## Step 1\nDo something".into(),
+            submission_id: 1,
+            artifact_revision: 2,
+            artifact_hash: "a".repeat(64),
         };
         let mut pav = crate::views::plan_approval_view::PlanApprovalViewState::new(
             request,
@@ -887,11 +1296,20 @@ mod plan_approval_enter_tests {
         let mut agent = agent_with_revise_prompt();
         agent.prompt.set_text("please use auth middleware");
         let outcome = agent.handle_plan_feedback_key(&enter_key());
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert!(agent.plan_approval_view.is_none());
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::CheckPlanApprovalDecision)
+        ));
+        assert!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .unwrap()
+                .decision_pending()
+        );
         assert_eq!(
             agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
-            Some("Plan revision sent.")
+            Some("Plan decision sent; waiting for confirmation.")
         );
     }
     #[test]
@@ -905,11 +1323,20 @@ mod plan_approval_enter_tests {
             });
         }
         let outcome = agent.handle_plan_feedback_key(&enter_key());
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert!(agent.plan_approval_view.is_none());
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::CheckPlanApprovalDecision)
+        ));
+        assert!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .unwrap()
+                .decision_pending()
+        );
         assert_eq!(
             agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
-            Some("Plan revision sent.")
+            Some("Plan decision sent; waiting for confirmation.")
         );
     }
     #[test]
@@ -917,8 +1344,17 @@ mod plan_approval_enter_tests {
         let mut agent = agent_with_revise_prompt();
         let a = KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE);
         let outcome = agent.handle_plan_feedback_key(&a);
-        assert!(matches!(outcome, InputOutcome::Changed));
-        assert!(agent.plan_approval_view.is_none(), "`a` must approve");
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::CheckPlanApprovalDecision)
+        ));
+        assert!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .unwrap()
+                .decision_pending()
+        );
         assert_ne!(
             agent.toast.as_ref().map(|(msg, _)| msg.as_str()),
             Some("Plan revision sent.")
@@ -933,6 +1369,9 @@ mod plan_approval_enter_tests {
             session_id: "test-session".into(),
             tool_call_id: "call-with-comments".into(),
             plan_content: "# Plan\n\nDo something".into(),
+            submission_id: 1,
+            artifact_revision: 2,
+            artifact_hash: "a".repeat(64),
         };
         let mut pav = crate::views::plan_approval_view::PlanApprovalViewState::new(
             request,
@@ -953,7 +1392,25 @@ mod plan_approval_enter_tests {
         });
         agent.plan_approval_view = Some(pav);
 
-        assert!(matches!(agent.approve_plan(), InputOutcome::Changed));
+        assert!(matches!(
+            agent.approve_plan(),
+            InputOutcome::Action(Action::CheckPlanApprovalDecision)
+        ));
+        assert!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .unwrap()
+                .decision_pending()
+        );
+        assert_eq!(
+            agent
+                .pending_plan_approval_decision
+                .as_ref()
+                .unwrap()
+                .artifact_hash,
+            "a".repeat(64)
+        );
         let response = rx
             .try_recv()
             .expect("approval response should be sent synchronously")
@@ -970,6 +1427,179 @@ mod plan_approval_enter_tests {
                 .as_deref()
                 .is_some_and(|feedback| feedback.contains("keep the public API stable"))
         );
+        let pending_decision = agent.pending_plan_approval_decision.as_ref().unwrap();
+        assert_eq!(pending_decision.response.decision_id, parsed.decision_id);
+        let retry = agent.approve_plan();
+        assert!(matches!(
+            retry,
+            InputOutcome::Action(Action::CheckPlanApprovalDecision)
+        ));
+        assert!(
+            rx.try_recv().is_err(),
+            "recheck must not resend the reverse response"
+        );
+    }
+
+    #[test]
+    fn approval_moves_different_submission_notes_to_stashed_draft_not_feedback() {
+        let mut agent = agent_with_revise_prompt();
+        let old_content = "# Same plan body";
+        let hash = blake3::hash(old_content.as_bytes()).to_hex().to_string();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let mut pav = crate::views::plan_approval_view::PlanApprovalViewState::new(
+            crate::views::plan_approval_view::PlanApprovalExtRequest {
+                session_id: "test-session".into(),
+                tool_call_id: "new-submission".into(),
+                plan_content: old_content.into(),
+                submission_id: 2,
+                artifact_revision: 5,
+                artifact_hash: hash.clone(),
+            },
+            crate::views::prompt_widget::StashedPrompt {
+                text: "original restored draft".into(),
+                cursor: 7,
+                images: Vec::new(),
+                chip_elements: vec![crate::app::session::ChipElement {
+                    range: 0..8,
+                    kind: crate::views::prompt_widget::KIND_PASTE,
+                    display: None,
+                }],
+                image_counter: 0,
+                image_undo_stash: Vec::new(),
+            },
+            tx,
+        );
+        pav.comments.push(PlanComment {
+            id: 0,
+            line_range: 0..1,
+            text: "new approval feedback".into(),
+        });
+        agent.plan_approval_view = Some(pav);
+        agent.plan_comments_artifact = Some(PlanArtifactPreview {
+            session_id: "test-session".into(),
+            binding_epoch: agent.session_binding_epoch,
+            submission_id: 1,
+            retained: false,
+            artifact_revision: 5,
+            artifact_hash: hash,
+            plan_content: old_content.into(),
+        });
+        agent.plan_comments.push(PlanComment {
+            id: 3,
+            line_range: 0..1,
+            text: "old submission note".into(),
+        });
+
+        assert!(matches!(
+            agent.approve_plan(),
+            InputOutcome::Action(Action::CheckPlanApprovalDecision)
+        ));
+        let stashed = &agent.plan_approval_view.as_ref().unwrap().stashed_prompt;
+        assert!(stashed.text.starts_with("original restored draft\n\n"));
+        assert!(stashed.text.contains("submission 1 (revision 5, hash "));
+        assert!(stashed.text.contains("old submission note"));
+        assert_eq!(stashed.cursor, stashed.text.len());
+        assert_eq!(stashed.chip_elements[0].range, 0..8);
+        let pending = agent.pending_plan_approval_decision.as_ref().unwrap();
+        assert_eq!(pending.comments.len(), 1);
+        assert_eq!(pending.comments[0].text, "new approval feedback");
+        assert!(
+            !pending
+                .response
+                .feedback
+                .as_deref()
+                .unwrap_or_default()
+                .contains("old submission note")
+        );
+        assert_eq!(agent.plan_comments.len(), 1);
+        assert_eq!(agent.plan_comments[0].text, "new approval feedback");
+        assert_eq!(
+            agent.plan_comments_artifact.as_ref().unwrap().submission_id,
+            2
+        );
+    }
+
+    #[test]
+    fn deferring_keeps_comment_identity_until_receipt_confirmation() {
+        let mut agent = make_agent();
+        let (tx, mut rx) = tokio::sync::oneshot::channel();
+        let request = crate::views::plan_approval_view::PlanApprovalExtRequest {
+            session_id: "test-session".into(),
+            tool_call_id: "call-defer".into(),
+            plan_content: "# Plan\n\nDo something".into(),
+            submission_id: 17,
+            artifact_revision: 23,
+            artifact_hash: "b".repeat(64),
+        };
+        let mut pav = crate::views::plan_approval_view::PlanApprovalViewState::new(
+            request,
+            crate::views::prompt_widget::StashedPrompt {
+                text: "original prompt".into(),
+                cursor: 15,
+                images: Vec::new(),
+                chip_elements: Vec::new(),
+                image_counter: 0,
+                image_undo_stash: Vec::new(),
+            },
+            tx,
+        );
+        pav.next_comment_id = 2;
+        pav.comments.push(PlanComment {
+            id: 1,
+            line_range: 2..3,
+            text: "preserve this note".into(),
+        });
+        agent.plan_approval_view = Some(pav);
+        agent.prompt.set_text("extra feedback");
+
+        assert!(matches!(
+            agent.defer_plan(),
+            InputOutcome::Action(Action::CheckPlanApprovalDecision)
+        ));
+        assert!(
+            agent
+                .plan_approval_view
+                .as_ref()
+                .unwrap()
+                .decision_pending()
+        );
+        assert!(agent.line_viewer.is_none());
+        assert_eq!(agent.prompt.text(), "extra feedback");
+        assert_eq!(agent.plan_next_comment_id, 2);
+        assert_eq!(agent.plan_comments.len(), 1);
+        assert_eq!(agent.plan_comments[0].text, "preserve this note");
+        let comment_source = agent.plan_comments_artifact.as_ref().unwrap();
+        assert_eq!(comment_source.submission_id, 17);
+        assert_eq!(comment_source.artifact_hash, "b".repeat(64));
+        assert_eq!(comment_source.artifact_revision, 23);
+        let pending = agent.pending_plan_approval_decision.as_ref().unwrap();
+        assert_eq!(pending.response.submission_id, 17);
+        assert_eq!(pending.artifact_revision, 23);
+        assert_eq!(pending.artifact_hash, "b".repeat(64));
+        assert_eq!(pending.comments.len(), 1);
+        assert!(
+            pending
+                .response
+                .feedback
+                .as_deref()
+                .unwrap()
+                .contains("extra feedback")
+        );
+
+        let response = rx
+            .try_recv()
+            .expect("deferred response should be sent")
+            .expect("response channel should succeed");
+        let parsed: crate::views::plan_approval_view::PlanApprovalExtResponse =
+            serde_json::from_str(response.0.get()).expect("typed deferred response");
+        assert_eq!(
+            parsed.outcome,
+            crate::views::plan_approval_view::PlanApprovalOutcome::Deferred
+        );
+        assert_eq!(parsed.submission_id, 17);
+        let feedback = parsed.feedback.expect("comments and freeform feedback");
+        assert!(feedback.contains("preserve this note"));
+        assert!(feedback.contains("extra feedback"));
     }
 
     #[test]

@@ -19,6 +19,7 @@ use super::dashboard::{
 use super::interject::dispatch_interject;
 use super::jump::{dispatch_jump_dismiss, dispatch_jump_picker_select, dispatch_jump_show_picker};
 use super::modes::{
+    dispatch_check_plan_approval_decision, dispatch_review_retained_plan,
     dispatch_set_behavior_mode, dispatch_set_behavior_then_prompt, dispatch_show_plan,
     set_default_permission_mode, set_permission_mode,
 };
@@ -131,14 +132,38 @@ pub(crate) fn dispatch(action: Action, app: &mut AppView) -> Vec<Effect> {
 
 fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
     let effects = match action {
-        Action::Quit | Action::QuitConfirmed => {
-            let mut effects = unregister_all_active_sessions(app);
-            effects.push(Effect::Quit);
-            effects
+        Action::Quit | Action::QuitConfirmed => begin_exit_suspension(app, false, false),
+        Action::RestartForUpdate => begin_exit_suspension(app, true, false),
+        Action::RetryExitSuspension => {
+            let Some((restart_for_update, is_unconfirmed)) =
+                app.exit_suspension.as_ref().map(|exit| {
+                    (
+                        exit.restart_for_update,
+                        matches!(
+                            &exit.phase,
+                            crate::app::root::ExitSuspensionPhase::Unconfirmed { .. }
+                        ),
+                    )
+                })
+            else {
+                return vec![];
+            };
+            if !is_unconfirmed {
+                return vec![];
+            }
+            begin_exit_suspension(app, restart_for_update, true)
         }
-        Action::RestartForUpdate => {
+        Action::ForceQuit => {
+            if !app.exit_suspension.as_ref().is_some_and(|exit| {
+                matches!(
+                    &exit.phase,
+                    crate::app::root::ExitSuspensionPhase::Unconfirmed { .. }
+                )
+            }) {
+                return vec![];
+            }
+            app.exit_suspension = None;
             let mut effects = unregister_all_active_sessions(app);
-            app.restart_for_update = true;
             effects.push(Effect::Quit);
             effects
         }
@@ -980,6 +1005,8 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ShowQueue => dispatch_show_queue(app),
         Action::ShowTasks => dispatch_show_tasks(app),
         Action::ShowPlan => dispatch_show_plan(app),
+        Action::ReviewRetainedPlan => dispatch_review_retained_plan(app),
+        Action::CheckPlanApprovalDecision => dispatch_check_plan_approval_decision(app),
         Action::SetBehaviorThenPrompt { mode, prompt } => {
             dispatch_set_behavior_then_prompt(app, mode, prompt)
         }
@@ -1375,6 +1402,34 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
     };
     sync_sleep_inhibitor(app);
     effects
+}
+
+fn begin_exit_suspension(app: &mut AppView, restart_for_update: bool, retry: bool) -> Vec<Effect> {
+    if !app
+        .agents
+        .values()
+        .any(|agent| agent.session.session_id.is_some() && !agent.session.attached_as_viewer)
+    {
+        if restart_for_update {
+            app.restart_for_update = true;
+        }
+        let mut effects = unregister_all_active_sessions(app);
+        effects.push(Effect::Quit);
+        return effects;
+    }
+    if let Some(exit) = app.exit_suspension.as_ref() {
+        if !retry || matches!(&exit.phase, crate::app::root::ExitSuspensionPhase::Pending) {
+            return vec![];
+        }
+    }
+    let exit_id = uuid::Uuid::now_v7().to_string();
+    app.exit_suspension = Some(crate::app::root::ExitSuspension {
+        exit_id: exit_id.clone(),
+        phase: crate::app::root::ExitSuspensionPhase::Pending,
+        restart_for_update,
+        deadline: std::time::Instant::now() + std::time::Duration::from_secs(5),
+    });
+    vec![Effect::SuspendForExit { exit_id }]
 }
 pub(super) fn dispatch_action_result(
     app: &mut AppView,

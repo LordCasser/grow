@@ -31,6 +31,30 @@ impl AgentView {
         ev: &Event,
     ) -> Option<InputOutcome> {
         self.maintain_mode_banner(Instant::now());
+        let retained_plan_review_is_focused = matches!(ev, Event::Key(key)
+            if key.kind != KeyEventKind::Release && key!('r').matches(key))
+            && self.plan_approval_view.is_none()
+            && self.is_plan_viewer()
+            && !self.is_casual_commenting()
+            && self
+                .line_viewer
+                .as_ref()
+                .is_some_and(|viewer| viewer.list_state.input_mode().is_none())
+            && self.plan_artifact_preview.as_ref().is_some_and(|preview| {
+                preview.retained
+                    && preview.binding_epoch == self.session_binding_epoch
+                    && self
+                        .session
+                        .session_id
+                        .as_ref()
+                        .is_some_and(|session_id| preview.session_id == session_id.0.as_ref())
+            });
+        if retained_plan_review_is_focused {
+            // The preview renders this explicit action. Let its local input
+            // route own the key instead of consuming it as a mode-switch
+            // confirmation before the viewer can dispatch Review.
+            return None;
+        }
         let target = self.behavior_switch_target?;
         let confirm = match ev {
             Event::Key(key) if key.kind != KeyEventKind::Release => {
@@ -1925,6 +1949,47 @@ mod background_and_tasks_shortcut_tests {
         assert!(!agent.tasks.overlay.focused);
     }
 }
+#[cfg(test)]
+mod retained_plan_shortcut_tests {
+    use super::test_fixtures::make_agent;
+    use crate::actions::ActionRegistry;
+    use crate::app::actions::Action;
+    use crate::app::root::InputOutcome;
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+
+    #[test]
+    fn retained_plan_review_shortcut_reaches_viewer_during_behavior_confirmation() {
+        let mut agent = make_agent();
+        agent.session.behavior_mode = tools::types::BehaviorId::Plan;
+        agent.session.session_id = Some(acp_transport::protocol::SessionId::new("plan-session"));
+        agent.show_behavior_switch_warning(tools::types::BehaviorId::Normal, 8_000);
+
+        let content = "# retained plan".to_owned();
+        agent
+            .resolve_plan_preview(
+                tools::implementations::grow_build::plan_control::PlanArtifactQueryResponse {
+                    session_id: "plan-session".into(),
+                    submission_id: 1,
+                    retained: true,
+                    artifact_revision: 1,
+                    artifact_hash: blake3::hash(content.as_bytes()).to_hex().to_string(),
+                    plan_content: content,
+                },
+            )
+            .unwrap();
+
+        let outcome = agent.handle_input(
+            &Event::Key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE)),
+            &ActionRegistry::defaults(),
+            &mut Vec::new(),
+        );
+        assert!(matches!(
+            outcome,
+            InputOutcome::Action(Action::ReviewRetainedPlan)
+        ));
+    }
+}
+
 #[cfg(test)]
 mod command_palette_input_default_tests {
     use super::test_fixtures::make_agent;

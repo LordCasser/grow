@@ -1335,6 +1335,9 @@ mod link_click_tests {
             session_id: "test-session".into(),
             tool_call_id: "call-1".into(),
             plan_content: "# Plan\n\nStep one\nStep two".into(),
+            submission_id: 1,
+            artifact_revision: 2,
+            artifact_hash: "a".repeat(64),
         };
         agent.plan_approval_view = Some(
             crate::views::plan_approval_view::PlanApprovalViewState::new(

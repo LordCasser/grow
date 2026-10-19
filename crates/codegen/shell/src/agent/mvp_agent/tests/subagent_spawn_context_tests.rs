@@ -76,6 +76,7 @@ async fn subagent_spawn_context_inherits_parent_permission_handle() {
                             execution_cwd: None,
                             classifier_turns: None,
                             call_evidence: None,
+                            human_interaction: None,
                         },
                     )
                     .await;

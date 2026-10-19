@@ -103,6 +103,8 @@ pub(crate) struct DraftPrompt {
     pub(crate) text: String,
     pub(crate) cursor: usize,
     chips: Vec<DraftChip>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    frozen_skill_selection: Option<crate::app::session::FrozenSkillSelection>,
 }
 
 impl DraftPrompt {
@@ -166,7 +168,28 @@ impl DraftPrompt {
             text: text.to_owned(),
             cursor,
             chips,
+            frozen_skill_selection: None,
         })
+    }
+
+    fn from_parts_with_skill(
+        text: &str,
+        cursor: usize,
+        chips: &[ChipElement],
+        frozen_skill_selection: Option<crate::app::session::FrozenSkillSelection>,
+    ) -> io::Result<Self> {
+        if frozen_skill_selection
+            .as_ref()
+            .is_some_and(|selection| !valid_frozen_skill_selection(selection))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid frozen skill selection",
+            ));
+        }
+        let mut prompt = Self::from_parts(text, cursor, chips)?;
+        prompt.frozen_skill_selection = frozen_skill_selection;
+        Ok(prompt)
     }
 
     fn chip_elements(&self) -> Vec<ChipElement> {
@@ -556,7 +579,9 @@ impl DraftSnapshot {
             cwd: agent.session.cwd.clone(),
             original: capture.clone(),
             capture,
-            can_restore: agent.prompt.text().is_empty() && !agent.prompt.has_local_draft_images(),
+            can_restore: agent.session.in_flight_prompt.is_none()
+                && agent.prompt.text().is_empty()
+                && !agent.prompt.has_local_draft_images(),
             ownership_epoch,
             content_epoch,
             restored: None,
@@ -1724,6 +1749,7 @@ fn capture_agent(agent: &AgentView, revision: u64) -> io::Result<LocalDraftRecor
                 prompt.text.as_str(),
                 prompt.images.as_slice(),
                 prompt.chip_elements.as_slice(),
+                prompt.frozen_skill_selection.as_ref(),
             )
         })
         .or_else(|| {
@@ -1734,6 +1760,7 @@ fn capture_agent(agent: &AgentView, revision: u64) -> io::Result<LocalDraftRecor
                     prompt.text.as_str(),
                     prompt.images.as_slice(),
                     prompt.chip_elements.as_slice(),
+                    None,
                 ))
             })
         });
@@ -1766,14 +1793,21 @@ fn capture_agent(agent: &AgentView, revision: u64) -> io::Result<LocalDraftRecor
     };
     record.composer = record.composer.filter(|p| !p.is_empty());
 
-    if let Some((prompt_id, expected_turn_id, text, images, chips)) = uncertain {
+    if let Some((prompt_id, expected_turn_id, text, images, chips, frozen_skill_selection)) =
+        uncertain
+    {
         if !images.is_empty() {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "uncertain submission contains images outside the local draft budget",
             ));
         }
-        let uncertain_prompt = DraftPrompt::from_parts(text, text.len(), chips)?;
+        let uncertain_prompt = DraftPrompt::from_parts_with_skill(
+            text,
+            text.len(),
+            chips,
+            frozen_skill_selection.cloned(),
+        )?;
         if record
             .composer
             .as_ref()
@@ -1793,8 +1827,13 @@ fn capture_agent(agent: &AgentView, revision: u64) -> io::Result<LocalDraftRecor
     let mut staged = agent.session.pending_prompts.iter().filter(|prompt| {
         prompt.kind == QueueEntryKind::Prompt
             && prompt.prompt_id.is_none()
-            && prompt.wire_blocks.is_none()
-            && !prompt.display_as_skill
+            && ((prompt.wire_blocks.is_none() && !prompt.display_as_skill)
+                || (prompt.display_as_skill
+                    && prompt
+                        .wire_blocks
+                        .as_deref()
+                        .and_then(frozen_skill_selection_from_blocks)
+                        .is_some()))
             && prompt.combined_texts.is_empty()
     });
     if let Some(prompt) = staged.next() {
@@ -1810,10 +1849,15 @@ fn capture_agent(agent: &AgentView, revision: u64) -> io::Result<LocalDraftRecor
                 "staged prompt contains images",
             ));
         }
-        record.staged_prompt = Some(DraftPrompt::from_parts(
+        let selection = prompt
+            .wire_blocks
+            .as_deref()
+            .and_then(frozen_skill_selection_from_blocks);
+        record.staged_prompt = Some(DraftPrompt::from_parts_with_skill(
             &prompt.text,
             prompt.text.len(),
             &prompt.chip_elements,
+            selection,
         )?);
     }
     if record.composer.is_some() && record.staged_prompt.is_some() {
@@ -1842,6 +1886,20 @@ fn normal_stash(agent: &AgentView) -> Option<&StashedPrompt> {
         .or(agent.stashed_prompt.as_ref())
 }
 
+fn frozen_skill_selection_from_blocks(
+    blocks: &[acp_transport::protocol::ContentBlock],
+) -> Option<crate::app::session::FrozenSkillSelection> {
+    blocks.iter().find_map(|block| {
+        let acp_transport::protocol::ContentBlock::Text(text) = block else {
+            return None;
+        };
+        text.meta
+            .as_ref()?
+            .get("grow/skillSelection")
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+    })
+}
+
 fn restore_agent(agent: &mut AgentView, record: &LocalDraftRecord) {
     if !agent.prompt.text().is_empty() || agent.prompt.has_local_draft_images() {
         tracing::warn!("local draft recovery skipped: live composer is not empty");
@@ -1849,10 +1907,9 @@ fn restore_agent(agent: &mut AgentView, record: &LocalDraftRecord) {
     }
     // A staged prompt never crossed ACP. Put it back in the composer rather
     // than recreating the queue, so recovery cannot send by itself.
-    let prompt = record
-        .staged_prompt
-        .as_ref()
-        .or(record.composer.as_ref())
+    let staged_prompt = record.staged_prompt.as_ref();
+    let prompt = staged_prompt
+        .or_else(|| record.composer.as_ref())
         .or_else(|| {
             record
                 .uncertain_submission
@@ -1864,6 +1921,8 @@ fn restore_agent(agent: &mut AgentView, record: &LocalDraftRecord) {
         agent.prompt.restore_chip_elements(&prompt.chip_elements());
         agent.prompt.set_cursor(prompt.cursor);
     }
+    agent.session.staged_skill_selection =
+        staged_prompt.and_then(|staged| staged.frozen_skill_selection.clone());
     if agent.session.deferred_session_mode.is_none() {
         agent.session.deferred_session_mode = record.deferred_session_mode;
     }
@@ -1872,6 +1931,7 @@ fn restore_agent(agent: &mut AgentView, record: &LocalDraftRecord) {
             prompt_id: Some(submission.prompt_id.clone()),
             admission_resolved: None,
             expected_turn_id: submission.expected_turn_id.clone(),
+            frozen_skill_selection: submission.prompt.frozen_skill_selection.clone(),
             text: submission.prompt.text.clone(),
             images: Vec::new(),
             scrollback_entry: crate::scrollback::EntryId::new(0),
@@ -1897,6 +1957,10 @@ fn validate_record(record: &LocalDraftRecord) -> bool {
                     && prompt.text.is_char_boundary(chip.start)
                     && prompt.text.is_char_boundary(chip.end)
             })
+            && prompt
+                .frozen_skill_selection
+                .as_ref()
+                .is_none_or(valid_frozen_skill_selection)
     };
     record.composer.as_ref().is_none_or(valid_prompt)
         && record.staged_prompt.as_ref().is_none_or(valid_prompt)
@@ -1908,6 +1972,17 @@ fn validate_record(record: &LocalDraftRecord) -> bool {
                     && submission.prompt_id.len() <= 1024
                     && valid_prompt(&submission.prompt)
             })
+}
+
+fn valid_frozen_skill_selection(selection: &crate::app::session::FrozenSkillSelection) -> bool {
+    !selection.name.is_empty()
+        && selection.name.len() <= 1024
+        && !selection.path.is_empty()
+        && selection.path.len() <= 16 * 1024
+        && selection
+            .plugin_name
+            .as_ref()
+            .is_none_or(|name| !name.is_empty() && name.len() <= 1024)
 }
 
 fn count_records(root: &Path) -> io::Result<usize> {
@@ -1992,6 +2067,7 @@ mod tests {
                 text: text.into(),
                 cursor: text.len(),
                 chips: Vec::new(),
+                frozen_skill_selection: None,
             }),
             staged_prompt: None,
             uncertain_submission: None,
@@ -2018,6 +2094,7 @@ mod tests {
                     prompt_id: Some(if structured { "blocks" } else { "text" }.into()),
                     admission_resolved: None,
                     expected_turn_id: None,
+                    frozen_skill_selection: None,
                     text: "submitted request".into(),
                     images: Vec::new(),
                     scrollback_entry: crate::scrollback::EntryId::new(1),
@@ -2658,6 +2735,7 @@ mod tests {
             prompt_id: Some("original-prompt-id".into()),
             admission_resolved: None,
             expected_turn_id: Some("original-turn-id".into()),
+            frozen_skill_selection: None,
             text: "submitted once".into(),
             images: Vec::new(),
             scrollback_entry: crate::scrollback::EntryId::new(1),
@@ -2695,6 +2773,55 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn uncertain_skill_submission_restores_frozen_source_with_original_identity() {
+        let mut first = crate::app::root::tests::test_app_with_agent();
+        let agent = first.agents.values_mut().next().unwrap();
+        agent.session.session_id = Some(acp_transport::protocol::SessionId::new("skill-source"));
+        let selection = crate::app::session::FrozenSkillSelection {
+            name: "local:review".into(),
+            path: "/repo/.grow/skills/review/SKILL.md".into(),
+            plugin_name: None,
+        };
+        agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
+            prompt_id: Some("selected-skill-prompt".into()),
+            admission_resolved: None,
+            expected_turn_id: None,
+            frozen_skill_selection: Some(selection.clone()),
+            text: "/local:review inspect".into(),
+            images: Vec::new(),
+            scrollback_entry: crate::scrollback::EntryId::new(1),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+
+        let captured = capture_agent(agent, 1).unwrap();
+        let (root, store) = temp_store();
+        let key = LocalDraftKey::session("skill-source").unwrap();
+        store.write(&key, &captured).unwrap();
+        let restored_record = store.load(&key).unwrap().unwrap();
+        assert_eq!(
+            restored_record
+                .uncertain_submission
+                .as_ref()
+                .and_then(|submission| submission.prompt.frozen_skill_selection.as_ref()),
+            Some(&selection)
+        );
+
+        let mut second = crate::app::root::tests::test_app_with_agent();
+        let agent = second.agents.values_mut().next().unwrap();
+        restore_agent(agent, &restored_record);
+        let restored = agent
+            .session
+            .in_flight_prompt
+            .as_ref()
+            .expect("restored intent retains source identity");
+        assert_eq!(restored.prompt_id.as_deref(), Some("selected-skill-prompt"));
+        assert_eq!(restored.frozen_skill_selection.as_ref(), Some(&selection));
+        assert_eq!(restored.text, "/local:review inspect");
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[tokio::test]
     async fn persisted_uncertain_fifo_retry_reuses_identity_and_late_admission_keeps_edit() {
         let directory = tempfile::tempdir().unwrap();
@@ -2721,6 +2848,7 @@ mod tests {
             prompt_id: Some(prompt_id.into()),
             admission_resolved: None,
             expected_turn_id: None,
+            frozen_skill_selection: None,
             text: original_text.into(),
             images: Vec::new(),
             scrollback_entry: crate::scrollback::EntryId::new(1),
@@ -2852,6 +2980,7 @@ mod tests {
             prompt_id: Some("checkpoint-prompt".into()),
             admission_resolved: None,
             expected_turn_id: Some("checkpoint-turn".into()),
+            frozen_skill_selection: None,
             text: "frozen request".into(),
             images: Vec::new(),
             scrollback_entry: crate::scrollback::EntryId::new(1),
@@ -2977,6 +3106,7 @@ mod tests {
                     prompt_id: Some(if structured { "blocks" } else { "text" }.into()),
                     admission_resolved: None,
                     expected_turn_id: None,
+                    frozen_skill_selection: None,
                     text: "owned by the next RPC".into(),
                     images: Vec::new(),
                     scrollback_entry: crate::scrollback::EntryId::new(1),
@@ -3057,6 +3187,7 @@ mod tests {
             prompt_id: Some("binding-race".into()),
             admission_resolved: None,
             expected_turn_id: None,
+            frozen_skill_selection: None,
             text: "pre-bind draft".into(),
             images: Vec::new(),
             scrollback_entry: crate::scrollback::EntryId::new(1),
@@ -3286,6 +3417,203 @@ mod tests {
         app.checkpoint_local_drafts().await.unwrap();
     }
 
+    #[tokio::test]
+    async fn worker_restores_pending_skill_as_unsent_draft_with_frozen_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("drafts");
+        let session_id = acp_transport::protocol::SessionId::new("staged-skill-restore");
+        let selection = crate::app::session::FrozenSkillSelection {
+            name: "local:review".into(),
+            path: "/repo/.grow/skills/review/SKILL.md".into(),
+            plugin_name: None,
+        };
+        let mut first = crate::app::root::tests::test_app_with_agent();
+        first.local_drafts = LocalDraftRuntime {
+            worker: Some(DraftIoWorker::with_store(LocalDraftStore::new(
+                root.clone(),
+            ))),
+            ..Default::default()
+        };
+        let agent_id = *first.agents.keys().next().unwrap();
+        let agent = first.agents.get_mut(&agent_id).unwrap();
+        agent.session.session_id = Some(session_id.clone());
+        let mut block =
+            acp_transport::protocol::TextContent::new("/local:review inspect".to_owned());
+        block.meta = Some(
+            [(
+                "grow/skillSelection".into(),
+                serde_json::to_value(&selection).unwrap(),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        agent
+            .session
+            .pending_prompts
+            .push_back(crate::app::session::QueuedPrompt {
+                wire_blocks: Some(vec![acp_transport::protocol::ContentBlock::Text(block)]),
+                display_as_skill: true,
+                ..crate::app::session::QueuedPrompt::plain(
+                    1,
+                    "/local:review inspect",
+                    crate::app::session::QueueEntryKind::Prompt,
+                )
+            });
+        first.sync_local_drafts(Instant::now());
+        first.checkpoint_local_drafts().await.unwrap();
+
+        let key = LocalDraftKey::session(&session_id.0).unwrap();
+        let saved = LocalDraftStore::new(root.clone())
+            .load(&key)
+            .unwrap()
+            .expect("pending selected skill must be checkpointed");
+        assert!(saved.uncertain_submission.is_none());
+        assert_eq!(
+            saved
+                .staged_prompt
+                .as_ref()
+                .and_then(|draft| draft.frozen_skill_selection.as_ref()),
+            Some(&selection)
+        );
+
+        let mut restored = crate::app::root::tests::test_app_with_agent();
+        restored.local_drafts = LocalDraftRuntime {
+            worker: Some(DraftIoWorker::with_store(LocalDraftStore::new(root))),
+            ..Default::default()
+        };
+        restored
+            .agents
+            .get_mut(&agent_id)
+            .unwrap()
+            .session
+            .session_id = Some(session_id);
+        restored.sync_local_drafts(Instant::now());
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            restored.local_draft_ready_notify().unwrap().notified(),
+        )
+        .await
+        .unwrap();
+        restored.sync_local_drafts(Instant::now());
+
+        let agent = &restored.agents[&agent_id];
+        assert_eq!(agent.prompt.text(), "/local:review inspect");
+        assert_eq!(
+            agent.session.staged_skill_selection.as_ref(),
+            Some(&selection)
+        );
+        assert!(agent.session.pending_prompts.is_empty());
+        assert!(agent.session.in_flight_prompt.is_none());
+
+        crate::app::root::dispatch::dispatch(
+            crate::app::actions::Action::SendPrompt("/local:review inspect".into()),
+            &mut restored,
+        );
+        let agent = &restored.agents[&agent_id];
+        let sent = agent
+            .session
+            .in_flight_prompt
+            .as_ref()
+            .expect("explicit send drains through normal input path");
+        assert_eq!(sent.frozen_skill_selection.as_ref(), Some(&selection));
+        assert!(
+            sent.prompt_id.is_some(),
+            "explicit send receives a fresh identity"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn session_bind_does_not_restore_staged_cwd_prompt_over_first_send_checkpoint() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("drafts");
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        app.local_drafts = LocalDraftRuntime {
+            worker: Some(DraftIoWorker::with_store(LocalDraftStore::new(
+                root.clone(),
+            ))),
+            ..Default::default()
+        };
+        let agent_id = *app.agents.keys().next().unwrap();
+        app.agents.get_mut(&agent_id).unwrap().session.session_id = None;
+
+        // The user submits before ACP session creation finishes. That first
+        // send is kept in the queue and checkpointed under the cwd identity.
+        assert!(
+            crate::app::root::dispatch::dispatch(
+                crate::app::actions::Action::SendPrompt("first queued request".into()),
+                &mut app,
+            )
+            .is_empty()
+        );
+        assert_eq!(app.agents[&agent_id].session.pending_prompts.len(), 1);
+        let cwd_key = LocalDraftKey::cwd(&app.agents[&agent_id].session.cwd).unwrap();
+        app.sync_local_drafts(Instant::now());
+        app.checkpoint_local_drafts().await.unwrap();
+        let staged = LocalDraftStore::new(root.clone())
+            .load(&cwd_key)
+            .unwrap()
+            .expect("pre-session queued prompt must be checkpointed");
+        assert_eq!(
+            staged
+                .staged_prompt
+                .as_ref()
+                .map(|prompt| prompt.text.as_str()),
+            Some("first queued request")
+        );
+
+        // SessionCreated drains the queued row into in_flight_prompt. The
+        // worker then rekeys the cwd draft to the new session key while
+        // validating this exact send identity.
+        let session_id = acp_transport::protocol::SessionId::new("first-send-session");
+        let effects = crate::app::root::dispatch::dispatch(
+            crate::app::actions::Action::TaskComplete(
+                crate::app::actions::TaskResult::SessionCreated {
+                    agent_id,
+                    session_id: session_id.clone(),
+                    models: None,
+                },
+            ),
+            &mut app,
+        );
+        let (send_agent, send_session, prompt_id, expected_turn_id, fallback) = {
+            let send = effects
+                .iter()
+                .find(|effect| matches!(effect, crate::app::actions::Effect::SendPrompt { .. }))
+                .expect("SessionCreated must produce the drained prompt send");
+            let (send_agent, send_session, prompt_id, route) =
+                send.prompt_rpc_identity().expect("send prompt identity");
+            (
+                send_agent,
+                send_session.clone(),
+                prompt_id.to_owned(),
+                route.map(str::to_owned),
+                send.checkpoint_fallback(),
+            )
+        };
+        assert_eq!(send_agent, agent_id);
+        assert_eq!(send_session, session_id);
+
+        let checkpoint = app
+            .checkpoint_input_intent(send_agent, prompt_id.clone(), expected_turn_id, fallback)
+            .expect("input intent checkpoint must be queued");
+        checkpoint
+            .await
+            .expect("local draft worker must acknowledge checkpoint")
+            .expect("the current in-flight prompt must remain in the draft snapshot");
+
+        let saved = LocalDraftStore::new(root)
+            .load(&LocalDraftKey::session(&session_id.0).unwrap())
+            .unwrap()
+            .expect("session-bound draft must exist");
+        let submitted = saved
+            .uncertain_submission
+            .as_ref()
+            .expect("checkpoint must retain the in-flight identity");
+        assert_eq!(submitted.prompt_id, prompt_id);
+        assert_eq!(submitted.prompt.text, "first queued request");
+        assert!(saved.staged_prompt.is_none());
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn identity_transfer_follows_blocked_write_before_new_draft() {
         let directory = tempfile::tempdir().unwrap();
@@ -3307,6 +3635,7 @@ mod tests {
             prompt_id: Some("ordered-invalidation".into()),
             admission_resolved: None,
             expected_turn_id: None,
+            frozen_skill_selection: None,
             text: "submitted".into(),
             images: Vec::new(),
             scrollback_entry: crate::scrollback::EntryId::new(1),

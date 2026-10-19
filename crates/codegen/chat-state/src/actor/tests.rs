@@ -122,6 +122,7 @@ async fn seed_completed_request(h: &mut TestHarness, id: &str) {
     };
     h.handle
         .record_timeline_event_durably(crate::TimelineEventKind::Turn(crate::TurnEvent::Started {
+            prompt_id: "fixture-prompt".into(),
             id: turn,
             input_ids: Vec::new(),
             identity,
@@ -175,6 +176,7 @@ async fn record_prompt(handle: &crate::handle::ChatStateHandle, text: impl Into<
     let prompt_index = handle.get_prompt_index().await;
     handle.record_timeline_event(crate::TimelineEventKind::Turn(crate::TurnEvent::Started {
         id,
+        prompt_id: format!("test-prompt-{}", id.0),
         input_ids: Vec::new(),
         identity: crate::TurnIdentity {
             origin: "user".into(),
@@ -3846,6 +3848,7 @@ async fn child_result_and_parent_ended_retries_keep_their_canonical_event_once()
                 "artifact:subagent-output:blake3:{}",
                 "b".repeat(64)
             )),
+            planning_summary: None,
         }),
     )
     .await;
@@ -3871,10 +3874,13 @@ async fn child_result_and_parent_ended_retries_keep_their_canonical_event_once()
             crate::SubagentSpawnEvent {
                 subagent_id: "parent-ended-retry".into(),
                 child_session_id: "child-session".into(),
+                origin_tool_call_id: None,
                 security_parent_session_id: "parent-session".into(),
+                parent_step_id: None,
                 subagent_type: "task".into(),
                 description: "finalization test".into(),
                 prompt: "complete the task".into(),
+                execution_recipe: serde_json::json!({}),
                 context_source: crate::SubagentContextSource::New,
                 source_ref: None,
                 context_normalized: false,
@@ -9824,5 +9830,1612 @@ async fn assert_live_tool_image_budget(backend: sampling_types::ApiBackend) {
     assert_eq!(
         images, 5,
         "request projection must preserve original Timeline images"
+    );
+}
+
+async fn request_runtime_suspension(handle: &crate::handle::ChatStateHandle, operation_id: &str) {
+    handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Runtime(
+            crate::session_runtime::SessionRuntimeEvent::SuspendRequested {
+                operation_id: operation_id.into(),
+                root_session_id: "test-session".into(),
+            },
+        ))
+        .await
+        .unwrap();
+}
+
+async fn settle_runtime_commands(handle: &crate::handle::ChatStateHandle, operation_id: &str) {
+    handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Runtime(
+            crate::session_runtime::SessionRuntimeEvent::CommandsSettled {
+                operation_id: operation_id.into(),
+                commands: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+}
+
+async fn root_checkpoint_with_manual_tree_ack()
+-> (TestHarness, crate::session_runtime::RuntimeNodeRef) {
+    // The first three live facts are acknowledged automatically: request,
+    // empty command settlement, and checkpoint. TreeSuspended is the first
+    // write whose durable ACK the caller controls.
+    let h = TestHarness::with_manual_timeline_ack_after(vec![], 3);
+    request_runtime_suspension(&h.handle, "tree-ack-operation").await;
+    settle_runtime_commands(&h.handle, "tree-ack-operation").await;
+    let checkpoint = h
+        .handle
+        .checkpoint_runtime(
+            "tree-ack-operation".into(),
+            "a".repeat(64),
+            None,
+            None,
+            tokio::time::Instant::now() + Duration::from_secs(5),
+        )
+        .await
+        .expect("root checkpoint is durable before the tree barrier");
+    (
+        h,
+        crate::session_runtime::RuntimeNodeRef {
+            session_id: "test-session".into(),
+            checkpoint_seq: checkpoint.seq,
+        },
+    )
+}
+
+fn root_tree_suspended_kind(
+    node: crate::session_runtime::RuntimeNodeRef,
+) -> crate::TimelineEventKind {
+    crate::TimelineEventKind::Runtime(crate::session_runtime::SessionRuntimeEvent::TreeSuspended {
+        operation_id: "tree-ack-operation".into(),
+        nodes: vec![node],
+    })
+}
+
+#[tokio::test]
+async fn root_tree_suspended_lost_ack_retries_one_exact_barrier_fact() {
+    let (mut h, node) = root_checkpoint_with_manual_tree_ack().await;
+    let _ = h.drain_persistence();
+    let handle = h.handle.clone();
+    let kind = root_tree_suspended_kind(node.clone());
+    let write = tokio::spawn(async move { handle.record_timeline_event_durably(kind).await });
+
+    let lost_ack = h
+        .persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("first root tree barrier persistence attempt");
+    drop(lost_ack);
+    let retry_ack = h
+        .persistence_rx
+        .next_timeline_ack()
+        .await
+        .expect("same root tree barrier is retried after the ACK is lost");
+    let pending = h
+        .handle
+        .pending_timeline_commit()
+        .expect("the retry retains the immutable pending event");
+    assert!(matches!(
+        &pending.event.kind,
+        crate::TimelineEventKind::Runtime(
+            crate::session_runtime::SessionRuntimeEvent::TreeSuspended { operation_id, nodes }
+        ) if operation_id == "tree-ack-operation" && nodes == &vec![node.clone()]
+    ));
+    retry_ack.send(Ok(())).unwrap();
+    write.await.unwrap().unwrap();
+
+    let persisted_barriers = h
+        .drain_persistence()
+        .into_iter()
+        .filter_map(|record| match record {
+            PersistenceRecord::Timeline(event)
+                if matches!(
+                    event.kind,
+                    crate::TimelineEventKind::Runtime(
+                        crate::session_runtime::SessionRuntimeEvent::TreeSuspended { .. }
+                    )
+                ) =>
+            {
+                Some(event)
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        persisted_barriers.len(),
+        2,
+        "one ACK-lost attempt and its exact retry"
+    );
+    assert_eq!(
+        serde_json::to_value(&persisted_barriers[0]).unwrap(),
+        serde_json::to_value(&persisted_barriers[1]).unwrap(),
+        "retry must preserve operation, membership, sequence, and event identity"
+    );
+    let duplicate = h
+        .handle
+        .record_timeline_event_durably(root_tree_suspended_kind(node.clone()))
+        .await;
+    assert!(matches!(
+        duplicate,
+        Err(crate::commands::TimelineWriteError::Invalid(
+            crate::TimelineError::InvalidRuntime(_)
+        ))
+    ));
+    let timeline = crate::Timeline::from_events(h.handle.timeline_events().await.unwrap()).unwrap();
+    assert_eq!(timeline.runtime_lifecycle().tree, vec![node]);
+    assert_eq!(
+        timeline
+            .events()
+            .iter()
+            .filter(|event| matches!(
+                event.kind,
+                crate::TimelineEventKind::Runtime(
+                    crate::session_runtime::SessionRuntimeEvent::TreeSuspended { .. }
+                )
+            ))
+            .count(),
+        1,
+        "one logical root tree barrier is accepted"
+    );
+}
+
+#[tokio::test]
+async fn blocked_or_full_tree_barrier_does_not_claim_success_or_replace_writer() {
+    for storage_full in [false, true] {
+        let (mut h, node) = root_checkpoint_with_manual_tree_ack().await;
+        let _ = h.drain_persistence();
+        let kind = root_tree_suspended_kind(node);
+        let handle = h.handle.clone();
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(150);
+        let write = tokio::spawn(async move {
+            handle
+                .record_timeline_event_durably_before(kind, deadline)
+                .await
+        });
+        let ack = h
+            .persistence_rx
+            .next_timeline_ack()
+            .await
+            .expect("root tree barrier reaches the durable writer");
+        let competing_handle = h.handle.clone();
+        let competing = tokio::spawn(async move {
+            competing_handle
+                .record_timeline_event_durably(crate::TimelineEventKind::Observation(
+                    crate::ObservationEvent {
+                        scope: "test".into(),
+                        name: "must_not_steal_writer".into(),
+                        turn: None,
+                        step: None,
+                        data: None,
+                    },
+                ))
+                .await
+        });
+        let blocked_ack = if storage_full {
+            ack.send(Err(std::io::Error::new(
+                std::io::ErrorKind::StorageFull,
+                "tree barrier storage full",
+            )))
+            .unwrap();
+            None
+        } else {
+            Some(ack)
+        };
+        let result = tokio::time::timeout(Duration::from_secs(2), write)
+            .await
+            .expect("tree barrier resolves within its bounded persistence deadline")
+            .unwrap();
+        if storage_full {
+            assert!(matches!(
+                result,
+                Err(crate::commands::TimelineWriteError::Persistence(ref error))
+                    if error.kind() == std::io::ErrorKind::StorageFull
+            ));
+        } else {
+            assert!(matches!(
+                result,
+                Err(crate::commands::TimelineWriteError::DeadlineExceeded)
+            ));
+            drop(blocked_ack);
+        }
+        let pending = h
+            .handle
+            .pending_timeline_commit()
+            .expect("failed barrier retains its original pending commit");
+        assert!(matches!(
+            pending.event.kind,
+            crate::TimelineEventKind::Runtime(
+                crate::session_runtime::SessionRuntimeEvent::TreeSuspended { .. }
+            )
+        ));
+        assert_eq!(
+            pending.error_kind,
+            storage_full.then_some(std::io::ErrorKind::StorageFull)
+        );
+        assert_eq!(pending.acknowledgement_lost, !storage_full);
+        assert!(matches!(
+            tokio::time::timeout(Duration::from_secs(1), competing)
+                .await
+                .expect("poisoned writer closes instead of taking a queued write")
+                .unwrap(),
+            Err(crate::commands::TimelineWriteError::AcknowledgementLost)
+        ));
+        assert!(
+            h.handle.is_closed(),
+            "a failed writer epoch cannot admit a replacement write"
+        );
+        assert!(
+            h.persistence_rx.drain().iter().all(|record| match record {
+                PersistenceRecord::Timeline(event) => matches!(
+                    event.kind,
+                    crate::TimelineEventKind::Runtime(
+                        crate::session_runtime::SessionRuntimeEvent::TreeSuspended { .. }
+                    )
+                ),
+                PersistenceRecord::Flush => true,
+            }),
+            "the queued observation must never reach persistence"
+        );
+    }
+}
+
+async fn suspended_open_turn_events() -> (Vec<crate::TimelineEvent>, crate::TurnId) {
+    let h = TestHarness::new();
+    let turn = crate::TurnId(990);
+    let step = crate::StepId { turn, index: 0 };
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Turn(crate::TurnEvent::Started {
+            prompt_id: "cold-runtime-prompt".into(),
+            id: turn,
+            input_ids: Vec::new(),
+            identity: test_turn_identity(),
+            model_id: "test-model".into(),
+            input_message_count: 0,
+            prompt_index: 0,
+            prompt_text: "original in-flight turn".into(),
+            input_kind: crate::TurnInputKind::Prompt,
+            redirect_kind: None,
+        }))
+        .await
+        .unwrap();
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Step(crate::StepEvent::Started {
+            id: step,
+        }))
+        .await
+        .unwrap();
+    request_runtime_suspension(&h.handle, "cold-prefix-operation").await;
+    settle_runtime_commands(&h.handle, "cold-prefix-operation").await;
+    let continuation = crate::session_runtime::TurnContinuation {
+        turn_id: turn,
+        prompt_id: "cold-runtime-prompt".into(),
+        prompt_index: 0,
+        origin: "user".into(),
+        next_step_index: 1,
+        tool_turns_used: 0,
+        tool_calls_used: 0,
+        stop_continuations_used: 0,
+        output_schema: None,
+        resume_point: crate::session_runtime::TurnResumePoint::Model,
+        task_output_usage: None,
+        accepted_response: None,
+        structured_output_retries: 0,
+        sampling_attempts_used: 0,
+        sampling_max_attempts: Some(3),
+        sampling_replay_safe: true,
+        sampling_deadline_ms: None,
+        operations: Vec::new(),
+    };
+    let checkpoint = h
+        .handle
+        .checkpoint_runtime(
+            "cold-prefix-operation".into(),
+            "b".repeat(64),
+            Some(continuation),
+            Some(step),
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Runtime(
+            crate::session_runtime::SessionRuntimeEvent::TreeSuspended {
+                operation_id: "cold-prefix-operation".into(),
+                nodes: vec![crate::session_runtime::RuntimeNodeRef {
+                    session_id: "test-session".into(),
+                    checkpoint_seq: checkpoint.seq,
+                }],
+            },
+        ))
+        .await
+        .unwrap();
+    (h.handle.timeline_events().await.unwrap(), turn)
+}
+
+async fn cold_actor_from_events(
+    events: Vec<crate::TimelineEvent>,
+) -> (crate::handle::ChatStateHandle, MockPersistenceReceiver) {
+    let (persistence, persistence_rx) = MockTimelinePersistence::new();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let handle = ChatStateActor::spawn_from_timeline(
+        events,
+        test_config(),
+        Box::new(persistence),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .expect("cold load accepts the validated Timeline prefix");
+    (handle, persistence_rx)
+}
+
+fn assert_original_turn_is_preserved(events: &[crate::TimelineEvent], turn: crate::TurnId) {
+    let timeline = crate::Timeline::from_events(events.to_vec()).unwrap();
+    assert_eq!(timeline.active_turn(), Some(turn));
+    assert_eq!(
+        events
+            .iter()
+            .filter(|event| matches!(event.kind,
+                crate::TimelineEventKind::Turn(crate::TurnEvent::Started { id, .. }) if id == turn
+            ))
+            .count(),
+        1,
+        "cold restoration must not create a replacement Turn"
+    );
+    assert!(
+        !events.iter().any(|event| matches!(event.kind,
+            crate::TimelineEventKind::Turn(crate::TurnEvent::Ended { id, .. }) if id == turn
+        )),
+        "restore preparation/commit cannot create an interruption terminal before release"
+    );
+}
+
+#[tokio::test]
+async fn runtime_cold_load_prefixes_preserve_turn_until_execution_release() {
+    let (suspended_events, turn) = suspended_open_turn_events().await;
+    let (suspended, _suspended_persistence) = cold_actor_from_events(suspended_events).await;
+    assert_original_turn_is_preserved(&suspended.timeline_events().await.unwrap(), turn);
+    let suspended_state = suspended.runtime_state().await.unwrap();
+    assert_eq!(
+        suspended_state.phase,
+        crate::session_runtime::RuntimePhase::Suspended
+    );
+    let original_checkpoint = suspended_state
+        .checkpoint
+        .clone()
+        .expect("suspended prefix retains its checkpoint");
+    assert!(
+        suspended
+            .recover_interrupted_durably()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let prepared_event = suspended
+        .record_timeline_event_durably(crate::TimelineEventKind::Runtime(
+            crate::session_runtime::SessionRuntimeEvent::RestorePrepared {
+                operation_id: "cold-prefix-operation".into(),
+                instance_id: "restore-instance".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    let prepared_events = suspended.timeline_events().await.unwrap();
+    assert!(matches!(
+        prepared_event.kind,
+        crate::TimelineEventKind::Runtime(
+            crate::session_runtime::SessionRuntimeEvent::RestorePrepared { .. }
+        )
+    ));
+    drop(suspended);
+
+    let (prepared, _prepared_persistence) = cold_actor_from_events(prepared_events).await;
+    let prepared_state = prepared.runtime_state().await.unwrap();
+    assert_eq!(
+        prepared_state.phase,
+        crate::session_runtime::RuntimePhase::Restoring
+    );
+    assert!(!prepared_state.resume_committed);
+    assert_eq!(prepared_state.checkpoint, Some(original_checkpoint.clone()));
+    assert_original_turn_is_preserved(&prepared.timeline_events().await.unwrap(), turn);
+    assert!(
+        prepared
+            .recover_interrupted_durably()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    prepared
+        .record_timeline_event_durably(crate::TimelineEventKind::Runtime(
+            crate::session_runtime::SessionRuntimeEvent::Resumed {
+                operation_id: "cold-prefix-operation".into(),
+                instance_id: "restore-instance".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    let resumed_events = prepared.timeline_events().await.unwrap();
+    drop(prepared);
+
+    let (resumed, _resumed_persistence) = cold_actor_from_events(resumed_events).await;
+    let resumed_state = resumed.runtime_state().await.unwrap();
+    assert_eq!(
+        resumed_state.phase,
+        crate::session_runtime::RuntimePhase::Restoring
+    );
+    assert!(resumed_state.resume_committed);
+    assert_eq!(resumed_state.checkpoint, Some(original_checkpoint.clone()));
+    assert_original_turn_is_preserved(&resumed.timeline_events().await.unwrap(), turn);
+    assert!(
+        resumed
+            .recover_interrupted_durably()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    resumed
+        .record_timeline_event_durably(crate::TimelineEventKind::Runtime(
+            crate::session_runtime::SessionRuntimeEvent::ExecutionReleased {
+                operation_id: "cold-prefix-operation".into(),
+                instance_id: "restore-instance".into(),
+            },
+        ))
+        .await
+        .unwrap();
+    let released_events = resumed.timeline_events().await.unwrap();
+    drop(resumed);
+
+    let (released, _released_persistence) = cold_actor_from_events(released_events).await;
+    let released_state = released.runtime_state().await.unwrap();
+    assert_eq!(
+        released_state.phase,
+        crate::session_runtime::RuntimePhase::Running
+    );
+    assert_eq!(
+        released_state.checkpoint,
+        Some(original_checkpoint),
+        "checkpoint remains audit history"
+    );
+    assert_eq!(
+        released
+            .timeline_events()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|event| matches!(
+                &event.kind,
+                crate::TimelineEventKind::Turn(crate::TurnEvent::Ended { id, outcome, .. })
+                    if *id == turn && outcome == "interrupted"
+            ))
+            .count(),
+        1,
+        "after release, a cold crash follows ordinary interruption recovery"
+    );
+    assert_eq!(
+        released.runtime_state().await.unwrap().phase,
+        crate::session_runtime::RuntimePhase::Running
+    );
+}
+
+fn test_turn_identity() -> crate::TurnIdentity {
+    crate::TurnIdentity {
+        origin: "user".into(),
+        turn_kind: "internal".into(),
+        goal_id: None,
+        goal_definition_revision: None,
+        stage_id: None,
+    }
+}
+
+async fn seed_admitted_prompt_for_turn(
+    handle: &crate::handle::ChatStateHandle,
+    input_id: &str,
+    turn: crate::TurnId,
+) {
+    handle
+        .submit_input_durably(
+            input_id.into(),
+            crate::InputIntent::Prompt,
+            crate::InputPayloadRef {
+                blake3: blake3::hash(input_id.as_bytes()).to_hex().to_string(),
+                bytes: input_id.len() as u64,
+            },
+        )
+        .await
+        .unwrap();
+    let hook_occurrence_id = format!("hook-{input_id}");
+    handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Hook(
+            crate::HookEvent::Triggered {
+                occurrence_id: hook_occurrence_id.clone(),
+                event: crate::HookEventType::UserPromptSubmit,
+                gate: crate::HookGateKind::Prompt,
+                cause: crate::HookCause::Input {
+                    input_id: input_id.into(),
+                },
+                config_generation: 1,
+                handlers: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+    handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Hook(
+            crate::HookEvent::Completed {
+                occurrence_id: hook_occurrence_id,
+                decision: crate::HookAggregateDecision::Prompt {
+                    decision: crate::HookGateDecision::Allow,
+                },
+            },
+        ))
+        .await
+        .unwrap();
+    handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Input(
+            crate::InputEvent::AdmissionResolved {
+                input_id: input_id.into(),
+                decision: crate::InputAdmissionDecision::Allow,
+                route: Some(crate::InputRoute::Fifo),
+                supersedes: Vec::new(),
+            },
+        ))
+        .await
+        .unwrap();
+    let mut identity = test_turn_identity();
+    identity.turn_kind = "user".into();
+    handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Turn(crate::TurnEvent::Started {
+            prompt_id: "fixture-prompt".into(),
+            id: turn,
+            input_ids: vec![input_id.into()],
+            identity,
+            model_id: "test-model".into(),
+            input_message_count: handle.get_conversation_len().await,
+            prompt_index: 0,
+            prompt_text: "skill input".into(),
+            input_kind: crate::TurnInputKind::Prompt,
+            redirect_kind: None,
+        }))
+        .await
+        .unwrap();
+}
+
+async fn seed_admitted_load_skill_call(
+    handle: &crate::handle::ChatStateHandle,
+    turn: crate::TurnId,
+    call_id: &str,
+    arguments: &str,
+) {
+    let step = crate::StepId { turn, index: 0 };
+    let request_id = format!("request-{call_id}");
+    let input_message_count = handle.get_conversation_len().await;
+    let prompt_index = handle.get_prompt_index().await;
+    handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Turn(crate::TurnEvent::Started {
+            prompt_id: "fixture-prompt".into(),
+            id: turn,
+            input_ids: Vec::new(),
+            identity: test_turn_identity(),
+            model_id: "test-model".into(),
+            input_message_count,
+            prompt_index,
+            prompt_text: "model load_skill call".into(),
+            input_kind: crate::TurnInputKind::Prompt,
+            redirect_kind: None,
+        }))
+        .await
+        .unwrap();
+    handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Step(crate::StepEvent::Started {
+            id: step,
+        }))
+        .await
+        .unwrap();
+    handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Request(
+            crate::RequestEvent::Started {
+                id: request_id.clone(),
+                turn,
+                step,
+                model_id: "test-model".into(),
+                input_message_count,
+                tool_count: 1,
+            },
+        ))
+        .await
+        .unwrap();
+    handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Request(
+            crate::RequestEvent::Completed {
+                id: request_id.clone(),
+                duration_ms: 1,
+                time_to_first_token_ms: None,
+                usage: crate::RequestUsage::default(),
+                response_message_count: 1,
+                attempt: 1,
+                provider_terminal: None,
+            },
+        ))
+        .await
+        .unwrap();
+    handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Messages(crate::MessageEvent {
+            cause: crate::MessageCause::Assistant,
+            items: vec![ConversationItem::assistant_tool_calls(vec![
+                sampling_types::ToolCall {
+                    id: call_id.into(),
+                    name: sampling_types::LOAD_SKILL_TOOL_NAME.into(),
+                    arguments: arguments.into(),
+                },
+            ])],
+            surface: crate::SurfaceOp::Append,
+            response_admission: Some(crate::ResponseAdmission {
+                identity: crate::ResponseAdmissionIdentity {
+                    request_id,
+                    attempt: 1,
+                },
+                quarantined_tool_exchanges: 0,
+            }),
+        }))
+        .await
+        .unwrap();
+}
+
+fn user_skill_load(
+    input_id: &str,
+    reference_index: usize,
+    call_id: &str,
+    name: &str,
+    body: &str,
+) -> sampling_types::SkillLoadItem {
+    sampling_types::SkillLoadItem {
+        input_id: input_id.into(),
+        reference_index,
+        call_id: call_id.into(),
+        skill_name: name.into(),
+        source: sampling_types::SkillLoadSource::User,
+        args: String::new(),
+        prepared_body: std::sync::Arc::from(body),
+        prompt_index: Some(0),
+    }
+}
+
+fn user_display_echo(message_id: &str, prompt_index: usize, text: &str) -> crate::UserDisplayEcho {
+    let mut blocks = serde_json::json!([{"type": "text", "text": text}]);
+    blocks.sort_all_objects();
+    crate::UserDisplayEcho {
+        message_id: message_id.into(),
+        prompt_index,
+        block_count: 1,
+        blake3: blake3::hash(&serde_json::to_vec(&blocks).unwrap())
+            .to_hex()
+            .to_string(),
+    }
+}
+
+#[tokio::test]
+async fn checkpoint_runtime_selects_frontier_after_queued_observation() {
+    let h = TestHarness::new();
+    request_runtime_suspension(&h.handle, "suspend-queued-observation").await;
+    settle_runtime_commands(&h.handle, "suspend-queued-observation").await;
+    h.handle
+        .record_timeline_event(crate::TimelineEventKind::Observation(
+            crate::ObservationEvent {
+                scope: "test".into(),
+                name: "queued_before_checkpoint".into(),
+                turn: None,
+                step: None,
+                data: None,
+            },
+        ));
+
+    let checkpoint_event = h
+        .handle
+        .checkpoint_runtime(
+            "suspend-queued-observation".into(),
+            "a".repeat(64),
+            None,
+            None,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    let crate::TimelineEventKind::Runtime(
+        crate::session_runtime::SessionRuntimeEvent::Checkpoint { checkpoint, .. },
+    ) = checkpoint_event.kind
+    else {
+        panic!("checkpoint command must commit a runtime checkpoint");
+    };
+    assert_eq!(checkpoint.frontier.get() + 1, checkpoint_event.seq.get());
+    let events = h.handle.timeline_events().await.unwrap();
+    assert!(matches!(
+        events
+            .get(checkpoint.frontier.get() as usize)
+            .map(|event| &event.kind),
+        Some(crate::TimelineEventKind::Observation(observation))
+            if observation.name == "queued_before_checkpoint"
+    ));
+}
+
+#[tokio::test]
+async fn suspension_hook_settlement_preserves_turn_input_and_unknown_outcome() {
+    let h = TestHarness::new();
+    let turn = crate::TurnId(952);
+    let input_id = "suspension-hook-input";
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Turn(crate::TurnEvent::Started {
+            prompt_id: "suspension-hook-prompt".into(),
+            id: turn,
+            input_ids: Vec::new(),
+            identity: test_turn_identity(),
+            model_id: "test-model".into(),
+            input_message_count: 0,
+            prompt_index: 0,
+            prompt_text: "ongoing turn".into(),
+            input_kind: crate::TurnInputKind::Prompt,
+            redirect_kind: None,
+        }))
+        .await
+        .unwrap();
+    h.handle
+        .submit_input_durably(
+            input_id.into(),
+            crate::InputIntent::Prompt,
+            crate::InputPayloadRef {
+                blake3: blake3::hash(input_id.as_bytes()).to_hex().to_string(),
+                bytes: input_id.len() as u64,
+            },
+        )
+        .await
+        .unwrap();
+    let occurrence_id = "suspension-hook-occurrence";
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Hook(
+            crate::HookEvent::Triggered {
+                occurrence_id: occurrence_id.into(),
+                event: crate::HookEventType::UserPromptSubmit,
+                gate: crate::HookGateKind::Prompt,
+                cause: crate::HookCause::Input {
+                    input_id: input_id.into(),
+                },
+                config_generation: 1,
+                handlers: vec![crate::HookHandlerPlan {
+                    index: 0,
+                    run_id: "suspension-hook-run".into(),
+                    name: "prompt hook".into(),
+                    provenance: crate::HookHandlerProvenance::UserConfig,
+                    kind: crate::HookHandlerKind::Command,
+                    failure_policy: crate::HookFailurePolicy::Allow,
+                    action: crate::HookHandlerPlanAction::Execute,
+                }],
+            },
+        ))
+        .await
+        .unwrap();
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Hook(
+            crate::HookEvent::RunStarted {
+                occurrence_id: occurrence_id.into(),
+                run_id: "suspension-hook-run".into(),
+                handler_index: 0,
+            },
+        ))
+        .await
+        .unwrap();
+    request_runtime_suspension(&h.handle, "suspend-hook-operation").await;
+    settle_runtime_commands(&h.handle, "suspend-hook-operation").await;
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    let settled = h
+        .handle
+        .settle_hooks_for_suspension("suspend-hook-operation".into(), deadline)
+        .await
+        .unwrap();
+    assert!(settled.iter().any(|event| matches!(
+        &event.kind,
+        crate::TimelineEventKind::Hook(crate::HookEvent::RunFinished {
+            outcome: crate::HookRunOutcome::InterruptedOutcomeUnknown,
+            ..
+        })
+    )));
+    assert!(settled.iter().any(|event| matches!(
+        &event.kind,
+        crate::TimelineEventKind::Hook(crate::HookEvent::Completed { .. })
+    )));
+
+    let events = h.handle.timeline_events().await.unwrap();
+    let timeline = crate::Timeline::from_events(events.clone()).unwrap();
+    assert_eq!(timeline.active_turn(), Some(turn));
+    assert_eq!(
+        timeline.input_state(input_id).unwrap().state,
+        crate::InputState::Submitted
+    );
+    assert!(!events.iter().any(|event| matches!(
+        &event.kind,
+        crate::TimelineEventKind::Turn(crate::TurnEvent::Ended { id, .. }) if *id == turn
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        &event.kind,
+        crate::TimelineEventKind::Input(crate::InputEvent::AdmissionResolved { input_id: id, .. })
+            if id == input_id
+    )));
+    assert!(
+        h.handle
+            .settle_hooks_for_suspension("suspend-hook-operation".into(), deadline)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let continuation = crate::session_runtime::TurnContinuation {
+        turn_id: turn,
+        prompt_id: "suspension-hook-prompt".into(),
+        prompt_index: 0,
+        origin: "user".into(),
+        next_step_index: 0,
+        tool_turns_used: 0,
+        tool_calls_used: 0,
+        stop_continuations_used: 0,
+        output_schema: None,
+        resume_point: crate::session_runtime::TurnResumePoint::Model,
+        task_output_usage: None,
+        accepted_response: None,
+        structured_output_retries: 0,
+        sampling_attempts_used: 0,
+        sampling_max_attempts: Some(3),
+        sampling_replay_safe: true,
+        sampling_deadline_ms: None,
+        operations: Vec::new(),
+    };
+    h.handle
+        .checkpoint_runtime(
+            "suspend-hook-operation".into(),
+            "a".repeat(64),
+            Some(continuation),
+            None,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    assert!(
+        h.handle
+            .recover_interrupted_durably()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let events = h.handle.timeline_events().await.unwrap();
+    let timeline = crate::Timeline::from_events(events.clone()).unwrap();
+    assert_eq!(timeline.active_turn(), Some(turn));
+    assert_eq!(
+        timeline.input_state(input_id).unwrap().state,
+        crate::InputState::Submitted
+    );
+}
+
+#[tokio::test]
+async fn rewind_rejects_an_unfinished_runtime_checkpoint_without_changing_surface() {
+    let h = TestHarness::new();
+    h.handle
+        .push_user_message_durably(ConversationItem::user("retained prompt"))
+        .await
+        .unwrap();
+    request_runtime_suspension(&h.handle, "suspend-rewind-source").await;
+    settle_runtime_commands(&h.handle, "suspend-rewind-source").await;
+    h.handle
+        .checkpoint_runtime(
+            "suspend-rewind-source".into(),
+            "a".repeat(64),
+            None,
+            None,
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+    let before = h.handle.get_conversation().await;
+    let events_before = h.handle.timeline_events().await.unwrap();
+    let result = h.handle.rewind_durably(0).await;
+    assert!(matches!(
+        result,
+        Err(crate::commands::TimelineWriteError::Invalid(
+            crate::TimelineError::InvalidRuntime(_)
+        ))
+    ));
+    assert_eq!(
+        serde_json::to_value(h.handle.get_conversation().await).unwrap(),
+        serde_json::to_value(before).unwrap()
+    );
+    assert_eq!(
+        serde_json::to_value(h.handle.timeline_events().await.unwrap()).unwrap(),
+        serde_json::to_value(events_before).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn checkpoint_runtime_rejects_open_request_without_installing_checkpoint() {
+    let h = TestHarness::new();
+    let turn = crate::TurnId(930);
+    let step = crate::StepId { turn, index: 0 };
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Turn(crate::TurnEvent::Started {
+            prompt_id: "prompt-open-request".into(),
+            id: turn,
+            input_ids: Vec::new(),
+            identity: test_turn_identity(),
+            model_id: "test-model".into(),
+            input_message_count: 0,
+            prompt_index: 0,
+            prompt_text: "open request".into(),
+            input_kind: crate::TurnInputKind::Prompt,
+            redirect_kind: None,
+        }))
+        .await
+        .unwrap();
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Step(crate::StepEvent::Started {
+            id: step,
+        }))
+        .await
+        .unwrap();
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Request(
+            crate::RequestEvent::Started {
+                id: "request-still-open".into(),
+                turn,
+                step,
+                model_id: "test-model".into(),
+                input_message_count: 0,
+                tool_count: 0,
+            },
+        ))
+        .await
+        .unwrap();
+    request_runtime_suspension(&h.handle, "suspend-open-request").await;
+    settle_runtime_commands(&h.handle, "suspend-open-request").await;
+
+    let continuation = crate::session_runtime::TurnContinuation {
+        turn_id: turn,
+        prompt_id: "fixture-prompt".into(),
+        prompt_index: 0,
+        origin: "user".into(),
+        next_step_index: 1,
+        tool_turns_used: 0,
+        tool_calls_used: 0,
+        stop_continuations_used: 0,
+        output_schema: None,
+        resume_point: crate::session_runtime::TurnResumePoint::Model,
+        task_output_usage: None,
+        accepted_response: None,
+        structured_output_retries: 0,
+        sampling_attempts_used: 0,
+        sampling_max_attempts: Some(3),
+        sampling_replay_safe: true,
+        sampling_deadline_ms: None,
+        operations: Vec::new(),
+    };
+    assert!(matches!(
+        h.handle
+            .checkpoint_runtime(
+                "suspend-open-request".into(),
+                "a".repeat(64),
+                Some(continuation),
+                Some(step),
+                tokio::time::Instant::now() + Duration::from_secs(1),
+            )
+            .await,
+        Err(crate::commands::TimelineWriteError::Invalid(
+            crate::TimelineError::InvalidRuntime(_)
+        ))
+    ));
+    let runtime = h.handle.runtime_state().await.unwrap();
+    assert_eq!(
+        runtime.phase,
+        crate::session_runtime::RuntimePhase::Suspending
+    );
+    assert!(runtime.checkpoint.is_none());
+    assert!(
+        h.handle
+            .timeline_events()
+            .await
+            .unwrap()
+            .iter()
+            .all(|event| !matches!(
+                &event.kind,
+                crate::TimelineEventKind::Runtime(
+                    crate::session_runtime::SessionRuntimeEvent::Checkpoint { .. }
+                )
+            ))
+    );
+}
+
+#[tokio::test]
+async fn checkpoint_runtime_preserves_settled_turn_through_interruption_recovery() {
+    let h = TestHarness::new();
+    let turn = crate::TurnId(931);
+    let step = crate::StepId { turn, index: 0 };
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Turn(crate::TurnEvent::Started {
+            prompt_id: "prompt-931".into(),
+            id: turn,
+            input_ids: Vec::new(),
+            identity: test_turn_identity(),
+            model_id: "test-model".into(),
+            input_message_count: 0,
+            prompt_index: 0,
+            prompt_text: "settled turn".into(),
+            input_kind: crate::TurnInputKind::Prompt,
+            redirect_kind: None,
+        }))
+        .await
+        .unwrap();
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Step(crate::StepEvent::Started {
+            id: step,
+        }))
+        .await
+        .unwrap();
+    h.handle
+        .push_response_durably(
+            vec![ConversationItem::assistant_tool_calls(vec![
+                sampling_types::ToolCall {
+                    id: "original-pending-call".into(),
+                    name: "spawn_subagent".into(),
+                    arguments: "{}".into(),
+                },
+            ])],
+            None,
+        )
+        .await
+        .unwrap();
+    request_runtime_suspension(&h.handle, "suspend-settled-turn").await;
+    settle_runtime_commands(&h.handle, "suspend-settled-turn").await;
+    let continuation = crate::session_runtime::TurnContinuation {
+        turn_id: turn,
+        prompt_id: "prompt-931".into(),
+        prompt_index: 0,
+        origin: "user".into(),
+        next_step_index: 1,
+        tool_turns_used: 0,
+        tool_calls_used: 0,
+        stop_continuations_used: 0,
+        output_schema: None,
+        resume_point: crate::session_runtime::TurnResumePoint::Model,
+        task_output_usage: None,
+        accepted_response: None,
+        structured_output_retries: 0,
+        sampling_attempts_used: 0,
+        sampling_max_attempts: Some(3),
+        sampling_replay_safe: true,
+        sampling_deadline_ms: None,
+        operations: Vec::new(),
+    };
+    h.handle
+        .checkpoint_runtime(
+            "suspend-settled-turn".into(),
+            "a".repeat(64),
+            Some(continuation),
+            Some(step),
+            tokio::time::Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+    assert!(
+        h.handle
+            .recover_interrupted_durably()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let runtime = h.handle.runtime_state().await.unwrap();
+    assert_eq!(
+        runtime.phase,
+        crate::session_runtime::RuntimePhase::Suspended
+    );
+    assert_eq!(runtime.checkpoint.unwrap().turn.unwrap().turn_id, turn);
+    let events = h.handle.timeline_events().await.unwrap();
+    assert!(events.iter().any(|event| matches!(
+        &event.kind,
+        crate::TimelineEventKind::Turn(crate::TurnEvent::Started { id, .. }) if *id == turn
+    )));
+    assert!(!events.iter().any(|event| matches!(
+        &event.kind,
+        crate::TimelineEventKind::Turn(crate::TurnEvent::Ended { id, .. }) if *id == turn
+    )));
+
+    let original_surface = h.handle.get_conversation().await;
+    let (persistence, _persistence_rx) = MockTimelinePersistence::new();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let restored = ChatStateActor::spawn_from_timeline(
+        events.clone(),
+        test_config(),
+        Box::new(persistence),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .expect("cold load must preserve the suspended continuation");
+    assert_eq!(
+        serde_json::to_value(restored.get_conversation().await).unwrap(),
+        serde_json::to_value(original_surface).unwrap(),
+        "a suspended unresolved call must not receive an interruption placeholder"
+    );
+    assert_eq!(
+        restored.timeline_events().await.unwrap().len(),
+        events.len()
+    );
+}
+
+#[tokio::test]
+async fn conditional_skill_input_publishes_user_and_ordered_loads_once() {
+    let h = TestHarness::new();
+    let input_id = "input-skills";
+    let turn = crate::TurnId(940);
+    seed_admitted_prompt_for_turn(&h.handle, input_id, turn).await;
+    let mut user = ConversationItem::user("/review fix /format rust");
+    user.set_prompt_index(0);
+    let loads = vec![
+        user_skill_load(input_id, 0, "skill-call-review", "review", "review body"),
+        user_skill_load(input_id, 1, "skill-call-format", "format", "format body"),
+    ];
+    let revision = h.handle.get_surface_revision().await.unwrap();
+
+    let outcome = h
+        .handle
+        .consume_input_group_conditionally(
+            vec![input_id.into()],
+            turn,
+            user.clone(),
+            Some(user_display_echo(input_id, 0, "/review fix /format rust")),
+            loads.clone(),
+            revision,
+            128_000,
+        )
+        .await
+        .unwrap();
+    assert_eq!(outcome, crate::ConditionalToolResultOutcome::Accepted);
+    assert_eq!(
+        serde_json::to_value(h.handle.get_conversation().await).unwrap(),
+        serde_json::to_value(vec![
+            user.clone(),
+            ConversationItem::SkillLoad(loads[0].clone()),
+            ConversationItem::SkillLoad(loads[1].clone()),
+        ])
+        .unwrap()
+    );
+    let events = h.handle.timeline_events().await.unwrap();
+    let consumed = events
+        .iter()
+        .filter_map(|event| match &event.kind {
+            crate::TimelineEventKind::Input(crate::InputEvent::Consumed {
+                input_ids,
+                item,
+                skill_loads,
+                ..
+            }) => Some((input_ids, item, skill_loads)),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(consumed.len(), 1);
+    assert_eq!(consumed[0].0, &[input_id.to_string()]);
+    assert_eq!(
+        serde_json::to_value(consumed[0].1).unwrap(),
+        serde_json::to_value(&user).unwrap()
+    );
+    assert_eq!(consumed[0].2, &loads);
+
+    let revision_after = h.handle.get_surface_revision().await.unwrap();
+    assert!(matches!(
+        h.handle
+            .consume_input_group_conditionally(
+                vec![input_id.into()],
+                turn,
+                user,
+                None,
+                loads,
+                revision_after,
+                128_000,
+            )
+            .await,
+        Err(crate::commands::TimelineWriteError::Invalid(
+            crate::TimelineError::InvalidInput
+        ))
+    ));
+    assert_eq!(
+        h.handle.timeline_events().await.unwrap().len(),
+        events.len()
+    );
+
+    h.handle
+        .settle_unconsumed_skill_loads()
+        .await
+        .unwrap()
+        .expect("terminal settlement removes unconsumed user guidance");
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Turn(crate::TurnEvent::Ended {
+            id: turn,
+            outcome: "completed".into(),
+            duration_ms: 1,
+            tool_count: 0,
+            terminal: crate::TurnTerminal {
+                source: crate::TurnTerminalSource::Host,
+                stop_reason: "end_turn".into(),
+                completion_kind: "completed".into(),
+            },
+            cancellation_category: None,
+            details: None,
+        }))
+        .await
+        .unwrap();
+    let settled_history = h.handle.timeline_events().await.unwrap();
+    let (persistence, _persistence_records) = MockTimelinePersistence::new();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let restored = ChatStateActor::spawn_from_timeline(
+        settled_history.clone(),
+        test_config(),
+        Box::new(persistence),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .expect("settled user skill history cold-restores");
+    let restored_surface = restored.get_conversation().await;
+    assert!(
+        restored_surface
+            .iter()
+            .all(|item| !matches!(item, ConversationItem::SkillLoad(_)))
+    );
+    assert!(
+        restored_surface
+            .iter()
+            .all(|item| !item.text_content().contains("review body")
+                && !item.text_content().contains("format body"))
+    );
+    assert!(settled_history.iter().any(|event| matches!(
+        &event.kind,
+        crate::TimelineEventKind::Input(crate::InputEvent::Consumed { skill_loads, .. })
+            if skill_loads.len() == 2
+    )));
+}
+
+#[tokio::test]
+async fn conditional_skill_input_revision_conflict_leaves_admitted_input_unconsumed() {
+    let h = TestHarness::new();
+    let input_id = "input-stale-skills";
+    let turn = crate::TurnId(941);
+    seed_admitted_prompt_for_turn(&h.handle, input_id, turn).await;
+    let mut user = ConversationItem::user("/review check");
+    user.set_prompt_index(0);
+    let loads = vec![user_skill_load(
+        input_id,
+        0,
+        "stale-skill-call",
+        "review",
+        "must not publish",
+    )];
+    let before_revision = h.handle.get_surface_revision().await.unwrap();
+    let before_events = h.handle.timeline_events().await.unwrap();
+
+    let outcome = h
+        .handle
+        .consume_input_group_conditionally(
+            vec![input_id.into()],
+            turn,
+            user,
+            None,
+            loads,
+            before_revision + 1,
+            128_000,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        crate::ConditionalToolResultOutcome::RejectedSurfaceChanged
+    );
+    assert!(h.handle.get_conversation().await.is_empty());
+    let after_events = h.handle.timeline_events().await.unwrap();
+    assert_eq!(after_events.len(), before_events.len());
+    assert!(!after_events.iter().any(|event| matches!(
+        &event.kind,
+        crate::TimelineEventKind::Input(crate::InputEvent::Consumed { input_ids, .. })
+            if input_ids.iter().any(|id| id == input_id)
+    )));
+}
+
+#[tokio::test]
+async fn model_skill_call_mismatch_fails_closed_and_stale_rejection_uses_only_original_id() {
+    let h = TestHarness::new();
+    let call_id = "model-skill-original-call";
+    seed_admitted_load_skill_call(
+        &h.handle,
+        crate::TurnId(942),
+        call_id,
+        r#"{"name":"review","args":"actual args"}"#,
+    )
+    .await;
+    let skill = sampling_types::SkillLoadItem {
+        input_id: format!("model:{call_id}"),
+        reference_index: 0,
+        call_id: call_id.into(),
+        skill_name: "review".into(),
+        source: sampling_types::SkillLoadSource::Model,
+        args: "mismatched args".into(),
+        prepared_body: std::sync::Arc::from("must not publish"),
+        prompt_index: Some(0),
+    };
+    let prepared_result =
+        ConversationItem::tool_result(call_id, sampling_types::skill_load_result_content(&skill));
+    let rejection = ConversationItem::tool_result(call_id, "Skill was not loaded: call mismatch");
+    let revision = h.handle.get_surface_revision().await.unwrap();
+    let before_events = h.handle.timeline_events().await.unwrap();
+
+    assert!(matches!(
+        h.handle
+            .publish_model_skill_conditionally(
+                prepared_result.clone(),
+                skill.clone(),
+                rejection.clone(),
+                revision,
+                128_000,
+                2_048,
+            )
+            .await,
+        Err(crate::commands::TimelineWriteError::Invalid(
+            crate::TimelineError::InvalidModelSkillLoad
+        ))
+    ));
+    assert_eq!(
+        h.handle.timeline_events().await.unwrap().len(),
+        before_events.len()
+    );
+
+    // The stale-revision branch publishes the caller's fallback result but
+    // must keep it tied to the original model call identity.
+    let outcome = h
+        .handle
+        .publish_model_skill_conditionally(
+            prepared_result,
+            skill,
+            rejection,
+            revision + 1,
+            128_000,
+            2_048,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        outcome,
+        crate::ConditionalToolResultOutcome::RejectedSurfaceChanged
+    );
+    let surface = h.handle.get_conversation().await;
+    let results = surface
+        .iter()
+        .filter_map(|item| match item {
+            ConversationItem::ToolResult(result) => Some(result),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].tool_call_id, call_id);
+    assert_eq!(
+        results[0].content.as_ref(),
+        "Skill was not loaded: call mismatch"
+    );
+    assert!(
+        !surface
+            .iter()
+            .any(|item| matches!(item, ConversationItem::SkillLoad(_)))
+    );
+}
+
+#[tokio::test]
+async fn unconsumed_model_skill_is_pinned_then_settled_once_without_branch_revival() {
+    let h = TestHarness::with_conversation(vec![ConversationItem::system("system")]);
+    let call_id = "settled-skill-call";
+    let args = r#"{"name":"review","args":"focus"}"#;
+    seed_admitted_load_skill_call(&h.handle, crate::TurnId(943), call_id, args).await;
+    let step = crate::StepId {
+        turn: crate::TurnId(943),
+        index: 0,
+    };
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Tool(crate::ToolEvent::Started {
+            call_id: call_id.into(),
+            turn: step.turn,
+            step,
+            name: sampling_types::LOAD_SKILL_TOOL_NAME.into(),
+            input: Some(serde_json::from_str(args).unwrap()),
+        }))
+        .await
+        .unwrap();
+    let skill = sampling_types::SkillLoadItem {
+        input_id: format!("model:{call_id}"),
+        reference_index: 0,
+        call_id: call_id.into(),
+        skill_name: "review".into(),
+        source: sampling_types::SkillLoadSource::Model,
+        args: "focus".into(),
+        prepared_body: std::sync::Arc::from("private unconsumed guidance"),
+        prompt_index: Some(0),
+    };
+    let result =
+        ConversationItem::tool_result(call_id, sampling_types::skill_load_result_content(&skill));
+    let rejection = ConversationItem::tool_result(call_id, "Skill was not loaded");
+    let revision = h.handle.get_surface_revision().await.unwrap();
+    assert_eq!(
+        h.handle
+            .publish_model_skill_conditionally(result, skill, rejection, revision, 128_000, 2_048,)
+            .await
+            .unwrap(),
+        crate::ConditionalToolResultOutcome::Accepted
+    );
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Tool(
+            crate::ToolEvent::Completed {
+                call_id: call_id.into(),
+                name: sampling_types::LOAD_SKILL_TOOL_NAME.into(),
+                outcome: "completed".into(),
+                duration_ms: 1,
+                details: None,
+            },
+        ))
+        .await
+        .unwrap();
+
+    let source_items = h.handle.get_conversation_len().await;
+    let prompt_index = h.handle.get_prompt_index().await;
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Compaction(
+            crate::CompactionEvent::Started {
+                mode: crate::CompactionMode::Foreground,
+                id: "skill-pin".into(),
+                source_items,
+                prompt_index,
+            },
+        ))
+        .await
+        .unwrap();
+    let target = record_compaction_summary(&h.handle, "skill-pin").await;
+    assert!(matches!(
+        h.handle
+            .replace_compaction_range(target, vec![ConversationItem::user_meta("summary")])
+            .await,
+        Err(crate::commands::TimelineWriteError::Invalid(
+            crate::TimelineError::UnconsumedSkillLoadProtected
+        ))
+    ));
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Compaction(
+            crate::CompactionEvent::Failed {
+                id: "skill-pin".into(),
+                duration_ms: 1,
+                error: "unconsumed skill load is pinned".into(),
+            },
+        ))
+        .await
+        .unwrap();
+
+    let turn = step.turn;
+    let settled = h
+        .handle
+        .settle_unconsumed_skill_loads()
+        .await
+        .unwrap()
+        .expect("terminal settlement writes one Surface replacement");
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Step(crate::StepEvent::Ended {
+            id: step,
+            outcome: "completed".into(),
+            duration_ms: 1,
+        }))
+        .await
+        .unwrap();
+    h.handle
+        .record_timeline_event_durably(crate::TimelineEventKind::Turn(crate::TurnEvent::Ended {
+            id: turn,
+            outcome: "completed".into(),
+            duration_ms: 1,
+            tool_count: 1,
+            terminal: crate::TurnTerminal {
+                source: crate::TurnTerminalSource::Host,
+                stop_reason: "end_turn".into(),
+                completion_kind: "completed".into(),
+            },
+            cancellation_category: None,
+            details: None,
+        }))
+        .await
+        .unwrap();
+    assert!(matches!(
+        settled.kind,
+        crate::TimelineEventKind::Messages(crate::MessageEvent {
+            cause: crate::MessageCause::SkillLoadSettlement,
+            ..
+        })
+    ));
+    assert!(
+        h.handle
+            .settle_unconsumed_skill_loads()
+            .await
+            .unwrap()
+            .is_none()
+    );
+    let surface = h.handle.get_conversation().await;
+    assert!(
+        !surface
+            .iter()
+            .any(|item| matches!(item, ConversationItem::SkillLoad(_)))
+    );
+    let failure_result = surface.iter().find_map(|item| match item {
+        ConversationItem::ToolResult(result) if result.tool_call_id == call_id => Some(result),
+        _ => None,
+    });
+    assert_eq!(
+        failure_result.map(|result| result.content.as_ref()),
+        Some("Loaded skill content was not consumed before execution ended")
+    );
+    let branch = h
+        .handle
+        .materialize_branch_transcript("test-timeline".into())
+        .await
+        .unwrap();
+    assert!(branch.transcript.iter().all(|item| {
+        !matches!(item, ConversationItem::SkillLoad(_))
+            && item.text_content() != "private unconsumed guidance"
+    }));
+    let history = h.handle.timeline_events().await.unwrap();
+    assert!(history.iter().any(|event| matches!(
+        &event.kind,
+        crate::TimelineEventKind::Messages(crate::MessageEvent {
+            cause: crate::MessageCause::SkillLoadModel,
+            ..
+        })
+    )));
+    assert!(history.iter().any(|event| matches!(
+        &event.kind,
+        crate::TimelineEventKind::Messages(crate::MessageEvent {
+            cause: crate::MessageCause::SkillLoadSettlement,
+            ..
+        })
+    )));
+
+    let (persistence, _persistence_records) = MockTimelinePersistence::new();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let restored = ChatStateActor::spawn_from_timeline(
+        history,
+        test_config(),
+        Box::new(persistence),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .expect("cold restore should preserve settlement without reviving the skill");
+    let restored_surface = restored.get_conversation().await;
+    assert!(
+        restored_surface
+            .iter()
+            .all(|item| !matches!(item, ConversationItem::SkillLoad(_)))
+    );
+    assert!(
+        restored_surface
+            .iter()
+            .all(|item| item.text_content() != "private unconsumed guidance")
+    );
+    assert_eq!(
+        restored_surface
+            .iter()
+            .filter_map(|item| match item {
+                ConversationItem::ToolResult(result) if result.tool_call_id == call_id => {
+                    Some(result.content.as_ref())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>(),
+        vec!["Loaded skill content was not consumed before execution ended"]
     );
 }

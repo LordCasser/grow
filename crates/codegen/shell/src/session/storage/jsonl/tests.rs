@@ -81,6 +81,100 @@ async fn shared_read_session_resolution_stays_out_of_the_writer_cache() {
 }
 
 #[tokio::test]
+async fn read_only_admission_does_not_create_reclaim_metadata() {
+    let root = TempDir::new().unwrap();
+    let info = create_test_info();
+    let creator = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    creator.init_session(&info, default_model_id()).await.unwrap();
+    drop(creator);
+
+    let sessions = root.path().join("sessions");
+    let intents = sessions.join(RECLAIM_INTENT_DIRECTORY);
+    if intents.exists() {
+        std::fs::remove_dir_all(intents).unwrap();
+    }
+    let gate_path = sessions.join(RECLAIM_GATE_FILE);
+    if gate_path.exists() {
+        std::fs::remove_file(gate_path).unwrap();
+    }
+    let snapshot = || {
+        fn visit(root: &std::path::Path, path: &std::path::Path, entries: &mut Vec<String>) {
+            for entry in std::fs::read_dir(path).unwrap() {
+                let entry = entry.unwrap();
+                let path = entry.path();
+                entries.push(path.strip_prefix(root).unwrap().display().to_string());
+                if path.is_dir() {
+                    visit(root, &path, entries);
+                }
+            }
+        }
+        let mut entries = Vec::new();
+        visit(root.path(), root.path(), &mut entries);
+        entries.sort();
+        entries
+    };
+    let before = snapshot();
+    let observer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    observer.open_session(&info).unwrap();
+    observer.open_session_by_id_shared_read(info.id.0.as_ref()).unwrap();
+    assert_eq!(snapshot(), before, "read-only opens must not create reclaim files or directories");
+    assert!(!sessions.join(RECLAIM_INTENT_DIRECTORY).exists());
+    assert!(!sessions.join(RECLAIM_GATE_FILE).exists());
+}
+
+#[tokio::test]
+async fn unrelated_writer_admission_survives_a_busy_reclaim_decision_gate() {
+    let root = TempDir::new().unwrap();
+    let stale = Info {
+        id: acp::SessionId::new("cleanup-race-stale"),
+        cwd: "/cleanup/stale".into(),
+    };
+    let unrelated = Info {
+        id: acp::SessionId::new("cleanup-race-unrelated"),
+        cwd: "/cleanup/unrelated".into(),
+    };
+    let creator = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    for info in [&stale, &unrelated] {
+        creator.init_session(info, default_model_id()).await.unwrap();
+    }
+    drop(creator);
+    let maintenance = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let gate = maintenance
+        .acquire_reclaim_gate()
+        .unwrap()
+        .expect("maintenance owns the global decision gate");
+
+    let cleanup_root = root.path().to_path_buf();
+    let cleanup = std::thread::spawn(move || {
+        JsonlStorageAdapter::with_root(cleanup_root)
+            .cleanup_stale_sessions_sync(30, None, |_| {})
+    });
+    let counts = cleanup
+        .join()
+        .unwrap()
+        .expect("cleanup without a committed intent does not need the decision gate");
+    assert_eq!(counts, (0, 0));
+
+    let contender = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    assert_eq!(
+        contender.acquire_reclaim_gate().err().unwrap().kind(),
+        std::io::ErrorKind::WouldBlock,
+        "the mutation gate remains held while ordinary admission proceeds"
+    );
+
+    let reader = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let opened = reader.open_session(&unrelated).unwrap();
+    assert_eq!(
+        opened.summary().info.id.0.as_ref(),
+        unrelated.id.0.as_ref()
+    );
+    drop(opened);
+    let contender = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    assert!(contender.try_acquire_writer_lease(&unrelated).unwrap());
+    drop(gate);
+}
+
+#[tokio::test]
 async fn bounded_shared_read_resolution_fails_closed_at_the_cwd_scan_limit() {
     let root = TempDir::new().unwrap();
     let sessions = root.path().join("sessions");
@@ -232,8 +326,8 @@ async fn write_load_claims_the_session_lease_before_timeline_replay() {
         .load_session_for_write_without_updates(&info)
         .await
         .expect_err("a second writer must fail before replaying Timeline");
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
-    assert!(error.to_string().contains("already has an active writer"));
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    assert!(error.to_string().contains("is being written"));
 
     drop(owner);
     contender
@@ -241,6 +335,114 @@ async fn write_load_claims_the_session_lease_before_timeline_replay() {
         .await
         .expect("the writer lease must be released with its adapter");
 }
+
+#[tokio::test]
+async fn cold_writer_load_seeds_from_full_physical_update_snapshot() {
+    let root = TempDir::new().unwrap();
+    let info = create_test_info();
+    let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    writer.init_session(&info, default_model_id()).await.unwrap();
+
+    // These rows are physical history even if a client reconnect cursor or
+    // rewind projection does not display them. A cold writer load (including
+    // noReplay callers) must retain their identity bound.
+    for (method, params) in [
+        (
+            "session/update",
+            serde_json::json!({
+                "sessionId": info.id,
+                "update": {"sessionUpdate":"agent_message_chunk", "content":{"type":"text", "text":"old"}},
+                "_meta":{"eventId":"test-session-123-9000000000"}
+            }),
+        ),
+        (
+            "_grow/session/update",
+            serde_json::json!({
+                "sessionId": info.id,
+                "update": {
+                    "sessionUpdate":"ui_notice", "correlationId":"notice-1",
+                    "category":"lifecycle", "message":"old notice", "tone":"info"
+                },
+                "_meta":{"eventId":"test-session-123-9000000042"}
+            }),
+        ),
+    ] {
+        let update = SessionUpdateEnvelope {
+            timestamp: 1,
+            method: method.into(),
+            params,
+        }
+        .into_update()
+        .unwrap();
+        writer
+            .append_update_durable_commit_aware(&info, &update)
+            .await
+            .unwrap();
+    }
+
+    let hidden = SessionUpdateEnvelope {
+        timestamp: 2,
+        method: "session/update".into(),
+        params: serde_json::json!({
+            "sessionId": info.id,
+            "update": {"sessionUpdate":"user_message_chunk", "content":{"type":"text", "text":"rewound"}},
+            "_meta":{"eventId":"test-session-123-9000000999"}
+        }),
+    }
+    .into_update()
+    .unwrap();
+    writer
+        .append_update_durable_commit_aware(&info, &hidden)
+        .await
+        .unwrap();
+    let rewind = SessionUpdateEnvelope {
+        timestamp: 3,
+        method: "_grow/session/update".into(),
+        params: serde_json::json!({
+            "sessionId": info.id,
+            "update": {"sessionUpdate":"rewind_marker", "target_prompt_index":0, "created_at":"2026-10-19"}
+        }),
+    }
+    .into_update()
+    .unwrap();
+    writer
+        .append_update_durable_commit_aware(&info, &rewind)
+        .await
+        .unwrap();
+
+    let physical = std::fs::read_to_string(writer.updates_file(&info)).unwrap();
+    let displayed = crate::session::storage::filter_rewind_lines(
+        physical.lines().filter(|line| !line.trim().is_empty()).collect(),
+    );
+    assert!(
+        !displayed.iter().any(|line| line.contains("9000000999")),
+        "the high identity row is physically retained but hidden by rewind"
+    );
+
+    writer
+        .load_session_for_write_without_updates(&info)
+        .await
+        .unwrap();
+    let next = crate::util::event_id::generate_event_id(info.id.0.as_ref());
+    let next_suffix = next.rsplit('-').next().unwrap().parse::<u64>().unwrap();
+    assert!(next_suffix > 9_000_000_999, "generated {next}");
+    let new_update = SessionUpdateEnvelope {
+        timestamp: 4,
+        method: "session/update".into(),
+        params: serde_json::json!({
+            "sessionId": info.id,
+            "update": {"sessionUpdate":"agent_message_chunk", "content":{"type":"text", "text":"new response"}},
+            "_meta":{"eventId":next}
+        }),
+    }
+    .into_update()
+    .unwrap();
+    writer
+        .append_update_durable_commit_aware(&info, &new_update)
+        .await
+        .expect("the cold-loaded writer must persist a fresh event without identity conflict");
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn session_init_rejects_symlinked_sessions_root() {
@@ -570,6 +772,8 @@ fn response_projection_production_timeline_with_items(
     let step = chat_state::StepId { turn, index: 0 };
     for kind in [
         chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started {
+
+            prompt_id: "fixture-prompt".into(),
             id: turn,
             input_ids: Vec::new(),
             identity: chat_state::TurnIdentity {
@@ -1144,6 +1348,8 @@ async fn append_completed_prompt_turn(
     let turn = chat_state::TurnId(id);
     let started = timeline
         .record(chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started {
+
+            prompt_id: "fixture-prompt".into(),
             id: turn,
             input_ids: Vec::new(),
             identity: chat_state::TurnIdentity {
@@ -1321,7 +1527,8 @@ async fn prepared_session_atomically_publishes_the_exact_prompt_blob_set() {
         )
         .await
         .unwrap_err();
-    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+    assert!(error.to_string().contains("is being written"));
     assert!(!missing_target.exists());
     assert!(
         std::fs::read_dir(temp_dir.path())
@@ -1758,6 +1965,8 @@ async fn strict_reload_accepts_sideband_selected_consumed_input() {
     })).unwrap();
     let turn = chat_state::TurnId(1);
     timeline.record(chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started {
+
+        prompt_id: "fixture-prompt".into(),
         id: turn,
         input_ids: vec![input_id.into()],
         identity: chat_state::TurnIdentity {
@@ -1775,9 +1984,11 @@ async fn strict_reload_accepts_sideband_selected_consumed_input() {
         redirect_kind: None,
     })).unwrap();
     timeline.record(chat_state::TimelineEventKind::Input(chat_state::InputEvent::Consumed {
+        display_echo: None,
         input_ids: vec![input_id.into()],
         turn,
         item: ConversationItem::user("hello"),
+        skill_loads: Vec::new(),
     })).unwrap();
     let selected = *timeline.surface_ids().last().unwrap();
     let source_ref = chat_state::TimelineRangeRef {
@@ -1866,7 +2077,49 @@ async fn completed_image_sideband_is_recoverable_before_parent_projection() {
     let info = create_test_info();
     adapter.init_session(&info, default_model_id()).await.unwrap();
 
-    let mut timeline = chat_state::Timeline::from_seed(vec![ConversationItem::user("screenshot")])
+    let mut timeline = chat_state::Timeline::default();
+    let source_turn = chat_state::TurnId(0);
+    timeline
+        .record(chat_state::TimelineEventKind::Turn(
+            chat_state::TurnEvent::Started {
+                prompt_id: "fixture-prompt".into(),
+                id: source_turn,
+                input_ids: Vec::new(),
+                identity: chat_state::TurnIdentity {
+                    origin: "user".into(),
+                    turn_kind: "internal".into(),
+                    goal_id: None,
+                    goal_definition_revision: None,
+                    stage_id: None,
+                },
+                model_id: "test-model".into(),
+                input_message_count: 0,
+                prompt_index: 0,
+                prompt_text: "screenshot".into(),
+                input_kind: chat_state::TurnInputKind::Prompt,
+                redirect_kind: None,
+            },
+        ))
+        .unwrap();
+    let mut source_item = ConversationItem::user("screenshot");
+    source_item.set_prompt_index(0);
+    timeline.append(source_item, chat_state::MessageCause::User).unwrap();
+    timeline
+        .record(chat_state::TimelineEventKind::Turn(
+            chat_state::TurnEvent::Ended {
+                id: source_turn,
+                outcome: "completed".into(),
+                duration_ms: 1,
+                tool_count: 0,
+                terminal: chat_state::TurnTerminal {
+                    source: chat_state::TurnTerminalSource::Host,
+                    stop_reason: "end_turn".into(),
+                    completion_kind: "completed".into(),
+                },
+                cancellation_category: None,
+                details: None,
+            },
+        ))
         .unwrap();
     let source = timeline.surface_ids()[0];
     let source_revision = timeline.surface_revision();
@@ -2811,6 +3064,178 @@ async fn delete_session_removes_dir_and_is_idempotent() {
             "summary must not load after delete"
         );
     adapter.delete_session(&info).await.expect("second delete must succeed");
+}
+
+#[tokio::test]
+async fn fork_does_not_inherit_a_suspended_runtime_checkpoint() {
+    let temp_dir = TempDir::new().unwrap();
+    let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+    let source = Info {
+        id: acp::SessionId::new("suspended-fork-source"),
+        cwd: "/source".into(),
+    };
+    adapter.init_session(&source, default_model_id()).await.unwrap();
+    append_timeline_seed(&adapter, &source, vec![ConversationItem::user("history")]).await;
+
+    let mut timeline = chat_state::Timeline::from_events(
+        adapter.read_timeline_events_sync(&source).unwrap(),
+    )
+    .unwrap();
+    timeline
+        .record(chat_state::TimelineEventKind::Runtime(
+            chat_state::session_runtime::SessionRuntimeEvent::SuspendRequested {
+                operation_id: "fork-source-op".into(),
+                root_session_id: source.id.0.to_string(),
+            },
+        ))
+        .unwrap();
+    let settled = timeline
+        .record(chat_state::TimelineEventKind::Runtime(
+            chat_state::session_runtime::SessionRuntimeEvent::CommandsSettled {
+                operation_id: "fork-source-op".into(),
+                commands: Vec::new(),
+            },
+        ))
+        .unwrap();
+    timeline
+        .record(chat_state::TimelineEventKind::Runtime(
+            chat_state::session_runtime::SessionRuntimeEvent::Checkpoint {
+                operation_id: "fork-source-op".into(),
+                checkpoint: chat_state::session_runtime::RuntimeCheckpoint {
+                    frontier: settled.seq,
+                    runtime_source_hash: "d".repeat(64),
+                    turn: None,
+                    step: None,
+                },
+            },
+        ))
+        .unwrap();
+    for event in timeline.events().iter().rev().take(3).rev() {
+        adapter
+            .append_timeline_event_durable(&source, event)
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        timeline.runtime_lifecycle().phase,
+        chat_state::session_runtime::RuntimePhase::Suspended
+    );
+
+    let target = Info {
+        id: acp::SessionId::new("suspended-fork-target"),
+        cwd: "/target".into(),
+    };
+    adapter
+        .copy_session_data(&source, &target, CopySessionOptions::default())
+        .await
+        .unwrap();
+    let fork = adapter.load_session(&target).await.unwrap();
+    assert_eq!(
+        chat_state::Timeline::from_events(fork.timeline_events.clone()).unwrap().runtime_lifecycle().phase,
+        chat_state::session_runtime::RuntimePhase::Running
+    );
+    assert!(chat_state::Timeline::from_events(fork.timeline_events.clone()).unwrap().runtime_lifecycle().checkpoint.is_none());
+    assert!(chat_state::Timeline::from_events(fork.timeline_events).unwrap().active_turn().is_none());
+}
+
+#[tokio::test]
+async fn explicit_delete_preserves_unfinished_runtime_handoff_but_allows_consumed_audit() {
+    for consumed in [false, true] {
+        let temp_dir = TempDir::new().unwrap();
+        let adapter = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+        let info = create_test_info();
+        adapter.init_session(&info, default_model_id()).await.unwrap();
+        let mut timeline = chat_state::Timeline::from_events(
+            adapter.read_timeline_events_sync(&info).unwrap(),
+        )
+        .unwrap();
+        timeline
+            .record(
+            chat_state::TimelineEventKind::Runtime(
+                chat_state::session_runtime::SessionRuntimeEvent::SuspendRequested {
+                    operation_id: "delete-op".into(),
+                    root_session_id: info.id.0.to_string(),
+                },
+            ),
+        )
+            .unwrap();
+        let settled = timeline
+            .record(
+            chat_state::TimelineEventKind::Runtime(
+                chat_state::session_runtime::SessionRuntimeEvent::CommandsSettled {
+                    operation_id: "delete-op".into(),
+                    commands: Vec::new(),
+                },
+            ),
+        )
+            .unwrap();
+        timeline
+            .record(
+            chat_state::TimelineEventKind::Runtime(
+                chat_state::session_runtime::SessionRuntimeEvent::Checkpoint {
+                    operation_id: "delete-op".into(),
+                    checkpoint: chat_state::session_runtime::RuntimeCheckpoint {
+                        frontier: settled.seq,
+                        runtime_source_hash: "b".repeat(64),
+                        turn: None,
+                        step: None,
+                    },
+                },
+            ),
+        )
+            .unwrap();
+        if consumed {
+            timeline
+                .record(
+                chat_state::TimelineEventKind::Runtime(
+                    chat_state::session_runtime::SessionRuntimeEvent::RestorePrepared {
+                        operation_id: "delete-op".into(),
+                        instance_id: "instance-1".into(),
+                    },
+                ),
+            )
+                .unwrap();
+            timeline
+                .record(
+                chat_state::TimelineEventKind::Runtime(
+                    chat_state::session_runtime::SessionRuntimeEvent::Resumed {
+                        operation_id: "delete-op".into(),
+                        instance_id: "instance-1".into(),
+                    },
+                ),
+            )
+                .unwrap();
+            timeline
+                .record(
+                chat_state::TimelineEventKind::Runtime(
+                    chat_state::session_runtime::SessionRuntimeEvent::ExecutionReleased {
+                        operation_id: "delete-op".into(),
+                        instance_id: "instance-1".into(),
+                    },
+                ),
+            )
+                .unwrap();
+        }
+        for event in timeline.events() {
+            adapter
+                .append_timeline_event_durable(&info, event)
+                .await
+                .unwrap();
+        }
+        drop(adapter);
+
+        let reopened = JsonlStorageAdapter::with_root(temp_dir.path().to_path_buf());
+        let dir = reopened.session_dir(&info);
+        let result = reopened.delete_session(&info).await;
+        if consumed {
+            result.expect("a resumed checkpoint is audit, not live execution ownership");
+            assert!(!dir.exists());
+        } else {
+            let error = result.expect_err("an unconsumed checkpoint protects its source");
+            assert_eq!(error.kind(), std::io::ErrorKind::WouldBlock);
+            assert!(dir.exists());
+        }
+    }
 }
 
 #[tokio::test]
@@ -4196,7 +4621,24 @@ async fn forked_control_snapshot_drops_plan_runtime_without_its_artifact() {
     );
     plan.approval_pending = true;
     plan.plan_artifact_revision = 4;
-    plan.plan_artifact_hash = Some("orphaned-plan-artifact".into());
+    let orphaned_hash = blake3::hash(b"orphaned-plan-artifact").to_hex().to_string();
+    plan.plan_artifact_hash = Some(orphaned_hash.clone());
+    plan.plan_submission_id = Some(1);
+    plan.last_plan_submission_id = 1;
+    plan.retained_plan = Some(crate::session::behavior::RetainedPlanCandidate {
+        submission_id: 1,
+        artifact_revision: 4,
+        artifact_hash: orphaned_hash,
+        amendment: false,
+        status: crate::session::behavior::RetainedPlanStatus::Reviewing,
+        decisions: vec![crate::session::behavior::RetainedPlanDecision {
+            decision_id: "review-before-fork".into(),
+            submission_id: 1,
+            action: crate::session::behavior::RetainedPlanAction::Review,
+            feedback: None,
+            resulting_status: crate::session::behavior::RetainedPlanStatus::Reviewing,
+        }],
+    });
     append_control_snapshot(
         &adapter,
         &source_info,
@@ -4218,6 +4660,8 @@ async fn forked_control_snapshot_drops_plan_runtime_without_its_artifact() {
         forked.behavior.state,
         crate::session::behavior::BehaviorState::Normal
     );
+    assert!(forked.behavior.retained_plan.is_none());
+    assert_eq!(forked.behavior.last_plan_submission_id, 0);
     assert!(forked.behavior.runtime_fields_match_selection());
 }
 
@@ -5711,6 +6155,7 @@ async fn cleanup_ttl_requires_closed_timeline_and_preserves_new_references() {
             let kinds = match case {
                 "turn" => vec![chat_state::TimelineEventKind::Turn(
                     chat_state::TurnEvent::Started {
+                        prompt_id: "fixture-prompt".into(),
                         id: turn,
                         input_ids: Vec::new(),
                         identity: chat_state::TurnIdentity {
@@ -5740,6 +6185,7 @@ async fn cleanup_ttl_requires_closed_timeline_and_preserves_new_references() {
                 )],
                 "tool" => vec![
                     chat_state::TimelineEventKind::Turn(chat_state::TurnEvent::Started {
+                        prompt_id: "fixture-prompt".into(),
                         id: turn,
                         input_ids: Vec::new(),
                         identity: chat_state::TurnIdentity {
@@ -5858,6 +6304,219 @@ async fn cleanup_ttl_requires_closed_timeline_and_preserves_new_references() {
     let cutoff = chrono::Utc::now() - chrono::Duration::days(30);
     assert!(!cleaner.delete_if_still_stale(candidate, cutoff).unwrap());
     assert!(cleaner.session_dir(&info).is_dir());
+}
+
+#[tokio::test]
+async fn cleanup_ttl_preserves_open_plan_responsibility_and_retained_decisions() {
+    for case in ["drafting", "deferred", "reviewing"] {
+        let root = TempDir::new().unwrap();
+        let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        let info = create_test_info();
+        let mut summary = writer.init_session(&info, default_model_id()).await.unwrap();
+        summary.updated_at = chrono::Utc::now() - chrono::Duration::days(40);
+        summary.last_active_at = Some(summary.updated_at);
+        writer.write_summary_sync(&info, &summary).unwrap();
+
+        let mut behavior = crate::session::behavior::BehaviorSnapshot::normal();
+        if case == "drafting" {
+            behavior = crate::session::behavior::BehaviorSnapshot::selected(
+                tool_types::BehaviorId::Plan,
+            );
+        } else {
+            let deferred = crate::session::behavior::RetainedPlanDecision {
+                decision_id: "decision-defer".into(),
+                submission_id: 1,
+                action: crate::session::behavior::RetainedPlanAction::Defer,
+                feedback: None,
+                resulting_status: crate::session::behavior::RetainedPlanStatus::Deferred,
+            };
+            let mut decisions = vec![deferred];
+            let status = if case == "reviewing" {
+                decisions.push(crate::session::behavior::RetainedPlanDecision {
+                    decision_id: "decision-review".into(),
+                    submission_id: 1,
+                    action: crate::session::behavior::RetainedPlanAction::Review,
+                    feedback: None,
+                    resulting_status: crate::session::behavior::RetainedPlanStatus::Reviewing,
+                });
+                crate::session::behavior::RetainedPlanStatus::Reviewing
+            } else {
+                crate::session::behavior::RetainedPlanStatus::Deferred
+            };
+            behavior.last_plan_submission_id = 1;
+            behavior.retained_plan = Some(crate::session::behavior::RetainedPlanCandidate {
+                submission_id: 1,
+                artifact_revision: 3,
+                artifact_hash: blake3::hash(b"retained plan").to_hex().to_string(),
+                amendment: false,
+                status,
+                decisions,
+            });
+        }
+        append_control_snapshot(
+            &writer,
+            &info,
+            &crate::session::control::SessionControlSnapshot::new(1, "grow", behavior, None),
+        )
+        .await;
+        drop(writer);
+
+        let cleaner = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        let session_dir = cleaner.session_dir(&info);
+        let (deleted, errors) = cleaner.cleanup_stale_sessions_sync(30, None, |_| {}).unwrap();
+        assert_eq!((deleted, errors), (0, 0), "{case}");
+        assert!(session_dir.is_dir(), "{case}");
+    }
+}
+
+#[tokio::test]
+async fn cleanup_ttl_preserves_runtime_checkpoints_and_local_planning_obligations() {
+    for case in [
+        "suspending",
+        "idle-checkpoint",
+        "planning-wait",
+        "planning-replan",
+        "planning-open-link",
+        "planning-required-delivery",
+    ] {
+        let root = TempDir::new().unwrap();
+        let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        let info = create_test_info();
+        let mut summary = writer.init_session(&info, default_model_id()).await.unwrap();
+        summary.updated_at = chrono::Utc::now() - chrono::Duration::days(40);
+        summary.last_active_at = Some(summary.updated_at);
+        writer.write_summary_sync(&info, &summary).unwrap();
+
+        let mut timeline = chat_state::Timeline::default();
+        if case == "suspending" || case == "idle-checkpoint" {
+            let requested = timeline
+                .record(chat_state::TimelineEventKind::Runtime(
+                    chat_state::session_runtime::SessionRuntimeEvent::SuspendRequested {
+                        operation_id: "suspend-op".into(),
+                        root_session_id: info.id.0.to_string(),
+                    },
+                ))
+                .unwrap();
+            writer
+                .append_timeline_event_durable(&info, &requested)
+                .await
+                .unwrap();
+            if case == "idle-checkpoint" {
+                let commands_settled = timeline
+                    .record(chat_state::TimelineEventKind::Runtime(
+                        chat_state::session_runtime::SessionRuntimeEvent::CommandsSettled {
+                            operation_id: "suspend-op".into(),
+                            commands: Vec::new(),
+                        },
+                    ))
+                    .unwrap();
+                writer
+                    .append_timeline_event_durable(&info, &commands_settled)
+                    .await
+                    .unwrap();
+                let checkpoint = timeline
+                    .record(chat_state::TimelineEventKind::Runtime(
+                        chat_state::session_runtime::SessionRuntimeEvent::Checkpoint {
+                            operation_id: "suspend-op".into(),
+                            checkpoint: chat_state::session_runtime::RuntimeCheckpoint {
+                                frontier: commands_settled.seq,
+                                runtime_source_hash: "a".repeat(64),
+                                turn: None,
+                                step: None,
+                            },
+                        },
+                    ))
+                    .unwrap();
+                writer
+                    .append_timeline_event_durable(&info, &checkpoint)
+                    .await
+                    .unwrap();
+                assert!(timeline.active_turn().is_none());
+                assert!(timeline.runtime_lifecycle().checkpoint.is_some());
+            }
+        } else {
+            let mut plan = tool_types::planning::LocalPlan::new(
+                info.id.0.to_string(),
+                "scope-1",
+            );
+            plan.revision = 1;
+            plan.steps.push(tool_types::planning::PlanStep {
+                id: "step-1".into(),
+                content: "Keep this work until its obligations settle".into(),
+                priority: tool_types::planning::PlanPriority::Normal,
+                status: tool_types::planning::PlanStepStatus::Pending,
+                requirements: None,
+                removed: false,
+            });
+            match case {
+                "planning-wait" => plan.waits.push(tool_types::planning::PlanWait {
+                    id: "wait-1".into(),
+                    step_ids: Vec::new(),
+                    dependencies: vec![tool_types::planning::WaitDependency {
+                        kind: tool_types::planning::DependencyKind::Task,
+                        id: "task-1".into(),
+                    }],
+                    condition: tool_types::planning::WaitCondition::Any,
+                }),
+                "planning-replan" => {
+                    let mut link = test_plan_link(false, false);
+                    link.pending_source_revision = Some(1);
+                    plan.links.push(link);
+                    plan.replans.push(tool_types::planning::ReplanChange {
+                        id: "replan-1".into(),
+                        link_id: "link-1".into(),
+                        child_session_id: "child-1".into(),
+                        step_id: "step-1".into(),
+                        source_revision: 1,
+                        content: "updated task".into(),
+                        requirements: None,
+                        priority: tool_types::planning::PlanPriority::Normal,
+                        status: tool_types::planning::PlanStepStatus::Pending,
+                        removed: false,
+                        progress: tool_types::planning::ReplanProgress::Pending,
+                    });
+                }
+                "planning-open-link" => plan.links.push(test_plan_link(false, false)),
+                "planning-required-delivery" => {
+                    plan.links.push(test_plan_link(true, true));
+                }
+                _ => unreachable!(),
+            }
+            let planning = timeline
+                .record(chat_state::TimelineEventKind::Planning(
+                    chat_state::timeline::PlanningEvent {
+                        previous: None,
+                        plan: Box::new(plan),
+                    },
+                ))
+                .unwrap();
+            writer
+                .append_timeline_event_durable(&info, &planning)
+                .await
+                .unwrap();
+        }
+        drop(writer);
+
+        let cleaner = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+        let session_dir = cleaner.session_dir(&info);
+        let (deleted, errors) = cleaner.cleanup_stale_sessions_sync(30, None, |_| {}).unwrap();
+        assert_eq!((deleted, errors), (0, 0), "{case}");
+        assert!(session_dir.is_dir(), "{case}");
+    }
+}
+
+fn test_plan_link(terminal: bool, required: bool) -> tool_types::planning::PlanLink {
+    tool_types::planning::PlanLink {
+        id: "link-1".into(),
+        parent_step_id: "step-1".into(),
+        child_session_id: "child-1".into(),
+        terminal,
+        required,
+        pending_source_revision: None,
+        review_required_revision: 0,
+        result_id: None,
+        dispatch_failure: None,
+    }
 }
 
 #[tokio::test]
@@ -5980,6 +6639,14 @@ async fn cleanup_child_seed_requires_exact_parent_terminal_result_chain() {
         ),
         (
             true,
+            true,
+            "consumed",
+            chat_state::SubagentOutcome::Completed,
+            false,
+            "both",
+        ),
+        (
+            true,
             false,
             "missing",
             chat_state::SubagentOutcome::Completed,
@@ -6044,10 +6711,13 @@ async fn cleanup_child_seed_requires_exact_parent_terminal_result_chain() {
                 chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
                     subagent_id: "cleanup-agent".into(),
                     child_session_id: child_info.id.0.to_string(),
+                    origin_tool_call_id: None,
                     security_parent_session_id: parent_info.id.0.to_string(),
+            parent_step_id: None,
                     subagent_type: "worker".into(),
                     description: "cleanup fixture".into(),
                     prompt: "run".into(),
+                    execution_recipe: serde_json::json!({}),
                     context_source: chat_state::SubagentContextSource::New,
                     source_ref: None,
                     context_normalized: false,
@@ -6105,6 +6775,7 @@ async fn cleanup_child_seed_requires_exact_parent_terminal_result_chain() {
                             tokens_used: 0,
                             error,
                             output_ref: None,
+                            planning_summary: None,
                         },
                     ))
                     .unwrap(),
@@ -6175,6 +6846,8 @@ async fn cleanup_child_seed_requires_exact_parent_terminal_result_chain() {
                     parent
                         .record(chat_state::TimelineEventKind::Turn(
                             chat_state::TurnEvent::Started {
+
+                                prompt_id: "fixture-prompt".into(),
                                 id: turn,
                                 input_ids: Vec::new(),
                                 identity: chat_state::TurnIdentity {
@@ -6259,27 +6932,497 @@ async fn cleanup_child_seed_requires_exact_parent_terminal_result_chain() {
         let cleaner = JsonlStorageAdapter::with_root(root.path().to_path_buf());
         let child_dir = cleaner.session_dir(&child_info);
         let parent_dir = cleaner.session_dir(&parent_info);
+        if !hold_parent_writer {
+            let deleting = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+            let error = deleting
+                .delete_session_by_id_sync(parent_info.id.0.as_ref(), None)
+                .expect_err("a linked parent cannot be explicitly deleted by itself");
+            assert!(error.to_string().contains(child_info.id.0.as_ref()));
+            drop(deleting);
+            let deleting = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+            let error = deleting
+                .delete_session_by_id_sync(child_info.id.0.as_ref(), None)
+                .expect_err("a linked child cannot be explicitly deleted by itself");
+            assert!(error.to_string().contains(parent_info.id.0.as_ref()));
+            drop(deleting);
+        }
         let (deleted, errors) = cleaner.cleanup_stale_sessions_sync(30, None, |_| {}).unwrap();
         assert_eq!(errors, 0);
         let chain_closed = has_terminal
             && (!surface_completion
                 || outcome == chat_state::SubagentOutcome::Cancelled
                 || receipt == "consumed");
-        let target_deleted = chain_closed && !hold_parent_writer && stale != "both";
-        let expected_deleted = if target_deleted { 1 } else { 0 };
+        let target_deleted = chain_closed && !hold_parent_writer && stale == "both";
+        let expected_deleted = if target_deleted { 2 } else { 0 };
         assert_eq!(deleted, expected_deleted, "{stale} / {receipt} / {outcome:?}");
-        if stale == "parent" && target_deleted {
-            assert!(!parent_dir.exists(), "a closed stale parent permits cleanup");
-            assert!(child_dir.is_dir(), "the fresh child remains independently retained");
-        } else if stale == "child" && target_deleted {
-            assert!(!child_dir.exists(), "a closed stale child permits cleanup");
-            assert!(parent_dir.is_dir(), "the fresh parent remains independently retained");
+        if target_deleted {
+            assert!(!parent_dir.exists(), "the stale closed parent is reclaimed");
+            assert!(!child_dir.exists(), "the stale closed child is reclaimed with its parent");
         } else {
-            assert!(parent_dir.is_dir(), "an unresolved or live parent is retained");
-            assert!(child_dir.is_dir(), "an unresolved or live child is retained");
+            assert!(parent_dir.is_dir(), "an unresolved, fresh, or live parent is retained");
+            assert!(child_dir.is_dir(), "an unresolved, fresh, or live child is retained");
         }
         drop(retained_parent_writer);
     }
+}
+
+#[tokio::test]
+async fn cleanup_retains_spawn_when_child_source_is_missing() {
+    let root = TempDir::new().unwrap();
+    let parent_info = Info {
+        id: acp::SessionId::new("cleanup-missing-child-parent"),
+        cwd: "/cleanup-missing-child-parent".into(),
+    };
+    let adapter = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    adapter
+        .init_session(&parent_info, default_model_id())
+        .await
+        .unwrap();
+
+    let mut timeline = chat_state::Timeline::default();
+    timeline
+        .record(chat_state::TimelineEventKind::Subagent(
+            chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
+                subagent_id: "missing-child".into(),
+                child_session_id: "cleanup-missing-child".into(),
+                origin_tool_call_id: None,
+                security_parent_session_id: parent_info.id.0.to_string(),
+                parent_step_id: None,
+                subagent_type: "worker".into(),
+                description: "missing child fixture".into(),
+                prompt: "run".into(),
+                execution_recipe: serde_json::json!({}),
+                context_source: chat_state::SubagentContextSource::New,
+                source_ref: None,
+                context_normalized: false,
+                resumed_from: None,
+                parent_prompt_id: None,
+                capability_mode: None,
+                permission_mode: None,
+                effective_permission_mode: None,
+                workflow_run_id: None,
+                goal_id: None,
+                goal_definition_revision: None,
+                surface_completion: false,
+                child_cwd: "/cleanup-missing-child".into(),
+                worktree_path: None,
+                effective_model_id: "model".into(),
+                model_transport_key: sampling_types::ModelImageInputKey::new(
+                    "model",
+                    "responses",
+                    "test",
+                ),
+                reasoning_effort: None,
+            }),
+        ))
+        .unwrap();
+    for event in timeline.events() {
+        adapter
+            .append_timeline_event_durable(&parent_info, event)
+            .await
+            .unwrap();
+    }
+    let mut stale = adapter.open_session(&parent_info).unwrap().summary().clone();
+    stale.updated_at = chrono::Utc::now() - chrono::Duration::days(40);
+    stale.last_active_at = Some(stale.updated_at);
+    adapter.write_summary_sync(&parent_info, &stale).unwrap();
+    drop(adapter);
+
+    let cleaner = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    assert_eq!(
+        cleaner.cleanup_stale_sessions_sync(30, None, |_| {}).unwrap(),
+        (0, 1)
+    );
+    assert!(cleaner.session_dir(&parent_info).is_dir());
+    assert!(
+        !cleaner
+            .session_dir(&Info {
+                id: acp::SessionId::new("cleanup-missing-child"),
+                cwd: "/cleanup-missing-child".into(),
+            })
+            .exists()
+    );
+}
+
+#[tokio::test]
+async fn cleanup_reclaims_three_level_chain_with_root_summary_and_direct_seed() {
+    let root_dir = TempDir::new().unwrap();
+    let root_info = Info {
+        id: acp::SessionId::new("cleanup-tree-root"),
+        cwd: "/cleanup-tree-root".into(),
+    };
+    let child_info = Info {
+        id: acp::SessionId::new("cleanup-tree-child"),
+        cwd: "/cleanup-tree-child".into(),
+    };
+    let grandchild_info = Info {
+        id: acp::SessionId::new("cleanup-tree-grandchild"),
+        cwd: "/cleanup-tree-grandchild".into(),
+    };
+    let writer = JsonlStorageAdapter::with_root(root_dir.path().to_path_buf());
+    for info in [&root_info, &child_info, &grandchild_info] {
+        writer.init_session(info, default_model_id()).await.unwrap();
+    }
+
+    let spawn = |subagent_id: &str, child: &Info, parent: &Info| {
+        chat_state::SubagentSpawnEvent {
+            subagent_id: subagent_id.into(),
+            child_session_id: child.id.0.to_string(),
+            origin_tool_call_id: None,
+            security_parent_session_id: parent.id.0.to_string(),
+            parent_step_id: None,
+            subagent_type: "worker".into(),
+            description: "nested cleanup fixture".into(),
+            prompt: "run".into(),
+            execution_recipe: serde_json::json!({}),
+            context_source: chat_state::SubagentContextSource::New,
+            source_ref: None,
+            context_normalized: false,
+            resumed_from: None,
+            parent_prompt_id: None,
+            capability_mode: None,
+            permission_mode: None,
+            effective_permission_mode: None,
+            workflow_run_id: None,
+            goal_id: None,
+            goal_definition_revision: None,
+            surface_completion: false,
+            child_cwd: child.cwd.clone(),
+            worktree_path: None,
+            effective_model_id: "model".into(),
+            model_transport_key: sampling_types::ModelImageInputKey::new(
+                "model",
+                "responses",
+                "test",
+            ),
+            reasoning_effort: None,
+        }
+    };
+    let seed = |subagent_id: &str, parent: &Info, spawn_seq: u64| {
+        chat_state::SubagentSeedEvent {
+            parent_timeline_id: parent.id.0.to_string(),
+            parent_spawn_seq: spawn_seq,
+            subagent_id: subagent_id.into(),
+            security_parent_session_id: parent.id.0.to_string(),
+            context_source: chat_state::SubagentContextSource::New,
+            source_ref: None,
+            normalized: false,
+        }
+    };
+
+    let mut root_timeline = chat_state::Timeline::default();
+    let root_spawn = root_timeline
+        .record(chat_state::TimelineEventKind::Subagent(
+            chat_state::SubagentEvent::Spawned(spawn(
+                "root-child",
+                &child_info,
+                &root_info,
+            )),
+        ))
+        .unwrap();
+
+    let mut child_timeline = chat_state::Timeline::default();
+    child_timeline
+        .record(chat_state::TimelineEventKind::SubagentSeed(seed(
+            "root-child",
+            &root_info,
+            root_spawn.seq.get(),
+        )))
+        .unwrap();
+    let child_spawn = child_timeline
+        .record(chat_state::TimelineEventKind::Subagent(
+            chat_state::SubagentEvent::Spawned(spawn(
+                "nested-child",
+                &grandchild_info,
+                &child_info,
+            )),
+        ))
+        .unwrap();
+
+    let mut grandchild_timeline = chat_state::Timeline::default();
+    grandchild_timeline
+        .record(chat_state::TimelineEventKind::SubagentSeed(seed(
+            "nested-child",
+            &child_info,
+            child_spawn.seq.get(),
+        )))
+        .unwrap();
+    let grandchild_result = grandchild_timeline
+        .record(chat_state::TimelineEventKind::SubagentResult(
+            chat_state::SubagentResultEvent {
+                subagent_id: "nested-child".into(),
+                outcome: chat_state::SubagentOutcome::Completed,
+                duration_ms: 1,
+                tool_calls: 0,
+                turns: 0,
+                tokens_used: 0,
+                error: None,
+                output_ref: None,
+                planning_summary: None,
+            },
+        ))
+        .unwrap();
+    child_timeline
+        .record(chat_state::TimelineEventKind::Subagent(
+            chat_state::SubagentEvent::Ended(chat_state::SubagentTerminalEvent {
+                subagent_id: "nested-child".into(),
+                child_session_id: grandchild_info.id.0.to_string(),
+                outcome: chat_state::SubagentOutcome::Completed,
+                duration_ms: 1,
+                tool_calls: 0,
+                turns: 0,
+                tokens_used: 0,
+                error: None,
+                result_ref: Some(chat_state::TimelineRangeRef {
+                    timeline_id: grandchild_info.id.0.to_string(),
+                    first_seq: grandchild_result.seq.get(),
+                    last_seq: grandchild_result.seq.get(),
+                }),
+                snapshot_ref: None,
+            }),
+        ))
+        .unwrap();
+    let child_result = child_timeline
+        .record(chat_state::TimelineEventKind::SubagentResult(
+            chat_state::SubagentResultEvent {
+                subagent_id: "root-child".into(),
+                outcome: chat_state::SubagentOutcome::Completed,
+                duration_ms: 2,
+                tool_calls: 0,
+                turns: 0,
+                tokens_used: 0,
+                error: None,
+                output_ref: None,
+                planning_summary: None,
+            },
+        ))
+        .unwrap();
+    root_timeline
+        .record(chat_state::TimelineEventKind::Subagent(
+            chat_state::SubagentEvent::Ended(chat_state::SubagentTerminalEvent {
+                subagent_id: "root-child".into(),
+                child_session_id: child_info.id.0.to_string(),
+                outcome: chat_state::SubagentOutcome::Completed,
+                duration_ms: 2,
+                tool_calls: 0,
+                turns: 0,
+                tokens_used: 0,
+                error: None,
+                result_ref: Some(chat_state::TimelineRangeRef {
+                    timeline_id: child_info.id.0.to_string(),
+                    first_seq: child_result.seq.get(),
+                    last_seq: child_result.seq.get(),
+                }),
+                snapshot_ref: None,
+            }),
+        ))
+        .unwrap();
+
+    for (info, timeline) in [
+        (&root_info, &root_timeline),
+        (&child_info, &child_timeline),
+        (&grandchild_info, &grandchild_timeline),
+    ] {
+        for event in timeline.events() {
+            writer
+                .append_timeline_event_durable(info, event)
+                .await
+                .unwrap();
+        }
+        let mut summary = writer.open_session(info).unwrap().summary().clone();
+        summary.updated_at = chrono::Utc::now() - chrono::Duration::days(40);
+        summary.last_active_at = Some(summary.updated_at);
+        if info.id != root_info.id {
+            // Nested summaries retain the lifecycle root while the grandchild
+            // seed above names its direct owner (the child session).
+            summary.parent_session_id = Some(root_info.id.0.to_string());
+        }
+        writer.write_summary_sync(info, &summary).unwrap();
+    }
+    drop(writer);
+
+    let cleaner = JsonlStorageAdapter::with_root(root_dir.path().to_path_buf());
+    assert_eq!(
+        cleaner.cleanup_stale_sessions_sync(30, None, |_| {}).unwrap(),
+        (3, 0)
+    );
+    for info in [&root_info, &child_info, &grandchild_info] {
+        assert!(!cleaner.session_dir(info).exists());
+    }
+}
+
+async fn create_test_reclaim_intent(
+    root: &TempDir,
+) -> (JsonlStorageAdapter, SessionReclaimIntent) {
+    let (writer, intent) = build_test_reclaim_intent(root).await;
+    writer.persist_reclaim_intent(&intent).unwrap();
+    (writer, intent)
+}
+
+async fn build_test_reclaim_intent(
+    root: &TempDir,
+) -> (JsonlStorageAdapter, SessionReclaimIntent) {
+    let creator = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let infos = [
+        Info {
+            id: acp::SessionId::new("reclaim-member-a"),
+            cwd: "/reclaim/a".into(),
+        },
+        Info {
+            id: acp::SessionId::new("reclaim-member-b"),
+            cwd: "/reclaim/b".into(),
+        },
+    ];
+    for info in &infos {
+        creator.init_session(info, default_model_id()).await.unwrap();
+    }
+    drop(creator);
+
+    let writer = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let mut members = Vec::new();
+    let intent_id = uuid::Uuid::now_v7().simple().to_string();
+    for (index, info) in infos.iter().enumerate() {
+        let opened = writer.open_session(info).unwrap();
+        let (entity_volume, entity_index) = opened.directory().entity_identity().unwrap();
+        members.push(SessionReclaimMember {
+            session_id: info.id.0.to_string(),
+            cwd: info.cwd.clone(),
+            entity_volume,
+            entity_index,
+            quarantine_name: format!(".reclaim-{intent_id}-{index}"),
+        });
+    }
+    members.sort_by(|left, right| left.cwd.cmp(&right.cwd).then_with(|| left.session_id.cmp(&right.session_id)));
+    let intent = SessionReclaimIntent {
+        version: 1,
+        id: intent_id,
+        members,
+    };
+    JsonlStorageAdapter::validate_reclaim_intent(&intent).unwrap();
+    (writer, intent)
+}
+
+#[tokio::test]
+async fn committed_session_reclaim_resumes_after_one_member_was_removed() {
+    let root = TempDir::new().unwrap();
+    let (writer, intent) = create_test_reclaim_intent(&root).await;
+    let first = &intent.members[0];
+    let info = first.info();
+    let parent = writer.open_session_parent(&info).unwrap();
+    parent
+        .rename_child_no_replace(
+            std::ffi::OsStr::new(&first.session_id),
+            std::ffi::OsStr::new(&first.quarantine_name),
+        )
+        .unwrap();
+    let quarantined = parent
+        .open_relative(
+            std::path::Path::new(&first.quarantine_name),
+            "partially reclaimed session",
+            false,
+        )
+        .unwrap();
+    quarantined.remove_all_contents().unwrap();
+    parent
+        .remove_empty_child(std::ffi::OsStr::new(&first.quarantine_name), true)
+        .unwrap();
+    drop(writer);
+
+    let restarted = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let removed = restarted.recover_pending_reclaims_sync().unwrap();
+    assert_eq!(removed.len(), 2);
+    for member in &intent.members {
+        assert!(!restarted.session_dir(&member.info()).exists());
+    }
+    let gate = restarted.acquire_reclaim_gate().unwrap().unwrap();
+    assert!(JsonlStorageAdapter::read_reclaim_intents(&gate.intents)
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn committed_session_reclaim_preserves_replacement_identity() {
+    let root = TempDir::new().unwrap();
+    let (writer, intent) = create_test_reclaim_intent(&root).await;
+    let replacement_root = TempDir::new().unwrap();
+    let replacement_writer = JsonlStorageAdapter::with_root(replacement_root.path().to_path_buf());
+    let replacement_info = intent.members[0].info();
+    replacement_writer
+        .init_session(&replacement_info, default_model_id())
+        .await
+        .unwrap();
+    drop(replacement_writer);
+    drop(writer);
+
+    let member = &intent.members[0];
+    let target = JsonlStorageAdapter::with_root(root.path().to_path_buf()).session_dir(&member.info());
+    let replacement = JsonlStorageAdapter::with_root(replacement_root.path().to_path_buf())
+        .session_dir(&member.info());
+    std::fs::remove_dir_all(&target).unwrap();
+    std::fs::rename(&replacement, &target).unwrap();
+
+    let restarted = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let error = restarted
+        .recover_pending_reclaims_sync()
+        .expect_err("replacement must block the committed cleanup");
+    assert!(error.to_string().contains("changed identity"));
+    assert!(target.is_dir(), "replacement session must be preserved");
+    assert!(JsonlStorageAdapter::with_root(root.path().to_path_buf())
+        .session_dir(&intent.members[1].info())
+        .is_dir());
+}
+
+#[tokio::test]
+async fn committed_session_reclaim_waits_for_all_member_writers() {
+    let root = TempDir::new().unwrap();
+    let (writer, intent) = build_test_reclaim_intent(&root).await;
+    for member in &intent.members {
+        writer.ensure_writer_lease(&member.info()).unwrap();
+    }
+    // Production commits an intent only after claiming every member. The
+    // decision owner therefore remains the live writer that blocks recovery
+    // until its lease drains.
+    writer.persist_reclaim_intent(&intent).unwrap();
+    let contender = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    assert!(
+        !contender.try_acquire_writer_lease(&intent.members[1].info()).unwrap(),
+        "a writer cannot enter a session after its reclaim decision commits"
+    );
+
+    let restarted = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    assert!(restarted.recover_pending_reclaims_sync().is_err());
+    for item in &intent.members {
+        assert!(restarted.session_dir(&item.info()).is_dir());
+    }
+    drop(writer);
+    assert_eq!(restarted.recover_pending_reclaims_sync().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn malformed_reclaim_intent_blocks_session_admission() {
+    let root = TempDir::new().unwrap();
+    let (writer, mut intent) = create_test_reclaim_intent(&root).await;
+    intent.members[0].quarantine_name = ".reclaim-unrelated-0".into();
+    let gate = writer.acquire_reclaim_gate().unwrap().unwrap();
+    let bytes = serde_json::to_vec(&intent).unwrap();
+    gate.intents
+        .write_atomic(
+            std::ffi::OsStr::new(&format!("{}.json", intent.id)),
+            &bytes,
+            true,
+            true,
+        )
+        .unwrap();
+    drop(gate);
+    drop(writer);
+
+    let restarted = JsonlStorageAdapter::with_root(root.path().to_path_buf());
+    let error = restarted
+        .open_session(&intent.members[0].info())
+        .err().expect("a malformed committed intent must block admission");
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+    assert!(restarted.session_dir(&intent.members[0].info()).is_dir());
+    assert!(restarted.session_dir(&intent.members[1].info()).is_dir());
 }
 
 #[tokio::test]
@@ -6605,6 +7748,8 @@ async fn ttl_discovery_budget_exhaustion_preserves_every_candidate() {
         std::fs::read_dir(&sessions).unwrap().count(),
         TTL_DISCOVERY_MAX_DIRECTORY_ENTRIES + 1
     );
+    assert!(!sessions.join(RECLAIM_INTENT_DIRECTORY).exists());
+    assert!(!sessions.join(RECLAIM_GATE_FILE).exists());
     assert!(cleaner.opened_sessions.lock().unwrap().is_empty());
     assert!(cleaner.writer_leases.lock().unwrap().is_empty());
 }
