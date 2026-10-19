@@ -2147,6 +2147,7 @@ mod plan_approval_helper_tests {
 #[cfg(test)]
 mod plan_finish_projection_tests {
     use agent_client_protocol::schema::v1 as acp;
+    use std::sync::Arc;
 
     #[tokio::test(flavor = "current_thread")]
     async fn completed_plan_clears_only_after_successful_manual_behavior_selection() {
@@ -2219,8 +2220,319 @@ mod plan_finish_projection_tests {
                         .unwrap()
                         .unwrap();
                     assert!(persisted.behavior.completed_plan.is_none());
+                    assert_eq!(
+                        persisted.behavior.last_plan_submission_id,
+                        completed.last_plan_submission_id,
+                        "manual dismissal must not reset the session submission counter"
+                    );
                     assert_eq!(persisted.behavior.behavior().as_id(), target);
                 }
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn behavior_switch_preserves_deferred_candidate_and_cold_restore_identity() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use crate::session::behavior::{
+                    BehaviorChangeOutcome, RetainedPlanAction, RetainedPlanDecisionOutcome,
+                    RetainedPlanStatus,
+                };
+
+                let (actor, _events) = crate::session::actor::tests::support::build_actor().await;
+                {
+                    let mut behavior = actor.behavior.lock();
+                    behavior.select_behavior(tool_types::BehaviorId::Plan);
+                    behavior.record_plan_artifact("# Deferred plan");
+                    assert!(behavior.submit_initial_plan());
+                    let expected = behavior.snapshot();
+                    assert_eq!(
+                        behavior.decide_submitted_plan_if(
+                            &expected,
+                            expected.plan_submission_id.unwrap(),
+                            "defer-switch-regression",
+                            RetainedPlanAction::Defer,
+                            None,
+                        ),
+                        RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Deferred)
+                    );
+                }
+                let before_switch = actor.behavior.lock().snapshot();
+                actor
+                    .persist_control_snapshot_durably(before_switch.clone(), None)
+                    .await
+                    .expect("persist deferred candidate before switching");
+
+                let confirmation = actor
+                    .request_behavior_change(acp::SessionModeId::new("normal"))
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    confirmation,
+                    BehaviorChangeOutcome::ConfirmationRequired { .. }
+                ));
+                assert_eq!(
+                    actor.behavior.lock().snapshot(),
+                    before_switch,
+                    "confirmation must not select the target or alter Plan state"
+                );
+
+                let applied = actor
+                    .request_behavior_change(acp::SessionModeId::new("normal"))
+                    .await
+                    .unwrap();
+                assert!(matches!(applied, BehaviorChangeOutcome::Applied));
+
+                let live = actor.behavior.lock().snapshot();
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                let persisted =
+                    crate::session::control::SessionControlSnapshot::latest_from_timeline(&events)
+                        .unwrap()
+                        .unwrap()
+                        .behavior;
+                assert_eq!(
+                    live, persisted,
+                    "latest durable Control must match live state"
+                );
+                assert_eq!(persisted.behavior(), tool_types::BehaviorId::Normal);
+                assert_eq!(persisted.plan_artifact_revision, 0);
+                assert!(persisted.plan_artifact_hash.is_none());
+                assert!(persisted.plan_submission_id.is_none());
+                assert!(persisted.last_plan_handoff.is_none());
+                assert!(!persisted.approval_pending);
+                assert_eq!(persisted.last_plan_submission_id, 1);
+                assert_eq!(
+                    persisted.retained_plan.as_ref().unwrap().status,
+                    RetainedPlanStatus::Deferred
+                );
+
+                let mut restored =
+                    crate::session::behavior::BehaviorCoordinator::from_snapshot(persisted.clone());
+                assert_eq!(restored.snapshot(), persisted);
+                restored.select_behavior(tool_types::BehaviorId::Plan);
+                restored.record_plan_artifact("# Same text, new cycle");
+                assert!(restored.submit_initial_plan());
+                assert_eq!(restored.plan_submission_id(), Some(2));
+                assert_eq!(restored.snapshot().last_plan_submission_id, 2);
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn goal_lifecycle_entry_preserves_completed_plan_snapshot() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use tools::implementations::grow_build::{
+                    CreateGoalTool, GetGoalTool, UpdateGoalTool, plan_control::PlanControlTool,
+                    todo::TodoWriteTool,
+                };
+                use tools::registry::types::ToolConfig;
+
+                let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (mut actor, _events) =
+                    crate::session::actor::tests::support::create_test_actor_ex(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await;
+                actor.goal_enabled = true;
+                *actor.agent.borrow_mut() =
+                    crate::session::actor::tests::support::test_agent_with_tools(vec![
+                        ToolConfig::for_tool::<PlanControlTool>(),
+                        ToolConfig::for_tool::<CreateGoalTool>(),
+                        ToolConfig::for_tool::<GetGoalTool>(),
+                        ToolConfig::for_tool::<UpdateGoalTool>(),
+                        ToolConfig::for_tool::<TodoWriteTool>(),
+                    ])
+                    .await;
+                {
+                    let mut behavior = actor.behavior.lock();
+                    behavior.select_behavior(tool_types::BehaviorId::Plan);
+                    behavior.record_plan_artifact("# Approved plan before Goal entry");
+                    assert!(behavior.submit_initial_plan());
+                    assert!(behavior.approve_submitted_plan());
+                }
+                let before = actor.behavior.lock().snapshot();
+                let owner = std::sync::Arc::new(actor);
+                let boundary = owner.step_control_gate.lock().await;
+                let completing = owner.clone();
+                let completion = tokio::task::spawn_local(async move {
+                    completing
+                        .finish_plan_to_default_if(&before, Some("Goal handoff report"))
+                        .await
+                });
+                tokio::task::yield_now().await;
+                drop(boundary);
+                assert!(completion.await.unwrap().unwrap());
+                let completed = owner.behavior.lock().snapshot();
+                let completed_plan = completed.completed_plan.clone().expect("completed plan");
+
+                assert!(matches!(
+                    owner.request_goal_behavior_entry().await,
+                    Ok(crate::session::behavior::BehaviorChangeOutcome::Applied)
+                ));
+
+                let events = owner.chat_state_handle.timeline_events().await.unwrap();
+                let persisted =
+                    crate::session::control::SessionControlSnapshot::latest_from_timeline(&events)
+                        .unwrap()
+                        .unwrap()
+                        .behavior;
+                assert_eq!(owner.behavior.lock().snapshot(), persisted);
+                assert_eq!(persisted.behavior(), tool_types::BehaviorId::Goal);
+                assert_eq!(persisted.completed_plan.as_ref(), Some(&completed_plan));
+                assert_eq!(
+                    persisted.last_plan_submission_id,
+                    completed.last_plan_submission_id
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn failed_behavior_selection_does_not_change_live_plan_state() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use crate::session::behavior::{
+                    BehaviorChangeOutcome, RetainedPlanAction, RetainedPlanDecisionOutcome,
+                    RetainedPlanStatus,
+                };
+
+                struct RejectControlPersistence {
+                    events: Arc<std::sync::Mutex<Vec<chat_state::TimelineEvent>>>,
+                    reject_controls: Arc<std::sync::atomic::AtomicBool>,
+                }
+
+                impl chat_state::TimelinePersistence for RejectControlPersistence {
+                    fn persist_timeline_event_and_ack(
+                        &mut self,
+                        event: &chat_state::TimelineEvent,
+                    ) -> tokio::sync::oneshot::Receiver<std::io::Result<()>> {
+                        let reject =
+                            matches!(&event.kind, chat_state::TimelineEventKind::Control(_))
+                                && self
+                                    .reject_controls
+                                    .load(std::sync::atomic::Ordering::SeqCst);
+                        if !reject {
+                            self.events
+                                .lock()
+                                .expect("test event log remains available")
+                                .push(event.clone());
+                        }
+                        let (tx, rx) = tokio::sync::oneshot::channel();
+                        let result = if reject {
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::StorageFull,
+                                "injected permanent Control failure",
+                            ))
+                        } else {
+                            Ok(())
+                        };
+                        let _ = tx.send(result);
+                        rx
+                    }
+
+                    fn flush(&mut self) {}
+                }
+
+                let (gateway_tx, _gateway_rx) =
+                    tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (mut actor, _event_rx) =
+                    crate::session::actor::tests::support::create_test_actor_ex(
+                        0,
+                        256_000,
+                        85,
+                        gateway_tx,
+                        persistence_tx,
+                    )
+                    .await;
+                {
+                    let mut behavior = actor.behavior.lock();
+                    behavior.select_behavior(tool_types::BehaviorId::Plan);
+                    behavior.record_plan_artifact("# Deferred plan");
+                    assert!(behavior.submit_initial_plan());
+                    let expected = behavior.snapshot();
+                    assert_eq!(
+                        behavior.decide_submitted_plan_if(
+                            &expected,
+                            expected.plan_submission_id.unwrap(),
+                            "defer-failed-switch-regression",
+                            RetainedPlanAction::Defer,
+                            None,
+                        ),
+                        RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Deferred)
+                    );
+                }
+                let before = actor.behavior.lock().snapshot();
+                let sampling_config = actor
+                    .chat_state_handle
+                    .get_sampling_config()
+                    .await
+                    .expect("read sampling config");
+                let initial_events = actor.chat_state_handle.timeline_events().await.unwrap();
+                let events = Arc::new(std::sync::Mutex::new(initial_events.clone()));
+                let reject_controls = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
+                actor.chat_state_handle = chat_state::ChatStateActor::spawn_from_timeline(
+                    initial_events,
+                    sampling_config,
+                    Box::new(RejectControlPersistence {
+                        events: events.clone(),
+                        reject_controls: reject_controls.clone(),
+                    }),
+                    event_tx,
+                    tokio_util::sync::CancellationToken::new(),
+                )
+                .await
+                .expect("start fault-injecting durable owner");
+                actor.events =
+                    crate::session::events::EventTracker::new(actor.chat_state_handle.clone());
+                actor
+                    .persist_control_snapshot_durably(before.clone(), None)
+                    .await
+                    .expect("persist initial Plan snapshot");
+
+                let confirmation = actor
+                    .request_behavior_change(acp::SessionModeId::new("normal"))
+                    .await
+                    .unwrap();
+                assert!(matches!(
+                    confirmation,
+                    BehaviorChangeOutcome::ConfirmationRequired { .. }
+                ));
+                let before_failed_commit = actor.behavior.lock().snapshot();
+                reject_controls.store(true, std::sync::atomic::Ordering::SeqCst);
+                assert!(
+                    actor
+                        .request_behavior_change(acp::SessionModeId::new("normal"))
+                        .await
+                        .is_err()
+                );
+                assert_eq!(
+                    actor.behavior.lock().snapshot(),
+                    before_failed_commit,
+                    "failed durable selection must leave the live Behavior snapshot intact"
+                );
+                let durable_events = events
+                    .lock()
+                    .expect("durable event log remains readable")
+                    .clone();
+                assert_eq!(
+                    crate::session::control::SessionControlSnapshot::latest_from_timeline(
+                        &durable_events,
+                    )
+                    .unwrap()
+                    .unwrap()
+                    .behavior,
+                    before,
+                    "failed selection must not replace the acknowledged Control snapshot"
+                );
             })
             .await;
     }

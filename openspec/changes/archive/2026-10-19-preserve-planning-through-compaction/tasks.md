@@ -1,0 +1,5 @@
+- [x] 增加根与 child 的 sync/async compaction 通知回归，确认现有 TODO 不丢失。
+- [x] 增加 compaction 后显式 Plan 更新仍替换 TODO 投影的回归。
+- [x] 删除同步 compaction 对 TODO 的清空副作用。
+- [x] 对抗性检查 compaction 通知只更新展示状态，不伪造 Plan 更新。
+- [x] 运行 root/child 同步与异步 compaction 回归。

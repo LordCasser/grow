@@ -603,6 +603,8 @@ fn handle_session_notification_inner(
                 | GrowSessionUpdate::AutoCompactCompleted { .. }
                 | GrowSessionUpdate::AutoCompactFailed { .. }
                 | GrowSessionUpdate::AutoCompactCancelled { .. }
+                | GrowSessionUpdate::ImageRecoveryOperation { .. }
+                | GrowSessionUpdate::TurnCompleted { .. }
                 | GrowSessionUpdate::SamplingAttempt { .. }
                 | GrowSessionUpdate::RetryState(_)
                 | GrowSessionUpdate::MemoryFlushCompleted { .. }
@@ -639,6 +641,7 @@ fn handle_session_notification_inner(
             child_sid,
             meta.event_id.clone(),
             meta.is_replay,
+            meta.prompt_id.clone(),
             agent,
         );
         let control_resolved = controls_pending_before
@@ -820,16 +823,8 @@ fn handle_session_notification_inner(
                 &mut agent.scrollback,
                 meta.event_id.as_deref(),
             );
-            if let GrowSessionUpdate::AutoCompactCompleted {
-                tokens_after,
-                async_compact,
-                ..
-            } = update
-            {
+            if let GrowSessionUpdate::AutoCompactCompleted { tokens_after, .. } = update {
                 refresh_context_used(agent, *tokens_after);
-                if !async_compact {
-                    agent.todo.update_todos(Vec::new());
-                }
             }
             changed
         }
@@ -1650,7 +1645,7 @@ fn handle_session_notification_inner(
     (changed || control_resolved) && is_active
 }
 
-fn apply_image_recovery_operation(
+pub(crate) fn apply_image_recovery_operation(
     operation_id: String,
     prompt_id: Option<String>,
     state: shell::extensions::notification::ImageRecoveryOperationState,
@@ -1779,6 +1774,7 @@ pub(super) fn handle_child_session_notification(
     child_sid: &str,
     event_id: Option<String>,
     is_replay: bool,
+    envelope_prompt_id: Option<String>,
     agent: &mut AgentView,
 ) -> bool {
     let changed = match update {
@@ -1844,6 +1840,50 @@ pub(super) fn handle_child_session_notification(
                     &mut child.scrollback,
                 )
             }),
+        GrowSessionUpdate::ImageRecoveryOperation {
+            operation_id,
+            prompt_id,
+            state,
+        } => agent
+            .subagent_views
+            .get_mut(child_sid)
+            .is_some_and(|child| {
+                apply_image_recovery_operation(
+                    operation_id,
+                    prompt_id,
+                    state,
+                    &mut child.scrollback,
+                )
+            }),
+        GrowSessionUpdate::TurnCompleted {
+            prompt_id,
+            stop_reason,
+            ..
+        } => {
+            let Some(child) = agent.subagent_views.get_mut(child_sid) else {
+                return false;
+            };
+            // A child terminal is scoped to the exact prompt that emitted it.
+            // Replay is chronological history; live terminals must still match
+            // the child's active prompt and must not repeat a finalized one.
+            let stale = envelope_prompt_id
+                .as_deref()
+                .is_some_and(|envelope_prompt| envelope_prompt != prompt_id)
+                || (!is_replay
+                    && (child.session.current_prompt_id.as_deref() != Some(prompt_id.as_str())
+                        || child.session.finalized_prompt.as_deref() == Some(prompt_id.as_str())));
+            if stale {
+                false
+            } else {
+                let message = if matches!(stop_reason.as_str(), "cancelled" | "canceled") {
+                    "Image recovery cancelled"
+                } else {
+                    "Image recovery interrupted"
+                };
+                settle_unfinished_image_recovery(&mut child.scrollback, Some(&prompt_id), message);
+                true
+            }
+        }
         GrowSessionUpdate::AutoCompactStarted { .. }
         | GrowSessionUpdate::AutoCompactCompleted { .. }
         | GrowSessionUpdate::AutoCompactFailed { .. }

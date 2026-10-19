@@ -1243,7 +1243,7 @@ impl SessionActor {
                         "limit": limit,
                     })),
                 ),
-                Err(_) => (
+                Err(error) => (
                     crate::session::events::TurnOutcomeLabel::Error,
                     chat_state::TurnTerminal {
                         source: chat_state::TurnTerminalSource::Host,
@@ -1257,7 +1257,11 @@ impl SessionActor {
                     None,
                     timeline_error_override
                         .as_ref()
-                        .map(|(_, context)| context.clone()),
+                        .map(|(_, context)| context.clone())
+                        .or_else(|| {
+                            crate::session::commands::is_fatal_turn_boundary_error(error)
+                                .then(|| serde_json::json!({ "error": error }))
+                        }),
                 ),
             };
         let terminal_turn = self.events.current_turn();
@@ -1319,8 +1323,14 @@ impl SessionActor {
                 None
             };
             drop(turn_scope_guard);
-            let boundary_error =
+            let mut boundary_error =
                 crate::session::commands::fatal_turn_boundary_error("terminal", error.to_string());
+            if let Err(original) = &execution {
+                boundary_error
+                    .data
+                    .as_mut()
+                    .expect("boundary error has data")["cause"] = serde_json::json!(original);
+            }
             return Err(crate::sampling::error::attach_prompt_usage(
                 boundary_error,
                 usage,

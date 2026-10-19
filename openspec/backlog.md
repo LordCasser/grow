@@ -1,16 +1,24 @@
 # 未解决边界
 
-已解决事项的设计、验证与归档记录见 [changes/archive/](changes/archive/)。用户于 2026-10-19 授权逐项结合代码核查、立项和修复；本轮确认结果与验证状态见 [backlog audit](changes/archive/2026-10-19-prepare-v2-4-0/backlog-audit.md)。确认缺陷已分别修复、验证和归档；下面保留明确暂缓的产品方向、依赖真实负载证据的优化假设，以及随后审计发现且需独立处理的架构债务。用户再次确认本轮只修已确认缺陷，以下三项保持暂缓。原记录中的“后续/本次不改”描述的是登记时范围。
+2026-10-19 按用户授权核对并修复 v2.4.0 后续审计四项，以及 backlog 中三项可验证问题。七项分别立项、补齐回归、对抗性审查并归档；MCP 不在本轮修改范围。以下保留此前明确暂缓或缺少真实负载证据的方向，不扩大为新功能。
 
 - **Remote Control / Agent Host 跨设备使用（暂缓、未排期）**：用户认可从其他设备连接和操作已有 Grow 会话的方向，但当前不实施、不设日期，不纳入 MCP 多轮或保留计划提案。本次不展开远端控制架构，也不因此引入统一 Dock、Memory 或其他大型功能。未来明确启动时另建 change，重新界定身份、权限、执行 owner、断线和恢复边界；本条不构成实现授权。决策见 [2026-10-11 上游主题评审](changes/archive/2026-10-18-record-upstream-review-2bdd1d6/review.md)。
 
 - **Provider 缓存策略与 native epoch 的关系**：[理论 review](changes/archive/2026-09-28-evaluate-provider-cache-affinity/results.md) 只能确认当前 key、breakpoint 与 retention 的本地机制及各官方契约，不能证明统一调整会改善多 provider 的成本与延迟。若要优化，先确认具体 provider/model/deployment、字段透传与负载，再按该 route 的真实证据另开最小行为 change；不预建通用 cache policy registry。
 - **Recap 与主请求缓存的关系**：recap 使用独立 key 且没有主请求 tools，已修正把本地 wire 形状表述成远端复用的注释和测试名。真实共享前缀与收益仍未验证；保留 Sideband tool-free 契约，不能为缓存假设增加工具定义。
 
-## 待独立核对
+## 本轮已解决
 
-- **同步 compaction 的 TODO 展示清理**：`pager/src/app/acp_handler/session_notification.rs` 在 `AutoCompactCompleted { async_compact: false }` 时直接清空前端 TODO，而当前局部计划由 Timeline 持有。需独立核对同步压缩后的计划再投影及恢复顺序，确认是否存在暂时或持续丢失任务入口；本次 Plan 顶部入口及 Agent 切换修复不扩展到压缩路径。
+| 问题 | 归档与验证 |
+| --- | --- |
+| Behavior 切换丢失 retained Plan 与提交计数 | [Plan 持久快照](changes/archive/2026-10-19-preserve-plan-state-on-behavior-switch/verification.md) |
+| 图片恢复 cursor 重连重复行及旧 spinner | [重连合并](changes/archive/2026-10-19-merge-image-recovery-reconnect-rows/verification.md) |
+| child 图片恢复通知、真实历史回放及异常结束漏处理 | [child 图片恢复](changes/archive/2026-10-19-route-child-image-recovery/verification.md) |
+| Windows storage CI 未覆盖构建配置路径 | [CI 触发范围](changes/archive/2026-10-19-fix-windows-storage-build-input-triggers/verification.md) |
+| 同步 compaction 清空当前 TODO | [保留计划投影](changes/archive/2026-10-19-preserve-planning-through-compaction/verification.md) |
+| 工具运行时失败继续采样、原始错误被后续 ACK/Step 错误遮蔽 | [工具失败停止边界](changes/archive/2026-10-19-stop-on-tool-runtime-failure/verification.md) |
+| child handoff 重复复制已有历史、重复校验已验证的冷 Timeline | [历史所有权优化](changes/archive/2026-10-19-reduce-child-handoff-history-copy/verification.md) |
 
-- **工具运行时错误被后续 Step 错误遮蔽（已确认，待独立立项）**：本轮 resource 模型管线回归曾触发 Timeline 参数校验拒绝；`shell/src/session/actor/turn/mod.rs` 的 `execute_tool_calls_result` 匹配把 `Err` 落到 `_ => false` 后尝试下一 Step，最终报告 Step/Turn 边界失败而遮蔽最初错误。resource 参数校验已在 strengthen-skill-loading 修正，正常路径与权限拒绝继续通过现有生命周期；通用工具运行时错误的 fail-stop、未完成 Tool/Step 的 durable 收尾及原始错误保留须另立最小 change，不顺带重写当前回合状态机。验收需注入 tool admission/result publication/terminal ACK 失败，断言不发下一模型请求，并检查冷恢复没有伪造完成或丢失原始错误。
+挂起优化仅消除已经确认的重复工作。单次本机合成历史测量不代表端到端挂起耗时，也不能解释所有真实长会话等待；仍保留 live 历史验证、最新事实重读、writer/child 关系检查和既有期限。未来只有真实多节点负载证据才能支持进一步优化，不预建缓存或并行退役框架。
 
-- **长会话挂起的历史复制与重放成本（已确认重复工作，进一步优化待测量）**：`shell/src/agent/mvp_agent/runtime_handoff.rs` 的 child 核对多次取得完整 Timeline，`CanonicalChildFacts::read` 又复制并通过 `Timeline::from_events` 重放。本轮 [最小性能优化](changes/archive/2026-10-19-streamline-suspension-runtime-observation/verification.md) 仅去掉 root 身份/退役节点观察中直接丢弃的完整历史复制，并增加阶段耗时。后续需先测量多节点长历史的 replay、native I/O、service/auxiliary drain 与 UI frame 成本，再决定复用权威派生状态或减少复制；不得直接删掉冷历史验证、并行退役父子节点或用超时丢弃仍在途 writer。该重复工作尚不能证明是两个用户会话长时间等待的唯一来源。
+原审计证据见 [v2.4.0 后续审计](changes/archive/2026-10-19-audit-post-v2-4-0-boundaries/audit.md)。

@@ -1,0 +1,7 @@
+schema: spec-driven
+created: 2026-10-19
+skip_specs: true
+skip_specs_reason: >-
+  This change corrects CI workflow path filters only. It does not change product
+  behavior or the archived development-workflow contract; the existing release
+  workflow_call remains a required gate and is covered by regression checks.

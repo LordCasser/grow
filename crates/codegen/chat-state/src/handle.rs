@@ -33,6 +33,8 @@ pub struct ChatStateHandle {
 pub struct PendingTimelineCommit {
     pub event: crate::TimelineEvent,
     pub error_kind: Option<std::io::ErrorKind>,
+    /// Original persistence diagnostic, retained after the actor closes.
+    pub error_message: Option<String>,
     pub acknowledgement_lost: bool,
 }
 

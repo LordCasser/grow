@@ -308,6 +308,92 @@ mod desired_state_tests {
     }
 
     #[tokio::test]
+    async fn successful_control_intent_switch_persists_retained_plan_and_submission_counter() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use crate::session::behavior::{
+                    RetainedPlanAction, RetainedPlanDecisionOutcome, RetainedPlanStatus,
+                };
+
+                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
+                {
+                    let mut behavior = actor.behavior.lock();
+                    behavior.select_behavior(tool_types::BehaviorId::Plan);
+                    behavior.record_plan_artifact("# Deferred candidate");
+                    assert!(behavior.submit_initial_plan());
+                    let snapshot = behavior.snapshot();
+                    assert_eq!(
+                        behavior.decide_submitted_plan_if(
+                            &snapshot,
+                            snapshot.plan_submission_id.unwrap(),
+                            "control-intent-deferred-switch",
+                            RetainedPlanAction::Defer,
+                            None,
+                        ),
+                        RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Deferred)
+                    );
+                }
+
+                let intent = |sequence| crate::session::ControlIntent {
+                    client_id: "plan-switch-test".into(),
+                    generation: 7,
+                    sequence,
+                };
+                for (sequence, expected) in [
+                    (
+                        1,
+                        BehaviorChangeOutcome::ConfirmationRequired {
+                            message: String::new(),
+                            remaining_ms: 0,
+                        },
+                    ),
+                    (2, BehaviorChangeOutcome::Applied),
+                ] {
+                    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                    assert!(
+                        actor
+                            .admit_behavior_selection(
+                                acp::SessionModeId::new("normal"),
+                                Some(intent(sequence)),
+                                response_tx,
+                            )
+                            .await
+                    );
+                    let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+                    actor
+                        .clone()
+                        .drain_behavior_selections(completion_tx)
+                        .await
+                        .unwrap();
+                    let actual = response_rx.await.unwrap().unwrap();
+                    match (expected, actual) {
+                        (
+                            BehaviorChangeOutcome::ConfirmationRequired { .. },
+                            BehaviorChangeOutcome::ConfirmationRequired { .. },
+                        )
+                        | (BehaviorChangeOutcome::Applied, BehaviorChangeOutcome::Applied) => {}
+                        (expected, actual) => panic!("expected {expected:?}, got {actual:?}"),
+                    }
+                }
+
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                let persisted =
+                    crate::session::control::SessionControlSnapshot::latest_from_timeline(&events)
+                        .unwrap()
+                        .unwrap()
+                        .behavior;
+                assert_eq!(actor.behavior.lock().snapshot(), persisted);
+                assert_eq!(persisted.behavior(), tool_types::BehaviorId::Normal);
+                assert_eq!(persisted.last_plan_submission_id, 1);
+                assert_eq!(
+                    persisted.retained_plan.as_ref().unwrap().status,
+                    RetainedPlanStatus::Deferred
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
     async fn picker_projection_and_admission_share_the_host_foreground_rejection() {
         tokio::task::LocalSet::new()
             .run_until(async {
@@ -1219,13 +1305,13 @@ impl SessionActor {
             && self.behavior.lock().snapshot().completed_plan.is_some();
         if !decision.effects.is_empty() {
             let persisted_goal = self.goal_tracker.lock().snapshot().cloned();
-            let mut next_behavior = crate::session::behavior::BehaviorSnapshot::selected(mode);
-            if !clear_completed_plan {
-                let previous = self.behavior.lock().snapshot();
-                if previous.completed_plan.is_some() {
-                    next_behavior.completed_plan = previous.completed_plan;
-                    next_behavior.last_plan_submission_id = previous.last_plan_submission_id;
-                }
+            let mut coordinator = crate::session::behavior::BehaviorCoordinator::from_snapshot(
+                self.behavior.lock().snapshot(),
+            );
+            coordinator.select_behavior(mode);
+            let mut next_behavior = coordinator.snapshot();
+            if clear_completed_plan {
+                next_behavior.completed_plan = None;
             }
             let persisted = if let Some(intent) = control_intent {
                 self.persist_behavior_transition_for_control_durably(

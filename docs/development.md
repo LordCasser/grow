@@ -140,6 +140,12 @@ Agent 激活必须将新的 ToolBridge 绑定到原 SessionActor 的 Planning ru
 
 Plan 完成时先保全原始报告，再将完成引用与退出 Normal 一起提交到 Control；提交确认后才发布完成标记并继续正常采样生成简短总结。canonical 查询同时读取计划与报告，Pager 用独立 Tab 展示；完成入口只在下一次成功手动选择 Behavior 时清除，同模式选择也适用。恢复和自动 Goal 控制保留该引用，fork 不继承完成展示。契约见 [完成结果持久化](../openspec/specs/behavior-goal/spec.md#requirement-plan-completion-retains-an-inspectable-durable-result) 与 [完成详情和总结](../openspec/specs/client-surfaces/spec.md#requirement-completed-plan-details-separate-the-full-report-from-the-summary)。
 
+离开 Plan 时，先将 coordinator 选择语义应用到待持久快照并等待 Control 确认，再更新 live Behavior；保留 retained candidate 与 submission counter，清除 Plan runtime 字段。只有成功的手动 Behavior 选择按既有规则清除 completed-plan 引用；GoalLifecycle 选择保留它。冷恢复后下一次提交继续使用更大的 submission identity。压缩完成只更新压缩状态，root 和 child 的 TODO 投影都保留到显式 Plan 更新。见 [retained Plan owner](../openspec/specs/behavior-goal/spec.md#requirement-retained-plans-remain-under-the-existing-session-owner)、[completed Plan 持久结果](../openspec/specs/behavior-goal/spec.md#requirement-plan-completion-retains-an-inspectable-durable-result) 与 [局部计划的 live/resume 投影](../openspec/specs/task-planning/spec.md#requirement-committed-local-plans-have-one-live-and-resumed-projection)。
+
+图片恢复仍是单条可见 operation row：root 与 child 各自投影到所属 scrollback；child 历史恢复包含持久 Grow lifecycle 和 prompt terminal，resident reconnect 的 cursor tail 按 operation identity 更新旧行并保留 EntryId。检查重连时同时核对重复行、终态和迟到 progress，不把恢复行移到 parent transcript。见 [图片恢复行](../openspec/specs/client-surfaces/spec.md#requirement-image-recovery-is-one-visible-operation-row)。
+
+工具 runtime 基础设施错误必须停止当前采样与 completion recovery，并在原有 terminal transaction 中按 Tool、Step、Turn 顺序收尾；不跨越未确认工具提交 StepEnded，也不把 terminal ACK 失败当作成功。子会话 handoff 的历史优化可以复用已通过 `load_light` 校验的 Timeline，但仍需保留 child spawn/terminal 一致性检查和 verified-prefix reconciliation。见 [工具失败终态展示](../openspec/specs/client-surfaces/spec.md#requirement-generic-tool-failures-render-their-terminal-content-once)、[工具运行时失败边界](../openspec/specs/model-sampling/spec.md#requirement-tool-runtime-failures-stop-dependent-sampling) 与 [子会话 verified commit prefix](../openspec/specs/session-timeline/spec.md#requirement-subagent-reconciliation-advances-only-verified-commit-prefixes)。
+
 按受影响 crate 缩小检查范围；下列命令是项目现有 CI/README 的入口，不意味着每次纯文档修改都运行全部测试。
 
 先核对 `cargo --version` 和 `rustc --version` 与 `rust-toolchain.toml` 一致。该文件由 rustup 代理读取；若 Homebrew 的 Cargo/Rust 位于 PATH 前面，需要把 rustup 代理目录（通常是 `~/.cargo/bin`）置于前面并重新核对版本，避免本地验证与发布工具链不同。

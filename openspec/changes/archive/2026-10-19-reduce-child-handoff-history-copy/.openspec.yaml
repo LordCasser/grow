@@ -1,0 +1,6 @@
+schema: spec-driven
+created: 2026-10-19
+skip_specs: true
+skip_specs_reason: >-
+  This is an internal ownership refactor. Timeline validation, child fact
+  validation, suspension deadlines, and durable runtime behavior remain the same.

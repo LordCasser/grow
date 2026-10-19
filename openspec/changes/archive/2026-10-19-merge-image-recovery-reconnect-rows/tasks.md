@@ -1,0 +1,4 @@
+- [x] 增加 cursor reload 交错回归：Started、reload、Completed、cursor merge，断言唯一行、EntryId 不变、终态不运行。
+- [x] 增加终态旧行遇到迟到 progress 的对抗性合并回归。
+- [x] 按 operation_id 合并 tail 中图片恢复行并保持原身份。
+- [x] 运行目标回归并核实 native commit 与 running index 边界。

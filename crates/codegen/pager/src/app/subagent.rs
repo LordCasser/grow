@@ -245,25 +245,51 @@ pub(crate) fn replay_inherited_updates(
     child_session_id: &str,
 ) {
     let home = effective_grow_home();
-    let replay_meta = crate::acp::meta::NotificationMeta {
-        is_replay: true,
-        ..Default::default()
-    };
     let outcome = match stream_session_history_at(child_session_id, &home, |update| match update {
         shell::session::storage::SessionUpdate::Acp(notification) => {
+            let mut meta =
+                crate::acp::meta::NotificationMeta::from_json(notification.meta.as_ref());
+            meta.is_replay = true;
             child_view.session.handle_update(
                 notification.update,
-                &replay_meta,
+                &meta,
                 &mut child_view.scrollback,
             );
         }
-        shell::session::storage::SessionUpdate::Grow(notification) => {
-            if let shell::extensions::notification::SessionUpdate::UiNotice(notice) =
-                notification.update
-            {
+        shell::session::storage::SessionUpdate::Grow(notification) => match notification.update {
+            shell::extensions::notification::SessionUpdate::UiNotice(notice) => {
                 crate::app::acp_handler::apply_ui_notice(child_view, notice, None, true);
             }
-        }
+            shell::extensions::notification::SessionUpdate::ImageRecoveryOperation {
+                operation_id,
+                prompt_id,
+                state,
+            } => {
+                crate::app::acp_handler::apply_image_recovery_operation(
+                    operation_id,
+                    prompt_id,
+                    state,
+                    &mut child_view.scrollback,
+                );
+            }
+            shell::extensions::notification::SessionUpdate::TurnCompleted {
+                prompt_id,
+                stop_reason,
+                ..
+            } => {
+                let message = if matches!(stop_reason.as_str(), "cancelled" | "canceled") {
+                    "Image recovery cancelled"
+                } else {
+                    "Image recovery interrupted"
+                };
+                crate::app::acp_handler::settle_unfinished_image_recovery(
+                    &mut child_view.scrollback,
+                    Some(&prompt_id),
+                    message,
+                );
+            }
+            _ => {}
+        },
         _ => {}
     }) {
         Ok(outcome) => outcome,
@@ -465,6 +491,11 @@ pub(crate) fn finalize_finished_child_view(
     child_view: &mut crate::app::agent_view::AgentView,
     elapsed: std::time::Duration,
 ) {
+    crate::app::acp_handler::settle_unfinished_image_recovery(
+        &mut child_view.scrollback,
+        child_view.session.current_prompt_id.as_deref(),
+        "Image recovery interrupted",
+    );
     child_view
         .session
         .tracker
@@ -1333,6 +1364,138 @@ mod tests {
         )
         .unwrap();
         sessions_dir
+    }
+    #[test]
+    fn replay_inherited_updates_preserves_child_image_lifecycle_order() {
+        use shell::extensions::notification::{
+            ImageRecoveryOperationState as State, SessionNotification, SessionUpdate as GrowUpdate,
+        };
+
+        let home = tempfile::tempdir().unwrap();
+        let child_sid = "child-image-history-order";
+        let session_dir =
+            setup_enrichment_dir(home.path(), std::path::Path::new("/tmp"), child_sid);
+        write_timeline_events(&session_dir, &chat_state::Timeline::default());
+        set_replay_grow_home_for_tests(Some(home.path().to_path_buf()));
+
+        let grow_line = |event_seq: u64, update| {
+            let notification = SessionNotification {
+                session_id: agent_client_protocol::schema::v1::SessionId::new(child_sid),
+                update,
+                meta: Some(serde_json::json!({
+                    "eventId": format!("{child_sid}-{event_seq}"),
+                    "promptId": "child-prompt",
+                })),
+            };
+            serde_json::json!({
+                "timestamp": 0,
+                "method": "_grow/session/update",
+                "params": notification,
+            })
+            .to_string()
+        };
+        let acp_line = |event_seq: u64, update| {
+            let notification = agent_client_protocol::schema::v1::SessionNotification::new(
+                agent_client_protocol::schema::v1::SessionId::new(child_sid),
+                update,
+            )
+            .meta(
+                serde_json::json!({
+                    "eventId": format!("{child_sid}-{event_seq}"),
+                    "promptId": "child-prompt",
+                })
+                .as_object()
+                .cloned(),
+            );
+            serde_json::json!({
+                "timestamp": 0,
+                "method": "session/update",
+                "params": notification,
+            })
+            .to_string()
+        };
+        let lines = [
+            grow_line(
+                10,
+                GrowUpdate::ImageRecoveryOperation {
+                    operation_id: "recover-from-disk".into(),
+                    prompt_id: Some("child-prompt".into()),
+                    state: State::Started {
+                        message: "Preparing image recovery…".into(),
+                    },
+                },
+            ),
+            acp_line(
+                11,
+                agent_client_protocol::schema::v1::SessionUpdate::AgentMessageChunk(
+                    agent_client_protocol::schema::v1::ContentChunk::new(
+                        agent_client_protocol::schema::v1::ContentBlock::Text(
+                            agent_client_protocol::schema::v1::TextContent::new(
+                                "after recovery started",
+                            ),
+                        ),
+                    ),
+                ),
+            ),
+            grow_line(
+                12,
+                GrowUpdate::TurnCompleted {
+                    prompt_id: "child-prompt".into(),
+                    stop_reason: "end_turn".into(),
+                    agent_result: None,
+                    usage: None,
+                    identity: None,
+                },
+            ),
+        ];
+        std::fs::write(session_dir.join("updates.jsonl"), lines.join("\n") + "\n").unwrap();
+
+        let mut child = make_min_child_view();
+        replay_inherited_updates(&mut child, child_sid);
+        set_replay_grow_home_for_tests(None);
+
+        let entries = child
+            .scrollback
+            .iter_entries()
+            .map(|(_, entry)| &entry.block)
+            .collect::<Vec<_>>();
+        let image_index = entries
+            .iter()
+            .position(|block| matches!(block, RenderBlock::ImageRecovery(_)))
+            .unwrap();
+        let response_index = entries
+            .iter()
+            .position(|block| matches!(block, RenderBlock::AgentMessage(_)))
+            .unwrap();
+        assert!(
+            image_index < response_index,
+            "image operation must retain its durable position relative to ACP output"
+        );
+        let RenderBlock::ImageRecovery(row) = entries[image_index] else {
+            unreachable!()
+        };
+        assert!(!row.running);
+        assert_eq!(row.message, "Image recovery interrupted");
+    }
+    #[test]
+    fn finished_child_settles_unfinished_image_recovery() {
+        let mut child = make_min_child_view();
+        child.session.current_prompt_id = Some("child-prompt".into());
+        child.scrollback.push_block(RenderBlock::image_recovery(
+            "recover-finished-child",
+            Some("child-prompt".into()),
+            "Preparing image recovery…",
+            true,
+            false,
+        ));
+
+        finalize_finished_child_view(&mut child, std::time::Duration::from_secs(1));
+
+        let RenderBlock::ImageRecovery(row) = &child.scrollback.entry(0).unwrap().block else {
+            panic!("expected image recovery row")
+        };
+        assert!(!row.running);
+        assert_eq!(row.message, "Image recovery interrupted");
     }
     #[test]
     fn enrich_from_timeline_populates_fields() {

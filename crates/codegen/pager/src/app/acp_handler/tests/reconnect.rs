@@ -1185,6 +1185,113 @@
         assert!(agent.session.state.is_idle());
     }
 
+    #[test]
+    fn cursor_reconnect_merges_image_recovery_completion_into_original_entry() {
+        use shell::extensions::notification::ImageRecoveryOperationState as State;
+
+        let mut app = make_app_with_agent("image-reconnect");
+        let id = AgentId(0);
+        app.agents.get_mut(&id).unwrap().session.state = AgentState::TurnRunning;
+        app.agents.get_mut(&id).unwrap().session.current_prompt_id = Some("image-prompt".into());
+        let notify = |state| {
+            let payload = shell::extensions::notification::SessionNotification {
+                session_id: acp::SessionId::new("image-reconnect"),
+                update: GrowSessionUpdate::ImageRecoveryOperation {
+                    operation_id: "image-operation".into(),
+                    prompt_id: Some("image-prompt".into()),
+                    state,
+                },
+                meta: None,
+            };
+            acp::ExtNotification::new(
+                "grow/session/update",
+                std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
+            )
+        };
+        assert!(handle_session_notification(
+            &notify(State::Started { message: "Preparing image recovery…".into() }),
+            &mut app,
+        ));
+        let original_id = app.agents[&id].scrollback.iter_entries().find_map(|(id, entry)| {
+            matches!(&entry.block, RenderBlock::ImageRecovery(_)).then_some(id)
+        }).unwrap();
+        assert!(!app.agents[&id].scrollback.is_committed(original_id));
+
+        app.agents.get_mut(&id).unwrap().begin_session_reload(1);
+        assert!(handle_session_notification(
+            &notify(State::Completed { message: "Converted 1 image".into() }),
+            &mut app,
+        ));
+        assert!(app.agents.get_mut(&id).unwrap().finalize_reload_and_maybe_adopt(
+            1,
+            true,
+            Some("image-prompt".into()),
+        ));
+
+        let rows = app.agents[&id].scrollback.iter_entries().filter_map(|(id, entry)| {
+            match &entry.block {
+                RenderBlock::ImageRecovery(row) => Some((id, row)),
+                _ => None,
+            }
+        }).collect::<Vec<_>>();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, original_id);
+        assert_eq!(rows[0].1.message, "Converted 1 image");
+        assert!(!rows[0].1.running);
+        assert!(
+            !app.agents[&id].scrollback.is_committed(original_id),
+            "the first live recovery row remains outside native history"
+        );
+        assert_eq!(app.agents[&id].scrollback.commit_scan_cursor(), 0);
+
+        assert!(!handle_session_notification(
+            &notify(State::Vision { message: "late progress".into() }),
+            &mut app,
+        ));
+        let row = app.agents[&id].scrollback.get_by_id(original_id).unwrap();
+        let RenderBlock::ImageRecovery(row) = &row.block else { panic!("identity retained") };
+        assert_eq!(row.message, "Converted 1 image");
+        assert!(!row.running);
+
+        let original_index = app.agents[&id]
+            .scrollback
+            .index_of_id(original_id)
+            .expect("original row remains in the scrollback");
+        app.agents.get_mut(&id).unwrap().scrollback.mark_committed(original_index);
+        app.agents.get_mut(&id).unwrap().scrollback.set_commit_scan_cursor(original_index + 1);
+        assert!(app.agents[&id].scrollback.is_committed(original_id));
+        assert!(
+            app.agents[&id].scrollback.commit_scan_cursor() > original_index,
+            "the committed row is behind the native commit frontier before reload"
+        );
+
+        app.agents.get_mut(&id).unwrap().begin_session_reload(2);
+        assert!(handle_session_notification(
+            &notify(State::Vision { message: "late progress in cursor tail".into() }),
+            &mut app,
+        ));
+        assert!(app.agents.get_mut(&id).unwrap().finalize_reload_and_maybe_adopt(
+            2,
+            true,
+            None,
+        ));
+        let rows = app.agents[&id].scrollback.iter_entries().filter_map(|(id, entry)| {
+            match &entry.block {
+                RenderBlock::ImageRecovery(row) => Some((id, row)),
+                _ => None,
+            }
+        }).collect::<Vec<_>>();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].0, original_id);
+        assert_eq!(rows[0].1.message, "Converted 1 image");
+        assert!(!rows[0].1.running);
+        assert!(app.agents[&id].scrollback.is_committed(original_id));
+        assert!(
+            app.agents[&id].scrollback.commit_scan_cursor() > original_index,
+            "cursor-tail merging must not make the committed row eligible for native output again"
+        );
+    }
+
     /// Ingest-only cursor rule (Grow path): a `ModelChanged` the catalog can't
     /// resolve is durably held, so ingesting it advances the reconnect cursor
     /// and dedup highwater even before it can be projected. A later catalog

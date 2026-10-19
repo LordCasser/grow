@@ -70,8 +70,8 @@ use session_notification::{
     confirm_context_used, detect_plan_mode_change, drop_unexpected_replay,
 };
 pub(crate) use session_notification::{
-    apply_deferred_authoritative_controls, handle_descendant_state_replay,
-    handle_session_notification, sync_child_control_projection,
+    apply_deferred_authoritative_controls, apply_image_recovery_operation,
+    handle_descendant_state_replay, handle_session_notification, sync_child_control_projection,
 };
 
 pub(crate) fn sync_child_control_projection_by_session_id(

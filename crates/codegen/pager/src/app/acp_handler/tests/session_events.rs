@@ -1445,7 +1445,7 @@
             summary_preview: None,
         };
         let changed =
-            handle_child_session_notification(update, child_sid, None, false, &mut agent);
+            handle_child_session_notification(update, child_sid, None, false, None, &mut agent);
         assert!(changed);
 
         let info = agent.session.subagent_sessions.get(child_sid).unwrap();
@@ -1485,7 +1485,7 @@
             percentage: 72,
             reason: "threshold".into(),
         };
-        let _ = handle_child_session_notification(update, child_sid, None, false, &mut agent);
+        let _ = handle_child_session_notification(update, child_sid, None, false, None, &mut agent);
 
         let child_view = agent.subagent_views.get(child_sid).unwrap();
         assert_eq!(
@@ -1509,6 +1509,7 @@
             "unknown-child",
             None,
             false,
+            None,
             &mut agent,
         );
         assert!(!changed);
@@ -1532,7 +1533,7 @@
             summary_preview: None,
         };
         let changed =
-            handle_child_session_notification(update, child_sid, None, false, &mut agent);
+            handle_child_session_notification(update, child_sid, None, false, None, &mut agent);
         // No child_view means nothing visible changed — must not trigger redraw.
         assert!(!changed);
         // SubagentInfo should still be updated (data correctness).
@@ -1546,7 +1547,7 @@
         let mut agent = make_agent(Some("root-sess"));
         let update = GrowSessionUpdate::MemoryFlushStarted;
         let changed =
-            handle_child_session_notification(update, "child-1", None, false, &mut agent);
+            handle_child_session_notification(update, "child-1", None, false, None, &mut agent);
         assert!(!changed);
     }
 
@@ -1574,6 +1575,7 @@
             child_sid,
             Some("event-child-command".into()),
             false,
+            None,
             &mut agent,
         ));
 
@@ -1617,6 +1619,7 @@
             child_sid,
             None,
             false,
+            None,
             &mut agent,
         ));
         let update = GrowSessionUpdate::ControlStateUpdate(ControlStateUpdate {
@@ -1639,6 +1642,7 @@
             child_sid,
             Some("event-child-control".into()),
             false,
+            None,
             &mut agent,
         ));
         let child = agent.subagent_views.get_mut(child_sid).unwrap();
@@ -1672,6 +1676,7 @@
             child_sid,
             Some("replayed-child-control".into()),
             true,
+            None,
             &mut agent,
         ));
         assert_eq!(
@@ -1700,4 +1705,214 @@
             session.model_failure_reported,
             "ordinary terminal errors already displayed their error"
         );
+    }
+
+    fn grow_update_notif(session_id: &str, update: GrowSessionUpdate, is_replay: bool) -> acp::ExtNotification {
+        let payload = shell::extensions::notification::SessionNotification {
+            session_id: acp::SessionId::new(session_id),
+            update,
+            meta: Some(serde_json::json!({ "isReplay": is_replay })),
+        };
+        acp::ExtNotification::new(
+            "grow/session/update",
+            std::sync::Arc::from(serde_json::value::to_raw_value(&payload).unwrap()),
+        )
+    }
+
+    fn compact_completed(async_compact: bool) -> GrowSessionUpdate {
+        GrowSessionUpdate::AutoCompactCompleted {
+            manual: false,
+            async_compact,
+            tokens_before: 100,
+            tokens_after: 50,
+            elapsed_ms: Some(1),
+            summary_preview: None,
+        }
+    }
+
+    #[test]
+    fn compaction_completion_preserves_root_and_child_todos_until_explicit_plan_update() {
+        for async_compact in [false, true] {
+            let mut app = make_app_with_agent("plan-root");
+            let root = AgentId(0);
+            assert!(handle(make_plan_message("plan-root", &["root obligation"]), &mut app));
+
+            let mut child = make_agent(Some("plan-child"));
+            child.todo.update_todos(vec![shell::tools::todo::TodoItem {
+                content: "child obligation".into(),
+                priority: shell::tools::todo::TodoPriority::Medium,
+                status: shell::tools::todo::TodoStatus::Pending,
+                meta: None,
+            }]);
+            app.agents.get_mut(&root).unwrap().subagent_views.insert(
+                "plan-child".into(),
+                Box::new(child),
+            );
+            app.agents.get_mut(&root).unwrap().session.subagent_sessions.insert(
+                "plan-child".into(),
+                make_subagent_info("plan-child"),
+            );
+            assert!(handle_session_notification(
+                &grow_update_notif("plan-root", compact_completed(async_compact), false),
+                &mut app,
+            ));
+            assert!(handle_session_notification(
+                &grow_update_notif("plan-child", compact_completed(async_compact), false),
+                &mut app,
+            ));
+            assert_eq!(todo_contents(&app, root), vec!["root obligation"]);
+            assert_eq!(
+                app.agents[&root].subagent_views["plan-child"]
+                    .todo.todos().iter().map(|item| item.content.clone()).collect::<Vec<_>>(),
+                vec!["child obligation"],
+            );
+
+            assert!(handle(make_plan_message("plan-root", &["explicit root replacement"]), &mut app));
+            assert_eq!(todo_contents(&app, root), vec!["explicit root replacement"]);
+        }
+    }
+
+    #[test]
+    fn child_image_recovery_full_notification_path_replays_one_terminal_row() {
+        use shell::extensions::notification::ImageRecoveryOperationState as State;
+
+        let mut app = make_app_with_agent("image-parent");
+        let parent = AgentId(0);
+        app.agents.get_mut(&parent).unwrap().subagent_views.insert(
+            "image-child".into(),
+            Box::new(make_agent(Some("image-child"))),
+        );
+        app.agents.get_mut(&parent).unwrap().session.subagent_sessions.insert(
+            "image-child".into(),
+            make_subagent_info("image-child"),
+        );
+        let send = |app: &mut AppView, state, is_replay| {
+            let notif = grow_update_notif(
+                "image-child",
+                GrowSessionUpdate::ImageRecoveryOperation {
+                    operation_id: "recover-child-1".into(),
+                    prompt_id: Some("child-prompt".into()),
+                    state,
+                },
+                is_replay,
+            );
+            // Replay and live notification both traverse the same session route.
+            handle_session_notification(&notif, app)
+        };
+
+        assert!(send(
+            &mut app,
+            State::Started { message: "Preparing image recovery…".into() },
+            false,
+        ));
+        assert!(send(
+            &mut app,
+            State::Vision { message: "Calling the configured vision model…".into() },
+            false,
+        ));
+        app.agents.get_mut(&parent).unwrap().subagent_views
+            .get_mut("image-child").unwrap().session.loading_replay = true;
+        assert!(send(
+            &mut app,
+            State::Completed { message: "Converted 1 image".into() },
+            true,
+        ));
+        assert!(send(
+            &mut app,
+            State::Completed { message: "Converted 1 image".into() },
+            true,
+        ));
+        app.agents.get_mut(&parent).unwrap().subagent_views
+            .get_mut("image-child").unwrap().session.loading_replay = false;
+        assert!(!send(
+            &mut app,
+            State::Ocr { message: "Running OCR".into() },
+            false,
+        ));
+
+        let child = &app.agents[&parent].subagent_views["image-child"];
+        let rows = child.scrollback.iter_entries().filter_map(|(_, entry)| match &entry.block {
+            RenderBlock::ImageRecovery(row) => Some(row),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].message, "Converted 1 image");
+        assert!(!rows[0].running);
+        assert!(app.agents[&parent].scrollback.iter_entries().all(|(_, entry)| {
+            !matches!(&entry.block, RenderBlock::ImageRecovery(_))
+        }));
+    }
+
+    #[test]
+    fn child_turn_completed_settles_only_its_matching_image_recovery_prompt() {
+        use shell::extensions::notification::ImageRecoveryOperationState as State;
+
+        let mut app = make_app_with_agent("image-terminal-parent");
+        let parent = AgentId(0);
+        let child = make_agent(Some("image-terminal-child"));
+        app.agents.get_mut(&parent).unwrap().subagent_views.insert(
+            "image-terminal-child".into(),
+            Box::new(child),
+        );
+        app.agents.get_mut(&parent).unwrap().session.subagent_sessions.insert(
+            "image-terminal-child".into(),
+            make_subagent_info("image-terminal-child"),
+        );
+        app.agents.get_mut(&parent).unwrap().subagent_views
+            .get_mut("image-terminal-child").unwrap().session.current_prompt_id = Some("prompt-current".into());
+
+        let start = grow_update_notif(
+            "image-terminal-child",
+            GrowSessionUpdate::ImageRecoveryOperation {
+                operation_id: "recover-terminal-child".into(),
+                prompt_id: Some("prompt-current".into()),
+                state: State::Started { message: "Preparing image recovery…".into() },
+            },
+            false,
+        );
+        assert!(handle_session_notification(&start, &mut app));
+
+        let stale = grow_update_notif(
+            "image-terminal-child",
+            GrowSessionUpdate::TurnCompleted {
+                prompt_id: "prompt-old".into(),
+                stop_reason: "end_turn".into(),
+                agent_result: None,
+                usage: None,
+                identity: None,
+            },
+            false,
+        );
+        assert!(!handle_session_notification(&stale, &mut app));
+        let row = &app.agents[&parent].subagent_views["image-terminal-child"]
+            .scrollback
+            .entry(0)
+            .unwrap()
+            .block;
+        let RenderBlock::ImageRecovery(row) = row else { panic!("expected child image recovery row") };
+        assert!(row.running, "stale prompt terminal must leave the active row alone");
+
+        let terminal = grow_update_notif(
+            "image-terminal-child",
+            GrowSessionUpdate::TurnCompleted {
+                prompt_id: "prompt-current".into(),
+                stop_reason: "end_turn".into(),
+                agent_result: None,
+                usage: None,
+                identity: None,
+            },
+            false,
+        );
+        assert!(handle_session_notification(&terminal, &mut app));
+        let child = &app.agents[&parent].subagent_views["image-terminal-child"];
+        let rows = child.scrollback.iter_entries().filter_map(|(_, entry)| match &entry.block {
+            RenderBlock::ImageRecovery(row) => Some(row),
+            _ => None,
+        }).collect::<Vec<_>>();
+        assert_eq!(rows.len(), 1);
+        assert!(!rows[0].running);
+        assert_eq!(rows[0].message, "Image recovery interrupted");
+        assert!(app.agents[&parent].scrollback.iter_entries().all(|(_, entry)| {
+            !matches!(&entry.block, RenderBlock::ImageRecovery(_))
+        }));
     }

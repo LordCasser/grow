@@ -3918,8 +3918,9 @@ pub fn stream_replay_updates_at<F: FnMut(acp::SessionUpdate)>(
     })
 }
 
-/// Restore a child's visible conversation and communication in one ordered
-/// stream. Lifecycle/control snapshots are restored separately by their owner.
+/// Restore a child's visible conversation, communication, and image recovery
+/// lifecycle in one ordered stream. Lifecycle/control snapshots are restored
+/// separately by their owner.
 pub fn stream_session_history_at(
     session_id: &str,
     grow_home: &Path,
@@ -3948,6 +3949,8 @@ pub fn stream_session_history_at(
                     if matches!(
                         n.update,
                         crate::extensions::notification::SessionUpdate::UiNotice(_)
+                            | crate::extensions::notification::SessionUpdate::ImageRecoveryOperation { .. }
+                            | crate::extensions::notification::SessionUpdate::TurnCompleted { .. }
                     ) =>
                 {
                     emit(SessionUpdate::Grow(n));

@@ -168,6 +168,7 @@ mod tests {
                 ))
                 .expect("test event is valid"),
             error_kind: None,
+            error_message: None,
             acknowledgement_lost: true,
         };
         let unknown = FinalizationFailure::timeline(
@@ -212,6 +213,7 @@ mod tests {
                 ))
                 .expect("test event is valid"),
             error_kind: None,
+            error_message: None,
             acknowledgement_lost: false,
         };
         let failure = FinalizationFailure::timeline(

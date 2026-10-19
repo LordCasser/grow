@@ -3504,6 +3504,10 @@ async fn storage_full_failure_poison_closes_the_actor_without_retrying_forever()
         .expect("permanent persistence failure keeps the rejected event identity");
     assert_eq!(pending.event.seq.get(), 0);
     assert_eq!(pending.error_kind, Some(std::io::ErrorKind::StorageFull));
+    assert_eq!(
+        pending.error_message.as_deref(),
+        Some("simulated full disk")
+    );
     assert!(!pending.acknowledgement_lost);
     assert!(matches!(
         &pending.event.kind,

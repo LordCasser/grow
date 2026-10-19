@@ -98,6 +98,7 @@ impl ChatStateActor {
             .unwrap_or_else(|e| e.into_inner()) = Some(crate::PendingTimelineCommit {
             event: event.clone(),
             error_kind: None,
+            error_message: None,
             acknowledgement_lost: false,
         });
         loop {
@@ -157,6 +158,7 @@ impl ChatStateActor {
                         .as_mut()
                     {
                         pending.error_kind = Some(error.kind());
+                        pending.error_message = Some(error.to_string());
                     }
                     return Err(crate::commands::TimelineWriteError::Persistence(error));
                 }
@@ -169,7 +171,8 @@ impl ChatStateActor {
                     {
                         match &error {
                             crate::commands::TimelineWriteError::Persistence(error) => {
-                                pending.error_kind = Some(error.kind())
+                                pending.error_kind = Some(error.kind());
+                                pending.error_message = Some(error.to_string());
                             }
                             crate::commands::TimelineWriteError::AcknowledgementLost => {
                                 pending.acknowledgement_lost = true

@@ -642,6 +642,14 @@ impl SessionActor {
         let mut delay_satisfied_for = None;
         let mut result_precedes_current_agent = false;
         loop {
+            // The terminal owner must close unresolved tools before StepEnded.
+            // Neither queued controls nor completion recovery may overtake a
+            // failed durable boundary and replace its original error.
+            if let Err(error) = &result
+                && crate::session::commands::is_fatal_turn_boundary_error(error)
+            {
+                return result;
+            }
             let outcome = match &result {
                 Ok(TurnOutcome::Completed { .. }) => "completed",
                 Ok(TurnOutcome::ControlEnded { .. }) => "control_boundary",
@@ -748,11 +756,6 @@ impl SessionActor {
                 // turn that successful response into a failure of the new
                 // Agent's completion contract. The new contract starts with
                 // the first response actually sampled under that Agent.
-                return result;
-            }
-            if let Err(error) = &result
-                && crate::session::commands::is_fatal_turn_boundary_error(error)
-            {
                 return result;
             }
             if matches!(
@@ -2654,9 +2657,17 @@ impl SessionActor {
                     },
                 })
                 .collect();
-            let execute_tool_calls_result = self.execute_tool_calls(tool_call_responses).await;
+            let execute_tool_calls_result = self
+                .execute_tool_calls(tool_call_responses)
+                .await
+                .map_err(|error| {
+                    crate::session::commands::tool_execution_error(
+                        error,
+                        self.chat_state_handle.pending_timeline_commit(),
+                    )
+                })?;
             let resample_after_control = match execute_tool_calls_result {
-                Ok(ToolLoop::PermissionReject { tool_name, reason }) => {
+                ToolLoop::PermissionReject { tool_name, reason } => {
                     return Ok(TurnOutcome::Cancelled {
                         category: Some(
                             crate::session::events::CancellationCategory::PermissionRejected,
@@ -2667,9 +2678,9 @@ impl SessionActor {
                         })),
                     });
                 }
-                Ok(ToolLoop::HookDenied { .. }) => false,
-                Ok(ToolLoop::Control(ControlDisposition::ResampleStep)) => true,
-                Ok(ToolLoop::Control(ControlDisposition::EndTurn)) => {
+                ToolLoop::HookDenied { .. } => false,
+                ToolLoop::Control(ControlDisposition::ResampleStep) => true,
+                ToolLoop::Control(ControlDisposition::EndTurn) => {
                     let snapshot = self
                         .finalize_turn_bookkeeping(
                             req_id,
@@ -2682,7 +2693,7 @@ impl SessionActor {
                         snapshot: Box::new(snapshot),
                     });
                 }
-                Ok(ToolLoop::Cancelled) => {
+                ToolLoop::Cancelled => {
                     return Ok(TurnOutcome::Cancelled {
                         category: Some(
                             crate::session::events::CancellationCategory::PermissionCancelled,
@@ -2690,7 +2701,7 @@ impl SessionActor {
                         context: None,
                     });
                 }
-                Ok(ToolLoop::PermissionTimedOut { tool_name }) => {
+                ToolLoop::PermissionTimedOut { tool_name } => {
                     return Ok(TurnOutcome::Cancelled {
                         category: Some(
                             crate::session::events::CancellationCategory::PermissionTimedOut,
@@ -2701,12 +2712,14 @@ impl SessionActor {
                         })),
                     });
                 }
-                Ok(ToolLoop::FollowupMessage(followup_message)) => {
+                ToolLoop::FollowupMessage(followup_message) => {
                     self.add_followup_message_as_user_turn(&followup_message)
                         .await;
                     continue;
                 }
-                _ => false,
+                ToolLoop::Continue | ToolLoop::NonExistingTool | ToolLoop::ToolParsingError => {
+                    false
+                }
             };
             if let Some(cursor) = self.turn_continuation.borrow_mut().as_mut() {
                 cursor.accepted_response = None;

@@ -3,17 +3,25 @@ use super::*;
 use chat_state::session_runtime::{RuntimeNodeRef, RuntimePhase, SessionRuntimeEvent};
 use tools::implementations::grow_build::task::types::{FrozenChildRef, SubagentEvent};
 
-#[derive(Default)]
+#[derive(Default, PartialEq, Eq)]
 struct CanonicalChildFacts {
     spawned: std::collections::BTreeMap<String, chat_state::SubagentSpawnEvent>,
     ended: std::collections::BTreeMap<String, chat_state::SubagentTerminalEvent>,
 }
 
 impl CanonicalChildFacts {
-    fn read(events: &[chat_state::TimelineEvent]) -> Result<Self, String> {
-        chat_state::Timeline::from_events(events.to_vec()).map_err(|error| {
+    fn read(events: Vec<chat_state::TimelineEvent>) -> Result<Self, String> {
+        let timeline = chat_state::Timeline::from_events(events).map_err(|error| {
             format!("invalid root Timeline while reconciling children: {error}")
         })?;
+        Self::from_validated_timeline(&timeline)
+    }
+
+    fn from_validated_timeline(timeline: &chat_state::Timeline) -> Result<Self, String> {
+        Self::scan(timeline.events())
+    }
+
+    fn scan(events: &[chat_state::TimelineEvent]) -> Result<Self, String> {
         let mut facts = Self::default();
         for event in events {
             match &event.kind {
@@ -323,7 +331,7 @@ impl MvpAgent {
                 .await
                 .map_err(|_| "root Timeline query exceeded suspension deadline")?
                 .ok_or("root Timeline unavailable while reconciling child completion")?;
-        let facts = CanonicalChildFacts::read(&events)?;
+        let facts = CanonicalChildFacts::read(events)?;
         let candidates = std::collections::BTreeSet::from([task_id.to_owned()]);
         Ok(self
             .verify_ended_children(
@@ -387,7 +395,7 @@ impl MvpAgent {
             node.session_id == arguments.session_id.0.as_ref()
                 && Some(node.checkpoint_seq) == runtime.checkpoint_seq
         });
-        let root_facts = CanonicalChildFacts::read(root.timeline.events())
+        let root_facts = CanonicalChildFacts::from_validated_timeline(&root.timeline)
             .map_err(|error| acp::Error::internal_error().data(error))?;
         let canonical_open_child = root_facts.open().any(|(_, spawn)| {
             spawn.child_session_id == arguments.session_id.0.as_ref()
@@ -596,7 +604,7 @@ impl MvpAgent {
             .timeline_events()
             .await
             .ok_or("root Timeline unavailable")?;
-        let facts = CanonicalChildFacts::read(&events)?;
+        let facts = CanonicalChildFacts::read(events)?;
         let tree_sessions = runtime
             .tree
             .iter()
@@ -873,7 +881,7 @@ impl MvpAgent {
             .timeline_events()
             .await
             .ok_or("root Timeline unavailable while completing partial barrier")?;
-        let facts = CanonicalChildFacts::read(&events)?;
+        let facts = CanonicalChildFacts::read(events)?;
         let open = facts
             .open()
             .map(|(task_id, spawn)| (task_id.clone(), spawn.clone()))
@@ -995,7 +1003,7 @@ impl MvpAgent {
             .runtime_suspend
             .store(true, std::sync::atomic::Ordering::Release);
         let (runtime, initial_facts) = self.runtime_snapshot_before(&root_handle, deadline).await?;
-        let initial_open_ids = CanonicalChildFacts::read(&initial_facts)?
+        let initial_open_ids = CanonicalChildFacts::read(initial_facts)?
             .open()
             .map(|(task_id, _)| task_id.clone())
             .collect::<std::collections::BTreeSet<_>>();
@@ -1027,7 +1035,7 @@ impl MvpAgent {
             .map_err(|_| "child initialization is still settling".to_string())?;
         };
         let (runtime, facts) = self.runtime_snapshot_before(&root_handle, deadline).await?;
-        let canonical = CanonicalChildFacts::read(&facts)?;
+        let canonical = CanonicalChildFacts::read(facts)?;
         let frozen_ids = frozen_children
             .iter()
             .map(|child| child.task_id.clone())
@@ -1257,7 +1265,7 @@ impl MvpAgent {
         // committed during the checkpoint race is reflected in the barrier.
         let (latest_runtime, latest_events) =
             self.runtime_snapshot_before(&root_handle, deadline).await?;
-        let latest_facts = CanonicalChildFacts::read(&latest_events)?;
+        let latest_facts = CanonicalChildFacts::read(latest_events)?;
         let latest_terminal_ids = self
             .verify_ended_children(
                 &root_handle,
@@ -1398,6 +1406,149 @@ mod tests {
             ),
             reasoning_effort: None,
         }
+    }
+
+    fn read_borrowed_clone_path(
+        events: &[chat_state::TimelineEvent],
+    ) -> Result<CanonicalChildFacts, String> {
+        chat_state::Timeline::from_events(events.to_vec()).map_err(|error| {
+            format!("invalid root Timeline while reconciling children: {error}")
+        })?;
+        CanonicalChildFacts::scan(events)
+    }
+
+    #[test]
+    #[ignore = "local clone-versus-owned Timeline measurement; no timing threshold"]
+    fn canonical_child_facts_owned_read_matches_borrowed_clone_path() {
+        let mut timeline = chat_state::Timeline::default();
+        for _ in 0..8_000 {
+            timeline
+                .record(chat_state::TimelineEventKind::Observation(
+                    chat_state::ObservationEvent {
+                        scope: "handoff_measurement".into(),
+                        name: "independent_history_event".into(),
+                        turn: None,
+                        step: None,
+                        data: Some(serde_json::json!({ "payload": "x".repeat(4096) })),
+                    },
+                ))
+                .unwrap();
+        }
+        timeline
+            .record(chat_state::TimelineEventKind::Subagent(
+                chat_state::SubagentEvent::Spawned(spawn(
+                    "measurement-task",
+                    "measurement-child",
+                    "root",
+                )),
+            ))
+            .unwrap();
+        timeline
+            .record(chat_state::TimelineEventKind::Subagent(
+                chat_state::SubagentEvent::Ended(chat_state::SubagentTerminalEvent {
+                    subagent_id: "measurement-task".into(),
+                    child_session_id: "measurement-child".into(),
+                    outcome: chat_state::SubagentOutcome::Cancelled,
+                    duration_ms: 0,
+                    tool_calls: 0,
+                    turns: 0,
+                    tokens_used: 0,
+                    error: Some("measurement fixture".into()),
+                    result_ref: None,
+                    snapshot_ref: None,
+                }),
+            ))
+            .unwrap();
+        let events = timeline.events().to_vec();
+        let owned_candidate_events = events.clone();
+        let serialized_bytes = serde_json::to_vec(&events).unwrap().len();
+
+        let started = std::time::Instant::now();
+        let borrowed = read_borrowed_clone_path(&events).unwrap();
+        let borrowed_elapsed = started.elapsed();
+
+        let started = std::time::Instant::now();
+        let owned = CanonicalChildFacts::read(owned_candidate_events).unwrap();
+        let owned_elapsed = started.elapsed();
+
+        assert_eq!(borrowed.spawned, owned.spawned);
+        assert_eq!(borrowed.ended, owned.ended);
+        assert!(serialized_bytes > 32 * 1024 * 1024);
+        println!(
+            "events={} serialized_bytes={} borrowed_clone_replay_us={} owned_replay_us={}",
+            events.len(),
+            serialized_bytes,
+            borrowed_elapsed.as_micros(),
+            owned_elapsed.as_micros()
+        );
+    }
+
+    #[test]
+    fn canonical_child_facts_reject_duplicate_spawn() {
+        let mut timeline = chat_state::Timeline::default();
+        timeline
+            .record(chat_state::TimelineEventKind::Subagent(
+                chat_state::SubagentEvent::Spawned(spawn("task", "child", "root")),
+            ))
+            .unwrap();
+        let mut events = timeline.events().to_vec();
+        let mut duplicate = events[0].clone();
+        duplicate.seq = EventSeq::new(2);
+        events.push(duplicate);
+
+        assert!(CanonicalChildFacts::read(events).is_err());
+    }
+
+    #[test]
+    fn canonical_child_facts_reject_terminal_for_another_child_session() {
+        let mut timeline = chat_state::Timeline::default();
+        timeline
+            .record(chat_state::TimelineEventKind::Subagent(
+                chat_state::SubagentEvent::Spawned(spawn("task", "child", "root")),
+            ))
+            .unwrap();
+        let mut events = timeline.events().to_vec();
+        let mut mismatched_terminal = events[0].clone();
+        mismatched_terminal.seq = EventSeq::new(2);
+        mismatched_terminal.kind = chat_state::TimelineEventKind::Subagent(
+            chat_state::SubagentEvent::Ended(chat_state::SubagentTerminalEvent {
+                subagent_id: "task".into(),
+                child_session_id: "different-child".into(),
+                outcome: chat_state::SubagentOutcome::Cancelled,
+                duration_ms: 0,
+                tool_calls: 0,
+                turns: 0,
+                tokens_used: 0,
+                error: Some("test".into()),
+                result_ref: None,
+                snapshot_ref: None,
+            }),
+        );
+        events.push(mismatched_terminal);
+
+        assert!(CanonicalChildFacts::read(events).is_err());
+    }
+
+    #[test]
+    fn canonical_child_facts_reject_damaged_timeline_sequence() {
+        let mut timeline = chat_state::Timeline::default();
+        for name in ["first", "second"] {
+            timeline
+                .record(chat_state::TimelineEventKind::Observation(
+                    chat_state::ObservationEvent {
+                        scope: "handoff_test".into(),
+                        name: name.into(),
+                        turn: None,
+                        step: None,
+                        data: None,
+                    },
+                ))
+                .unwrap();
+        }
+        let mut events = timeline.events().to_vec();
+        events[1].seq = events[0].seq;
+
+        assert!(CanonicalChildFacts::read(events).is_err());
     }
 
     fn suspended_runtime(

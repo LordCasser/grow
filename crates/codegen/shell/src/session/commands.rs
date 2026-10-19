@@ -240,6 +240,37 @@ pub(crate) fn response_admission_error(error: chat_state::TimelineWriteError) ->
     fatal_turn_boundary_error("response-admission", error.to_string())
 }
 
+pub(crate) fn tool_execution_error(
+    error: acp::Error,
+    pending: Option<chat_state::PendingTimelineCommit>,
+) -> acp::Error {
+    let detail = error
+        .data
+        .as_ref()
+        .and_then(crate::sampling::error::error_detail_from_data)
+        .unwrap_or_else(|| error.to_string());
+    let detail = match pending
+        .as_ref()
+        .and_then(|pending| pending.error_message.as_deref())
+    {
+        Some(message) => format!("{detail}; pending Timeline persistence failed: {message}"),
+        None => detail,
+    };
+    let mut fatal = fatal_turn_boundary_error("tool-execution", detail);
+    let data = fatal.data.as_mut().expect("boundary error has data");
+    data["cause"] = serde_json::json!(error);
+    if let Some(pending) = pending
+        && let Some(message) = pending.error_message
+    {
+        data["persistenceFailure"] = serde_json::json!({
+            "seq": pending.event.seq,
+            "kind": pending.error_kind.map(|kind| format!("{kind:?}")),
+            "message": message,
+        });
+    }
+    fatal
+}
+
 pub(crate) fn response_projection_error(detail: impl Into<String>) -> acp::Error {
     fatal_turn_boundary_error("response-projection", detail)
 }

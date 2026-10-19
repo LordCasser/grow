@@ -1,0 +1,6 @@
+- [x] 增加端到端 child 通知回归，覆盖 Started → progress → Completed，以及 replay 幂等和终态后迟到 progress。
+- [x] 接通 child 分流白名单和共享 operation 行投影。
+- [x] 对抗性检查 child session 身份、event highwater 和终态行为。
+- [x] 纳入 child prompt `TurnCompleted` 的 exact-prompt settle，并确认 `SubagentFinished` 会收尾仍 running 的 recovery。
+- [x] 从真实 updates.jsonl 按原始物理顺序回放并合并 ACP 与 Grow recovery 轨道。
+- [x] 运行新增 child lifecycle 回归。

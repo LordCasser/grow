@@ -17,7 +17,9 @@ on:
       - "crates/codegen/shell/src/session/persistence.rs"
       - "crates/codegen/shell/src/session/input_inbox.rs"
       - "crates/codegen/chat-state/**"
+      - "Cargo.toml"
       - "Cargo.lock"
+      - ".cargo/**"
   push:
     branches: [main]
     paths:
@@ -28,7 +30,9 @@ on:
       - "crates/codegen/shell/src/session/persistence.rs"
       - "crates/codegen/shell/src/session/input_inbox.rs"
       - "crates/codegen/chat-state/**"
+      - "Cargo.toml"
       - "Cargo.lock"
+      - ".cargo/**"
 
 permissions:
   contents: read

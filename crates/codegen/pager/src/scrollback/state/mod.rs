@@ -500,6 +500,66 @@ impl ScrollbackState {
             }
             tail.remove_entry(tail_id);
         }
+        // A cursor tail can repeat a lifecycle that started before the
+        // reconnect. Keep the original row identity and apply the tail's
+        // latest state, while a terminal original remains authoritative over
+        // delayed progress.
+        let image_recovery_rows = self
+            .entries
+            .iter()
+            .filter_map(|(id, entry)| match &entry.block {
+                RenderBlock::ImageRecovery(block) => Some((block.operation_id.clone(), *id)),
+                _ => None,
+            })
+            .collect::<HashMap<_, _>>();
+        let repeated_recoveries = tail
+            .entries
+            .iter()
+            .filter_map(|(tail_id, tail_entry)| {
+                let RenderBlock::ImageRecovery(tail_block) = &tail_entry.block else {
+                    return None;
+                };
+                image_recovery_rows
+                    .get(&tail_block.operation_id)
+                    .copied()
+                    .map(|original_id| (*tail_id, original_id))
+            })
+            .collect::<Vec<_>>();
+        for (tail_id, original_id) in repeated_recoveries {
+            let incoming = tail
+                .get_by_id(tail_id)
+                .and_then(|entry| match &entry.block {
+                    RenderBlock::ImageRecovery(block) => Some(block.clone()),
+                    _ => None,
+                });
+            if let Some(incoming) = incoming {
+                let should_apply = self
+                    .get_by_id(original_id)
+                    .and_then(|entry| match &entry.block {
+                        RenderBlock::ImageRecovery(existing) => {
+                            Some(existing.running || !incoming.running)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(false);
+                if should_apply {
+                    if let Some(original) = self.get_by_id_mut(original_id)
+                        && let Some(existing) = original.block.as_image_recovery_mut()
+                    {
+                        existing.prompt_id = incoming.prompt_id;
+                        existing.message = incoming.message;
+                        existing.running = incoming.running;
+                        existing.failed = incoming.failed;
+                        original.invalidate_cache();
+                    }
+                    self.set_entry_running(original_id, incoming.running);
+                }
+            }
+            if tail.is_committed(tail_id) {
+                self.minimal_commit.mark_committed(original_id);
+            }
+            tail.remove_entry(tail_id);
+        }
         let tail_permission_groups = tail
             .entries
             .iter()

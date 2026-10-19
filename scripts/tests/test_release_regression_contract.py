@@ -7,6 +7,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 RELEASE = (ROOT / ".github/workflows/release.yml").read_text()
+WINDOWS = (ROOT / ".github/workflows/windows-session-storage.yml").read_text()
 
 GATES = {
     "core-regressions": ".github/workflows/core-regression.yml",
@@ -32,6 +33,19 @@ def job_block(source: str, name: str) -> str:
     if not match:
         raise AssertionError(f"workflow job {name!r} is missing")
     return match.group("body")
+
+
+def trigger_paths(source: str, trigger: str) -> list[str]:
+    match = re.search(
+        rf"^  {re.escape(trigger)}:\n"
+        rf"(?P<header>(?:    .*\n)*?)    paths:\n"
+        rf"(?P<body>(?:      - .*\n)+)",
+        source,
+        re.MULTILINE,
+    )
+    if not match:
+        raise AssertionError(f"{trigger} path filter is missing")
+    return re.findall(r'^      - "?([^"\n]+)"?$', match.group("body"), re.MULTILINE)
 
 
 def release_contract_errors(source: str) -> list[str]:
@@ -69,6 +83,18 @@ def release_contract_errors(source: str) -> list[str]:
 
 
 class ReleaseRegressionContractTests(unittest.TestCase):
+    def test_windows_filter_covers_direct_build_inputs_for_both_source_triggers(self) -> None:
+        pull_request_paths = trigger_paths(WINDOWS, "pull_request")
+        push_paths = trigger_paths(WINDOWS, "push")
+        self.assertEqual(pull_request_paths, push_paths)
+        for path in (".cargo/**", "Cargo.toml", "Cargo.lock"):
+            with self.subTest(path=path):
+                self.assertIn(path, pull_request_paths)
+
+    def test_windows_release_gate_remains_path_independent_and_mandatory(self) -> None:
+        self.assertRegex(WINDOWS, r"(?m)^  workflow_call:\n    inputs:")
+        self.assertEqual(release_contract_errors(RELEASE), [])
+
     def test_publish_dag_is_fail_closed_and_commit_bound(self) -> None:
         self.assertEqual(release_contract_errors(RELEASE), [])
 
