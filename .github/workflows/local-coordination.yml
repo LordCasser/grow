@@ -1,6 +1,19 @@
 name: Local agent coordination
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/local-coordination.yml"
+      - "scripts/test_local_coordination.py"
+      - "crates/codegen/shell/src/coordination/**"
+      - "crates/codegen/shell/src/local_ipc/**"
+      - "crates/codegen/shell/src/**/coordination.rs"
+      - "crates/codegen/shell/src/session/acp_conversion.rs"
+      - "crates/codegen/tools/src/implementations/grow_build/coordination.rs"
+      - "crates/codegen/pager/src/**"
+      - "crates/codegen/pager-minimal/src/**"
+      - "Cargo.lock"
   workflow_dispatch:
     inputs:
       process_only:

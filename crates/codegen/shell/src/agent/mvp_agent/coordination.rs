@@ -246,16 +246,6 @@ impl SessionCoordinationBackend {
                 "question must be nonempty and at most 16384 bytes",
             ));
         }
-        record_coordination_inquiry(
-            &self.source,
-            crate::coordination::InquiryEvent::OutgoingStarted {
-                inquiry_id: inquiry_id.clone(),
-                target_session_id: target_session_id.clone(),
-                question: question.clone(),
-            },
-        )
-        .await?;
-
         let coordination = self.coordination.clone();
         let task_source = self.source.clone();
         let task_source_session_id = self.source_session_id.clone();
@@ -264,26 +254,23 @@ impl SessionCoordinationBackend {
         let task_question = question.clone();
         let task_cancellation = cancellation.clone();
         let task = tokio::spawn(async move {
-            let result = coordination
-                .ask_session(
+            let admission_source = task_source.clone();
+            let startup = crate::coordination::InquiryEvent::OutgoingStarted {
+                inquiry_id: task_inquiry_id.clone(),
+                target_session_id: task_target_session_id.clone(),
+                question: task_question.clone(),
+            };
+            let outcome = coordination
+                .ask_session_with_admission(
                     &task_inquiry_id,
                     &task_source_session_id,
                     &task_target_session_id,
                     &task_question,
                     progress,
                     task_cancellation,
+                    async move { record_coordination_inquiry(&admission_source, startup).await },
                 )
-                .await;
-            let outcome = match result {
-                Ok(outcome) => outcome,
-                // A conflicting retry must not overwrite the original audit.
-                Err(error) if error.code == CoordinationErrorCode::Conflict => return Err(error),
-                Err(error) => crate::coordination::InquiryOutcome::terminal(
-                    &task_inquiry_id,
-                    crate::coordination::InquiryStatus::Failed,
-                    error,
-                ),
-            };
+                .await?;
             if let Err(error) = record_coordination_inquiry(
                 &task_source,
                 crate::coordination::InquiryEvent::OutgoingCompleted {

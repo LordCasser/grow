@@ -1,5 +1,240 @@
 use super::*;
 
+async fn query_during_source_startup(cancel_during_admission: bool) {
+    use crate::session::storage::{JsonlStorageAdapter, StorageAdapter};
+    use std::sync::atomic::AtomicUsize;
+    use tokio::sync::oneshot;
+
+    let home = tempfile::tempdir().unwrap();
+    let source = CoordinationRuntime::new(home.path().to_owned());
+    let target = CoordinationRuntime::new(home.path().to_owned());
+    source.ensure_started().await.unwrap();
+    target.ensure_started().await.unwrap();
+    source.publish_sessions(vec![snapshot("source", "/repo")]);
+    target.publish_sessions(vec![snapshot("target", "/repo")]);
+    let mut incoming = target.take_inquiry_receiver().unwrap();
+    let id = uuid::Uuid::now_v7().to_string();
+    let info = crate::session::info::Info {
+        id: acp_transport::protocol::SessionId::new("source"),
+        cwd: "/repo".into(),
+    };
+    let storage = JsonlStorageAdapter::with_root(home.path().to_owned());
+    storage
+        .init_session(&info, crate::session::persistence::default_model_id())
+        .await
+        .unwrap();
+    let event = chat_state::Timeline::default()
+        .record(
+            super::super::super::inquiry::InquiryEvent::OutgoingStarted {
+                inquiry_id: id.clone(),
+                target_session_id: "target".into(),
+                question: "work?".into(),
+            }
+            .timeline_kind(),
+        )
+        .unwrap();
+    let admissions = Arc::new(AtomicUsize::new(0));
+    let (committed_tx, committed_rx) = oneshot::channel();
+    let (ack_tx, ack_rx) = oneshot::channel();
+    let cancellation = CancellationToken::new();
+    let ask = {
+        let handle = source.handle();
+        let id = id.clone();
+        let admissions = Arc::clone(&admissions);
+        let cancellation = cancellation.clone();
+        tokio::spawn(async move {
+            handle
+                .ask_session_with_admission(
+                    &id,
+                    "source",
+                    "target",
+                    "work?",
+                    None,
+                    cancellation,
+                    async move {
+                        admissions.fetch_add(1, Ordering::SeqCst);
+                        storage
+                            .append_timeline_event_durable(&info, &event)
+                            .await
+                            .unwrap();
+                        committed_tx.send(()).unwrap();
+                        ack_rx.await.unwrap();
+                        Ok(())
+                    },
+                )
+                .await
+        })
+    };
+    committed_rx.await.unwrap();
+    let query = {
+        let handle = source.handle();
+        let id = id.clone();
+        tokio::spawn(async move { handle.get_inquiry(&id, "source").await })
+    };
+    let state = timeout(Duration::from_secs(2), query)
+        .await
+        .unwrap()
+        .unwrap()
+        .expect("a query must not classify a live durable start as a cold-source orphan");
+    assert_eq!(state.phase, InquiryPhase::Discovering);
+    assert!(state.outcome.is_none());
+    assert!(
+        incoming.try_recv().is_err(),
+        "dispatch preceded durable ACK"
+    );
+    let conflict = timeout(
+        Duration::from_secs(2),
+        source.handle().ask_session_with_admission(
+            &id,
+            "source",
+            "changed-target",
+            "work?",
+            None,
+            Default::default(),
+            async { panic!("a conflicting retry must not run admission") },
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap_err();
+    assert_eq!(conflict.code, CoordinationErrorCode::Conflict);
+    let (retry_progress_tx, mut retry_progress_rx) = mpsc::unbounded_channel();
+    let retry = {
+        let handle = source.handle();
+        let id = id.clone();
+        let admissions = Arc::clone(&admissions);
+        tokio::spawn(async move {
+            handle
+                .ask_session_with_admission(
+                    &id,
+                    "source",
+                    "target",
+                    "work?",
+                    Some(retry_progress_tx),
+                    Default::default(),
+                    async move {
+                        admissions.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    },
+                )
+                .await
+        })
+    };
+    assert_eq!(
+        timeout(Duration::from_secs(2), retry_progress_rx.recv())
+            .await
+            .unwrap(),
+        Some(InquiryPhase::Discovering),
+        "the retry must join the live startup before its ACK is released"
+    );
+    assert_eq!(admissions.load(Ordering::SeqCst), 1);
+    if cancel_during_admission {
+        assert!(
+            timeout(
+                Duration::from_secs(2),
+                source.cancel_session(&id, "source", "target")
+            )
+            .await
+            .unwrap()
+            .unwrap(),
+            "startup must remain cancellable before durable ACK"
+        );
+    }
+    ack_tx.send(()).unwrap();
+    if !cancel_during_admission {
+        let inquiry = timeout(Duration::from_secs(2), incoming.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        inquiry
+            .respond_to
+            .send(InquiryOutcome::answered(&id, "one answer".into()))
+            .unwrap();
+    }
+    let outcome = ask.await.unwrap().unwrap();
+    assert_eq!(
+        outcome.status,
+        if cancel_during_admission {
+            InquiryStatus::Cancelled
+        } else {
+            InquiryStatus::Answered
+        }
+    );
+    assert_eq!(retry.await.unwrap().unwrap(), outcome);
+    assert_eq!(admissions.load(Ordering::SeqCst), 1);
+    assert!(incoming.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn query_observes_live_source_startup_before_durable_ack() {
+    query_during_source_startup(false).await;
+}
+
+#[tokio::test]
+async fn cancellation_during_source_admission_never_dispatches() {
+    query_during_source_startup(true).await;
+}
+
+#[tokio::test]
+async fn failed_source_admission_does_not_dispatch_or_leave_a_live_record() {
+    let home = tempfile::tempdir().unwrap();
+    let runtime = CoordinationRuntime::new(home.path().to_owned());
+    runtime.ensure_started().await.unwrap();
+    runtime.publish_sessions(vec![
+        snapshot("source", "/repo"),
+        snapshot("target", "/repo"),
+    ]);
+    let mut incoming = runtime.take_inquiry_receiver().unwrap();
+    let id = uuid::Uuid::now_v7().to_string();
+    let error = runtime
+        .handle()
+        .ask_session_with_admission(
+            &id,
+            "source",
+            "target",
+            "work?",
+            None,
+            Default::default(),
+            std::future::ready(Err(CoordinationError::new(
+                CoordinationErrorCode::AuditFailure,
+                "commit failed",
+            ))),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, CoordinationErrorCode::AuditFailure);
+    assert!(runtime.shared.outgoing.lock().await.is_empty());
+    assert!(incoming.try_recv().is_err());
+    assert_eq!(
+        runtime
+            .handle()
+            .get_inquiry(&id, "source")
+            .await
+            .unwrap_err()
+            .code,
+        CoordinationErrorCode::NotFound
+    );
+    let retry_error = runtime
+        .handle()
+        .ask_session_with_admission(
+            &id,
+            "source",
+            "target",
+            "work?",
+            None,
+            Default::default(),
+            std::future::ready(Err(CoordinationError::new(
+                CoordinationErrorCode::AuditFailure,
+                "retry reached admission",
+            ))),
+        )
+        .await
+        .unwrap_err();
+    assert_eq!(retry_error.message, "retry reached admission");
+    assert!(runtime.shared.outgoing.lock().await.is_empty());
+    assert!(incoming.try_recv().is_err());
+}
+
 #[tokio::test]
 async fn uuid_text_aliases_cannot_create_separate_inquiry_identities() {
     let home = tempfile::tempdir().unwrap();

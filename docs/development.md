@@ -165,6 +165,8 @@ Windows 协调清单用句柄级原子替换保留已有读者；独立会话加
 
 询问按 source session 与 inquiry ID 建立稳定身份，source/target Timeline 约束重试、恢复、响应关联和取消；见 [询问身份与恢复契约](../openspec/specs/local-coordination/spec.md#requirement-inquiry-identity-and-replay-are-durable-across-session-recovery)。
 
+source 的 durable startup 与 runtime 登记使用同一 admission 边界，查询也在该边界内回退到历史，避免把正在接纳的询问误判为重启遗留。对应契约见 [启动与查询一致性](../openspec/specs/local-coordination/spec.md#requirement-live-source-inquiry-startup-and-queries-share-an-admission-boundary)。协调回归包含 actor/runtime 单测及 `python3 scripts/test_local_coordination.py --binary <本次构建的 grow>` 的真实独立进程测试；包级测试通过不能代替后者。`Local agent coordination` workflow 对相关 PR、相关 main push 及手动触发执行；发布 workflow 仍对可原生运行的实际 release binary 执行同一进程回归。
+
 模型 `ask_session` 的空白 inquiry_id 会按未提供处理并生成新 ID，非空值与外部协议 ID 继续严格校验；详见 [询问身份契约](../openspec/specs/local-coordination/spec.md#requirement-inquiry-scoped-operations)。
 
 跨会话协调与 Windows 存储还应检查对应 `.github/workflows/` 的平台回归。OpenSpec CI 只做文档格式与归档完成状态检查，语义由场景、源码、测试和 review 共同核对。

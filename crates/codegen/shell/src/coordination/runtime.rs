@@ -44,7 +44,7 @@ struct InquiryRecord {
     payload: InquiryPayload,
     cancellation: InquiryCancellation,
     progress: watch::Sender<InquiryPhase>,
-    result: watch::Sender<Option<InquiryOutcome>>,
+    result: watch::Sender<Option<Result<InquiryOutcome, CoordinationError>>>,
     terminal_at: std::sync::Mutex<Option<Instant>>,
     target: std::sync::Mutex<Option<PeerManifest>>,
 }
@@ -69,7 +69,7 @@ impl InquiryRecord {
     }
 
     fn complete(&self, outcome: InquiryOutcome) {
-        self.result.send_replace(Some(outcome));
+        self.result.send_replace(Some(Ok(outcome)));
         self.progress.send_replace(InquiryPhase::Finished);
         *self.terminal_at.lock().unwrap_or_else(|e| e.into_inner()) = Some(Instant::now());
     }
@@ -352,6 +352,27 @@ impl CoordinationRuntime {
 }
 
 impl CoordinationHandle {
+    pub async fn ask_session(
+        &self,
+        inquiry_id: &str,
+        source_session_id: &str,
+        target_session_id: &str,
+        question: &str,
+        progress: Option<mpsc::UnboundedSender<InquiryPhase>>,
+        cancellation: CancellationToken,
+    ) -> Result<InquiryOutcome, CoordinationError> {
+        self.ask_session_with_admission(
+            inquiry_id,
+            source_session_id,
+            target_session_id,
+            question,
+            progress,
+            cancellation,
+            std::future::ready(Ok(())),
+        )
+        .await
+    }
+
     pub fn require_ready(&self) -> Result<(), CoordinationError> {
         self.shared.require_ready()
     }
@@ -403,7 +424,7 @@ impl CoordinationHandle {
         Ok(discovered)
     }
 
-    pub async fn ask_session(
+    pub(crate) async fn ask_session_with_admission(
         &self,
         inquiry_id: &str,
         source_session_id: &str,
@@ -411,6 +432,7 @@ impl CoordinationHandle {
         question: &str,
         progress: Option<mpsc::UnboundedSender<InquiryPhase>>,
         cancellation: CancellationToken,
+        admission: impl std::future::Future<Output = Result<(), CoordinationError>> + Send + 'static,
     ) -> Result<InquiryOutcome, CoordinationError> {
         validate_inquiry_id(inquiry_id)
             .map_err(|e| CoordinationError::new(CoordinationErrorCode::InvalidRequest, e))?;
@@ -475,11 +497,20 @@ impl CoordinationHandle {
                     .cancellation
                     .cancel(InquiryCancellationReason::Explicit);
             }
-            outgoing.insert(key, Arc::clone(&record));
+            // Publish the live startup before its durable fact can be observed.
+            // Do not hold the map lock across the source actor's acknowledgement:
+            // progress queries and cancellation must remain available.
+            outgoing.insert(key.clone(), Arc::clone(&record));
             let sender = self.clone();
             let task_record = Arc::clone(&record);
             let task_id = inquiry_id.to_owned();
             tokio::spawn(async move {
+                if let Err(error) = admission.await {
+                    sender.shared.outgoing.lock().await.remove(&key);
+                    task_record.result.send_replace(Some(Err(error)));
+                    task_record.progress.send_replace(InquiryPhase::Finished);
+                    return;
+                }
                 sender.run_outgoing(task_id, task_record).await;
             });
             record
@@ -490,7 +521,7 @@ impl CoordinationHandle {
         send_progress(&progress, *phases.borrow());
         loop {
             if let Some(outcome) = result.borrow().clone() {
-                return Ok(outcome);
+                return outcome;
             }
             tokio::select! {
                 _ = cancellation.cancelled(), if !record.cancellation.is_cancelled() => {
@@ -648,10 +679,11 @@ impl CoordinationHandle {
                 } else {
                     *record.progress.borrow()
                 },
-                outcome: outcome.clone(),
+                outcome: outcome.clone().transpose()?,
             });
         }
-        drop(outgoing);
+        // Keep the absence check and durable fallback in one critical section.
+        // Otherwise a startup could commit between these two observations.
         let fact = self
             .durable_inquiry(inquiry_id, source_session_id)
             .await?
@@ -661,10 +693,11 @@ impl CoordinationHandle {
                     "inquiry not found in this source session",
                 )
             })?;
+        drop(outgoing);
         let super::InquiryEvent::OutgoingCompleted { audit } = fact else {
             return Err(CoordinationError::new(
                 CoordinationErrorCode::SourceUnavailable,
-                "source restarted before recording the inquiry outcome; only an explicit retry of the same request can resume it",
+                "inquiry has a durable start but no live source execution; only an explicit retry of the same request can resume it",
             ));
         };
         Ok(InquiryState {
@@ -1043,6 +1076,9 @@ async fn serve_connection(mut stream: LocalStream, shared: Arc<Shared>) -> Resul
             loop {
                 let terminal = result.borrow().clone();
                 if let Some(outcome) = terminal {
+                    let outcome = outcome.unwrap_or_else(|error| {
+                        InquiryOutcome::terminal(&response_inquiry_id, InquiryStatus::Failed, error)
+                    });
                     return write_response(&mut stream, Response::Inquiry { outcome }).await;
                 }
                 tokio::select! {
@@ -1135,7 +1171,7 @@ async fn accept_inquiry(
 ) -> Result<
     (
         watch::Receiver<InquiryPhase>,
-        watch::Receiver<Option<InquiryOutcome>>,
+        watch::Receiver<Option<Result<InquiryOutcome, CoordinationError>>>,
     ),
     (String, String),
 > {
@@ -1286,14 +1322,16 @@ async fn run_inquiry(
             }
         }
     };
-    record.result.send_replace(Some(outcome));
+    record.result.send_replace(Some(Ok(outcome)));
     *record
         .terminal_at
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Instant::now());
 }
 
-async fn wait_for_terminal(mut result: watch::Receiver<Option<InquiryOutcome>>) {
+async fn wait_for_terminal(
+    mut result: watch::Receiver<Option<Result<InquiryOutcome, CoordinationError>>>,
+) {
     while result.borrow().is_none() {
         if result.changed().await.is_err() {
             break;
