@@ -2,7 +2,7 @@
 
 ## 最终范围
 
-版本保持 **2.4.0**。用户最终确定 Ctrl+C 保留输入框及当前回合取消行为、绝不关联退出；默认 Ctrl+D 一秒内连续两次确认退出，确认后挂起整棵会话树。行为 change 已归档为 [separate-cancel-from-session-exit](../archive/2026-10-19-separate-cancel-from-session-exit/verification.md)，主契约为 `client-surfaces` 的 Confirmed quit requirement。
+版本保持 **2.4.0**。用户最终确定 Ctrl+C 保留输入框及当前回合取消行为、绝不关联退出；默认 Ctrl+D 一秒内连续两次确认退出，确认后挂起整棵会话树。行为 change 已归档为 [separate-cancel-from-session-exit](../2026-10-19-separate-cancel-from-session-exit/verification.md)，主契约为 `client-surfaces` 的 Confirmed quit requirement。
 
 此前选择性提交 `2e69e5db` 排除的下列四项现已全部纳入本次最终工作区，保留它们各自的实施与验证记录，不改写历史范围决定：
 - `2026-10-18-complete-image-fallback-lifecycle-regressions`
@@ -43,4 +43,12 @@ MCP 多轮交互仍因官方 SDK/真实服务门禁暂缓，唯一相关 open ch
 
 ## 最终提交与分支操作
 
-待第一笔包含全部实现、规范、归档、文档及本记录的提交完成后，fast-forward 合入本地 main，仅删除已合并的 `codex/v2-4-0`。完成后在本节追加真实 Git 结果，再勾选末项并归档；不提前宣称该动作已完成。
+- 全部剩余实现、四项归档、按键修正及文档已提交为 `8e80b1cc`（`feat: finalize 2.4.0 session exit and remaining fixes`），该提交继承此前完整的 2.4.0 提交 `2e69e5db`。
+- 已切换到本地 `main`，执行 `git merge --ff-only codex/v2-4-0`，从 `8cc20454` 快进到 `8e80b1cc`。
+- 已执行 `git branch -d codex/v2-4-0`，成功删除该已合并任务分支；其他 codex 分支和 worktree 保留。
+- 归档前复核当前分支为 main、任务分支不存在，35 个 tag 与操作前逐条一致。没有推送远端或触发发布。
+- 本 change 仅以最后一笔 main 文档提交记录以上已完成动作并归档，不新增产品实现。
+
+## 归档后校验
+
+`openspec validate --all --strict --no-interactive` 为 **16 passed / 0 failed**；`openspec validate --archived --no-interactive` 为 **607 passed / 0 failed**（日志 `/tmp/grow-v2-4-0-finalize141-archives.log`）。活动目录仅保留明确暂缓的 `add-mcp-multi-round-elicitation`。归档后的本记录相对链接目标已重新核对，格式与 diff 检查通过。
