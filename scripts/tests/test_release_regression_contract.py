@@ -8,6 +8,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 RELEASE = (ROOT / ".github/workflows/release.yml").read_text()
 WINDOWS = (ROOT / ".github/workflows/windows-session-storage.yml").read_text()
+CORE = (ROOT / ".github/workflows/core-regression.yml").read_text()
 
 GATES = {
     "core-regressions": ".github/workflows/core-regression.yml",
@@ -83,6 +84,14 @@ def release_contract_errors(source: str) -> list[str]:
 
 
 class ReleaseRegressionContractTests(unittest.TestCase):
+    def test_core_installs_and_checks_ripgrep_before_library_tests(self) -> None:
+        install = CORE.index("- name: Install ripgrep for search tool tests")
+        tests = CORE.index("cargo test --locked --lib")
+        install_step = CORE[install:tests]
+        self.assertIn("sudo apt-get install --yes ripgrep", install_step)
+        self.assertIn("command -v rg", install_step)
+        self.assertIn("rg --version", install_step)
+
     def test_windows_filter_covers_direct_build_inputs_for_both_source_triggers(self) -> None:
         pull_request_paths = trigger_paths(WINDOWS, "pull_request")
         push_paths = trigger_paths(WINDOWS, "push")

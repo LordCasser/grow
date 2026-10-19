@@ -1,0 +1,5 @@
+- [x] 1.1 核对 grep 对 ripgrep 的运行时依赖及失败路径。
+- [x] 1.2 在核心 Rust 测试前安装并检查 ripgrep。
+- [x] 1.3 用 Python 合约测试验证环境步骤先于 Rust 单测。
+- [x] 1.4 为 Bash `set -a` 测试失败保留 stderr 和阶段信息，不改断言或生产代码。
+- [x] 1.5 运行相关 Python 与 Rust 格式检查，并记录验证结果。

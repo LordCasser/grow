@@ -78,6 +78,13 @@ jobs:
               actual = {dependency["name"] for dependency in packages[name]["dependencies"]}
               assert not actual & blocked, f"{name} must not depend on {sorted(actual & blocked)}"
           PY
+      - name: Install ripgrep for search tool tests
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --yes ripgrep
+          command -v rg
+          rg --version
       - name: Run core and presentation regressions
         run: >-
           cargo test --locked --lib

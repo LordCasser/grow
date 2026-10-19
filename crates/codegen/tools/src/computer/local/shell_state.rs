@@ -956,8 +956,8 @@ mod tests {
         assert!(state.cwd.is_absolute(), "cwd should be absolute");
     }
 
-    /// Helper: run a command against a ShellState, update state, return (exit_code, stdout).
-    async fn run_command(state: &mut ShellState, command: &str) -> (i32, String) {
+    /// Run a command against a ShellState, update state, and return its exit code and output.
+    async fn run_command(state: &mut ShellState, command: &str) -> (i32, String, String) {
         use command_fds::CommandFdExt;
 
         let prep = state
@@ -995,7 +995,8 @@ mod tests {
 
         let code = output.status.code().unwrap_or(-1);
         let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-        (code, stdout)
+        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        (code, stdout, stderr)
     }
 
     #[tokio::test]
@@ -1007,11 +1008,11 @@ mod tests {
         let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
 
         // cd to /tmp (macOS resolves to /private/tmp via symlink)
-        let (code, _) = run_command(&mut state, "cd /tmp").await;
+        let (code, _, _) = run_command(&mut state, "cd /tmp").await;
         assert_eq!(code, 0);
 
         // Next command should see the resolved /tmp as cwd
-        let (code, stdout) = run_command(&mut state, "pwd").await;
+        let (code, stdout, _) = run_command(&mut state, "pwd").await;
         assert_eq!(code, 0);
         let actual_pwd = stdout.trim();
         assert!(
@@ -1030,11 +1031,11 @@ mod tests {
         let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
 
         // Export a variable
-        let (code, _) = run_command(&mut state, "export MY_TEST_VAR=persistent_value").await;
+        let (code, _, _) = run_command(&mut state, "export MY_TEST_VAR=persistent_value").await;
         assert_eq!(code, 0);
 
         // Next command should see it
-        let (code, stdout) = run_command(&mut state, "echo $MY_TEST_VAR").await;
+        let (code, stdout, _) = run_command(&mut state, "echo $MY_TEST_VAR").await;
         assert_eq!(code, 0);
         assert_eq!(stdout.trim(), "persistent_value");
     }
@@ -1048,10 +1049,10 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
 
-        let (code, _) = run_command(&mut state, "export GPG_TTY=/grow-sentinel-tty").await;
+        let (code, _, _) = run_command(&mut state, "export GPG_TTY=/grow-sentinel-tty").await;
         assert_eq!(code, 0);
 
-        let (code, stdout) = run_command(&mut state, "echo \"[$GPG_TTY]\"").await;
+        let (code, stdout, _) = run_command(&mut state, "echo \"[$GPG_TTY]\"").await;
         assert_eq!(code, 0);
         assert!(
             !stdout.contains("/grow-sentinel-tty"),
@@ -1068,10 +1069,10 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let mut state = ShellState::init(ShellKind::Zsh, &cwd, None).await.unwrap();
 
-        let (code, _) = run_command(&mut state, "export GPG_TTY=/grow-sentinel-tty").await;
+        let (code, _, _) = run_command(&mut state, "export GPG_TTY=/grow-sentinel-tty").await;
         assert_eq!(code, 0);
 
-        let (code, stdout) = run_command(&mut state, "echo \"[$GPG_TTY]\"").await;
+        let (code, stdout, _) = run_command(&mut state, "echo \"[$GPG_TTY]\"").await;
         assert_eq!(code, 0);
         assert!(
             !stdout.contains("/grow-sentinel-tty"),
@@ -1113,7 +1114,7 @@ mod tests {
         );
 
         let pattern = "--include=*.no_such_ext_xyz_12345";
-        let (code, stdout) = run_command(&mut state, &format!("printf '%s\\n' {pattern}")).await;
+        let (code, stdout, _) = run_command(&mut state, &format!("printf '%s\\n' {pattern}")).await;
         assert_eq!(code, 0, "unmatched glob must not fail, stdout={stdout:?}");
         assert!(
             stdout.contains(pattern),
@@ -1134,11 +1135,11 @@ mod tests {
         let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
 
         // Define a function
-        let (code, _) = run_command(&mut state, "greet() { echo \"hello $1\"; }").await;
+        let (code, _, _) = run_command(&mut state, "greet() { echo \"hello $1\"; }").await;
         assert_eq!(code, 0);
 
         // Call it in the next command
-        let (code, stdout) = run_command(&mut state, "greet world").await;
+        let (code, stdout, _) = run_command(&mut state, "greet world").await;
         assert_eq!(code, 0);
         assert_eq!(stdout.trim(), "hello world");
     }
@@ -1161,7 +1162,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
 
-        let (code, stdout) = run_command(
+        let (code, stdout, _) = run_command(
             &mut state,
             &format!("source {} && echo AFTER_SOURCE_OK", probe.display()),
         )
@@ -1188,14 +1189,17 @@ mod tests {
 
         // Turn on allexport; the option is captured by the dump and replayed
         // into every subsequent command's shell.
-        let (code, _) = run_command(&mut state, "set -a").await;
-        assert_eq!(code, 0);
+        let (code, stdout, stderr) = run_command(&mut state, "set -a").await;
+        assert_eq!(
+            code, 0,
+            "command stage `set -a` failed; stdout={stdout:?}, stderr={stderr:?}"
+        );
 
         // This command's wrapper assigns __grow_user_cmd under allexport.
         // printenv only sees exported vars — it must not see the temp var
         // (neither from this command's own assignment nor re-exported from a
         // previous command's state dump).
-        let (code, stdout) = run_command(
+        let (code, stdout, _) = run_command(
             &mut state,
             "printenv __grow_user_cmd >/dev/null 2>&1 && echo LEAKED_TO_ENV || echo ENV_CLEAN",
         )
@@ -1221,7 +1225,7 @@ mod tests {
         let cwd = std::env::current_dir().unwrap();
         let mut state = ShellState::init(ShellKind::Zsh, &cwd, None).await.unwrap();
 
-        let (code, stdout) = run_command(
+        let (code, stdout, _) = run_command(
             &mut state,
             &format!("source {} && echo AFTER_SOURCE_OK", probe.display()),
         )
@@ -1243,7 +1247,7 @@ mod tests {
         let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
 
         // Define an alias
-        let (code, _) = run_command(&mut state, "alias ll='ls -la'").await;
+        let (code, _, _) = run_command(&mut state, "alias ll='ls -la'").await;
         assert_eq!(code, 0);
 
         // Verify the alias survives by checking the dump itself (base64-encoded).
@@ -1280,7 +1284,7 @@ mod tests {
             prep.args
         );
 
-        let (code, stdout) = run_command(&mut state, "type -t find && type -t grep").await;
+        let (code, stdout, _) = run_command(&mut state, "type -t find && type -t grep").await;
         assert_eq!(code, 0, "type -t find/grep failed: {stdout}");
         assert_eq!(
             stdout.lines().filter(|l| l.trim() == "function").count(),
@@ -1291,7 +1295,7 @@ mod tests {
         // Only assert the binary actually routes to ugrep when ugrep resolves on
         // this host; otherwise the shadow correctly falls back to OS grep.
         if which::which("ugrep").is_ok() {
-            let (code, stdout) = run_command(&mut state, "grep --version | head -3").await;
+            let (code, stdout, _) = run_command(&mut state, "grep --version | head -3").await;
             assert_eq!(code, 0, "grep --version failed: {stdout}");
             assert!(
                 stdout.to_ascii_lowercase().contains("ugrep"),
@@ -1309,16 +1313,16 @@ mod tests {
         let mut state = ShellState::init(ShellKind::Bash, &cwd, None).await.unwrap();
 
         // Set up some state
-        let (_, _) = run_command(&mut state, "export SURVIVE_TEST=yes").await;
+        let (_, _, _) = run_command(&mut state, "export SURVIVE_TEST=yes").await;
         let prev_cwd = state.cwd.clone();
 
         // Run a failing command — state should still update (dump runs regardless)
-        let (code, _) = run_command(&mut state, "false").await;
+        let (code, _, _) = run_command(&mut state, "false").await;
         assert_ne!(code, 0);
 
         // Previous state should still be there
         assert_eq!(state.cwd, prev_cwd);
-        let (_, stdout) = run_command(&mut state, "echo $SURVIVE_TEST").await;
+        let (_, stdout, _) = run_command(&mut state, "echo $SURVIVE_TEST").await;
         assert_eq!(stdout.trim(), "yes");
     }
 }
