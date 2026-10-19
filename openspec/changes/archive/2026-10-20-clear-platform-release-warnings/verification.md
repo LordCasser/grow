@@ -13,3 +13,9 @@ The cancelled candidate GCC builds also emit sqlite-vec C warnings; musl Rust bu
 ## Validation
 
 Formatting, local targeted/default CLI and hosted replacement-source results are recorded below as they complete. No previous-source artifact or green gate substitutes for the corrected source.
+
+Local validation: pinned Rust 1.93.1 default CLI build succeeded without warnings; managed_text 34 passed, fast-worktree with metadata enabled and gc filter 67 passed, unified_log 31 passed. The initial fast-worktree filter without metadata selected zero cases and is explicitly not counted as evidence; rerun with the real production feature executes the CWD scan guards. Python workflow/runner regressions: 19 passed. Changed-source rustfmt and whitespace checks pass; strict current/change validation: 17 passed.
+
+Corrected main source 5fcbd12b0c10afef1f34695394d2ad81ff5b5310 is pushed. Old run is completed/cancelled with no public release. The unpublished annotated tag was replaced only after checking its expected old remote object (force-with-lease); tag preflight validates the new exact SHA and official run 39290950832 rebuilds all ten platforms with all release gates enabled. No public asset/tag is replaced.
+
+Hosted corrected-source proof: official run 39290950832 Windows aarch64 job 118191312608 and Windows x86_64 job 118191312635 both completed successfully. Complete logs confirm RUSTFLAGS=-D warnings with zero warning/error diagnostics; each job also passes its native version/process coordination smoke, packaging, attestation and upload steps. The independently reviewed resource/failure boundaries are preserved. This closes the platform-warning maintenance change; the overall release still depends on the remaining official gates.

@@ -1,0 +1,101 @@
+{
+  "release": "https://github.com/LordCasser/grow/releases/tag/v2.4.1",
+  "publishedAt": "2026-10-19T18:14:26Z",
+  "source": "5fcbd12b0c10afef1f34695394d2ad81ff5b5310",
+  "public": true,
+  "prerelease": false,
+  "notesMatchTag": true,
+  "assets": [
+    {
+      "platform": "linux-x86_64",
+      "name": "grow-2.4.1-linux-x86_64.tar.gz",
+      "sha256": "2e712e51c1a1e74b5449f1721d1845dc54f1794c22eeed1ab1ef6e2e9a9892b8",
+      "bytes": 49278761,
+      "entry": "grow",
+      "architecture": 62
+    },
+    {
+      "platform": "linux-aarch64",
+      "name": "grow-2.4.1-linux-aarch64.tar.gz",
+      "sha256": "2dd807245f6dfa891d0fb079737ee25cd819ab8515283332ca22610aa7d98172",
+      "bytes": 46250939,
+      "entry": "grow",
+      "architecture": 183
+    },
+    {
+      "platform": "linux-riscv64",
+      "name": "grow-2.4.1-linux-riscv64.tar.gz",
+      "sha256": "67a37f52ecdfa3b0fda18af501c3082bc5073122f2d4f86bc513369ce89440d4",
+      "bytes": 49060054,
+      "entry": "grow",
+      "architecture": 243
+    },
+    {
+      "platform": "linux-x86_64-musl",
+      "name": "grow-2.4.1-linux-x86_64-musl.tar.gz",
+      "sha256": "24cf98e6c3767afeb2c9fab2fc6de0dda61f90f6fd79b38dbe92f95ac7f9a4e9",
+      "bytes": 49846359,
+      "entry": "grow",
+      "architecture": 62
+    },
+    {
+      "platform": "linux-aarch64-musl",
+      "name": "grow-2.4.1-linux-aarch64-musl.tar.gz",
+      "sha256": "882e54a30baa9161531c01b21b456f1dce65f562545c6eee5e73318e61ea566b",
+      "bytes": 45766724,
+      "entry": "grow",
+      "architecture": 183
+    },
+    {
+      "platform": "macos-aarch64",
+      "name": "grow-2.4.1-macos-aarch64.tar.gz",
+      "sha256": "624ebf338936e301a56d0981df7f501ef70e52bfbadbc307345140e96aebac69",
+      "bytes": 43150051,
+      "entry": "grow",
+      "architecture": 16777228
+    },
+    {
+      "platform": "macos-x86_64",
+      "name": "grow-2.4.1-macos-x86_64.tar.gz",
+      "sha256": "b5d26df1814dd8df91865a7a44d0b0de786a065a5df2c103f71c94c276d116b5",
+      "bytes": 46816598,
+      "entry": "grow",
+      "architecture": 16777223
+    },
+    {
+      "platform": "windows-x86_64",
+      "name": "grow-2.4.1-windows-x86_64.tar.gz",
+      "sha256": "2d5e09243d0463ed4f87420565adee097259cb245fc1d9ba06d2512ebc359595",
+      "bytes": 44601063,
+      "entry": "grow.exe",
+      "architecture": 34404
+    },
+    {
+      "platform": "windows-aarch64",
+      "name": "grow-2.4.1-windows-aarch64.tar.gz",
+      "sha256": "4f555274a1e15e86a4304fea11b5d78d980bab78b579c320ed1ffc386d4809f5",
+      "bytes": 41397522,
+      "entry": "grow.exe",
+      "architecture": 43620
+    },
+    {
+      "platform": "ohos-aarch64",
+      "name": "grow-2.4.1-ohos-aarch64.tar.gz",
+      "sha256": "496784173c2ceb225a292cadc6ceb828a0426eb1b55665c4b3cf2dd8422e26b6",
+      "bytes": 42695774,
+      "entry": "grow",
+      "architecture": 183
+    }
+  ],
+  "nativeMacArm64Version": "grow 2.4.1 (5fcbd12)",
+  "releaseRun": "https://github.com/LordCasser/grow/actions/runs/39290950832",
+  "tagObject": "2b2a19332ee90fdf5378a5bccaaf4f6e7e5df92a",
+  "latestAtVerification": "v2.4.1",
+  "nativeMacArm64CodeSignatureVerified": true,
+  "attestations": {
+    "verifiedCount": 10,
+    "signerWorkflow": "LordCasser/grow/.github/workflows/build-one.yml",
+    "sourceDigest": "5fcbd12b0c10afef1f34695394d2ad81ff5b5310",
+    "signerDigest": "5fcbd12b0c10afef1f34695394d2ad81ff5b5310"
+  }
+}

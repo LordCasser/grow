@@ -11,7 +11,11 @@
 
 - **动态项目配置 watch 的生产回收尚未接入**：生产调用会向 ConfigFileWatcher 注册 cwd，当前 `unwatch_path` 仅由 API 测试使用；本轮只修复既有注销契约和迟到回调，未接入新的 session teardown 生命周期。长期 leader 多 cwd 的 watch 回收需另建 change，先确认各生产注册者的共享引用所有权，不能直接在任一 session 关闭时注销共享目录。证据见 [配置监听注销验证](changes/archive/2026-10-19-reject-orphaned-config-watch-events/verification.md)。
 
-- **第三方交叉编译告警与 sqlite-vec 边界**：v2.4.1 首次候选的 GCC 构建暴露上游 sqlite-vec 的 pragma、符号比较及可能未初始化诊断，其中 `vec0_metadata_filter_text` 的 `size_t metadataInIdx = -1` 后检查 `< 0` 是无效哨兵判断；尚无 Grow 运行时触发复现。Grow 当前 vec0 schema 只有 chunk_id/embedding，查询为 MATCH/k，不使用 text metadata IN。供应商 C 与 v2.4.0 相同，既有打包 workaround 要求上游文件保持一致；后续另立最小 change 验证边界并选择上游修复或明确维护补丁，不能仅消音或声称所有诊断无害。另有 nix 0.26 的 musl `suseconds_t` 弃用提示，以及安装 cross 0.2.5 时其独立 lock 中 dunce 1.0.2 的撤回提示（Grow lock 为 1.0.5）；分别按依赖约束处理，不混入 MCP。证据见 [平台告警维护验证](changes/clear-platform-release-warnings/verification.md)。
+- **第三方交叉编译告警与 sqlite-vec 边界**：v2.4.1 首次候选的 GCC 构建暴露上游 sqlite-vec 的 pragma、符号比较及可能未初始化诊断，其中 `vec0_metadata_filter_text` 的 `size_t metadataInIdx = -1` 后检查 `< 0` 是无效哨兵判断；尚无 Grow 运行时触发复现。Grow 当前 vec0 schema 只有 chunk_id/embedding，查询为 MATCH/k，不使用 text metadata IN。供应商 C 与 v2.4.0 相同，既有打包 workaround 要求上游文件保持一致；后续另立最小 change 验证边界并选择上游修复或明确维护补丁，不能仅消音或声称所有诊断无害。另有 nix 0.26 的 musl `suseconds_t` 弃用提示，以及安装 cross 0.2.5 时其独立 lock 中 dunce 1.0.2 的撤回提示（Grow lock 为 1.0.5）；分别按依赖约束处理，不混入 MCP。证据见 [平台告警维护验证](changes/archive/2026-10-20-clear-platform-release-warnings/verification.md)。
+
+- **精确测试 runner 的阶段可观测性与子进程期限**：`scripts/run_exact_cargo_test.py` 的 list/run 两次 `subprocess.run` 都先完整缓冲输出，且无子进程级 timeout；成功仅在整项结束后打印测试名称。Core job 的 90 分钟总期限仍能阻断发布，但运行中难以区分编译、枚举与测试等待，取消时的子孙进程收尾也需跨平台验证。后续独立 change 可先拆清各阶段耗时和进度，再制定编译/执行预算及 Windows/Unix 清理；本版不臆测长 PTY 步骤就是死锁，也不通过缩短期限或跳过用例掩盖问题。
+
+- **OHOS 产物未嵌入 Git 短哈希**：2.4.1 OHOS 容器冒烟打印 `grow 2.4.1 (unknown)`；`crates/codegen/cli/build.rs` 在 `git rev-parse --short HEAD` 失败时使用该回退值，当前不保留失败原因。工作流仍按不可变完整 SHA 检出并为产物生成来源证明，因此版本及外部来源绑定可校验；后续独立维护需验证容器中的 Git 元数据可见性/调用失败原因，再补齐内嵌标识，不能把容器冒烟等同于真实设备验证。本次不为该展示元数据更换已完成门禁的发布候选。
 
 ## 本轮已解决
 
