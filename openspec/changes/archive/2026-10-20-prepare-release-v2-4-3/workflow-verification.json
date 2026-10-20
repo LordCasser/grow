@@ -1,0 +1,132 @@
+{
+  "databaseId": 39425379616,
+  "url": "https://github.com/LordCasser/grow/actions/runs/39425379616",
+  "headSha": "2069c43db5a3756bf65d1a275e8ed16bef3a86fa",
+  "status": "completed",
+  "conclusion": "success",
+  "createdAt": "2026-10-20T12:50:11Z",
+  "updatedAt": "2026-10-20T13:57:29Z",
+  "job_count": 20,
+  "jobs": [
+    {
+      "databaseId": 118636506780,
+      "name": "Validate dispatch inputs",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 118636507061,
+      "name": "Validate release tag",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 118636507173,
+      "name": "Select platform matrix",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 118636672684,
+      "name": "Build windows-aarch64 / Build windows-aarch64",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 118636672724,
+      "name": "Build macos-x86_64 / Build macos-x86_64",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 118636672778,
+      "name": "Build linux-riscv64 / Build linux-riscv64",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 118636672790,
+      "name": "Build macos-aarch64 / Build macos-aarch64",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 118636672791,
+      "name": "Build linux-x86_64 / Build linux-x86_64",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 118636672884,
+      "name": "Build linux-aarch64 / Build linux-aarch64",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 118636672989,
+      "name": "Build linux-aarch64-musl / Build linux-aarch64-musl",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 118636673015,
+      "name": "Build windows-x86_64 / Build windows-x86_64",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 118636673102,
+      "name": "Build linux-x86_64-musl / Build linux-x86_64-musl",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 118636673157,
+      "name": "Build ohos-aarch64 / Build ohos-aarch64",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 118636673809,
+      "name": "Core regressions on release commit / Core tests and CLI build",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 118636674035,
+      "name": "Native coordination and export regressions on release commit / native (macos-15)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 118636674135,
+      "name": "Native coordination and export regressions on release commit / native (ubuntu-24.04)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 118636674136,
+      "name": "Windows storage regressions on release commit / Create and reopen a session",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 118636674253,
+      "name": "Native coordination and export regressions on release commit / native (windows-2025)",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 118636674390,
+      "name": "OpenSpec validation on release commit / validate",
+      "status": "completed",
+      "conclusion": "success"
+    },
+    {
+      "databaseId": 118668270102,
+      "name": "Publish release assets",
+      "status": "completed",
+      "conclusion": "success"
+    }
+  ]
+}

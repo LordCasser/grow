@@ -19,3 +19,7 @@
 结果 58 passed、0 failed、0 ignored，3.04s。两个原失败用例均实际通过；这沿既有 CI 测试栈配置执行，没有增加业务 deadline。指定文件 rustfmt --check 和 git diff --check 通过。Windows 的实际 GREEN 以新候选的正式 native 门禁为准；不拿本地测试代替跨平台通过。
 
 归档后严格校验：Totals: 16 passed, 0 failed (16 items)；Totals: 664 passed, 0 failed (664 items)。
+
+## 正式候选 Windows GREEN
+
+源码 `2069c43db5a3756bf65d1a275e8ed16bef3a86fa` 的官方 [run 39425379616](https://github.com/LordCasser/grow/actions/runs/39425379616)、Windows native job `118636674253` 已 completed/success。日志确认两个原失败用例均 `... ok`；Shell coordination 为 58 passed、0 failed、0 ignored，3.15s。该 job 的实际独立进程发现回归亦通过。此记录仅确认该门禁，整版发布以发布准备验证中的最终流水线及公开产物证据为准。
