@@ -1,5 +1,11 @@
 # Changelog
 
+# 2.4.2 — 2026-10-20
+
+修复会话挂起与恢复、Goal/Plan 状态及工作范围切换，并改进构建诊断、资源释放和精确回归测试运行器。
+
+完整发布说明见 [changelogs/2.4.2.md](https://github.com/LordCasser/grow/blob/main/crates/codegen/shell/changelogs/2.4.2.md)。
+
 # 2.4.1 — 2026-10-19
 
 修复会话退出与恢复、Windows 导出和 Skill 加载，改善视觉辅助、Agent 通信及 Plan 展示，并补强同提交发布门禁。
