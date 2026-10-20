@@ -298,6 +298,7 @@ class RealCommandTests(unittest.TestCase):
                 import importlib.util, sys
                 spec = importlib.util.spec_from_file_location('exact_runner', {module_path!r})
                 runner = importlib.util.module_from_spec(spec)
+                sys.modules[spec.name] = runner
                 spec.loader.exec_module(runner)
                 runner.execute = lambda *args, **kwargs: runner._run_phase(
                     [sys.executable, '-u', '-c', {parent!r}], 'execute', 10)
@@ -311,7 +312,15 @@ class RealCommandTests(unittest.TestCase):
                 deadline = time.monotonic() + 5
                 while not pid_path.exists() and process.poll() is None and time.monotonic() < deadline:
                     time.sleep(0.02)
-                self.assertTrue(pid_path.exists(), "runner did not start the real child process tree")
+                if not pid_path.exists():
+                    process.terminate()
+                    stdout, stderr = process.communicate(timeout=5)
+                    self.fail(
+                        "runner did not start the real child process tree; "
+                        f"exit_code={process.returncode}, "
+                        f"stdout={stdout.decode(errors='replace')}, "
+                        f"stderr={stderr.decode(errors='replace')}"
+                    )
                 process.send_signal(signal.SIGTERM)
                 process.communicate(timeout=5)
                 self.assertEqual(process.returncode, 143)

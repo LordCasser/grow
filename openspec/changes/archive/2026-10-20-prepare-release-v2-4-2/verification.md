@@ -11,3 +11,7 @@ workspace 2.4.1 → 2.4.2；Cargo.lock 仅 33 个无 registry source 的本地 w
 ## 后续执行边界
 
 准备归档与版本提交后，才创建指向清洁 HEAD 的 annotated v2.4.2，运行 `scripts/validate-release.sh`，原子推送 main/tag，并从 main dispatch 官方 release.yml。这里尚不宣称 tag、托管门禁或公开资产已完成，实际结果随后追加。
+
+## 首轮候选与发布门禁修复
+
+候选 `85eb50ab` 的 annotated tag 与静态 preflight 通过，已原子推送 main/tag。官方 run 39401343936 在 Python 3.12 SIGTERM 夹具导入时失败；未发布 Release，已取消全部作业。独立修复见 fix-runner-sigterm-fixture-import，后续候选重新校验全部门禁。
