@@ -1,6 +1,8 @@
 # 未解决边界
 
-截至 2026-10-20，已确认的 backlog 缺陷已分别立项、补齐回归并修复；完成记录见下表。以下仅保留用户此前明确暂缓的方向：Remote Control，以及依赖真实路由与负载证据的 Provider/Recap 缓存优化。MCP 不在本轮修改范围。
+截至 2026-10-20，此前 backlog 缺陷的完成记录见下表。退出挂起节点修复之后的扩散审计又确认三个待修边界，保留用户此前明确暂缓的 Remote Control，以及依赖真实路由与负载证据的 Provider/Recap 缓存优化。MCP 不在本轮修改范围。
+
+
 
 - **Remote Control / Agent Host 跨设备使用（暂缓、未排期）**：用户认可从其他设备连接和操作已有 Grow 会话的方向，但当前不实施、不设日期，不纳入 MCP 多轮或保留计划提案。本次不展开远端控制架构，也不因此引入统一 Dock、Memory 或其他大型功能。未来明确启动时另建 change，重新界定身份、权限、执行 owner、断线和恢复边界；本条不构成实现授权。决策见 [2026-10-11 上游主题评审](changes/archive/2026-10-18-record-upstream-review-2bdd1d6/review.md)。
 
@@ -9,8 +11,14 @@
 
 ## 本轮已解决
 
+
 | 问题 | 归档与验证 |
 | --- | --- |
+| 恢复放行后、等待未重绑时再次挂起丢失逻辑等待 | [跨恢复周期等待](changes/archive/2026-10-20-preserve-waits-across-runtime-release/verification.md) |
+| 已处置的未派发任务仍阻塞 scope 切换 | [scope 义务校验](changes/archive/2026-10-20-fix-undispatched-planning-scope/verification.md) |
+| 树冻结失败重试换 owner、节点意图前 Suspended 等待丢失 | [树挂起准入边界](changes/archive/2026-10-20-fix-tree-suspension-admission-boundaries/verification.md) |
+| 自动 Goal 激活/重激活丢失 retained Plan 与提交计数 | [自动 Goal 快照](changes/archive/2026-10-20-fix-automatic-goal-plan-snapshot/verification.md) |
+| 退出挂起重复提交后台完成通知，以及节点挂起意图后的超时重试丢失人工等待 | [挂起重试证据修复](changes/archive/2026-10-20-fix-suspension-retry-evidence/verification.md) |
 | 持久 Bash 捕获前局部变量遮蔽同名导出值 | [捕获隔离修复](changes/archive/2026-10-20-fix-bash-env-export-capture-shadow/verification.md) |
 | session 移除/空闲卸载后动态配置监听未回收 | [resident 监听生命周期](changes/archive/2026-10-20-reclaim-session-config-watches/verification.md) |
 | 精确测试 runner 缺少阶段进度、子进程期限与有界收尾 | [runner 加固](changes/archive/2026-10-20-harden-exact-cargo-runner/verification.md) |

@@ -1018,6 +1018,21 @@ impl MvpAgent {
                 .clone()
                 .ok_or("runtime handoff identity is missing")?
         };
+        // Persist ownership before coordinator freeze can take effect. A failed
+        // acknowledgement or initializer drain must retry the same operation.
+        if runtime.phase == RuntimePhase::Running {
+            root_handle
+                .chat_state_handle
+                .record_timeline_event_durably_before(
+                    chat_state::TimelineEventKind::Runtime(SessionRuntimeEvent::SuspendRequested {
+                        operation_id: operation_id.clone(),
+                        root_session_id: root.0.to_string(),
+                    }),
+                    deadline,
+                )
+                .await
+                .map_err(|error| error.to_string())?;
+        }
         let frozen_children = loop {
             let children = self
                 .freeze_tree_admission(&root, &operation_id, deadline)
@@ -1034,7 +1049,7 @@ impl MvpAgent {
             .await
             .map_err(|_| "child initialization is still settling".to_string())?;
         };
-        let (runtime, facts) = self.runtime_snapshot_before(&root_handle, deadline).await?;
+        let (_, facts) = self.runtime_snapshot_before(&root_handle, deadline).await?;
         let canonical = CanonicalChildFacts::read(facts)?;
         let frozen_ids = frozen_children
             .iter()
@@ -1080,19 +1095,6 @@ impl MvpAgent {
                     "original child {id} has not confirmed its execution ownership"
                 ));
             }
-        }
-        if runtime.phase == RuntimePhase::Running {
-            root_handle
-                .chat_state_handle
-                .record_timeline_event_durably_before(
-                    chat_state::TimelineEventKind::Runtime(SessionRuntimeEvent::SuspendRequested {
-                        operation_id: operation_id.clone(),
-                        root_session_id: root.0.to_string(),
-                    }),
-                    deadline,
-                )
-                .await
-                .map_err(|error| error.to_string())?;
         }
         // Drain descendants before parents, keeping the root accounting mailbox
         // alive to acknowledge each child's final provider settlement.

@@ -713,6 +713,89 @@ async fn question_deadline_requires_closed_receiver_and_expired_shared_deadline(
 }
 
 #[tokio::test(flavor = "current_thread")]
+async fn question_worker_resolves_suspend_when_foreground_receiver_closes_before_shutdown() {
+    use super::support::*;
+    use tools::implementations::grow_build::ask_user_question::UserQuestionRequest;
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (actor, mut gateway_rx, _) = question_worker_actor(None).await;
+            let (request_tx, request_rx) = tokio::sync::mpsc::unbounded_channel();
+            let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+            request_tx
+                .send(UserQuestionRequest {
+                    tool_call_id: "suspended-question-receiver-drop".into(),
+                    questions: Vec::new(),
+                    deadline: None,
+                    result_tx,
+                })
+                .unwrap();
+            let runtime_suspend = actor.state.lock().await.runtime_suspend.clone();
+            super::super::spawn::start_user_question_worker(
+                &actor,
+                request_rx,
+                runtime_suspend.clone(),
+            );
+            let ext_args = receive_question_ext_method(&mut gateway_rx).await;
+            let opened =
+                interaction_events(&actor.chat_state_handle.timeline_events().await.unwrap());
+            assert!(matches!(
+                opened.as_slice(),
+                [chat_state::InteractionEvent::Opened { .. }]
+            ));
+            assert!(
+                actor
+                    .pending_interactions
+                    .lock()
+                    .unwrap()
+                    .contains_key("suspended-question-receiver-drop")
+            );
+
+            // The foreground owner is aborted before suspend_node cancels
+            // background services. The worker must classify this as a
+            // suspension from runtime_suspend alone.
+            runtime_suspend.store(true, std::sync::atomic::Ordering::Release);
+            drop(result_rx);
+            assert!(!actor.background_service_shutdown.is_cancelled());
+
+            let events = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                loop {
+                    let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                    if interaction_events(&events).iter().any(|event| {
+                        matches!(
+                            event,
+                            chat_state::InteractionEvent::Resolved {
+                                resolution: chat_state::InteractionResolution::Suspended,
+                                ..
+                            }
+                        )
+                    }) {
+                        break events;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .expect("closed foreground receiver during suspend must resolve as Suspended");
+            assert!(matches!(
+                interaction_events(&events).as_slice(),
+                [
+                    chat_state::InteractionEvent::Opened { attempt_id, .. },
+                    chat_state::InteractionEvent::Resolved {
+                        attempt_id: resolved_attempt,
+                        resolution: chat_state::InteractionResolution::Suspended,
+                        ..
+                    }
+                ] if attempt_id == resolved_attempt
+            ));
+            assert!(actor.pending_interactions.lock().unwrap().is_empty());
+            actor.background_service_shutdown.cancel();
+            drop(ext_args.response_tx);
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
 async fn question_worker_never_reports_answer_when_open_or_resolution_persistence_fails() {
     use super::support::*;
     use tools::implementations::grow_build::ask_user_question::{

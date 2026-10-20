@@ -624,9 +624,9 @@ pub(super) fn start_user_question_worker(
                     }
                 }
             };
-            let resolution = if runtime_suspend.load(std::sync::atomic::Ordering::Acquire)
-                && shutdown.is_cancelled()
-            {
+            // The turn receiver can close before the background worker's
+            // shutdown token: suspension aborts the foreground owner first.
+            let resolution = if runtime_suspend.load(std::sync::atomic::Ordering::Acquire) {
                 chat_state::InteractionResolution::Suspended
             } else {
                 match &result {

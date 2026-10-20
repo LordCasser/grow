@@ -454,6 +454,10 @@ async fn handled_receipt_ack_loss_cold_retry_preserves_new_replan() {
 }
 
 async fn linked_actor() -> std::sync::Arc<SessionActor> {
+    linked_actor_with_required(true).await
+}
+
+async fn linked_actor_with_required(required: bool) -> std::sync::Arc<SessionActor> {
     let (actor, _gateway_rx) = build_actor().await;
     let mut plan = tool_types::LocalPlan::new(actor.session_id_string(), "work:test");
     plan.steps.push(PlanStep {
@@ -469,7 +473,7 @@ async fn linked_actor() -> std::sync::Arc<SessionActor> {
         parent_step_id: "step-1".into(),
         child_session_id: "task-1".into(),
         terminal: false,
-        required: true,
+        required,
         pending_source_revision: None,
         review_required_revision: 0,
         result_id: None,
@@ -2328,6 +2332,247 @@ async fn linked_parent_update_is_dispatched_received_handled_and_completion_is_n
                 .is_err(),
                 "completion alone must not emit another replan"
             );
+        })
+        .await;
+}
+
+async fn select_planning_scope(
+    actor: &std::sync::Arc<SessionActor>,
+    prompt_id: &str,
+) -> Result<(), String> {
+    use tools::implementations::grow_build::todo::{PlanningAction, TodoWriteInput};
+
+    let (respond_to, response) = tokio::sync::oneshot::channel();
+    actor
+        .handle_planning_command(PlanningCommand::Write {
+            prompt_id: prompt_id.into(),
+            input: TodoWriteInput {
+                merge: true,
+                todos: Vec::new(),
+                actions: vec![PlanningAction::SelectScope {
+                    scope_id: "work:next".into(),
+                }],
+            },
+            respond_to,
+        })
+        .await;
+    response
+        .await
+        .expect("scope selection must answer")
+        .map(|_| ())
+}
+
+async fn release_undispatched_link(actor: &std::sync::Arc<SessionActor>, prompt_id: &str) {
+    use tools::implementations::grow_build::todo::{PlanningAction, TodoWriteInput};
+
+    let current = actor
+        .chat_state_handle
+        .planning_state()
+        .await
+        .expect("read planning state")
+        .expect("plan exists");
+    let (respond_to, response) = tokio::sync::oneshot::channel();
+    actor
+        .handle_planning_command(PlanningCommand::Write {
+            prompt_id: prompt_id.into(),
+            input: TodoWriteInput {
+                merge: true,
+                todos: Vec::new(),
+                actions: vec![PlanningAction::Review {
+                    review: DeliveryReview {
+                        link_id: "task-1".into(),
+                        result_id: None,
+                        reviewed_source_revision: current.plan.revision,
+                        decision: ReviewDecision::Released,
+                        reason: Some("task was rejected before dispatch".into()),
+                        verification_refs: Vec::new(),
+                    },
+                }],
+            },
+            respond_to,
+        })
+        .await;
+    response
+        .await
+        .expect("review must answer")
+        .expect("released review must commit");
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn required_undispatched_scope_switch_needs_released_review() {
+    use crate::session::actor::tests::support::install_test_foreground;
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let actor = linked_actor().await;
+            install_test_foreground(&actor, "scope-required-unreleased").await;
+            record_undispatched(&actor, "coordinator admission closed")
+                .await
+                .expect("dispatch failure must be recorded");
+
+            let before = actor
+                .chat_state_handle
+                .planning_state()
+                .await
+                .unwrap()
+                .unwrap();
+            let error = select_planning_scope(&actor, "scope-required-unreleased")
+                .await
+                .expect_err("unreleased required delivery must block scope switch");
+            assert!(error.contains("dispose old executions"));
+            let after = actor
+                .chat_state_handle
+                .planning_state()
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after.seq, before.seq);
+            assert_eq!(after.plan, before.plan);
+            assert!(!after.plan.links[0].terminal);
+            assert!(after.plan.links[0].result_id.is_none());
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn optional_undispatched_scope_switch_succeeds_without_review() {
+    use crate::session::actor::tests::support::install_test_foreground;
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let actor = linked_actor_with_required(false).await;
+            install_test_foreground(&actor, "scope-optional-undispatched").await;
+            record_undispatched(&actor, "coordinator admission closed")
+                .await
+                .expect("dispatch failure must be recorded");
+
+            select_planning_scope(&actor, "scope-optional-undispatched")
+                .await
+                .expect("optional explicit dispatch failure is disposed");
+            let current = actor
+                .chat_state_handle
+                .planning_state()
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(current.plan.scope_id, "work:next");
+            assert!(current.plan.links.is_empty());
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn released_required_undispatched_scope_switch_succeeds_without_faking_result() {
+    use crate::session::actor::tests::support::install_test_foreground;
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let actor = linked_actor().await;
+            install_test_foreground(&actor, "scope-required-released").await;
+            record_undispatched(&actor, "coordinator admission closed")
+                .await
+                .expect("dispatch failure must be recorded");
+            release_undispatched_link(&actor, "scope-required-released").await;
+
+            let released = actor
+                .chat_state_handle
+                .planning_state()
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                actor
+                    .planning_completion_blockers()
+                    .await
+                    .unwrap()
+                    .is_empty()
+            );
+            let next = tool_types::LocalPlan::new(actor.session_id_string(), "work:next");
+            next.validate_transition_from(&released.plan)
+                .expect("LocalPlan accepts the explicitly released dispatch failure");
+            let link = &released.plan.links[0];
+            assert!(!link.terminal);
+            assert!(link.result_id.is_none());
+            assert_eq!(
+                link.dispatch_failure.as_deref(),
+                Some("coordinator admission closed")
+            );
+
+            select_planning_scope(&actor, "scope-required-released")
+                .await
+                .expect("actor must use LocalPlan transition rules");
+            let current = actor
+                .chat_state_handle
+                .planning_state()
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(current.plan.scope_id, "work:next");
+            assert!(current.plan.links.is_empty());
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn active_or_unknown_link_blocks_scope_switch_without_faking_terminal() {
+    use crate::session::actor::tests::support::install_test_foreground;
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let actor = linked_actor_with_required(false).await;
+            install_test_foreground(&actor, "scope-live-link").await;
+            release_undispatched_link(&actor, "scope-live-link").await;
+            let before = actor
+                .chat_state_handle
+                .planning_state()
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(before.plan.reviews.len(), 1);
+            assert_eq!(before.plan.reviews[0].decision, ReviewDecision::Released);
+            let error = select_planning_scope(&actor, "scope-live-link")
+                .await
+                .expect_err("an active link must block even after Released review");
+            assert!(error.contains("dispose old executions"));
+            let after = actor
+                .chat_state_handle
+                .planning_state()
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(after.seq, before.seq);
+            assert_eq!(after.plan, before.plan);
+            let link = &after.plan.links[0];
+            assert!(!link.terminal);
+            assert!(link.result_id.is_none());
+            assert!(link.dispatch_failure.is_none());
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn optional_released_undispatched_scope_switch_succeeds() {
+    use crate::session::actor::tests::support::install_test_foreground;
+
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let actor = linked_actor_with_required(false).await;
+            install_test_foreground(&actor, "scope-optional-released").await;
+            record_undispatched(&actor, "coordinator admission closed")
+                .await
+                .expect("dispatch failure must be recorded");
+            release_undispatched_link(&actor, "scope-optional-released").await;
+
+            select_planning_scope(&actor, "scope-optional-released")
+                .await
+                .expect("optional explicit dispatch failure remains disposed after review");
+            let current = actor
+                .chat_state_handle
+                .planning_state()
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(current.plan.scope_id, "work:next");
         })
         .await;
 }

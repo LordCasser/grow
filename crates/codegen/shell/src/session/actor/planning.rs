@@ -782,13 +782,12 @@ impl SessionActor {
                     if scope_id.trim().is_empty() || scope_id.len() > 128 {
                         return Err("invalid work scope identity".into());
                     }
-                    if !plan.waits.is_empty()
-                        || plan.links.iter().any(|link| !link.terminal)
-                        || !plan.unresolved_required_deliveries().is_empty()
-                    {
-                        return Err("dispose old executions, waits and mandatory deliveries before switching scope".into());
-                    }
-                    plan = LocalPlan::new(self.session_info.id.0.to_string(), scope_id);
+                    let next = LocalPlan::new(self.session_info.id.0.to_string(), scope_id);
+                    next.validate_transition_from(&plan).map_err(|_| {
+                        "dispose old executions, waits and mandatory deliveries before switching scope"
+                            .to_string()
+                    })?;
+                    plan = next;
                 }
             }
         }

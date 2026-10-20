@@ -63,25 +63,6 @@ impl PendingInteractions {
             .send_modify(|generation| *generation = generation.wrapping_add(1));
     }
 
-    pub(crate) fn snapshot_attempts(&self) -> Vec<(String, PendingKind, String)> {
-        let entries = self
-            .entries
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let attempts = self
-            .attempts
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        entries
-            .iter()
-            .filter_map(|(call_id, kind)| {
-                attempts
-                    .get(call_id)
-                    .map(|attempt| (call_id.clone(), *kind, attempt.clone()))
-            })
-            .collect()
-    }
-
     pub(crate) async fn resolve_durably(
         &self,
         call_id: &str,

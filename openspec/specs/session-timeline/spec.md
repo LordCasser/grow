@@ -1062,6 +1062,11 @@ Replay activity SHALL exclude time between a validated `TreeSuspended` event and
 - **WHEN** CommandsSettled 已持久确认，命令 runner 已退役或其完成缓存已淘汰，但 checkpoint 写入或 ACK 需要重试
 - **THEN** 从同一 operation 的持久结算复用原 call/command 身份、完成或中断证据、后台属性与有界输出；不再次终止命令，不依赖已退役的内存缓存，不将已有证据改为空集合或 Unknown。
 
+#### Scenario: Background command settlement reaches a durable checkpoint
+
+- **WHEN** 挂起已持久记录一个后台命令的 CommandsSettled，且该命令的完成通知尚未接纳
+- **THEN** 挂起 SHALL 以 Timeline 接受的终态通知身份持久接纳该结果，再提交节点 checkpoint；相同 operation 的重试 SHALL 复用命令结算和通知，不重新运行命令或写入第二个逻辑通知。
+
 #### Scenario: Root acknowledgment is lost
 - **WHEN** 所有节点已保存，但 root 挂起提交的 ACK 丢失
 - **THEN** 重试或重启核对同一挂起事实，不追加另一份逻辑任务，不重新执行已保存的工作。
@@ -1416,3 +1421,57 @@ Cold session load SHALL seed the process event sequence above every valid ACP/Gr
 
 - **WHEN** a durable Timeline expectation has no corresponding update-cache row
 - **THEN** its identity also contributes to the sequence lower bound before writer publication.
+
+### Requirement: Suspension retries reuse canonical completion receipts
+
+挂起 SHALL 复用相同后台任务终态身份已接纳的完成回执，包括已消费回执；仅无回执时提交 CommandsSettled 对应通知。原正文及消费状态 SHALL 保持不变，不能通过放宽异正文身份冲突或新建通知版本绕过重试。
+
+#### Scenario: A normal completion precedes suspension
+- **WHEN** 后台任务正常完成回执已接纳，挂起又收集到同一任务结算，且首次挂起失败后按同 operation 重试并恢复
+- **THEN** checkpoint 与恢复成功复用原回执及正文，不重复提交或重新消费终态通知。
+
+#### Scenario: Suspension creates the first receipt
+- **WHEN** 挂起结算尚无终态回执，通知接纳后 checkpoint 前失败
+- **THEN** 同 operation 重试复用该回执，恢复仅交付一次原结果。
+
+### Requirement: Suspension retries retain human wait evidence
+
+挂起 SHALL 从当前周期的持久交互事实和匹配恢复 checkpoint 明确保留的等待保留原调用、等待种类及 attempt。物理 owner 退出或首次挂起超时 SHALL NOT 把未回答等待变成 OutcomeUnknown 或 tool_result。已回答、取消、失败或未被匹配恢复 checkpoint 保留的历史交互 SHALL NOT 被复活。
+
+#### Scenario: Owners drain after the first deadline
+- **WHEN** 人工问题、权限或计划审批 owner 在挂起中释放，checkpoint 前首次挂起因期限失败，随后以同 operation 重试
+- **THEN** 重试 checkpoint 保留 AwaitUser 或 AwaitPermission 与原调用依赖，原 attempt 合法结算为 Suspended，恢复重建原等待而不伪造结果。
+
+#### Scenario: A wait was already resolved
+- **WHEN** Timeline 已记录交互的真实解决，或历史 Suspended 未被匹配恢复 checkpoint 保留
+- **THEN** 本次挂起不因旧 Opened 事实恢复该等待，不覆盖真实完成结果。
+
+#### Scenario: Question receiver closes before service shutdown
+- **WHEN** 挂起已关闭执行准入，前台 owner 先释放问题接收器，而问题服务 shutdown token 尚未取消
+- **THEN** 该交互按 Suspended 结算并保留原等待资格，不能因清理顺序被记录为业务取消；普通非挂起的接收器关闭仍沿原取消语义。
+
+### Requirement: Tree admission freeze has a durable suspension identity
+树级挂起 SHALL 在首次 coordinator freeze 副作用前持久确认 root operation。冻结后的初始化超时或 ACK 未确认 SHALL 保留该身份，重试 SHALL 复用它，不允许覆盖不同 owner。
+
+#### Scenario: Initializing child exceeds the freeze deadline
+- **WHEN** coordinator 已冻结，但 child 初始化未在期限内完成
+- **THEN** root 保留持久挂起身份，重试继续同 operation 并重新核对 child，不发生 conflicting suspension owner。
+
+#### Scenario: Freeze acknowledgement is lost
+- **WHEN** coordinator 接纳冻结后 ACK 丢失
+- **THEN** 首轮报告未确认，重试向 coordinator 发送相同持久 operation。
+
+### Requirement: Suspension wait evidence spans admission closure
+人工等待 SHALL 在当前执行周期内保留因挂起结算的 attempt，即使 Suspended 早于该节点 SuspendRequested。ExecutionReleased SHALL 隔离未被匹配 checkpoint 明确保留为 AwaitUser/AwaitPermission 的历史证据；真实交互解决和工具结果 SHALL 不被旧等待覆盖。
+
+#### Scenario: Child wait settles before node suspension intent
+- **WHEN** root 或 child 准入已关闭，问题、权限或计划审批先记为 Suspended，节点随后提交挂起意图，且首次 drain 超时后重试
+- **THEN** checkpoint 与冷恢复保留原 AwaitUser/AwaitPermission，不伪造 OutcomeUnknown 或工具结果。
+
+#### Scenario: A previous suspension was released
+- **WHEN** 历史 Suspended 之后存在 ExecutionReleased，再进入新的挂起周期
+- **THEN** 只延续匹配 checkpoint 明确保留的逻辑等待，其余历史 attempt 不复活；后续新 attempt 与真实解决事实优先。
+
+#### Scenario: Re-suspend before a restored human wait rebinds
+- **WHEN** 问题、权限或计划审批的 checkpoint 已恢复并放行，但物理 worker 尚未建立新 attempt，此时再次挂起
+- **THEN** 新 checkpoint 保留原逻辑等待且无伪造工具结果，不将其转为 OutcomeUnknown；真实回答或工具结果不得被旧 checkpoint 覆盖。

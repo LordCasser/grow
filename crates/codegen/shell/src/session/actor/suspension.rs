@@ -840,12 +840,6 @@ impl SessionActor {
         tracing::info!(session_id = %self.session_info.id.0, %operation_id, phase = "started", "session suspension progress");
         // Keep this owner alive when the caller's shared exit deadline expires.
         // No checkpoint ACK is returned while a physical producer is unjoined.
-        let pending = self
-            .pending_interactions
-            .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .clone();
-        let pending_attempts = self.pending_interactions.snapshot_attempts();
         if self.chat_state_handle.runtime_state().await?.phase == RuntimePhase::Running {
             self.chat_state_handle
                 .record_timeline_event_durably_before(
@@ -992,15 +986,24 @@ impl SessionActor {
             if !command.is_backgrounded {
                 continue;
             }
+            let source = chat_state::NotificationSource::TaskCompleted {
+                task_id: command.command_id.clone(),
+                task_kind: command.task_kind,
+                owner: command.owner.clone(),
+            };
+            let source_version = chat_state::NotificationSourceVersion::Ordinal { value: 1 };
+            match self
+                .chat_state_handle
+                .received_notification_id(source.clone(), source_version.clone())
+                .await
+            {
+                Some(Some(_)) => continue,
+                Some(None) => {}
+                None => return Err("command completion receipt history is unavailable".into()),
+            }
             self.receive_notification_before(
-                chat_state::NotificationSource::TaskCompleted {
-                    task_id: command.command_id.clone(),
-                    task_kind: command.task_kind,
-                    owner: command.owner.clone(),
-                },
-                chat_state::NotificationSourceVersion::Opaque {
-                    value: format!("session-suspend:{operation_id}"),
-                },
+                source,
+                source_version,
                 command_suspension_result(command)?,
                 Some(deadline),
             )
@@ -1011,6 +1014,7 @@ impl SessionActor {
             .timeline_events()
             .await
             .ok_or("suspension evidence unavailable")?;
+        let pending = suspension_interactions(&events, &operation_id)?;
         let surface = self.chat_state_handle.get_conversation().await;
         let delegation_events = self.runtime_delegation_events().await?;
         let mut cursor = self.turn_continuation.borrow().clone();
@@ -1102,16 +1106,16 @@ impl SessionActor {
                         SuspendedOperationState::AwaitChild,
                         Some(child.subagent_id.clone()),
                     )
-                } else if let Some(kind) = pending.get(&call_id) {
+                } else if let Some((kind, _)) = pending.get(&call_id) {
                     match kind {
-                        crate::session::pending_interaction::PendingKind::Question => {
+                        chat_state::InteractionKind::Question => {
                             (SuspendedOperationState::AwaitUser, Some(call_id.clone()))
                         }
-                        crate::session::pending_interaction::PendingKind::Permission => (
+                        chat_state::InteractionKind::Permission => (
                             SuspendedOperationState::AwaitPermission,
                             Some(call_id.clone()),
                         ),
-                        crate::session::pending_interaction::PendingKind::PlanApproval => {
+                        chat_state::InteractionKind::PlanApproval => {
                             (SuspendedOperationState::AwaitUser, Some(call_id.clone()))
                         }
                     }
@@ -1282,26 +1286,15 @@ impl SessionActor {
                 _ => {}
             }
         }
-        for (call_id, pending_kind, attempt_id) in &pending_attempts {
-            let kind = match pending_kind {
-                crate::session::pending_interaction::PendingKind::Question => {
-                    chat_state::InteractionKind::Question
-                }
-                crate::session::pending_interaction::PendingKind::Permission => {
-                    chat_state::InteractionKind::Permission
-                }
-                crate::session::pending_interaction::PendingKind::PlanApproval => {
-                    chat_state::InteractionKind::PlanApproval
-                }
-            };
-            if open_interactions.remove(&(call_id.clone(), attempt_id.clone(), kind)) {
+        for (call_id, (kind, attempt_id)) in &pending {
+            if open_interactions.remove(&(call_id.clone(), attempt_id.clone(), *kind)) {
                 self.chat_state_handle
                     .record_timeline_event_durably_before(
                         chat_state::TimelineEventKind::Interaction(
                             chat_state::InteractionEvent::Resolved {
                                 tool_call_id: call_id.clone(),
                                 attempt_id: attempt_id.clone(),
-                                kind,
+                                kind: *kind,
                                 resolution: chat_state::InteractionResolution::Suspended,
                             },
                         ),
@@ -1397,6 +1390,10 @@ impl SessionActor {
         .await;
     }
 }
+
+#[cfg(test)]
+#[path = "suspension_receipt_tests.rs"]
+mod receipt_tests;
 
 /// Align the in-memory cursor with the durable Timeline prefix. A committed
 /// next Step is authoritative even when the caller has not received its ACK.
@@ -1511,6 +1508,133 @@ mod cursor_alignment_tests {
     };
 
     const SESSION_ID: &str = "subagent-session";
+
+    #[test]
+    fn suspension_wait_evidence_does_not_resurrect_resolved_attempts() {
+        use chat_state::{InteractionEvent, InteractionKind, InteractionResolution};
+        for resolution in [
+            InteractionResolution::Answered,
+            InteractionResolution::Allowed,
+            InteractionResolution::Rejected,
+            InteractionResolution::Cancelled,
+            InteractionResolution::TimedOut,
+            InteractionResolution::Failed,
+        ] {
+            let events = vec![
+                event(
+                    1,
+                    TimelineEventKind::Interaction(InteractionEvent::Opened {
+                        tool_call_id: "call".into(),
+                        attempt_id: "attempt".into(),
+                        kind: InteractionKind::Permission,
+                    }),
+                ),
+                event(
+                    2,
+                    TimelineEventKind::Runtime(
+                        chat_state::session_runtime::SessionRuntimeEvent::SuspendRequested {
+                            operation_id: "op".into(),
+                            root_session_id: SESSION_ID.into(),
+                        },
+                    ),
+                ),
+                event(
+                    3,
+                    TimelineEventKind::Interaction(InteractionEvent::Resolved {
+                        tool_call_id: "call".into(),
+                        attempt_id: "attempt".into(),
+                        kind: InteractionKind::Permission,
+                        resolution,
+                    }),
+                ),
+            ];
+            assert!(
+                super::suspension_interactions(&events, "op")
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn suspension_wait_evidence_uses_the_current_operation_and_attempt() {
+        use chat_state::{InteractionEvent, InteractionKind, InteractionResolution};
+        let mut events = vec![
+            event(
+                1,
+                TimelineEventKind::Interaction(InteractionEvent::Opened {
+                    tool_call_id: "call".into(),
+                    attempt_id: "old".into(),
+                    kind: InteractionKind::Question,
+                }),
+            ),
+            event(
+                2,
+                TimelineEventKind::Runtime(
+                    chat_state::session_runtime::SessionRuntimeEvent::SuspendRequested {
+                        operation_id: "old-op".into(),
+                        root_session_id: SESSION_ID.into(),
+                    },
+                ),
+            ),
+            event(
+                3,
+                TimelineEventKind::Interaction(InteractionEvent::Resolved {
+                    tool_call_id: "call".into(),
+                    attempt_id: "old".into(),
+                    kind: InteractionKind::Question,
+                    resolution: InteractionResolution::Suspended,
+                }),
+            ),
+            event(
+                4,
+                TimelineEventKind::Runtime(
+                    chat_state::session_runtime::SessionRuntimeEvent::ExecutionReleased {
+                        operation_id: "old-op".into(),
+                        instance_id: "old-instance".into(),
+                    },
+                ),
+            ),
+            event(
+                5,
+                TimelineEventKind::Runtime(
+                    chat_state::session_runtime::SessionRuntimeEvent::SuspendRequested {
+                        operation_id: "op".into(),
+                        root_session_id: SESSION_ID.into(),
+                    },
+                ),
+            ),
+        ];
+        assert!(
+            super::suspension_interactions(&events, "op")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(super::suspension_interactions(&events, "old-op").is_err());
+        events.push(event(
+            6,
+            TimelineEventKind::Interaction(InteractionEvent::Opened {
+                tool_call_id: "call".into(),
+                attempt_id: "new".into(),
+                kind: InteractionKind::Question,
+            }),
+        ));
+        events.push(event(
+            7,
+            TimelineEventKind::Interaction(InteractionEvent::Resolved {
+                tool_call_id: "call".into(),
+                attempt_id: "new".into(),
+                kind: InteractionKind::Question,
+                resolution: InteractionResolution::Suspended,
+            }),
+        ));
+        assert_eq!(
+            super::suspension_interactions(&events, "op")
+                .unwrap()
+                .get("call"),
+            Some(&(InteractionKind::Question, "new".into()))
+        );
+    }
 
     #[tokio::test]
     async fn command_settlement_retry_reuses_evidence_after_terminal_eviction() {
@@ -1790,6 +1914,89 @@ mod cursor_alignment_tests {
         assert_eq!(cursor.stop_continuations_used, 1);
     }
 }
+
+/// Physical wait owners disappear during drain. Their Timeline attempts remain
+/// the authority across retries, including owners resolved as Suspended before
+/// the node intent. Only waits retained by the matching checkpoint survive
+/// ExecutionReleased until a new attempt or a real resolution takes ownership.
+fn suspension_interactions(
+    events: &[chat_state::TimelineEvent],
+    operation_id: &str,
+) -> Result<std::collections::BTreeMap<String, (chat_state::InteractionKind, String)>, String> {
+    let mut pending = std::collections::BTreeMap::new();
+    let mut current_operation = false;
+    let mut saved_checkpoint = None;
+    for event in events {
+        match &event.kind {
+            chat_state::TimelineEventKind::Runtime(SessionRuntimeEvent::Checkpoint {
+                operation_id,
+                checkpoint,
+            }) => saved_checkpoint = Some((operation_id, checkpoint)),
+            chat_state::TimelineEventKind::Runtime(SessionRuntimeEvent::ExecutionReleased {
+                operation_id,
+                ..
+            }) => {
+                pending.retain(|call_id, (kind, _)| {
+                    saved_checkpoint.is_some_and(|(saved_id, checkpoint)| {
+                        saved_id == operation_id
+                            && checkpoint.turn.as_ref().is_some_and(|turn| {
+                                turn.operations.iter().any(|operation| {
+                                    operation.call_id == *call_id
+                                        && matches!(
+                                            (&operation.state, *kind),
+                                            (
+                                                SuspendedOperationState::AwaitPermission,
+                                                chat_state::InteractionKind::Permission
+                                            ) | (
+                                                SuspendedOperationState::AwaitUser,
+                                                chat_state::InteractionKind::Question
+                                                    | chat_state::InteractionKind::PlanApproval
+                                            )
+                                        )
+                                })
+                            })
+                    })
+                });
+                saved_checkpoint = None;
+                current_operation = false;
+            }
+            chat_state::TimelineEventKind::Runtime(SessionRuntimeEvent::SuspendRequested {
+                operation_id: id,
+                ..
+            }) => current_operation = id == operation_id,
+            chat_state::TimelineEventKind::Interaction(chat_state::InteractionEvent::Opened {
+                tool_call_id,
+                attempt_id,
+                kind,
+            }) => {
+                pending.insert(tool_call_id.clone(), (*kind, attempt_id.clone()));
+            }
+            chat_state::TimelineEventKind::Interaction(
+                chat_state::InteractionEvent::Resolved {
+                    tool_call_id,
+                    attempt_id,
+                    kind,
+                    resolution,
+                },
+            ) => {
+                if *resolution != chat_state::InteractionResolution::Suspended
+                    && pending.get(tool_call_id) == Some(&(*kind, attempt_id.clone()))
+                {
+                    pending.remove(tool_call_id);
+                }
+            }
+            _ => {}
+        }
+    }
+    if !current_operation {
+        return Err("suspension interaction evidence belongs to another operation".into());
+    }
+    Ok(pending)
+}
+
+#[cfg(test)]
+#[path = "suspension_retry_wait_tests.rs"]
+mod retry_wait_tests;
 
 fn command_suspension_result(command: &RuntimeCommandSettlement) -> Result<String, String> {
     serde_json::to_string(&json!({

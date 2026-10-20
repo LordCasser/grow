@@ -27,16 +27,14 @@ pub(super) fn goal_view_from_snapshot(
     }
 }
 
-fn selected_behavior_preserving_completed_plan(
+fn selected_behavior_snapshot(
     selected: tool_types::BehaviorId,
     previous: &crate::session::behavior::BehaviorSnapshot,
 ) -> crate::session::behavior::BehaviorSnapshot {
-    let mut next = crate::session::behavior::BehaviorSnapshot::selected(selected);
-    if let Some(completed) = &previous.completed_plan {
-        next.completed_plan = Some(completed.clone());
-        next.last_plan_submission_id = previous.last_plan_submission_id;
-    }
-    next
+    let mut coordinator =
+        crate::session::behavior::BehaviorCoordinator::from_snapshot(previous.clone());
+    coordinator.select_behavior(selected);
+    coordinator.snapshot()
 }
 
 #[cfg(test)]
@@ -61,6 +59,39 @@ mod goal_admission_tests {
         completed
     }
 
+    async fn seed_retained_plan(
+        actor: &SessionActor,
+    ) -> crate::session::behavior::BehaviorSnapshot {
+        use crate::session::behavior::{
+            RetainedPlanAction, RetainedPlanDecisionOutcome, RetainedPlanStatus,
+        };
+
+        let snapshot = {
+            let mut behavior = actor.behavior.lock();
+            behavior.select_behavior(tool_types::BehaviorId::Plan);
+            behavior.record_plan_artifact("# Deferred plan");
+            assert!(behavior.submit_initial_plan());
+            let submitted = behavior.snapshot();
+            assert!(matches!(
+                behavior.decide_submitted_plan_if(
+                    &submitted,
+                    submitted.plan_submission_id.unwrap(),
+                    "goal-snapshot-defer",
+                    RetainedPlanAction::Defer,
+                    None,
+                ),
+                RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Deferred)
+            ));
+            behavior.select_behavior(tool_types::BehaviorId::Normal);
+            behavior.snapshot()
+        };
+        actor
+            .persist_control_snapshot_durably(snapshot.clone(), None)
+            .await
+            .unwrap();
+        snapshot
+    }
+
     async fn assert_completed_plan_is_durable_and_restorable(
         actor: &SessionActor,
         expected: &crate::session::behavior::CompletedPlan,
@@ -78,6 +109,36 @@ mod goal_admission_tests {
                 .snapshot(),
             current,
             "restoring the latest Control snapshot must reproduce memory"
+        );
+    }
+
+    async fn assert_retained_plan_is_durable_and_restorable(
+        actor: &SessionActor,
+        expected: &crate::session::behavior::BehaviorSnapshot,
+    ) {
+        let events = actor.chat_state_handle.timeline_events().await.unwrap();
+        let persisted =
+            crate::session::control::SessionControlSnapshot::latest_from_timeline(&events)
+                .unwrap()
+                .unwrap();
+        let current = actor.behavior.lock().snapshot();
+        assert_eq!(persisted.behavior, current);
+        assert_eq!(persisted.behavior.retained_plan, expected.retained_plan);
+        assert_eq!(
+            persisted.behavior.last_plan_submission_id,
+            expected.last_plan_submission_id
+        );
+        assert!(persisted.behavior.runtime_fields_match_selection());
+
+        let mut restored =
+            crate::session::behavior::BehaviorCoordinator::from_snapshot(persisted.behavior);
+        assert_eq!(restored.snapshot(), current);
+        restored.select_behavior(tool_types::BehaviorId::Plan);
+        restored.record_plan_artifact("# Next plan after cold restore");
+        assert!(restored.submit_initial_plan());
+        assert!(
+            restored.plan_submission_id().unwrap() > expected.last_plan_submission_id,
+            "a plan submitted after cold restore must use a fresh identity"
         );
     }
 
@@ -516,6 +577,27 @@ mod goal_admission_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn automatic_goal_activation_preserves_deferred_plan_after_cold_restore() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = goal_enabled_actor().await;
+                let retained = seed_retained_plan(&actor).await;
+
+                actor
+                    .initialize_goal_runtime("continue after the deferred Plan", None)
+                    .await
+                    .expect("automatic Goal creation and activation");
+
+                assert_eq!(
+                    actor.behavior.lock().behavior(),
+                    tool_types::BehaviorId::Goal
+                );
+                assert_retained_plan_is_durable_and_restorable(&actor, &retained).await;
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn goal_definition_reactivation_preserves_completed_plan_control_state() {
         tokio::task::LocalSet::new()
             .run_until(async {
@@ -573,6 +655,68 @@ mod goal_admission_tests {
                     "reactivated objective"
                 );
                 assert_completed_plan_is_durable_and_restorable(&actor, &completed).await;
+            })
+            .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn goal_definition_reactivation_preserves_deferred_plan_after_cold_restore() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = goal_enabled_actor().await;
+                let retained = seed_retained_plan(&actor).await;
+                actor
+                    .goal_tracker
+                    .lock()
+                    .create_goal(
+                        "goal-reactivation-retained-plan".into(),
+                        "previous objective".into(),
+                        None,
+                        "2026-10-19T00:00:00Z".into(),
+                    )
+                    .unwrap();
+                assert!(actor.goal_tracker.lock().complete());
+                let goal = actor.goal_tracker.lock().snapshot().cloned();
+                let behavior = actor.behavior.lock().snapshot();
+                actor
+                    .persist_control_snapshot_durably(behavior, goal)
+                    .await
+                    .unwrap();
+                crate::session::actor::tests::support::begin_test_active_causal_turn(&actor).await;
+
+                assert_eq!(
+                    actor
+                        .admit_goal_definition_control(
+                            "goal-reactivation-retained-plan".into(),
+                            PendingGoalDefinitionMutation::Edit {
+                                objective: "reactivated objective".into(),
+                                token_budget: None,
+                            },
+                        )
+                        .await
+                        .unwrap(),
+                    None
+                );
+                let boundary = actor
+                    .end_step_control_boundary("continued")
+                    .await
+                    .expect("Goal definition step boundary");
+                assert_eq!(
+                    actor
+                        .apply_pending_controls_at_step_boundary(boundary)
+                        .await,
+                    (false, false, true)
+                );
+
+                assert_eq!(
+                    actor.behavior.lock().behavior(),
+                    tool_types::BehaviorId::Goal
+                );
+                assert_eq!(
+                    actor.goal_tracker.lock().snapshot().unwrap().objective,
+                    "reactivated objective"
+                );
+                assert_retained_plan_is_durable_and_restorable(&actor, &retained).await;
             })
             .await;
     }
@@ -1205,10 +1349,8 @@ impl SessionActor {
             .cloned()
             .expect("Goal activation requires an active Goal snapshot");
         let context = self.goal_definition_context(&next);
-        let behavior = selected_behavior_preserving_completed_plan(
-            BehaviorId::Goal,
-            &self.behavior.lock().snapshot(),
-        );
+        let behavior =
+            selected_behavior_snapshot(BehaviorId::Goal, &self.behavior.lock().snapshot());
         if let Err(error) = self
             .persist_behavior_and_goal_transition_durably(behavior, next, context)
             .await
@@ -1335,17 +1477,11 @@ impl SessionActor {
 
         let persisted = if next_behavior != previous_behavior && next_behavior == BehaviorId::Goal {
             let context = self.goal_definition_context(&next);
-            let behavior = selected_behavior_preserving_completed_plan(
-                next_behavior,
-                &previous_behavior_snapshot,
-            );
+            let behavior = selected_behavior_snapshot(next_behavior, &previous_behavior_snapshot);
             self.persist_behavior_and_goal_transition_durably(behavior, next.clone(), context)
                 .await
         } else if next_behavior != previous_behavior {
-            let behavior = selected_behavior_preserving_completed_plan(
-                next_behavior,
-                &previous_behavior_snapshot,
-            );
+            let behavior = selected_behavior_snapshot(next_behavior, &previous_behavior_snapshot);
             self.persist_behavior_transition_durably(behavior, Some(next.clone()))
                 .await
         } else if next.status == GoalStatus::Active

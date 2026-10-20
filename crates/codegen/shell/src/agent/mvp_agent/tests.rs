@@ -608,7 +608,8 @@ async fn suspension_runtime_observation_avoids_discarded_long_history_copy() {
     let (events, _events_rx) = tokio::sync::mpsc::unbounded_channel();
     let config = serde_json::from_value(serde_json::json!({
         "base_url": "http://localhost", "model": "test", "context_window": 256000,
-    })).unwrap();
+    }))
+    .unwrap();
     let chat = chat_state::ChatStateActor::spawn(
         vec![],
         config,
@@ -627,14 +628,18 @@ async fn suspension_runtime_observation_avoids_discarded_long_history_copy() {
                 step: None,
                 data: Some(serde_json::json!({"payload": "x".repeat(4096)})),
             },
-        )).await.unwrap();
+        ))
+        .await
+        .unwrap();
     }
     let (mut handle, _commands) = make_test_handle_with_receiver("test-model", None);
     handle.chat_state_handle = chat.clone();
     let agent = build_minimal_agent_for_tests();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     let expected = chat.runtime_state().await.unwrap();
-    let copied_bytes = serde_json::to_vec(&chat.timeline_events().await.unwrap()).unwrap().len();
+    let copied_bytes = serde_json::to_vec(&chat.timeline_events().await.unwrap())
+        .unwrap()
+        .len();
     const SAMPLES: usize = 10;
     let started = std::time::Instant::now();
     for _ in 0..SAMPLES {
@@ -645,11 +650,18 @@ async fn suspension_runtime_observation_avoids_discarded_long_history_copy() {
     let old = started.elapsed();
     let started = std::time::Instant::now();
     for _ in 0..SAMPLES {
-        assert_eq!(agent.runtime_state_before(&handle, deadline).await.unwrap(), expected);
+        assert_eq!(
+            agent.runtime_state_before(&handle, deadline).await.unwrap(),
+            expected
+        );
     }
     let new = started.elapsed();
     assert!(copied_bytes > 32 * 1024 * 1024);
-    println!("history_bytes={copied_bytes} samples={SAMPLES} full_copy_us={} state_only_us={}", old.as_micros(), new.as_micros());
+    println!(
+        "history_bytes={copied_bytes} samples={SAMPLES} full_copy_us={} state_only_us={}",
+        old.as_micros(),
+        new.as_micros()
+    );
 }
 
 fn make_test_handle(model: &str, client_id: Option<&str>) -> crate::session::SessionHandle {
@@ -4749,3 +4761,6 @@ fn cancelled_rebuild_releases_nonresident_config_watch() {
         );
     });
 }
+
+#[path = "suspension_admission_tests.rs"]
+mod suspension_admission_tests;
