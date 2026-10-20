@@ -278,6 +278,15 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
                 "SetDisplayRefreshAutoCadence value differs from expected"
             )
         }
+        ("contextual_hints.undo", Action::SetContextualHintUndo(b))
+        | ("contextual_hints.plan_mode", Action::SetContextualHintPlanMode(b))
+        | ("contextual_hints.image_input", Action::SetContextualHintImageInput(b))
+        | ("contextual_hints.send_now", Action::SetContextualHintSendNow(b))
+        | ("contextual_hints.small_screen", Action::SetContextualHintSmallScreen(b))
+        | ("contextual_hints.word_select", Action::SetContextualHintWordSelect(b))
+        | ("contextual_hints.ssh_wrap", Action::SetContextualHintSshWrap(b)) => {
+            assert_eq!(b, expected, "{key} payload");
+        }
         (key, action) => panic!(
             "expected typed setter for `{key}={expected}`, got wrong Action variant: {action:?}"
         ),
@@ -2688,17 +2697,14 @@ fn pr4_picker_dispatches_each_theme_settings_action_variant() {
 // enums; these tests close that gap.
 // ---------------------------------------------------------------------------
 
-/// Clicking on an Enum row in Browse mode selects it without firing
-/// any Action — Enum rows require an explicit Enter to open the
-/// picker (mouse picker-entry is deferred to a future change). The body
-/// click outside the indicator hit-rect (cols 0-4) is a
-/// select-only event.
+/// The first body click on an unfocused Enum row only selects it.
+/// A second click or a click in the value column opens the picker.
 #[test]
 fn pr4_mouse_click_on_theme_row_selects_without_emitting_action() {
     let mut s = make_state();
     synth_rects(&mut s);
     let row_y = row_idx_for(&s, "theme") as u16;
-    // Body click (col 20 is well outside the 0-4 indicator hit-rect).
+    // Body click outside the value-column hit target.
     let outcome = handle_settings_mouse(
         &mut s,
         MouseEventKind::Down(crossterm::event::MouseButton::Left),
@@ -2745,12 +2751,10 @@ fn pr4_mouse_click_on_auto_light_theme_row_selects_without_emitting_action() {
     assert_eq!(s.selected, row_y as usize);
 }
 
-/// In picker mode (PickingEnum), mouse events are no-ops — clicks
-/// don't select picker choices yet. Pins the contract so a
-/// future change that adds click-to-pick must update this test
-/// explicitly.
+/// A picker without rendered choice hit targets must ignore clicks.
+/// Rendered choice selection is exercised in interaction_coverage.
 #[test]
-fn pr4_mouse_click_in_theme_picker_is_no_op() {
+fn theme_picker_mouse_click_without_choice_hit_targets_is_no_op() {
     let mut s = make_state();
     navigate_to(&mut s, "theme");
     let _ = handle_settings_key(&mut s, &press(KeyCode::Enter));
@@ -2763,7 +2767,7 @@ fn pr4_mouse_click_in_theme_picker_is_no_op() {
     );
     assert!(
         matches!(outcome, SettingsKeyOutcome::Unchanged),
-        "picker mode must ignore mouse clicks in PR 4, got {outcome:?}",
+        "unrendered picker must ignore clicks, got {outcome:?}",
     );
     assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
 }
@@ -6559,3 +6563,6 @@ fn subagent_permission_setting_is_searchable() {
         }
     )));
 }
+
+#[path = "settings_interaction_coverage/mod.rs"]
+mod interaction_coverage;

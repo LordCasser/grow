@@ -25,6 +25,347 @@ fn complete_setting_request(app: &mut AppView, effect: &Effect, success: bool) -
     dispatch(Action::TaskComplete(result), app)
 }
 
+fn setting_value(
+    app: &AppView,
+    key: crate::settings::SettingKey,
+) -> Option<crate::settings::SettingValue> {
+    crate::settings::current_value_for(key, &app.current_ui, &build_pager_snapshot(app))
+}
+
+fn setting_write(effects: &[Effect], key: crate::settings::SettingKey) -> &Effect {
+    let writes: Vec<_> = effects
+        .iter()
+        .filter(|effect| matches!(effect, Effect::PersistSetting { key: effect_key, .. } if *effect_key == key))
+        .collect();
+    assert_eq!(
+        writes.len(),
+        1,
+        "expected one persistence write for `{key}`, got {effects:?}"
+    );
+    writes[0]
+}
+
+fn dispatch_settings_key(app: &mut AppView, ch: char) -> Vec<Effect> {
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    match app.handle_input(&Event::Key(KeyEvent::new(
+        KeyCode::Char(ch),
+        KeyModifiers::NONE,
+    ))) {
+        crate::app::root::InputOutcome::Action(action) => dispatch(action, app),
+        outcome => panic!("expected settings key `{ch}` to dispatch an action, got {outcome:?}"),
+    }
+}
+
+fn open_reset_for_setting(app: &mut AppView, key: crate::settings::SettingKey) -> Vec<Effect> {
+    let selected_in_top_level = {
+        let Some(crate::views::modal::ActiveModal::Settings { state }) = app
+            .agents
+            .get_mut(&AgentId(0))
+            .and_then(|a| a.active_modal.as_mut())
+        else {
+            panic!("Settings must be open before opening reset confirmation");
+        };
+        if let Some(index) = state.rows.iter().position(
+            |row| matches!(row, crate::views::settings_modal::RowEntry::Setting { key: row_key, .. } if *row_key == key),
+        ) {
+            state.selected = index;
+            true
+        } else {
+            false
+        }
+    };
+    if selected_in_top_level {
+        dispatch_settings_key(app, 'd')
+    } else {
+        // The seven contextual-hint children are hidden under their Group
+        // sheet. Exercise the dispatch contract without claiming a top-level
+        // `d` shortcut for a row the UI does not render.
+        dispatch(Action::OpenResetConfirm { key }, app)
+    }
+}
+
+fn click_reset_confirm(app: &mut AppView, reset: bool) -> Vec<Effect> {
+    use crossterm::event::{Event, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::{buffer::Buffer, layout::Rect};
+
+    let area = Rect::new(0, 0, 100, 30);
+    let target = {
+        let Some(crate::views::modal::ActiveModal::ResetSettingsConfirm { settings_state, .. }) =
+            app.agents
+                .get_mut(&AgentId(0))
+                .and_then(|a| a.active_modal.as_mut())
+        else {
+            panic!("reset confirmation must be open before clicking its footer");
+        };
+        let mut buffer = Buffer::empty(area);
+        let overlay = crate::views::settings_modal::ResetConfirmOverlay {
+            prompt: "Reset setting to default?",
+            breadcrumb_suffix: "Reset setting",
+        };
+        assert!(crate::views::settings_modal::render_settings_modal(
+            &mut buffer,
+            area,
+            settings_state,
+            false,
+            Some(&overlay),
+        ));
+        settings_state
+            .window
+            .shortcut_hits
+            .iter()
+            .find(|hit| {
+                hit.id
+                    == if reset {
+                        crate::views::modal::RESET_CONFIRM_YES_ID
+                    } else {
+                        crate::views::modal::RESET_CONFIRM_NO_ID
+                    }
+            })
+            .map(|hit| (hit.rect.x, hit.rect.y))
+            .expect("rendered reset footer must expose the requested clickable shortcut")
+    };
+    match app.handle_input(&Event::Mouse(MouseEvent {
+        kind: MouseEventKind::Down(MouseButton::Left),
+        column: target.0,
+        row: target.1,
+        modifiers: crossterm::event::KeyModifiers::NONE,
+    })) {
+        crate::app::root::InputOutcome::Action(action) => dispatch(action, app),
+        outcome => panic!("clicking reset footer should dispatch an action, got {outcome:?}"),
+    }
+}
+
+// Match the startup cache/snapshot invariant without inheriting a previous
+// test's thread-local preferences or reading the user's layered config.
+fn settings_lifecycle_app() -> AppView {
+    use crate::appearance::{RenderMermaid, ScrollMode, TextSelection, cache};
+    let app = test_app_with_agent();
+    cache::set_page_flip_on_send(app.current_ui.page_flip_on_send_enabled());
+    cache::set_combine_queued_prompts(app.current_ui.combine_queued_prompts.unwrap_or(false));
+    cache::set_show_model_provider(false);
+    cache::set_vim_mode(false);
+    cache::set_keep_text_selection(TextSelection::Flash);
+    cache::set_scroll_speed(50);
+    cache::set_scroll_mode(ScrollMode::Auto);
+    cache::set_invert_scroll(false);
+    cache::set_scroll_lines(3);
+    cache::set_render_mermaid(RenderMermaid::Auto);
+    cache::set_show_thinking_blocks(true);
+    cache::set_group_tool_verbs(true);
+    cache::set_prompt_suggestions(true);
+    app
+}
+
+#[test]
+fn every_writable_setting_dispatch_failure_retry_reset_and_rollback_lifecycle() {
+    use crate::settings::{SettingKind, SettingsRegistry};
+
+    with_theme_test_env(|| {
+        let registry = SettingsRegistry::defaults();
+        assert_eq!(
+            registry.all().len(),
+            42,
+            "settings catalog coverage changed"
+        );
+        for meta in registry.all() {
+            if matches!(meta.kind, SettingKind::Group { .. }) {
+                let app = settings_lifecycle_app();
+                assert_eq!(setting_value(&app, meta.key), None);
+                continue;
+            }
+
+            let mut app = settings_lifecycle_app();
+            let baseline = setting_value(&app, meta.key)
+                .unwrap_or_else(|| panic!("scalar setting `{}` has no current value", meta.key));
+
+            let first = move_setting_away_from_default(&mut app, meta.key);
+            let first_write = setting_write(&first, meta.key).clone();
+            let first_target = match &first_write {
+                Effect::PersistSetting { value, .. } => value.clone(),
+                _ => unreachable!(),
+            };
+            assert_ne!(
+                first_target, baseline,
+                "`{}` did not move from its baseline",
+                meta.key
+            );
+            assert_eq!(setting_value(&app, meta.key), Some(first_target.clone()));
+
+            let next = complete_setting_request(&mut app, &first_write, false);
+            assert!(
+                next.is_empty(),
+                "uncontended failure should not schedule another write"
+            );
+            assert_eq!(
+                setting_value(&app, meta.key),
+                Some(baseline.clone()),
+                "first failure rollback for `{}`",
+                meta.key
+            );
+
+            let opened = dispatch(Action::OpenSettings, &mut app);
+            assert!(
+                !opened
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::PersistSetting { .. }))
+            );
+            let Some(crate::views::modal::ActiveModal::Settings { state }) =
+                &app.agents[&AgentId(0)].active_modal
+            else {
+                panic!("Settings should open after `{}` rollback", meta.key);
+            };
+            assert_eq!(
+                state.value_for(meta.key),
+                Some(baseline.clone()),
+                "reopened Settings must display the rolled-back value for `{}`",
+                meta.key
+            );
+
+            // Child keys are exercised through the dispatcher contract here:
+            // the Group row has no scalar to reset, while UI navigation into
+            // its child sheet owns whether a child exposes the `d` shortcut.
+            let opened_reset = open_reset_for_setting(&mut app, meta.key);
+            assert!(
+                !opened_reset
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::PersistSetting { .. }))
+            );
+            assert!(matches!(
+                app.agents[&AgentId(0)].active_modal,
+                Some(crate::views::modal::ActiveModal::ResetSettingsConfirm { .. })
+            ));
+            let cancelled = dispatch_settings_key(&mut app, 'n');
+            assert!(
+                !cancelled
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::PersistSetting { .. }))
+            );
+            assert_eq!(setting_value(&app, meta.key), Some(baseline.clone()));
+
+            if meta.key == "compact_mode" {
+                let _ = open_reset_for_setting(&mut app, meta.key);
+                let cancelled = click_reset_confirm(&mut app, false);
+                assert!(
+                    !cancelled
+                        .iter()
+                        .any(|effect| matches!(effect, Effect::PersistSetting { .. }))
+                );
+                assert_eq!(setting_value(&app, meta.key), Some(baseline.clone()));
+                assert!(matches!(
+                    app.agents[&AgentId(0)].active_modal,
+                    Some(crate::views::modal::ActiveModal::Settings { .. })
+                ));
+            }
+
+            let retry = move_setting_away_from_default(&mut app, meta.key);
+            let retry_write = setting_write(&retry, meta.key).clone();
+            assert!(
+                matches!(
+                    &retry_write,
+                    Effect::PersistSetting { value, .. } if *value == first_target
+                ),
+                "retry must persist the same value for `{}`",
+                meta.key
+            );
+            assert!(complete_setting_request(&mut app, &retry_write, true).is_empty());
+            assert_eq!(setting_value(&app, meta.key), Some(first_target.clone()));
+
+            let _ = open_reset_for_setting(&mut app, meta.key);
+            let reset = dispatch_settings_key(&mut app, 'y');
+            let reset_write = setting_write(&reset, meta.key).clone();
+            assert_eq!(
+                match &reset_write {
+                    Effect::PersistSetting { value, .. } => value,
+                    _ => unreachable!(),
+                },
+                &crate::settings::default_value_for(meta),
+                "reset must dispatch the registered default for `{}`",
+                meta.key,
+            );
+            assert!(complete_setting_request(&mut app, &reset_write, false).is_empty());
+            assert_eq!(
+                setting_value(&app, meta.key),
+                Some(first_target.clone()),
+                "later failure must return to the last successful value for `{}`",
+                meta.key,
+            );
+
+            let _ = open_reset_for_setting(&mut app, meta.key);
+            let reset_retry = if meta.key == "compact_mode" {
+                click_reset_confirm(&mut app, true)
+            } else {
+                dispatch_settings_key(&mut app, 'y')
+            };
+            let reset_retry_write = setting_write(&reset_retry, meta.key).clone();
+            assert!(complete_setting_request(&mut app, &reset_retry_write, true).is_empty());
+            assert_eq!(
+                setting_value(&app, meta.key),
+                Some(crate::settings::default_value_for(meta))
+            );
+        }
+    });
+}
+
+#[test]
+fn queued_reset_failure_returns_to_last_confirmed_value_across_setting_kinds() {
+    use crate::settings::{SettingKind, SettingsRegistry};
+
+    let registry = SettingsRegistry::defaults();
+    for key in [
+        "compact_mode",
+        "screen_mode",
+        "max_thoughts_width",
+        "default_model",
+        "show_tips",
+        "auto_update",
+    ] {
+        for first_succeeds in [false, true] {
+            let meta = registry
+                .find(key)
+                .expect("representative setting is registered");
+            assert!(!matches!(meta.kind, SettingKind::Group { .. }));
+            let mut app = settings_lifecycle_app();
+            if key == "screen_mode" {
+                app.current_ui.screen_mode = None;
+            }
+            let baseline = setting_value(&app, key).expect("registered scalar has a value");
+            let first = move_setting_away_from_default(&mut app, key);
+            let first_write = setting_write(&first, key).clone();
+            let target = match &first_write {
+                Effect::PersistSetting { value, .. } => value.clone(),
+                _ => unreachable!(),
+            };
+            let reset = action_for_reset(key, &crate::settings::default_value_for(meta))
+                .expect("representative key has a reset action");
+            let queued_dispatch = dispatch(reset, &mut app);
+            assert!(
+                !queued_dispatch
+                    .iter()
+                    .any(|effect| matches!(effect, Effect::PersistSetting { .. }))
+            );
+
+            let queued = complete_setting_request(&mut app, &first_write, first_succeeds);
+            assert!(
+                matches!(queued.as_slice(), [Effect::PersistSetting { key: queued_key, .. }] if *queued_key == key)
+            );
+            assert_eq!(
+                setting_value(&app, key),
+                Some(crate::settings::default_value_for(meta))
+            );
+            assert!(complete_setting_request(&mut app, &queued[0], false).is_empty());
+            assert_eq!(
+                setting_value(&app, key),
+                Some(if first_succeeds {
+                    target.clone()
+                } else {
+                    baseline.clone()
+                }),
+                "queued reset failure for `{key}` must restore its last confirmed baseline"
+            );
+        }
+    }
+}
+
 #[test]
 fn recursive_settings_reset_registers_write_once() {
     use crate::views::modal::ResetSettingsResult;
@@ -1227,7 +1568,7 @@ fn every_setting_has_action_for_reset_arm() {
                 continue;
             }
             let mut app = test_app_with_agent();
-            move_setting_away_from_default(&mut app, meta.key);
+            let _ = move_setting_away_from_default(&mut app, meta.key);
             let _ = dispatch(action.unwrap(), &mut app);
             let pager = build_pager_snapshot(&app);
             let reread = current_value_for(meta.key, &app.current_ui, &pager);
@@ -1255,7 +1596,7 @@ fn every_persisting_setting_has_rollback_arm() {
                 continue;
             };
             let mut app = test_app_with_agent();
-            move_setting_away_from_default(&mut app, meta.key);
+            let _ = move_setting_away_from_default(&mut app, meta.key);
             for eff in dispatch(reset_action, &mut app) {
                 let Effect::PersistSetting {
                     key,
@@ -1397,7 +1738,7 @@ fn pr13_set_show_tips_emits_persist_with_rollback() {
         } => {
             assert_eq!(*key, "show_tips");
             assert_eq!(*value, SettingValue::Bool(false));
-            assert_eq!(*rollback_value, SettingValue::Bool(true));
+            assert_eq!(*rollback_value, SettingValue::Bool(false));
         }
         other => panic!("expected PersistSetting effect, got {other:?}"),
     }
@@ -1447,13 +1788,13 @@ fn pr13_set_show_tips_idempotent_re_commit() {
 fn pr13_set_show_tips_first_commit_of_default_persists() {
     let mut app = test_app_with_agent();
     assert_eq!(app.show_tips, None);
-    let effects = dispatch(Action::SetShowTips(true), &mut app);
+    let effects = dispatch(Action::SetShowTips(false), &mut app);
     assert_eq!(
         effects.len(),
         1,
         "first commit of the default must persist (not silently no-op)"
     );
-    assert_eq!(app.show_tips, Some(true));
+    assert_eq!(app.show_tips, Some(false));
 }
 /// Subsequent commits of the same default hit the
 /// idempotent fast-path. Pins the symmetric half of the
@@ -1461,9 +1802,9 @@ fn pr13_set_show_tips_first_commit_of_default_persists() {
 #[test]
 fn pr13_set_show_tips_second_commit_of_default_no_ops() {
     let mut app = test_app_with_agent();
-    let _ = dispatch(Action::SetShowTips(true), &mut app);
-    assert_eq!(app.show_tips, Some(true));
-    let effects = dispatch(Action::SetShowTips(true), &mut app);
+    let _ = dispatch(Action::SetShowTips(false), &mut app);
+    assert_eq!(app.show_tips, Some(false));
+    let effects = dispatch(Action::SetShowTips(false), &mut app);
     assert!(
         effects.is_empty(),
         "second commit of the default must hit the idempotent fast-path \
@@ -1483,7 +1824,7 @@ fn pr13_show_tips_rollback_from_none_state_restores_none() {
         Effect::PersistSetting { rollback_value, .. } => rollback_value.clone(),
         _ => panic!("expected PersistSetting"),
     };
-    assert_eq!(rollback_value, SettingValue::Bool(true));
+    assert_eq!(rollback_value, SettingValue::Bool(false));
     assert_eq!(app.show_tips, Some(false));
     apply_setting_rollback(&mut app, "show_tips", &rollback_value);
     assert_eq!(
@@ -1521,55 +1862,58 @@ fn pr13_set_show_tips_toast_includes_restart_marker() {
 /// vacuously when current == default).
 /// Dispatches theme-mutating actions for the theme keys — callers must
 /// hold the theme test lock (wrap the test in [`with_theme_test_env`]).
-fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::SettingKey) {
+fn move_setting_away_from_default(
+    app: &mut AppView,
+    key: crate::settings::SettingKey,
+) -> Vec<Effect> {
     match key {
         "compact_mode" => {
-            let _ = dispatch(Action::SetCompactMode(true), app);
+            return dispatch(Action::SetCompactMode(true), app);
         }
         "show_timestamps" => {
-            let _ = dispatch(Action::SetTimestamps(false), app);
+            return dispatch(Action::SetTimestamps(false), app);
         }
         "show_timeline" => {
             let away = !app.current_ui.show_timeline_enabled();
-            let _ = dispatch(Action::SetTimeline(away), app);
+            return dispatch(Action::SetTimeline(away), app);
         }
         "page_flip_on_send" => {
             let away = !crate::appearance::cache::load_page_flip_on_send();
-            let _ = dispatch(Action::SetPageFlipOnSend(away), app);
+            return dispatch(Action::SetPageFlipOnSend(away), app);
         }
         "combine_queued_prompts" => {
             let away = !crate::appearance::cache::load_combine_queued_prompts();
-            let _ = dispatch(Action::SetCombineQueuedPrompts(away), app);
+            return dispatch(Action::SetCombineQueuedPrompts(away), app);
         }
         "simple_mode" => {
-            let _ = dispatch(Action::SetSimpleMode(false), app);
+            return dispatch(Action::SetSimpleMode(false), app);
         }
         "contextual_hints.undo" => {
-            let _ = dispatch(Action::SetContextualHintUndo(false), app);
+            return dispatch(Action::SetContextualHintUndo(false), app);
         }
         "contextual_hints.plan_mode" => {
-            let _ = dispatch(Action::SetContextualHintPlanMode(false), app);
+            return dispatch(Action::SetContextualHintPlanMode(false), app);
         }
         "contextual_hints.image_input" => {
-            let _ = dispatch(Action::SetContextualHintImageInput(false), app);
+            return dispatch(Action::SetContextualHintImageInput(false), app);
         }
         "contextual_hints.send_now" => {
-            let _ = dispatch(Action::SetContextualHintSendNow(false), app);
+            return dispatch(Action::SetContextualHintSendNow(false), app);
         }
         "contextual_hints.small_screen" => {
-            let _ = dispatch(Action::SetContextualHintSmallScreen(false), app);
+            return dispatch(Action::SetContextualHintSmallScreen(false), app);
         }
         "contextual_hints.word_select" => {
-            let _ = dispatch(Action::SetContextualHintWordSelect(false), app);
+            return dispatch(Action::SetContextualHintWordSelect(false), app);
         }
         "contextual_hints.ssh_wrap" => {
-            let _ = dispatch(Action::SetContextualHintSshWrap(false), app);
+            return dispatch(Action::SetContextualHintSshWrap(false), app);
         }
         "multiline_mode" => {
-            let _ = dispatch(Action::SetMultilineMode(true), app);
+            return dispatch(Action::SetMultilineMode(true), app);
         }
         "subagents.permission_mode" => {
-            let _ = dispatch(
+            return dispatch(
                 Action::SetSubagentPermissionMode(
                     workspace::permission::types::RequestPermissionMode::Ask,
                 ),
@@ -1577,97 +1921,145 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             );
         }
         "render_mermaid" => {
-            let _ = dispatch(
-                Action::SetRenderMermaid(crate::appearance::RenderMermaid::Off),
+            return dispatch(
+                Action::SetRenderMermaid(
+                    if crate::appearance::cache::load_render_mermaid()
+                        == crate::appearance::RenderMermaid::Off
+                    {
+                        crate::appearance::RenderMermaid::On
+                    } else {
+                        crate::appearance::RenderMermaid::Off
+                    },
+                ),
                 app,
             );
         }
         "theme" => {
-            let _ = dispatch(Action::SetTheme("tokyonight".to_owned()), app);
+            return dispatch(Action::SetTheme("tokyonight".to_owned()), app);
         }
         "auto_dark_theme" => {
-            let _ = dispatch(Action::SetAutoDarkTheme("tokyonight".to_owned()), app);
+            return dispatch(Action::SetAutoDarkTheme("tokyonight".to_owned()), app);
         }
         "auto_light_theme" => {
-            let _ = dispatch(Action::SetAutoLightTheme("rosepine-dawn".to_owned()), app);
+            return dispatch(Action::SetAutoLightTheme("tokyonight".to_owned()), app);
         }
         "permission_mode" => {
-            let _ = dispatch(
-                Action::SetPermissionMode(PermissionModeKind::AlwaysApprove),
+            return dispatch(
+                Action::SetDefaultPermissionMode(PermissionModeKind::AlwaysApprove),
                 app,
             );
         }
         "default_model" => {
             use std::sync::Arc;
-            if let ActiveView::Agent(aid) = app.active_view
-                && let Some(agent) = app.agents.get_mut(&aid)
-            {
-                let id = shell::agent::models::ModelId::new(Arc::from("test-model-move"));
-                let info =
-                    shell::agent::models::ModelInfo::new(id.clone(), "Test Model Move".to_string());
-                agent.session.models.available.insert(id.clone(), info);
-                agent.session.models.set_current(id, None);
-            }
+            let id = shell::agent::models::ModelId::new(Arc::from("test-model-move"));
+            let info =
+                shell::agent::models::ModelInfo::new(id.clone(), "Test Model Move".to_string());
+            app.models.available.insert(id.clone(), info);
+            return dispatch(Action::SetDefaultModel(id), app);
         }
         "max_thoughts_width" => {
-            let _ = dispatch(Action::SetMaxThoughtsWidth(200), app);
+            return dispatch(Action::SetMaxThoughtsWidth(200), app);
         }
         "behavior" => {
-            let _ = dispatch(Action::SetBehaviorMode(tools::types::BehaviorId::Plan), app);
+            return dispatch(Action::SetBehaviorMode(tools::types::BehaviorId::Plan), app);
         }
         "show_tips" => {
-            let _ = dispatch(Action::SetShowTips(false), app);
+            return dispatch(Action::SetShowTips(true), app);
         }
         "auto_update" => {
-            let _ = dispatch(Action::SetAutoUpdate(false), app);
+            return dispatch(Action::SetAutoUpdate(false), app);
         }
         "vim_mode" => {
-            let _ = dispatch(Action::SetVimMode(true), app);
+            return dispatch(
+                Action::SetVimMode(!crate::appearance::cache::load_vim_mode()),
+                app,
+            );
         }
         "remember_tool_approvals" => {
-            let _ = dispatch(Action::SetRememberToolApprovals(true), app);
+            return dispatch(Action::SetRememberToolApprovals(true), app);
         }
         "toolset.ask_user_question.timeout_enabled" => {
-            let _ = dispatch(Action::SetAskUserQuestionTimeoutEnabled(false), app);
+            return dispatch(Action::SetAskUserQuestionTimeoutEnabled(false), app);
         }
         "keep_text_selection" => {
-            let _ = dispatch(
-                Action::SetKeepTextSelection(crate::appearance::TextSelection::Hold),
+            return dispatch(
+                Action::SetKeepTextSelection(
+                    if crate::appearance::cache::load_keep_text_selection()
+                        == crate::appearance::TextSelection::Hold
+                    {
+                        crate::appearance::TextSelection::Flash
+                    } else {
+                        crate::appearance::TextSelection::Hold
+                    },
+                ),
                 app,
             );
         }
         "scroll_speed" => {
-            let _ = dispatch(Action::SetScrollSpeed(75), app);
+            let current = crate::appearance::cache::load_scroll_speed();
+            return dispatch(
+                Action::SetScrollSpeed(if current == 75 { 76 } else { 75 }),
+                app,
+            );
         }
         "scroll_mode" => {
-            let _ = dispatch(
-                Action::SetScrollMode(crate::appearance::ScrollMode::Wheel),
+            return dispatch(
+                Action::SetScrollMode(
+                    if crate::appearance::cache::load_scroll_mode()
+                        == crate::appearance::ScrollMode::Wheel
+                    {
+                        crate::appearance::ScrollMode::Trackpad
+                    } else {
+                        crate::appearance::ScrollMode::Wheel
+                    },
+                ),
                 app,
             );
         }
         "invert_scroll" => {
-            let _ = dispatch(Action::SetInvertScroll(true), app);
+            return dispatch(
+                Action::SetInvertScroll(!crate::appearance::cache::load_invert_scroll()),
+                app,
+            );
         }
         "display_refresh_auto_cadence" => {
-            let _ = dispatch(Action::SetDisplayRefreshAutoCadence(true), app);
+            return dispatch(Action::SetDisplayRefreshAutoCadence(true), app);
         }
         "scroll_lines" => {
-            let _ = dispatch(Action::SetScrollLines(5), app);
+            let current = crate::appearance::cache::load_scroll_lines().unwrap_or(3);
+            return dispatch(
+                Action::SetScrollLines(if current == 5 { 6 } else { 5 }),
+                app,
+            );
         }
         "show_thinking_blocks" => {
-            let _ = dispatch(Action::SetShowThinkingBlocks(true), app);
+            return dispatch(
+                Action::SetShowThinkingBlocks(
+                    !crate::appearance::cache::load_show_thinking_blocks(),
+                ),
+                app,
+            );
         }
         "group_tool_verbs" => {
-            let _ = dispatch(Action::SetGroupToolVerbs(false), app);
+            return dispatch(
+                Action::SetGroupToolVerbs(!crate::appearance::cache::load_group_tool_verbs()),
+                app,
+            );
         }
         "prompt_suggestions" => {
-            let _ = dispatch(Action::SetPromptSuggestions(false), app);
+            return dispatch(
+                Action::SetPromptSuggestions(!crate::appearance::cache::load_prompt_suggestions()),
+                app,
+            );
         }
         "show_model_provider" => {
-            let _ = dispatch(Action::SetShowModelProvider(true), app);
+            return dispatch(
+                Action::SetShowModelProvider(!crate::appearance::cache::load_show_model_provider()),
+                app,
+            );
         }
         "respect_manual_folds" => {
-            let _ = dispatch(
+            return dispatch(
                 Action::SetRespectManualFolds(
                     !crate::appearance::ScrollConfig::default().respect_manual_folds,
                 ),
@@ -1675,10 +2067,10 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
             );
         }
         "hunk_tracker_mode" => {
-            let _ = dispatch(Action::SetHunkTrackerMode("all_dirty".to_string()), app);
+            return dispatch(Action::SetHunkTrackerMode("all_dirty".to_string()), app);
         }
         "screen_mode" => {
-            let _ = dispatch(Action::SetScreenMode("minimal".to_string()), app);
+            return dispatch(Action::SetScreenMode("minimal".to_string()), app);
         }
         "fork_secondary_model" => {
             use std::sync::Arc;
@@ -1689,11 +2081,12 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
                 let info =
                     shell::agent::models::ModelInfo::new(id.clone(), "Test Fork Move".to_string());
                 agent.session.models.available.insert(id.clone(), info);
-                let _ = dispatch(Action::SetForkSecondaryModel(id), app);
+                return dispatch(Action::SetForkSecondaryModel(id), app);
             }
+            return vec![];
         }
         "default_selected_permission" => {
-            let _ = dispatch(
+            return dispatch(
                 Action::SetDefaultSelectedPermission("allow_once".to_string()),
                 app,
             );

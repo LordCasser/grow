@@ -445,3 +445,5 @@ CARGO_BUILD_JOBS=2 RUST_MIN_STACK=16777216 cargo test --locked -p pager --lib bo
 Settings 的 Agent 类别提供独立的 `Subagent permission mode`（Ask / Auto / Always approve，默认 Auto），写入 `[subagents].permission_mode`。该项重启后生效，沿 Settings 顺序保存与失败回滚；它与主 Agent 的默认权限及当前会话权限分开。契约见 [子 Agent 权限设置](../openspec/specs/client-surfaces/spec.md#requirement-settings-exposes-independent-subagent-permission-policy) 和 [定向配置写入](../openspec/specs/configuration-rules/spec.md#requirement-subagent-permission-settings-update-only-the-authored-policy)。
 
 完整 Settings 菜单集成回归使用 `cargo test --locked -p pager --test settings_e2e -- --test-threads=4`，覆盖注册清单、默认值、类型分支及键鼠交互；该套测试与 library 回归共同纳入 Core regression，正式发布时在同一已验证 SHA 上执行。
+
+Settings 的完整键鼠回归由 `cargo test --locked -p pager --test settings_e2e -- --test-threads=4` 执行；保存调度与重置失败回归由 `cargo test --locked -p pager --lib settings -- --test-threads=4` 执行（沿现有测试栈配置）。有效默认与失败后重试行为见 [偏好回滚契约](../openspec/specs/client-surfaces/spec.md#requirement-preference-rollback-uses-the-displayed-effective-default)。

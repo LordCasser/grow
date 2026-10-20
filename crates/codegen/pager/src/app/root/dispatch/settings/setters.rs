@@ -1790,8 +1790,8 @@ pub(in crate::app::root::dispatch) fn set_max_thoughts_width(
 pub(super) fn pr13_effective_default(key: &str) -> Option<bool> {
     use tools::implementations::grow_build::ask_user_question;
     match key {
-        "show_tips" => Some(true),
-        "auto_update" => Some(false),
+        "show_tips" => Some(false),
+        "auto_update" => Some(true),
         "toolset.ask_user_question.timeout_enabled" => {
             Some(ask_user_question::DEFAULT_ASK_USER_QUESTION_TIMEOUT_ENABLED)
         }
@@ -1807,7 +1807,7 @@ pub(super) fn set_show_tips_inner(app: &mut AppView, value: bool) {
 /// Outer dispatcher for `Action::SetShowTips`.
 pub(in crate::app::root::dispatch) fn set_show_tips(app: &mut AppView, new: bool) -> Vec<Effect> {
     let prev_state = app.show_tips;
-    let prev_effective = prev_state.unwrap_or(true);
+    let prev_effective = prev_state.unwrap_or(false);
     if prev_effective == new && prev_state.is_some() {
         // Idempotent fast-path. `.is_some()` lets the first commit of
         // the default value persist (so the resolver sees user intent).
