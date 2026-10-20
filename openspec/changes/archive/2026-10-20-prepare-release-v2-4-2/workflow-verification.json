@@ -1,0 +1,132 @@
+{
+  "databaseId": 39405009149,
+  "url": "https://github.com/LordCasser/grow/actions/runs/39405009149",
+  "headSha": "ecb0f9cc6b48d9114432eea6d3ff870302ea9abf",
+  "status": "completed",
+  "conclusion": "success",
+  "createdAt": "2026-10-20T10:02:02Z",
+  "updatedAt": "2026-10-20T11:14:21Z",
+  "release_source_commit": "ecb0f9cc6b48d9114432eea6d3ff870302ea9abf",
+  "jobs": [
+    {
+      "name": "Validate dispatch inputs",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/LordCasser/grow/actions/runs/39405009149/job/118568704499"
+    },
+    {
+      "name": "Select platform matrix",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/LordCasser/grow/actions/runs/39405009149/job/118568704809"
+    },
+    {
+      "name": "Validate release tag",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/LordCasser/grow/actions/runs/39405009149/job/118568704940"
+    },
+    {
+      "name": "Build linux-riscv64 / Build linux-riscv64",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/LordCasser/grow/actions/runs/39405009149/job/118568862118"
+    },
+    {
+      "name": "Build linux-x86_64 / Build linux-x86_64",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/LordCasser/grow/actions/runs/39405009149/job/118568862172"
+    },
+    {
+      "name": "Build linux-aarch64 / Build linux-aarch64",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/LordCasser/grow/actions/runs/39405009149/job/118568862245"
+    },
+    {
+      "name": "Build linux-x86_64-musl / Build linux-x86_64-musl",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/LordCasser/grow/actions/runs/39405009149/job/118568862247"
+    },
+    {
+      "name": "Build macos-aarch64 / Build macos-aarch64",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/LordCasser/grow/actions/runs/39405009149/job/118568862276"
+    },
+    {
+      "name": "Build windows-x86_64 / Build windows-x86_64",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/LordCasser/grow/actions/runs/39405009149/job/118568862389"
+    },
+    {
+      "name": "Build windows-aarch64 / Build windows-aarch64",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/LordCasser/grow/actions/runs/39405009149/job/118568862399"
+    },
+    {
+      "name": "Build macos-x86_64 / Build macos-x86_64",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/LordCasser/grow/actions/runs/39405009149/job/118568862415"
+    },
+    {
+      "name": "Build linux-aarch64-musl / Build linux-aarch64-musl",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/LordCasser/grow/actions/runs/39405009149/job/118568862417"
+    },
+    {
+      "name": "Core regressions on release commit / Core tests and CLI build",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/LordCasser/grow/actions/runs/39405009149/job/118568862438"
+    },
+    {
+      "name": "OpenSpec validation on release commit / validate",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/LordCasser/grow/actions/runs/39405009149/job/118568862475"
+    },
+    {
+      "name": "Build ohos-aarch64 / Build ohos-aarch64",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/LordCasser/grow/actions/runs/39405009149/job/118568862507"
+    },
+    {
+      "name": "Native coordination and export regressions on release commit / native (windows-2025)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/LordCasser/grow/actions/runs/39405009149/job/118568862508"
+    },
+    {
+      "name": "Native coordination and export regressions on release commit / native (ubuntu-24.04)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/LordCasser/grow/actions/runs/39405009149/job/118568862648"
+    },
+    {
+      "name": "Windows storage regressions on release commit / Create and reopen a session",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/LordCasser/grow/actions/runs/39405009149/job/118568862715"
+    },
+    {
+      "name": "Native coordination and export regressions on release commit / native (macos-15)",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/LordCasser/grow/actions/runs/39405009149/job/118568862786"
+    },
+    {
+      "name": "Publish release assets",
+      "status": "completed",
+      "conclusion": "success",
+      "url": "https://github.com/LordCasser/grow/actions/runs/39405009149/job/118596201189"
+    }
+  ]
+}

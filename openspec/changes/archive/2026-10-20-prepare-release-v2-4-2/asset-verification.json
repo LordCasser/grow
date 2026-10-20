@@ -1,0 +1,76 @@
+{
+  "tag": "v2.4.2",
+  "commit": "ecb0f9cc6b48d9114432eea6d3ff870302ea9abf",
+  "url": "https://github.com/LordCasser/grow/releases/tag/v2.4.2",
+  "published_at": "2026-10-20T11:14:18Z",
+  "asset_count": 11,
+  "checksum_count": 10,
+  "all_asset_digests_match": true,
+  "verified_binary_identity": "grow 2.4.2 (ecb0f9c)",
+  "assets": [
+    {
+      "name": "grow-2.4.2-linux-aarch64-musl.tar.gz",
+      "size": 45772357,
+      "digest": "sha256:7f25b7f1f86253e5794d803512cd975eee268bb04983a72745b607edfd00fc5a"
+    },
+    {
+      "name": "grow-2.4.2-linux-aarch64.tar.gz",
+      "size": 46260059,
+      "digest": "sha256:2d37ee45b6c41165322f74a7d870e03a7c86cce9057d14f595acca662dd731cd"
+    },
+    {
+      "name": "grow-2.4.2-linux-riscv64.tar.gz",
+      "size": 49077892,
+      "digest": "sha256:074a7ca0edee809c878e8a23645274622588c371b85dc94f5bac9bb093dd67d5"
+    },
+    {
+      "name": "grow-2.4.2-linux-x86_64-musl.tar.gz",
+      "size": 49839376,
+      "digest": "sha256:b308d42e62c6c8a4eb3ff4c0843257ab08ffd99fb9773327a72f1bb1036f14d7"
+    },
+    {
+      "name": "grow-2.4.2-linux-x86_64.tar.gz",
+      "size": 49303617,
+      "digest": "sha256:f41e1ecf79b4748a5ba8ef1b514a4ecc39e03bfb4acf017b1438e7fa66ae4864"
+    },
+    {
+      "name": "grow-2.4.2-macos-aarch64.tar.gz",
+      "size": 43164763,
+      "digest": "sha256:a9ea6281e080f4a649b526cd2c9bb43269b0ff3a38a1ae6daf687b2a829e9d61"
+    },
+    {
+      "name": "grow-2.4.2-macos-x86_64.tar.gz",
+      "size": 46820479,
+      "digest": "sha256:04db4564693c1b5fb17d6183909d7864dca96169d2025b56e70811534bf93c3b"
+    },
+    {
+      "name": "grow-2.4.2-ohos-aarch64.tar.gz",
+      "size": 42709407,
+      "digest": "sha256:8ead47589cedee61e45bc6990c80f5be3ae51fb7a65a1f6fe1bc450e3337255b"
+    },
+    {
+      "name": "grow-2.4.2-windows-aarch64.tar.gz",
+      "size": 41391296,
+      "digest": "sha256:28e7fa6417f96b82b82018e3db54072b15e4c8f16c92e99243b6dfd21c00e6d0"
+    },
+    {
+      "name": "grow-2.4.2-windows-x86_64.tar.gz",
+      "size": 44604538,
+      "digest": "sha256:cd5b2a4c90e64adb821c85191c98828a5dc9c68284bee9fcbb9382bb74a813bd"
+    },
+    {
+      "name": "SHA256SUMS",
+      "size": 989,
+      "digest": "sha256:95f5aa706e28047eb266235e63f2fec3ba94fd02ee0f12a8c3159a2e16b9b43f"
+    }
+  ],
+  "macos_aarch64_verification": {
+    "downloaded_archive_sha256_matches": true,
+    "archive_members": [
+      "grow"
+    ],
+    "executable_regular_file": true,
+    "codesign_verify_strict": true,
+    "isolated_grow_home": true
+  }
+}
