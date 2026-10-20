@@ -233,6 +233,8 @@ pub struct PagerLocalSnapshot {
     pub multiline_mode: bool,
     /// Canonical permission mode on the active agent.
     pub permission_mode: shell::util::config::PermissionMode,
+    /// Persisted child policy; independent of the active primary session.
+    pub subagent_permission_mode: workspace::permission::types::RequestPermissionMode,
     /// Currently-selected model's canonical id, or `None` if no model has
     /// been selected yet.
     pub current_model_id: Option<String>,
@@ -273,6 +275,7 @@ impl Default for PagerLocalSnapshot {
         Self {
             multiline_mode: false,
             permission_mode: shell::util::config::PermissionMode::Ask,
+            subagent_permission_mode: Default::default(),
             current_model_id: None,
             available_models: Vec::new(),
             behavior_mode: tools::types::BehaviorId::Normal,
@@ -290,6 +293,23 @@ impl Default for PagerLocalSnapshot {
             ask_user_question_timeout_enabled: None,
         }
     }
+}
+
+pub fn subagent_permission_mode_canonical(
+    mode: workspace::permission::types::RequestPermissionMode,
+) -> &'static str {
+    use workspace::permission::types::RequestPermissionMode;
+    match mode {
+        RequestPermissionMode::Ask => "ask",
+        RequestPermissionMode::Auto => "auto",
+        RequestPermissionMode::AlwaysApprove => "always-approve",
+    }
+}
+
+pub fn parse_subagent_permission_mode(
+    value: &str,
+) -> Option<workspace::permission::types::RequestPermissionMode> {
+    toml::Value::String(value.to_owned()).try_into().ok()
 }
 
 /// Resolve a persisted hunk-tracker mode to a registry choice.
@@ -560,6 +580,9 @@ pub fn current_value_for(
             Some("default") => "default",
             _ => "ask",
         })),
+        "subagents.permission_mode" => Some(SettingValue::Enum(
+            subagent_permission_mode_canonical(pager.subagent_permission_mode),
+        )),
         // remember_tool_approvals: reflects the user-config layer the modal
         // toggles (other layers feed the effective gate at spawn). None → false.
         "remember_tool_approvals" => Some(SettingValue::Bool(
@@ -819,6 +842,12 @@ mod tests {
                     assert_eq!(
                         *default, expected,
                         "auto_light_theme default drifts from UiConfig::default()",
+                    );
+                }
+                ("subagents.permission_mode", SettingKind::Enum { default, .. }) => {
+                    assert_eq!(
+                        *default,
+                        subagent_permission_mode_canonical(Default::default())
                     );
                 }
                 // permission_mode: None on disk → "ask" fallback.
@@ -1413,5 +1442,49 @@ mod tests {
                 crate::views::settings_modal::MAX_PICKER_CHOICES,
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod subagent_permission_setting_tests {
+    use super::*;
+    #[test]
+    fn subagent_permission_setting_catalog_and_snapshot_are_independent() {
+        use workspace::permission::types::RequestPermissionMode;
+        let registry = SettingsRegistry::defaults();
+        let meta = registry.find("subagents.permission_mode").unwrap();
+        assert_eq!(meta.category, SettingCategory::Agent);
+        assert!(meta.restart_required && !meta.hidden_in_minimal);
+        let SettingKind::Enum {
+            default,
+            choices,
+            supports_preview,
+        } = &meta.kind
+        else {
+            panic!("expected enum")
+        };
+        assert_eq!(*default, "auto");
+        assert!(!supports_preview);
+        assert_eq!(
+            choices.iter().map(|c| c.canonical).collect::<Vec<_>>(),
+            ["ask", "auto", "always-approve"]
+        );
+        let ui = UiConfig {
+            permission_mode: Some("always-approve".into()),
+            ..Default::default()
+        };
+        let pager = PagerLocalSnapshot {
+            subagent_permission_mode: RequestPermissionMode::Ask,
+            ..Default::default()
+        };
+        assert_eq!(
+            current_value_for("subagents.permission_mode", &ui, &pager),
+            Some(SettingValue::Enum("ask"))
+        );
+        assert_eq!(
+            current_value_for("permission_mode", &ui, &pager),
+            Some(SettingValue::Enum("always-approve"))
+        );
+        assert!(parse_subagent_permission_mode("invalid").is_none());
     }
 }

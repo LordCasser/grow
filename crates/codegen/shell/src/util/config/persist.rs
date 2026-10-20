@@ -19,6 +19,35 @@ async fn save_config_locked(config: &Config) -> Result<()> {
     save_config_at(config, &path).await
 }
 
+/// Persist the independent permission route used by newly created subagents.
+/// Only the authored `[subagents].permission_mode` value is changed, so this
+/// does not materialize runtime defaults from `SubagentsConfig`.
+pub async fn set_subagent_permission_mode(
+    mode: workspace::permission::types::RequestPermissionMode,
+) -> Result<()> {
+    let _guard = SAVE_LOCK.lock().await;
+    set_subagent_permission_mode_at(&user_config_path(), mode).await
+}
+
+async fn set_subagent_permission_mode_at(
+    path: &std::path::Path,
+    mode: workspace::permission::types::RequestPermissionMode,
+) -> Result<()> {
+    let mut root = read_config_for_save(path).await?;
+    let table = root
+        .as_table_mut()
+        .ok_or_else(|| anyhow::anyhow!("refusing to update [subagents] in non-table config"))?;
+    let section = table
+        .entry("subagents".to_string())
+        .or_insert_with(|| TomlValue::Table(TomlMap::new()));
+    let section = section.as_table_mut().ok_or_else(|| {
+        anyhow::anyhow!("refusing to update [subagents] because it is not a table")
+    })?;
+    section.insert("permission_mode".to_string(), TomlValue::try_from(mode)?);
+    atomic_write_string(path, &toml::to_string_pretty(&root)?)?;
+    Ok(())
+}
+
 async fn read_config_for_save(path: &std::path::Path) -> Result<TomlValue> {
     Ok(match tokio::fs::read_to_string(path).await {
         Ok(s) => match toml::from_str::<TomlValue>(&s) {
@@ -271,6 +300,125 @@ mod tests {
     use super::*;
     use toml::Value as TomlValue;
     use toml::map::Map as TomlMap;
+
+    #[tokio::test]
+    async fn subagent_permission_mode_saves_only_requested_mode() {
+        use workspace::permission::types::RequestPermissionMode as Mode;
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        for (mode, canonical) in [
+            (Mode::Ask, "ask"),
+            (Mode::Auto, "auto"),
+            (Mode::AlwaysApprove, "always-approve"),
+        ] {
+            std::fs::write(
+                &path,
+                "[subagents]\npermission_mode = \"obsolete-but-repairable\"\n",
+            )
+            .unwrap();
+            set_subagent_permission_mode_at(&path, mode).await.unwrap();
+            let saved_text = std::fs::read_to_string(&path).unwrap();
+            let saved: TomlValue = toml::from_str(&saved_text).unwrap();
+            let parsed: crate::config::SubagentsConfig =
+                saved["subagents"].clone().try_into().unwrap();
+
+            assert_eq!(parsed.permission_mode, mode);
+            assert_eq!(
+                saved["subagents"]["permission_mode"].as_str(),
+                Some(canonical)
+            );
+            assert!(!saved_text.contains("enabled ="));
+            assert!(!saved_text.contains("max_depth ="));
+            assert!(!saved_text.contains("classifier_input ="));
+        }
+    }
+
+    #[tokio::test]
+    async fn subagent_permission_mode_preserves_sibling_settings_and_unknown_values() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        std::fs::write(
+            &path,
+            r#"
+[ui]
+permission_mode = "ask"
+
+[subagents]
+permission_mode = "obsolete-but-repairable"
+custom = "${GROW_HOME}/agents"
+future_flag = true
+"#,
+        )
+        .unwrap();
+
+        set_subagent_permission_mode_at(
+            &path,
+            workspace::permission::types::RequestPermissionMode::Auto,
+        )
+        .await
+        .unwrap();
+
+        let saved: TomlValue = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(saved["ui"]["permission_mode"].as_str(), Some("ask"));
+        assert_eq!(
+            saved["subagents"]["custom"].as_str(),
+            Some("${GROW_HOME}/agents")
+        );
+        assert_eq!(saved["subagents"]["future_flag"].as_bool(), Some(true));
+        assert_eq!(saved["subagents"]["permission_mode"].as_str(), Some("auto"));
+    }
+
+    #[tokio::test]
+    async fn subagent_permission_mode_creates_missing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+
+        set_subagent_permission_mode_at(
+            &path,
+            workspace::permission::types::RequestPermissionMode::Ask,
+        )
+        .await
+        .unwrap();
+
+        let saved: TomlValue = toml::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(saved["subagents"]["permission_mode"].as_str(), Some("ask"));
+        assert_eq!(saved["subagents"].as_table().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn subagent_permission_mode_rejects_bad_source_without_replacing_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        for original in [
+            b"[subagents\npermission_mode = 'ask'".as_slice(),
+            b"subagents = 1",
+        ] {
+            std::fs::write(&path, original).unwrap();
+            assert!(
+                set_subagent_permission_mode_at(
+                    &path,
+                    workspace::permission::types::RequestPermissionMode::Ask,
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), original);
+        }
+
+        let invalid_utf8 = [b"[subagents]\npermission_mode = ".as_slice(), &[0xff]].concat();
+        std::fs::write(&path, &invalid_utf8).unwrap();
+        assert!(
+            set_subagent_permission_mode_at(
+                &path,
+                workspace::permission::types::RequestPermissionMode::Ask,
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), invalid_utf8);
+    }
 
     #[tokio::test]
     async fn update_rejects_invalid_section_types() {

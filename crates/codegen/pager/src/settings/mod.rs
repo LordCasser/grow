@@ -30,5 +30,6 @@ pub use registry::{
     DynamicEnumSource, EnumChoice, OwnedEnumChoice, PagerLocalSnapshot, SettingCategory,
     SettingKey, SettingKind, SettingMeta, SettingOwner, SettingValue, SettingsRegistry,
     StringValidator, canonical_hunk_tracker_mode, canonical_screen_mode, current_value_for,
-    default_value_for, dynamic_enum_choices,
+    default_value_for, dynamic_enum_choices, parse_subagent_permission_mode,
+    subagent_permission_mode_canonical,
 };

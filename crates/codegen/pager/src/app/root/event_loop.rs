@@ -1174,6 +1174,16 @@ pub(crate) async fn run(
     app.show_tips = config_session_bools.show_tips;
     app.auto_update = config_session_bools.auto_update;
     app.ask_user_question_timeout_enabled = config_session_bools.ask_user_question_timeout_enabled;
+    app.subagent_permission_mode = effective_config
+        .as_ref()
+        .and_then(|root| {
+            root.get("subagents")?
+                .get("permission_mode")?
+                .clone()
+                .try_into()
+                .ok()
+        })
+        .unwrap_or_default();
     // Prime thread-local caches so first render doesn't hit disk.
     crate::appearance::cache::prime(&app.current_ui);
     // Re-derive the render-value compact flag from the hydrated `current_ui`:

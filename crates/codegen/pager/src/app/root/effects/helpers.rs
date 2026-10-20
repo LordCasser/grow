@@ -642,6 +642,14 @@ pub(crate) async fn persist_setting(
                 cfg.ui.permission_mode = Some(canonical.to_string());
             }).await.map_err(|error| error.to_string())
         }
+        "subagents.permission_mode" => {
+            let SettingValue::Enum(canonical) = value else {
+                return Err(kind_mismatch("subagents.permission_mode", "Enum", &value));
+            };
+            let mode = crate::settings::parse_subagent_permission_mode(canonical)
+                .ok_or_else(|| format!("invalid subagent permission mode: {canonical}"))?;
+            shell::util::config::set_subagent_permission_mode(mode).await.map_err(|error| error.to_string())
+        }
         "compact_mode" => {
             let SettingValue::Bool(b) = value else {
                 return Err(kind_mismatch("compact_mode", "Bool", &value));

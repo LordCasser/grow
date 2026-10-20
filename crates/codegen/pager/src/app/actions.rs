@@ -399,6 +399,8 @@ pub enum Action {
     SetPermissionMode(PermissionModeKind),
     /// Persist the default permission for future sessions only.
     SetDefaultPermissionMode(PermissionModeKind),
+    /// Persist the child request policy; existing sessions keep their startup policy.
+    SetSubagentPermissionMode(workspace::permission::types::RequestPermissionMode),
     /// Toggle multiline input mode (swap Enter and Shift+Enter behavior).
     ToggleMultiline,
     /// Set multiline input mode (swap Enter and Shift+Enter behavior).

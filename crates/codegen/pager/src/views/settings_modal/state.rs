@@ -910,6 +910,8 @@ pub(super) fn action_for_enum_commit(key: SettingKey, choice: &'static str) -> O
             )),
             _ => None,
         },
+        "subagents.permission_mode" => crate::settings::parse_subagent_permission_mode(choice)
+            .map(Action::SetSubagentPermissionMode),
         "hunk_tracker_mode" => Some(Action::SetHunkTrackerMode(choice.to_string())),
         "screen_mode" => Some(Action::SetScreenMode(choice.to_string())),
         "render_mermaid" => {

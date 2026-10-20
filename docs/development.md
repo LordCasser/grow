@@ -441,3 +441,7 @@ CARGO_BUILD_JOBS=2 RUST_MIN_STACK=16777216 cargo test --locked -p pager --lib bo
 恢复后的人工等待以匹配 checkpoint 中的 `AwaitUser` / `AwaitPermission` 延续到新 attempt 建立；`ExecutionReleased` 只放行执行，不代表等待已回答。再次挂起时必须保留这段逻辑等待，真实解决与工具结果仍优先。见 [恢复与再次挂起](../openspec/specs/session-timeline/spec.md#requirement-suspension-wait-evidence-spans-admission-closure)。局部规划切换 scope 复用 `LocalPlan::validate_transition_from`：明确未派发的可选 link 可处置，必需交付仍需 Released review，活动或未知执行不能靠 review 伪装为已完成；见 [scope 处置规则](../openspec/specs/task-planning/spec.md#requirement-scope-switches-accept-explicitly-disposed-dispatch-failures)。
 
 精确测试 runner 的 compile 阶段用 Cargo JSON 确认唯一 libtest 产物，enumerate/execute 直接运行同一产物并保持 package manifest 所在目录；枚举不再通过 Cargo 触发重编译。诊断独立保留，缺失/多个产物或零测试仍失败。契约见 [固定测试产物](../openspec/specs/development-workflow/spec.md#requirement-exact-cargo-selections-stay-pinned-to-one-compiled-test-executable)。
+
+Settings 的 Agent 类别提供独立的 `Subagent permission mode`（Ask / Auto / Always approve，默认 Auto），写入 `[subagents].permission_mode`。该项重启后生效，沿 Settings 顺序保存与失败回滚；它与主 Agent 的默认权限及当前会话权限分开。契约见 [子 Agent 权限设置](../openspec/specs/client-surfaces/spec.md#requirement-settings-exposes-independent-subagent-permission-policy) 和 [定向配置写入](../openspec/specs/configuration-rules/spec.md#requirement-subagent-permission-settings-update-only-the-authored-policy)。
+
+完整 Settings 菜单集成回归使用 `cargo test --locked -p pager --test settings_e2e -- --test-threads=4`，覆盖注册清单、默认值、类型分支及键鼠交互；该套测试与 library 回归共同纳入 Core regression，正式发布时在同一已验证 SHA 上执行。

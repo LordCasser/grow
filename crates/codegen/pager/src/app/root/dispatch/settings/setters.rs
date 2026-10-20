@@ -179,6 +179,29 @@ pub(in crate::app::root::dispatch) fn set_hunk_tracker_mode(
     }]
 }
 
+pub(in crate::app::root::dispatch) fn set_subagent_permission_mode(
+    app: &mut AppView,
+    mode: workspace::permission::types::RequestPermissionMode,
+) -> Vec<Effect> {
+    let previous = app.subagent_permission_mode;
+    if previous == mode {
+        return vec![];
+    }
+    app.subagent_permission_mode = mode;
+    refresh_open_settings_modals(app);
+    let canonical = crate::settings::subagent_permission_mode_canonical(mode);
+    app.show_toast(&format!(
+        "✓ Subagent permission: {canonical} (restart to apply)"
+    ));
+    vec![Effect::PersistSetting {
+        key: "subagents.permission_mode",
+        value: crate::settings::SettingValue::Enum(canonical),
+        rollback_value: crate::settings::SettingValue::Enum(
+            crate::settings::subagent_permission_mode_canonical(previous),
+        ),
+    }]
+}
+
 /// State-only mutation for `vim_mode`. Propagates to every in-process
 /// agent so background subagents and side panes pick up the change
 /// without restart. The cache mirror lets new agents created later

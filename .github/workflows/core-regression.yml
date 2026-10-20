@@ -104,6 +104,8 @@ jobs:
           -p chat-state -p sampling-types -p sampler -p memory -p workflow
           -p shell -p pager -p pager-minimal -p agent -p tools -p tool-types
           -- --test-threads=4
+      - name: Run Settings integration regressions
+        run: cargo test --locked -p pager --test settings_e2e -- --test-threads=4
       - name: Build the application entry point
         run: cargo build --locked -p cli --bin grow
       - name: Verify live session recovery after sampling failure

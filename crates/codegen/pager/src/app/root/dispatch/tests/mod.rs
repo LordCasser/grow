@@ -116,6 +116,7 @@ fn test_app() -> AppView {
         require_plan_approval: false,
         plan_mode: false,
         subagents: false,
+        subagent_permission_mode: Default::default(),
         ask_user: false,
         mouse_captured: true,
         new_worktree_dialog: None,

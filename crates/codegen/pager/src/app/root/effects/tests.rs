@@ -1454,3 +1454,10 @@ async fn status_rpc_budget_includes_admission_and_retains_timed_out_worker_permi
     drop(permit);
     assert!(!prompt_status_rpc_in_flight(&session_id, Some("prompt")));
 }
+
+#[tokio::test]
+async fn subagent_permission_setting_rejects_invalid_effect_values() {
+    use crate::settings::SettingValue;
+    assert!(persist_setting("subagents.permission_mode", SettingValue::String("ask".into())).await.is_err());
+    assert!(persist_setting("subagents.permission_mode", SettingValue::Enum("invalid")).await.is_err());
+}

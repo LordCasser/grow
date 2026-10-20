@@ -704,6 +704,8 @@ pub struct AppView {
     /// Enable subagent spawning for new sessions (`--subagents`).
     /// Adds the `TaskTool` for spawning subagents.
     pub subagents: bool,
+    /// Settings mirror of the startup-only child permission policy.
+    pub subagent_permission_mode: workspace::permission::types::RequestPermissionMode,
     /// Enable the ask-user-question tool for new sessions (`--ask-user`).
     /// Automatically enabled by `plan_mode`.
     pub ask_user: bool,
@@ -1104,6 +1106,7 @@ impl AppView {
             require_plan_approval: false,
             plan_mode: false,
             subagents: false,
+            subagent_permission_mode: Default::default(),
             ask_user: false,
             mouse_captured: true,
             new_worktree_dialog: None,
@@ -4274,6 +4277,7 @@ pub(crate) mod tests {
             require_plan_approval: false,
             plan_mode: false,
             subagents: false,
+            subagent_permission_mode: Default::default(),
             ask_user: false,
             mouse_captured: true,
             new_worktree_dialog: None,

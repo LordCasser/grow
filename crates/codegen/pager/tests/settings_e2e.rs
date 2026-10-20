@@ -44,6 +44,8 @@ const ALL_SETTINGS_EXERCISED: &[&str] = &[
     "auto_light_theme",
     "render_mermaid",
     "permission_mode",
+    "subagents.permission_mode",
+    "show_model_provider",
     "default_model",
     "max_thoughts_width",
     "scroll_speed",
@@ -199,6 +201,12 @@ fn assert_set_bool_action(outcome: SettingsKeyOutcome, key: &str, expected: bool
         }
         ("show_timestamps", Action::SetTimestamps(b)) => {
             assert_eq!(b, expected, "SetTimestamps value differs from expected")
+        }
+        ("show_model_provider", Action::SetShowModelProvider(b)) => {
+            assert_eq!(
+                b, expected,
+                "SetShowModelProvider value differs from expected"
+            )
         }
         ("show_timeline", Action::SetTimeline(b)) => {
             assert_eq!(b, expected, "SetTimeline value differs from expected")
@@ -362,6 +370,16 @@ fn space_on_show_timeline_dispatches_typed_setter() {
     // Toggling flips the default; derived so it follows SHOW_TIMELINE_DEFAULT.
     let default_on = UiConfig::default().show_timeline_enabled();
     assert_set_bool_action(outcome, "show_timeline", !default_on);
+}
+
+#[test]
+fn space_on_show_model_provider_dispatches_typed_setter() {
+    pager::appearance::cache::set_show_model_provider(false);
+    let mut s = make_state();
+    navigate_to(&mut s, "show_model_provider");
+    let outcome = handle_settings_key(&mut s, &press(KeyCode::Char(' ')));
+    assert_set_bool_action(outcome, "show_model_provider", true);
+    pager::appearance::cache::set_show_model_provider(false);
 }
 
 #[test]
@@ -591,6 +609,31 @@ fn mouse_click_on_show_timestamps_two_stage_select_then_toggle() {
         row_y,
     );
     assert_set_bool_action(outcome, "show_timestamps", false);
+}
+
+#[test]
+fn mouse_click_on_show_model_provider_two_stage_select_then_toggle() {
+    pager::appearance::cache::set_show_model_provider(false);
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "show_model_provider") as u16;
+
+    let first = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row_y,
+    );
+    assert!(matches!(first, SettingsKeyOutcome::Changed));
+
+    let second = handle_settings_mouse(
+        &mut s,
+        MouseEventKind::Down(crossterm::event::MouseButton::Left),
+        10,
+        row_y,
+    );
+    assert_set_bool_action(second, "show_model_provider", true);
+    pager::appearance::cache::set_show_model_provider(false);
 }
 
 /// Value-column click toggles `show_timeline` in one click.
@@ -1770,6 +1813,7 @@ fn registry_kind_membership_through_pr_14() {
             "toolset.ask_user_question.timeout_enabled",
             "auto_update",
             "show_tips",
+            "show_model_provider",
             // Per-tip contextual-hint children (hidden from the top-level list,
             // toggled inside the group sub-sheet) are still Bool settings.
             "contextual_hints.undo",
@@ -1800,6 +1844,7 @@ fn registry_kind_membership_through_pr_14() {
             "render_mermaid",
             "screen_mode",
             "scroll_mode",
+            "subagents.permission_mode",
             "theme",
         ],
         "Enum kind membership drift",
@@ -1865,6 +1910,7 @@ fn enum_settings_membership_through_pr_14() {
             "render_mermaid",
             "screen_mode",
             "scroll_mode",
+            "subagents.permission_mode",
             "theme",
         ],
     );
@@ -1887,6 +1933,7 @@ fn defaults_round_trip_through_registry() {
     pager::appearance::cache::set_group_tool_verbs(true);
     pager::appearance::cache::set_page_flip_on_send(true);
     pager::appearance::cache::set_combine_queued_prompts(false);
+    pager::appearance::cache::set_show_model_provider(false);
     pager::appearance::cache::set_scroll_mode(pager::appearance::ScrollMode::Auto);
     pager::appearance::cache::set_invert_scroll(false);
     // 3 = the registry default shown while the profile is in charge.
@@ -1898,6 +1945,7 @@ fn defaults_round_trip_through_registry() {
             "compact_mode" => SettingValue::Bool(false),
             "screen_mode" => SettingValue::Enum("fullscreen"),
             "show_timestamps" => SettingValue::Bool(true),
+            "show_model_provider" => SettingValue::Bool(false),
             "show_timeline" => SettingValue::Bool(false),
             "page_flip_on_send" => SettingValue::Bool(true),
             "combine_queued_prompts" => SettingValue::Bool(false),
@@ -1911,6 +1959,7 @@ fn defaults_round_trip_through_registry() {
             "auto_light_theme" => SettingValue::Enum("growday"),
             "render_mermaid" => SettingValue::Enum("auto"),
             "permission_mode" => SettingValue::Enum("ask"),
+            "subagents.permission_mode" => SettingValue::Enum("auto"),
             "default_model" => SettingValue::String(String::new()),
             "max_thoughts_width" => SettingValue::Int(120),
             "scroll_speed" => SettingValue::Int(50),
@@ -1985,6 +2034,9 @@ fn settings_value_payload_matches_kind() {
         if is_group_child(&reg, meta.key) {
             continue;
         }
+        if meta.key == "show_model_provider" {
+            pager::appearance::cache::set_show_model_provider(false);
+        }
         let mut state = make_state();
         navigate_to(&mut state, meta.key);
         let outcome = handle_settings_key(&mut state, &press(KeyCode::Char(' ')));
@@ -2006,11 +2058,15 @@ fn settings_value_payload_matches_kind() {
             | SettingsKeyOutcome::Action(Action::SetPromptSuggestions(_))
             | SettingsKeyOutcome::Action(Action::SetGroupToolVerbs(_))
             | SettingsKeyOutcome::Action(Action::SetInvertScroll(_))
+            | SettingsKeyOutcome::Action(Action::SetShowModelProvider(_))
             | SettingsKeyOutcome::Action(Action::SetDisplayRefreshAutoCadence(_)) => {}
             other => panic!(
                 "expected a typed bool setter for `{}`, got {:?}",
                 meta.key, other
             ),
+        }
+        if meta.key == "show_model_provider" {
+            pager::appearance::cache::set_show_model_provider(false);
         }
     }
 }
@@ -6435,4 +6491,71 @@ fn group_tool_verbs_renders_under_appearance_category_shell_owned() {
         "group_tool_verbs must be immediately below respect_manual_folds; \
          Appearance order: {keys:?}"
     );
+}
+
+#[test]
+fn subagent_permission_setting_keyboard_commits_all_modes_independently() {
+    use workspace::permission::types::RequestPermissionMode;
+    for (idx, mode) in [
+        RequestPermissionMode::Ask,
+        RequestPermissionMode::Auto,
+        RequestPermissionMode::AlwaysApprove,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let mut s = make_state();
+        s.pager_snapshot.auto_mode_gate = false;
+        s.ui_snapshot.permission_mode = Some("always-approve".into());
+        navigate_to(&mut s, "subagents.permission_mode");
+        handle_settings_key(&mut s, &press(KeyCode::Enter));
+        assert!(matches!(s.mode(), SettingsModalMode::PickingEnum { .. }));
+        handle_settings_key(&mut s, &press(KeyCode::Up));
+        for _ in 0..idx {
+            handle_settings_key(&mut s, &press(KeyCode::Down));
+        }
+        let outcome = handle_settings_key(&mut s, &press(KeyCode::Enter));
+        assert!(
+            matches!(outcome, SettingsKeyOutcome::Action(Action::SetSubagentPermissionMode(actual)) if actual == mode),
+            "{outcome:?}"
+        );
+        assert_eq!(
+            s.ui_snapshot.permission_mode.as_deref(),
+            Some("always-approve")
+        );
+    }
+}
+
+#[test]
+fn subagent_permission_setting_mouse_opens_its_own_picker() {
+    let mut s = make_state();
+    synth_rects(&mut s);
+    let row_y = row_idx_for(&s, "subagents.permission_mode") as u16;
+    for _ in 0..2 {
+        handle_settings_mouse(
+            &mut s,
+            MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            10,
+            row_y,
+        );
+    }
+    assert!(
+        matches!(s.mode(), SettingsModalMode::PickingEnum { key, .. } if key == "subagents.permission_mode")
+    );
+}
+
+#[test]
+fn subagent_permission_setting_is_searchable() {
+    let mut s = make_state();
+    handle_settings_key(&mut s, &press(KeyCode::Char('/')));
+    for c in "subagent permission".chars() {
+        handle_settings_key(&mut s, &press(KeyCode::Char(c)));
+    }
+    assert!(s.filtered_indices().iter().any(|&idx| matches!(
+        s.rows[idx],
+        RowEntry::Setting {
+            key: "subagents.permission_mode",
+            ..
+        }
+    )));
 }

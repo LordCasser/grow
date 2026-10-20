@@ -90,6 +90,24 @@ const THEME_CHOICES: &[EnumChoice] = &[
 // Choice order: safe → classifier → unsafe (Ask → Auto → Always approve).
 // "Always approve" at the end creates a speed bump against
 // accidental selection.
+const SUBAGENT_PERMISSION_MODE_CHOICES: &[EnumChoice] = &[
+    EnumChoice {
+        canonical: "ask",
+        display: "Ask",
+        description: "Ask the user to approve child tool requests that need review.",
+    },
+    EnumChoice {
+        canonical: "auto",
+        display: "Auto",
+        description: "Use the configured classifier to review child requests; unavailable judgments deny.",
+    },
+    EnumChoice {
+        canonical: "always-approve",
+        display: "Always approve",
+        description: "Approve reviewable child requests automatically, within delegated capability limits.",
+    },
+];
+
 const PERMISSION_MODE_CHOICES: &[EnumChoice] = &[
     EnumChoice {
         canonical: "ask",
@@ -580,6 +598,29 @@ pub fn default_settings() -> Vec<SettingMeta> {
                 supports_preview: false,
             },
             restart_required: false,
+            hidden_in_minimal: false,
+        },
+        SettingMeta {
+            key: "subagents.permission_mode",
+            category: SettingCategory::Agent,
+            owner: SettingOwner::Shell,
+            label: "Subagent permission mode",
+            description: "Permission policy for subagents, independent of the primary Agent. Restart to apply.",
+            keywords: &[
+                "subagent",
+                "child",
+                "permission",
+                "approval",
+                "ask",
+                "auto",
+                "always",
+            ],
+            kind: SettingKind::Enum {
+                default: "auto",
+                choices: SUBAGENT_PERMISSION_MODE_CHOICES,
+                supports_preview: false,
+            },
+            restart_required: true,
             hidden_in_minimal: false,
         },
         // SHELL-owned `[ui].remember_tool_approvals`. Gates the per-tool

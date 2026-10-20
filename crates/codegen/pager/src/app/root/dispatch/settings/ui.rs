@@ -73,6 +73,7 @@ pub(crate) fn refresh_open_settings_modals(app: &mut AppView) {
             state.pager_snapshot = crate::settings::PagerLocalSnapshot {
                 multiline_mode: agent.multiline_mode,
                 permission_mode: agent.session.permission_mode(),
+                subagent_permission_mode: app.subagent_permission_mode,
                 current_model_id: default_model_id.clone(),
                 available_models: default_model_catalog.clone(),
                 behavior_mode: agent.session.effective_behavior(),
@@ -219,6 +220,7 @@ pub(in crate::app::root::dispatch) fn dispatch_open_settings(
     let pager_snapshot = crate::settings::PagerLocalSnapshot {
         multiline_mode: agent.multiline_mode,
         permission_mode: agent.session.permission_mode(),
+        subagent_permission_mode: app.subagent_permission_mode,
         current_model_id: default_model_id,
         available_models: default_model_catalog,
         behavior_mode: agent.session.effective_behavior(),
@@ -665,6 +667,7 @@ pub(crate) fn build_pager_snapshot(app: &AppView) -> crate::settings::PagerLocal
     crate::settings::PagerLocalSnapshot {
         multiline_mode: agent_multiline_mode(app),
         permission_mode: agent_permission_mode(app),
+        subagent_permission_mode: app.subagent_permission_mode,
         current_model_id: app.models.current_model_id_str().map(str::to_owned),
         available_models: app
             .models
@@ -818,6 +821,10 @@ pub(in crate::app::root::dispatch) fn action_for_reset(
         ("auto_update", SettingValue::Bool(b)) => Some(Action::SetAutoUpdate(*b)),
         ("display_refresh_auto_cadence", SettingValue::Bool(b)) => {
             Some(Action::SetDisplayRefreshAutoCadence(*b))
+        }
+        ("subagents.permission_mode", SettingValue::Enum(s)) => {
+            crate::settings::parse_subagent_permission_mode(s)
+                .map(Action::SetSubagentPermissionMode)
         }
         // hunk_tracker_mode: canonical enum string round-trip.
         ("hunk_tracker_mode", SettingValue::Enum(s)) => {
@@ -1031,6 +1038,11 @@ pub(in crate::app::root::dispatch) fn apply_setting_rollback(
         }
         ("show_model_provider", SettingValue::Bool(enabled)) => {
             crate::appearance::cache::set_show_model_provider(*enabled);
+        }
+        ("subagents.permission_mode", SettingValue::Enum(s)) => {
+            if let Some(mode) = crate::settings::parse_subagent_permission_mode(s) {
+                app.subagent_permission_mode = mode;
+            }
         }
         // hunk_tracker_mode: restore the in-memory ui mirror.
         ("hunk_tracker_mode", SettingValue::Enum(s)) => {

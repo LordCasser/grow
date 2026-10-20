@@ -1344,6 +1344,7 @@ pub(super) fn dispatch_dashboard_dispatch_slash(app: &mut AppView, text: String)
             pager_state: crate::settings::PagerLocalSnapshot {
                 multiline_mode: dashboard_multiline,
                 permission_mode: pending_permission.as_runtime(),
+                subagent_permission_mode: app.subagent_permission_mode,
                 current_model_id: app.models.current_model_id_str().map(str::to_owned),
                 available_models: app
                     .models

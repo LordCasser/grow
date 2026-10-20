@@ -1039,6 +1039,9 @@ fn dispatch_inner(action: Action, app: &mut AppView) -> Vec<Effect> {
         Action::ToggleTimestamps => dispatch_toggle_timestamps(app),
         Action::SetPermissionMode(kind) => set_permission_mode(app, kind),
         Action::SetDefaultPermissionMode(kind) => set_default_permission_mode(app, kind),
+        Action::SetSubagentPermissionMode(mode) => {
+            super::settings::setters::set_subagent_permission_mode(app, mode)
+        }
         Action::SetMultilineMode(v) => set_multiline_mode(app, v),
         Action::SetRenderMermaid(kind) => set_render_mermaid(app, kind),
         Action::SetShowModelProvider(enabled) => set_show_model_provider(app, enabled),

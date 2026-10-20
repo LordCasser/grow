@@ -1568,6 +1568,14 @@ fn move_setting_away_from_default(app: &mut AppView, key: crate::settings::Setti
         "multiline_mode" => {
             let _ = dispatch(Action::SetMultilineMode(true), app);
         }
+        "subagents.permission_mode" => {
+            let _ = dispatch(
+                Action::SetSubagentPermissionMode(
+                    workspace::permission::types::RequestPermissionMode::Ask,
+                ),
+                app,
+            );
+        }
         "render_mermaid" => {
             let _ = dispatch(
                 Action::SetRenderMermaid(crate::appearance::RenderMermaid::Off),
@@ -3541,4 +3549,110 @@ fn mouse_reporting_toggle_off_sticky_persists_after_transient_toast() {
         Some("Mouse reporting on"),
     );
     reset_mouse_capture_enabled(true);
+}
+
+#[test]
+fn subagent_permission_setting_queued_failure_restores_confirmed_policy() {
+    use crate::settings::SettingValue;
+    use workspace::permission::types::RequestPermissionMode as Mode;
+    for first_succeeds in [false, true] {
+        let mut app = test_app_with_agent();
+        app.current_ui.permission_mode = Some("always-approve".into());
+        let active_permission = app
+            .agents
+            .values()
+            .next()
+            .unwrap()
+            .session
+            .permission_mode();
+        let first = dispatch(Action::SetSubagentPermissionMode(Mode::Ask), &mut app);
+        assert!(matches!(
+            &first[..],
+            [Effect::PersistSetting {
+                key: "subagents.permission_mode",
+                value: SettingValue::Enum("ask"),
+                ..
+            }]
+        ));
+        assert!(
+            dispatch(
+                Action::SetSubagentPermissionMode(Mode::AlwaysApprove),
+                &mut app
+            )
+            .is_empty()
+        );
+        let queued = complete_setting_request(&mut app, &first[0], first_succeeds);
+        assert_eq!(app.subagent_permission_mode, Mode::AlwaysApprove);
+        assert!(matches!(
+            &queued[..],
+            [Effect::PersistSetting {
+                key: "subagents.permission_mode",
+                value: SettingValue::Enum("always-approve"),
+                ..
+            }]
+        ));
+        assert!(complete_setting_request(&mut app, &queued[0], false).is_empty());
+        assert_eq!(
+            app.subagent_permission_mode,
+            if first_succeeds {
+                Mode::Ask
+            } else {
+                Mode::Auto
+            }
+        );
+        assert_eq!(
+            app.current_ui.permission_mode.as_deref(),
+            Some("always-approve")
+        );
+        assert_eq!(
+            app.agents
+                .values()
+                .next()
+                .unwrap()
+                .session
+                .permission_mode(),
+            active_permission
+        );
+        assert_eq!(
+            dispatch(
+                Action::SetSubagentPermissionMode(Mode::AlwaysApprove),
+                &mut app
+            )
+            .len(),
+            1
+        );
+    }
+}
+
+#[test]
+fn subagent_permission_setting_reset_persists_auto_and_refreshes_modal() {
+    use crate::settings::SettingValue;
+    use workspace::permission::types::RequestPermissionMode as Mode;
+    let mut app = test_app_with_agent();
+    app.auto_mode_gate = false;
+    app.subagent_permission_mode = Mode::Ask;
+    setup_reset_confirm_open(&mut app, "subagents.permission_mode");
+    let effects = dispatch(
+        Action::ConfirmResetSetting {
+            choice: crate::views::modal::ResetSettingsResult::Reset,
+        },
+        &mut app,
+    );
+    assert_eq!(app.subagent_permission_mode, Mode::Auto);
+    let Some(crate::views::modal::ActiveModal::Settings { state }) =
+        &app.agents[&AgentId(0)].active_modal
+    else {
+        panic!("settings must remain open")
+    };
+    assert_eq!(state.pager_snapshot.subagent_permission_mode, Mode::Auto);
+    assert!(matches!(
+        &effects[..],
+        [Effect::PersistSetting {
+            key: "subagents.permission_mode",
+            value: SettingValue::Enum("auto"),
+            ..
+        }]
+    ));
+    assert!(complete_setting_request(&mut app, &effects[0], true).is_empty());
+    assert!(dispatch(Action::SetSubagentPermissionMode(Mode::Auto), &mut app).is_empty());
 }

@@ -545,6 +545,7 @@ fn rows_contain_categories_and_settings_through_pr_14() {
             "prompt_suggestions",
             // SHELL-owned permission_mode (Agent category).
             "permission_mode",
+            "subagents.permission_mode",
             // SHELL-owned remember_tool_approvals (Agent category,
             // registered right after permission_mode).
             "remember_tool_approvals",

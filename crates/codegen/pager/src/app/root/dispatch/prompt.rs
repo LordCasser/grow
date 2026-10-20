@@ -684,6 +684,7 @@ pub(super) fn dispatch_send_prompt_inner(
                 pager_state: crate::settings::PagerLocalSnapshot {
                     multiline_mode: agent.multiline_mode,
                     permission_mode: agent.session.permission_mode(),
+                    subagent_permission_mode: app.subagent_permission_mode,
                     current_model_id: control_intent_models
                         .current_model_id_str()
                         .map(str::to_owned),

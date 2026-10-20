@@ -9,6 +9,8 @@
 - **Provider 缓存策略与 native epoch 的关系（暂缓、待真实路由证据）**：[理论 review](changes/archive/2026-09-28-evaluate-provider-cache-affinity/results.md) 只能确认当前 key、breakpoint 与 retention 的本地机制及各官方契约，不能证明统一调整会改善多 provider 的成本与延迟。若要优化，先确认具体 provider/model/deployment、字段透传与负载，再按该 route 的真实证据另开最小行为 change；不预建通用 cache policy registry。
 - **Recap 与主请求缓存的关系（暂缓、待真实共享前缀与收益证据）**：recap 使用独立 key 且没有主请求 tools，已修正把本地 wire 形状表述成远端复用的注释和测试名。真实共享前缀与收益仍未验证；保留 Sideband tool-free 契约，不能为缓存假设增加工具定义。
 
+- **Settings 交互覆盖的完整性限制**：catalog 与 ALL_SETTINGS_EXERCISED 的 42/42 字符串登记不证明每项键盘/鼠标路径均已执行；部分 Enum 只覆盖鼠标打开 picker，Int/DynamicEnum 等缺少同等范围的交互覆盖。逐项按真实路径补强时另开最小测试维护 change，不引入通用测试生成框架。审计见 [配置入口审查](changes/archive/2026-10-20-complete-settings-preference-test-inventory/audit.md)。
+
 ## 本轮已解决
 
 - **Pager/CLI 构建身份失效路径（独立债务）**：build.rs 以 crate 相对 `.git/HEAD` 注册并不存在的路径，使重复 Cargo 调用重新编译；发布门禁已观察 pager 在 no-run 后的枚举阶段再次编译。exact runner 将直接运行已编译产物以隔离阶段预算；Git/worktree/branch ref 的精确失效追踪另项修正，不混入本次 runner 改动。
@@ -16,6 +18,7 @@
 
 | 问题 | 归档与验证 |
 | --- | --- |
+| show_model_provider 的四项集成清单遗漏、完整 Settings integration 未进发布门禁 | [设置清单与门禁](changes/archive/2026-10-20-complete-settings-preference-test-inventory/verification.md) |
 | 恢复放行后、等待未重绑时再次挂起丢失逻辑等待 | [跨恢复周期等待](changes/archive/2026-10-20-preserve-waits-across-runtime-release/verification.md) |
 | 已处置的未派发任务仍阻塞 scope 切换 | [scope 义务校验](changes/archive/2026-10-20-fix-undispatched-planning-scope/verification.md) |
 | 树冻结失败重试换 owner、节点意图前 Suspended 等待丢失 | [树挂起准入边界](changes/archive/2026-10-20-fix-tree-suspension-admission-boundaries/verification.md) |
