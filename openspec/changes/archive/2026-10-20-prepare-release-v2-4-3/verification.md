@@ -15,3 +15,9 @@ Python scripts 34 项执行，33 通过、1 skipped；修改 Rust 文件 rustfmt
 准备归档只证明候选可供托管验证，不宣称公开发布已完成。跟踪全部门禁和十平台构建，通过后核对 Release 非草稿/非预发布/latest、十个 archive + SHA256SUMS、远端 tag commit、实际下载的 macOS ARM64 包摘要/签名/隔离配置版本身份，再追加最终结果。
 
 归档后严格校验：Totals: 16 passed, 0 failed (16 items)；Totals: 663 passed, 0 failed (663 items)。
+
+## 首轮候选的 Windows 夹具失败
+
+候选 578d0fb2232e5286e26dc62ccfbbed2df21b7a25 与 annotated tag object f3a28be37f65ed81f37444609a05dcfa3fab7f2b 已通过静态 preflight 并推送。官方 [run 39422108840](https://github.com/LordCasser/grow/actions/runs/39422108840) 中完整 Settings integration 已 success；Windows native job 118625552333 的 Shell coordination 组为 56 passed、2 failed，两个原有未监听 localhost 夹具在 5 秒 deadline 内未结算。
+
+未跳过失败用例或放宽期限，独立 [test-only change](../2026-10-20-stabilize-coordination-rejection-fixtures/verification.md) 改为受控本地 HTTP 拒绝并断言恰好一个实际请求。旧官方 run 已 completed/cancelled，Release API 返回 404；新的候选仅在这些确认后以 expected tag-object lease 替换未发布的 v2.4.3。已公开 v2.4.2 不变，旧候选通过项不代替最终候选的正式门禁。

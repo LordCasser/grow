@@ -836,6 +836,31 @@ mod tests {
         )
     }
 
+    async fn mock_coordination_rejection(
+        actor: &SessionActor,
+    ) -> test_support::MockInferenceServer {
+        use test_support::{MockInferenceServer, ScriptedResponse};
+
+        let server = MockInferenceServer::start().await.unwrap();
+        server.enqueue_response(
+            "/v1/chat/completions",
+            ScriptedResponse::json(
+                400,
+                serde_json::json!({
+                    "error": {
+                        "message": "coordination fixture rejection",
+                        "type": "invalid_request_error"
+                    }
+                }),
+            ),
+        );
+        let mut config = actor.chat_state_handle.get_sampling_config().await.unwrap();
+        config.base_url = server.url();
+        config.api_backend = sampling_types::ApiBackend::ChatCompletions;
+        actor.chat_state_handle.replace_sampling_route(config);
+        server
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn source_startup_admission_survives_rebuild_without_duplicate_append_or_notice() {
         tokio::task::LocalSet::new()
@@ -1302,6 +1327,7 @@ mod tests {
                     )
                     .await,
                 );
+                let server = mock_coordination_rejection(&actor).await;
                 let before = actor
                     .chat_state_handle
                     .materialize_timeline(actor.session_info.id.to_string())
@@ -1319,8 +1345,9 @@ mod tests {
                     actor.handle_coordination_inquiry(&inquiry),
                 )
                 .await
-                .expect("non-listening test provider must fail promptly");
+                .expect("mock provider rejection must fail promptly");
                 assert_eq!(outcome.status, crate::coordination::InquiryStatus::Failed);
+                assert_eq!(server.request_count(), 1);
                 let after = actor
                     .chat_state_handle
                     .materialize_timeline(actor.session_info.id.to_string())
@@ -1497,6 +1524,7 @@ mod tests {
                     )
                     .await,
                 );
+                let server = mock_coordination_rejection(&actor).await;
                 let observed = Arc::new(std::sync::Mutex::new(None));
                 let observed_for_gateway = Arc::clone(&observed);
                 tokio::task::spawn_local(async move {
@@ -1526,6 +1554,7 @@ mod tests {
                 .unwrap();
 
                 assert_eq!(outcome.status, crate::coordination::InquiryStatus::Failed);
+                assert_eq!(server.request_count(), 1);
                 let request = observed.lock().unwrap().clone().unwrap();
                 assert_eq!(request.session_id, actor.session_info.id);
                 assert_eq!(request.options.len(), 2);
