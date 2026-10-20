@@ -105,7 +105,17 @@ jobs:
       - name: Install cross
         if: ${{ inputs.builder == 'cross' }}
         shell: bash
-        run: cargo install cross --locked --version 0.2.5
+        run: |
+          set -euo pipefail
+          archive="${RUNNER_TEMP}/cross-0.2.5-x86_64-linux-gnu.tar.gz"
+          curl --fail --location --retry 5 --retry-all-errors \
+            --output "$archive" \
+            https://github.com/cross-rs/cross/releases/download/v0.2.5/cross-x86_64-unknown-linux-gnu.tar.gz
+          echo "642375d1bcf3bd88272c32ba90e999f3d983050adf45e66bd2d3887e8e838bad  $archive" | sha256sum --check --strict
+          stage="$(mktemp -d "${RUNNER_TEMP}/cross-0.2.5.XXXXXX")"
+          tar -xzf "$archive" -C "$stage"
+          install -m 755 "$stage/cross" "$stage/cross-util" "${HOME}/.cargo/bin/"
+          cross --version | grep -E '^cross 0\.2\.5( |$)'
 
       - name: Prepare bundled ripgrep
         if: ${{ inputs.builder != 'windows' && inputs.builder != 'ohos' }}
@@ -187,6 +197,7 @@ jobs:
             -e "HOME=${HOME}" -e "HOST_UID=${HOST_UID}" -e "HOST_GID=${HOST_GID}" \
             -e "CARGO_HOME=${CARGO_HOME}" -e "RUSTUP_HOME=${RUSTUP_HOME}" \
             -e "GROW_VERSION=${GROW_VERSION}" \
+            -e "RELEASE_COMMIT=${RELEASE_COMMIT}" \
             -e "GROW_TOOLS_BUNDLE_RG_PATH=${GROW_TOOLS_BUNDLE_RG_PATH}" \
             -e "GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1" \
             -e "TARGET_TRIPLE=${TARGET_TRIPLE}" -e "CARGO_INCREMENTAL=0" \
@@ -209,7 +220,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          export CROSS_CONTAINER_OPTS="-v ${GITHUB_WORKSPACE}/.build-tools:/opt/tools:ro -e GROW_VERSION=${GROW_VERSION} -e GROW_TOOLS_BUNDLE_RG_PATH=/opt/tools/rg/${ASSET_PLATFORM}/rg -e GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1"
+          export CROSS_CONTAINER_OPTS="-v ${GITHUB_WORKSPACE}/.build-tools:/opt/tools:ro -e GROW_VERSION=${GROW_VERSION} -e RELEASE_COMMIT=${RELEASE_COMMIT} -e GROW_TOOLS_BUNDLE_RG_PATH=/opt/tools/rg/${ASSET_PLATFORM}/rg -e GROW_TOOLS_BUNDLE_RG_SKIP_EXEC_CHECK=1"
           cross build --locked --profile release-dist \
             --features release-dist -p cli --bin grow --target "${TARGET_TRIPLE}"
 
@@ -255,6 +266,7 @@ jobs:
           docker run --pull always --rm \
             -v "${GITHUB_WORKSPACE}:/workspace/grow" -w /workspace/grow \
             -e "GROW_VERSION=${GROW_VERSION}" \
+            -e "RELEASE_COMMIT=${RELEASE_COMMIT}" \
             -e "CARGO_PROFILE=release-dist" \
             -e "CARGO_TARGET_DIR=/workspace/grow/target-ohos" \
             -e "CARGO_INCREMENTAL=0" \
@@ -382,7 +394,9 @@ jobs:
           bin="target/${TARGET_TRIPLE}/release-dist/grow"
           test -x "$bin"
           test -s "$bin"
-          "$bin" --version | tee /dev/stderr | grep -F "${GROW_VERSION}"
+          actual_version="$("$bin" --version)"
+          echo "$actual_version"
+          test "$actual_version" = "grow ${GROW_VERSION} (${RELEASE_COMMIT:0:7})"
           python scripts/test_local_coordination.py --binary "$bin"
 
       - name: Smoke-test native binary
@@ -392,7 +406,8 @@ jobs:
           $bin = "target/$env:TARGET_TRIPLE/release-dist/grow.exe"
           if (-not (Test-Path $bin)) { throw "missing $bin" }
           $version = & $bin --version
-          if ($version -notlike "*$env:GROW_VERSION*") { throw "unexpected version: $version" }
+          $expected = "grow $env:GROW_VERSION ($($env:RELEASE_COMMIT.Substring(0, 7)))"
+          if ($version -ne $expected) { throw "unexpected version: $version (expected $expected)" }
           python scripts/test_local_coordination.py --binary $bin
           if ($LASTEXITCODE -ne 0) { throw "native process regression failed: $LASTEXITCODE" }
 

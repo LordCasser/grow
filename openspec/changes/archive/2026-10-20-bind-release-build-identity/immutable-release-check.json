@@ -1,0 +1,96 @@
+{
+  "release_url": "https://github.com/LordCasser/grow/releases/tag/v2.4.1",
+  "before_after_api_equal": true,
+  "public_release": {
+    "assets": [
+      {
+        "digest": "sha256:882e54a30baa9161531c01b21b456f1dce65f562545c6eee5e73318e61ea566b",
+        "id": 657043390,
+        "name": "grow-2.4.1-linux-aarch64-musl.tar.gz",
+        "size": 45766724,
+        "updated_at": "2026-10-19T18:13:31Z"
+      },
+      {
+        "digest": "sha256:2dd807245f6dfa891d0fb079737ee25cd819ab8515283332ca22610aa7d98172",
+        "id": 657043387,
+        "name": "grow-2.4.1-linux-aarch64.tar.gz",
+        "size": 46250939,
+        "updated_at": "2026-10-19T18:13:30Z"
+      },
+      {
+        "digest": "sha256:67a37f52ecdfa3b0fda18af501c3082bc5073122f2d4f86bc513369ce89440d4",
+        "id": 657043392,
+        "name": "grow-2.4.1-linux-riscv64.tar.gz",
+        "size": 49060054,
+        "updated_at": "2026-10-19T18:13:31Z"
+      },
+      {
+        "digest": "sha256:24cf98e6c3767afeb2c9fab2fc6de0dda61f90f6fd79b38dbe92f95ac7f9a4e9",
+        "id": 657043391,
+        "name": "grow-2.4.1-linux-x86_64-musl.tar.gz",
+        "size": 49846359,
+        "updated_at": "2026-10-19T18:13:31Z"
+      },
+      {
+        "digest": "sha256:2e712e51c1a1e74b5449f1721d1845dc54f1794c22eeed1ab1ef6e2e9a9892b8",
+        "id": 657043388,
+        "name": "grow-2.4.1-linux-x86_64.tar.gz",
+        "size": 49278761,
+        "updated_at": "2026-10-19T18:13:31Z"
+      },
+      {
+        "digest": "sha256:624ebf338936e301a56d0981df7f501ef70e52bfbadbc307345140e96aebac69",
+        "id": 657043508,
+        "name": "grow-2.4.1-macos-aarch64.tar.gz",
+        "size": 43150051,
+        "updated_at": "2026-10-19T18:13:32Z"
+      },
+      {
+        "digest": "sha256:b5d26df1814dd8df91865a7a44d0b0de786a065a5df2c103f71c94c276d116b5",
+        "id": 657043515,
+        "name": "grow-2.4.1-macos-x86_64.tar.gz",
+        "size": 46816598,
+        "updated_at": "2026-10-19T18:13:33Z"
+      },
+      {
+        "digest": "sha256:496784173c2ceb225a292cadc6ceb828a0426eb1b55665c4b3cf2dd8422e26b6",
+        "id": 657043513,
+        "name": "grow-2.4.1-ohos-aarch64.tar.gz",
+        "size": 42695774,
+        "updated_at": "2026-10-19T18:13:33Z"
+      },
+      {
+        "digest": "sha256:4f555274a1e15e86a4304fea11b5d78d980bab78b579c320ed1ffc386d4809f5",
+        "id": 657043516,
+        "name": "grow-2.4.1-windows-aarch64.tar.gz",
+        "size": 41397522,
+        "updated_at": "2026-10-19T18:13:33Z"
+      },
+      {
+        "digest": "sha256:2d5e09243d0463ed4f87420565adee097259cb245fc1d9ba06d2512ebc359595",
+        "id": 657043512,
+        "name": "grow-2.4.1-windows-x86_64.tar.gz",
+        "size": 44601063,
+        "updated_at": "2026-10-19T18:13:33Z"
+      },
+      {
+        "digest": "sha256:6458c230d961a1b5713161e4f03c7ecb800c640b7d87370341e718f65d78c20a",
+        "id": 657045636,
+        "name": "SHA256SUMS",
+        "size": 989,
+        "updated_at": "2026-10-19T18:14:24Z"
+      }
+    ],
+    "draft": false,
+    "id": 417597536,
+    "prerelease": false,
+    "published_at": "2026-10-19T18:14:26Z",
+    "tag_name": "v2.4.1"
+  },
+  "tag_object": "2b2a19332ee90fdf5378a5bccaaf4f6e7e5df92a",
+  "tag_source": "5fcbd12b0c10afef1f34695394d2ad81ff5b5310",
+  "remote_tag_matches_local": true,
+  "mcp_branch_unchanged": "5b375b07c08ec113c06cb9fa426bd0353e114941",
+  "stash_unchanged": "29671011ad27541fa97a8cc649d63190532aed60",
+  "root_cargo_lock_unchanged": true
+}

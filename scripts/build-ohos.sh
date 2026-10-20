@@ -42,6 +42,7 @@
 #   OHOS_SDK_ROOT            SDK root (default /opt/ohos-sdk/ohos)
 #   GROW_VERSION             version stamp for VERSION_WITH_COMMIT
 #                            (default: [workspace.package].version)
+#   RELEASE_COMMIT           validated full source commit for release builds
 #   GROW_TOOLS_BUNDLE_RG_PATH  embed this OHOS rg binary (optional; else PATH rg)
 #   CARGO_PROFILE            release (default) | release-dist
 #   CARGO_TARGET_DIR         (default $HOME/grow-target; container-local so the
@@ -126,7 +127,24 @@ smoke_existing_artifact() {
   done
   export TERM=xterm-256color
   export HOME="${HOME:-/storage/Users/currentUser}"
-  "$BIN" --version
+  version_output="$(GROW_HOME="$HOME/.grow-smoke" "$BIN" --version)"
+  printf '%s\n' "$version_output"
+  if [ "${RELEASE_COMMIT+x}" ]; then
+    if [[ ! "$RELEASE_COMMIT" =~ ^[0123456789ABCDEFabcdef]{40}$ ]]; then
+      echo "error: RELEASE_COMMIT must contain exactly 40 ASCII hexadecimal characters" >&2
+      exit 1
+    fi
+    if [ -z "${GROW_VERSION:-}" ]; then
+      echo "error: GROW_VERSION is required when RELEASE_COMMIT is set" >&2
+      exit 1
+    fi
+    short_commit="$(printf '%.7s' "$RELEASE_COMMIT" | tr 'ABCDEF' 'abcdef')"
+    expected="grow $GROW_VERSION ($short_commit)"
+    if [ "$version_output" != "$expected" ]; then
+      echo "error: unexpected version identity; expected '$expected', got '$version_output'" >&2
+      exit 1
+    fi
+  fi
   GROW_HOME="$HOME/.grow-smoke" "$BIN" sessions list
   GROW_HOME="$HOME/.grow-smoke" "$BIN" doctor 2>&1 | head -10 || true
 }

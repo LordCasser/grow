@@ -3,15 +3,26 @@ use std::process::Command;
 fn main() {
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-env-changed=GROW_VERSION");
+    println!("cargo:rerun-if-env-changed=RELEASE_COMMIT");
 
-    let commit = Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
+    let commit = match std::env::var_os("RELEASE_COMMIT") {
+        Some(value) => {
+            let value = value.to_str().expect("RELEASE_COMMIT must be Unicode");
+            assert!(
+                value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()),
+                "RELEASE_COMMIT must contain exactly 40 ASCII hexadecimal characters"
+            );
+            value[..7].to_ascii_lowercase()
+        }
+        None => Command::new("git")
+            .args(["rev-parse", "--short", "HEAD"])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .and_then(|o| String::from_utf8(o.stdout).ok())
+            .map(|s| s.trim().to_string())
+            .unwrap_or_else(|| "unknown".to_string()),
+    };
 
     let version = std::env::var("GROW_VERSION")
         .or_else(|_| std::env::var("CARGO_PKG_VERSION"))

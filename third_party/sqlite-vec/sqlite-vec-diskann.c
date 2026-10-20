@@ -919,6 +919,7 @@ static int diskann_robust_prune(
     f32 alpha, int max_neighbors,
     i64 *outNeighborRowids, int *outNeighborCount) {
 
+  UNUSED_PARAMETER(p_vector);
   struct VectorColumnDefinition *col = &p->vector_columns[vec_col_idx];
   int rc;
 

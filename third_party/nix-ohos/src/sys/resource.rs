@@ -438,6 +438,6 @@ mod test {
         let user = usage.user_time();
         assert!(user.tv_sec() > 0 || user.tv_usec() > 0);
         assert_eq!(user.tv_sec(), rusage.ru_utime.tv_sec);
-        assert_eq!(user.tv_usec(), rusage.ru_utime.tv_usec);
+        assert_eq!(user.tv_usec(), i64::from(rusage.ru_utime.tv_usec));
     }
 }

@@ -82,9 +82,22 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update
-          sudo apt-get install --yes ripgrep
+          sudo apt-get install --yes ripgrep libsqlite3-dev
           command -v rg
           rg --version
+      - name: Verify native vector dependency boundaries
+        run: |
+          set -euo pipefail
+          cc -O2 -Wall -Wextra -Werror -DSQLITE_CORE \
+            third_party/sqlite-vec/tests/native_boundaries.c -lsqlite3 -lm \
+            -o "${RUNNER_TEMP}/sqlite-vec-boundaries"
+          "${RUNNER_TEMP}/sqlite-vec-boundaries"
+          cc -O1 -g -Wall -Wextra -Werror -DSQLITE_CORE \
+            -fsanitize=address,undefined -fno-omit-frame-pointer \
+            third_party/sqlite-vec/tests/native_boundaries.c -lsqlite3 -lm \
+            -o "${RUNNER_TEMP}/sqlite-vec-boundaries-asan"
+          ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 \
+            "${RUNNER_TEMP}/sqlite-vec-boundaries-asan" --boundary-only
       - name: Run core and presentation regressions
         run: >-
           cargo test --locked --lib

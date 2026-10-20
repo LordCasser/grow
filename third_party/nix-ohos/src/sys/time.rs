@@ -565,12 +565,10 @@ impl TimeValLike for TimeVal {
         self.num_microseconds() / 1_000
     }
 
-    // The cast is not unnecessary on all platforms.
-    #[allow(clippy::unnecessary_cast)]
     fn num_microseconds(&self) -> i64 {
         let secs = self.num_seconds() * 1_000_000;
         let usec = self.micros_mod_sec();
-        secs + usec as i64
+        secs + usec
     }
 
     fn num_nanoseconds(&self) -> i64 {
@@ -588,9 +586,9 @@ impl TimeVal {
         })
     }
 
-    fn micros_mod_sec(&self) -> suseconds_t {
+    fn micros_mod_sec(&self) -> i64 {
         if self.tv_sec() < 0 && self.tv_usec() > 0 {
-            self.tv_usec() - MICROS_PER_SEC as suseconds_t
+            self.tv_usec() - MICROS_PER_SEC
         } else {
             self.tv_usec()
         }
@@ -601,8 +599,10 @@ impl TimeVal {
         self.0.tv_sec
     }
 
-    pub const fn tv_usec(&self) -> suseconds_t {
-        self.0.tv_usec
+    // The cast is not unnecessary on all platforms.
+    #[allow(clippy::unnecessary_cast)]
+    pub const fn tv_usec(&self) -> i64 {
+        self.0.tv_usec as i64
     }
 }
 
@@ -780,6 +780,23 @@ mod test {
             TimeVal::minutes(3) + TimeVal::seconds(2),
             TimeVal::seconds(182)
         );
+    }
+
+    #[test]
+    pub fn test_timeval_negative_seconds_positive_microseconds() {
+        let timeval = TimeVal::new(-2, 250_000);
+
+        assert_eq!(timeval.tv_usec(), 250_000);
+        assert_eq!(timeval.micros_mod_sec(), -750_000);
+        assert_eq!(timeval.num_microseconds(), -1_750_000);
+    }
+
+    #[test]
+    pub fn test_timeval_usec_matches_raw_libc_value() {
+        let timeval = TimeVal::new(123, 456_789);
+        let raw: &libc::timeval = timeval.as_ref();
+
+        assert_eq!(timeval.tv_usec(), i64::from(raw.tv_usec));
     }
 
     #[test]

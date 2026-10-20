@@ -4,7 +4,7 @@
 # as musl so libc-gated branches compile against OHOS's musl-shaped libc (see
 # the [patch.crates-io] comment in the workspace root Cargo.toml). Consumed by
 # pprof v0.15 (nix ^0.26) as of 2026-08; workspace crates use registry nix
-# 0.30 via workspace.dependencies.
+# 0.31.3 via workspace.dependencies.
 # Local modifications:
 #   src/sys/signal.rs: bare `extern fn` fn-pointer types rewritten as
 #   `extern "C" fn` (rustc missing_abi lint; same fix upstream shipped in
@@ -13,6 +13,8 @@
 #   rustc >= 1.83 in upstream nix 0.26..0.31 as well).
 #   src/sys/statfs.rs: same missing_abi fix.
 #   src/**: target_env="ohos" treated as musl in libc-gated cfg branches.
+#   src/sys/time.rs: microsecond arithmetic and the tv_usec accessor use i64,
+#   while TimeVal retains libc's timeval storage and raw constructor ABI.
 #   Cargo.toml: [lints.rust] check-cfg declares cfg(fbsd14), which upstream
 #   uses for FreeBSD 14 doc blocks (unexpected_cfgs lint; upstream never
 #   declared it).

@@ -39,7 +39,10 @@ feature, or a decision to accept aws-lc-rs (re-evaluate the OHOS constraint).
 
 **Why**: pprof 0.15.0 (the latest release) requires `nix ^0.26`. nix 0.26.x
 predates OpenHarmony support, so the vendored copy patches
-`target_env="ohos"` to behave like musl.
+`target_env="ohos"` to behave like musl. Microsecond value accessors now return
+`i64` instead of the deprecated musl `suseconds_t` alias; the raw
+`libc::timeval` layout, constructor and FFI boundary stay unchanged. See the
+[diagnostic repair](../../openspec/changes/archive/2026-10-20-repair-third-party-build-diagnostics/verification.md).
 
 **Blocking evidence**: pprof 0.15.0's `Cargo.toml`:
 `nix = { version = "0.26", default-features = false, features = ["signal", "fs"] }`.
@@ -67,11 +70,15 @@ the registry).
 **Why**: every published package containing the upstream musl typedef fix
 (0.1.10-alpha.2 through alpha.4) omits four C implementation files included by
 `sqlite-vec.c`; crates.io 0.1.9 lacks the musl fix. The vendored copy restores
-the files byte-identical to the upstream tag (see
-`third_party/sqlite-vec/Cargo.toml` VENDORING NOTES).
+the omitted files from the upstream tag and maintains a small source patch
+for missing-IN dispatch, unsupported vector/metric errors, initialization and
+portable warning-free compilation. This copy is no longer byte-identical to
+upstream; see `third_party/sqlite-vec/Cargo.toml` VENDORING NOTES and the
+[repair evidence](../../openspec/changes/archive/2026-10-20-repair-third-party-build-diagnostics/verification.md).
 
 **Unblock condition**: a crates.io release that both contains the musl fix and
-packages every included C file.
+packages every included C file and incorporates equivalent boundary fixes.
+Do not drop the maintained fixes merely because packaging is corrected.
 
 ## 5. rmcp's reqwest 0.13 integration
 
