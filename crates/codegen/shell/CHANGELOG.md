@@ -1,5 +1,11 @@
 # Changelog
 
+# 2.4.3 — 2026-10-20
+
+补齐子 Agent 权限模式设置，修正 Settings 测试覆盖，并将完整菜单集成测试纳入发布门禁。
+
+完整发布说明见 [changelogs/2.4.3.md](https://github.com/LordCasser/grow/blob/main/crates/codegen/shell/changelogs/2.4.3.md)。
+
 # 2.4.2 — 2026-10-20
 
 修复会话挂起与恢复、Goal/Plan 状态及工作范围切换，并改进构建诊断、资源释放和精确回归测试运行器。
