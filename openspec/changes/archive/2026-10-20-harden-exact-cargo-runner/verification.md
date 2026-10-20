@@ -1,0 +1,27 @@
+# Verification
+
+- `python3 -m unittest scripts.tests.test_run_exact_cargo_test -v`: **16 passed**. Coverage includes a temporary real Cargo/libtest crate, immediate streaming from a live subprocess, a forced output-reader I/O failure, exact and ignored selection, and finite positive deadline validation.
+- Real child-process tests verify timeout and KeyboardInterrupt tree cleanup; Unix tests additionally verify SIGTERM cleanup and bounded return with an explicit `cleanup unconfirmed` error when a detached descendant holds the output pipe after its parent exits. That fixture kills its escaped child in `finally` so a failing assertion cannot leave it running.
+- `python3 -m py_compile scripts/run_exact_cargo_test.py scripts/tests/test_run_exact_cargo_test.py`: passed.
+- `python3 scripts/run_exact_cargo_test.py --help`: passed; the compile default is 3600 seconds and all three deadlines can be overridden.
+- `openspec validate --all --strict --no-interactive`: **19 passed, 0 failed**.
+
+The existing `.github/workflows/windows-session-storage.yml` runs `python -m unittest discover -s scripts/tests` on `windows-2025` and its path filters include `scripts/run_exact_cargo_test.py` and `scripts/tests/**`; it will exercise the platform-independent real timeout and KeyboardInterrupt descendant fixtures through native `taskkill /T /F`. Native Windows execution has not been performed from this macOS host. The Unix-only escaped-descendant fixture verifies that a direct child can exit while a detached descendant holds stdout, then checks the runner returns within a bound with cleanup explicitly unconfirmed; the fixture forcibly stops its descendant in `finally`. The streaming regression uses a ready/release file handshake so it checks output arrival without assuming a child startup duration. The 60-minute compile default is a budget choice relative to the workflow's 90-minute total timeout, not a claim based on a cold-build benchmark; the three phase budgets total about 76 minutes. Runner-specific verification builds only the two-test libtest fixture; the separate Bash/watch changes were validated with the workspace Rust tests and Pager check recorded in their own changes.
+
+
+## Integrated completion — 2026-10-20
+
+- Full Python discovery with Rust 1.93.1: **29 tests OK, 1 skipped** (the existing OHOS-only smoke case on macOS). This run includes all 16 runner tests and the existing release metadata contracts. Existing Windows storage CI discovers the real cross-platform process-tree fixtures; hosted/native Windows was not run locally.
+- Bash production descriptor tests: **29 passed**. Shell watcher tests: **17 passed**; targeted config-watch/owner tests **14 passed**; disconnect tests **15 passed**, all with zero failed/ignored. These scoped sets overlap and are not added as unique test totals. Pager non-test type-check passed. No compiler warnings in these runs.
+- All three changes were archived with their deltas merged. Strict current validation: **16 passed**, archived validation: **648 passed**, zero failures. YAML, changed Rust formatting and diff hygiene checks passed; the unrelated pre-existing test formatting was preserved.
+- Read-only identity checks confirm the existing v2.4.1 tag object/source and public release with all 11 assets match the preceding immutable receipt. MCP branch, active MCP change, stash, root Cargo.toml/Cargo.lock and Git index remain unchanged. No commit, push or release performed.
+- An agent's accidental fresh debug target under target/release-dist was stopped and its own 2.8GB removed. The existing active default target cache was reused for verification; no global/user caches or release-dist artifacts were removed.
+
+
+## Main submission review — 2026-10-20
+
+- Submission scope contains exactly the four completed repairs and their existing archived changes: metadata-name ownership, Bash export capture, resident configuration-watch ownership, and exact Cargo runner deadlines/cleanup. The cancelled thinking-order draft is absent; its tracker/background/scrollback implementation has no diff.
+- Fresh pre-commit checks: `python3 -m unittest discover -s scripts/tests -v` ran **29 tests, OK, 1 skipped** (the OHOS-only case); strict current OpenSpec **16 passed**, archived OpenSpec **648 passed**. Full logs are `/tmp/grow-submit-fixes-python.log`, `/tmp/grow-submit-fixes-spec.log` and `/tmp/grow-submit-fixes-archives.log`. Existing Rust test/check logs were reviewed; Rust and sanitizer results above were not re-run for a documentation/commit-only operation. No new native Windows claim.
+- A separate read-only review found no mismatch between the four repairs and their contracts or verification boundaries. Parent review also checked the actual Git diff and confirmed no MCP, cancelled Thinking, root dependency or published tag changes.
+- The clean detached `grow-openspec-sdd` worktree was removed after confirming its HEAD is an ancestor of main. The obsolete `codex/pre-release-v2.1.10-local` branch was removed after creating and verifying `.git/retired-pre-release-v2.1.10-20261020.bundle`; its non-ancestor historical commits remain recoverable from that bundle. No remote branch deletion.
+- The desktop archive tool refused the attached `v2-4-0-release-finalization/grow` worktree because a pinned task or workspace protects it. That worktree and `codex/harden-runtime-release` remain. The MCP branch/worktree and existing stash remain intact.

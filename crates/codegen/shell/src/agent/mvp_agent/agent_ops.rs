@@ -196,29 +196,25 @@ impl MvpAgent {
     pub async fn flush_all_sessions(&self, grace: std::time::Duration) {
         self.activity.flush_all_sessions(grace).await;
     }
-    /// Install the channel that fans new session cwds into the runtime's
-    /// `ConfigFileWatcher::watch_path`, before accepting sessions. Both leader
-    /// and in-process runtimes wire it when project watching is enabled.
+    /// Install resident watch updates before accepting sessions. Both leader
+    /// and in-process runtimes consume acquisitions and releases when enabled.
     pub fn set_config_watcher_path_tx(
         &mut self,
-        tx: tokio::sync::mpsc::UnboundedSender<std::path::PathBuf>,
+        tx: tokio::sync::mpsc::UnboundedSender<crate::config::watcher::SessionConfigWatchUpdate>,
     ) {
         self.config_watcher_path_tx = Some(tx);
     }
-    /// Best-effort fan-out of a new session's `cwd` to the runtime's
-    /// `ConfigFileWatcher` for dynamic non-recursive registration
-    /// No-op if the channel was never installed
-    /// (`set_config_watcher_path_tx` was not called — watching disabled,
-    /// tests) or if the receiver has been dropped. Watcher errors are
-    /// logged inside the spawned task and do NOT propagate here.
-    pub(crate) fn notify_session_cwd_for_watch(&self, cwd: &std::path::Path) {
-        if let Some(tx) = self.config_watcher_path_tx.as_ref()
-            && tx.send(cwd.to_path_buf()).is_err()
-        {
-            tracing::debug!(
-                cwd = %cwd.display(),
-                "config watcher path channel closed; session cwd not registered"
-            );
+    /// Hold one watch owner for this resident, including across actor rebuilds.
+    pub(crate) fn notify_session_cwd_for_watch(&self, id: &acp::SessionId, cwd: &std::path::Path) {
+        let Some(tx) = self.config_watcher_path_tx.as_ref() else { return; };
+        let mut resident = self.resident_resources.borrow_mut();
+        let resources = resident.entry(id.clone()).or_default();
+        if let Some(registration) = resources.config_watch.as_ref() {
+            registration.update(cwd);
+        } else {
+            resources.config_watch = Some(crate::config::watcher::SessionConfigWatchRegistration::new(
+                id.0.to_string(), cwd, tx.clone(),
+            ));
         }
     }
     /// Pre-session command availability snapshot.
@@ -2087,7 +2083,7 @@ impl MvpAgent {
             .send(SessionCommand::DispatchSessionStartHook {
                 source: source.to_string(),
             });
-        self.notify_session_cwd_for_watch(std::path::Path::new(&session_info.cwd));
+        self.notify_session_cwd_for_watch(&session_info.id, std::path::Path::new(&session_info.cwd));
         self.activity.register_session(&session_info.id.0, &handle);
         if let Some(old) = self
             .sessions

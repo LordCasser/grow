@@ -30,7 +30,50 @@ static void nearest(sqlite3 *db, const char *sql, int expected) {
   assert(sqlite3_finalize(stmt) == SQLITE_OK);
 }
 
-int main(int argc, char **argv) {
+static void metadata_lifecycle(sqlite3 *db) {
+  // Construction can reach shadow-name ownership before a shadow SQL fails.
+  execute(db, "CREATE TABLE broken_info(value)");
+  char *err = NULL;
+  assert(sqlite3_exec(db,
+      "CREATE VIRTUAL TABLE broken USING vec0(embedding float[2], label text, score integer, active boolean, chunk_size=8)",
+      NULL, NULL, &err) == SQLITE_ERROR);
+  assert(err != NULL);
+  sqlite3_free(err);
+  execute(db, "DROP TABLE broken_info");
+
+  // Exercise every allocated metadata name, including non-text columns.
+  execute(db, "CREATE VIRTUAL TABLE lifecycle USING vec0(embedding float[2], label text, score integer, active boolean, chunk_size=8)");
+  execute(db, "BEGIN; INSERT INTO lifecycle VALUES(1,'[1,0]','first',7,1); COMMIT");
+  nearest(db, "SELECT rowid FROM lifecycle WHERE embedding MATCH '[1,0]' AND k=1 AND label IN ('first') AND score=7 AND active=1", 1);
+  execute(db, "ALTER TABLE lifecycle RENAME TO renamed");
+  execute(db, "INSERT INTO renamed VALUES(2,'[0,1]','second',8,0)");
+  const char *query = "SELECT rowid FROM renamed WHERE embedding MATCH '[0,1]' AND k=1 AND label IN ('second') AND score=8 AND active=0";
+  nearest(db, query, 2);
+
+  // Copy the database to a new connection to exercise real xConnect/xDisconnect.
+  sqlite3 *reopened = NULL;
+  assert(sqlite3_open(":memory:", &reopened) == SQLITE_OK);
+  assert(sqlite3_vec_init(reopened, NULL, NULL) == SQLITE_OK);
+  sqlite3_backup *backup = sqlite3_backup_init(reopened, "main", db, "main");
+  assert(backup != NULL);
+  assert(sqlite3_backup_step(backup, -1) == SQLITE_DONE);
+  assert(sqlite3_backup_finish(backup) == SQLITE_OK);
+  nearest(reopened, query, 2);
+  assert(sqlite3_close(reopened) == SQLITE_OK);
+  execute(db, "DROP TABLE renamed");
+
+  // Model a constructor whose later name allocation failed: NULL slots and
+  // repeated cleanup must be safe without relying on allocator timing.
+  vec0_vtab partial = {0};
+  partial.numMetadataColumns = 3;
+  partial.shadowMetadataChunksNames[0] = sqlite3_mprintf("partial_metadatachunks00");
+  partial.shadowMetadataChunksNames[1] = sqlite3_mprintf("partial_metadatachunks01");
+  assert(partial.shadowMetadataChunksNames[0] && partial.shadowMetadataChunksNames[1]);
+  vec0_free(&partial);
+  vec0_free(&partial);
+}
+
+int main(void) {
   sqlite3 *db = NULL;
   assert(sqlite3_open(":memory:", &db) == SQLITE_OK);
   assert(sqlite3_vec_init(db, NULL, NULL) == SQLITE_OK);
@@ -69,11 +112,7 @@ int main(int argc, char **argv) {
   assert(sqlite3_blob_read(blob, after, 8, 0) == SQLITE_OK);
   assert(memcmp(before, after, 8) == 0);
   assert(sqlite3_blob_close(blob) == SQLITE_OK);
-  if (argc == 2 && strcmp(argv[1], "--boundary-only") == 0) {
-    assert(sqlite3_close(db) == SQLITE_OK);
-    puts("sqlite-vec allocation/error boundaries passed");
-    return 0;
-  }
+  metadata_lifecycle(db);
 
   sqlite3_module module = vec0Module;
   module.xCreate = capture_create;

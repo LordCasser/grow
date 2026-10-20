@@ -97,7 +97,7 @@ jobs:
             third_party/sqlite-vec/tests/native_boundaries.c -lsqlite3 -lm \
             -o "${RUNNER_TEMP}/sqlite-vec-boundaries-asan"
           ASAN_OPTIONS=detect_leaks=1 UBSAN_OPTIONS=halt_on_error=1 \
-            "${RUNNER_TEMP}/sqlite-vec-boundaries-asan" --boundary-only
+            "${RUNNER_TEMP}/sqlite-vec-boundaries-asan"
       - name: Run core and presentation regressions
         run: >-
           cargo test --locked --lib

@@ -74,12 +74,12 @@ fn sudo_alias_injection() -> String {
 /// functions, and aliases as base64-encoded replayable shell snippets.
 const DUMP_BASH_STATE_SCRIPT: &str = r##"
 dump_bash_state() {
-  # Preserve the user's flag, but never auto-export serializer temporaries:
-  # a large function body would otherwise exceed exec's environment limits.
-  case $- in
-    *a*) builtin set +a; local +x __grow_dump_allexport='set -o allexport' ;;
-    *) local +x __grow_dump_allexport='set +o allexport' ;;
-  esac
+  # Keep the original flags in this function's positional scope so no local
+  # variable can shadow an exported user variable during the export capture.
+  # Disable allexport before introducing serializer locals, since large payloads
+  # would otherwise enter child environments and exceed exec's limits.
+  set -- "$-"
+  case $1 in *a*) builtin set +a ;; esac
   set -euo pipefail
   if ! command -v base64 >/dev/null 2>&1; then
     echo "Error: base64 command is required" >&2
@@ -106,9 +106,7 @@ dump_bash_state() {
 
   _emit "$PWD"
 
-  local +x env_vars
-  env_vars=$(builtin export -p 2>/dev/null | command grep -viE '_proxy=|GROW_SANDBOX|GROW_AGENT=|SUDO_ASKPASS|GROW_ASKPASS|ELECTRON_RUN_AS_NODE|SSH_AUTH_SOCK|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|WAYLAND_DISPLAY|GPG_TTY' || true)
-  _emit_encoded "$env_vars" "ENV_VARS_B64"
+  _emit_encoded "$(builtin export -p 2>/dev/null | command grep -viE '_proxy=|GROW_SANDBOX|GROW_AGENT=|SUDO_ASKPASS|GROW_ASKPASS|ELECTRON_RUN_AS_NODE|SSH_AUTH_SOCK|DBUS_SESSION_BUS_ADDRESS|XDG_RUNTIME_DIR|WAYLAND_DISPLAY|GPG_TTY' || true)" "ENV_VARS_B64"
 
   # errexit/pipefail here are this function's own `set -euo pipefail` (set is
   # shell-global in bash); replaying them would abort later user commands.
@@ -129,7 +127,7 @@ dump_bash_state() {
   _emit_encoded "$aliases" "ALIASES_B64"
 
   # Keep the POSIX/shopt ordering, but defer allexport until payloads are done.
-  _emit "$__grow_dump_allexport"
+  case $1 in *a*) _emit 'set -o allexport' ;; *) _emit 'set +o allexport' ;; esac
 
   _emit "# end of bash state dump"
   _emit "__GROW_BASH_STATE_END__"
@@ -1286,12 +1284,11 @@ mod tests {
         let function_body = "x".repeat(1_200_000);
 
         for allexport in [false, true] {
-            // `env_vars` exercises a name declared before `export -p`; that
-            // same-name local shadows it in the current capture design, so
-            // preservation assertions below target payload locals captured afterward.
+            // Keep a same-name export for the environment capture itself and
+            // payload-local names exercised by the later capture stages.
             let initial_snapshot = format!(
                 "grow_large() {{ : '{function_body}'; printf 'LARGE_FUNCTION_OK\\n'; }}\n\
-                 export all_functions=all_functions_sentinel content=content_sentinel env_vars=env_vars_sentinel\n\
+                 export all_functions=all_functions_sentinel content=content_sentinel env_vars=env_vars_sentinel __grow_dump_allexport=dump_flag_sentinel\n\
                  export GROW_SHELL_STATE_TEST_USER_SENTINEL=preserved\n{}",
                 if allexport {
                     "set -o allexport\n"
@@ -1308,7 +1305,7 @@ mod tests {
             for replay in 1..=2 {
                 let (code, stdout, stderr) = run_command(
                     &mut state,
-                    "printf 'ALLEXPORT='; case $- in *a*) printf 'on\\n' ;; *) printf 'off\\n' ;; esac; grow_large; declare -p GROW_SHELL_STATE_TEST_USER_SENTINEL all_functions content; declare -f grow_large | wc -c",
+                    "printf 'ALLEXPORT='; case $- in *a*) printf 'on\\n' ;; *) printf 'off\\n' ;; esac; grow_large; declare -p GROW_SHELL_STATE_TEST_USER_SENTINEL env_vars __grow_dump_allexport all_functions content; declare -f grow_large | wc -c",
                 )
                 .await;
                 assert_eq!(
@@ -1324,6 +1321,8 @@ mod tests {
                     "user export should remain exported on replay {replay}, stdout={stdout:?}, stderr={stderr:?}"
                 );
                 for (name, value) in [
+                    ("env_vars", "env_vars_sentinel"),
+                    ("__grow_dump_allexport", "dump_flag_sentinel"),
                     ("all_functions", "all_functions_sentinel"),
                     ("content", "content_sentinel"),
                 ] {

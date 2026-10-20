@@ -15,6 +15,7 @@
 #   sqlite-vec.c: validate missing metadata-IN/unsupported dispatch, initialize
 #   absent primary-key length, make byte-size domains explicit, replace folding
 #   pragmas with comments and mark the SQLITE_CORE-only unused pApi parameter.
+#   Free metadata shadow-table names in the shared virtual-table destructor.
 #   sqlite-vec-diskann.c: mark intentionally unused p_vector using the existing
 #   UNUSED_PARAMETER macro. No warning categories are suppressed by build.rs.
 #   Regression harness: tests/native_boundaries.c (real SQLite, invalid-state

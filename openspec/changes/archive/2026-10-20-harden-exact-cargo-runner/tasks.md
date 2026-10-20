@@ -1,0 +1,5 @@
+- [x] Document compile, enumeration, and execution deadlines and observable phase behavior in the development-workflow delta.
+- [x] Implement streaming, bounded diagnostic capture, phase reporting, configurable timeouts, and process-tree cleanup.
+- [x] Preserve exact selection, ignored-test, and zero-test failure semantics.
+- [x] Add real Cargo/libtest streaming coverage, inherited-pipe timeout coverage, finite-deadline validation, and real timeout/cancellation descendant-cleanup coverage; cover Windows tree-kill command construction and native test paths.
+- [x] Run focused Python tests and strict OpenSpec validation; record platform limits and results in verification.md.

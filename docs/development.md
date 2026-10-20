@@ -136,11 +136,11 @@ Minimal 新会话欢迎卡在 root Agent 绑定 session ID 后才提交，因为
 
 ## Rust 验证入口
 
-Bash 持久命令沿 `ShellState::prepare_command` 的 fd 3/4 传输快照；排查大函数与 `set -a` 时，核对序列化临时值的 export 属性及恢复顺序，不能靠缩短函数或关闭用户选项消除失败。回归入口为 `computer::local::shell_state::tests`，行为见 [Bash 快照导出隔离](../openspec/specs/tool-authorization/spec.md#requirement-persistent-bash-snapshots-isolate-serializer-export-state)。
+Bash 持久命令沿 `ShellState::prepare_command` 的 fd 3/4 传输快照；dump 在声明任何局部变量前捕获 `export -p`，原始 allexport 标志保存在函数自身位置参数中，避免序列化变量遮蔽用户同名导出值。排查大函数与 `set -a` 时，核对临时值的 export 属性及恢复顺序，不能靠缩短函数或关闭用户选项消除失败。回归入口为 `computer::local::shell_state::tests`，行为见 [Bash 快照导出隔离](../openspec/specs/tool-authorization/spec.md#requirement-persistent-bash-snapshots-isolate-serializer-export-state)。
 
 快照 reader 必须等到完整结束标记行（含换行），并按固定后缀检查，避免大载荷反复全文扫描。背景进程仅持有 fd 4 不应阻止完整快照返回；五秒期限与不完整快照保留旧状态的语义不变。见 [快照结束边界](../openspec/specs/tool-authorization/spec.md#requirement-shell-dump-readers-require-complete-terminator-lines)。
 
-ConfigFileWatcher 在 debouncer 回调处理路径时重新核对配置源所有权；API 取消注册会阻止未交付的无主项目通知，已进入接收队列的通知不撤回。共享祖先、全局和显式配置源分别保留自己的 watch；当前生产注册路径尚未接入 `unwatch_path`，不代表已经实现 session 关闭时回收监听。见 [配置事件所有权](../openspec/specs/configuration-rules/spec.md#requirement-configuration-watch-delivery-retains-a-live-source-owner)。
+ConfigFileWatcher 在 debouncer 回调处理路径时重新核对配置源所有权，已进入接收队列的通知不撤回。leader 与进程内 runtime 通过相同的 session 登记消息处理监听；登记绑定现有 resident 资源，actor 重建期间保留，移除、空闲卸载或 agent 销毁时发送释放。失败或取消的重建若未发布新 resident，由现有生命周期 guard 释放留下的登记。runtime 消费释放后才回收无主路径；共享 cwd、仓库祖先、启动 cwd、全局和显式配置源保留各自所有权。路径在接纳时规范化，释放不重新解释已消失或改指向的别名；watcher 启动失败会关闭未消费的登记接收端。生产统一走 session 所有权入口，直接 watch/unwatch API 的调用方仍须自行协调全部引用。见 [配置事件所有权](../openspec/specs/configuration-rules/spec.md#requirement-configuration-watch-delivery-retains-a-live-source-owner) 及 [resident 监听契约](../openspec/specs/configuration-rules/spec.md#requirement-dynamic-project-watches-follow-resident-session-ownership)。
 
 Agent 激活必须将新的 ToolBridge 绑定到原 SessionActor 的 Planning runtime，并从 Timeline 恢复局部计划投影。启动 hydration 与 Agent 替换共用该绑定；替换本身不提交新计划或重复发布 ACP plan。Plan 顶部阶段入口依赖 Behavior 投影，点击沿 canonical artifact 查询显示完整计划；TODO 徽标及面板独立保留。契约见 [Agent 替换与 TODO](../openspec/specs/task-planning/spec.md#requirement-agent-replacement-preserves-session-planning-access) 和 [Plan 顶部详情](../openspec/specs/client-surfaces/spec.md#requirement-active-plan-has-an-inspectable-top-status-entry)。
 
@@ -359,7 +359,11 @@ Skill discovery 在 Agent 构建时生成唯一 `SkillManager` 目录，模型�
 
 发布门禁通过 reusable workflow 接收 release validate 得到的完整 commit SHA，checkout 后核对，core、三平台协调/导出、Windows storage、OpenSpec 任一失败、跳过或取消均阻止发布。精确测试使用 `scripts/run_exact_cargo_test.py`，先确认唯一名称，再确认该测试实际通过且无 ignored，防止重命名后 0 test 假通过；本地运行示例：`python3 scripts/run_exact_cargo_test.py --package pager --lib trajectory_cmd::tests::transcript_download_http_uses_production_export_archive`。见 [发布门禁](../openspec/specs/development-workflow/spec.md#requirement-release-regression-gates-are-bound-to-the-published-source)。
 
-官方构建另外把已校验的 `RELEASE_COMMIT` 传入所有容器：CLI build script 要求完整 40 位十六进制 SHA，以前七位小写生成版本标识，并跟踪环境变化使 Cargo 缓存失效。native 与 OHOS smoke 比较完整 `grow <version> (<commit>)`，拒绝 `unknown` 或错误提交号；OHOS 显式提供 SHA 时也必须提供 `GROW_VERSION`。不依赖容器 Git 所有权，也不修改 Git 全局信任规则。见 [构建身份修复与验证](../openspec/changes/archive/2026-10-20-bind-release-build-identity/verification.md)。cross 0.2.5 使用固定 SHA-256 的官方 Linux x86_64 二进制包，避免源码安装的独立旧 lock 引用已撤回依赖；现有 cross runner 均为 x86_64。Core 门禁对实际 vendored sqlite-vec 执行严格 C 编译、SQL 查询和边界 sanitizer 检查，验证范围及独立泄漏债务见 [第三方诊断修复](../openspec/changes/archive/2026-10-20-repair-third-party-build-diagnostics/verification.md)。
+精确测试 runner 把编译、枚举和执行分开报告，并实时转发输出；默认期限依次为 60 分钟、60 秒、15 分钟，可用 `--compile-timeout`、`--list-timeout`、`--test-timeout` 覆写，必须为有限正数。此预算保留既有 90 分钟 job 总门禁，不代表冷构建基准。超时或取消会尝试终止 Unix 进程组／Windows 子进程树并回收直接子进程；输出读取和收尾也有界，无法确认后代结束时明确失败，不声称已回收。读异常不会当作正常 EOF；零测试、缺失名称和未显式启用的 ignored 测试继续失败。正常流式输出用握手回归验证，超时、取消、SIGTERM 和父退出后仍被后代持有的管道各有失败路径用例；现有 Windows storage gate 会执行跨平台用例，本机验证不代替 Windows 原生执行。见 [精确 runner 契约](../openspec/specs/development-workflow/spec.md#requirement-exact-cargo-regression-runners-expose-bounded-phases)。
+
+官方构建另外把已校验的 `RELEASE_COMMIT` 传入所有容器：CLI build script 要求完整 40 位十六进制 SHA，以前七位小写生成版本标识，并跟踪环境变化使 Cargo 缓存失效。native 与 OHOS smoke 比较完整 `grow <version> (<commit>)`，拒绝 `unknown` 或错误提交号；OHOS 显式提供 SHA 时也必须提供 `GROW_VERSION`。不依赖容器 Git 所有权，也不修改 Git 全局信任规则。见 [构建身份修复与验证](../openspec/changes/archive/2026-10-20-bind-release-build-identity/verification.md)。cross 0.2.5 使用固定 SHA-256 的官方 Linux x86_64 二进制包，避免源码安装的独立旧 lock 引用已撤回依赖；现有 cross runner 均为 x86_64。Core 门禁对实际 vendored sqlite-vec 执行严格 C 编译及完整 SQL/生命周期 sanitizer 检查（ASan、UBSan 与泄漏检测），原始诊断证据见 [第三方诊断修复](../openspec/changes/archive/2026-10-20-repair-third-party-build-diagnostics/verification.md)。
+
+metadata 名称释放的后续修复与验证见 [所有权修复](../openspec/changes/archive/2026-10-20-release-vector-metadata-names/verification.md)。
 
 `search_replace` 在明确 NotFound 后通过本地文件系统的独占创建提交完整新文件；既有文件的普通替换和空文件更新使用读取字节条件提交，并以目标文件 advisory lock 串行化 Grow 写者。ACP 文件系统缺少条件写入能力时明确失败；不遵守 advisory lock 的外部写者仍可能在比较与写入间竞争。见[编辑创建契约](../openspec/specs/tool-authorization/spec.md#requirement-search-replace-creation-requires-confirmed-absence)和[既有文件提交契约](../openspec/specs/tool-authorization/spec.md#requirement-local-search-replace-commits-compare-the-source-bytes)。
 

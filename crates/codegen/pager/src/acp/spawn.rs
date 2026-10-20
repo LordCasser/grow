@@ -279,7 +279,7 @@ fn spawn_agent_thread_direct(
                                     biased;
                                     _ = cancel_paths.cancelled() => break,
                                     path = path_rx.recv() => match path {
-                                        Some(path) => watcher_for_paths.borrow_mut().watch_path(&path),
+                                        Some(update) => watcher_for_paths.borrow_mut().apply_session_update(update),
                                         None => break,
                                     },
                                 }

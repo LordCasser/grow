@@ -2899,8 +2899,15 @@ fn disconnect_keeps_resident_when_actor_is_unreachable() {
 #[test]
 fn disconnect_unloads_idle_session_without_finalize() {
     run_local_for_bridge_test(|| async {
-        let agent = build_minimal_agent_for_tests();
+        let mut agent = build_minimal_agent_for_tests();
+        let (watch_tx, mut watch_rx) = tokio::sync::mpsc::unbounded_channel();
+        agent.set_config_watcher_path_tx(watch_tx);
         let sid = acp::SessionId::new("sess-idle");
+        agent.notify_session_cwd_for_watch(&sid, &std::env::temp_dir());
+        assert!(matches!(
+            watch_rx.try_recv().unwrap(),
+            crate::config::watcher::SessionConfigWatchUpdate::Register { .. }
+        ));
         let (handle, _cmd_tx, cmd_rx) = make_live_session_handle(&sid, None);
         agent.sessions.borrow_mut().insert(sid.clone(), handle);
         let mut observed = spawn_fake_actor(cmd_rx, false);
@@ -2913,6 +2920,13 @@ fn disconnect_unloads_idle_session_without_finalize() {
         );
         agent.ensure_session_supervisor();
         drive_disconnect(&agent, &sid).await;
+        assert!(
+            matches!(
+                watch_rx.try_recv().unwrap(),
+                crate::config::watcher::SessionConfigWatchUpdate::Release { .. }
+            ),
+            "confirmed idle unload releases its watch owner"
+        );
         assert!(
             !agent.sessions.borrow().contains_key(&sid),
             "idle session must be unloaded from the resident map on disconnect"
@@ -2995,12 +3009,23 @@ fn disconnect_unloads_before_slow_actor_teardown_finishes() {
 #[test]
 fn disconnect_keeps_resident_when_actor_reports_busy() {
     run_local_for_bridge_test(|| async {
-        let agent = build_minimal_agent_for_tests();
+        let mut agent = build_minimal_agent_for_tests();
+        let (watch_tx, mut watch_rx) = tokio::sync::mpsc::unbounded_channel();
+        agent.set_config_watcher_path_tx(watch_tx);
         let sid = acp::SessionId::new("sess-busy");
+        agent.notify_session_cwd_for_watch(&sid, &std::env::temp_dir());
+        assert!(matches!(
+            watch_rx.try_recv().unwrap(),
+            crate::config::watcher::SessionConfigWatchUpdate::Register { .. }
+        ));
         let (handle, _cmd_tx, cmd_rx) = make_live_session_handle(&sid, None);
         agent.sessions.borrow_mut().insert(sid.clone(), handle);
         let mut observed = spawn_fake_actor(cmd_rx, true);
         drive_disconnect(&agent, &sid).await;
+        assert!(
+            watch_rx.try_recv().is_err(),
+            "busy residents retain their watch owner"
+        );
         assert!(
             agent.sessions.borrow().contains_key(&sid),
             "a between-turns session with queued work must stay resident"
@@ -4640,5 +4665,87 @@ fn resident_response_snapshot_delivers_future_projection_once_before_tools() {
                 drain.abort();
             }
         }
+    });
+}
+
+#[test]
+fn resident_config_watch_registration_follows_resource_lifetime() {
+    use crate::config::watcher::SessionConfigWatchUpdate;
+    let mut agent = build_minimal_agent_for_tests();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    agent.set_config_watcher_path_tx(tx);
+    let sid = acp::SessionId::new("watch-owner");
+    let cwd = std::env::temp_dir();
+    agent.notify_session_cwd_for_watch(&sid, &cwd);
+    assert!(
+        matches!(rx.try_recv().unwrap(), SessionConfigWatchUpdate::Register { session_id, .. } if session_id == sid.0.as_ref())
+    );
+    // Actor replacement uses take_session, retaining resident resources.
+    agent.take_session(&sid);
+    assert!(rx.try_recv().is_err());
+    agent.notify_session_cwd_for_watch(&sid, &cwd);
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        SessionConfigWatchUpdate::Register { .. }
+    ));
+    assert!(rx.try_recv().is_err());
+    // This is the existing resource-drop boundary after successful idle-unload.
+    agent.resident_resources.borrow_mut().remove(&sid);
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        SessionConfigWatchUpdate::Release { .. }
+    ));
+    agent.notify_session_cwd_for_watch(&sid, &cwd);
+    let _ = rx.try_recv().unwrap();
+    agent.remove_session(&sid);
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        SessionConfigWatchUpdate::Release { .. }
+    ));
+    agent.remove_session(&sid);
+    assert!(rx.try_recv().is_err());
+    agent.notify_session_cwd_for_watch(&sid, &cwd);
+    let _ = rx.try_recv().unwrap();
+    drop(agent);
+    assert!(matches!(
+        rx.try_recv().unwrap(),
+        SessionConfigWatchUpdate::Release { .. }
+    ));
+    assert!(rx.try_recv().is_err());
+}
+
+#[test]
+fn cancelled_rebuild_releases_nonresident_config_watch() {
+    run_local_for_bridge_test(|| async {
+        use crate::config::watcher::SessionConfigWatchUpdate;
+        let mut agent = build_minimal_agent_for_tests();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        agent.set_config_watcher_path_tx(tx);
+        let sid = acp::SessionId::new("cancelled-watch-rebuild");
+        let (handle, _tx, _rx) = make_live_session_handle(&sid, None);
+        agent.sessions.borrow_mut().insert(sid.clone(), handle);
+        agent.notify_session_cwd_for_watch(&sid, &std::env::temp_dir());
+        let _ = rx.try_recv().unwrap();
+        let mut rebuild = Box::pin(async {
+            let _owner = agent.lock_session_lifecycle(&sid).await;
+            agent.take_session(&sid);
+            futures::future::pending::<()>().await;
+        });
+        assert!(futures::poll!(rebuild.as_mut()).is_pending());
+        assert!(rx.try_recv().is_err(), "a live rebuild retains its watch");
+        drop(rebuild);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            SessionConfigWatchUpdate::Release { .. }
+        ));
+        assert!(
+            agent
+                .resident_resources
+                .borrow()
+                .get(&sid)
+                .unwrap()
+                .config_watch
+                .is_none()
+        );
     });
 }

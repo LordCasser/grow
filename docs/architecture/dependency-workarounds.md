@@ -72,7 +72,11 @@ the registry).
 `sqlite-vec.c`; crates.io 0.1.9 lacks the musl fix. The vendored copy restores
 the omitted files from the upstream tag and maintains a small source patch
 for missing-IN dispatch, unsupported vector/metric errors, initialization and
-portable warning-free compilation. This copy is no longer byte-identical to
+portable warning-free compilation. The shared destructor also releases metadata
+shadow-table names on disconnect, drop and constructor failure, while statement
+cleanup retains names for live tables. Full native SQL runs under leak detection;
+see the [metadata ownership repair](../../openspec/changes/archive/2026-10-20-release-vector-metadata-names/verification.md).
+This copy is no longer byte-identical to
 upstream; see `third_party/sqlite-vec/Cargo.toml` VENDORING NOTES and the
 [repair evidence](../../openspec/changes/archive/2026-10-20-repair-third-party-build-diagnostics/verification.md).
 

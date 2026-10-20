@@ -72,6 +72,46 @@ pub enum ConfigChangeEvent {
     ProjectConfigChanged { path: PathBuf },
 }
 
+/// Ordered updates from resident session owners to the runtime watcher.
+#[derive(Debug)]
+pub enum SessionConfigWatchUpdate {
+    Register { session_id: String, cwd: PathBuf },
+    Release { session_id: String },
+}
+
+/// A resident resource: retained across actor rebuild, released on teardown.
+pub struct SessionConfigWatchRegistration {
+    session_id: String,
+    tx: mpsc::UnboundedSender<SessionConfigWatchUpdate>,
+}
+
+impl SessionConfigWatchRegistration {
+    pub fn new(
+        session_id: String,
+        cwd: &Path,
+        tx: mpsc::UnboundedSender<SessionConfigWatchUpdate>,
+    ) -> Self {
+        let registration = Self { session_id, tx };
+        registration.update(cwd);
+        registration
+    }
+
+    pub fn update(&self, cwd: &Path) {
+        let _ = self.tx.send(SessionConfigWatchUpdate::Register {
+            session_id: self.session_id.clone(),
+            cwd: cwd.to_path_buf(),
+        });
+    }
+}
+
+impl Drop for SessionConfigWatchRegistration {
+    fn drop(&mut self) {
+        let _ = self.tx.send(SessionConfigWatchUpdate::Release {
+            session_id: self.session_id.clone(),
+        });
+    }
+}
+
 /// Watches `~/.grow/` for `config.toml`
 /// changes, plus project `.grow/config.toml` paths provided at startup.
 ///
@@ -95,6 +135,8 @@ pub enum ConfigChangeEvent {
 /// to register additional cwds at runtime when new sessions open in
 /// previously-unwatched directories.
 pub struct ConfigFileWatcher {
+    session_cwds: HashMap<String, PathBuf>,
+    bootstrap_cwd: Option<PathBuf>,
     state: std::sync::Arc<parking_lot::Mutex<ConfigWatchState>>,
 }
 
@@ -239,13 +281,22 @@ impl ConfigFileWatcher {
             let mut current = state.lock();
             current.debouncer = Some(debouncer);
         }
-        let mut watcher = Self { state };
-        if let Some(cwd) = cwd {
-            watcher.watch_path(cwd);
+        let bootstrap_cwd =
+            cwd.map(|cwd| dunce::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf()));
+        let mut watcher = Self {
+            state,
+            session_cwds: HashMap::new(),
+            bootstrap_cwd,
+        };
+        if let Some(cwd) = watcher.bootstrap_cwd.clone() {
+            watcher.watch_registered_path(cwd);
         }
         Some((watcher, rx))
     }
 
+    /// Direct distinct-cwd API: callers coordinate all owners themselves and
+    /// must not mix this with session-owned registrations for the same key.
+    /// Production resident owners use `apply_session_update` exclusively.
     /// Register the project config chain from cwd to repository root as
     /// **non-recursive** watch
     /// targets, in addition to whatever was passed to [`Self::start`].
@@ -266,6 +317,10 @@ impl ConfigFileWatcher {
     /// the user-triggered refresh as the fallback.
     pub fn watch_path(&mut self, cwd: &Path) {
         let cwd = dunce::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        self.watch_registered_path(cwd);
+    }
+
+    fn watch_registered_path(&mut self, cwd: PathBuf) {
         let roots = agent::repo::RepoDirChain::resolve(&cwd).dirs;
         // Idempotent at our layer: skip the redundant
         // `notify` watch-add when this cwd is already registered, so
@@ -284,6 +339,30 @@ impl ConfigFileWatcher {
         state.project_roots.insert(cwd, roots);
     }
 
+    /// Reconcile a resident owner without revoking shared or bootstrap paths.
+    pub fn apply_session_update(&mut self, update: SessionConfigWatchUpdate) {
+        let previous = match update {
+            SessionConfigWatchUpdate::Register { session_id, cwd } => {
+                let cwd = dunce::canonicalize(&cwd).unwrap_or(cwd);
+                if self.session_cwds.get(&session_id) == Some(&cwd) {
+                    return;
+                }
+                self.watch_registered_path(cwd.clone());
+                self.session_cwds.insert(session_id, cwd)
+            }
+            SessionConfigWatchUpdate::Release { session_id } => {
+                self.session_cwds.remove(&session_id)
+            }
+        };
+        if let Some(previous) = previous
+            && self.bootstrap_cwd.as_ref() != Some(&previous)
+            && !self.session_cwds.values().any(|cwd| cwd == &previous)
+        {
+            // Release the acquired key even when its old alias no longer exists.
+            self.unwatch_registered_path(&previous);
+        }
+    }
+
     /// Release the project config chain previously registered for `cwd` via
     /// [`Self::start`] / [`Self::watch_path`].
     ///
@@ -298,8 +377,12 @@ impl ConfigFileWatcher {
     /// global and explicit config sources retain their own directory watches.
     pub fn unwatch_path(&mut self, cwd: &Path) {
         let cwd = dunce::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
+        self.unwatch_registered_path(&cwd);
+    }
+
+    fn unwatch_registered_path(&mut self, cwd: &Path) {
         let mut state = self.state.lock();
-        let Some(roots) = state.project_roots.remove(&cwd) else {
+        let Some(roots) = state.project_roots.remove(cwd) else {
             return;
         };
         for root in roots {
@@ -1140,5 +1223,122 @@ mod replacement_discovery_tests {
         while rx.try_recv().is_ok() {}
         std::fs::write(grow.join("workflows/check.rhai"), "second").unwrap();
         next_change(&mut rx).await;
+    }
+}
+
+#[cfg(test)]
+mod session_watch_tests {
+    use super::*;
+
+    fn register(watcher: &mut ConfigFileWatcher, session: &str, cwd: &Path) {
+        watcher.apply_session_update(SessionConfigWatchUpdate::Register {
+            session_id: session.to_owned(),
+            cwd: cwd.to_path_buf(),
+        });
+    }
+
+    fn release(watcher: &mut ConfigFileWatcher, session: &str) {
+        watcher.apply_session_update(SessionConfigWatchUpdate::Release {
+            session_id: session.to_owned(),
+        });
+    }
+
+    #[test]
+    fn resident_config_watch_shares_replaces_and_releases_acquired_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let repo = root.join("repo");
+        let a = repo.join("a");
+        let b = repo.join("b");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir_all(a.join(".grow")).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        git2::Repository::init(&repo).unwrap();
+        let (mut watcher, _events) = ConfigFileWatcher::start(&home, &[], None, None).unwrap();
+        register(&mut watcher, "one", &a);
+        register(&mut watcher, "two", &a.join("."));
+        register(&mut watcher, "one", &a);
+        assert_eq!(watcher.session_cwds.len(), 2);
+        release(&mut watcher, "one");
+        assert!(watcher.state.lock().project_roots.contains_key(&a));
+        register(&mut watcher, "two", &b);
+        assert!(!watcher.state.lock().project_roots.contains_key(&a));
+        assert!(watcher.state.lock().watched_cwds.contains(&repo));
+        // The old directory may disappear before teardown; use the acquired key.
+        std::fs::remove_dir(&b).unwrap();
+        release(&mut watcher, "two");
+        release(&mut watcher, "two");
+        assert!(watcher.session_cwds.is_empty());
+        assert!(watcher.state.lock().project_roots.is_empty());
+        assert!(watcher.state.lock().watched_cwds.is_empty());
+        assert_eq!(
+            watcher
+                .state
+                .lock()
+                .change_for_path(&a.join(".grow/config.toml"), &home),
+            None
+        );
+    }
+
+    #[test]
+    fn resident_config_watch_retains_bootstrap_and_independent_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let bootstrap = root.join("bootstrap");
+        let project = root.join("project");
+        let config = project.join(".grow/config.toml");
+        std::fs::create_dir(&home).unwrap();
+        std::fs::create_dir(&bootstrap).unwrap();
+        std::fs::create_dir_all(config.parent().unwrap()).unwrap();
+        let (mut watcher, _events) =
+            ConfigFileWatcher::start(&home, std::slice::from_ref(&config), Some(&bootstrap), None)
+                .unwrap();
+        register(&mut watcher, "one", &bootstrap);
+        register(&mut watcher, "two", &project);
+        release(&mut watcher, "one");
+        release(&mut watcher, "two");
+        assert!(watcher.state.lock().project_roots.contains_key(&bootstrap));
+        assert!(!watcher.state.lock().project_roots.contains_key(&project));
+        assert_eq!(
+            watcher
+                .state
+                .lock()
+                .change_for_path(&home.join("config.toml"), &home),
+            Some(ConfigChangeEvent::GlobalConfigChanged)
+        );
+        assert_eq!(
+            watcher.state.lock().change_for_path(&config, &home),
+            Some(ConfigChangeEvent::ProjectConfigChanged {
+                path: config.clone()
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resident_config_watch_releases_old_alias_after_retarget() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let home = root.join("home");
+        let a = root.join("a");
+        let b = root.join("b");
+        let alias = root.join("alias");
+        for path in [&home, &a, &b] {
+            std::fs::create_dir(path).unwrap();
+        }
+        std::os::unix::fs::symlink(&a, &alias).unwrap();
+        let (mut watcher, _events) = ConfigFileWatcher::start(&home, &[], None, None).unwrap();
+        register(&mut watcher, "one", &alias);
+        register(&mut watcher, "two", &a);
+        std::fs::remove_file(&alias).unwrap();
+        std::os::unix::fs::symlink(&b, &alias).unwrap();
+        register(&mut watcher, "one", &alias);
+        release(&mut watcher, "two");
+        assert!(!watcher.state.lock().project_roots.contains_key(&a));
+        assert!(watcher.state.lock().project_roots.contains_key(&b));
+        release(&mut watcher, "one");
+        assert!(watcher.state.lock().project_roots.is_empty());
     }
 }

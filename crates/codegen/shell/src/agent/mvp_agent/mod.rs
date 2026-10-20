@@ -404,6 +404,7 @@ const IDLE_UNLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_milli
 /// removal.
 #[derive(Default)]
 struct ResidentResources {
+    config_watch: Option<crate::config::watcher::SessionConfigWatchRegistration>,
     /// Strong ref pinning the code-nav index; the manager holds only a `Weak`.
     codebase_index: Option<std::sync::Arc<codebase_graph::IndexManagerHandle>>,
     require_gateway: bool,
@@ -489,22 +490,11 @@ pub struct MvpAgent {
     default_permission_mode: crate::util::config::PermissionMode,
     /// Memory system configuration (None when --experimental-memory not set).
     memory_config: Option<crate::config::MemoryConfig>,
-    /// Optional channel to the runtime's `ConfigFileWatcher` for dynamic
-    /// per-cwd registration as new sessions open. Each
-    /// successful session insert in `spawn_and_register_session` sends
-    /// the session's cwd to the watcher task spawned in
-    /// the leader or in-process runtime, which calls
-    /// [`crate::config::watcher::ConfigFileWatcher::watch_path`] (a
-    /// **non-recursive** watch on `<cwd>/` and `<cwd>/.grow/`).
-    ///
-    /// `None` when project watching is disabled or unavailable, and in tests
-    /// without a watcher; registration is a no-op in that case.
-    /// Plain `Option` (not `RefCell`) — this is written
-    /// exactly once, by `set_config_watcher_path_tx(&mut self)` during
-    /// runtime construction while the agent is still uniquely owned, and
-    /// only read thereafter. No interior mutability is required.
+    /// Resident registration updates to the runtime configuration watcher.
+    /// Installed once at startup; absent when project watching is disabled.
+    /// Registrations live in ResidentResources and release when that owner drops.
     pub(crate) config_watcher_path_tx: Option<
-        tokio::sync::mpsc::UnboundedSender<std::path::PathBuf>,
+        tokio::sync::mpsc::UnboundedSender<crate::config::watcher::SessionConfigWatchUpdate>,
     >,
     /// Buffering configuration. LEADER-SAFE(init-once): set once per connection
     /// during initialize from client capabilities, read when spawning sessions.
@@ -848,6 +838,13 @@ pub(crate) struct SessionLifecycleGuard<'a> {
 }
 impl Drop for SessionLifecycleGuard<'_> {
     fn drop(&mut self) {
+        // A failed/cancelled rebuild may have retired its old actor without
+        // publishing a replacement. Do not retain that non-resident's watch.
+        if !self.agent.sessions.borrow().contains_key(&self.session_id)
+            && let Some(resources) = self.agent.resident_resources.borrow_mut().get_mut(&self.session_id)
+        {
+            resources.config_watch.take();
+        }
         // This LocalSet cannot interleave another acquisition between the
         // strong-count check and removal. A waiter owns a strong reference, so
         // only the final transaction can reclaim the weak registry entry.

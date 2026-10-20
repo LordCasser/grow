@@ -1,0 +1,4 @@
+- [x] Add the delta scenario for preserving an exported variable named `env_vars`.
+- [x] Add a regression test covering serialized capture and replay through production state descriptors.
+- [x] Implement capture before payload-local scope can shadow user exports.
+- [x] Run targeted tests and OpenSpec validation; record the result and adversarial boundaries in `verification.md`.

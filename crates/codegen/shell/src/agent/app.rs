@@ -596,9 +596,8 @@ pub async fn run_leader(
 
     local_set
         .run_until(async move {
-            // Channel for fanning new session cwds from
-            // the agent (each `spawn_and_register_session` call) into
-            // the leader's `ConfigFileWatcher::watch_path`. Both ends
+            // Ordered resident registrations and releases from the agent to
+            // the runtime's ConfigFileWatcher. Both ends
             // live inside the `LocalSet` so neither needs `Send`. The
             // tx is installed on the agent before `AgentSideConnection`
             // moves it; the rx is drained by a small task spawned
@@ -611,7 +610,7 @@ pub async fn run_leader(
             // many sessions spawn over the leader's lifetime.
             let (config_watcher_path_tx, config_watcher_path_rx_opt) =
                 if recursive_config_watch_enabled {
-                    let (tx, rx) = mpsc::unbounded_channel::<std::path::PathBuf>();
+                    let (tx, rx) = mpsc::unbounded_channel::<crate::config::watcher::SessionConfigWatchUpdate>();
                     (Some(tx), Some(rx))
                 } else {
                     (None, None)
@@ -750,7 +749,7 @@ pub async fn run_leader(
                                 biased;
                                 _ = cancel_for_drain.cancelled() => break,
                                 cwd = rx.recv() => match cwd {
-                                    Some(cwd) => watcher_for_drain.borrow_mut().watch_path(&cwd),
+                                    Some(update) => watcher_for_drain.borrow_mut().apply_session_update(update),
                                     None => break,
                                 },
                             }
@@ -760,6 +759,8 @@ pub async fn run_leader(
                 Some(watcher)
             } else {
                 warn!("Config file watcher failed to start; hot-reload disabled");
+                // Close the unavailable consumer rather than buffering session updates.
+                drop(config_watcher_path_rx.take());
                 None
             };
 
