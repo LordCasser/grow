@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import codecs
+import json
 import math
 import os
 import queue
@@ -47,18 +48,22 @@ class CommandOutput:
     listed_matches: int = 0
     passed_tests: list[str] = field(default_factory=list)
     summaries: list[tuple[int, int, int]] = field(default_factory=list)
+    test_executables: dict[str, str] = field(default_factory=dict)
 
 
-def cargo_commands(package: str, target: str | None, test_name: str, ignored: bool):
-    base = ["cargo", "test", "--locked", "-p", package]
-    base.extend(["--lib"] if target is None else ["--test", target])
-    build_command = [*base, "--no-run"]
-    list_command = [*base, test_name, "--", "--exact", "--list"]
-    run_arguments = ["--exact", "--format=pretty", "--color=never", "--test-threads=1"]
+def cargo_compile_command(package: str, target: str | None) -> list[str]:
+    command = ["cargo", "test", "--locked", "-p", package]
+    command.extend(["--lib"] if target is None else ["--test", target])
+    command.extend(["--no-run", "--message-format=json"])
+    return command
+
+
+def test_commands(executable: str, test_name: str, ignored: bool) -> tuple[list[str], list[str]]:
+    list_command = [executable, test_name, "--exact", "--list"]
+    run_arguments = [test_name, "--exact", "--format=pretty", "--color=never", "--test-threads=1"]
     if ignored:
         run_arguments.append("--ignored")
-    run_command = [*base, test_name, "--", *run_arguments]
-    return build_command, list_command, run_command
+    return list_command, [executable, *run_arguments]
 
 
 def _terminate_process_tree(process: subprocess.Popen[bytes]) -> bool:
@@ -135,8 +140,56 @@ def _parse_line(output: CommandOutput, line: str, selected_test: str | None) -> 
         output.summaries.append(tuple(map(int, summary.groups())))
 
 
+def _compile_line_output(output: CommandOutput, line: str) -> str:
+    """Capture Cargo artifacts and render diagnostics without printing artifact JSON."""
+    try:
+        message = json.loads(line)
+    except (json.JSONDecodeError, TypeError):
+        return line + "\n"
+    if not isinstance(message, dict):
+        return line + "\n"
+
+    reason = message.get("reason")
+    if reason == "compiler-artifact":
+        profile = message.get("profile")
+        executable = message.get("executable")
+        manifest_path = message.get("manifest_path")
+        if (
+            isinstance(profile, dict)
+            and profile.get("test") is True
+            and isinstance(executable, str)
+            and executable.strip()
+            and isinstance(manifest_path, str)
+            and manifest_path.strip()
+        ):
+            output.test_executables[executable] = str(Path(manifest_path).parent)
+        return ""
+    if reason == "compiler-message":
+        diagnostic = message.get("message")
+        rendered = diagnostic.get("rendered") if isinstance(diagnostic, dict) else None
+        if isinstance(rendered, str) and rendered:
+            return rendered
+        return line + "\n"
+    if reason in {"build-script-executed", "build-finished"}:
+        return ""
+    return line + "\n"
+
+
+def _emit_output(output: CommandOutput, text: str) -> None:
+    if not text:
+        return
+    sys.stdout.write(text)
+    sys.stdout.flush()
+    _append_tail(output, text)
+
+
 def _run_phase(
-    command: list[str], phase: str, timeout: float, *, selected_test: str | None = None
+    command: list[str],
+    phase: str,
+    timeout: float,
+    *,
+    selected_test: str | None = None,
+    cwd: str | Path | None = None,
 ) -> CommandOutput:
     print(f"[{phase}] starting (timeout: {timeout:g}s)", file=sys.stderr, flush=True)
     creation_options: dict[str, object] = {}
@@ -146,7 +199,7 @@ def _run_phase(
         creation_options["start_new_session"] = True
     process = subprocess.Popen(
         command,
-        cwd=ROOT,
+        cwd=ROOT if cwd is None else cwd,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         bufsize=0,
@@ -212,18 +265,25 @@ def _run_phase(
             else:
                 text = decoder.decode(chunk)
             if text:
-                sys.stdout.write(text)
-                sys.stdout.flush()
-                _append_tail(result, text)
+                if phase != "compile":
+                    _emit_output(result, text)
                 pending_line += text
                 lines = pending_line.split("\n")
                 pending_line = lines.pop()
                 for line in lines:
-                    _parse_line(result, line.rstrip("\r"), selected_test)
-                if len(pending_line) > OUTPUT_TAIL_LIMIT:
+                    clean_line = line.rstrip("\r")
+                    if phase == "compile":
+                        _emit_output(result, _compile_line_output(result, clean_line))
+                    else:
+                        _parse_line(result, clean_line, selected_test)
+                if phase != "compile" and len(pending_line) > OUTPUT_TAIL_LIMIT:
                     pending_line = pending_line[-OUTPUT_TAIL_LIMIT:]
         if pending_line:
-            _parse_line(result, pending_line.rstrip("\r"), selected_test)
+            clean_line = pending_line.rstrip("\r")
+            if phase == "compile":
+                _emit_output(result, _compile_line_output(result, clean_line))
+            else:
+                _parse_line(result, clean_line, selected_test)
         if failure is None:
             result.returncode = process.wait(timeout=max(0.0, deadline - time.monotonic()))
     except (KeyboardInterrupt, CancellationRequested) as error:
@@ -295,7 +355,7 @@ def execute(
     list_timeout: float = DEFAULT_LIST_TIMEOUT,
     test_timeout: float = DEFAULT_TEST_TIMEOUT,
 ) -> None:
-    build_command, list_command, run_command = cargo_commands(package, target, test_name, ignored)
+    build_command = cargo_compile_command(package, target)
     try:
         built = _run_phase(build_command, "compile", compile_timeout)
     except TestSelectionError as error:
@@ -304,10 +364,21 @@ def execute(
         raise TestSelectionError(f"Cargo compilation failed:\n{error}") from error
     if built.returncode:
         raise TestSelectionError(f"Cargo compilation failed (exit {built.returncode}):\n{built.tail}")
+    if len(built.test_executables) != 1:
+        raise TestSelectionError(
+            "Cargo compilation must produce exactly one test executable; "
+            f"found {len(built.test_executables)}"
+        )
 
+    executable, package_directory = next(iter(built.test_executables.items()))
+    list_command, run_command = test_commands(executable, test_name, ignored)
     try:
         listed = _run_phase(
-            list_command, "enumerate", list_timeout, selected_test=test_name
+            list_command,
+            "enumerate",
+            list_timeout,
+            selected_test=test_name,
+            cwd=package_directory,
         )
     except TestSelectionError as error:
         if "timed out" in str(error):
@@ -326,7 +397,7 @@ def execute(
             f"expected exactly one listed test named {test_name!r}, found {listed.listed_matches}"
         )
 
-    result = _run_phase(run_command, "execute", test_timeout)
+    result = _run_phase(run_command, "execute", test_timeout, cwd=package_directory)
     if result.returncode:
         raise TestSelectionError(
             f"Cargo test failed for {test_name!r} (exit {result.returncode}):\n{result.tail}"

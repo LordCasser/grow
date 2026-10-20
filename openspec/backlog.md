@@ -11,6 +11,8 @@
 
 ## 本轮已解决
 
+- **Pager/CLI 构建身份失效路径（独立债务）**：build.rs 以 crate 相对 `.git/HEAD` 注册并不存在的路径，使重复 Cargo 调用重新编译；发布门禁已观察 pager 在 no-run 后的枚举阶段再次编译。exact runner 将直接运行已编译产物以隔离阶段预算；Git/worktree/branch ref 的精确失效追踪另项修正，不混入本次 runner 改动。
+
 
 | 问题 | 归档与验证 |
 | --- | --- |

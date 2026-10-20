@@ -15,3 +15,7 @@ workspace 2.4.1 → 2.4.2；Cargo.lock 仅 33 个无 registry source 的本地 w
 ## 首轮候选与发布门禁修复
 
 候选 `85eb50ab` 的 annotated tag 与静态 preflight 通过，已原子推送 main/tag。官方 run 39401343936 在 Python 3.12 SIGTERM 夹具导入时失败；未发布 Release，已取消全部作业。独立修复见 fix-runner-sigterm-fixture-import，后续候选重新校验全部门禁。
+
+## 第二轮候选与编译阶段隔离修复
+
+候选 f264f01d 的 Python 夹具门禁通过，但 macOS/Windows 导出精确用例在 enumerate 再次触发 Cargo 编译而超时，尚未执行产品断言。独立修复 run-exact-tests-from-built-artifact 让后两阶段固定执行已编译 libtest，并保留 package cwd。旧 run 39402132260 已 completed/cancelled，Release 404。候选 annotated tag object 33ed09435095fd685a2322fb890ce4b7b12b24e6 仅在此确认后以 expected-object lease 替换。
