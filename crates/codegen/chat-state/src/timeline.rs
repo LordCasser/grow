@@ -6837,6 +6837,14 @@ fn valid_integrity_repair(before: &[ConversationItem], replacement: &[Conversati
         if conversation_slices_match(&paired, replacement) {
             return true;
         }
+        // Keep verifying previously committed quarantine + pairing repairs
+        // without applying the newer model-skill metadata normalization.
+        let mut previous_repair = before.to_vec();
+        crate::compaction_utils::quarantine_malformed_tool_exchanges(&mut previous_repair);
+        crate::compaction_utils::repair_tool_pairing_with_reason(&mut previous_repair, reason);
+        if conversation_slices_match(&previous_repair, replacement) {
+            return true;
+        }
         let mut repaired = before.to_vec();
         crate::compaction_utils::repair_history_with_reason(&mut repaired, reason);
         if conversation_slices_match(&repaired, replacement) {

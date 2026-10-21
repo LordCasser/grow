@@ -414,6 +414,10 @@ Portable prefix 与 live suffix 的切点 SHALL NOT 将同一完整工具往返�
 - **WHEN** 普通模型请求收到完整、合法的正常 provider 终止和可见回复，且没有待执行调用或独立宿主继续理由
 - **THEN** 正常结束本 Turn，不要求 FinishTurn；末尾标点和正文是否像行动预告不参与完成判定。
 
+#### Scenario: Model skill metadata separates completed results
+- **WHEN** Model SkillLoad 紧邻其匹配结果且后面还有同批真实结果，历史重建或 native prefix 重置
+- **THEN** 请求保留全部真实调用和结果各一次，元数据不截断批次、不产生孤立 output，原 native 内容不变。
+
 ### Requirement: Provider termination remains distinct from host control
 
 三 backend SHALL 保存实际收到的原生 terminal 信息，并保留独立的中性终止语义。工具调用的存在 SHALL NOT 覆写拒绝、截断或其他 provider 原因。provider 结束仅表示该响应结束，SHALL NOT 自动完成 Goal。原始终止事实 SHALL 与所属 request/attempt 关联并在候选拒收后仍可追溯。
@@ -463,6 +467,10 @@ Portable prefix 与 live suffix 的切点 SHALL NOT 将同一完整工具往返�
 - **THEN** 不启用当前路由的 reasoning 兼容状态。
 
 验证入口：`sampling-types/src/conversation.rs` 的 wire 投影、`sampling-types/src/error.rs` 的分类、`chat-state/src/actor/tests.rs` 的路由状态测试与 `shell/src/session/actor/turn/sampling.rs` 的恢复测试。
+
+#### Scenario: Runtime-only Chat history requires reasoning replay
+- **WHEN** Chat 路由明确要求 reasoning_content，而当前历史只有会生成 assistant 的非空 AgentMessage 或用户 SkillLoad
+- **THEN** 可确认一次启用，portable 与新增 live Runtime assistant 均编码空 reasoning_content，不借用无关 reasoning，不改变既有恢复额度；空收件批次或 Model-only 技能元数据不构成启用依据。
 
 ### Requirement: Messages tool identity encoding preserves distinct exchanges
 Messages 请求 SHALL 将中性工具调用 ID 与结果关联 ID 一致转换为 ASCII 字母、数字、下划线或连字符组成的非空有界 ID。请求中不同原始身份 SHALL NOT 因编码而碰撞。有效 native continuation 的原生内容和 ID SHALL 保持不变，生成 ID SHALL 避免与其冲突。编码 SHALL NOT 改写原始 Timeline 或执行身份。
@@ -561,7 +569,7 @@ Subagent cancellation SHALL stop new provider admission, cancel active provider 
 
 ### Requirement: Runtime agent messages project to complete tool exchanges
 
-有来源的 runtime agent-message context item SHALL 在模型请求中投影为完整、可配对的专用收件工具调用/结果，使用从 receipt 确定的稳定身份。该投影 SHALL NOT 冒充模型主动执行或触发工具 dispatch，不得追加孤立 ToolResult 或篡改其他真实工具的结果。canonical Surface 坐标 SHALL 不因 provider 一对多展开改变。
+有来源的 runtime agent-message context item SHALL 在 Chat/Messages 请求中投影为完整、可配对的专用收件工具调用/结果，使用从 receipt 确定的稳定身份；Responses SHALL 使用明确标记来源的独立 user 上下文，携带完整收件 JSON 并声明不是直接用户指令或人工授权，不生成模拟模型调用或 reasoning。该投影 SHALL NOT 冒充模型主动执行或触发工具 dispatch，不得追加孤立 ToolResult 或篡改其他真实工具的结果。canonical Surface 坐标 SHALL 不因 provider 一对多展开改变。
 
 #### Scenario: Receiving a message during a tool batch
 - **WHEN** 消息到达而现有真实工具批次尚未闭合
@@ -574,6 +582,10 @@ Subagent cancellation SHALL stop new provider admission, cancel active provider 
 #### Scenario: Compaction and source permissions
 - **WHEN** 对含 runtime agent message 的 Surface 进行 compaction 或权限判定
 - **THEN** input_ref 仍指向 canonical 事实，消息不获得 DirectUser/Interjection 权限证据；一对 provider item 不生成两份消费坐标。
+
+#### Scenario: Responses thinking receives a Runtime message
+- **WHEN** Responses thinking 路由收到有来源的 AgentMessage
+- **THEN** 正文及 receipt/source/target/reply 身份完整出现一次，不生成 function_call/output 或伪造思考，canonical 权限和消费坐标不变。
 
 ### Requirement: Named provider stream errors retain their error facts
 

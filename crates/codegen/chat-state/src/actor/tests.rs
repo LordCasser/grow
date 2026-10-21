@@ -10412,6 +10412,25 @@ async fn seed_admitted_load_skill_call(
     call_id: &str,
     arguments: &str,
 ) {
+    seed_admitted_tool_batch(
+        handle,
+        turn,
+        call_id,
+        vec![sampling_types::ToolCall {
+            id: call_id.into(),
+            name: sampling_types::LOAD_SKILL_TOOL_NAME.into(),
+            arguments: arguments.into(),
+        }],
+    )
+    .await;
+}
+
+async fn seed_admitted_tool_batch(
+    handle: &crate::handle::ChatStateHandle,
+    turn: crate::TurnId,
+    call_id: &str,
+    calls: Vec<sampling_types::ToolCall>,
+) {
     let step = crate::StepId { turn, index: 0 };
     let request_id = format!("request-{call_id}");
     let input_message_count = handle.get_conversation_len().await;
@@ -10467,13 +10486,7 @@ async fn seed_admitted_load_skill_call(
     handle
         .record_timeline_event_durably(crate::TimelineEventKind::Messages(crate::MessageEvent {
             cause: crate::MessageCause::Assistant,
-            items: vec![ConversationItem::assistant_tool_calls(vec![
-                sampling_types::ToolCall {
-                    id: call_id.into(),
-                    name: sampling_types::LOAD_SKILL_TOOL_NAME.into(),
-                    arguments: arguments.into(),
-                },
-            ])],
+            items: vec![ConversationItem::assistant_tool_calls(calls)],
             surface: crate::SurfaceOp::Append,
             response_admission: Some(crate::ResponseAdmission {
                 identity: crate::ResponseAdmissionIdentity {
@@ -11442,4 +11455,230 @@ async fn unconsumed_model_skill_is_pinned_then_settled_once_without_branch_reviv
             .collect::<Vec<_>>(),
         vec!["Loaded skill content was not consumed before execution ended"]
     );
+}
+
+#[tokio::test]
+async fn model_skill_batch_preserves_success_through_request_and_timeline_replay() {
+    use sampling_types::{ApiBackend, SkillLoadSource, ToolCall};
+    let h = TestHarness::new();
+    seed_admitted_tool_batch(
+        &h.handle,
+        crate::TurnId(959),
+        "skill-a",
+        vec![
+            ToolCall {
+                id: "skill-a".into(),
+                name: "load_skill".into(),
+                arguments: r#"{"name":"review","args":""}"#.into(),
+            },
+            ToolCall {
+                id: "write-b".into(),
+                name: "write_file".into(),
+                arguments: "{}".into(),
+            },
+        ],
+    )
+    .await;
+    let mut skill = user_skill_load("model:skill-a", 0, "skill-a", "review", "full skill body");
+    skill.source = SkillLoadSource::Model;
+    let result =
+        ConversationItem::tool_result("skill-a", sampling_types::skill_load_result_content(&skill));
+    let revision = h.handle.get_surface_revision().await.unwrap();
+    assert_eq!(
+        h.handle
+            .publish_model_skill_conditionally(
+                result.clone(),
+                skill.clone(),
+                ConversationItem::tool_result("skill-a", "not loaded"),
+                revision,
+                128_000,
+                4_096,
+            )
+            .await
+            .unwrap(),
+        crate::ConditionalToolResultOutcome::Accepted
+    );
+    let published = h.handle.timeline_events().await.unwrap().len();
+    let revision = h.handle.get_surface_revision().await.unwrap();
+    assert!(
+        h.handle
+            .publish_model_skill_conditionally(
+                result,
+                skill,
+                ConversationItem::tool_result("skill-a", "not loaded"),
+                revision,
+                128_000,
+                4_096,
+            )
+            .await
+            .is_err(),
+        "duplicate model metadata must not enter the Timeline"
+    );
+    assert_eq!(h.handle.timeline_events().await.unwrap().len(), published);
+    h.handle
+        .push_tool_result_durably(ConversationItem::tool_result(
+            "write-b",
+            "write succeeded exactly once",
+        ))
+        .await
+        .unwrap();
+    assert!(!h.handle.has_dangling_tool_calls().await);
+    let before = h.handle.timeline_events().await.unwrap();
+    let mut historical = crate::Timeline::from_events(before.clone()).unwrap();
+    let mut legacy = historical.surface().to_vec();
+    crate::compaction_utils::repair_tool_pairing_with_reason(
+        &mut legacy,
+        sampling_types::DanglingToolCallReason::UserCancelled,
+    );
+    assert!(
+        !serde_json::to_string(&legacy)
+            .unwrap()
+            .contains("write succeeded exactly once")
+    );
+    historical
+        .replace_all(legacy, crate::MessageCause::IntegrityRepair)
+        .unwrap();
+    crate::Timeline::from_events(historical.events().to_vec()).unwrap();
+    let mut forged = crate::Timeline::from_events(before.clone()).unwrap();
+    let mut altered = forged.surface().to_vec();
+    altered[3] = ConversationItem::tool_result("write-b", "fabricated success");
+    assert!(
+        forged
+            .replace_all(altered, crate::MessageCause::IntegrityRepair)
+            .is_err()
+    );
+    let request = h
+        .handle
+        .build_request("skill-batch", vec![], None, None, None)
+        .await
+        .unwrap();
+    let wire = wire_request_json(&request, &ApiBackend::Responses);
+    assert!(wire.to_string().contains("write succeeded exactly once"));
+    assert!(!wire.to_string().contains("cancelled by the user"));
+    let after = h.handle.timeline_events().await.unwrap();
+    assert!(
+        after.len() > before.len(),
+        "metadata ordering is a durable repair"
+    );
+    assert_eq!(
+        serde_json::to_value(&after[..before.len()]).unwrap(),
+        serde_json::to_value(&before).unwrap()
+    );
+    let replayed = crate::Timeline::from_events(after.clone()).unwrap();
+    assert_eq!(
+        serde_json::to_value(replayed.surface()).unwrap(),
+        serde_json::to_value(h.handle.get_conversation().await).unwrap()
+    );
+    h.handle
+        .build_request("skill-batch-again", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert_eq!(h.handle.timeline_events().await.unwrap().len(), after.len());
+    let (persistence, _records) = MockTimelinePersistence::new();
+    let (event_tx, _event_rx) = mpsc::unbounded_channel();
+    let restored = ChatStateActor::spawn_from_timeline(
+        after,
+        test_config(),
+        Box::new(persistence),
+        event_tx,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let cold = restored
+        .build_request("cold-skill-batch", vec![], None, None, None)
+        .await
+        .unwrap();
+    assert!(
+        wire_request_json(&cold, &ApiBackend::Responses)
+            .to_string()
+            .contains("write succeeded exactly once")
+    );
+}
+
+#[tokio::test]
+async fn chat_runtime_only_reasoning_recovery_is_acknowledged_once() {
+    use sampling_types::{AgentMessage, ApiBackend};
+    for fact in [
+        ConversationItem::SkillLoad(user_skill_load("input", 0, "skill", "review", "body")),
+        ConversationItem::received_agent_message(AgentMessage {
+            receipt_id: "receipt".into(),
+            source_session_id: "source".into(),
+            target_session_id: "target".into(),
+            message_id: "message".into(),
+            reply_to: None,
+            message: "body".into(),
+        }),
+    ] {
+        let config = SamplingConfig {
+            api_backend: ApiBackend::ChatCompletions,
+            ..test_config()
+        };
+        let h =
+            TestHarness::with_config(vec![ConversationItem::user("start"), fact], config.clone());
+        assert_eq!(
+            h.handle
+                .enable_portable_reasoning(ApiBackend::Responses)
+                .await,
+            Some(false)
+        );
+        assert_eq!(
+            h.handle
+                .enable_portable_reasoning(ApiBackend::ChatCompletions)
+                .await,
+            Some(true)
+        );
+        assert_eq!(
+            h.handle
+                .enable_portable_reasoning(ApiBackend::ChatCompletions)
+                .await,
+            Some(false)
+        );
+        let request = h
+            .handle
+            .build_request("runtime-only", vec![], None, None, None)
+            .await
+            .unwrap();
+        let wire = wire_request_json(&request, &ApiBackend::ChatCompletions);
+        let assistant = wire["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|m| m["role"] == "assistant")
+            .unwrap();
+        assert_eq!(assistant["reasoning_content"], "");
+        assert!(h.handle.reset_continuation().await);
+        assert_eq!(
+            h.handle
+                .enable_portable_reasoning(ApiBackend::ChatCompletions)
+                .await,
+            Some(false)
+        );
+        h.handle.replace_sampling_route(config);
+        assert_eq!(
+            h.handle
+                .enable_portable_reasoning(ApiBackend::ChatCompletions)
+                .await,
+            Some(true)
+        );
+    }
+    for fact in [ConversationItem::agent_message(vec![]), {
+        let mut skill = user_skill_load("model:skill", 0, "skill", "review", "body");
+        skill.source = sampling_types::SkillLoadSource::Model;
+        ConversationItem::SkillLoad(skill)
+    }] {
+        let h = TestHarness::with_config(
+            vec![fact],
+            SamplingConfig {
+                api_backend: ApiBackend::ChatCompletions,
+                ..test_config()
+            },
+        );
+        assert_eq!(
+            h.handle
+                .enable_portable_reasoning(ApiBackend::ChatCompletions)
+                .await,
+            Some(false)
+        );
+    }
 }

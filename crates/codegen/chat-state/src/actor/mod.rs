@@ -861,6 +861,13 @@ impl ChatStateActor {
                     sampling_types::ApiBackend::ChatCompletions => portable
                         .iter()
                         .any(|item| matches!(item, ConversationItem::Assistant(_)))
+                        || surface.iter().any(|item| match item {
+                            ConversationItem::AgentMessage(batch) => !batch.messages.is_empty(),
+                            ConversationItem::SkillLoad(skill) => {
+                                skill.source == sampling_types::SkillLoadSource::User
+                            }
+                            _ => false,
+                        })
                         || projection.spans.iter().any(|span| {
                             matches!(
                                 &span.fragment,

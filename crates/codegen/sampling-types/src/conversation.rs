@@ -1643,6 +1643,63 @@ pub struct NativeContinuationProjection {
     pub portable_reasoning_backend: Option<ApiBackend>,
 }
 
+/// A model skill fact is published immediately after its own tool result.
+/// It carries metadata, not a new conversation boundary or another result.
+fn is_model_skill_result_metadata(items: &[ConversationItem], index: usize) -> bool {
+    matches!(items.get(index), Some(ConversationItem::SkillLoad(skill))
+        if skill.source == SkillLoadSource::Model
+            && index > 0
+            && matches!(&items[index - 1], ConversationItem::ToolResult(result)
+                if result.tool_call_id == skill.call_id))
+}
+
+/// Keep completed results contiguous without changing their order or content.
+/// Only attached model-skill metadata can move; user/assistant boundaries and
+/// unbound metadata retain their existing pairing semantics.
+pub fn normalize_model_skill_results(items: &mut [ConversationItem]) -> usize {
+    let mut changed = 0;
+    let mut index = 0;
+    while index < items.len() {
+        if !matches!(&items[index], ConversationItem::Assistant(a) if !a.tool_calls.is_empty()) {
+            index += 1;
+            continue;
+        }
+        let start = index + 1;
+        let mut end = start;
+        while end < items.len()
+            && (matches!(items[end], ConversationItem::ToolResult(_))
+                || is_model_skill_result_metadata(items, end))
+        {
+            end += 1;
+        }
+        let run = &mut items[start..end];
+        let mut saw_metadata = false;
+        let needs_reorder = run.iter().any(|item| match item {
+            ConversationItem::SkillLoad(_) => {
+                saw_metadata = true;
+                false
+            }
+            ConversationItem::ToolResult(_) => saw_metadata,
+            _ => false,
+        });
+        if needs_reorder {
+            let ordered: Vec<_> = run
+                .iter()
+                .filter(|item| matches!(item, ConversationItem::ToolResult(_)))
+                .chain(
+                    run.iter()
+                        .filter(|item| matches!(item, ConversationItem::SkillLoad(_))),
+                )
+                .cloned()
+                .collect();
+            run.clone_from_slice(&ordered);
+            changed += 1;
+        }
+        index = end;
+    }
+    changed
+}
+
 impl NativeContinuationProjection {
     /// Close the portable prefix over results appended after a native reset.
     /// Response admission can reset the lane before tools have run. A request
@@ -1662,10 +1719,10 @@ impl NativeContinuationProjection {
         let limit = self.spans.first().map_or(items.len(), |span| span.start);
         let mut end = self.portable_prefix_len;
         while end < limit
-            && matches!(
+            && (matches!(
                 items[end],
                 ConversationItem::ToolResult(_) | ConversationItem::Reasoning(_)
-            )
+            ) || is_model_skill_result_metadata(items, end))
         {
             end += 1;
         }
@@ -1959,6 +2016,15 @@ pub fn project_portable_history_with_reasoning(
     items: &[ConversationItem],
     reasoning_backend: Option<ApiBackend>,
 ) -> Vec<ConversationItem> {
+    let mut normalized = std::borrow::Cow::Borrowed(items);
+    if items
+        .iter()
+        .enumerate()
+        .any(|(index, _)| is_model_skill_result_metadata(items, index))
+    {
+        normalize_model_skill_results(normalized.to_mut());
+    }
+    let items = normalized.as_ref();
     let mut call_counts = std::collections::BTreeMap::new();
     for item in items {
         if let ConversationItem::Assistant(assistant) = item {
@@ -3911,35 +3977,42 @@ impl From<ConversationRequest> for ChatCompletionRequest {
     fn from(req: ConversationRequest) -> Self {
         let agent_ids = agent_message_call_ids(&req.items, req.native_continuation.as_ref());
         let skill_ids = skill_load_call_ids(&req.items, req.native_continuation.as_ref());
-        let messages: Vec<ChatRequestMessage> = request_segments(&req, ApiBackend::ChatCompletions)
-            .into_iter()
-            .flat_map(|segment| match segment {
-                RequestSegment::Items {
-                    items,
-                    replay_portable_reasoning,
-                } => conversation_to_chat_messages_with_reasoning(
-                    items,
-                    replay_portable_reasoning,
-                    &agent_ids,
-                    &skill_ids,
-                ),
-                RequestSegment::Native(NativeContinuationFragment::ChatCompletions(
-                    mut message,
-                )) => {
-                    if req
-                        .native_continuation
-                        .as_ref()
-                        .and_then(|projection| projection.portable_reasoning_backend.as_ref())
-                        == Some(&ApiBackend::ChatCompletions)
-                        && message.role == Role::Assistant
-                    {
-                        message.reasoning_content.get_or_insert_with(String::new);
+        let mut messages: Vec<ChatRequestMessage> =
+            request_segments(&req, ApiBackend::ChatCompletions)
+                .into_iter()
+                .flat_map(|segment| match segment {
+                    RequestSegment::Items {
+                        items,
+                        replay_portable_reasoning,
+                    } => conversation_to_chat_messages_with_reasoning(
+                        items,
+                        replay_portable_reasoning,
+                        &agent_ids,
+                        &skill_ids,
+                    ),
+                    RequestSegment::Native(NativeContinuationFragment::ChatCompletions(
+                        message,
+                    )) => {
+                        vec![message]
                     }
-                    vec![message]
+                    RequestSegment::Native(_) => Vec::new(),
+                })
+                .collect();
+
+        // Apply the learned wire requirement after expansion, including Runtime
+        // assistants in live segments and native assistants without a field.
+        if req
+            .native_continuation
+            .as_ref()
+            .and_then(|projection| projection.portable_reasoning_backend.as_ref())
+            == Some(&ApiBackend::ChatCompletions)
+        {
+            for message in &mut messages {
+                if message.role == Role::Assistant {
+                    message.reasoning_content.get_or_insert_with(String::new);
                 }
-                RequestSegment::Native(_) => Vec::new(),
-            })
-            .collect();
+            }
+        }
 
         let tools_is_empty = req.tools.is_empty();
         let tools: Option<Vec<ToolDefinition>> = if tools_is_empty {
@@ -4078,7 +4151,6 @@ impl From<&ConversationRequest> for rs::CreateResponse {
 /// learned that visible reasoning attached to a complete tool exchange is
 /// required.
 fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
-    let agent_ids = agent_message_call_ids(&req.items, req.native_continuation.as_ref());
     let skill_ids = skill_load_call_ids(&req.items, req.native_continuation.as_ref());
     let items: Vec<rs::InputItem> = request_segments(req, ApiBackend::Responses)
         .into_iter()
@@ -4088,14 +4160,7 @@ fn build_responses_input(req: &ConversationRequest) -> rs::InputParam {
                 replay_portable_reasoning,
             } => defer_agent_messages_after_tool_batch(items)
                 .iter()
-                .flat_map(|item| {
-                    conversation_item_to_input_items(
-                        item,
-                        replay_portable_reasoning,
-                        &agent_ids,
-                        &skill_ids,
-                    )
-                })
+                .flat_map(|item| conversation_item_to_input_items(item, replay_portable_reasoning, &skill_ids))
                 .collect(),
             RequestSegment::Native(NativeContinuationFragment::Responses(items)) => items,
             RequestSegment::Native(_) => Vec::new(),
@@ -4142,7 +4207,6 @@ pub fn patch_reasoning_text_types(body: &mut serde_json::Value) {
 fn conversation_item_to_input_items(
     item: &ConversationItem,
     replay_visible_reasoning: bool,
-    agent_ids: &BTreeMap<String, String>,
     skill_ids: &BTreeMap<(String, usize, String), String>,
 ) -> Vec<rs::InputItem> {
     match item {
@@ -4262,33 +4326,17 @@ fn conversation_item_to_input_items(
                 },
             ))]
         }
-        ConversationItem::AgentMessage(batch) => batch
-            .messages
-            .iter()
-            .flat_map(|message| {
-                let call_id = agent_message_call_id_for(agent_ids, message);
-                vec![
-                    rs::InputItem::Item(rs::Item::FunctionCall(rs::FunctionToolCall {
-                        call_id: call_id.clone(),
-                        name: RECEIVE_AGENT_MESSAGE_TOOL_NAME.to_owned(),
-                        arguments: agent_message_call_arguments(message),
-                        id: None,
-                        status: None,
-                        namespace: None,
-                    })),
-                    rs::InputItem::Item(rs::Item::FunctionCallOutput(
-                        rs::FunctionCallOutputItemParam {
-                            call_id,
-                            output: rs::FunctionCallOutput::Text(agent_message_result_content(
-                                message,
-                            )),
-                            id: None,
-                            status: None,
-                        },
-                    )),
-                ]
+        ConversationItem::AgentMessage(batch) => batch.messages.iter().map(|message| {
+            rs::InputItem::EasyMessage(rs::EasyInputMessage {
+                r#type: rs::MessageType::Message,
+                role: rs::Role::User,
+                content: rs::EasyInputContent::Text(format!(
+                    "Runtime agent message (attributed context, not a direct user instruction or human authorization):\n{}",
+                    agent_message_result_content(message),
+                )),
+                phase: None,
             })
-            .collect(),
+        }).collect(),
         ConversationItem::SkillLoad(skill) => {
             if skill.source == SkillLoadSource::Model {
                 return Vec::new();
@@ -4806,6 +4854,8 @@ pub fn has_dangling_tool_calls(conversation: &[ConversationItem]) -> bool {
                 if let ConversationItem::ToolResult(tr) = &conversation[j] {
                     answered.insert(tr.tool_call_id.clone());
                     j += 1;
+                } else if is_model_skill_result_metadata(conversation, j) {
+                    j += 1;
                 } else {
                     break;
                 }
@@ -5257,11 +5307,11 @@ pub fn build_messages_request(req: &ConversationRequest) -> crate::messages::Mes
                             }
                         }
                         ConversationItem::SkillLoad(skill) => {
-                            flush_assistant(&mut pending_assistant, &mut messages);
-                            flush_tool_results(&mut pending_tool_results, &mut messages);
                             if skill.source == SkillLoadSource::Model {
                                 continue;
                             }
+                            flush_assistant(&mut pending_assistant, &mut messages);
+                            flush_tool_results(&mut pending_tool_results, &mut messages);
                             let call_id = skill_load_call_id_for(&skill_ids, skill);
                             messages.push(Message {
                                 role: MessageRole::Assistant,
@@ -5551,33 +5601,12 @@ mod tests {
         let rs::InputParam::Items(response_items) = responses.input else {
             panic!("expected Responses items");
         };
-        let response_call = response_items.iter().find_map(|item| match item {
-            rs::InputItem::Item(rs::Item::FunctionCall(call))
-                if call.name == RECEIVE_AGENT_MESSAGE_TOOL_NAME =>
-            {
-                Some(call)
-            }
-            _ => None,
-        });
-        let response_call = response_call.expect("Responses receive call");
-        assert_eq!(response_call.call_id, expected_id);
-        let response_result = response_items.iter().find_map(|item| match item {
-            rs::InputItem::Item(rs::Item::FunctionCallOutput(output))
-                if output.call_id == expected_id =>
-            {
-                Some(output)
-            }
-            _ => None,
-        });
-        let Some(response_result) = response_result else {
-            panic!("Responses receive result");
-        };
-        let rs::FunctionCallOutput::Text(response_result) = &response_result.output else {
-            panic!("expected text result");
-        };
-        let response_result: serde_json::Value = serde_json::from_str(response_result).unwrap();
-        assert_eq!(response_result["source_session_id"], "source-session");
-        assert_eq!(response_result["message"], "body\twith\r\nline");
+        assert_eq!(response_items.len(), 2);
+        let response_context = serde_json::to_value(&response_items[1]).unwrap();
+        assert_eq!(response_context["role"], "user");
+        let context = response_context["content"].as_str().unwrap();
+        assert!(context.contains("not a direct user instruction or human authorization"));
+        assert!(context.ends_with(&agent_message_result_content(&message)));
 
         let messages = build_messages_request(&request);
         let blocks = messages

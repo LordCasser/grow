@@ -985,6 +985,8 @@ pub fn sanitize_compacted_history(items: Vec<ConversationItem>) -> SanitizeResul
 /// What [`repair_history`] changed; all-zero/empty means nothing was rewritten.
 #[derive(Debug, Clone, Default)]
 pub struct HistoryRepairReport {
+    /// Model skill metadata moved behind its batch's real results.
+    pub normalized_tool_batches: usize,
     /// Protocol-invalid exchanges projected as non-executable historical evidence.
     pub quarantined_tool_exchanges: usize,
     /// Duplicate `ToolResult` entries removed.
@@ -998,7 +1000,8 @@ pub struct HistoryRepairReport {
 impl HistoryRepairReport {
     /// Whether the repair modified the conversation.
     pub fn changed(&self) -> bool {
-        self.quarantined_tool_exchanges > 0
+        self.normalized_tool_batches > 0
+            || self.quarantined_tool_exchanges > 0
             || self.duplicates_removed > 0
             || !self.stripped_tool_result_ids.is_empty()
             || self.synthetic_results_inserted > 0
@@ -1024,7 +1027,9 @@ pub(crate) fn repair_history_with_reason(
     reason: sampling_types::DanglingToolCallReason,
 ) -> HistoryRepairReport {
     let quarantined_tool_exchanges = quarantine_malformed_tool_exchanges(items);
+    let normalized_tool_batches = sampling_types::normalize_model_skill_results(items);
     let mut report = repair_tool_pairing_with_reason(items, reason);
+    report.normalized_tool_batches = normalized_tool_batches;
     report.quarantined_tool_exchanges = quarantined_tool_exchanges;
     report
 }
@@ -1039,6 +1044,7 @@ pub(crate) fn repair_tool_pairing_with_reason(
     let stripped_tool_result_ids = strip_displaced_tool_results(items);
     let synthetic_results_inserted = sampling_types::repair_dangling_tool_calls(items, reason);
     HistoryRepairReport {
+        normalized_tool_batches: 0,
         quarantined_tool_exchanges: 0,
         duplicates_removed,
         stripped_tool_result_ids,
