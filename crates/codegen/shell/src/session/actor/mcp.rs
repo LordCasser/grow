@@ -22,16 +22,40 @@ impl SessionActor {
     /// Shared clients are already connected (Arc-shared from parent), so
     /// `get_tool_registrations` reuses the existing transport — no new handshakes.
     pub(super) async fn register_shared_client_tools(&self) {
-        let (mut touched_servers, shared_clients, shared_client_ids) = {
-            let mut st = self.mcp_state.lock().await;
-            let touched = st.reconcile_inherited_clients();
-            let clients = st
-                .shared_clients
-                .iter()
-                .map(|(name, client)| (name.clone(), std::sync::Arc::clone(client)))
-                .collect::<std::collections::HashMap<_, _>>();
-            (touched, clients, st.shared_client_ids())
+        let (mut touched_servers, shared_clients, shared_client_ids, generation) = {
+            let mut state = self.mcp_state.lock().await;
+            let touched = state.reconcile_inherited_clients();
+            (
+                touched,
+                state.shared_clients.clone(),
+                state.shared_client_ids(),
+                state.generation(),
+            )
         };
+        // Discover the inherited authority's pool, then apply the current
+        // Agent's narrower eligibility at publication (it may change meanwhile).
+        let mut registrations = std::collections::HashMap::new();
+        for server in &touched_servers {
+            let Some(client) = shared_clients.get(server) else {
+                continue;
+            };
+            match client
+                .get_tool_registrations(Arc::clone(&self.mcp_state))
+                .await
+            {
+                Ok(tools) => {
+                    registrations.insert(server.clone(), tools);
+                }
+                Err(error) => tracing::warn!(server, %error, "Failed to list shared MCP tools"),
+            }
+        }
+        // Remote discovery is complete. Reconcile one current bridge and its
+        // search snapshot without racing Agent replacement.
+        let publication = self.mcp.publication_bridge.lock().await;
+        let mut state = self.mcp_state.lock().await;
+        if state.generation() != generation {
+            return;
+        }
         if let Some(capabilities) = &self.subagent_capabilities {
             let inheritance = self.agent.borrow().definition().mcp_inheritance.clone();
             capabilities.replace_bound_mcp_client_ids(
@@ -44,67 +68,58 @@ impl SessionActor {
         if touched_servers.is_empty() {
             return;
         }
-        let mut touched_servers: Vec<_> = touched_servers.drain().collect();
-        touched_servers.sort_unstable();
-        tracing::info!(
-            session_id = %self.session_info.id.0,
-            count = shared_clients.len(),
-            "Reconciling tools from shared MCP clients"
-        );
-        let mcp_state_arc = std::sync::Arc::clone(&self.mcp_state);
-        let mut ui_tools: std::collections::HashMap<
-            String,
-            Vec<crate::extensions::mcp::McpToolEntry>,
-        > = std::collections::HashMap::new();
-        for server_name in &touched_servers {
-            let eligible = self
+        let mut touched: Vec<_> = touched_servers.drain().collect();
+        touched.sort_unstable();
+        let mut ui_tools = std::collections::HashMap::new();
+        for server in touched {
+            // A replacement inherited client must not receive the old result.
+            if !match (
+                shared_clients.get(&server),
+                state.shared_clients.get(&server),
+            ) {
+                (Some(expected), Some(current)) => Arc::ptr_eq(expected, current),
+                (None, None) => true,
+                _ => false,
+            } {
+                continue;
+            }
+            let eligible = !self
                 .subagent_capabilities
                 .as_ref()
-                .is_none_or(|capabilities| capabilities.mcp_server_eligible(server_name));
-            let prefix = format!(
-                "{}{}",
-                server_name,
-                workspace_types::MCP_TOOL_NAME_DELIMITER
-            );
-            // Reconcile in-place on every parent eligibility generation. The
-            // bridge object remains stable, but stale definitions and metadata
-            // are removed before the current qualified list is registered.
-            self.agent
-                .borrow()
-                .tool_bridge()
-                .unregister_tools_by_prefix(&prefix);
-            self.mcp_state
-                .lock()
-                .await
-                .mcp_tool_meta
-                .retain(|qualified, _| !qualified.starts_with(&prefix));
-            let Some(client) = shared_clients.get(server_name) else {
+                .is_some_and(|state| !state.mcp_server_eligible(&server));
+            // Discovery failure is not an empty catalog. Retain the last
+            // complete catalog unless the client retired or eligibility ended.
+            if shared_clients.contains_key(&server)
+                && eligible
+                && !registrations.contains_key(&server)
+            {
                 continue;
-            };
+            }
+            let prefix = format!("{}{}", server, workspace_types::MCP_TOOL_NAME_DELIMITER);
+            publication.unregister_tools_by_prefix(&prefix);
+            state
+                .mcp_tool_meta
+                .retain(|name, _| !name.starts_with(&prefix));
             if !eligible {
                 continue;
             }
-            let regs = match client
-                .get_tool_registrations(std::sync::Arc::clone(&mcp_state_arc))
-                .await
-            {
-                Ok(r) => r,
-                Err(e) => {
-                    tracing::warn!(
-                        server = %server_name,
-                        error = %e,
-                        "Failed to list tools from shared MCP client, skipping"
-                    );
-                    continue;
-                }
-            };
-            let mut mcp_state = self.mcp_state.lock().await;
-            for reg in regs {
-                self.register_mcp_tool(server_name, reg, &mut mcp_state, &mut ui_tools)
+            for registration in registrations.remove(&server).unwrap_or_default() {
+                self.register_mcp_tool(&server, registration, &mut state, &mut ui_tools)
                     .await;
             }
         }
-        self.refresh_mcp_snapshot_and_schedule_reminder().await;
+        let initialized = state.is_initialized();
+        drop(state);
+        refresh_mcp_snapshot_and_schedule_reminder_with(
+            publication.clone(),
+            Arc::clone(&self.mcp_state),
+            self.mcp.tool_metadata_snapshot.clone(),
+            Arc::clone(&self.mcp.reminder_dirty),
+            initialized,
+            generation,
+        )
+        .await;
+        drop(publication);
         if !ui_tools.is_empty() {
             self.emit_mcp_catalog_updates(ui_tools);
         }
@@ -207,7 +222,8 @@ impl SessionActor {
     pub(super) async fn refresh_mcp_auxiliary_policy(&self) {
         let cwd = std::path::Path::new(&self.session_info.cwd);
         let disabled = crate::util::config::get_all_mcp_disabled_tools(cwd);
-        let bridge = self.agent.borrow().tool_bridge().clone();
+        let publication = self.mcp.publication_bridge.lock().await;
+        let bridge = publication.clone();
         let mut state = self.mcp_state.lock().await;
         for (name, client) in &state.owned_clients {
             crate::session::mcp_servers::refresh_client_policy(
@@ -271,7 +287,7 @@ impl SessionActor {
             }
         }
         drop(state);
-        self.refresh_mcp_snapshot_and_schedule_reminder().await;
+        self.refresh_mcp_snapshot_under_publication(&publication).await;
         let snapshot = crate::extensions::mcp::build_mcp_status(&self.mcp_state, &bridge).await;
         self.emit_mcp_catalog_updates(
             snapshot
@@ -319,18 +335,31 @@ impl SessionActor {
     /// `<system-reminder>` at a turn boundary. The `search_tool` description
     /// itself stays static (cacheable).
     pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder(&self) {
+        let publication = self.mcp.publication_bridge.lock().await;
+        self.refresh_mcp_snapshot_under_publication(&publication).await;
+    }
+
+    // Callers hold the publication lock through registration and snapshot.
+    pub(super) async fn refresh_mcp_snapshot_under_publication(
+        &self,
+        publication: &tokio::sync::MutexGuard<'_, Arc<tools::bridge::ToolBridge>>,
+    ) {
         let cwd = std::path::Path::new(&self.session_info.cwd);
         // Keep the MCP trust-domain ceilings in sync with config on every
         // snapshot refresh (whole-set replace, same source as init).
         let server_access = crate::util::config::get_mcp_server_max_access(cwd);
-        self.mcp_state.lock().await.mcp_server_max_access = server_access;
-        let mcp_initialized = self.mcp_state.lock().await.is_initialized();
+        let (mcp_initialized, generation) = {
+            let mut state = self.mcp_state.lock().await;
+            state.mcp_server_max_access = server_access;
+            (state.is_initialized(), state.generation())
+        };
         refresh_mcp_snapshot_and_schedule_reminder_with(
-            self.agent.borrow().tool_bridge().clone(),
+            Arc::clone(publication),
             Arc::clone(&self.mcp_state),
             self.mcp.tool_metadata_snapshot.clone(),
             Arc::clone(&self.mcp.reminder_dirty),
             mcp_initialized,
+            generation,
         )
         .await;
     }
@@ -638,6 +667,7 @@ impl SessionActor {
             client.get_tool_registrations(Arc::clone(&self.mcp_state)),
         )
         .await;
+        let publication = self.mcp.publication_bridge.lock().await;
         let mut state = self.mcp_state.lock().await;
         if !state.accepts_client_event(server, episode)
             || !state
@@ -692,7 +722,8 @@ impl SessionActor {
                 .await;
         }
         drop(state);
-        self.refresh_mcp_snapshot_and_schedule_reminder().await;
+        self.refresh_mcp_snapshot_under_publication(&publication).await;
+        drop(publication);
         // Config updates can run while snapshot refresh waits for its lock.
         if self
             .mcp_state
@@ -1085,7 +1116,8 @@ impl SessionActor {
                 .collect()
         };
         let mcp_state_bg = std::sync::Arc::clone(&self.mcp_state);
-        let tool_bridge = self.agent.borrow().tool_bridge().clone();
+        let publication_bridge = Arc::clone(&self.mcp.publication_bridge);
+        let capabilities = self.subagent_capabilities.clone();
         let gateway = self.notifications.gateway.clone();
         let tool_snapshot = self.mcp.tool_metadata_snapshot.clone();
         let mcp_reminder_dirty = Arc::clone(&self.mcp.reminder_dirty);
@@ -1202,6 +1234,27 @@ impl SessionActor {
                 }
             }
             drop(futs);
+            let mut shared_registrations = Vec::new();
+            for (server_name, client) in &shared_clients_for_bg {
+                let regs = match client
+                    .get_tool_registrations(Arc::clone(&mcp_state_bg))
+                    .await
+                {
+                    Ok(r) => r,
+                    Err(e) => {
+                        tracing::warn!(
+                            server = %server_name,
+                            error = %e,
+                            "Failed to list tools from shared MCP client in bg task"
+                        );
+                        continue;
+                    }
+                };
+                shared_registrations.push((server_name.clone(), regs));
+            }
+            // All remote waits precede this local publication boundary.
+            let publication = publication_bridge.lock().await;
+            let tool_bridge = publication.clone();
             let mut ui_tools_by_server: std::collections::HashMap<
                 String,
                 Vec<crate::extensions::mcp::McpToolEntry>,
@@ -1245,6 +1298,9 @@ impl SessionActor {
                                 .collect();
                             for reg in registrations {
                                 let qualified_name = reg.name.clone();
+                                if capabilities.as_ref().is_some_and(|state| !state.mcp_tool_eligible(&qualified_name)) {
+                                    continue;
+                                }
                                 let prefix = format!(
                                     "{}{}",
                                     server_name,
@@ -1435,7 +1491,6 @@ impl SessionActor {
                     elapsed_ms = handshake_start.elapsed().as_millis() as u64,
                     "mcp_bg_handshake: clients inserted, calling notify_waiters"
                 );
-                mcp_handshakes_done.notify_waiters();
                 ::diagnostics::session_ctx::log_event(::diagnostics::events::McpInitCompleted {
                     total_duration_ms: handshake_start.elapsed().as_millis() as u64,
                     server_count,
@@ -1447,24 +1502,16 @@ impl SessionActor {
                     is_reinit,
                 });
             }
-            for (server_name, client) in &shared_clients_for_bg {
-                let regs = match client
-                    .get_tool_registrations(Arc::clone(&mcp_state_bg))
-                    .await
-                {
-                    Ok(r) => r,
-                    Err(e) => {
-                        tracing::warn!(
-                            server = %server_name,
-                            error = %e,
-                            "Failed to list tools from shared MCP client in bg task"
-                        );
-                        continue;
-                    }
-                };
+            for (server_name, regs) in shared_registrations {
                 let mut mcp_state = mcp_state_bg.lock().await;
+                if mcp_state.generation() != generation {
+                    return;
+                }
                 for reg in regs {
                     let qualified_name = reg.name.clone();
+                    if capabilities.as_ref().is_some_and(|state| !state.mcp_tool_eligible(&qualified_name)) {
+                        continue;
+                    }
                     let prefix = format!(
                         "{}{}",
                         server_name,
@@ -1479,7 +1526,7 @@ impl SessionActor {
                             .mcp_tool_meta
                             .insert(qualified_name.clone(), meta.clone());
                     }
-                    if mcp_state.is_tool_disabled(server_name, &unqualified) {
+                    if mcp_state.is_tool_disabled(&server_name, &unqualified) {
                         mcp_state
                             .disabled_tool_registrations
                             .insert(qualified_name, reg);
@@ -1503,16 +1550,22 @@ impl SessionActor {
             // background initialization started.
             {
                 let mut mcp_state = mcp_state_bg.lock().await;
+                if mcp_state.generation() != generation {
+                    return;
+                }
                 mcp_state.mcp_server_max_access = server_access_bg;
             }
-            refresh_mcp_snapshot_and_schedule_reminder_with(
+            if !refresh_mcp_snapshot_and_schedule_reminder_with(
                 tool_bridge.clone(),
                 Arc::clone(&mcp_state_bg),
                 tool_snapshot,
                 mcp_reminder_dirty,
                 true,
+                generation,
             )
-            .await;
+            .await { return; }
+            mcp_handshakes_done.notify_waiters();
+            drop(publication);
             for (server_name, tools) in ui_tools_by_server {
                 let payload = crate::extensions::mcp::McpServerStatusPayload {
                     session_id: session_id_owned.to_string(),

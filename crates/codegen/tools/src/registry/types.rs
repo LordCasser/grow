@@ -1430,7 +1430,12 @@ impl FinalizedToolset {
     fn tool_not_found_error(tool_name: &str) -> tool_runtime::ToolError {
         let tid = tool_protocol::ToolId::new(tool_name)
             .unwrap_or_else(|_| tool_protocol::ToolId::new("unknown").expect("valid"));
-        tool_runtime::ToolError::not_found(tid, format!("Tool not found: {tool_name}"))
+        let detail = if tool_name.contains("__") {
+            format!("MCP tool is not registered in this session: {tool_name}. Refresh search_tool to check the current catalog; this error does not establish whether the remote tool exists or the server is connected.")
+        } else {
+            format!("Tool not found: {tool_name}")
+        };
+        tool_runtime::ToolError::not_found(tid, detail)
     }
     pub async fn try_parse(
         &self,
@@ -2277,6 +2282,20 @@ mod tests {
             system_reminder_tag: crate::reminders::DEFAULT_REMINDER_TAG,
         }
     }
+    #[tokio::test]
+    async fn missing_mcp_tool_reports_local_registration_without_remote_claims() {
+        let tmp = TempDir::new().unwrap();
+        let toolset = ToolRegistryBuilder::new()
+            .finalize(ToolServerConfig::default(), test_session_context(&tmp))
+            .unwrap();
+        let error = toolset.try_parse("demo__missing", &serde_json::json!({})).await.unwrap_err();
+        assert!(error.detail.contains("not registered in this session"));
+        assert!(error.detail.contains("Refresh search_tool"));
+        assert!(matches!(error.kind, tool_runtime::ToolErrorKind::NotFound));
+        let native = toolset.try_parse("missing", &serde_json::json!({})).await.unwrap_err();
+        assert_eq!(native.detail, "Tool not found: missing");
+    }
+
     /// `kind_params` remains available when multiple native tools share one
     /// `ToolKind`. Standard and concise tools may coexist, while the separate
     /// hashline file-tool family is intentionally rejected by validation.

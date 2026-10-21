@@ -345,6 +345,8 @@ Pager 的进程内 ACP session 会通过配置 watcher 刷新活动 session 的 
 
 MCP 的服务 `name` 同时作为 catalog、客户端和工具前缀身份。跨来源同名项按配置高于插件、客户端高于配置的既有优先级选取一项；单个 ACP 客户端数组内重名会在 new/load/update 接纳前报错。显式 `name + serverUrl` 必须匹配同一当前项，URL 不作跨名称别名；见 [服务身份](../openspec/specs/extension-runtime/spec.md#requirement-mcp-server-name-is-the-session-identity)。
 
+MCP doctor、工具注册和 descriptor 共用完整 `tools/list` 分页收集；后续页失败或 cursor 循环会整体报错。后台发现结束后才取得当前 Agent 的发布目标，注册和搜索快照与 Agent 切换在同一本地边界内完成；网络等待不阻塞切换。排查 `search_tool` 可见但 `use_tool` 未注册时，应检查当前会话目录与切换时序，不能仅凭未注册错误认定服务断线。见 [MCP 目录发现与发布](../openspec/specs/extension-runtime/spec.md#requirement-mcp-initialization-publishes-to-the-current-agent-bridge)。
+
 辅助策略与连接配置独立刷新：修改 `disabled_mcp_tools`、启动/工具超时或 per-tool timeout 不需要重连未变化的 endpoint。可信项目按 server name 覆写全局 mask，空数组解除继承的禁用；工具禁用同步作用于模型注册、搜索快照和 direct call。删除超时覆写恢复下一层或默认值，`_meta` 仍优先；已准入调用保留自己的期限。见 [辅助策略热刷新](../openspec/specs/extension-runtime/spec.md#requirement-live-mcp-auxiliary-policy-follows-effective-configuration)。
 
 MCP 工具的模型路径把 `structuredContent` 与 text/resource 描述投成受既有文本限额约束的正文，image block 与 image resource 则作为运行时附件绕开文本截断，并在 Shell 结果结算时走原有正规化、图片预算与 Timeline follow-up。`use_tool` 的三层 JSON value 往返用 `TypedToolOutput.model_output` 携带附件，再还原到运行时 `MCPOutput`；默认 ACP `raw_output` 不序列化这些图片的 base64。显式 `expose_image_base64` 仍会把有界原始数据写进正文，长正文可能被截断并保存完整文件。direct `grow/mcp/call` 不写模型 Timeline，返回原生完整 `CallToolResult`；其 JSON 响应载荷上限为 16 MiB，超限报错而不返回残缺 JSON。契约见 [MCP 结果完整性](../openspec/specs/extension-runtime/spec.md#requirement-mcp-tool-results-retain-structured-and-typed-content) 和 [附件恢复](../openspec/specs/session-timeline/spec.md#requirement-mcp-image-evidence-survives-text-output-truncation)。

@@ -1,6 +1,6 @@
 //! MCP server integration using the official rmcp SDK.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::future::Future;
 use std::sync::{Arc, LazyLock};
@@ -2520,6 +2520,42 @@ enum PendingTransport {
 /// through to the session-actor dispatcher.
 pub type McpService = Arc<RunningService<RoleClient, GrowClientHandler>>;
 
+/// Fetch every page of a server's `tools/list` catalog.
+///
+/// A repeated cursor means the server cannot make progress. Treat it as a
+/// discovery failure so callers never publish a partial catalog or loop
+/// forever on a malformed response.
+pub async fn list_all_tools(
+    peer: &rmcp::service::Peer<RoleClient>,
+) -> Result<Vec<rmcp::model::Tool>, McpError> {
+    let mut tools = Vec::new();
+    let mut cursor: Option<String> = None;
+    let mut seen_cursors = HashSet::new();
+
+    loop {
+        let result = peer
+            .list_tools(Some(
+                PaginatedRequestParams::default().with_cursor(cursor),
+            ))
+            .await?;
+        let next_cursor = result.next_cursor;
+        if let Some(next) = next_cursor.as_ref()
+            && !seen_cursors.insert(next.clone())
+        {
+            return Err(McpError::ClientError(format!(
+                "MCP tools/list returned repeated cursor {next:?}"
+            )));
+        }
+        tools.extend(result.tools);
+        match next_cursor {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+
+    Ok(tools)
+}
+
 /// MCP client connection state machine.
 ///
 /// Single-flight handshake invariant: at most one task at a time may run
@@ -3853,34 +3889,22 @@ impl McpClient {
         // work to a single `spawn_blocking` so the executor is never blocked on
         // `std::fs` (this runs on every MCP tool-set change, not just startup).
         let mut files: Vec<(String, Vec<u8>)> = Vec::new();
-        let mut cursor: Option<String> = None;
-        loop {
-            let result = mcp_service
-                .list_tools(Some(
-                    PaginatedRequestParams::default().with_cursor(cursor.clone()),
-                ))
-                .await?;
-            for tool in result.tools {
-                let descriptor = serde_json::json!({
-                    "name": tool.name.as_ref(),
-                    "description": tool.description.as_deref(),
-                    "inputSchema": tool.input_schema.as_ref(),
-                });
-                match serde_json::to_vec_pretty(&descriptor) {
-                    Ok(bytes) => files.push((
-                        format!("{}.json", sanitize_descriptor_segment(tool.name.as_ref())),
-                        bytes,
-                    )),
-                    Err(e) => tracing::warn!(
-                        tool = %tool.name.as_ref(),
-                        error = %e,
-                        "failed to serialize MCP tool descriptor",
-                    ),
-                }
-            }
-            match result.next_cursor {
-                Some(next) => cursor = Some(next),
-                None => break,
+        for tool in list_all_tools(mcp_service.peer()).await? {
+            let descriptor = serde_json::json!({
+                "name": tool.name.as_ref(),
+                "description": tool.description.as_deref(),
+                "inputSchema": tool.input_schema.as_ref(),
+            });
+            match serde_json::to_vec_pretty(&descriptor) {
+                Ok(bytes) => files.push((
+                    format!("{}.json", sanitize_descriptor_segment(tool.name.as_ref())),
+                    bytes,
+                )),
+                Err(e) => tracing::warn!(
+                    tool = %tool.name.as_ref(),
+                    error = %e,
+                    "failed to serialize MCP tool descriptor",
+                ),
             }
         }
 
@@ -3941,24 +3965,8 @@ impl McpClient {
         let _ensure_init_timer = diagnostics::instrumentation::timer("mcp_ensure_initialized");
         let mcp_service = self.ensure_initialized().await?;
 
-        let mut all_tools = Vec::new();
-        let mut cursor: Option<String> = None;
-
         let _list_tools_timer = diagnostics::instrumentation::timer("mcp_list_tools");
-        loop {
-            let list_tools_result = mcp_service
-                .list_tools(Some(
-                    PaginatedRequestParams::default().with_cursor(cursor.clone()),
-                ))
-                .await?;
-
-            all_tools.extend(list_tools_result.tools);
-
-            match list_tools_result.next_cursor {
-                Some(next) => cursor = Some(next),
-                None => break,
-            }
-        }
+        let all_tools = list_all_tools(mcp_service.peer()).await?;
 
         let registrations: Vec<_> = all_tools
             .into_iter()

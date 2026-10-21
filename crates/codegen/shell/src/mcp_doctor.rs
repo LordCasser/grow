@@ -244,13 +244,9 @@ async fn check_handshake(
 }
 
 async fn check_tools_list(service: &mcp_servers::McpService) -> Check {
-    use mcp::rmcp::model::PaginatedRequestParams;
-    match service
-        .list_tools(Some(PaginatedRequestParams::default()))
-        .await
-    {
-        Ok(result) => {
-            let count = result.tools.len();
+    match ::mcp::servers::list_all_tools(service.peer()).await {
+        Ok(tools) => {
+            let count = tools.len();
             if count == 0 {
                 Check::fail(
                     "0 tools discovered",

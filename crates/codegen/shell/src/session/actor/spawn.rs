@@ -2449,6 +2449,7 @@ pub(crate) async fn spawn_session_actor(
         deny_read_globs,
         mcp_state: mcp_state.clone(),
         mcp: McpSessionState {
+            publication_bridge: Arc::new(TokioMutex::new(agent.tool_bridge().clone())),
             strategy: mcp_strategy,
             initial_client_servers: initial_client_mcp_servers.clone(),
             tool_metadata_snapshot,

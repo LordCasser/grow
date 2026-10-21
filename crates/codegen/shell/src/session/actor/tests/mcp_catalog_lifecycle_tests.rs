@@ -12,6 +12,7 @@ struct CatalogServer {
     tools: Mutex<Vec<String>>,
     calls: AtomicUsize,
     block_list: AtomicBool,
+    fail_list: AtomicBool,
     started: tokio::sync::Notify,
     release: tokio::sync::Notify,
 }
@@ -31,6 +32,9 @@ impl ::mcp::acp_transport::AcpReverseInvoker for CatalogServer {
                 "serverInfo": {"name":"catalog-fixture", "version":"1"}
             }),
             "tools/list" => {
+                if self.fail_list.swap(false, Ordering::SeqCst) {
+                    return Err("catalog temporarily unavailable".into());
+                }
                 let tools = self.tools.lock().unwrap().clone();
                 if self.block_list.swap(false, Ordering::SeqCst) {
                     self.started.notify_one();
@@ -256,7 +260,9 @@ async fn mcp_catalog_retirement_prunes_snapshot_before_bridge_restore() {
             actor.mcp_state.lock().await.owned_clients.remove("demo");
             actor.unregister_server_tools("demo");
             assert!(listed(&actor).await.is_empty());
-            actor.restore_mcp_tools_from_snapshot().await;
+            let publication = actor.mcp.publication_bridge.lock().await;
+            actor.restore_mcp_tools_from_snapshot(&publication).await;
+            drop(publication);
             assert!(listed(&actor).await.is_empty());
             assert_eq!(server.calls.load(Ordering::SeqCst), 0);
         })
@@ -526,6 +532,383 @@ demo = ["work"]
                 .is_err()
             );
             assert_eq!(server.calls.load(Ordering::SeqCst), 0);
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mcp_initial_discovery_follows_agent_switch() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let (gateway, _notifications) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence, _records) = tokio::sync::mpsc::unbounded_channel();
+            let actor = Arc::new(create_test_actor(0, 128000, 80, gateway, persistence).await);
+            let server = Arc::new(CatalogServer::default());
+            *server.tools.lock().unwrap() = vec!["echo".into()];
+            server.block_list.store(true, Ordering::SeqCst);
+            actor.mcp_state.lock().await.set_acp_servers(
+                vec![::mcp::servers::AcpServerEntry {
+                    name: "demo".into(),
+                    server_id: "fixture".into(),
+                }],
+                server.clone(),
+            );
+            let old_bridge = actor.agent.borrow().tool_bridge().clone();
+            actor.ensure_mcp_tools_initialized().await;
+            tokio::time::timeout(std::time::Duration::from_secs(5), server.started.notified())
+                .await
+                .unwrap();
+            let mut definition = agent::AgentDefinition::default_grow_build();
+            definition.name = "mcp-reviewer".into();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            // A blocked remote list must not block a local Agent replacement.
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                actor.admit_agent_selection(definition, None, tx).await;
+                rx.await.unwrap().unwrap();
+            })
+            .await
+            .unwrap();
+            let bridge = actor.agent.borrow().tool_bridge().clone();
+            assert!(!Arc::ptr_eq(&old_bridge, &bridge));
+            server.release.notify_one();
+            tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                actor.mcp_initialization_worker.take().unwrap(),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            assert_eq!(listed(&actor).await, ["echo"]);
+            assert!(
+                old_bridge
+                    .tool_definitions()
+                    .await
+                    .iter()
+                    .all(|t| t.function.name != "demo__echo")
+            );
+            let result = bridge
+                .call("demo__echo", json!({"value":"after switch"}), "switch-call")
+                .await
+                .unwrap();
+            assert!(result.prompt_text.contains("echo:after switch"));
+            assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+            let mut definition = agent::AgentDefinition::default_grow_build();
+            definition.name = "mcp-reviewer-again".into();
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            actor.admit_agent_selection(definition, None, tx).await;
+            rx.await.unwrap().unwrap();
+            assert_eq!(listed(&actor).await, ["echo"]);
+            let bridge = actor.agent.borrow().tool_bridge().clone();
+            bridge
+                .call(
+                    "demo__echo",
+                    json!({"value":"second switch"}),
+                    "second-switch-call",
+                )
+                .await
+                .unwrap();
+            assert_eq!(server.calls.load(Ordering::SeqCst), 2);
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mcp_initial_discovery_respects_retirement_and_disabled_tools() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            for retire in [true, false] {
+                let actor = fixture().await;
+                let server = Arc::new(CatalogServer::default());
+                *server.tools.lock().unwrap() = vec!["echo".into()];
+                server.block_list.store(true, Ordering::SeqCst);
+                actor.mcp_state.lock().await.set_acp_servers(
+                    vec![::mcp::servers::AcpServerEntry {
+                        name: "demo".into(),
+                        server_id: "fixture".into(),
+                    }],
+                    server.clone(),
+                );
+                actor.ensure_mcp_tools_initialized().await;
+                tokio::time::timeout(std::time::Duration::from_secs(5), server.started.notified())
+                    .await
+                    .unwrap();
+                {
+                    let mut state = actor.mcp_state.lock().await;
+                    if retire {
+                        // Advance catalog generation while discovery is outstanding.
+                        assert!(state.update_configs(vec![acp::McpServer::Http(
+                            acp::McpServerHttp::new("replacement", "http://127.0.0.1:1")
+                        )]));
+                    } else {
+                        state
+                            .disabled_tools
+                            .insert("demo".into(), ["echo".into()].into_iter().collect());
+                    }
+                }
+                server.release.notify_one();
+                tokio::time::timeout(
+                    std::time::Duration::from_secs(5),
+                    actor.mcp_initialization_worker.take().unwrap(),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert!(listed(&actor).await.is_empty());
+                let bridge = actor.agent.borrow().tool_bridge().clone();
+                assert!(
+                    bridge
+                        .call(
+                            "demo__echo",
+                            json!({"value":"must not execute"}),
+                            "blocked-call"
+                        )
+                        .await
+                        .is_err()
+                );
+                assert_eq!(server.calls.load(Ordering::SeqCst), 0);
+                if retire {
+                    assert!(
+                        !actor
+                            .mcp_state
+                            .lock()
+                            .await
+                            .owned_clients
+                            .contains_key("demo")
+                    );
+                } else {
+                    assert!(
+                        actor
+                            .mcp_state
+                            .lock()
+                            .await
+                            .disabled_tool_registrations
+                            .contains_key("demo__echo")
+                    );
+                }
+            }
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mcp_shared_discovery_follows_agent_switch() {
+    tokio::task::LocalSet::new().run_until(async {
+        let parent = fixture().await;
+        let server = Arc::new(CatalogServer::default());
+        *server.tools.lock().unwrap() = vec!["echo".into()];
+        let (_, episode) = install(&parent, &server).await;
+        parent.refresh_mcp_server_tools("demo", episode).await;
+        let pool = ::mcp::servers::SharedMcpPool::from_state(&*parent.mcp_state.lock().await);
+        let (gateway, _notifications) = tokio::sync::mpsc::unbounded_channel();
+        let (persistence, _records) = tokio::sync::mpsc::unbounded_channel();
+        let actor = Arc::new(create_test_actor(0, 128000, 80, gateway, persistence).await);
+        actor.mcp_state.lock().await.import_shared_clients(&pool);
+        let old_bridge = actor.agent.borrow().tool_bridge().clone();
+        server.block_list.store(true, Ordering::SeqCst);
+        let discovery = actor.register_shared_client_tools();
+        tokio::pin!(discovery);
+        tokio::select! {
+            _ = server.started.notified() => {},
+            _ = &mut discovery => panic!("shared discovery must wait"),
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("shared discovery did not start"),
+        }
+        let mut definition = agent::AgentDefinition::default_grow_build();
+        definition.name = "shared-mcp-reviewer".into();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            actor.admit_agent_selection(definition, None, tx).await;
+            rx.await.unwrap().unwrap();
+        }).await.unwrap();
+        server.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), discovery).await.unwrap();
+        assert_eq!(listed(&actor).await, ["echo"]);
+        assert!(old_bridge.tool_definitions().await.iter().all(|t| t.function.name != "demo__echo"));
+        let bridge = actor.agent.borrow().tool_bridge().clone();
+        bridge.call("demo__echo", json!({"value":"shared"}), "shared-switch-call").await.unwrap();
+        assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+    }).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mcp_shared_discovery_filters_current_named_inheritance_after_agent_switch() {
+    tokio::task::LocalSet::new().run_until(async {
+        let parent = fixture().await;
+        let server = Arc::new(CatalogServer::default());
+        *server.tools.lock().unwrap() = vec!["echo".into()];
+        let (_, episode) = install(&parent, &server).await;
+        parent.refresh_mcp_server_tools("demo", episode).await;
+        let pool = ::mcp::servers::SharedMcpPool::from_state(&*parent.mcp_state.lock().await);
+        let (gateway, _notifications) = tokio::sync::mpsc::unbounded_channel();
+        let (persistence, _records) = tokio::sync::mpsc::unbounded_channel();
+        let mut actor = create_test_actor(0, 128000, 80, gateway, persistence).await;
+        actor.mcp_state.lock().await.import_shared_clients(&pool);
+        let old_bridge = actor.agent.borrow().tool_bridge().clone();
+        let shared_client_ids = actor.mcp_state.lock().await.shared_client_ids();
+        let capabilities = crate::session::subagent_capability::SubagentCapabilityState::from_bridge(
+            &old_bridge,
+            &tools::registry::types::ToolServerConfig { tools: vec![] },
+            tool_types::SubagentCapabilityMode::ReadOnly,
+            Some(pool.eligibility()),
+            shared_client_ids,
+        )
+        .await;
+        assert!(capabilities.mcp_server_eligible("demo"));
+        actor.subagent_capabilities = Some(capabilities);
+        let actor = Arc::new(actor);
+        server.block_list.store(true, Ordering::SeqCst);
+        let discovery = actor.register_shared_client_tools();
+        tokio::pin!(discovery);
+        tokio::select! {
+            _ = server.started.notified() => {},
+            _ = &mut discovery => panic!("shared discovery must wait"),
+            _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => panic!("shared discovery did not start"),
+        }
+        let mut definition = agent::AgentDefinition::default_grow_build();
+        definition.name = "shared-mcp-reviewer-named".into();
+        definition.mcp_inheritance = agent::config::McpInheritance::Named(vec!["other".into()]);
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            actor.admit_agent_selection(definition, None, tx).await;
+            rx.await.unwrap().unwrap();
+        })
+        .await
+        .unwrap();
+        server.release.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(5), discovery)
+            .await
+            .unwrap();
+        assert!(
+            !actor.subagent_capabilities.as_ref().unwrap().mcp_server_eligible("demo"),
+            "the current Agent's named inheritance must filter the inherited authority"
+        );
+        assert!(listed(&actor).await.is_empty());
+        assert!(old_bridge.tool_definitions().await.iter().all(|t| t.function.name != "demo__echo"));
+        let bridge = actor.agent.borrow().tool_bridge().clone();
+        assert!(bridge.call("demo__echo", json!({"value":"shared"}), "shared-switch-call").await.is_err());
+        assert_eq!(server.calls.load(Ordering::SeqCst), 0);
+    }).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mcp_shared_discovery_failure_preserves_catalog_but_empty_catalog_removes_it() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let parent = fixture().await;
+            let server = Arc::new(CatalogServer::default());
+            *server.tools.lock().unwrap() = vec!["echo".into()];
+            let (_, episode) = install(&parent, &server).await;
+            parent.refresh_mcp_server_tools("demo", episode).await;
+            let pool = ::mcp::servers::SharedMcpPool::from_state(&*parent.mcp_state.lock().await);
+            let (gateway, _notifications) = tokio::sync::mpsc::unbounded_channel();
+            let (persistence, _records) = tokio::sync::mpsc::unbounded_channel();
+            let actor = Arc::new(create_test_actor(0, 128000, 80, gateway, persistence).await);
+            actor.mcp_state.lock().await.import_shared_clients(&pool);
+            actor.register_shared_client_tools().await;
+            assert_eq!(listed(&actor).await, ["echo"]);
+
+            server.fail_list.store(true, Ordering::SeqCst);
+            actor.register_shared_client_tools().await;
+            assert_eq!(listed(&actor).await, ["echo"]);
+            let bridge = actor.agent.borrow().tool_bridge().clone();
+            let result = bridge
+                .call(
+                    "demo__echo",
+                    json!({"value":"after failed list"}),
+                    "failed-list-call",
+                )
+                .await
+                .unwrap();
+            assert!(result.prompt_text.contains("echo:after failed list"));
+            assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+
+            server.tools.lock().unwrap().clear();
+            actor.register_shared_client_tools().await;
+            assert!(listed(&actor).await.is_empty());
+            assert!(
+                bridge
+                    .call(
+                        "demo__echo",
+                        json!({"value":"after empty list"}),
+                        "empty-list-call"
+                    )
+                    .await
+                    .is_err()
+            );
+            assert_eq!(server.calls.load(Ordering::SeqCst), 1);
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mcp_snapshot_rejects_a_superseded_publication_generation() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let actor = fixture().await;
+            let server = Arc::new(CatalogServer::default());
+            *server.tools.lock().unwrap() = vec!["echo".into()];
+            let (_, episode) = install(&actor, &server).await;
+            actor.refresh_mcp_server_tools("demo", episode).await;
+            let old_generation = actor.mcp_state.lock().await.generation();
+            actor
+                .mcp_state
+                .lock()
+                .await
+                .update_configs(vec![acp::McpServer::Http(acp::McpServerHttp::new(
+                    "replacement",
+                    "http://127.0.0.1:1",
+                ))]);
+            actor
+                .mcp
+                .tool_metadata_snapshot
+                .lock()
+                .unwrap()
+                .tools
+                .clear();
+            actor.mcp.reminder_dirty.store(false, Ordering::Relaxed);
+            let published = refresh_mcp_snapshot_and_schedule_reminder_with(
+                actor.agent.borrow().tool_bridge().clone(),
+                Arc::clone(&actor.mcp_state),
+                actor.mcp.tool_metadata_snapshot.clone(),
+                Arc::clone(&actor.mcp.reminder_dirty),
+                true,
+                old_generation,
+            )
+            .await;
+            assert!(!published);
+            assert!(
+                actor
+                    .mcp
+                    .tool_metadata_snapshot
+                    .lock()
+                    .unwrap()
+                    .tools
+                    .is_empty()
+            );
+            assert!(!actor.mcp.reminder_dirty.load(Ordering::Relaxed));
+        })
+        .await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn mcp_snapshot_refresh_waits_for_publication_boundary() {
+    tokio::task::LocalSet::new()
+        .run_until(async {
+            let actor = fixture().await;
+            let server = Arc::new(CatalogServer::default());
+            *server.tools.lock().unwrap() = vec!["echo".into()];
+            let (_, episode) = install(&actor, &server).await;
+            actor.refresh_mcp_server_tools("demo", episode).await;
+            let publication = actor.mcp.publication_bridge.lock().await;
+            let refresh = actor.refresh_mcp_snapshot_and_schedule_reminder();
+            tokio::pin!(refresh);
+            assert!(futures::poll!(&mut refresh).is_pending());
+            // A publisher may retire the tool before the waiting refresh runs.
+            actor.unregister_server_tools("demo");
+            drop(publication);
+            tokio::time::timeout(std::time::Duration::from_secs(5), refresh)
+                .await
+                .unwrap();
+            assert!(listed(&actor).await.is_empty());
         })
         .await;
 }

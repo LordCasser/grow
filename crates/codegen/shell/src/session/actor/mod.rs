@@ -1479,6 +1479,10 @@ pub(crate) struct ModelAuthMemo {
 /// lifetimes. The individual synchronization primitives retain their existing
 /// boundaries.
 struct McpSessionState {
+    /// Serialize local catalog publication with Agent replacement. Never held
+    /// while discovering a remote catalog; detached work resolves this target
+    /// only after discovery completes.
+    publication_bridge: Arc<TokioMutex<Arc<tools::bridge::ToolBridge>>>,
     strategy: McpInitStrategy,
     initial_client_servers: Vec<acp::McpServer>,
     tool_metadata_snapshot: Arc<std::sync::Mutex<crate::session::tool_index::ToolMetadataSnapshot>>,

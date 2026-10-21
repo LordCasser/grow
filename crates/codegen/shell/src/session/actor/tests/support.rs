@@ -1087,6 +1087,12 @@ async fn create_test_actor_ex_inner(
             control_epoch.clone(),
         ),
     ));
+    let rebuild_spec = crate::session::agent_rebuild::test_rebuild_spec_default();
+    let mut test_agent = test_agent_default().await;
+    test_agent
+        .activate_resource_domain(&rebuild_spec.resource_domain)
+        .await
+        .expect("test actor resource domain must be active before Agent rebuilds");
     let actor = SessionActor {
         session_info: SessionInfo {
             id: acp::SessionId::new("test-actor"),
@@ -1124,6 +1130,7 @@ async fn create_test_actor_ex_inner(
         deny_read_globs: Vec::new(),
         mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
         mcp: McpSessionState {
+            publication_bridge: Arc::new(TokioMutex::new(test_agent.tool_bridge().clone())),
             strategy: McpInitStrategy::Blocking,
             initial_client_servers: vec![],
             tool_metadata_snapshot: Arc::new(std::sync::Mutex::new(Default::default())),
@@ -1225,7 +1232,7 @@ async fn create_test_actor_ex_inner(
         client_identifier: None,
         origin_client: None,
         signals_handle: Default::default(),
-        agent: std::cell::RefCell::new(test_agent_default().await),
+        agent: std::cell::RefCell::new(test_agent),
         agent_profile: crate::session::handle::SessionAgentProfile::new(
             "grow-build".into(),
             Default::default(),
@@ -1311,18 +1318,12 @@ async fn create_test_actor_ex_inner(
         sampler_handle: sampler::SamplerHandle::noop(),
         sampler_owner: std::cell::RefCell::new(None),
         sampler_event_drainer: TaskSlot::new(),
-        rebuild_spec: crate::session::agent_rebuild::test_rebuild_spec_default(),
+        rebuild_spec,
         image_description_model: parking_lot::RwLock::new(None),
         session_title_route: std::cell::RefCell::new(None.into()),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         workspace_ops: workspace::WorkspaceOps::for_test(),
     };
-    actor
-        .agent
-        .borrow_mut()
-        .activate_resource_domain(&actor.rebuild_spec.resource_domain)
-        .await
-        .expect("test actor resource domain must be active before Agent rebuilds");
     (actor, observed_event_rx, planning_command_rx)
 }
 #[cfg(test)]

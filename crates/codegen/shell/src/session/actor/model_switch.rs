@@ -2319,6 +2319,9 @@ impl SessionActor {
             )
         })?;
         resource_activation.commit().await;
+        // The publisher never holds this across remote discovery. Either its
+        // full catalog is already in the snapshot, or it will target this Agent.
+        let mut mcp_publication = self.mcp.publication_bridge.lock().await;
         if let Some(capabilities) = &self.subagent_capabilities {
             capabilities.replace_agent_harness(
                 new_agent.tool_bridge(),
@@ -2326,6 +2329,7 @@ impl SessionActor {
                 candidate_mcp_bindings.unwrap_or_default(),
             );
         }
+        *mcp_publication = new_agent.tool_bridge().clone();
         *self.agent.borrow_mut() = new_agent;
         // Keep foreground admission fenced until the new harness has every
         // critical runtime resource and MCP registration. Goal idle-driving is
@@ -2365,7 +2369,8 @@ impl SessionActor {
         }
         // Restore the already-observed catalog using local metadata only.
         // Remote list calls do not belong inside the step-control/cancel gate.
-        self.restore_mcp_tools_from_snapshot().await;
+        self.restore_mcp_tools_from_snapshot(&mcp_publication).await;
+        drop(mcp_publication);
         self.agent_profile
             .replace(new_agent_name.clone(), new_subagent_filter);
         self.workflow_manager

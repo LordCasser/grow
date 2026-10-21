@@ -25,16 +25,16 @@ pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder_with(
     tool_metadata_snapshot: Arc<std::sync::Mutex<crate::session::tool_index::ToolMetadataSnapshot>>,
     mcp_reminder_dirty: Arc<std::sync::atomic::AtomicBool>,
     mcp_initialized: bool,
-) {
+    generation: u64,
+) -> bool {
     use crate::session::tool_index::{
         ServerMetadata, ToolMetadata, extract_parameter_names, split_qualified_name,
     };
 
-    let generation = mcp_state.lock().await.generation();
     let all_defs = tool_bridge.tool_definitions().await;
     let state = mcp_state.lock().await;
     if state.generation() != generation {
-        return;
+        return false;
     }
     let mut seen_tools = std::collections::HashSet::new();
     let mcp_tools: Vec<ToolMetadata> = all_defs
@@ -83,6 +83,7 @@ pub(super) async fn refresh_mcp_snapshot_and_schedule_reminder_with(
 
     mcp_reminder_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
     tracing::debug!("MCP snapshot updated, reminder marked dirty");
+    true
 }
 
 impl SessionActor {
@@ -91,7 +92,10 @@ impl SessionActor {
     /// through the live shared `McpState`, so the step-control/cancellation
     /// gate contains only bounded local work. In-flight handshakes and later
     /// list-change pushes still update whichever bridge is live.
-    pub(super) async fn restore_mcp_tools_from_snapshot(&self) {
+    pub(super) async fn restore_mcp_tools_from_snapshot(
+        &self,
+        publication: &tokio::sync::MutexGuard<'_, Arc<tools::bridge::ToolBridge>>,
+    ) {
         let tools = self
             .mcp
             .tool_metadata_snapshot
@@ -100,7 +104,7 @@ impl SessionActor {
             .tools
             .clone();
         if tools.is_empty() {
-            self.refresh_mcp_snapshot_and_schedule_reminder().await;
+            self.refresh_mcp_snapshot_under_publication(publication).await;
             return;
         }
         let mut all_ui_tools: std::collections::HashMap<
@@ -136,7 +140,7 @@ impl SessionActor {
             )
             .await;
         }
-        self.refresh_mcp_snapshot_and_schedule_reminder().await;
+        self.refresh_mcp_snapshot_under_publication(publication).await;
         self.emit_mcp_catalog_updates(all_ui_tools);
     }
 }
