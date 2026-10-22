@@ -64,15 +64,14 @@ use tokio::net::UnixStream;
 /// Pipe character used for ID namespacing (must match server.rs)
 const ID_NAMESPACE_SEP: char = '|';
 
-/// Wait for socket file to exist and be connectable.
+/// Wait for the bound endpoint without creating a throwaway ACP connection.
+/// All tests use a current-thread runtime; the server binds/listens without an
+/// await between publishing the socket and accepting clients.
 async fn wait_for_socket(sock_path: &std::path::Path) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
         if sock_path.exists() {
-            // Try to connect to verify it's actually listening
-            if UnixStream::connect(sock_path).await.is_ok() {
-                return;
-            }
+            return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
@@ -92,7 +91,7 @@ async fn setup_test_server(
     let sock_path = temp.path().join("leader.sock");
     let handle = spawn_leader_server(sock_path.clone()).await.unwrap();
 
-    // Wait for socket to be connectable instead of fixed sleep
+    // Wait for binding without injecting a client-disconnected notification
     wait_for_socket(&sock_path).await;
 
     (sock_path, handle.cancel, handle.acp_rx, handle.response_tx)
