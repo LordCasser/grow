@@ -1,8 +1,0 @@
-
-running 1 test
-test session::storage::jsonl::response_commit_perf::normal_response_storage_commit_release ... PERF_RESPONSE_COMMIT {"body_bytes":4096,"rounds":21,"total_ms":{"median":13.0325,"p95":20.532292},"candidate_anchor_exact_append_ms":{"median":4.461833,"p95":12.103625},"timeline_admission_durable_append_ms":{"median":8.527750000000001,"p95":8.630374999999999},"projection_build_with_digest_ms":{"median":0.0,"p95":0.0},"projection_commit_ms":{"median":0.0,"p95":0.0},"ledger_barriers":{"scope":"Timeline and updates ledgers only; excludes summary, artifact, and all other system calls","update_file":0,"update_directory":0,"timeline_file":42,"timeline_directory":42}}
-PERF_RESPONSE_COMMIT {"body_bytes":32768,"rounds":21,"total_ms":{"median":13.124416,"p95":22.123542},"candidate_anchor_exact_append_ms":{"median":4.429625000000001,"p95":8.3765},"timeline_admission_durable_append_ms":{"median":8.989666999999999,"p95":13.747041999999999},"projection_build_with_digest_ms":{"median":0.0,"p95":0.0},"projection_commit_ms":{"median":0.0,"p95":0.0},"ledger_barriers":{"scope":"Timeline and updates ledgers only; excludes summary, artifact, and all other system calls","update_file":0,"update_directory":0,"timeline_file":42,"timeline_directory":42}}
-ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4358 filtered out; finished in 2.66s
-

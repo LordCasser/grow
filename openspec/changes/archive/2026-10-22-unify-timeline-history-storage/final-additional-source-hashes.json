@@ -1,8 +1,0 @@
-{
-  "captured_utc": "2026-10-21T18:52:00.780785+00:00",
-  "purpose": "Additional test-only diagnostic source not in prior C3 source inventory",
-  "source_hashes": {
-    "crates/codegen/test-support/src/acp_client.rs": "5cbc0f6db37ddc1e6efcd8378948af0b62129d1ac802826b3a273ef1b2fc23ee"
-  },
-  "mtime_utc": "2026-10-21T18:06:12.605422+00:00"
-}

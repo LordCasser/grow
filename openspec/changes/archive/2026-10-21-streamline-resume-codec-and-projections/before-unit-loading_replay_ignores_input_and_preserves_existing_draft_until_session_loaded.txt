@@ -1,6 +1,0 @@
-
-running 1 test
-test app::root::dispatch::tests::session::load::loading_replay_ignores_input_and_preserves_existing_draft_until_session_loaded ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7564 filtered out; finished in 0.04s
-

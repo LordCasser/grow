@@ -1,3 +1,0 @@
-Sampling process 82817 for 2 seconds with 1 millisecond of run time between samples
-Sampling completed, processing symbols...
-Sample analysis of process 82817 written to file /Users/lordcasser/workspace/projects/grow/openspec/changes/profile-modern-session-resume/cpu-sample-2048.txt

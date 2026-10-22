@@ -1,8 +1,0 @@
-{
-  "changes_since_p0_runtime_snapshot": [
-    "crates/codegen/pager/src/app/acp_handler/tests/semantic_replay_bench.rs",
-    "crates/codegen/pager/tests/pty_e2e/resume_input_latency.rs"
-  ],
-  "interpretation": "only fixture/test formatting and added default-off measurement control; no production source changed after runtime/functional binaries were built",
-  "baseline_target_needed_for_P1": true
-}

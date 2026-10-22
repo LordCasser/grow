@@ -1,8 +1,10 @@
 # P0 release verification and P1 gate
 
+> 归档整理（2026-10-22）：仅保留本报告中的最终验证结论、测量口径与限制。以下提到的逐次运行数据、构建日志、诊断快照和中间结果曾用于验证，现已从仓库清理；历史“保留原始记录”表述不再表示文件仍在仓库中。
+
 ## Scope and method
 
-Diagnostics/test tooling only; no storage, protocol, replay order, readiness, input policy or rendering algorithm changed. Normal release/default CLI features, Rust 1.99.1 (Homebrew; actual compiler recorded in build/run context, despite repository toolchain file pinning1.93.1), incremental off, four build jobs. Own target `target/resume-attribution-release`; shared target is untouched. Executable identities are retained in binary/probe identity JSON and each comparison directory. No own compilation or correctness run overlaps formal sampling; external host load is uncontrolled.
+Diagnostics/test tooling only; no storage, protocol, replay order, readiness, input policy or rendering algorithm changed. Normal release/default CLI features, Rust 1.99.1 (Homebrew; actual compiler recorded in build/run context, despite repository toolchain file pinning1.93.1), incremental off, four build jobs. Own target `target/resume-attribution-release`; shared target is untouched. Executable identities were checked during the original comparison. No own compilation or correctness run overlaps formal sampling; external host load is uncontrolled.
 
 Three alternating AB/BA pairs, fresh processes with warm executable/filesystem cache. `smoke/` retains excluded warmups: both newly built CLI executables initially spent about1.2s before their first instrumented frame; this interval is unassigned and must not be attributed to Markdown. Formal samples follow warmup. N=3 is a local comparison, not a latency guarantee.
 
@@ -10,7 +12,7 @@ Paired CLI fixtures use identical modern admitted history, 128/512/2048 turns ×
 
 ## Measured attribution
 
-All values below are medians in milliseconds, n=3; complete ranges and per-run data are retained in `paired/attribution-summary.json`, `semantic-summary.json`, `rpc/control-summary.json`.
+All values below are medians in milliseconds, n=3; per-run records have been removed from the archive.
 
 | Turns | Counting RPC | No-draw decode/project | No-draw handler | TUI loading batch | TUI Markdown finish | TUI frame construction | TUI reducer finalize |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -48,7 +50,7 @@ Default slow first visible284.8→283.4ms; maximum observed gap136.2→143.1ms; 
 - No-draw:9 real ignored-test executions across3 sizes/3 processes, exact full assistant-source and order comparisons; actual handler ACK and complete AgentView reload finish, no frames.
 - Counting RPC:9 formal runs; full-history correctness oracle at128/2048 passes. Actual follow-up input after quit/resume passes for pre-P0 and P0 CLI.
 - Detailed PTY:3 pairs ×normal128/512/2048,3 pairs ×slow512, loading Ctrl+D quit/re-resume pair all pass. Defaults-off:3 pairs ×normal128/512/2048 andslow512 pass. Normal/slow captures also assert zero inference from restore/ignored loading input; ready key echo and history progress gates pass.
-- Initial test compilation failed on private Shell file constants; fixture-local literals fixed it. First RPC build omitted required test-support; runner corrected it. Both failed attempts are retained, not counted as executed tests. Scoped rustfmt and git diff checks pass.
+- Initial test compilation failed on private Shell file constants; fixture-local literals fixed it. First RPC build omitted required test-support; runner corrected it. Both failed attempts were excluded from executed test counts. Scoped rustfmt and git diff checks pass.
 
 ## P1 decision
 

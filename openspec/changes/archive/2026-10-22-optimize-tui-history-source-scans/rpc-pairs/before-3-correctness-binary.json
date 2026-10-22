@@ -1,7 +1,0 @@
-{
-  "binary": "/Users/lordcasser/workspace/projects/grow/target/tui-scan-release/binaries/before-session_load_perf",
-  "sha256": "220f73b886676412e9953952947b9ed065731b58853fd87bdb84ab773821f837",
-  "profile": "release",
-  "fixture": "cold process; warm page cache; setup outside RPC",
-  "rss_scope": "whole test process including fixture, not isolated load peak"
-}

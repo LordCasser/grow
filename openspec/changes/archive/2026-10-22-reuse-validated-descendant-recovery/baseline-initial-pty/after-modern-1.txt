@@ -1,9 +1,0 @@
-
-running 1 test
-test resume_input_latency::resume_modern_admission_projection_128_512_turns ... [testkit] admitted history: turns=2048 admissions=2048 missing_projections=2048 updates=0B timeline=74818903B rewind=3434B total=74822337B
-[resume-source] turns=2048 instrumentation=false stats={"timeline_bytes":74819163,"updates_bytes":0,"timeline_and_updates_bytes":74819163,"counted_files":["timeline.jsonl","updates.jsonl"],"excluded_source_files":["summary and other session files"],"source_file_count":1,"history_body":{"notifications":4097,"notification_types":{"agent_message_chunk":2049,"user_message_chunk":2048},"canonical_turns_by_fixture_sequence_marker":2048,"assistant_message_notifications":2049,"message_blocks":4097,"block_types":{"text":4097},"text_bytes":67191739,"scope":"typed_projector_output","matches_runtime_notification_input":true}}
-[resume-pty] turns=2048 modern=true update_bytes=0 history_visible_ms=562.0 ready_ms=unavailable ready_visible_ms=867.1 instrumentation=false ready_echo_p95_ms=4.0 ready_echo_max_ms=4.0 frames=28
-ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 22 filtered out; finished in 4.25s
-

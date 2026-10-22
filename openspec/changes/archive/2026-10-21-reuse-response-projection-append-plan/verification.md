@@ -1,5 +1,7 @@
 # 验证记录
 
+> 归档整理（2026-10-22）：仅保留本报告中的最终验证结论、测量口径与限制。以下提到的逐次运行数据、构建日志、诊断快照和中间结果曾用于验证，现已从仓库清理；历史“保留原始记录”表述不再表示文件仍在仓库中。
+
 2026-10-21，本地 macOS；基线 HEAD 为 a1d1c2965075c87645eab22adce6d48b19410c59，优化结果包含当前工作树改动。所有数据均为合成历史、dev/test 未优化构建，不能当作 release 或真实用户会话的速度承诺。
 
 构建统一使用 CARGO_INCREMENTAL=0、CARGO_PROFILE_DEV_DEBUG=0、CARGO_PROFILE_TEST_DEBUG=0、CARGO_BUILD_JOBS=2：
@@ -24,7 +26,7 @@ cargo test --locked --offline -p chat-state -p shell -p pager --features shell/t
 
 ## 正确性与对抗性复核
 
-Projection 模块 19 passed、0 failed、1 ignored，见 [日志](correctness-1-shell.txt)。覆盖 exact conflict、candidate anchor、duplicate physical exact records、suppression、尾部排序安全、resident delta、rewind 与 inherited branch。特别区分“planner 需要 materialize canonical”和“物理 exact 缺失”：已有 exact 即使被 canonical materialization 替换，也不得再次追加。
+Projection 模块 19 passed、0 failed、1 ignored，见 日志。覆盖 exact conflict、candidate anchor、duplicate physical exact records、suppression、尾部排序安全、resident delta、rewind 与 inherited branch。特别区分“planner 需要 materialize canonical”和“物理 exact 缺失”：已有 exact 即使被 canonical materialization 替换，也不得再次追加。
 
 JSONL 与持久化集成回归分别 179 和 82 passed，见 [存储 change](../2026-10-21-index-exact-update-commits/verification.md)。调用方直接追加 planner 明确指出缺失的 canonical，保留 durable append 及失败处理。
 
@@ -34,7 +36,7 @@ fixture 使用合法 legacy Timeline，没有现代 response admission 身份，
 
 ## 原始数据
 
-[优化前](baseline-ignored_resume_projection_reconcile_baseline_scales_with_existing_projection_count.txt)、[优化后](after-ignored_resume_projection_reconcile_baseline_scales_with_existing_projection_count.txt)。
+优化前、优化后。
 
 ## 端到端实测数据
 
@@ -47,7 +49,7 @@ fixture 使用合法 legacy Timeline，没有现代 response admission 身份，
 
 这个 legacy fixture 的端到端基本不变，不能宣称整体恢复加速。所有六次 timing 与两次 history 验证通过；history 检查 load response 前文本完整顺序，所有运行还检查 rewind_points.jsonl 的指纹不变。
 
-[128 前](baseline-e2e-128.txt)、[128 后](after-e2e-128-timing.txt)、[512 前](baseline-e2e-512.txt)、[512 后](after-e2e-512-timing.txt)、[128 完整历史](after-e2e-128-history.txt)、[512 完整历史](after-e2e-512-history.txt)。
+128 前、128 后、512 前、512 后、128 完整历史、512 完整历史。
 
 ## 收尾
 

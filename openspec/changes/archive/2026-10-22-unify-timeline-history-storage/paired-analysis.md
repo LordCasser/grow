@@ -1,6 +1,6 @@
 # 最终 release 配对结果
 
-使用最终 production CLI4 与 build21 performance executable；其后只有纯 rustfmt、cfg(test) reader 与工具 integration test 变化，见 `final-source-audit.json`。早期 root 目录 CLI3 数据保留于 [intermediate-paired-analysis](intermediate-paired-analysis.md)，不计入本表。所有以下原始文件均在 [final-paired](final-paired/formal-run-context.json)。
+使用最终 production CLI4 与 build21 performance executable；其后只有纯 rustfmt、cfg(test) reader 与工具 integration test 变化，见 `final-source-audit.json`。早期 root 目录 CLI3 数据保留于 intermediate-paired-analysis，不计入本表。所有以下原始文件均在 final-paired。
 
 Rust 1.93.1，普通 release，三对 AB/BA，冷进程/温热页缓存；fixture 不进入 RPC；测量与本任务编译/正确性运行串行，外部主机负载不受控制。以下为 median [min, max] ms；n=3 不能作为分布保证。
 

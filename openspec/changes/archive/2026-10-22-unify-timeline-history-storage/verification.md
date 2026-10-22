@@ -1,6 +1,8 @@
 # C3 验证记录
 
-实施、最终 correctness 与 release 配对测量已完成。实施前的 release 基线、golden 与中间失败保留于 [baseline-verification](baseline-verification.md)、[对抗审查](adversarial-review.md) 和各阶段原始日志。
+> 归档整理（2026-10-22）：仅保留本报告中的最终验证结论、测量口径与限制。以下提到的逐次运行数据、构建日志、诊断快照和中间结果曾用于验证，现已从仓库清理；历史“保留原始记录”表述不再表示文件仍在仓库中。
+
+实施、最终 correctness 与 release 配对测量已完成。实施前的基线和中间失败已在最终结果中区分；对抗性结论见[对抗审查](adversarial-review.md)。
 
 ## 实现边界
 
@@ -10,7 +12,7 @@
 
 ## 构建与运行身份
 
-Rust 1.93.1，普通 release、jobs=4、incremental=0、locked/offline，专用 `target/resume-release`。共享 checkout 有其他变更，未复位。最终生产 CLI4 SHA-256 为 `f4f432dce245cb2d585e21817a1a8a79e382e5d417839a125327173de74d34cf`；完整命令、源码及 executable hashes 见 [final-build-context.json](final-build-context.json)、[after-test-binaries-21.json](after-test-binaries-21.json)。
+Rust 1.93.1，普通 release、jobs=4、incremental=0、locked/offline，专用 `target/resume-release`。共享 checkout 有其他变更，未复位。最终生产 CLI4 SHA-256 为 `f4f432dce245cb2d585e21817a1a8a79e382e5d417839a125327173de74d34cf`；完整命令、源码及 executable hashes 见 final-build-context.json、after-test-binaries-21.json。
 
 build21 后的两类源码变化分别留证：`final-22-test-only-change.json` 是 cfg(test) 的旧 reader 迁移，`final-rustfmt-source-map.json` 是 C3 文件纯 rustfmt。额外 test-support 诊断源 hash 见 `final-additional-source-hashes.json`，后续工具组合测试为 `final-25-tool-context.json`；当前源码与生产构建的对应证明见 `final-source-audit.json`。测试驱动显式使用实际 CLI；ignored 用例必须报告真实 `1 passed`，禁止把退出码 0、忽略或空选择当作成功。
 
@@ -31,7 +33,7 @@ build21 后的两类源码变化分别留证：`final-22-test-only-change.json` 
 
 ## Release 配对基准
 
-最终配对运行已完成，原始数据位于 `final-paired/`，详见 [配对报告](paired-analysis.md)。旧 root 目录 paired 数据属于 recovery reorder 前的中间候选，不计入最终表；测量与编译/正确性测试串行，3 对 AB/BA、冷进程/温热页缓存、固定合成业务内容，fixture 构造不进入 load RPC。`first_history` 是 ACP 收到首条历史；PTY `history_visible` 是末尾 sentinel 可见，两者不可混用。
+最终配对运行已完成，详见[配对报告](paired-analysis.md)。recovery reorder 前的中间候选不计入最终表；测量与编译/正确性测试串行，3 对 AB/BA、冷进程/温热页缓存、固定合成业务内容，fixture 构造不进入 load RPC。`first_history` 是 ACP 收到首条历史；PTY `history_visible` 是末尾 sentinel 可见，两者不可混用。
 
 | 2048 轮现代样本 | Before | After |
 | --- | ---: | ---: |

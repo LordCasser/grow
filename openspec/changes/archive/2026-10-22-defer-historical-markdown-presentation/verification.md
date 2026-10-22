@@ -1,5 +1,7 @@
 # P1 release 验证与收益
 
+> 归档整理（2026-10-22）：仅保留本报告中的最终验证结论、测量口径与限制。以下提到的逐次运行数据、构建日志、诊断快照和中间结果曾用于验证，现已从仓库清理；历史“保留原始记录”表述不再表示文件仍在仓库中。
+
 ## 结论与范围
 
 P0 先独立归档，再按其约81%的 loading batch Markdown 终态开销启动 P1。P1 在现有 renderer / wrap cache 上分开原文完结与派生展示，不改 Timeline、持久化、协议、历史顺序或 ready 屏障；没有 SQLite、分页、后台全量恢复或提前放开输入。
@@ -12,7 +14,7 @@ P0 先独立归档，再按其约81%的 loading batch Markdown 终态开销启�
 
 Before 为已验证的 P0 CLI SHA256 `f6ecedff6b19d9693071d16900aeee25f3541f2318cd0a53d1e0f30956b64f0d`，after 为 P1 `dcd4aebfa016de6d3828d49e8e8a2cc1081669da277eca3abbf0ede2bb615785`。默认-off与详细-log两组身份一致；unit、PTY、RPC和Markdown executable身份另存。最终CLI包含page-edge settle；最后的source修改只在 cfg(test)布局测试中明确固定实际边界，unit重新构建。`source-final-audit.json`确认最终source/config相对最终unit构建无漂移；Shell/Timeline/持久化及third_party未改。
 
-每组3对 AB/BA、fresh process / warmed executable+fixture file cache；新 executable 先预热。warmup与所有exploratory、失败记录保留但不计入正式表。正式测量不与本任务的编译或正确性检查并发；机器非隔离环境，外部活动不受控制。n=3是本机对照证据，不是延迟保证。固定现代 admitted 历史：每轮8×4096B正文，实际投影折叠为每轮user+assistant，PTY额外一条末屏sentinel合并进最后assistant。所有15对详细观测的消息类型、文本字节、finish数量和完整source字节均相同，见 `source-count-checks.json`。
+每组3对 AB/BA、fresh process / warmed executable+fixture file cache；新 executable 先预热。warmup与所有exploratory、失败运行不计入正式表。正式测量不与本任务的编译或正确性检查并发；机器非隔离环境，外部活动不受控制。n=3是本机对照证据，不是延迟保证。固定现代 admitted 历史：每轮8×4096B正文，实际投影折叠为每轮user+assistant，PTY额外一条末屏sentinel合并进最后assistant。所有15对详细观测的消息类型、文本字节、finish数量和完整source字节均相同，见 `source-count-checks.json`。
 
 `history_visible`是最后sentinel在PTY模拟屏幕可见；首个sequence marker不保证是turn1；PTY receipt与屏幕观察使用各自已标记时钟。默认-off的 `ready_ms`明确 unavailable，不能写成0或以末屏代替ready。详细日志的ready值是完整finalize完成后的观察，prompt-stable另外包含约500ms固定观察窗口。
 
@@ -70,4 +72,4 @@ Before 为已验证的 P0 CLI SHA256 `f6ecedff6b19d9693071d16900aeee25f3541f2318
 
 归档前全量strict17/17；归档后主规范16/16、归档687/687，均0失败，见对应validate日志。P1已独立归档，新增client-surfaces契约已合入主规范，开发者说明同步更新。archive命令中的6/7只剩归档/验证自身的行政checkbox，执行后已勾选；所有实现与验证门槛在归档前完成。
 
-最终源码与二进制身份留证后，删除专用 `target/resume-attribution-release`（含P0/P1对照executables及全部中间产物），删除前分配占用10.565GiB；共享target和真实sessions保留，已确认专用路径不存在。原始release日志、casts、归因与失败记录作为验证证据保留。
+最终源码与二进制身份留证后，删除专用 `target/resume-attribution-release`（含P0/P1对照executables及全部中间产物），删除前分配占用10.565GiB；共享target和真实sessions保留，已确认专用路径不存在。逐次运行日志、casts、归因快照与失败记录已按最终结果留存规则清理。

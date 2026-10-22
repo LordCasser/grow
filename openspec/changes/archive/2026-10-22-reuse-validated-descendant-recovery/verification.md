@@ -1,5 +1,7 @@
 # 验证记录
 
+> 归档整理（2026-10-22）：仅保留本报告中的最终验证结论、测量口径与限制。以下提到的逐次运行数据、构建日志、诊断快照和中间结果曾用于验证，现已从仓库清理；历史“保留原始记录”表述不再表示文件仍在仓库中。
+
 本项只消除同次恢复的重复读取/校验：根 ownership 从实际 replay 的已校验 Timeline/history 截点随接受的 load 结果传递；后代的 ownership 和有序 lifecycle/control 从一次完整 shared-read 校验生成。普通 load、resync、transport reconnect 均接入，payload 一次性消费，无跨 load cache。磁盘格式、写入/ACK、全历史就绪屏障及分页不变。
 
 ## 对照方法

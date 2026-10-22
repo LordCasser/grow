@@ -1,3 +1,0 @@
-Task status: ✓ Complete
-Skipping spec updates (--skip-specs flag provided).
-Change 'reuse-resume-canonical-projections' archived as '2026-10-21-reuse-resume-canonical-projections'.

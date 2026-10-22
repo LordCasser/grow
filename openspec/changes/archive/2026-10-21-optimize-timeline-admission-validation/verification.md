@@ -1,5 +1,7 @@
 # 验证记录
 
+> 归档整理（2026-10-22）：仅保留本报告中的最终验证结论、测量口径与限制。以下提到的逐次运行数据、构建日志、诊断快照和中间结果曾用于验证，现已从仓库清理；历史“保留原始记录”表述不再表示文件仍在仓库中。
+
 2026-10-21，本地 macOS；基线 HEAD 为 a1d1c2965075c87645eab22adce6d48b19410c59，优化结果包含当前工作树改动。所有数据均为合成历史、dev/test 未优化构建，不能当作 release 或真实用户会话的速度承诺。
 
 构建统一使用 CARGO_INCREMENTAL=0、CARGO_PROFILE_DEV_DEBUG=0、CARGO_PROFILE_TEST_DEBUG=0、CARGO_BUILD_JOBS=2：
@@ -24,7 +26,7 @@ cargo test --locked --offline -p chat-state -p shell -p pager --features shell/t
 
 ## 正确性与对抗性复核
 
-完整 chat-state 回归 569 passed、0 failed、3 ignored，见 [日志](correctness-0-chat_state.txt)。每次基准另外比较恢复 Surface、派生状态及 admission 失败结果。新增覆盖拒绝事件不污染索引、attempt supersession、重复 admission、空 ID/空名称/重复 tool ID、compaction 与 rewind 后的 active Surface 摘要。
+完整 chat-state 回归 569 passed、0 failed、3 ignored，见 日志。每次基准另外比较恢复 Surface、派生状态及 admission 失败结果。新增覆盖拒绝事件不污染索引、attempt supersession、重复 admission、空 ID/空名称/重复 tool ID、compaction 与 rewind 后的 active Surface 摘要。
 
 新 compaction/rewind 测试最初误将 post-rewind quarantine count 设为 0；旧 quarantine 算法独立 oracle 得到 2。rewind 恢复未压缩分支及原有 malformed assistant，因此只修正 fixture 的预期，保留旧 oracle 与摘要的逐步比对。完整回归与三次基准随后均通过。
 
@@ -32,7 +34,7 @@ cargo test --locked --offline -p chat-state -p shell -p pager --features shell/t
 
 ## 原始数据
 
-[优化前](baseline-benchmark_timeline_response_admission_validation.txt)、[优化后](after-benchmark_timeline_response_admission_validation.txt)。
+优化前、优化后。
 
 ## 归档校验
 

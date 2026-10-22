@@ -1,5 +1,7 @@
 # R6 验证与现代恢复对比
 
+> 归档整理（2026-10-22）：仅保留本报告中的最终验证结论、测量口径与限制。以下提到的逐次运行数据、构建日志、诊断快照和中间结果曾用于验证，现已从仓库清理；历史“保留原始记录”表述不再表示文件仍在仓库中。
+
 ## 口径
 
 R6在R5验证及独立计时之后实施。before与R5原始样本见[独立R5记录](../2026-10-21-optimize-timeline-writer-prefix/verification.md)；R6同样5组各3次独立进程，现代合法admission/projection、空candidate anchor、匹配当前mock route，主矩阵每轮32KiB，setup不计入load RPC。性能统一为macOS ARM64、Homebrew Rust 1.99.1、unoptimized debug=0/incremental=0/jobs=2；未与本任务编译/正确性用例并行。主机有其他项目负载，保留全部样本和范围，不视为release承诺。额外固定1.93.1门禁见收尾。
@@ -14,7 +16,7 @@ R6在R5验证及独立计时之后实施。before与R5原始样本见[独立R5�
 | modern-repair-512 | 4485.4 | 3881.8 | 3080.6 | 31.3% |
 | modern-short-512 | 1694.5 | 1229.1 | 1104.9 | 34.8% |
 
-三次中位数，2048轮R6范围9.793–11.118秒（before18.188–19.534、R5后13.446–13.597）。[原始R6十五次](r6-measurements.json)、[三阶段摘要](comparison.json)、[产物身份](builds.json)。每条source指向完整stdout/stderr。R5前后的样本保存在另一个独立change，不混用最早四项优化前的HEAD样本。
+三次中位数，2048轮R6范围9.793–11.118秒（before18.188–19.534、R5后13.446–13.597）。原始R6十五次、三阶段摘要、产物身份。每条source指向完整stdout/stderr。R5前后的样本保存在另一个独立change，不混用最早四项优化前的HEAD样本。
 
 ## 收益来源
 
@@ -57,6 +59,6 @@ cargo build --locked --offline -p cli --features shell/test-support --bin grow
 
 固定1.93.1结果：默认CLI check通过；Shell/Pager library、session_load_perf及PTY target构建通过；同一539项定向回归再次全部通过（0 failed，5 ignored），原始输出为r6-pinned-correctness-*.txt。这是两个工具链上的同一组用例，不把重复运行计作更多独立覆盖。CLI/PTY门禁结果见下文。
 
-固定1.93.1收尾：真实CLI构建通过；现代512轮加载中双Ctrl+D退出code0，再次恢复必须经过新的SessionLoaded、最后历史标记及非Loading稳定画面，随后退出code0，精确目标通过。慢写现代512亦通过，ready输入p95 86.5ms、max96.6ms（阈值100ms）；该组为固定工具链正确性探针，不并入1.99.1性能对比。见[pinned现代退出恢复](pinned-pty-ctrl_d_exits_during_modern_session_loading.txt)、[pinned慢写历史](pinned-pty-resume_modern_history_progress_with_slow_writer.txt)。
+固定1.93.1收尾：真实CLI构建通过；现代512轮加载中双Ctrl+D退出code0，再次恢复必须经过新的SessionLoaded、最后历史标记及非Loading稳定画面，随后退出code0，精确目标通过。慢写现代512亦通过，ready输入p95 86.5ms、max96.6ms（阈值100ms）；该组为固定工具链正确性探针，不并入1.99.1性能对比。见pinned现代退出恢复、pinned慢写历史。
 
 收尾：两项独立skip_specs change均已归档；全量strict 16 passed、archive strict 674 passed，均0 failed；Rust1.93.1的28个相关Rust文件格式检查、git diff --check、change链接及证据未忽略检查均通过。清理本次独占固定工具链target、测试可执行文件/dep-info与临时脚本，合计回收约11.15 GiB；保留当前grow和可复用依赖缓存，不触碰既有incremental。复跑需按记录重新no-run构建。

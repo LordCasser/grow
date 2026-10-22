@@ -1,5 +1,0 @@
-{
-  "source_files": 2426,
-  "non_p0_source_mtime_after_baseline_start": [],
-  "scope": "mtime observation is not proof of no concurrent writes; hashes freeze P0/P1 comparison context"
-}

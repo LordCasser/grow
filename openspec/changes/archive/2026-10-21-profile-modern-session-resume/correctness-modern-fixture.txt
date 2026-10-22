@@ -1,9 +1,0 @@
-['/Users/lordcasser/workspace/projects/grow/target/debug/deps/shell-f7cac3aa63c59686', 'session::testkit::synth::admission::tests::admitted_history_repairs_one_projection_without_changing_replay', '--exact', '--nocapture', '--test-threads=1']
-Exact enumeration=1
-
-running 1 test
-test session::testkit::synth::admission::tests::admitted_history_repairs_one_projection_without_changing_replay ... [testkit] admitted history: turns=3 admissions=3 missing_projections=1 updates=4995B timeline=5827B rewind=0B total=10822B
-ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4330 filtered out; finished in 0.11s
-

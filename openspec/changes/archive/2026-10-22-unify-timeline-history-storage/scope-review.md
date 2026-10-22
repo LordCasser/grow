@@ -38,7 +38,7 @@ resident/cursor 必须同时证明 Timeline 准入截点和展示覆盖；新 ad
 
 - 两者都能消除一份 64 MiB response 正文；现代 2048 轮样本的两个日志共约 148.17 MB，粗略节省上限约 45%，会被新增 checksum/metadata 回补。真实完整目录含其他文件，不能按此承诺。
 - 两者都可删除 canonical digest 构造、projection 正文解码/比较与 projection durable commit。精简账本仍需读取小型展示事实并按身份关联，完全合并也必须生成相同历史，二者均不是零成本。
-- [正常提交基线](before-commit-measurements.json)：三个独立进程，32 KiB response 的进程内 median 分别为 41.215、31.235、41.405 ms。测量窗口为 anchor + admission + projection，不含完整 turn。每次对应两个 updates 和一个 Timeline durable append，共六个 ledger file/directory 同步探针点；不是全进程 fsync syscall 总数。
+- 正常提交基线：三个独立进程，32 KiB response 的进程内 median 分别为 41.215、31.235、41.405 ms。测量窗口为 anchor + admission + projection，不含完整 turn。每次对应两个 updates 和一个 Timeline durable append，共六个 ledger file/directory 同步探针点；不是全进程 fsync syscall 总数。
 - 两者都可把该窗口的三次 ledger 提交减少为 anchor + admission 两次。删除约一次同步等待的理想贡献约十余毫秒；不能承诺整个 turn 加速三分之一，新增校验与其他持久化仍有成本。
 - 最新恢复基线的 2048 轮 RPC 为 754–1085 ms，主机波动明显。不得拿最高的那次与优化后最低值对比。实施后应使用保留的 before executable 做 AB/BA 配对测量。
 

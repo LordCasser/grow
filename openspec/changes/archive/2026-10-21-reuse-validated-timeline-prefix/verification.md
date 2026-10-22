@@ -1,5 +1,7 @@
 # Verification
 
+> 归档整理（2026-10-22）：仅保留本报告中的最终验证结论、测量口径与限制。以下提到的逐次运行数据、构建日志、诊断快照和中间结果曾用于验证，现已从仓库清理；历史“保留原始记录”表述不再表示文件仍在仓库中。
+
 ## 实现与对抗性核对
 
 首次 Unix writer load 在 append 锁下打开 pinned directory 内的 Timeline，捕获包含 dev/inode/ctime 的原 stamp，流式解码完整行并累计原字节 BLAKE3。与普通恢复共用 evidence 校验，保留一次 fold 生成的 Timeline。经过 updates、Sideband、summary 和状态投影全部必要校验后，安装前再次以同一 directory 打开当前文件并核对原 stamp。安装不覆盖任何已确认的不同 len/hash；随后 append 仍走原 tail、stamp/hash 回退与 file/directory sync。

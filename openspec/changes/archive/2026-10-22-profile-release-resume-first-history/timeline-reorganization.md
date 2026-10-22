@@ -56,7 +56,7 @@
 
 首条历史 6.69 s 由 load_light 4.252 s、raw snapshot 0.026 s、reconcile 0.718 s、同步全量入队 1.576 s 及约 0.120 s 未归因余量组成。这里无重叠；load_light 内部阶段不能再相加。seeded-route 的 writer 初始化在初次 replay 后，第 2 项主要影响 ready，不能拿来解释首条历史。
 
-详细同轮数据见 [analysis](analysis.md)、[breakdown](debug-first-history-breakdown.json) 和 [R6 验证](../2026-10-21-reuse-resume-canonical-projections/verification.md)。
+详细同轮数据见 [analysis](analysis.md)、breakdown 和 [R6 验证](../2026-10-21-reuse-resume-canonical-projections/verification.md)。
 
 ## 共用基准与通过条件
 

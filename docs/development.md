@@ -122,6 +122,10 @@ F8 可在任意焦点暂停，`]` 在正文或通过控制框显式跳到下一�
 
 普通 resume 的历史加载与 `grow replay` 播放器是独立入口。`session::storage::communication_history` 将 Timeline-only 通信按 canonical response、input、tool 和已有通信身份定位到历史区间，根 load、延迟 child 历史和离线 transcript 共用该规划；加载后的 coordination snapshot 只发布当前待处理 inquiry。已有 receipt/阶段保持原位置，缺失接收方 inquiry 阶段按 source peer + inquiry ID + phase 去重。合成行保留来源时间且没有缓存 eventId，不能充当 reconnect cursor；涉及合成时沿完整替换回退。没有可靠锚点会标估算，缺失正文使用既有 unavailable 说明。它不重新投递消息、消费通知或运行 Hook；不新增 viewport 持久化，也不改变普通 Goal 恢复策略。契约见 [恢复通信顺序](../openspec/specs/client-surfaces/spec.md#requirement-resume-restores-ordered-communication-history)，验证见 [记录](../openspec/changes/archive/2026-10-01-restore-ordered-resume-communications/verification.md)。
 
+## 性能验证记录留存
+
+性能变更归档仅提交最终可信结论：在 `verification.md`（纯分析可用 `analysis.md`）写明最终数值、样本与环境、比较口径、未改善项、失败或不确定性以及正确性验证结果。逐次运行日志、trace、终端录屏、构建输出、临时脚本、热身和中间候选不进入仓库归档；归档前检查报告引用不指向已清理文件。原始数据如需临时复核，在工作区外保存，不能用其存在作为最终结论的前提。
+
 ## 不改行为的最小变更
 
 先创建 change，在生成的 `.openspec.yaml` 中保留 schema/created 并加入 `skip_specs: true`。proposal 写明不改行为的原因，design 简述影响，tasks 只列必要动作和验证。不创建空 delta，也不为工具维护虚构产品能力。完成后使用 `openspec archive <change> --skip-specs --yes`，再运行上述全量与归档校验。
@@ -433,7 +437,7 @@ Messages 在单次请求内为中性工具 ID 建立映射，预留已有合法�
 CARGO_BUILD_JOBS=2 RUST_MIN_STACK=16777216 cargo test --locked -p pager --lib bounded_replay_text_blocks_and_prompt_measurement -- --ignored --nocapture --test-threads=1
 ```
 
-恢复 PTY 探针已接入 `pty_e2e_persistence`：`resume_history_progress_with_slow_writer` 和 `resume_dense_history_progress_with_slow_writer` 用递增可见标记记录首条历史、推进次数和最大内容间隔，并核对 loading 输入被忽略及 ready 后输入回显；`ctrl_d_exits_during_session_loading` 确认加载中退出后还能恢复原历史。运行时沿用上述 `PAGER_BINARY` 方式、`--ignored --nocapture --test-threads=1`；先用 `--list` 确认精确测试存在，避免过滤到零项。性能原始数据见四项归档：[Timeline admission](../openspec/changes/archive/2026-10-21-optimize-timeline-admission-validation/verification.md)、[projection append plan](../openspec/changes/archive/2026-10-21-reuse-response-projection-append-plan/verification.md)、[布局与加载交互](../openspec/changes/archive/2026-10-21-optimize-replay-layout-maintenance/verification.md)、[exact commit 索引](../openspec/changes/archive/2026-10-21-index-exact-update-commits/verification.md)。历史数据不作为当前构建的速度承诺。
+恢复 PTY 探针已接入 `pty_e2e_persistence`：`resume_history_progress_with_slow_writer` 和 `resume_dense_history_progress_with_slow_writer` 用递增可见标记记录首条历史、推进次数和最大内容间隔，并核对 loading 输入被忽略及 ready 后输入回显；`ctrl_d_exits_during_session_loading` 确认加载中退出后还能恢复原历史。运行时沿用上述 `PAGER_BINARY` 方式、`--ignored --nocapture --test-threads=1`；先用 `--list` 确认精确测试存在，避免过滤到零项。性能最终结论见四项归档：[Timeline admission](../openspec/changes/archive/2026-10-21-optimize-timeline-admission-validation/verification.md)、[projection append plan](../openspec/changes/archive/2026-10-21-reuse-response-projection-append-plan/verification.md)、[布局与加载交互](../openspec/changes/archive/2026-10-21-optimize-replay-layout-maintenance/verification.md)、[exact commit 索引](../openspec/changes/archive/2026-10-21-index-exact-update-commits/verification.md)。历史数据不作为当前构建的速度承诺。
 
 ### Prompt cache 离线诊断
 

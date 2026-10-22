@@ -1,17 +1,19 @@
 # Verification — TUI source scans and copies
 
+> 归档整理（2026-10-22）：仅保留本报告中的最终验证结论、测量口径与限制。以下提到的逐次运行数据、构建日志、诊断快照和中间结果曾用于验证，现已从仓库清理；历史“保留原始记录”表述不再表示文件仍在仓库中。
+
 ## Outcome
 
 The optimization reduces unnecessary image detection work for image-free long messages while preserving the existing replay, layout and persistence boundaries. The diagnostics-off 2048-turn ordinary PTY last-history median falls from **552.8 to 428.6 ms (22.5%)**; slow output falls from **668.5 to 565.8 ms (15.4%)**. No general first-frame improvement is claimed. Small sessions, image-heavy text and slash-dense candidates do not show consistent speedups. Readiness and full history delivery remain coupled.
 
 ## Build and comparison boundaries
 
-- macOS arm64; actual Homebrew `rustc/cargo 1.99.1`, not the repository-pinned 1.93.1. See [build context](build-context.json). Release, default CLI features, locked/offline dependency resolution, 4 build jobs, incremental disabled. Shell test support is enabled only for its test/benchmark builds. No release compiler flags were relaxed.
+- macOS arm64; actual Homebrew `rustc/cargo 1.99.1`, not the repository-pinned 1.93.1. See build context. Release, default CLI features, locked/offline dependency resolution, 4 build jobs, incremental disabled. Shell test support is enabled only for its test/benchmark builds. No release compiler flags were relaxed.
 - Both binaries include the same optional first-send/applied/frame diagnostics. CPU differences are limited to borrowing normalized source, conservative image scan guards, one dimension probe for the same bytes, and allocation-free ASCII Mermaid candidate matching. No new dependency, storage/index/cache, batch-size, frame-cadence, ready, ACK or notification-order change.
-- [Before source hashes](source-before.json), [after source hashes](source-after.json), [delta](source-delta.json), [before binary hashes](before-binaries.json), [after binary hashes](after-binaries.json) are retained. All 2,047 frozen source/manifest hashes were rechecked after measurement. The six changed files comprise three production files and three test files. Source snapshots include shared earlier work; this change is not a diff against Git HEAD.
+- All 2,047 frozen source/manifest hashes were rechecked after measurement. The six changed files comprise three production files and three test files. Source snapshots include shared earlier work; this change is not a diff against Git HEAD.
 - Shell and `session_load_perf` before/after binaries are byte-identical. Backend measurements are a negative control, not a backend optimization result. The final before CLI was rebuilt after common marker code was frozen.
-- No compiler was observed in retained formal-start/end process snapshots and sampled checks. Warmups for both binaries and all PTY scales are excluded from medians. Each measured group runs serially in A/B, B/A, A/B order, n=3 per stage/scale; diagnostics-off and detailed-log groups are separate. Results are local measurements, not a statistical significance or hardware-independent promise.
-- [Initial before baseline](initial-baseline/) is retained separately, including its slow first 128-turn sample (~974ms). Its cause was not isolated; it is not mixed into the paired medians or compared against a warmed after binary. Compilation-time diagnostic smoke is excluded from performance data.
+- No compiler was observed in formal-start/end process snapshots and sampled checks. Warmups for both binaries and all PTY scales are excluded from medians. Each measured group runs serially in A/B, B/A, A/B order, n=3 per stage/scale; diagnostics-off and detailed-log groups are separate. Results are local measurements, not a statistical significance or hardware-independent promise.
+- An initial before baseline contained a slow first 128-turn sample (~974ms). Its cause was not isolated; it is not mixed into the paired medians or compared against a warmed after binary. Compilation-time diagnostic smoke is excluded from performance data.
 
 ## End-to-end release results
 
@@ -27,7 +29,7 @@ All values below are milliseconds, median [min, max], n=3 per cell. `history_vis
 
 Ordinary 512-turn last-screen medians are essentially unchanged (173.2→174.0ms); 128-turn medians rise (133.9→142.1ms) with overlapping ranges. Do not claim universal end-to-end acceleration. Detailed logs corroborate the 2048-turn last-screen reduction: ordinary 555.5→449.5ms, slow 666.2→551.7ms. Diagnostic logs are not substituted for the default-off result.
 
-Raw output and summaries: [default-off](pty-default-off/metrics-summary.json), [detailed attribution](pty-log/attribution-summary.json), [formal runner](run_formal.py), [formal output](formal-run.log). Slow-writer fixtures keep their original progress assertions and pass on both binaries; loading input suppression, Ctrl+D/re-resume and ready-key echo assertions pass. No thresholds were weakened.
+The default-off results below are the final performance evidence; detailed attribution was used only to explain phases. Slow-writer fixtures keep their original progress assertions and pass on both binaries; loading input suppression, Ctrl+D/re-resume and ready-key echo assertions pass. No thresholds were weakened.
 
 ## Isolated costs and non-benefits
 
@@ -50,9 +52,9 @@ The microbenchmark times only deferred push plus completion (512 messages); fixt
 | image_markdown_repeated | 196.3 [195.0, 203.4] | 196.8 [196.4, 198.0] | no gain; 512 refs to one real PNG, dedup retained |
 | unicode_false_markers | 360.3 [360.0, 376.5] | 345.1 [342.2, 357.1] | small reduction; conservative Mermaid parse retained |
 
-[Micro data](micro/summary.json), [semantic data](semantic/summary.json). Slash/image candidates still pay their regex/parse/file costs; the tiny dimension-probe reduction does not make these aggregate cases materially faster. No representative mixed-media performance claim is made.
+Micro data, semantic data. Slash/image candidates still pay their regex/parse/file costs; the tiny dimension-probe reduction does not make these aggregate cases materially faster. No representative mixed-media performance claim is made.
 
-The byte-identical RPC control preserves complete-history/body/order oracles (128/2048 turns, n=3). At 2048 turns first history is 227.020→226.760ms, last history 377.201→370.058ms and load RPC 392.221→384.651ms. Small differences on identical binaries are run variance, not a claimed optimization. See [RPC results](rpc-pairs/summary.json).
+The byte-identical RPC control preserves complete-history/body/order oracles (128/2048 turns, n=3). At 2048 turns first history is 227.020→226.760ms, last history 377.201→370.058ms and load RPC 392.221→384.651ms. Small differences on identical binaries are run variance, not a claimed optimization. See RPC results.
 
 ## First-history attribution
 
@@ -63,7 +65,7 @@ Opt-in markers use the same session/cursor and writer sequence:
 - `pager.replay.first_frame`: first produced ordinary-root frame following history application with a new writer sequence and unobscured nonempty scrollback. It may contain later history. It does not prove the source cursor row is on screen.
 - Existing successful `pager.frame.delivery` and `frame_ack` are matched by sequence; physical PTY marker observations remain independent. Child fullscreen/Dashboard/obscured views are outside the root-frame metric, not counted as false successful frames.
 
-All **30** nonempty formal root replay pipelines have exactly one send/applied/frame marker; session/cursor agree and sequence maps to one successful delivery and one ACK. [Correlation data](pty-log/first-history.json), [summary](pty-log/first-history-summary.json), [analyzer](analyze_first_history.py). Times below share instrumentation UTC and are relative to the inferred start of `session.load_session`; they are not relative to PTY spawn.
+All **30** nonempty formal root replay pipelines have exactly one send/applied/frame marker; session/cursor agree and sequence maps to one successful delivery and one ACK. Correlation data, summary, analyzer. Times below share instrumentation UTC and are relative to the inferred start of `session.load_session`; they are not relative to PTY spawn.
 
 | 2048-turn metric | Ordinary before→after | Slow writer before→after |
 | --- | ---: | ---: |
@@ -79,17 +81,17 @@ Slow-writer first delivery also does not improve (324.9→334.7ms), while final 
 
 ## Correctness and adversarial coverage
 
-[Scoped release results](checks.json): **2,703 passed, 0 failed, 8 ignored** across 16 selections: pager 1,818; pager-render 174; Shell 711. Ignored entries are not counted as passed. Existing release-only exclusion `scrollback::state::tests::insert_block_before_rejects_an_already_committed_anchor` requires debug assertions, as in earlier changes; the assertion/test was not modified. This is focused affected-scope validation, not a claim of the entire workspace suite.
+Scoped release results: **2,703 passed, 0 failed, 8 ignored** across 16 selections: pager 1,818; pager-render 174; Shell 711. Ignored entries are not counted as passed. Existing release-only exclusion `scrollback::state::tests::insert_block_before_rejects_an_already_committed_anchor` requires debug assertions, as in earlier changes; the assertion/test was not modified. This is focused affected-scope validation, not a claim of the entire workspace suite.
 
 - ACP/meta/tracker/load/fork/event-loop/subagent suites cover ownership, cursor/reconnect, failure/retry, ignored loading input and replay lifecycle. Shell storage/history/persistence/runtime handoff/subagent scopes cover durable resume and child recovery; persistence source remains unchanged in the paired delta.
 - Existing physical-prefix presentation oracle covers 44 updates across 7 ACP and 31 distinct Grow presentation families (37 Grow occurrences). The broader 46-fixture raw protocol golden has 33 Grow families; sampling-attempt/rewind-marker have separate handling tests. These are not all represented in one PTY mixed-media performance fixture.
 - New source-scan oracles exercise empty/Unicode/false candidates, mixed-case and entity-encoded Mermaid, raw/pretty copy, copy-first/render-first, late append, and normalized source. Existing media/layout oracles compare eager/deferred rows, anchors, source selection, scroll info and independently calculated heights. Image widths 32/64/80/100/120, Mermaid 24/48/80/88/120, sticky-layout width sequence 28→52→23→80→120→80→28; root/child parity at 80/120.
 - Image tests cover relative Markdown paths, Unix bare paths, duplicate/alt precedence, missing/corrupt files, formats/dimensions and separator/Unicode false candidates. Backslash drive/UNC strings are tested using readable Unix filenames, not claimed as native Windows filesystem execution. Same-byte dimension probing retains completion-time file observation; no cross-message file cache exists.
-- [Four manual release PTY checks](manual-checks.json) pass: cold root/child/grandchild Ctrl+D resume, partial-leaf release without checkpoint replay, unique concurrent cold claim, and post-resume follow-up with history. No duplicate work/result observed by these oracles.
+- Four manual release PTY checks pass: cold root/child/grandchild Ctrl+D resume, partial-leaf release without checkpoint replay, unique concurrent cold claim, and post-resume follow-up with history. No duplicate work/result observed by these oracles.
 - Baseline added tests passed on old code (7 source tests, 9 image tests; ignored manual benchmark separate). Final format and whitespace checks pass. No test threshold, ready gate, history order or persistence check was removed to obtain performance.
 
 [Adversarial review](adversarial-review.md) records candidate correctness, borrow lifetime, file observation, diagnostics scope and limits. Independent read-only source/data review findings are recorded there after final review.
 
 ## Completion
 
-Strict active/spec and archive validations, final source/binary integrity and dedicated build cleanup are recorded in `completion.json`. Only `target/tui-scan-release` is removed; shared target and live session data are retained. Retained binary manifests identify now-removed reproducibility artifacts; rebuild from captured source baseline/patch and build scripts if needed.
+Strict active/spec and archive validations, final source/binary integrity and dedicated build cleanup completed. Only `target/tui-scan-release` is removed; shared target and live session data are retained. The removed binaries and scripts are not part of the retained result.

@@ -1,1 +1,0 @@
-Stopped only the owned final-10 actor-updates test process after more than 3 minutes stuck at goal_owned_subagent_spawn_reaches_live_client_before_goal_refresh. Preserve incomplete log; this is a failed validation pending fixture/ACK diagnosis and final rerun, not a pass. Runner continues subsequent groups.

@@ -1,5 +1,7 @@
 # 验证记录
 
+> 归档整理（2026-10-22）：仅保留本报告中的最终验证结论、测量口径与限制。逐次运行数据和测试输出已从仓库清理。
+
 2026-10-21，本地 macOS；基线 HEAD 为 a1d1c2965075c87645eab22adce6d48b19410c59，优化结果包含当前工作树改动。所有数据均为合成历史、dev/test 未优化构建，不能当作 release 或真实用户会话的速度承诺。
 
 构建统一使用 CARGO_INCREMENTAL=0、CARGO_PROFILE_DEV_DEBUG=0、CARGO_PROFILE_TEST_DEBUG=0、CARGO_BUILD_JOBS=2：
@@ -34,7 +36,7 @@ cargo test --locked --offline -p chat-state -p shell -p pager --features shell/t
 
 ## 正确性与对抗性复核
 
-JSONL 模块 179 passed、0 failed、1 ignored，持久化模块 82 passed，分别见 [JSONL](correctness-2-shell.txt) 和 [persistence](correctness-3-shell.txt)。包括 ACP/projection exact、重复与冲突、失败后的可读记录、file/directory sync 失败重试、不重复追加、session load、rewind、fork 和 cursor 边界。
+JSONL 模块 179 passed、0 failed、1 ignored，持久化模块 82 passed，分别见 JSONL 和 persistence。包括 ACP/projection exact、重复与冲突、失败后的可读记录、file/directory sync 失败重试、不重复追加、session load、rewind、fork 和 cursor 边界。
 
 新回归覆盖普通更新与 exact 混排、同一身份的全部重复记录（任一 payload 不同即 Conflict）、同长度外部修改、物理文件替换及无换行尾部被后续 append 终结。缓存不保留正文或文件句柄。Unix 使用 dev/ino，Windows 使用 volume/file index 识别实体；文件 stamp、大小和实体变化均重建。Windows 分支与项目既有句柄身份 API 一致，但本次运行平台为 macOS，未宣称 Windows runtime 验证。
 
@@ -42,7 +44,7 @@ JSONL 模块 179 passed、0 failed、1 ignored，持久化模块 82 passed，分
 
 ## 原始数据
 
-[优化前](baseline-exact_commit_history_scaling_measurement.txt)、[优化后](after-exact_commit_history_scaling_measurement.txt)。
+优化前、优化后。
 
 ## 归档校验
 

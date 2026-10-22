@@ -1,9 +1,0 @@
-{
-  "crates/codegen/pager/src/scrollback/blocks/markdown_content.rs": "f33054624355dfb270e9a35e6c288ca212cf3f7044c1cf3a212bfc3e1ff4c599",
-  "crates/codegen/pager/src/scrollback/blocks/agent.rs": "3cefc124470ba2c39b6224e363f6f8f8a8f861aa345ed6b20a9446e4bbdf04ad",
-  "crates/codegen/pager/src/app/root/event_loop.rs": "7a88ec3dc2bfacbbebc1655808cd63511e7d94489ed75aa715e8633dbdc5d5f7",
-  "crates/codegen/pager/src/app/root/dispatch/session/load.rs": "d065ae1fe7f8a1becbff5a767bec7532e371da51366364d8fa3cd18fd116e0c7",
-  "crates/codegen/pager-render/src/render/draw.rs": "3ece5655c064473c8d0b0c78ad5c8c09ec23781f863ed6f6c538b3e88016c663",
-  "crates/codegen/pager-render/src/prompt_images.rs": "c4c78913467cdb450b5b29491e43be1776711352761df0557dc34fb0fe38997c",
-  "crates/codegen/markdown/src/streaming.rs": "e3288f389b87311c5c2ccc3cdafc9526c65d0121e8cf3dd36e29c6e7288065af"
-}

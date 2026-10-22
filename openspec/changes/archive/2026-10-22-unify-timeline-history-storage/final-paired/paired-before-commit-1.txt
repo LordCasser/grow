@@ -1,8 +1,0 @@
-
-running 1 test
-test session::storage::jsonl::response_commit_perf::normal_response_storage_commit_release ... PERF_RESPONSE_COMMIT {"body_bytes":4096,"rounds":21,"total_ms":{"median":43.738167000000004,"p95":71.149958},"candidate_anchor_exact_append_ms":{"median":15.707458,"p95":23.38925},"timeline_admission_durable_append_ms":{"median":15.136875,"p95":22.798833000000002},"projection_build_with_digest_ms":{"median":0.038708,"p95":0.193417},"projection_commit_ms":{"median":15.000083,"p95":23.193542},"ledger_barriers":{"scope":"Timeline and updates ledgers only; excludes summary, artifact, and all other system calls","update_file":42,"update_directory":42,"timeline_file":21,"timeline_directory":21}}
-PERF_RESPONSE_COMMIT {"body_bytes":32768,"rounds":21,"total_ms":{"median":49.473833,"p95":95.878333},"candidate_anchor_exact_append_ms":{"median":15.049292000000001,"p95":28.826667},"timeline_admission_durable_append_ms":{"median":14.993958,"p95":34.866042},"projection_build_with_digest_ms":{"median":0.422959,"p95":0.613625},"projection_commit_ms":{"median":17.785291,"p95":37.5315},"ledger_barriers":{"scope":"Timeline and updates ledgers only; excludes summary, artifact, and all other system calls","update_file":42,"update_directory":42,"timeline_file":21,"timeline_directory":21}}
-ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 4340 filtered out; finished in 7.26s
-

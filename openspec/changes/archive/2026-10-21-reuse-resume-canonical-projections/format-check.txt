@@ -1,2 +1,0 @@
-
-exit_code=0, Rust1.93.1, 28 Rust files

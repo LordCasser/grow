@@ -1,1 +1,0 @@
-Diagnostic replica of private enums using the exact public ACP types and same pointer/discriminant shapes; no production code or contract change. Grow was already Box and represented by Box<u8>. chunk=448 tool=312 toolupdate=312 content=456 fact=528 source=536 boxed_source=24

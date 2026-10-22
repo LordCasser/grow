@@ -1,5 +1,7 @@
 # R5/R6 后的首条历史与 release 恢复
 
+> 归档整理（2026-10-22）：仅保留本报告中的最终验证结论、测量口径与限制。以下提到的逐次运行数据、构建日志、诊断快照和中间结果曾用于验证，现已从仓库清理；历史“保留原始记录”表述不再表示文件仍在仓库中。
+
 本次只分析现有 JSONL、Timeline 和 ACP 路径，不引入 SQLite。恢复仍完整校验历史，按实际吞吐量交付全部可见历史；没有跳过正文校验、降低同步等级或使用预折叠快照。
 
 ## 6.69 秒实际包含什么
@@ -15,7 +17,7 @@
 | 以上合计 | 6572.098 |
 | 到首条客户端历史的剩余差值 | 119.850 |
 
-四个阶段互不重叠。`load_light` 内的 canonical 构造 2727.964 ms、Timeline read/decode 931.047 ms、physical updates decode 552.546 ms 已包含在 4251.930 ms 中，不能再相加；主 Timeline fold 只有 15.775 ms。历史只有 duration 聚合，119.850 ms 不能精确命名为某个锁、sleep 或网关函数。见 [同轮拆分](debug-first-history-breakdown.json)。
+四个阶段互不重叠。`load_light` 内的 canonical 构造 2727.964 ms、Timeline read/decode 931.047 ms、physical updates decode 552.546 ms 已包含在 4251.930 ms 中，不能再相加；主 Timeline fold 只有 15.775 ms。历史只有 duration 聚合，119.850 ms 不能精确命名为某个锁、sleep 或网关函数。见 同轮拆分。
 
 `replay_session_updates` 先读取全部 updates 快照、做完整 reconciliation，再进入没有 await 的 `forward_raw_replay_line` 循环。`forward_with_completion` 只是向 gateway channel 入队；gateway receiver 与 load 使用 LocalSet，循环结束后 `rx.await` 才给它执行机会。因此第一条已入队，不代表客户端已收到；这 1.58 秒同步循环也进入首条历史延迟。
 
@@ -44,7 +46,7 @@ release 使用仓库固定 Rust 1.93.1、普通 `--release`，不是 release-dis
 
 ## C2 完成后、C3 实施前的首条历史拆解
 
-取 C2 优化后 **RPC 中位数所在的同一次 modern-2048 运行**，RPC 743.678 ms、首条历史 474.457 ms。时间线见 [同轮原始区间](../2026-10-21-reuse-validated-timeline-prefix/after-timelines.json)，不是分别挑选各阶段最快样本。
+取 C2 优化后 **RPC 中位数所在的同一次 modern-2048 运行**，RPC 743.678 ms、首条历史 474.457 ms。时间线见 同轮原始区间，不是分别挑选各阶段最快样本。
 
 | 首条历史前已串行完成的阶段 | ms |
 | --- | ---: |

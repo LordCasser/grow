@@ -1,9 +1,0 @@
-{
-  "owned_target": "/Users/lordcasser/workspace/projects/grow/target/resume-attribution-release",
-  "allocated_kib_before": 11078428,
-  "allocated_gib_before": 10.56521224975586,
-  "removed": true,
-  "scope": "only owned dedicated target, including P0/P1 retained comparison executables and initial binaries; shared target and real sessions untouched",
-  "identity_evidence": "final-retained-binary-identities.json; paired and default-paired identities.json",
-  "completed_at": "2026-10-22 10:44:42 +0800"
-}

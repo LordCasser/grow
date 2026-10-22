@@ -1,5 +1,7 @@
 # 现代长会话恢复：剩余瓶颈
 
+> 归档整理（2026-10-22）：仅保留本报告中的最终验证结论、测量口径与限制。以下提到的逐次运行数据、构建日志、诊断快照和中间结果曾用于验证，现已从仓库清理；历史“保留原始记录”表述不再表示文件仍在仓库中。
+
 结论：原来的“局部快、整体不变”主要是样本没有覆盖热点。补充现代样本后，还发现了一条未使用 bulk restore 的 writer 前缀验证路径，以及两次随正文体积增长的 canonical projection 构造。长历史的主要成本落在这些路径，主 Timeline::from_events 已经不是大头。
 
 ## 1. 测量口径与样本
@@ -21,7 +23,7 @@ legacy 对照来自首轮；现代正式数据补齐了 route baseline，未改�
 | 现代：512 turns，缺 32 条 projection | 17.75 / 18.22 | 1024 | 2.898 | 4.206（4.187–4.215） |
 | 现代：512 turns，缺路由基线 | 17.75 / 19.28 | 1024 | 3.371 | 4.105（4.068–4.635） |
 
-原始结构化数据见 [comparison-measurements.json](comparison-measurements.json)，三轮 stdout/stderr 按 profile-run-N.txt 保存。现代六组为18次正式 timing；另有两组 legacy 共6次。首轮12次缺路由基线的现代探索保存在 initial-measurements.json 和 unseeded-modern-*.txt，未混入现代正式中位数。
+原始结构化数据见 comparison-measurements.json，三轮 stdout/stderr 按 profile-run-N.txt 保存。现代六组为18次正式 timing；另有两组 legacy 共6次。首轮12次缺路由基线的现代探索保存在 initial-measurements.json 和 unseeded-modern-*.txt，未混入现代正式中位数。
 
 没有重建四项优化之前的整个现代版本。本轮建立的是优化后现代基线，不能据此声称“现代会话优化前后整体也不变”。
 
@@ -54,7 +56,7 @@ actor call 约6.10 s。源码链为 append_timeline_event_with_durability → sp
 
 这不是“actor 没复用 validated Timeline”，也不是“多次调用主 from_events”。actor 复用了该对象，独立的持久化 writer 为首次 append 再验一次 prefix。其累计 lifecycle 克隆在请求数增长时呈二次工作量。主 fold 在本轮仅14.5 ms，和这条私有验证路径必须分开看。
 
-独立 [2秒 CPU 采样](cpu-sample-2048.txt) 中，选中的 blocking worker 共292次样本全部在 load_timeline_prefix，其中约76%在 Timeline::accept 及 lifecycle 克隆/析构路径。该比例只描述这个线程和时间窗，不是整个进程或总恢复的占比。采样运行未计入 timing，见 [命令](cpu-sample-command.txt) 与 [诊断运行](sampled-run-2048.txt)。这证实 prefix 恢复是 actor call 中持续消耗 CPU 的热点，但没有把整个6.10 s都精确计作 prefix 独占时间。
+独立 2秒 CPU 采样 中，选中的 blocking worker 共292次样本全部在 load_timeline_prefix，其中约76%在 Timeline::accept 及 lifecycle 克隆/析构路径。该比例只描述这个线程和时间窗，不是整个进程或总恢复的占比。采样运行未计入 timing，见 命令 与 诊断运行。这证实 prefix 恢复是 actor call 中持续消耗 CPU 的热点，但没有把整个6.10 s都精确计作 prefix 独占时间。
 
 相关源码：[prefix恢复](../../../../crates/codegen/shell/src/session/storage/jsonl/mod.rs:1921)、[实时校验克隆](../../../../crates/codegen/chat-state/src/timeline.rs:3865)、[bulk replay入口](../../../../crates/codegen/chat-state/src/timeline.rs:2087)。这是 session-timeline 中 Bulk replay avoids cumulative lifecycle copying 契约的实现覆盖缺口；不通过缩窄契约掩盖，已单独登记 R5，当前 change只记录和测量。
 
@@ -104,8 +106,8 @@ coordination backend安装ACK约0.30 s；prepare与snapshot publish均很小。�
 
 512正常终端中，历史末尾约6.427 s已经可见，而真正加载完成约7.513 s，存在约1.1 s的收尾窗口。慢写样本三轮都看到11次历史推进，最大内容间隔351–357 ms；之后仍需等writer startup。ready后的输入回显很快，这支持“加载阶段工作未完成”，不支持把等待误判为composer处理慢。
  
-首次PTY用画面稳定+模型标签判断ready，512轮时注入被正确忽略，导致探针失败；见 [原始失败](first-pass-pty-readiness-heuristic.txt)。现改为明确观察pager.replay.end_batch（SessionLoaded dispatch）再测试输入，同时单独记录末尾标记首次可见时间，不把500 ms画面稳定等待加入这两个时点。输入延迟与内容推进断言均保留，六次实际测试执行全部通过。
+首次PTY用画面稳定+模型标签判断ready，512轮时注入被正确忽略，导致探针失败；见 原始失败。现改为明确观察pager.replay.end_batch（SessionLoaded dispatch）再测试输入，同时单独记录末尾标记首次可见时间，不把500 ms画面稳定等待加入这两个时点。输入延迟与内容推进断言均保留，六次实际测试执行全部通过。
 
-[正常终端第1轮](pty-resume_modern_admission_projection_128_512_turns-1.txt)、[第2轮](pty-resume_modern_admission_projection_128_512_turns-2.txt)、[第3轮](pty-resume_modern_admission_projection_128_512_turns-3.txt)；[慢写第1轮](pty-resume_modern_history_progress_with_slow_writer-1.txt)、[第2轮](pty-resume_modern_history_progress_with_slow_writer-2.txt)、[第3轮](pty-resume_modern_history_progress_with_slow_writer-3.txt)。
+正常终端第1轮、第2轮、第3轮；慢写第1轮、第2轮、第3轮。
 
 512普通终端的一个实测轮次中，79次frame render合计约592 ms，diff约57 ms、write约1.8 ms，分布在约7.7 s启动过程中。这些计时与Shell处理可重叠，不从wall time直接相减；128轮另观察到约205 ms的单帧峰值，不能声称所有TUI停顿已消除。
