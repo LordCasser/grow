@@ -37,7 +37,5 @@
   "crates/codegen/tools/src/reminders/skill_discovery.rs": "251a32e61a8925d5dd50a842522a13d0c5dd7d9aed4261dda679bee1984203e3",
   "crates/codegen/tools/src/types/skill_discovery_tracker/mod.rs": "77b03b9d16f4a1b82c563a635ec9c87eb61fa5f410feb507f5b305c7b7dd0591",
   "crates/codegen/workspace/src/permission/manager.rs": "14b50b8d48c5de52cd8c0e6ee1b40a5207b4f0251e23b510ed334cdf9634d5ba",
-  "crates/codegen/workspace/src/worktree/mod.rs": "0222f71f69823a28df7f5db9bd97d3015997c91eaccfbbfc8c5d288b3de41047",
-  "openspec/backlog.md": "4cee3ba7cd19a4fed0c65247ccc6f7e5d390b19d5d8b255f5c05728732c19191",
-  "openspec/changes/archive/2026-10-22-compact-internal-message-types/verification.md": "2cf1f1e1382c4188c14814e20fbb4de5d32e4b994bb62c1dbbb25fe7c9e0137d"
+  "crates/codegen/workspace/src/worktree/mod.rs": "0222f71f69823a28df7f5db9bd97d3015997c91eaccfbbfc8c5d288b3de41047"
 }

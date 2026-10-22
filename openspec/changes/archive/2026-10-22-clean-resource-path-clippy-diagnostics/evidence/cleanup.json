@@ -1,0 +1,16 @@
+{
+  "deleted_target": "/Users/lordcasser/workspace/projects/grow/target/rust-quality-2-5-0",
+  "allocated_bytes_before": 20638973952,
+  "remaining_owned_processes": [],
+  "terminated_owned_processes": [],
+  "deleted_extra_home": "/Users/lordcasser/.local/share/grow-quality-rdjj59je-home",
+  "deleted_isolated_home_and_grow_home": true,
+  "retained_candidate": "/Users/lordcasser/workspace/projects/grow/target/local-release-2.5.0/grow",
+  "shared_targets_untouched": [
+    "target/debug",
+    "target/release-dist"
+  ],
+  "deleted_raw_run_directory": "/private/tmp/grow-quality-rdjj59je",
+  "external_temporary_raw_archive": "/private/tmp/grow-quality-verification-3554838.tar.gz",
+  "external_archive_bytes": 6167498
+}

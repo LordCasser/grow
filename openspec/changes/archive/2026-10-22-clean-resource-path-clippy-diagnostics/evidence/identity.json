@@ -13,5 +13,6 @@
     "CARGO_INCREMENTAL": "0",
     "RUST_MIN_STACK": "16777216"
   },
-  "change_baseline": "83d76a9de0aad21cab6bca2287130b8329020f87"
+  "change_baseline": "83d76a9d",
+  "validated_source_commit": "35548386343ba0f0416d3fac6cde2c25c36ea013"
 }

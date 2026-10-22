@@ -1,0 +1,421 @@
+[
+  {
+    "label": "fmt-resource",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all"
+    ],
+    "exit": 0,
+    "elapsed_s": 7.123721832991578,
+    "log": "fmt-resource.log"
+  },
+  {
+    "label": "clippy-resource-first",
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit": 101,
+    "elapsed_s": 92.32668333302718,
+    "log": "clippy-resource-first.log"
+  },
+  {
+    "label": "fmt-resource-final",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all"
+    ],
+    "exit": 0,
+    "elapsed_s": 7.934520541981328,
+    "log": "fmt-resource-final.log"
+  },
+  {
+    "label": "fmt-resource-check",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all"
+    ],
+    "exit": 0,
+    "elapsed_s": 9.072487082972657,
+    "log": "fmt-resource-check.log"
+  },
+  {
+    "label": "check-resource-cli",
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "-p",
+      "cli",
+      "--message-format=json"
+    ],
+    "exit": 0,
+    "elapsed_s": 185.28513562498847,
+    "log": "check-resource-cli.log"
+  },
+  {
+    "label": "probe-resource-policy",
+    "command": [
+      "python3",
+      "/private/tmp/grow-quality-rdjj59je/probe_policy.py"
+    ],
+    "exit": 0,
+    "elapsed_s": 213.81832125002984,
+    "log": "probe-resource-policy.log"
+  },
+  {
+    "label": "fmt-resource-final-check",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--",
+      "--check"
+    ],
+    "exit": 0,
+    "elapsed_s": 7.963102375040762,
+    "log": "fmt-resource-final-check.log"
+  },
+  {
+    "label": "validate-resource-pre",
+    "command": [
+      "openspec",
+      "validate",
+      "--all",
+      "--strict",
+      "--no-interactive"
+    ],
+    "exit": 0,
+    "elapsed_s": 1.1541817919933237,
+    "log": "validate-resource-pre.log"
+  },
+  {
+    "label": "clippy-resource-final",
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit": 0,
+    "elapsed_s": 198.59277212497545,
+    "log": "clippy-resource-final.log"
+  },
+  {
+    "label": "prepare-resource-rg",
+    "command": [
+      "python3",
+      "/private/tmp/grow-quality-rdjj59je/prepare_rg.py"
+    ],
+    "exit": 0,
+    "elapsed_s": 2.5936405420070514,
+    "log": "prepare-resource-rg.log"
+  },
+  {
+    "label": "clippy-resource-cli",
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "-p",
+      "cli",
+      "--message-format=json",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "exit": 0,
+    "elapsed_s": 208.77466233301675,
+    "log": "clippy-resource-cli.log"
+  },
+  {
+    "label": "build-resource-cli",
+    "command": [
+      "cargo",
+      "build",
+      "--locked",
+      "-p",
+      "cli",
+      "--message-format=json"
+    ],
+    "exit": 0,
+    "elapsed_s": 285.9052064999705,
+    "log": "build-resource-cli.log"
+  },
+  {
+    "label": "test-resource-libs",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "chat-state",
+      "-p",
+      "tools",
+      "-p",
+      "shell",
+      "-p",
+      "acp-transport",
+      "-p",
+      "workspace-types",
+      "-p",
+      "pager",
+      "-p",
+      "config",
+      "-p",
+      "workspace",
+      "-p",
+      "diagnostics",
+      "-p",
+      "shell-base",
+      "-p",
+      "fast-worktree",
+      "-p",
+      "pager-render",
+      "--lib",
+      "--",
+      "--test-threads=4"
+    ],
+    "exit": 101,
+    "elapsed_s": 441.73505716602085,
+    "log": "test-resource-libs.log"
+  },
+  {
+    "label": "test-resource-workspace-home",
+    "command": [
+      "python3",
+      "/private/tmp/grow-quality-rdjj59je/retest_workspace.py"
+    ],
+    "exit": 0,
+    "elapsed_s": 3.9197105829953216,
+    "log": "test-resource-workspace-home.log"
+  },
+  {
+    "label": "test-resource-workspace-types",
+    "command": [
+      "/Users/lordcasser/workspace/projects/grow/target/rust-quality-2-5-0/debug/deps/workspace_types-2bea866e9e63eb91",
+      "--test-threads=4"
+    ],
+    "exit": 0,
+    "elapsed_s": 0.7010768749751151,
+    "log": "test-resource-workspace-types.log"
+  },
+  {
+    "label": "validate-resource-source",
+    "command": [
+      "openspec",
+      "validate",
+      "--all",
+      "--strict",
+      "--no-interactive"
+    ],
+    "exit": 0,
+    "elapsed_s": 1.0898687909939326,
+    "log": "validate-resource-source.log"
+  },
+  {
+    "label": "compile-resource-pty",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "pager",
+      "--test",
+      "pty_e2e_persistence",
+      "--no-run",
+      "--message-format=json"
+    ],
+    "exit": 0,
+    "elapsed_s": 151.4815630419762,
+    "log": "compile-resource-pty.log"
+  },
+  {
+    "label": "compile-resource-orphan",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "shell",
+      "--features",
+      "test-support",
+      "--test",
+      "test_subagent_orphan_reconcile",
+      "--no-run",
+      "--message-format=json"
+    ],
+    "exit": 0,
+    "elapsed_s": 148.444856874994,
+    "log": "compile-resource-orphan.log"
+  },
+  {
+    "label": "release-resource-candidate",
+    "command": [
+      "python3",
+      "/private/tmp/grow-quality-rdjj59je/build_candidate.py"
+    ],
+    "exit": 1,
+    "elapsed_s": 805.200410624966,
+    "log": "release-resource-candidate.log"
+  },
+  {
+    "label": "package-resource-candidate",
+    "command": [
+      "python3",
+      "/private/tmp/grow-quality-rdjj59je/package_candidate.py"
+    ],
+    "exit": 0,
+    "elapsed_s": 2.1273753750137985,
+    "log": "package-resource-candidate.log"
+  },
+  {
+    "label": "test-resource-pty-normal",
+    "command": [
+      "python3",
+      "/private/tmp/grow-quality-rdjj59je/run_candidate_exact.py",
+      "pty",
+      "resume_input_latency::resume_modern_admission_projection_128_512_turns",
+      "512,2048"
+    ],
+    "exit": 1,
+    "elapsed_s": 35.68074445897946,
+    "log": "test-resource-pty-normal.log"
+  },
+  {
+    "label": "test-resource-pty-slow",
+    "command": [
+      "python3",
+      "/private/tmp/grow-quality-rdjj59je/run_candidate_exact.py",
+      "pty",
+      "resume_input_latency::resume_modern_history_progress_with_slow_writer",
+      "512"
+    ],
+    "exit": 0,
+    "elapsed_s": 7.426003207976464,
+    "log": "test-resource-pty-slow.log"
+  },
+  {
+    "label": "test-resource-pty-ctrl-d",
+    "command": [
+      "python3",
+      "/private/tmp/grow-quality-rdjj59je/run_candidate_exact.py",
+      "pty",
+      "resume_input_latency::ctrl_d_exits_during_modern_session_loading"
+    ],
+    "exit": 0,
+    "elapsed_s": 6.582370374992024,
+    "log": "test-resource-pty-ctrl-d.log"
+  },
+  {
+    "label": "test-resource-orphan",
+    "command": [
+      "python3",
+      "/private/tmp/grow-quality-rdjj59je/run_candidate_exact.py",
+      "orphan",
+      "resume_reconciles_orphaned_running_subagent"
+    ],
+    "exit": 0,
+    "elapsed_s": 2.428204625030048,
+    "log": "test-resource-orphan.log"
+  },
+  {
+    "label": "test-resource-pty-normal-verified",
+    "command": [
+      "python3",
+      "/private/tmp/grow-quality-rdjj59je/run_candidate_exact.py",
+      "pty",
+      "resume_input_latency::resume_modern_admission_projection_128_512_turns",
+      "512,2048"
+    ],
+    "exit": 0,
+    "elapsed_s": 34.451458292023744,
+    "log": "test-resource-pty-normal-verified.log"
+  },
+  {
+    "label": "install-resource-candidate",
+    "command": [
+      "python3",
+      "/private/tmp/grow-quality-rdjj59je/install_candidate.py"
+    ],
+    "exit": 0,
+    "elapsed_s": 1.4585785830277018,
+    "log": "install-resource-candidate.log"
+  },
+  {
+    "label": "cleanup-resource-owned",
+    "command": [
+      "python3",
+      "/private/tmp/grow-quality-rdjj59je/cleanup_owned.py"
+    ],
+    "exit": 0,
+    "elapsed_s": 4.766826375038363,
+    "log": "cleanup-resource-owned.log"
+  },
+  {
+    "label": "validate-resource-ready",
+    "command": [
+      "openspec",
+      "validate",
+      "--all",
+      "--strict",
+      "--no-interactive"
+    ],
+    "exit": 0,
+    "elapsed_s": 1.1329829160240479,
+    "log": "validate-resource-ready.log"
+  },
+  {
+    "label": "archive-resource",
+    "command": [
+      "openspec",
+      "archive",
+      "clean-resource-path-clippy-diagnostics",
+      "--yes"
+    ],
+    "exit": 0,
+    "elapsed_s": 0.9429543339647353,
+    "log": "archive-resource.log"
+  },
+  {
+    "label": "validate-resource-post",
+    "command": [
+      "openspec",
+      "validate",
+      "--all",
+      "--strict",
+      "--no-interactive"
+    ],
+    "exit": 0,
+    "elapsed_s": 1.8472063340013847,
+    "log": "validate-resource-post.log"
+  },
+  {
+    "label": "validate-resource-archives",
+    "command": [
+      "openspec",
+      "validate",
+      "--archived",
+      "--strict",
+      "--no-interactive"
+    ],
+    "exit": 0,
+    "elapsed_s": 1.000040083017666,
+    "log": "validate-resource-archives.log"
+  }
+]

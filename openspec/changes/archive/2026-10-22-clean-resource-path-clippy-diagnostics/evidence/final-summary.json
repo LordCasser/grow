@@ -1,0 +1,12 @@
+{
+  "validated_source_commit": "35548386343ba0f0416d3fac6cde2c25c36ea013",
+  "libraries": 12,
+  "passed": 17421,
+  "ignored": 36,
+  "exact_release_tests": 4,
+  "all_exact_tests_one_pass_each": true,
+  "released": false,
+  "final_compiler_and_clippy_diagnostics": 0,
+  "current_specs_validated": 16,
+  "archived_changes_validated": 699
+}

@@ -1,0 +1,101 @@
+[
+  {
+    "binary": "target/rust-quality-2-5-0/debug/deps/acp_transport-ea3ddb1aa5007164",
+    "status": "ok",
+    "passed": 16,
+    "failed": 0,
+    "ignored": 0,
+    "sha256": "e1a0a4b1f6fb3c5fc7953a1271602fa2168ded69044ea3382e268f540ed168c4"
+  },
+  {
+    "binary": "target/rust-quality-2-5-0/debug/deps/chat_state-404819630b6d208a",
+    "status": "ok",
+    "passed": 573,
+    "failed": 0,
+    "ignored": 3,
+    "sha256": "09deb1e2249b52dd3128d290d8573ea91b269b6ee0a0d32bd7d2b93acb5b8671"
+  },
+  {
+    "binary": "target/rust-quality-2-5-0/debug/deps/config-49ace9335f68d94d",
+    "status": "ok",
+    "passed": 94,
+    "failed": 0,
+    "ignored": 0,
+    "sha256": "354c6b4b1e4a0e3c8397d175df7277f105005a3d90313aa2e69884ef0ced9efd"
+  },
+  {
+    "binary": "target/rust-quality-2-5-0/debug/deps/diagnostics-1b99c08a3bbb7ae1",
+    "status": "ok",
+    "passed": 53,
+    "failed": 0,
+    "ignored": 0,
+    "sha256": "256b9681e023c1570aecfe88fcb521025c4455d0de5347dda4a3b7cbf638a3b0"
+  },
+  {
+    "binary": "target/rust-quality-2-5-0/debug/deps/fast_worktree-54ffd40166446c3a",
+    "status": "ok",
+    "passed": 293,
+    "failed": 0,
+    "ignored": 0,
+    "sha256": "d17e0a03bd6089e31955d05edb4603a43c700238925c9287044c2a3ca97cc535"
+  },
+  {
+    "binary": "target/rust-quality-2-5-0/debug/deps/pager-471e025b658cd4cd",
+    "status": "ok",
+    "passed": 7593,
+    "failed": 0,
+    "ignored": 16,
+    "sha256": "8df12499bf28b0df65e82ea85ac4215e1fc7c8c0e61dd838d0cdaad67bf895b4"
+  },
+  {
+    "binary": "target/rust-quality-2-5-0/debug/deps/pager_render-45a9f8ffdc262a94",
+    "status": "ok",
+    "passed": 1022,
+    "failed": 0,
+    "ignored": 1,
+    "sha256": "7d928376abb199d4c821ad67e64ec390577242895922e51781ac0bafb2eb16b2"
+  },
+  {
+    "binary": "target/rust-quality-2-5-0/debug/deps/shell-76cfeb2c16e16002",
+    "status": "ok",
+    "passed": 4362,
+    "failed": 0,
+    "ignored": 9,
+    "sha256": "5c04793bec10d88b0070d0e08a015875b8f057dd782d8af3ffaa745a0e4b59eb"
+  },
+  {
+    "binary": "target/rust-quality-2-5-0/debug/deps/shell_base-219724f2257fa613",
+    "status": "ok",
+    "passed": 63,
+    "failed": 0,
+    "ignored": 0,
+    "sha256": "1768b28affffa96457b275c14287b730f463904333aa6586fcc44cab0eb6a60f"
+  },
+  {
+    "binary": "target/rust-quality-2-5-0/debug/deps/tools-3b63d0df29401a0a",
+    "status": "ok",
+    "passed": 2427,
+    "failed": 0,
+    "ignored": 7,
+    "sha256": "feee624922f4ff5ca250c8b5a7e5deead81db2326fdb5a2cf030b0bba742b721"
+  },
+  {
+    "binary": "target/rust-quality-2-5-0/debug/deps/workspace-14928a97c856be8f",
+    "status": "ok",
+    "passed": 874,
+    "failed": 0,
+    "ignored": 0,
+    "rerun_log": "test-resource-workspace-home.log",
+    "home_override": "/Users/lordcasser/.local/share/grow-quality-rdjj59je-home",
+    "sha256": "23ca01c3efe1f134d5d910abf90682f5351aa286cd7eafd74e6379667901a6cf"
+  },
+  {
+    "binary": "target/rust-quality-2-5-0/debug/deps/workspace_types-2bea866e9e63eb91",
+    "sha256": "215553a12f9da8beb2d7f8f27af1c4a3be8ce1896f760cefab0102a3b205a65c",
+    "status": "ok",
+    "passed": 51,
+    "failed": 0,
+    "ignored": 0,
+    "rerun_log": "test-resource-workspace-types.log"
+  }
+]
