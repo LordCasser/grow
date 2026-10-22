@@ -586,11 +586,17 @@ async fn headless_config_enables_doom_loop_check_header() {
         .iter()
         .filter(|e| e.method == "POST" && e.path.contains("/responses"))
         .collect();
-    // The session turn carries `x-grow-turn-idx`; aux side-queries (session
-    // title, etc.) do not.
-    let (turns, aux): (Vec<_>, Vec<_>) = responses_posts
-        .into_iter()
-        .partition(|e| e.header("x-grow-turn-idx").is_some());
+    // This fixture's grow-build turn advertises its tools; title and other
+    // auxiliary requests do not. Classify independently of the opt-in header
+    // being tested, without depending on retired tracing headers.
+    let (turns, aux): (Vec<_>, Vec<_>) = responses_posts.into_iter().partition(|entry| {
+        entry
+            .body
+            .as_ref()
+            .and_then(|body| body.get("tools"))
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|tools| tools.len() >= 2)
+    });
     assert!(
         !turns.is_empty(),
         "no session turn POST /v1/responses logged; requests:\n{}",
