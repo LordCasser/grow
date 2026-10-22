@@ -1,0 +1,57 @@
+{
+  "root": "/Users/lordcasser/workspace/projects/grow",
+  "run": "/private/tmp/gr25-9_pzf2cq",
+  "commit": "e4e969eddba3738dfc76f9783ef0596046e4f6cd",
+  "initial_worktree_clean": true,
+  "toolchain": "rustc 1.93.1 (01f6ddf75 2026-02-11)\nbinary: rustc\ncommit-hash: 01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf\ncommit-date: 2026-02-11\nhost: aarch64-apple-darwin\nrelease: 1.93.1\nLLVM version: 21.1.8\n",
+  "cargo": "cargo 1.93.1 (083ac5135 2025-12-15)\n",
+  "target": "/Users/lordcasser/workspace/projects/grow/target/release-readiness-2-5-0",
+  "env": {
+    "HOME": "/private/tmp/gr25-9_pzf2cq/home",
+    "USERPROFILE": "/private/tmp/gr25-9_pzf2cq/home",
+    "GROW_HOME": "/private/tmp/gr25-9_pzf2cq/grow",
+    "CARGO_HOME": "/Users/lordcasser/.cargo",
+    "RUSTUP_HOME": "/Users/lordcasser/.rustup",
+    "RUSTUP_TOOLCHAIN": "1.93.1",
+    "CARGO_TARGET_DIR": "/Users/lordcasser/workspace/projects/grow/target/release-readiness-2-5-0",
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_BUILD_JOBS": "4",
+    "CARGO_PROFILE_DEV_DEBUG": "0",
+    "CARGO_PROFILE_TEST_DEBUG": "0",
+    "CARGO_PROFILE_DEV_SPLIT_DEBUGINFO": "off",
+    "CARGO_PROFILE_TEST_SPLIT_DEBUGINFO": "off",
+    "RUST_MIN_STACK": "16777216",
+    "CARGO_NET_OFFLINE": "true"
+  },
+  "initial_commit": "567560b82f5e7d2f1420877f4364bf3ebaaefbcf",
+  "initial_findings_fix_worktree_clean": true,
+  "dashboard_fixture_fix_worktree_clean": true,
+  "queue_fixture_fix_worktree_clean": true,
+  "final_fixture_and_btw_worktree_clean": true,
+  "disconnect_fix_worktree_clean": true,
+  "runtime_probe_env": {
+    "GROW_PTY_RESUME_TURNS": "128,512,2048",
+    "GROW_PTY_RESUME_TRACE_DIR": "/private/tmp/gr25-9_pzf2cq/pty-traces",
+    "GROW_PTY_RESUME_TRACE_LABEL": "release250"
+  },
+  "binary_code_commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff",
+  "lifecycle_fixture_fix_worktree_clean": true,
+  "changes_after_binary_build": [
+    "crates/codegen/pager/tests/pty_e2e/image_chip_preview_path_free_pty.rs",
+    "crates/codegen/shell/changelogs/2.5.0.md",
+    "crates/codegen/shell/tests/test_built_binary_e2e.rs",
+    "crates/codegen/shell/tests/test_doom_loop_recovery.rs",
+    "crates/codegen/test-support/src/acp_client.rs",
+    "openspec/backlog.md",
+    "openspec/changes/prepare-release-v2-5-0/initial-findings.md"
+  ],
+  "lifecycle_oracle_fix_worktree_clean": true,
+  "image_fixture_fix_worktree_clean": true,
+  "slow_probe_env": {
+    "GROW_PTY_RESUME_TURNS": "512,2048",
+    "PTY_E2E_ARTIFACT_DIR": "/private/tmp/gr25-9_pzf2cq/image-artifacts"
+  },
+  "image_project_fix_worktree_clean": true,
+  "doom_model_fix_worktree_clean": true,
+  "doom_request_fixture_fix_worktree_clean": true
+}

@@ -1,0 +1,13 @@
+{
+  "path": "/Users/lordcasser/workspace/projects/grow/target/local-release-2.5.0/grow",
+  "sha256": "961422a415613c567ea03e3350174cdfc4b41fdeb0c1d6f49a2e2a4fcdd9380d",
+  "bytes": 100316192,
+  "commit": "c7447e8262d3cff11657ae3d79d31384bf6a4a02",
+  "version": "grow 2.5.0 (c7447e8)",
+  "pinned_ripgrep": {
+    "url": "https://github.com/BurntSushi/ripgrep/releases/download/15.0.0/ripgrep-15.0.0-aarch64-apple-darwin.tar.gz",
+    "archive_sha256": "98bb2e61e7277ba0ea72d2ae2592497fd8d2940934a16b122448d302a6637e3b",
+    "binary_sha256": "ec39d6010fbb27989a6f7be3e4edabd12ef4bafb5a6222834e540ff72c3c0e8b",
+    "version": "ripgrep 15.0.0 (rev 3a612f88b8)"
+  }
+}

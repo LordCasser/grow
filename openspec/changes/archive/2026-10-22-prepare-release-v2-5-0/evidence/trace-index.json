@@ -1,0 +1,32 @@
+[
+  {
+    "file": "release250-modern-128-89829-1792658580158220000-loading.json",
+    "turns": 128,
+    "modern": true,
+    "slow_writer": false
+  },
+  {
+    "file": "release250-modern-2048-89829-1792658613618489000-loading.json",
+    "turns": 2048,
+    "modern": true,
+    "slow_writer": false
+  },
+  {
+    "file": "release250-modern-2048-92785-1792659048189567000-loading.json",
+    "turns": 2048,
+    "modern": true,
+    "slow_writer": true
+  },
+  {
+    "file": "release250-modern-512-89829-1792658586082603000-loading.json",
+    "turns": 512,
+    "modern": true,
+    "slow_writer": false
+  },
+  {
+    "file": "release250-modern-512-92785-1792659019245604000-loading.json",
+    "turns": 512,
+    "modern": true,
+    "slow_writer": true
+  }
+]

@@ -1,0 +1,99 @@
+{
+  "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff",
+  "libraries": [
+    {
+      "binary": "agent-4d4f619349a834bb",
+      "passed": 482,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "binary": "chat_state-404819630b6d208a",
+      "passed": 573,
+      "failed": 0,
+      "ignored": 3
+    },
+    {
+      "binary": "markdown-a8f4ef5c55b7d91f",
+      "passed": 502,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "binary": "mcp-117e19e00f60ddea",
+      "passed": 178,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "binary": "memory-c0ca1f135fcc0053",
+      "passed": 302,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "binary": "pager-7249ff57e230f07e",
+      "passed": 7593,
+      "failed": 0,
+      "ignored": 16
+    },
+    {
+      "binary": "pager_minimal-c98e9d52a4b2cd20",
+      "passed": 95,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "binary": "pager_render-45a9f8ffdc262a94",
+      "passed": 1022,
+      "failed": 0,
+      "ignored": 1
+    },
+    {
+      "binary": "sampler-093c4c8fc1f9f6d6",
+      "passed": 259,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "binary": "sampling_types-efc2ebae8615aea1",
+      "passed": 315,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "binary": "shell-76cfeb2c16e16002",
+      "passed": 4362,
+      "failed": 0,
+      "ignored": 9
+    },
+    {
+      "binary": "test_support-1d5e26f651fff93c",
+      "passed": 71,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "binary": "tool_types-8ce26a98afbffa21",
+      "passed": 123,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "binary": "tools-3b63d0df29401a0a",
+      "passed": 2427,
+      "failed": 0,
+      "ignored": 7
+    },
+    {
+      "binary": "workflow-04bb7cb50a539013",
+      "passed": 65,
+      "failed": 0,
+      "ignored": 0
+    }
+  ],
+  "passed": 18369,
+  "failed": 0,
+  "ignored": 36,
+  "note": "Only the final parent libtest summary per library is counted; nested test subprocess summaries are excluded."
+}

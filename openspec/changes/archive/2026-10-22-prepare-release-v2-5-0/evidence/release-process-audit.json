@@ -1,0 +1,68 @@
+{
+  "binary": "/Users/lordcasser/workspace/projects/grow/target/local-release-2.5.0/grow",
+  "remaining_candidate_processes": [
+    {
+      "pid": 83188,
+      "ppid": 1
+    },
+    {
+      "pid": 83271,
+      "ppid": 1
+    },
+    {
+      "pid": 83319,
+      "ppid": 1
+    },
+    {
+      "pid": 90246,
+      "ppid": 1
+    },
+    {
+      "pid": 90384,
+      "ppid": 1
+    }
+  ],
+  "details": [
+    {
+      "pid": 83188,
+      "args": "/Users/lordcasser/workspace/projects/grow/target/local-release-2.5.0/grow agent leader --no-exit-on-disconnect",
+      "grow_home": "/var/folders/gm/lzn3ylzx4lz7mx29lftngdz40000gn/T/.tmpFLKCqT/home/.grow",
+      "started": "Thu Oct 22 16:27:54 2026",
+      "test_home_still_exists": true,
+      "required_sigkill": false
+    },
+    {
+      "pid": 83271,
+      "args": "/Users/lordcasser/workspace/projects/grow/target/local-release-2.5.0/grow agent leader --no-exit-on-disconnect",
+      "grow_home": "/var/folders/gm/lzn3ylzx4lz7mx29lftngdz40000gn/T/.tmpJAhqG8/home/.grow",
+      "started": "Thu Oct 22 16:28:16 2026",
+      "test_home_still_exists": true,
+      "required_sigkill": false
+    },
+    {
+      "pid": 83319,
+      "args": "/Users/lordcasser/workspace/projects/grow/target/local-release-2.5.0/grow agent leader --no-exit-on-disconnect",
+      "grow_home": "/var/folders/gm/lzn3ylzx4lz7mx29lftngdz40000gn/T/.tmpMKxiT7/home/.grow",
+      "started": "Thu Oct 22 16:28:36 2026",
+      "test_home_still_exists": true,
+      "required_sigkill": false
+    },
+    {
+      "pid": 90246,
+      "args": "/Users/lordcasser/workspace/projects/grow/target/local-release-2.5.0/grow agent leader --no-exit-on-disconnect",
+      "grow_home": "/var/folders/gm/lzn3ylzx4lz7mx29lftngdz40000gn/T/.tmp3dkZQ9/home/.grow",
+      "started": "Thu Oct 22 16:44:04 2026",
+      "test_home_still_exists": true,
+      "required_sigkill": false
+    },
+    {
+      "pid": 90384,
+      "args": "/Users/lordcasser/workspace/projects/grow/target/local-release-2.5.0/grow agent leader --no-exit-on-disconnect",
+      "grow_home": "/var/folders/gm/lzn3ylzx4lz7mx29lftngdz40000gn/T/.tmptotGRE/home/.grow",
+      "started": "Thu Oct 22 16:44:16 2026",
+      "test_home_still_exists": true,
+      "required_sigkill": false
+    }
+  ],
+  "remaining_after_termination": []
+}

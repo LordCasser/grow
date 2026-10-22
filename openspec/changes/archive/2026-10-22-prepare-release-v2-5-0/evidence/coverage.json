@@ -1,0 +1,1764 @@
+{
+  "groups": [
+    {
+      "label": "core-libs-current",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff",
+      "log": "core-libs-current.log",
+      "targets": [
+        {
+          "binary": "agent-4d4f619349a834bb",
+          "passed": 482,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "chat_state-404819630b6d208a",
+          "passed": 573,
+          "failed": 0,
+          "ignored": 3
+        },
+        {
+          "binary": "markdown-a8f4ef5c55b7d91f",
+          "passed": 502,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "mcp-117e19e00f60ddea",
+          "passed": 178,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "memory-c0ca1f135fcc0053",
+          "passed": 302,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "pager-7249ff57e230f07e",
+          "passed": 7593,
+          "failed": 0,
+          "ignored": 16
+        },
+        {
+          "binary": "pager_minimal-c98e9d52a4b2cd20",
+          "passed": 95,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "pager_render-45a9f8ffdc262a94",
+          "passed": 1022,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "binary": "sampler-093c4c8fc1f9f6d6",
+          "passed": 259,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "sampling_types-efc2ebae8615aea1",
+          "passed": 315,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "shell-76cfeb2c16e16002",
+          "passed": 4362,
+          "failed": 0,
+          "ignored": 9
+        },
+        {
+          "binary": "test_support-1d5e26f651fff93c",
+          "passed": 71,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "tool_types-8ce26a98afbffa21",
+          "passed": 123,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "tools-3b63d0df29401a0a",
+          "passed": 2427,
+          "failed": 0,
+          "ignored": 7
+        },
+        {
+          "binary": "workflow-04bb7cb50a539013",
+          "passed": 65,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "passed": 18369,
+      "ignored": 36
+    },
+    {
+      "label": "shell-integrations-current",
+      "commit": "e4e969eddba3738dfc76f9783ef0596046e4f6cd",
+      "log": "shell-integrations-current-attempt-2.log",
+      "targets": [
+        {
+          "binary": "git_contention_e2e-6c3038897611d688",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "binary": "session_fork_replay_memory-4fff34de83d5b0e9",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "session_load_perf-4144be1cbd7bad19",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 3
+        },
+        {
+          "binary": "test_active_sessions_smoke-11ff73ebea739ff3",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "test_auth_provider_e2e-b13443de187c478e",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 3
+        },
+        {
+          "binary": "test_built_binary_e2e-3ee79e9269ae94fc",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 29
+        },
+        {
+          "binary": "test_debug_logging-4bba2f9069f2d8c6",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 6
+        },
+        {
+          "binary": "test_doom_loop_recovery-faa0a15e07f8a8b0",
+          "passed": 16,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "binary": "test_doomloop_capture-cdea64fac85fe2e8",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "test_fork_session-2a246375c3bd4a41",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "test_global_extra_headers_e2e-6275b593ff894c06",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "binary": "test_grow_session_update-03ba7e7c16ad5ac6",
+          "passed": 4,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "test_leader_death_repro-ca9b7c6d401da002",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 4
+        },
+        {
+          "binary": "test_leader_sandbox_confinement-49343c6d304bae5b",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "test_leader_soak-eeec44aa9c0efcd1",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "binary": "test_leader_stdio_integration-d526c64e52d82f3e",
+          "passed": 48,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "binary": "test_mcp_integration-2ef183ac16d1356c",
+          "passed": 7,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "test_mcp_permission_persistence-8d563a55cbe84f82",
+          "passed": 17,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "test_nonblocking_startup-bbb1e56e09950e33",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 3
+        },
+        {
+          "binary": "test_nonblocking_startup_offline-684de20b4cdf3ce5",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "binary": "test_refusal_stop_reason-a364760068f8f97b",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 2
+        },
+        {
+          "binary": "test_registry_churn-4e2b4249ca7c4efc",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "test_sampling_client-208f2daa91519176",
+          "passed": 27,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "test_session_end_hook_e2e-6d7293795b2e9352",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "binary": "test_session_load_memory-5f39cf6baf72c4f9",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 2
+        },
+        {
+          "binary": "test_session_protocol_recovery-0b32ffc86e8fcb63",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 3
+        },
+        {
+          "binary": "test_stop_hook_e2e-59023e1b900c5283",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 4
+        },
+        {
+          "binary": "test_subagent_orphan_reconcile-ea36e851ebecf570",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "binary": "test_summary_reasoning_effort-cf2f0158be2ab948",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 2
+        },
+        {
+          "binary": "test_tool_dispatch_duration_smoke-d165811e82914425",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "binary": "test_trusted_local_plugin_refresh_e2e-b9d8e310adf0ed79",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 1
+        },
+        {
+          "binary": "testkit_synth_roundtrip-f3ffbf66d93a884b",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "passed": 143,
+      "ignored": 71
+    },
+    {
+      "label": "pager-integrations",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff",
+      "log": "pager-integrations.log",
+      "targets": [
+        {
+          "binary": "doctor_early_dispatch-d782b23c1aae31da",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 14
+        },
+        {
+          "binary": "grow_home_paths-89526bd824961e9d",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "leader_pty_e2e-82e5d7672a17cef2",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 5
+        },
+        {
+          "binary": "mermaid_render_subprocess-e49e612a82866d06",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 4
+        },
+        {
+          "binary": "pty_e2e_clipboard-4f0492afd9017768",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 8
+        },
+        {
+          "binary": "pty_e2e_config_ui-68cb3643f385b1b7",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 14
+        },
+        {
+          "binary": "pty_e2e_minimal-6b0cae6dfb391cad",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 29
+        },
+        {
+          "binary": "pty_e2e_persistence-8860a7cb65d05e30",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 22
+        },
+        {
+          "binary": "pty_e2e_queue-92724dcf8d957d80",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 21
+        },
+        {
+          "binary": "pty_e2e_scroll_selection-c853bbdf15fb1ebe",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 33
+        },
+        {
+          "binary": "pty_e2e_shell_tools-8abb0e0425c95759",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 16
+        },
+        {
+          "binary": "pty_e2e_smoke-61bc0028766167b7",
+          "passed": 1,
+          "failed": 0,
+          "ignored": 29
+        },
+        {
+          "binary": "pty_xtversion-b2fc3dbb61faa30d",
+          "passed": 0,
+          "failed": 0,
+          "ignored": 9
+        },
+        {
+          "binary": "scripted_scenarios-f2ff641babd19a7f",
+          "passed": 3,
+          "failed": 0,
+          "ignored": 40
+        },
+        {
+          "binary": "selection_model_public_api-248ca701969796c1",
+          "passed": 2,
+          "failed": 0,
+          "ignored": 0
+        },
+        {
+          "binary": "settings_e2e-ab53e3817991f3c0",
+          "passed": 235,
+          "failed": 0,
+          "ignored": 0
+        }
+      ],
+      "passed": 249,
+      "ignored": 244
+    },
+    {
+      "label": "cli-unit",
+      "passed": 35,
+      "ignored": 0,
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff",
+      "log": "cli-unit.log"
+    },
+    {
+      "label": "sampling-types-runtime_projection",
+      "passed": 9,
+      "ignored": 0,
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff",
+      "log": "sampling-types-runtime_projection.log"
+    },
+    {
+      "label": "chat-state-model_skill_integrity",
+      "passed": 6,
+      "ignored": 0,
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff",
+      "log": "chat-state-model_skill_integrity.log"
+    },
+    {
+      "label": "mcp-tool_list_pagination",
+      "passed": 5,
+      "ignored": 0,
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff",
+      "log": "mcp-tool_list_pagination.log"
+    },
+    {
+      "label": "test-support-current",
+      "passed": 71,
+      "ignored": 0,
+      "commit": "2a28bb524708617c3fced2db9862554701f5a1c8",
+      "log": "test-support-current.log"
+    }
+  ],
+  "selected_exact_cases": 52,
+  "selected_exact": [
+    {
+      "label": "ci-exact-0",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "shell",
+        "--test",
+        "test_session_protocol_recovery",
+        "--ignored",
+        "protocol_failure_preserves_session_across_continue_switch_and_process_restart"
+      ],
+      "exit": 0,
+      "elapsed_s": 115.54251909255981,
+      "log": "ci-exact-0.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-1",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "shell",
+        "--test",
+        "test_session_protocol_recovery",
+        "--ignored",
+        "malformed_wire_json_allows_manual_continuation_in_the_same_resident_session"
+      ],
+      "exit": 0,
+      "elapsed_s": 3.7308740615844727,
+      "log": "ci-exact-1.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-2",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "shell",
+        "--test",
+        "test_session_protocol_recovery",
+        "--ignored",
+        "goal_sampling_failure_requires_explicit_restart_and_preserves_budget_gates"
+      ],
+      "exit": 0,
+      "elapsed_s": 18.847349166870117,
+      "log": "ci-exact-2.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-3",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_minimal",
+        "--ignored",
+        "minimal::minimal_thinking_is_visually_distinct_from_output::minimal_thinking_is_visually_distinct_from_output"
+      ],
+      "exit": 0,
+      "elapsed_s": 49.00764584541321,
+      "log": "ci-exact-3.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-4",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_minimal",
+        "--ignored",
+        "minimal::minimal_transcript_opens_in_pager::minimal_transcript_opens_in_pager"
+      ],
+      "exit": 0,
+      "elapsed_s": 27.93114995956421,
+      "log": "ci-exact-4.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-5",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_minimal",
+        "--ignored",
+        "minimal::minimal_parked_plan_commits_to_scrollback::minimal_parked_plan_commits_to_scrollback"
+      ],
+      "exit": 0,
+      "elapsed_s": 32.044437885284424,
+      "log": "ci-exact-5.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-6",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_minimal",
+        "--ignored",
+        "minimal::minimal_parked_plan_survives_quit::minimal_parked_plan_survives_quit"
+      ],
+      "exit": 0,
+      "elapsed_s": 26.31103801727295,
+      "log": "ci-exact-6.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-7",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_minimal",
+        "--ignored",
+        "minimal::minimal_new_session_keeps_history_and_resets::minimal_new_session_keeps_history_and_resets"
+      ],
+      "exit": 0,
+      "elapsed_s": 28.759327173233032,
+      "log": "ci-exact-7.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-8",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_minimal",
+        "--ignored",
+        "minimal::minimal_resize_preserves_committed_scrollback::minimal_resize_preserves_committed_scrollback"
+      ],
+      "exit": 0,
+      "elapsed_s": 29.808252811431885,
+      "log": "ci-exact-8.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-9",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_minimal",
+        "--ignored",
+        "minimal::minimal_esc_cancels_running_turn::minimal_esc_cancels_running_turn"
+      ],
+      "exit": 0,
+      "elapsed_s": 28.406904220581055,
+      "log": "ci-exact-9.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-10",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_minimal",
+        "--ignored",
+        "minimal::minimal_ctrl_d_confirms_and_quits::minimal_ctrl_d_confirms_and_quits"
+      ],
+      "exit": 0,
+      "elapsed_s": 25.84333896636963,
+      "log": "ci-exact-10.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-11",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_minimal",
+        "--ignored",
+        "minimal::minimal_transcript_pager_restore_no_artifacts::minimal_transcript_pager_restore_no_artifacts"
+      ],
+      "exit": 0,
+      "elapsed_s": 33.23282217979431,
+      "log": "ci-exact-11.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-12",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_config_ui",
+        "--ignored",
+        "show_thinking_blocks_toggle_hides_existing_pty::show_thinking_blocks_toggle_hides_existing_pty"
+      ],
+      "original_command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_config_ui",
+        "--ignored",
+        "show_thinking_blocks_toggle_hides_existing_pty::show_thinking_blocks_toggle_hides_existing_pty"
+      ],
+      "exit": 0,
+      "elapsed_s": 39.40451788902283,
+      "log": "ci-exact-12.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-13",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_config_ui",
+        "--ignored",
+        "verb_group_fold_expand_collapse_pty::verb_group_fold_expand_collapse_pty"
+      ],
+      "original_command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_config_ui",
+        "--ignored",
+        "verb_group_fold_expand_collapse_pty::verb_group_fold_expand_collapse_pty"
+      ],
+      "exit": 0,
+      "elapsed_s": 7.841957092285156,
+      "log": "ci-exact-13.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-14",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_scroll_selection",
+        "--ignored",
+        "resize_preserves_scroll_position::resize_preserves_scroll_position"
+      ],
+      "original_command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_scroll_selection",
+        "--ignored",
+        "resize_preserves_scroll_position::resize_preserves_scroll_position"
+      ],
+      "exit": 0,
+      "elapsed_s": 35.535990953445435,
+      "log": "ci-exact-14.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-15",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_scroll_selection",
+        "--ignored",
+        "read_tool_header_selection_copies_path_only_pty::read_tool_header_selection_copies_path_only_pty"
+      ],
+      "original_command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_scroll_selection",
+        "--ignored",
+        "read_tool_header_selection_copies_path_only_pty::read_tool_header_selection_copies_path_only_pty"
+      ],
+      "exit": 0,
+      "elapsed_s": 6.255440950393677,
+      "log": "ci-exact-15.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-16",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_queue",
+        "--ignored",
+        "queued_bash_promotion_renders_output_pty::queued_bash_promotion_renders_output_pty"
+      ],
+      "original_command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_queue",
+        "--ignored",
+        "queued_bash_promotion_renders_output_pty::queued_bash_promotion_renders_output_pty"
+      ],
+      "exit": 0,
+      "elapsed_s": 55.6863739490509,
+      "log": "ci-exact-16.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-17",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_queue",
+        "--ignored",
+        "send_now_tip_after_mid_turn_queue::send_now_tip_after_mid_turn_queue"
+      ],
+      "original_command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_queue",
+        "--ignored",
+        "send_now_tip_after_mid_turn_queue::send_now_tip_after_mid_turn_queue"
+      ],
+      "exit": 0,
+      "elapsed_s": 5.9337029457092285,
+      "log": "ci-exact-17.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-18",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_queue",
+        "--ignored",
+        "esc_cancels_running_turn_from_prompt_preserves_draft::esc_cancels_running_turn_from_prompt_preserves_draft"
+      ],
+      "original_command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_queue",
+        "--ignored",
+        "esc_cancels_running_turn_from_prompt_preserves_draft::esc_cancels_running_turn_from_prompt_preserves_draft"
+      ],
+      "exit": 0,
+      "elapsed_s": 6.731594800949097,
+      "log": "ci-exact-18.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-19",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_queue",
+        "--ignored",
+        "esc_cancels_running_turn_from_scrollback::esc_cancels_running_turn_from_scrollback"
+      ],
+      "original_command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_queue",
+        "--ignored",
+        "esc_cancels_running_turn_from_scrollback::esc_cancels_running_turn_from_scrollback"
+      ],
+      "exit": 0,
+      "elapsed_s": 6.612999200820923,
+      "log": "ci-exact-19.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-20",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "leader_pty_e2e",
+        "--ignored",
+        "leader_two_clients_shared_session::leader_two_clients_shared_session"
+      ],
+      "original_command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "leader_pty_e2e",
+        "--ignored",
+        "leader_two_clients_shared_session::leader_two_clients_shared_session"
+      ],
+      "exit": 0,
+      "elapsed_s": 49.79928970336914,
+      "log": "ci-exact-20.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-21",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "leader_pty_e2e",
+        "--ignored",
+        "leader_n_clients_shared_session::leader_n_clients_shared_session"
+      ],
+      "original_command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "leader_pty_e2e",
+        "--ignored",
+        "leader_n_clients_shared_session::leader_n_clients_shared_session"
+      ],
+      "exit": 0,
+      "elapsed_s": 19.40682291984558,
+      "log": "ci-exact-21.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-22",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "leader_pty_e2e",
+        "--ignored",
+        "leader_attach_during_active_turn::leader_attach_during_active_turn"
+      ],
+      "original_command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "leader_pty_e2e",
+        "--ignored",
+        "leader_attach_during_active_turn::leader_attach_during_active_turn"
+      ],
+      "exit": 0,
+      "elapsed_s": 19.893484830856323,
+      "log": "ci-exact-22.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-23",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_persistence",
+        "--ignored",
+        "suspend_nested_task_tree::ctrl_d_suspends_and_cold_resumes_root_child_grandchild_tree"
+      ],
+      "original_command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_persistence",
+        "--ignored",
+        "suspend_nested_task_tree::ctrl_d_suspends_and_cold_resumes_root_child_grandchild_tree"
+      ],
+      "exit": 0,
+      "elapsed_s": 37.064367055892944,
+      "log": "ci-exact-23.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-24",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_persistence",
+        "--ignored",
+        "ctrl_d_suspend_and_continue::ctrl_d_cold_resume_keeps_the_original_explicit_skill_snapshot"
+      ],
+      "original_command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_persistence",
+        "--ignored",
+        "ctrl_d_suspend_and_continue::ctrl_d_cold_resume_keeps_the_original_explicit_skill_snapshot"
+      ],
+      "exit": 0,
+      "elapsed_s": 2.9319028854370117,
+      "log": "ci-exact-24.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-25",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_persistence",
+        "--ignored",
+        "ctrl_d_suspend_and_continue::minimal_cold_resume_keeps_the_original_explicit_skill_snapshot"
+      ],
+      "original_command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_persistence",
+        "--ignored",
+        "ctrl_d_suspend_and_continue::minimal_cold_resume_keeps_the_original_explicit_skill_snapshot"
+      ],
+      "exit": 0,
+      "elapsed_s": 3.1420040130615234,
+      "log": "ci-exact-25.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-26",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager-pty-harness",
+        "--test",
+        "plan_approval_resume",
+        "plan_approval_restored_after_resume"
+      ],
+      "original_command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager-pty-harness",
+        "--test",
+        "plan_approval_resume",
+        "plan_approval_restored_after_resume"
+      ],
+      "exit": 0,
+      "elapsed_s": 123.03816413879395,
+      "log": "ci-exact-26.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-27",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager-pty-harness",
+        "--test",
+        "plan_approval_resume",
+        "deferred_plan_reviewed_after_resume"
+      ],
+      "original_command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager-pty-harness",
+        "--test",
+        "plan_approval_resume",
+        "deferred_plan_reviewed_after_resume"
+      ],
+      "exit": 0,
+      "elapsed_s": 6.77035117149353,
+      "log": "ci-exact-27.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-28",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_persistence",
+        "--ignored",
+        "suspend_nested_task_tree::cold_resume_after_partial_leaf_release_does_not_replay_checkpoint"
+      ],
+      "original_command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_persistence",
+        "--ignored",
+        "suspend_nested_task_tree::cold_resume_after_partial_leaf_release_does_not_replay_checkpoint"
+      ],
+      "exit": 0,
+      "elapsed_s": 8.29268217086792,
+      "log": "ci-exact-28.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "ci-exact-29",
+      "command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_persistence",
+        "--ignored",
+        "suspend_nested_task_tree::concurrent_cold_resume_claims_one_root_without_replaying_tree_work"
+      ],
+      "original_command": [
+        "/opt/homebrew/opt/python@3.15/bin/python3.15",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_persistence",
+        "--ignored",
+        "suspend_nested_task_tree::concurrent_cold_resume_claims_one_root_without_replaying_tree_work"
+      ],
+      "exit": 0,
+      "elapsed_s": 3.765854835510254,
+      "log": "ci-exact-29.log",
+      "commit": "8c469e1af3e6f8a3daf6dce624e423fc243b82ff"
+    },
+    {
+      "label": "extra-final-0",
+      "command": [
+        "python3",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "shell",
+        "--test",
+        "test_built_binary_e2e",
+        "--ignored",
+        "test_stdio_full_session_lifecycle"
+      ],
+      "original_command": [
+        "python3",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "shell",
+        "--test",
+        "test_built_binary_e2e",
+        "--ignored",
+        "test_stdio_full_session_lifecycle"
+      ],
+      "exit": 0,
+      "elapsed_s": 4.851651906967163,
+      "log": "extra-final-0.log",
+      "commit": "6c6b7c87e91f5f1bf153da68f3c9cefc3da46535"
+    },
+    {
+      "label": "extra-final-1",
+      "command": [
+        "python3",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "shell",
+        "--test",
+        "test_built_binary_e2e",
+        "--ignored",
+        "test_stdio_session_close"
+      ],
+      "original_command": [
+        "python3",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "shell",
+        "--test",
+        "test_built_binary_e2e",
+        "--ignored",
+        "test_stdio_session_close"
+      ],
+      "exit": 0,
+      "elapsed_s": 0.5566346645355225,
+      "log": "extra-final-1.log",
+      "commit": "6c6b7c87e91f5f1bf153da68f3c9cefc3da46535"
+    },
+    {
+      "label": "extra-corrected-2",
+      "command": [
+        "python3",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "shell",
+        "--test",
+        "test_built_binary_e2e",
+        "--ignored",
+        "test_stdio_prompt_then_immediate_load_session"
+      ],
+      "original_command": [
+        "python3",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "shell",
+        "--test",
+        "test_built_binary_e2e",
+        "--ignored",
+        "test_stdio_prompt_then_immediate_load_session"
+      ],
+      "exit": 0,
+      "elapsed_s": 6.24934196472168,
+      "log": "extra-corrected-2.log",
+      "commit": "848bf04074920b7da097b283376f315fd1e09dd6"
+    },
+    {
+      "label": "extra-final-3",
+      "command": [
+        "python3",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "shell",
+        "--test",
+        "test_built_binary_e2e",
+        "--ignored",
+        "test_stdio_xcode_escaped_slash_methods_get_responses"
+      ],
+      "original_command": [
+        "python3",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "shell",
+        "--test",
+        "test_built_binary_e2e",
+        "--ignored",
+        "test_stdio_xcode_escaped_slash_methods_get_responses"
+      ],
+      "exit": 0,
+      "elapsed_s": 0.8767561912536621,
+      "log": "extra-final-3.log",
+      "commit": "6c6b7c87e91f5f1bf153da68f3c9cefc3da46535"
+    },
+    {
+      "label": "extra-final-4",
+      "command": [
+        "python3",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "shell",
+        "--test",
+        "test_built_binary_e2e",
+        "--ignored",
+        "test_stdio_agent_exits_on_stdin_eof"
+      ],
+      "original_command": [
+        "python3",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "shell",
+        "--test",
+        "test_built_binary_e2e",
+        "--ignored",
+        "test_stdio_agent_exits_on_stdin_eof"
+      ],
+      "exit": 0,
+      "elapsed_s": 0.48266005516052246,
+      "log": "extra-final-4.log",
+      "commit": "6c6b7c87e91f5f1bf153da68f3c9cefc3da46535"
+    },
+    {
+      "label": "extra-final-5",
+      "command": [
+        "python3",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "shell",
+        "--test",
+        "test_built_binary_e2e",
+        "--ignored",
+        "test_headless_timeout_exit_kills_pending_background_task"
+      ],
+      "original_command": [
+        "python3",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "shell",
+        "--test",
+        "test_built_binary_e2e",
+        "--ignored",
+        "test_headless_timeout_exit_kills_pending_background_task"
+      ],
+      "exit": 0,
+      "elapsed_s": 2.1275336742401123,
+      "log": "extra-final-5.log",
+      "commit": "6c6b7c87e91f5f1bf153da68f3c9cefc3da46535"
+    },
+    {
+      "label": "extra-final-6",
+      "command": [
+        "python3",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "shell",
+        "--test",
+        "test_built_binary_e2e",
+        "--ignored",
+        "test_headless_no_wait_exit_kills_background_task"
+      ],
+      "original_command": [
+        "python3",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "shell",
+        "--test",
+        "test_built_binary_e2e",
+        "--ignored",
+        "test_headless_no_wait_exit_kills_background_task"
+      ],
+      "exit": 0,
+      "elapsed_s": 2.058367967605591,
+      "log": "extra-final-6.log",
+      "commit": "6c6b7c87e91f5f1bf153da68f3c9cefc3da46535"
+    },
+    {
+      "label": "extra-final-7",
+      "command": [
+        "python3",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "shell",
+        "--test",
+        "test_built_binary_e2e",
+        "--ignored",
+        "test_headless_waits_for_short_background_task_and_exits_clean"
+      ],
+      "original_command": [
+        "python3",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "shell",
+        "--test",
+        "test_built_binary_e2e",
+        "--ignored",
+        "test_headless_waits_for_short_background_task_and_exits_clean"
+      ],
+      "exit": 0,
+      "elapsed_s": 1.9920620918273926,
+      "log": "extra-final-7.log",
+      "commit": "6c6b7c87e91f5f1bf153da68f3c9cefc3da46535"
+    },
+    {
+      "label": "extra-validated-8",
+      "command": [
+        "python3",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_clipboard",
+        "--ignored",
+        "image_chip_preview_path_free_pty::image_chip_preview_path_free_pty"
+      ],
+      "original_command": [
+        "python3",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_clipboard",
+        "--ignored",
+        "image_chip_preview_path_free_pty::image_chip_preview_path_free_pty"
+      ],
+      "exit": 0,
+      "elapsed_s": 30.6200270652771,
+      "log": "extra-validated-8.log",
+      "commit": "9fee33a5f0d639d2a96f1c450d189d81b1aef18b"
+    },
+    {
+      "label": "extra-final-9",
+      "command": [
+        "python3",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_persistence",
+        "--ignored",
+        "continue_resumes_session_with_history::continue_resumes_session_with_history"
+      ],
+      "original_command": [
+        "python3",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_persistence",
+        "--ignored",
+        "continue_resumes_session_with_history::continue_resumes_session_with_history"
+      ],
+      "exit": 0,
+      "elapsed_s": 30.363616943359375,
+      "log": "extra-final-9.log",
+      "commit": "6c6b7c87e91f5f1bf153da68f3c9cefc3da46535"
+    },
+    {
+      "label": "extra-final-10",
+      "command": [
+        "python3",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_persistence",
+        "--ignored",
+        "resume_input_latency::ctrl_d_exits_during_modern_session_loading"
+      ],
+      "original_command": [
+        "python3",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_persistence",
+        "--ignored",
+        "resume_input_latency::ctrl_d_exits_during_modern_session_loading"
+      ],
+      "exit": 0,
+      "elapsed_s": 6.3889479637146,
+      "log": "extra-final-10.log",
+      "commit": "6c6b7c87e91f5f1bf153da68f3c9cefc3da46535"
+    },
+    {
+      "label": "extra-final-11",
+      "command": [
+        "python3",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_persistence",
+        "--ignored",
+        "resume_input_latency::resume_modern_admission_projection_128_512_turns"
+      ],
+      "original_command": [
+        "python3",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_persistence",
+        "--ignored",
+        "resume_input_latency::resume_modern_admission_projection_128_512_turns"
+      ],
+      "exit": 0,
+      "elapsed_s": 36.07195687294006,
+      "log": "extra-final-11.log",
+      "commit": "6c6b7c87e91f5f1bf153da68f3c9cefc3da46535"
+    },
+    {
+      "label": "extra-validated-12",
+      "command": [
+        "python3",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_persistence",
+        "--ignored",
+        "resume_input_latency::resume_modern_history_progress_with_slow_writer"
+      ],
+      "original_command": [
+        "python3",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "pty_e2e_persistence",
+        "--ignored",
+        "resume_input_latency::resume_modern_history_progress_with_slow_writer"
+      ],
+      "exit": 0,
+      "elapsed_s": 63.404240131378174,
+      "log": "extra-validated-12.log",
+      "commit": "9fee33a5f0d639d2a96f1c450d189d81b1aef18b"
+    },
+    {
+      "label": "extra-final-13",
+      "command": [
+        "python3",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "leader_pty_e2e",
+        "--ignored",
+        "leader_reattach_completion_roundtrips_durable_log::leader_reattach_completion_roundtrips_durable_log"
+      ],
+      "original_command": [
+        "python3",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "leader_pty_e2e",
+        "--ignored",
+        "leader_reattach_completion_roundtrips_durable_log::leader_reattach_completion_roundtrips_durable_log"
+      ],
+      "exit": 0,
+      "elapsed_s": 40.077608823776245,
+      "log": "extra-final-13.log",
+      "commit": "6c6b7c87e91f5f1bf153da68f3c9cefc3da46535"
+    },
+    {
+      "label": "extra-final-14",
+      "command": [
+        "python3",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--test",
+        "leader_pty_e2e",
+        "--ignored",
+        "leader_reattach_cancellation_roundtrips_durable_log::leader_reattach_cancellation_roundtrips_durable_log"
+      ],
+      "original_command": [
+        "python3",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--test",
+        "leader_pty_e2e",
+        "--ignored",
+        "leader_reattach_cancellation_roundtrips_durable_log::leader_reattach_cancellation_roundtrips_durable_log"
+      ],
+      "exit": 0,
+      "elapsed_s": 12.973278999328613,
+      "log": "extra-final-14.log",
+      "commit": "6c6b7c87e91f5f1bf153da68f3c9cefc3da46535"
+    },
+    {
+      "label": "extra-final-15",
+      "command": [
+        "python3",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--lib",
+        "export_cmd::tests::tree_export_keeps_parent_and_child_conversations_separate"
+      ],
+      "original_command": [
+        "python3",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--lib",
+        "export_cmd::tests::tree_export_keeps_parent_and_child_conversations_separate"
+      ],
+      "exit": 0,
+      "elapsed_s": 46.479087829589844,
+      "log": "extra-final-15.log",
+      "commit": "6c6b7c87e91f5f1bf153da68f3c9cefc3da46535"
+    },
+    {
+      "label": "extra-final-16",
+      "command": [
+        "python3",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--lib",
+        "export_cmd::tests::directory_sync_skips_only_unsupported_directory_handles"
+      ],
+      "original_command": [
+        "python3",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--lib",
+        "export_cmd::tests::directory_sync_skips_only_unsupported_directory_handles"
+      ],
+      "exit": 0,
+      "elapsed_s": 0.44669198989868164,
+      "log": "extra-final-16.log",
+      "commit": "6c6b7c87e91f5f1bf153da68f3c9cefc3da46535"
+    },
+    {
+      "label": "extra-final-17",
+      "command": [
+        "python3",
+        "/private/tmp/gr25-9_pzf2cq/run_exact_reusing_compile.py",
+        "--package",
+        "pager",
+        "--lib",
+        "trajectory_cmd::tests::transcript_download_http_uses_production_export_archive"
+      ],
+      "original_command": [
+        "python3",
+        "scripts/run_exact_cargo_test.py",
+        "--package",
+        "pager",
+        "--lib",
+        "trajectory_cmd::tests::transcript_download_http_uses_production_export_archive"
+      ],
+      "exit": 0,
+      "elapsed_s": 0.46852612495422363,
+      "log": "extra-final-17.log",
+      "commit": "6c6b7c87e91f5f1bf153da68f3c9cefc3da46535"
+    },
+    {
+      "label": "actual-test_subagent_orphan_reconcile",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "shell",
+        "--features",
+        "test-support",
+        "--test",
+        "test_subagent_orphan_reconcile",
+        "resume_reconciles_orphaned_running_subagent",
+        "--",
+        "--ignored",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "original_command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "shell",
+        "--features",
+        "test-support",
+        "--test",
+        "test_subagent_orphan_reconcile",
+        "resume_reconciles_orphaned_running_subagent",
+        "--",
+        "--ignored",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "elapsed_s": 2.30625319480896,
+      "log": "actual-test_subagent_orphan_reconcile-attempt-3.log",
+      "commit": "e4e969eddba3738dfc76f9783ef0596046e4f6cd"
+    },
+    {
+      "label": "actual-test_tool_dispatch_duration_smoke",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "shell",
+        "--features",
+        "test-support",
+        "--test",
+        "test_tool_dispatch_duration_smoke",
+        "sleep_tool_records_multi_second_dispatch_duration",
+        "--",
+        "--ignored",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "original_command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "shell",
+        "--features",
+        "test-support",
+        "--test",
+        "test_tool_dispatch_duration_smoke",
+        "sleep_tool_records_multi_second_dispatch_duration",
+        "--",
+        "--ignored",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "elapsed_s": 3.49723744392395,
+      "log": "actual-test_tool_dispatch_duration_smoke-attempt-3.log",
+      "commit": "e4e969eddba3738dfc76f9783ef0596046e4f6cd"
+    },
+    {
+      "label": "actual-session_load_perf",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "shell",
+        "--features",
+        "test-support",
+        "--test",
+        "session_load_perf",
+        "history_wire_golden",
+        "--",
+        "--ignored",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "original_command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "shell",
+        "--features",
+        "test-support",
+        "--test",
+        "session_load_perf",
+        "history_wire_golden",
+        "--",
+        "--ignored",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "elapsed_s": 0.548591136932373,
+      "log": "actual-session_load_perf-attempt-3.log",
+      "commit": "e4e969eddba3738dfc76f9783ef0596046e4f6cd"
+    },
+    {
+      "label": "actual-test_doom_loop_recovery",
+      "command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "shell",
+        "--features",
+        "test-support",
+        "--test",
+        "test_doom_loop_recovery",
+        "headless_config_enables_doom_loop_check_header",
+        "--",
+        "--ignored",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "original_command": [
+        "cargo",
+        "test",
+        "--locked",
+        "-p",
+        "shell",
+        "--features",
+        "test-support",
+        "--test",
+        "test_doom_loop_recovery",
+        "headless_config_enables_doom_loop_check_header",
+        "--",
+        "--ignored",
+        "--exact",
+        "--test-threads=1"
+      ],
+      "exit": 0,
+      "elapsed_s": 5.392884969711304,
+      "log": "actual-test_doom_loop_recovery-attempt-3.log",
+      "commit": "e4e969eddba3738dfc76f9783ef0596046e4f6cd"
+    }
+  ],
+  "note": "Counts are per job; overlapping reruns and nested libtests are not summed into a unique total."
+}

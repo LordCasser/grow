@@ -1,0 +1,11 @@
+{
+  "target": "/Users/lordcasser/workspace/projects/grow/target/release-readiness-2-5-0",
+  "allocated_bytes_before": 24471441408,
+  "removed": true,
+  "elapsed_s": 3.1486176250036806,
+  "preserved_binary": "/Users/lordcasser/workspace/projects/grow/target/local-release-2.5.0/grow",
+  "shared_targets_untouched": [
+    "target/debug",
+    "target/release-dist"
+  ]
+}

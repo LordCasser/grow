@@ -1,0 +1,3 @@
+{
+  "log_rotation_guard": "Manual tests all passed; the temporary phase4 post-check read an earlier failed log after rotation and stopped before remaining checks. Corrected to use the actual results row logfile; remaining phase9 skips the already passed four tests. Product sources and test assertions unchanged."
+}
