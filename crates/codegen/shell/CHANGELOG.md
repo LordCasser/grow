@@ -1,5 +1,11 @@
 # Changelog
 
+# 2.5.0 — 2026-10-22
+
+重组会话历史存储与恢复链路，减少长会话重复读取、解析和 TUI 扫描，并补齐图片、持久化及子会话恢复验证。新账本不自动迁移旧会话，升级前请查看说明并备份 GROW_HOME。
+
+完整发布说明见 [changelogs/2.5.0.md](https://github.com/LordCasser/grow/blob/v2.5.0/crates/codegen/shell/changelogs/2.5.0.md)。
+
 # 2.4.3 — 2026-10-20
 
 补齐子 Agent 权限模式设置，修正 Settings 测试覆盖，并将完整菜单集成测试纳入发布门禁。
