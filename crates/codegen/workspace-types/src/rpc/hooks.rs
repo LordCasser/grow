@@ -97,7 +97,7 @@ mod tests {
             (HookEventNameWire::PostCompact, "post_compact"),
         ] {
             assert_eq!(
-                serde_json::to_value(&variant).unwrap(),
+                serde_json::to_value(variant).unwrap(),
                 serde_json::json!(wire)
             );
             let parsed: HookEventNameWire =

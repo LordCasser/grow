@@ -182,9 +182,8 @@ mod tests {
     #[test]
     fn grow_fps_env_enables_hud() {
         for truthy in ["1", "full", " "] {
-            assert_eq!(
+            assert!(
                 FpsHud::with_env(Some(truthy.into())).enabled(),
-                true,
                 "GROW_FPS={truthy:?} must track the env-gate owner"
             );
         }

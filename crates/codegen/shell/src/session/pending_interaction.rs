@@ -277,13 +277,13 @@ impl PendingInteractionGuard {
             .get(&self.tool_call_id)
             .copied()
             .ok_or("interaction owner disappeared before open")?;
-        if !self
+        if self
             .pending
             .attempts
             .lock()
             .unwrap_or_else(|error| error.into_inner())
             .get(&self.tool_call_id)
-            .is_some_and(|active| active == &self.attempt_id)
+            .is_none_or(|active| active != &self.attempt_id)
         {
             return Err("interaction attempt no longer owns its tool call".into());
         }

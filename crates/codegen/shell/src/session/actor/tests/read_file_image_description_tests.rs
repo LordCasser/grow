@@ -430,11 +430,13 @@ async fn live_model_reload_updates_every_next_turn_sampler_knob() {
     local
         .run_until(async {
             let actor = test_actor().await;
-            let mut sampling = sampler::SamplerConfig::default();
-            sampling.base_url = "https://reloaded.example/v2".into();
-            sampling.model = "reloaded-model".into();
-            sampling.context_window = 64_000;
-            sampling.max_retries = Some(2);
+            let mut sampling = sampler::SamplerConfig {
+                base_url: "https://reloaded.example/v2".into(),
+                model: "reloaded-model".into(),
+                context_window: 64_000,
+                max_retries: Some(2),
+                ..sampler::SamplerConfig::default()
+            };
             sampling
                 .query_params
                 .insert("deployment".into(), "next".into());
@@ -484,10 +486,12 @@ async fn busy_model_reload_is_applied_before_the_next_idle_consumer() {
                 .await
                 .unwrap()
                 .model;
-            let mut sampling = sampler::SamplerConfig::default();
-            sampling.base_url = "https://deferred.example/v2".into();
-            sampling.model = "deferred-model".into();
-            sampling.context_window = 32_000;
+            let sampling = sampler::SamplerConfig {
+                base_url: "https://deferred.example/v2".into(),
+                model: "deferred-model".into(),
+                context_window: 32_000,
+                ..sampler::SamplerConfig::default()
+            };
             let catalog = SessionActor::published_catalog_for_test(
                 crate::agent::models::ModelId::new("provider/deferred"),
                 sampling,

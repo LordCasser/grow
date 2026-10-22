@@ -534,8 +534,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                 ::diagnostics::session_ctx::log_event(ev);
             });
         }
-        let enqueued_custom_model = if let Some(model_id) = resolved_custom_model {
-            Some(crate::timed!(log: "new_session: enqueue_session_model", {
+        let enqueued_custom_model = resolved_custom_model.map(|model_id| crate::timed!(log: "new_session: enqueue_session_model", {
                 self.control_session_handle(&session_id)
                     .ok_or_else(|| acp::Error::internal_error().data("new session actor missing"))
                     .and_then(|handle| {
@@ -549,10 +548,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                             ),
                         )
                     })
-            }))
-        } else {
-            None
-        };
+            }));
         drop(catalog_transaction);
         if let Some(enqueued) = enqueued_custom_model {
             let _ = match enqueued {
@@ -1455,13 +1451,12 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                     && handle.chat_state_handle.pending_timeline_commit().is_none())
                     .then(|| handle.runtime_observation.read().control_epoch.clone())
             });
-            if let Some(epoch) = healthy_epoch {
-                if self.storage_admission.complete_recovery(token, &epoch) {
+            if let Some(epoch) = healthy_epoch
+                && self.storage_admission.complete_recovery(token, &epoch) {
                     let _ = self.subagent_event_tx.send(tools::implementations::grow_build::task::types::SubagentEvent::OpenSpawnAdmission {
                         parent_session_id: session_id.to_string(),
                     });
                 }
-            }
         }
         let response_meta = serde_json::Value::Object(response_meta_map);
         ::diagnostics::unified_log::info(

@@ -377,7 +377,7 @@ fn restores_only_missing_incoming_inquiry_phases_around_existing_anchor_rows() {
     let approval_fact = InquiryEvent::from_timeline(&approval).unwrap().unwrap();
     let completed_fact = InquiryEvent::from_timeline(&completed).unwrap().unwrap();
     let existing_approval = notice_row(approval_fact.notice(), approval.seq.get());
-    let rows = vec![
+    let rows = [
         anchor(before_approval.seq.get()),
         existing_approval.clone(),
         anchor(before_completion.seq.get()),

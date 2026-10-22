@@ -327,8 +327,8 @@ async fn run_shape(shape: &str, edges: &[(usize, usize)], child_turns: usize) {
     assert_eq!(root.session.subagent_sessions.len(), 3);
     assert_eq!(root.subagent_views.len(), 3);
     assert_eq!(child_rows(root), expected_root_rows, "root child order");
-    for owner_index in 1..nodes.len() {
-        let owner_id = id(&nodes[owner_index]);
+    for node in nodes.iter().skip(1) {
+        let owner_id = id(node);
         let owner_view = &root.subagent_views[&owner_id];
         assert_eq!(
             child_rows(owner_view),

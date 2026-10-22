@@ -24,10 +24,10 @@ const WAVE_PERIOD: std::time::Duration = std::time::Duration::from_millis(691);
 fn native_soft_continuation(line: &crate::scrollback::types::BlockLine) -> bool {
     line.joiner.as_deref() == Some("")
         && matches!(&line.selectable, Selectable::All)
-        && !line
+        && line
             .link_source
             .as_ref()
-            .is_some_and(|source| source.display_start > 0)
+            .is_none_or(|source| source.display_start == 0)
 }
 
 pub struct EntryRenderer<'a> {
@@ -1825,8 +1825,10 @@ mod tests {
             format!("{}\nnext", "x".repeat(width as usize)),
             Color::Blue,
         ));
-        let mut appearance = crate::appearance::AppearanceConfig::default();
-        appearance.show_timestamps = false;
+        let mut appearance = crate::appearance::AppearanceConfig {
+            show_timestamps: false,
+            ..crate::appearance::AppearanceConfig::default()
+        };
         appearance.scrollback.layout.block_pad_left = 0;
         appearance.scrollback.layout.block_pad_right = 0;
         let renderer = EntryRenderer::new(&entry, &theme)
@@ -1843,8 +1845,10 @@ mod tests {
         let theme = Theme::current();
         let width = 12;
         let entry = ScrollbackEntry::new(RenderBlock::stub("a  ", Color::Blue));
-        let mut appearance = crate::appearance::AppearanceConfig::default();
-        appearance.show_timestamps = false;
+        let mut appearance = crate::appearance::AppearanceConfig {
+            show_timestamps: false,
+            ..crate::appearance::AppearanceConfig::default()
+        };
         appearance.scrollback.layout.block_pad_left = 0;
         appearance.scrollback.layout.block_pad_right = 0;
         let renderer = EntryRenderer::new(&entry, &theme)
@@ -1861,8 +1865,10 @@ mod tests {
         let _theme = pin_theme();
         let theme = Theme::current();
         let entry = ScrollbackEntry::new(RenderBlock::stub("a\nbb", Color::Blue));
-        let mut appearance = crate::appearance::AppearanceConfig::default();
-        appearance.show_timestamps = false;
+        let mut appearance = crate::appearance::AppearanceConfig {
+            show_timestamps: false,
+            ..crate::appearance::AppearanceConfig::default()
+        };
         appearance.scrollback.layout.block_pad_left = 0;
         appearance.scrollback.layout.block_pad_right = 0;
         let renderer = EntryRenderer::new(&entry, &theme)
@@ -1893,8 +1899,10 @@ mod tests {
         let theme = Theme::current();
         let width = 20;
         let entry = ScrollbackEntry::new(RenderBlock::agent_message("x".repeat(73)));
-        let mut appearance = crate::appearance::AppearanceConfig::default();
-        appearance.show_timestamps = false;
+        let mut appearance = crate::appearance::AppearanceConfig {
+            show_timestamps: false,
+            ..crate::appearance::AppearanceConfig::default()
+        };
         appearance.scrollback.layout.block_pad_left = 0;
         appearance.scrollback.layout.block_pad_right = 0;
         let renderer = EntryRenderer::new(&entry, &theme)
@@ -1912,8 +1920,10 @@ mod tests {
         let theme = Theme::current();
         let width = 20;
         let entry = ScrollbackEntry::new(RenderBlock::agent_message("word ".repeat(30)));
-        let mut appearance = crate::appearance::AppearanceConfig::default();
-        appearance.show_timestamps = false;
+        let mut appearance = crate::appearance::AppearanceConfig {
+            show_timestamps: false,
+            ..crate::appearance::AppearanceConfig::default()
+        };
         appearance.scrollback.layout.block_pad_left = 0;
         appearance.scrollback.layout.block_pad_right = 0;
         let renderer = EntryRenderer::new(&entry, &theme)

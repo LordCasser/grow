@@ -112,7 +112,7 @@ impl ChatStateActor {
         let placeholder = ContentPart::Text {
             text: IMAGE_COMPACT_PLACEHOLDER.into(),
         };
-        for ((source, part_index), _) in &selection.replaced {
+        for (source, part_index) in selection.replaced.keys() {
             if let Some(index) = surface_ids.iter().position(|id| id == source) {
                 image_content_mut(&mut items[index])[*part_index] = placeholder.clone();
             }

@@ -450,6 +450,12 @@ impl BehaviorSnapshot {
     }
 }
 
+impl Default for BehaviorCoordinator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BehaviorCoordinator {
     pub fn new() -> Self {
         Self {
@@ -983,10 +989,10 @@ impl BehaviorCoordinator {
             }
             RetainedPlanAction::Review => unreachable!(),
         }
-        if !self
+        if self
             .retained_plan
             .as_ref()
-            .is_some_and(|candidate| candidate.submission_id == submission_id)
+            .is_none_or(|candidate| candidate.submission_id != submission_id)
         {
             self.retained_plan = Some(RetainedPlanCandidate {
                 submission_id,
@@ -1009,14 +1015,14 @@ impl BehaviorCoordinator {
             feedback,
             resulting_status: next,
         });
-        if let Some(handoff) = self.plan.last_handoff.as_mut() {
-            if matches!(
+        if let Some(handoff) = self.plan.last_handoff.as_mut()
+            && matches!(
                 action,
                 RetainedPlanAction::Approve | RetainedPlanAction::Revise
-            ) {
-                handoff.submission_id = Some(submission_id);
-                handoff.decision_id = Some(decision_id.to_owned());
-            }
+            )
+        {
+            handoff.submission_id = Some(submission_id);
+            handoff.decision_id = Some(decision_id.to_owned());
         }
         RetainedPlanDecisionOutcome::Applied(next)
     }

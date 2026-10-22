@@ -242,10 +242,10 @@ impl SessionActor {
             .into_iter()
             .filter(|notification| match &notification.source {
                 chat_state::NotificationSource::TaskCompleted { task_id, .. } => {
-                    ids.contains(&task_id)
+                    ids.contains(task_id)
                 }
                 chat_state::NotificationSource::SubagentCompleted { subagent_id, .. } => {
-                    ids.contains(&subagent_id)
+                    ids.contains(subagent_id)
                 }
                 chat_state::NotificationSource::MonitorProgress { .. }
                 | chat_state::NotificationSource::TaskStillRunning { .. }

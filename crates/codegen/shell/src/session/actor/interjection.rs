@@ -237,14 +237,13 @@ impl SessionActor {
             let mut durable = Vec::with_capacity(to_requeue.len());
             for entry in to_requeue {
                 let mut rerouted = true;
-                if let Some(requeue) = &entry.requeue {
-                    if let Err(error) = self
+                if let Some(requeue) = &entry.requeue
+                    && let Err(error) = self
                         .reroute_input_ids(requeue.input_ids.clone(), chat_state::InputRoute::Fifo)
                         .await
-                    {
-                        tracing::error!(%error, input_ids = ?requeue.input_ids, "residual steer reroute was not durable");
-                        rerouted = false;
-                    }
+                {
+                    tracing::error!(%error, input_ids = ?requeue.input_ids, "residual steer reroute was not durable");
+                    rerouted = false;
                 }
                 if rerouted {
                     durable.push(entry);
@@ -612,11 +611,11 @@ impl SessionActor {
 
                 match publication {
                     Ok(()) => {
-                        if !group.items.is_empty() {
-                            if let Err(error) = self.finish_user_skill_loads(&group, true).await {
-                                tracing::error!(%error, ?input_ids, "published steer skill loads could not be finalized");
-                                continue;
-                            }
+                        if !group.items.is_empty()
+                            && let Err(error) = self.finish_user_skill_loads(&group, true).await
+                        {
+                            tracing::error!(%error, ?input_ids, "published steer skill loads could not be finalized");
+                            continue;
                         }
                         injected = true;
                     }

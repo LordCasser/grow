@@ -161,12 +161,11 @@ impl ConfigWatchState {
                 if let Some(debouncer) = &mut self.debouncer {
                     // A replacement directory must not inherit a watch on the old inode.
                     let _ = debouncer.watcher().unwatch(path);
-                    if path.is_dir() {
-                        if let Err(error) =
+                    if path.is_dir()
+                        && let Err(error) =
                             debouncer.watcher().watch(path, RecursiveMode::NonRecursive)
-                        {
-                            log_watch_error(&error, "failed to attach project config directory");
-                        }
+                    {
+                        log_watch_error(&error, "failed to attach project config directory");
                     }
                 }
                 Some(ConfigChangeEvent::ProjectConfigChanged {
@@ -1005,7 +1004,7 @@ mod late_config_directory_tests {
             std::fs::create_dir_all(&grow).unwrap();
             let (mut watcher, mut rx) = ConfigFileWatcher::start(
                 &home,
-                &[config.clone()],
+                std::slice::from_ref(&config),
                 Some(&project),
                 Some(Duration::from_millis(40)),
             )
@@ -1166,7 +1165,8 @@ mod replacement_discovery_tests {
         let grow = root.join(".grow");
         std::fs::create_dir_all(grow.join("skills")).unwrap();
         let (mut watcher, _rx) =
-            SkillsFileWatcher::start_with_dirs(&[grow.clone()], &grow, Some(&root)).unwrap();
+            SkillsFileWatcher::start_with_dirs(std::slice::from_ref(&grow), &grow, Some(&root))
+                .unwrap();
         assert!(!watcher.refresh_new_discovery_dirs());
         std::fs::rename(grow.join("skills"), grow.join("old-skills")).unwrap();
         std::fs::create_dir(grow.join("skills")).unwrap();
@@ -1190,7 +1190,8 @@ mod replacement_discovery_tests {
         let grow = root.join(".grow");
         std::fs::create_dir_all(grow.join("skills")).unwrap();
         let (mut watcher, mut rx) =
-            SkillsFileWatcher::start_with_dirs(&[grow.clone()], &grow, Some(&root)).unwrap();
+            SkillsFileWatcher::start_with_dirs(std::slice::from_ref(&grow), &grow, Some(&root))
+                .unwrap();
         std::fs::remove_dir_all(&grow).unwrap();
         next_change(&mut rx).await;
         watcher.refresh_new_discovery_dirs();

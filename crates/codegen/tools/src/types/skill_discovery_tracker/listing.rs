@@ -326,7 +326,7 @@ pub(super) fn format_announcement(
                     && announced.insert(skill.dedup_key())
             })
             .map(|(callable_name, skill)| {
-                build_skill_entry(&skill, callable_name, real_prefix, display_prefix, true)
+                build_skill_entry(skill, callable_name, real_prefix, display_prefix, true)
             })
             .collect(),
     );

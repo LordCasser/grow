@@ -356,15 +356,14 @@ fn system_text_from_end(app: &AppView, id: AgentId, offset: usize) -> String {
 fn insert_placeholder_agent(app: &mut AppView, id: AgentId) {
     let mut agent = AgentView::new(
         {
-            let session = AgentSession::new(
+            AgentSession::new(
                 id,
                 app.acp_tx.clone(),
                 Some("placeholder".into()),
                 ModelState::default(),
                 PathBuf::from("/tmp"),
                 shell::util::config::PermissionMode::Ask,
-            );
-            session
+            )
         },
         ScrollbackState::new(),
     );
@@ -476,15 +475,14 @@ fn two_agent_app_with_bg_task() -> AppView {
     let id1 = AgentId(1);
     let mut agent1 = AgentView::new(
         {
-            let session = AgentSession::new(
+            AgentSession::new(
                 id1,
                 app.acp_tx.clone(),
                 Some(acp::SessionId::new("sess-B")),
                 ModelState::default(),
                 PathBuf::from("/tmp"),
                 shell::util::config::PermissionMode::Ask,
-            );
-            session
+            )
         },
         ScrollbackState::new(),
     );

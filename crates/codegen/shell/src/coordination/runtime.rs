@@ -261,13 +261,12 @@ impl CoordinationRuntime {
             self.shared.publish()?;
             Ok(listener)
         })();
-        let listener = prepared.map_err(|error| {
+        let listener = prepared.inspect_err(|error| {
             *self
                 .shared
                 .startup_error
                 .lock()
                 .unwrap_or_else(|e| e.into_inner()) = Some(error.to_string());
-            error
         })?;
         self.shared.started.store(true, Ordering::Release);
         tokio::spawn(run_heartbeat(Arc::clone(&self.shared)));
@@ -1177,7 +1176,7 @@ async fn accept_inquiry(
 > {
     validate_inquiry_id(&inquiry_id)
         .map_err(|message| ("invalid_inquiry_id".to_owned(), message))?;
-    if payload.question.as_bytes().len() > MAX_QUESTION_BYTES {
+    if payload.question.len() > MAX_QUESTION_BYTES {
         return Err((
             "question_too_large".to_owned(),
             format!("coordination question exceeds the {MAX_QUESTION_BYTES}-byte limit"),

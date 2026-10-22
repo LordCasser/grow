@@ -639,13 +639,13 @@ impl acp_transport::AcpClientHandler for CountingClient {
             c.history_count += 1;
             c.history_bytes += text.text.len();
         }
-        if let Some(history) = &mut c.history {
-            if matches!(
+        if let Some(history) = &mut c.history
+            && matches!(
                 args.update,
                 acp::SessionUpdate::UserMessageChunk(_) | acp::SessionUpdate::AgentMessageChunk(_)
-            ) {
-                history.push(args.update);
-            }
+            )
+        {
+            history.push(args.update);
         }
         Ok(())
     }

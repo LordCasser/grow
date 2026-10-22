@@ -603,7 +603,7 @@ fn session_dir_with_prompt(content: &ContentController, prompt: &str) -> PathBuf
 }
 
 fn committed_user_skill(contents: &str) -> (String, String) {
-    let skill = parsed_timeline(contents)
+    parsed_timeline(contents)
         .find_map(|event| {
             if event.get("type")?.as_str()? != "input"
                 || event.pointer("/event/state")?.as_str()? != "consumed"
@@ -623,8 +623,7 @@ fn committed_user_skill(contents: &str) -> (String, String) {
                 skill.get("prepared_body")?.as_str()?.to_owned(),
             ))
         })
-        .unwrap_or_else(|| panic!("one committed explicit user Skill item; Timeline:\n{contents}"));
-    skill
+        .unwrap_or_else(|| panic!("one committed explicit user Skill item; Timeline:\n{contents}"))
 }
 
 fn committed_user_skill_count(contents: &str) -> usize {

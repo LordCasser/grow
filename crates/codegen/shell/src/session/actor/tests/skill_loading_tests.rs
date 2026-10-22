@@ -543,7 +543,7 @@ async fn queued_and_direct_skill_steers_keep_images_literal_text_and_atomic_iden
                                 display_echo,
                                 ..
                             },
-                        ) if input_ids == &[input_id.clone()] => {
+                        ) if input_ids == std::slice::from_ref(&input_id) => {
                             Some((item, skill_loads, display_echo))
                         }
                         _ => None,
@@ -666,7 +666,7 @@ async fn user_skill_pipeline_consumes_input_with_body_and_keeps_prompt_text() {
                         item,
                         skill_loads,
                         ..
-                    }) if input_ids == &[input_id.clone()] => Some((item, skill_loads)),
+                    }) if input_ids == std::slice::from_ref(&input_id) => Some((item, skill_loads)),
                     _ => None,
                 })
                 .expect("one atomic consumed event");
@@ -973,7 +973,9 @@ async fn repeated_user_skill_references_publish_one_atomic_group_with_distinct_c
                         input_ids,
                         skill_loads,
                         ..
-                    }) if input_ids == &[input_id.clone()] && !skill_loads.is_empty() => {
+                    }) if input_ids == std::slice::from_ref(&input_id)
+                        && !skill_loads.is_empty() =>
+                    {
                         Some(skill_loads)
                     }
                     _ => None,
@@ -1075,7 +1077,7 @@ async fn denied_user_skill_is_handled_without_loading_and_next_input_can_continu
                     chat_state::TimelineEventKind::Input(chat_state::InputEvent::Handled {
                         input_ids,
                         ..
-                    }) if input_ids == &[skill_input_id.clone()] => Some(input_ids),
+                    }) if input_ids == std::slice::from_ref(&skill_input_id) => Some(input_ids),
                     _ => None,
                 })
                 .count();
@@ -1309,7 +1311,7 @@ async fn second_user_skill_preparation_failure_does_not_publish_partial_group_an
                         chat_state::TimelineEventKind::Input(chat_state::InputEvent::Handled {
                             input_ids,
                             ..
-                        }) if input_ids == &[failed_input_id.clone()]
+                        }) if input_ids == std::slice::from_ref(&failed_input_id)
                     ))
                     .count(),
                 1,

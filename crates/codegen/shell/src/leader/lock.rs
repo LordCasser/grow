@@ -248,6 +248,12 @@ impl LeaderLock {
     }
 }
 
+impl Default for LeaderLock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 impl LeaderLock {
     /// Bind a lock to explicit paths for tests running outside the default home.

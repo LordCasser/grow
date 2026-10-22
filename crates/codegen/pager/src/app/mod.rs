@@ -463,7 +463,7 @@ fn ensure_llm_configured(mut raw: toml::Value) -> anyhow::Result<toml::Value> {
     let visual = std::env::var("VISUAL").ok();
     let editor = std::env::var("EDITOR").ok();
     let editor = external_editor::resolve_editor_command(visual.as_deref(), editor.as_deref());
-    let status = std::process::Command::new(&editor).arg(&path).status()?;
+    let status = std::process::Command::new(editor).arg(&path).status()?;
     if !status.success() {
         anyhow::bail!("editor `{editor}` exited unsuccessfully");
     }
@@ -1228,23 +1228,21 @@ fn init_terminal(
                 "kitty keyboard protocol skipped"
             );
             flags
+        } else if shell::util::with_locked_stderr(|stderr| {
+            execute!(stderr, event::PushKeyboardEnhancementFlags(flags)).is_ok()
+        }) {
+            tracing::info!(
+                kitty.flags = ?flags,
+                kitty.disambiguate = true,
+                kitty.report_event_types =
+                    flags.contains(event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES),
+                kitty.report_all_keys = false,
+                "kitty keyboard protocol pushed"
+            );
+            flags
         } else {
-            if shell::util::with_locked_stderr(|stderr| {
-                execute!(stderr, event::PushKeyboardEnhancementFlags(flags)).is_ok()
-            }) {
-                tracing::info!(
-                    kitty.flags = ?flags,
-                    kitty.disambiguate = true,
-                    kitty.report_event_types =
-                        flags.contains(event::KeyboardEnhancementFlags::REPORT_EVENT_TYPES),
-                    kitty.report_all_keys = false,
-                    "kitty keyboard protocol pushed"
-                );
-                flags
-            } else {
-                tracing::warn!("kitty keyboard protocol push failed");
-                event::KeyboardEnhancementFlags::empty()
-            }
+            tracing::warn!("kitty keyboard protocol push failed");
+            event::KeyboardEnhancementFlags::empty()
         };
         crate::terminal::set_pushed_kitty_flags(pushed_flags);
         if mode.is_fullscreen() {

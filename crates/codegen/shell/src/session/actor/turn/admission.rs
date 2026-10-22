@@ -63,54 +63,6 @@ pub(super) fn user_echo_mode(origin: &super::super::PromptOrigin) -> UserEchoMod
         _ => UserEchoMode::Broadcast,
     }
 }
-
-#[cfg(test)]
-mod stop_continuation_tests {
-    use super::initial_stop_continuations_used;
-    use chat_state::session_runtime::{
-        AcceptedResponseContinuation, TurnContinuation, TurnResumePoint,
-    };
-
-    #[test]
-    fn restored_cursor_preserves_stop_continuation_budget() {
-        let continuation = TurnContinuation {
-            turn_id: chat_state::TurnId(3),
-            prompt_id: "prompt".into(),
-            prompt_index: 0,
-            origin: "user".into(),
-            next_step_index: 4,
-            tool_turns_used: 1,
-            tool_calls_used: 0,
-            stop_continuations_used: 5,
-            output_schema: None,
-            resume_point: TurnResumePoint::Model,
-            task_output_usage: None,
-            accepted_response: Some(AcceptedResponseContinuation {
-                identity: chat_state::ResponseAdmissionIdentity {
-                    request_id: "request".into(),
-                    attempt: 1,
-                },
-                stop_reason: Some(sampling_types::StopReason::Stop),
-                stop_message: None,
-            }),
-            structured_output_retries: 2,
-            sampling_attempts_used: 0,
-            sampling_max_attempts: None,
-            sampling_replay_safe: true,
-            sampling_deadline_ms: None,
-            operations: Vec::new(),
-        };
-
-        let mut count = initial_stop_continuations_used(Some(&continuation));
-        assert_eq!(count, 5);
-        let encoded = serde_json::to_string(&continuation).unwrap();
-        let restored: TurnContinuation = serde_json::from_str(&encoded).unwrap();
-        assert_eq!(restored.structured_output_retries, 2);
-        count += 1;
-        assert_eq!(count, 6, "recovery must continue from the saved count");
-        assert_eq!(initial_stop_continuations_used(None), 0);
-    }
-}
 impl SessionActor {
     /// Run one admitted model turn, including bounded stop-gate continuations.
     /// Callers that resume an already-open step pass `step_already_started`;
@@ -958,28 +910,26 @@ impl SessionActor {
                         Ok(turn) => self.consume_fifo_inputs(turn_input_ids.clone(), turn, user_chat, display_echo).await,
                         Err(error) => Err(error),
                     }
+                } else if notification_ids.is_empty() {
+                    self.chat_state_handle
+                        .push_user_message_durably(user_chat)
+                        .await.map(|_| ())
+                        .map_err(|error| error.to_string())
                 } else {
-                    if notification_ids.is_empty() {
-                        self.chat_state_handle
-                            .push_user_message_durably(user_chat)
-                            .await.map(|_| ())
-                            .map_err(|error| error.to_string())
-                    } else {
-                        let turn = self.events.current_turn().ok_or_else(|| {
-                            "notification input commit has no durable Turn".to_string()
-                        });
-                        match turn {
-                            Ok(turn) => self
-                                .consume_notifications_durably(
-                                    notification_ids.clone(),
-                                    turn,
-                                    Some(user_chat),
-                                )
-                                .await
-                                .map(|_| ())
-                                .map_err(|error| error.to_string()),
-                            Err(error) => Err(error),
-                        }
+                    let turn = self.events.current_turn().ok_or_else(|| {
+                        "notification input commit has no durable Turn".to_string()
+                    });
+                    match turn {
+                        Ok(turn) => self
+                            .consume_notifications_durably(
+                                notification_ids.clone(),
+                                turn,
+                                Some(user_chat),
+                            )
+                            .await
+                            .map(|_| ())
+                            .map_err(|error| error.to_string()),
+                        Err(error) => Err(error),
                     }
                 };
                 drop(image_asset_guard);
@@ -1694,5 +1644,53 @@ impl SessionActor {
                 Err(crate::sampling::error::attach_prompt_usage(e, usage))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod stop_continuation_tests {
+    use super::initial_stop_continuations_used;
+    use chat_state::session_runtime::{
+        AcceptedResponseContinuation, TurnContinuation, TurnResumePoint,
+    };
+
+    #[test]
+    fn restored_cursor_preserves_stop_continuation_budget() {
+        let continuation = TurnContinuation {
+            turn_id: chat_state::TurnId(3),
+            prompt_id: "prompt".into(),
+            prompt_index: 0,
+            origin: "user".into(),
+            next_step_index: 4,
+            tool_turns_used: 1,
+            tool_calls_used: 0,
+            stop_continuations_used: 5,
+            output_schema: None,
+            resume_point: TurnResumePoint::Model,
+            task_output_usage: None,
+            accepted_response: Some(AcceptedResponseContinuation {
+                identity: chat_state::ResponseAdmissionIdentity {
+                    request_id: "request".into(),
+                    attempt: 1,
+                },
+                stop_reason: Some(sampling_types::StopReason::Stop),
+                stop_message: None,
+            }),
+            structured_output_retries: 2,
+            sampling_attempts_used: 0,
+            sampling_max_attempts: None,
+            sampling_replay_safe: true,
+            sampling_deadline_ms: None,
+            operations: Vec::new(),
+        };
+
+        let mut count = initial_stop_continuations_used(Some(&continuation));
+        assert_eq!(count, 5);
+        let encoded = serde_json::to_string(&continuation).unwrap();
+        let restored: TurnContinuation = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(restored.structured_output_retries, 2);
+        count += 1;
+        assert_eq!(count, 6, "recovery must continue from the saved count");
+        assert_eq!(initial_stop_continuations_used(None), 0);
     }
 }

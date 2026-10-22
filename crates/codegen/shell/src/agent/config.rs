@@ -2887,7 +2887,6 @@ reasoning_effort = "low"
                 token_ttl_secs: Some(3600),
                 timeout_secs: None,
                 cwd: None,
-                ..Default::default()
             },
         );
         let mut entry = test_model_entry("m", "https://litellm.example/v1", None, None);
@@ -3240,7 +3239,6 @@ reasoning_effort = "low"
                 token_ttl_secs: Some(3600),
                 timeout_secs: None,
                 cwd: None,
-                ..Default::default()
             },
         );
         model.auth_provider = Some(provider.clone());
@@ -3267,7 +3265,6 @@ reasoning_effort = "low"
                 token_ttl_secs: Some(3600),
                 timeout_secs: None,
                 cwd: None,
-                ..Default::default()
             },
         );
         model.auth_provider = Some(provider.clone());

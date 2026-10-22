@@ -2824,8 +2824,10 @@ fn pr6_permission_mode_does_not_support_preview() {
 fn pr6_current_value_for_reads_ui_default() {
     use pager::settings::current_value_for;
 
-    let mut ui = UiConfig::default();
-    ui.permission_mode = Some("auto".to_string());
+    let ui = UiConfig {
+        permission_mode: Some("auto".to_string()),
+        ..UiConfig::default()
+    };
     let snapshot = PagerLocalSnapshot {
         permission_mode: shell::util::config::PermissionMode::AlwaysApprove,
         ..PagerLocalSnapshot::default()

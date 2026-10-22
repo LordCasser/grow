@@ -108,13 +108,12 @@ async fn execution_returned_query_reports_finalization_pending_without_waiting()
             .query("execution-returned", false, None)
             .await
             .expect("query is authorized")
-        {
-            if matches!(
+            && matches!(
                 snapshot.status,
                 SubagentSnapshotStatus::FinalizationPending { .. }
-            ) {
-                break snapshot;
-            }
+            )
+        {
+            break snapshot;
         }
         tokio::task::yield_now().await;
     };
@@ -828,13 +827,7 @@ struct Harness {
 }
 
 fn harness(wait_before_start: bool, foreground_budget: std::time::Duration) -> Harness {
-    harness_with_config(
-        wait_before_start,
-        CoordinatorConfig {
-            foreground_budget,
-            ..CoordinatorConfig::default()
-        },
-    )
+    harness_with_config(wait_before_start, CoordinatorConfig { foreground_budget })
 }
 
 fn harness_with_config(wait_before_start: bool, config: CoordinatorConfig) -> Harness {
@@ -2350,7 +2343,6 @@ async fn cancel_parent_session_ack_ignores_pending_workflow_child() {
         true,
         CoordinatorConfig {
             foreground_budget: std::time::Duration::from_secs(60),
-            ..CoordinatorConfig::default()
         },
     );
 
@@ -3219,7 +3211,6 @@ async fn completed_direct_send_uses_readonly_receipt_route() {
         true,
         CoordinatorConfig {
             foreground_budget: std::time::Duration::from_secs(60),
-            ..CoordinatorConfig::default()
         },
     );
     let parent = parent_backend(&h);

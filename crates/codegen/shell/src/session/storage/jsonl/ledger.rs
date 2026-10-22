@@ -241,13 +241,12 @@ impl JsonlStorageAdapter {
                 }),
             ..
         }) = &fact
+            && owner_session_id != info.id.0.as_ref()
         {
-            if owner_session_id != info.id.0.as_ref() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "foreign communication receipt in session history",
-                ));
-            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "foreign communication receipt in session history",
+            ));
         }
         self.ensure_writer_lease(info)?;
         let directory = self.bound_session_directory(info)?;

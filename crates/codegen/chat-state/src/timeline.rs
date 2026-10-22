@@ -5069,14 +5069,7 @@ impl Timeline {
                 let original_results = self
                     .surface
                     .iter()
-                    .filter_map(|item| match item {
-                        ConversationItem::ToolResult(result)
-                            if result.tool_call_id == skill.call_id =>
-                        {
-                            Some(item)
-                        }
-                        _ => None,
-                    })
+                    .filter(|item| matches!(item, ConversationItem::ToolResult(result) if result.tool_call_id == skill.call_id))
                     .collect::<Vec<_>>();
                 let calls_preserved = original_calls.iter().all(|original| {
                     let call_in_range = self.surface[start_index..=end_index].iter().any(|item| {
@@ -5129,12 +5122,12 @@ impl Timeline {
             };
             if skill.source == sampling_types::SkillLoadSource::Model {
                 for item in &mut replacement {
-                    if let ConversationItem::ToolResult(result) = item {
-                        if result.tool_call_id == skill.call_id {
-                            result.content = std::sync::Arc::from(
-                                "Loaded skill content was not consumed before execution ended",
-                            );
-                        }
+                    if let ConversationItem::ToolResult(result) = item
+                        && result.tool_call_id == skill.call_id
+                    {
+                        result.content = std::sync::Arc::from(
+                            "Loaded skill content was not consumed before execution ended",
+                        );
                     }
                 }
             }
@@ -8676,7 +8669,7 @@ mod tests {
                 id: id.into(),
                 input_ref,
                 result_ref: crate::TimelineRangeRef {
-                    timeline_id: sideband_id.into(),
+                    timeline_id: sideband_id,
                     first_seq: 2,
                     last_seq: 2,
                 },

@@ -132,7 +132,7 @@ fn resolve_session_search_setting(config: Option<SessionSearchConfig>) -> Resolv
 /// Read the local `[session_search]` config table. A malformed config falls
 /// back to the built-in default and never disables search implicitly.
 fn load_session_search_disk_tiers() -> Option<SessionSearchConfig> {
-    let config = match crate::config::load_from_disk() {
+    match crate::config::load_from_disk() {
         Ok(toml) => toml
             .get("session_search")
             .and_then(|table| table.clone().try_into::<SessionSearchConfig>().ok()),
@@ -140,8 +140,7 @@ fn load_session_search_disk_tiers() -> Option<SessionSearchConfig> {
             tracing::warn!(error = %e, "could not read the config for session search");
             None
         }
-    };
-    config
+    }
 }
 
 /// Cheap after the setting is resolved. The first call in a process that

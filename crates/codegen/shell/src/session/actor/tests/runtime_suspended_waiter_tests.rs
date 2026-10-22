@@ -70,10 +70,7 @@ async fn late_observation_after_unknown_result_preserves_the_original_call_on_re
             assert_eq!(pending.len(), 1);
             assert_eq!(crate::session::notification_inbox::read_payload(&actor.session_directory, &pending[0].payload_ref).unwrap(), body);
             let surface = actor.chat_state_handle.get_conversation().await;
-            let results = surface.iter().filter_map(|item| match item {
-                ConversationItem::ToolResult(result) if result.tool_call_id == "remote-write-call" => Some(item),
-                _ => None,
-            }).collect::<Vec<_>>();
+            let results = surface.iter().filter(|item| matches!(item, ConversationItem::ToolResult(result) if result.tool_call_id == "remote-write-call")).collect::<Vec<_>>();
             assert_eq!(results.len(), 1);
             assert!(results[0].text_content().contains("OutcomeUnknown"));
             let events = actor.chat_state_handle.timeline_events().await.unwrap();

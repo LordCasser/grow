@@ -837,7 +837,8 @@ async fn controls_revoke_before_reentrant_classifier_can_allow() {
                     manager: manager.clone(),
                     control,
                 })));
-                let result = if control == "release" {
+
+                if control == "release" {
                     manager
                         .request_with_mode(
                             AccessKind::Bash("curl https://probe.example.test".into()),
@@ -858,8 +859,7 @@ async fn controls_revoke_before_reentrant_classifier_can_allow() {
                             None,
                         )
                         .await
-                };
-                result
+                }
             })
             .await;
         outcomes.push((control, result));

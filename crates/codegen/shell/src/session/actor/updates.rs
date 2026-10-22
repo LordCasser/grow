@@ -580,16 +580,14 @@ impl SessionActor {
                     );
                     return;
                 }
-            } else {
-                if let Err(error) = crate::session::persistence::append_buffered_and_ack(
-                    &self.notifications.persistence_tx,
-                    crate::session::storage::SessionUpdate::Acp(Box::new(notification.clone())),
-                )
-                .await
-                {
-                    tracing::warn!(%error, "presentation append failed; withholding live update");
-                    return;
-                }
+            } else if let Err(error) = crate::session::persistence::append_buffered_and_ack(
+                &self.notifications.persistence_tx,
+                crate::session::storage::SessionUpdate::Acp(Box::new(notification.clone())),
+            )
+            .await
+            {
+                tracing::warn!(%error, "presentation append failed; withholding live update");
+                return;
             }
         }
         if self
@@ -784,28 +782,27 @@ impl SessionActor {
         ) {
             tracing::debug!("storing Grow session notification");
         }
-        if !restored {
-            if let GrowSessionUpdate::SubagentSpawned {
+        if !restored
+            && let GrowSessionUpdate::SubagentSpawned {
                 subagent_id,
                 subagent_type,
                 description,
                 ..
             } = &notification.update
-            {
-                self.dispatch_observe_hook(
-                    ::hooks::event::HookEventName::SubagentStart,
-                    chat_state::HookCause::Subagent {
-                        subagent_id: subagent_id.clone(),
-                    },
-                    ::hooks::event::HookPayload::SubagentStart {
-                        subagent_id: subagent_id.clone(),
-                        subagent_type: subagent_type.clone(),
-                        description: Some(description.clone()),
-                    },
-                    None,
-                )
-                .await?;
-            }
+        {
+            self.dispatch_observe_hook(
+                ::hooks::event::HookEventName::SubagentStart,
+                chat_state::HookCause::Subagent {
+                    subagent_id: subagent_id.clone(),
+                },
+                ::hooks::event::HookPayload::SubagentStart {
+                    subagent_id: subagent_id.clone(),
+                    subagent_type: subagent_type.clone(),
+                    description: Some(description.clone()),
+                },
+                None,
+            )
+            .await?;
         }
         {
             let mut meta_map = notification.meta.take().and_then(|v| match v {
@@ -1122,7 +1119,7 @@ impl SessionActor {
                 Ok(()) => return Ok(()),
                 Err(error) if error.retry_exact() => {
                     attempts = attempts.saturating_add(1);
-                    if attempts == 1 || attempts % 10 == 0 {
+                    if attempts == 1 || attempts.is_multiple_of(10) {
                         tracing::warn!(attempts, %error, "durable UI event append uncertain; retrying exact event");
                     }
                     tokio::select! {
@@ -1261,16 +1258,14 @@ impl SessionActor {
                 );
                 return false;
             }
-        } else {
-            if let Err(error) = crate::session::persistence::append_buffered_and_ack(
-                &self.notifications.persistence_tx,
-                crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone())),
-            )
-            .await
-            {
-                tracing::warn!(%error, "Grow presentation append failed");
-                return false;
-            }
+        } else if let Err(error) = crate::session::persistence::append_buffered_and_ack(
+            &self.notifications.persistence_tx,
+            crate::session::storage::SessionUpdate::Grow(Box::new(notification.clone())),
+        )
+        .await
+        {
+            tracing::warn!(%error, "Grow presentation append failed");
+            return false;
         }
         true
     }

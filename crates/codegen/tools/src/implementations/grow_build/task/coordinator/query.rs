@@ -216,14 +216,10 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                 || self.pending.contains_key(&id)
                 || self.active.contains_key(&id)
                 || self.suspended.contains_key(&id);
-            let result = if exists {
+            let result = if exists || parent_session_id.is_some() {
                 Err(SubagentObservationError::Unauthorized)
             } else {
-                if parent_session_id.is_some() {
-                    Err(SubagentObservationError::Unauthorized)
-                } else {
-                    Ok(None)
-                }
+                Ok(None)
             };
             let _ = respond_to.send(result);
         }

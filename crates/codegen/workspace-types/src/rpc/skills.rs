@@ -189,7 +189,7 @@ mod tests {
     fn skill_scope_known_values_round_trip() {
         for raw in ["local", "repo", "user", "server", "bundled", "plugin"] {
             let v: SkillScope = serde_json::from_value(serde_json::json!(raw)).unwrap();
-            assert_eq!(serde_json::to_value(&v).unwrap(), serde_json::json!(raw));
+            assert_eq!(serde_json::to_value(v).unwrap(), serde_json::json!(raw));
         }
     }
 

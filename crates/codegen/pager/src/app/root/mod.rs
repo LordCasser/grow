@@ -938,7 +938,7 @@ pub(crate) fn paint_exit_suspension_notice(
 pub(crate) fn exit_suspension_notice_rows(suspension: &ExitSuspension, width: u16) -> u16 {
     match &suspension.phase {
         ExitSuspensionPhase::Pending => 1,
-        ExitSuspensionPhase::Unconfirmed { .. } if width >= 7 && width < 22 => 4,
+        ExitSuspensionPhase::Unconfirmed { .. } if (7..22).contains(&width) => 4,
         ExitSuspensionPhase::Unconfirmed { .. } => 3,
     }
 }
@@ -2487,27 +2487,27 @@ fn handle_welcome_input(ev: &Event, ctx: &mut WelcomeInputCtx<'_>) -> InputOutco
             search_only_on_slash: false,
             vim_normal_first: crate::appearance::cache::load_vim_mode(),
         };
-        if let Event::Key(key) = ev {
-            if let Some(selection) = session_picker_worktree_selection(
+        if let Event::Key(key) = ev
+            && let Some(selection) = session_picker_worktree_selection(
                 key,
                 ctx.sp_state,
                 &entry_map,
                 &non_selectable_flags,
                 ctx.sp_entries.as_deref(),
                 ctx.sp_content_results.as_deref(),
-            ) {
-                return InputOutcome::Action(match selection {
-                    SessionPickerWorktreeSelection::Fuzzy(original_index) => {
-                        Action::PickSessionInWorktree(original_index)
-                    }
-                    SessionPickerWorktreeSelection::Content { session_id, cwd } => {
-                        Action::PickContentSessionInWorktree { session_id, cwd }
-                    }
-                    SessionPickerWorktreeSelection::Unavailable => {
-                        return InputOutcome::Changed;
-                    }
-                });
-            }
+            )
+        {
+            return InputOutcome::Action(match selection {
+                SessionPickerWorktreeSelection::Fuzzy(original_index) => {
+                    Action::PickSessionInWorktree(original_index)
+                }
+                SessionPickerWorktreeSelection::Content { session_id, cwd } => {
+                    Action::PickContentSessionInWorktree { session_id, cwd }
+                }
+                SessionPickerWorktreeSelection::Unavailable => {
+                    return InputOutcome::Changed;
+                }
+            });
         }
         let outcome = handle_picker_input(ev, ctx.sp_state, entry_count, &config);
         match outcome {
@@ -4394,15 +4394,14 @@ pub(crate) mod tests {
         sid: &str,
     ) -> AgentSession {
         {
-            let session = AgentSession::new(
+            AgentSession::new(
                 id,
                 app.acp_tx.clone(),
                 Some(sid.to_string().into()),
                 ModelState::default(),
                 std::path::PathBuf::from("/tmp"),
                 shell::util::config::PermissionMode::Ask,
-            );
-            session
+            )
         }
     }
     pub(crate) fn test_app_with_agent() -> AppView {
@@ -4880,15 +4879,14 @@ pub(crate) mod tests {
     /// Build an idle subagent child `AgentView` for child gate↔tick symmetry tests.
     fn idle_child_view(app: &AppView, id_n: usize, sid: &str) -> Box<AgentView> {
         let session = {
-            let session = AgentSession::new(
+            AgentSession::new(
                 super::super::session::AgentId(id_n),
                 app.acp_tx.clone(),
                 Some(sid.to_string().into()),
                 ModelState::default(),
                 std::path::PathBuf::from("/tmp"),
                 shell::util::config::PermissionMode::Ask,
-            );
-            session
+            )
         };
         Box::new(AgentView::new(session, ScrollbackState::new()))
     }

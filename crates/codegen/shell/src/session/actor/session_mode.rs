@@ -46,404 +46,6 @@ pub(super) fn filter_cursor_tools_by_plan_mode(
         })
         .collect()
 }
-
-#[cfg(test)]
-mod desired_state_tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn behavior_admission_keeps_only_the_latest_target() {
-        tokio::task::LocalSet::new()
-            .run_until(async {
-                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
-
-                let (first_tx, first_rx) = tokio::sync::oneshot::channel();
-                assert!(
-                    actor
-                        .admit_behavior_selection(
-                            acp::SessionModeId::new("clarify"),
-                            None,
-                            first_tx,
-                        )
-                        .await,
-                    "the first desired target owns worker startup"
-                );
-
-                let (final_tx, mut final_rx) = tokio::sync::oneshot::channel();
-                assert!(
-                    !actor
-                        .admit_behavior_selection(acp::SessionModeId::new("plan"), None, final_tx)
-                        .await,
-                    "a later target reuses the active worker"
-                );
-
-                assert_eq!(
-                    first_rx.await.unwrap().unwrap(),
-                    BehaviorChangeOutcome::Superseded
-                );
-                assert!(matches!(
-                    final_rx.try_recv(),
-                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
-                ));
-
-                let admission = actor.state.lock().await;
-                let pending = admission
-                    .pending_behavior_control
-                    .as_ref()
-                    .expect("latest behavior target");
-                assert_eq!(pending.session_mode.0.as_ref(), "plan");
-                assert_eq!(pending.revision, admission.behavior_control_revision);
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn claimed_behavior_control_cancelled_by_shutdown_is_not_fatal() {
-        tokio::task::LocalSet::new()
-            .run_until(async {
-                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
-                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-                assert!(
-                    actor
-                        .admit_behavior_selection(
-                            acp::SessionModeId::new("clarify"),
-                            None,
-                            response_tx,
-                        )
-                        .await
-                );
-                actor
-                    .state
-                    .lock()
-                    .await
-                    .termination
-                    .request(TerminationState::Graceful);
-                let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
-
-                assert!(
-                    actor
-                        .clone()
-                        .drain_behavior_selections(completion_tx)
-                        .await
-                        .is_ok(),
-                    "a control claimed before the shutdown latch is a cancellation, not a fatal worker failure"
-                );
-                let error = response_rx
-                    .await
-                    .expect("control response")
-                    .expect_err("shutdown cancels the claimed control");
-                assert!(error.to_string().contains("shutting down"));
-                let state = actor.state.lock().await;
-                assert_eq!(state.termination, TerminationState::Graceful);
-                assert!(!state.behavior_control_worker_active);
-                assert!(state.applying_behavior_control.is_none());
-                assert!(state.foreground.is_idle());
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn behavior_admission_does_not_mutate_confirmation_before_commit_boundary() {
-        tokio::task::LocalSet::new()
-            .run_until(async {
-                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
-                actor
-                    .behavior
-                    .lock()
-                    .select_behavior(tools::types::BehaviorId::Plan);
-                let decision = actor.behavior.lock().decide_switch(
-                    tools::types::BehaviorId::Normal,
-                    crate::session::behavior::BehaviorSwitchFacts {
-                        source_owned_work_active: true,
-                        ..Default::default()
-                    },
-                    std::time::Duration::from_secs(8),
-                );
-                assert!(matches!(
-                    decision.outcome,
-                    BehaviorChangeOutcome::ConfirmationRequired { .. }
-                ));
-
-                let commit_boundary = actor.state.lock().await;
-                let replacement_actor = std::sync::Arc::clone(&actor);
-                let (responds_to, _response) = tokio::sync::oneshot::channel();
-                let replacement = tokio::task::spawn_local(async move {
-                    replacement_actor
-                        .admit_behavior_selection(
-                            acp::SessionModeId::new("clarify"),
-                            None,
-                            responds_to,
-                        )
-                        .await
-                });
-                tokio::task::yield_now().await;
-                assert!(
-                    actor.behavior.lock().pending_switch().is_some(),
-                    "a request waiting outside the commit boundary must not clear its latch"
-                );
-
-                drop(commit_boundary);
-                assert!(replacement.await.expect("replacement task"));
-                assert!(
-                    actor.behavior.lock().pending_switch().is_none(),
-                    "the replacement clears the old latch once its revision is admitted"
-                );
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn picker_can_enter_plan_from_a_regular_normal_foreground() {
-        tokio::task::LocalSet::new()
-            .run_until(async {
-                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
-                *actor.agent.borrow_mut() =
-                    super::super::tests::support::test_agent_with_plan_tools().await;
-                actor.state.lock().await.foreground = ForegroundState::RegularTurn(
-                    super::super::tests::support::running_task_stub("normal-turn"),
-                );
-
-                let projection = actor.behavior_availability_projection().await;
-                assert_eq!(
-                    projection
-                        .choice(tool_types::BehaviorId::Plan)
-                        .expect("Plan projection")
-                        .disposition,
-                    tool_types::BehaviorAvailabilityDisposition::Available,
-                );
-
-                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-                assert!(
-                    actor
-                        .admit_behavior_selection(
-                            acp::SessionModeId::new("plan"),
-                            None,
-                            response_tx,
-                        )
-                        .await
-                );
-                let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
-                actor
-                    .clone()
-                    .drain_behavior_selections(completion_tx)
-                    .await
-                    .unwrap();
-
-                assert_eq!(
-                    response_rx.await.unwrap().unwrap(),
-                    BehaviorChangeOutcome::Applied,
-                );
-                assert_eq!(
-                    actor.behavior.lock().behavior(),
-                    tool_types::BehaviorId::Plan,
-                );
-                assert_eq!(
-                    *actor.turn_behavior.lock(),
-                    tool_types::BehaviorId::Normal,
-                    "the already-admitted turn keeps its captured Behavior",
-                );
-                let state = actor.state.lock().await;
-                assert!(state.foreground.regular().is_some());
-                assert!(state.terminal_preemption_pending);
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn picker_can_enter_workflow_from_a_regular_normal_foreground() {
-        tokio::task::LocalSet::new()
-            .run_until(async {
-                let (mut actor, _gateway_rx) = super::super::tests::support::build_actor().await;
-                Arc::get_mut(&mut actor)
-                    .expect("test actor must be uniquely owned")
-                    .background_workflows_enabled = true;
-                actor.state.lock().await.foreground = ForegroundState::RegularTurn(
-                    super::super::tests::support::running_task_stub("normal-turn"),
-                );
-
-                let projection = actor.behavior_availability_projection().await;
-                assert_eq!(
-                    projection
-                        .choice(tool_types::BehaviorId::Workflow)
-                        .expect("Workflow projection")
-                        .disposition,
-                    tool_types::BehaviorAvailabilityDisposition::Available,
-                );
-
-                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-                assert!(
-                    actor
-                        .admit_behavior_selection(
-                            acp::SessionModeId::new("workflow"),
-                            None,
-                            response_tx,
-                        )
-                        .await
-                );
-                let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
-                actor
-                    .clone()
-                    .drain_behavior_selections(completion_tx)
-                    .await
-                    .unwrap();
-
-                assert_eq!(
-                    response_rx.await.unwrap().unwrap(),
-                    BehaviorChangeOutcome::Applied,
-                );
-                assert_eq!(
-                    actor.behavior.lock().behavior(),
-                    tool_types::BehaviorId::Workflow,
-                );
-                assert_eq!(
-                    *actor.turn_behavior.lock(),
-                    tool_types::BehaviorId::Normal,
-                    "the already-admitted turn keeps its captured Behavior",
-                );
-                let state = actor.state.lock().await;
-                assert!(state.foreground.regular().is_some());
-                assert!(state.terminal_preemption_pending);
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn successful_control_intent_switch_persists_retained_plan_and_submission_counter() {
-        tokio::task::LocalSet::new()
-            .run_until(async {
-                use crate::session::behavior::{
-                    RetainedPlanAction, RetainedPlanDecisionOutcome, RetainedPlanStatus,
-                };
-
-                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
-                {
-                    let mut behavior = actor.behavior.lock();
-                    behavior.select_behavior(tool_types::BehaviorId::Plan);
-                    behavior.record_plan_artifact("# Deferred candidate");
-                    assert!(behavior.submit_initial_plan());
-                    let snapshot = behavior.snapshot();
-                    assert_eq!(
-                        behavior.decide_submitted_plan_if(
-                            &snapshot,
-                            snapshot.plan_submission_id.unwrap(),
-                            "control-intent-deferred-switch",
-                            RetainedPlanAction::Defer,
-                            None,
-                        ),
-                        RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Deferred)
-                    );
-                }
-
-                let intent = |sequence| crate::session::ControlIntent {
-                    client_id: "plan-switch-test".into(),
-                    generation: 7,
-                    sequence,
-                };
-                for (sequence, expected) in [
-                    (
-                        1,
-                        BehaviorChangeOutcome::ConfirmationRequired {
-                            message: String::new(),
-                            remaining_ms: 0,
-                        },
-                    ),
-                    (2, BehaviorChangeOutcome::Applied),
-                ] {
-                    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
-                    assert!(
-                        actor
-                            .admit_behavior_selection(
-                                acp::SessionModeId::new("normal"),
-                                Some(intent(sequence)),
-                                response_tx,
-                            )
-                            .await
-                    );
-                    let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
-                    actor
-                        .clone()
-                        .drain_behavior_selections(completion_tx)
-                        .await
-                        .unwrap();
-                    let actual = response_rx.await.unwrap().unwrap();
-                    match (expected, actual) {
-                        (
-                            BehaviorChangeOutcome::ConfirmationRequired { .. },
-                            BehaviorChangeOutcome::ConfirmationRequired { .. },
-                        )
-                        | (BehaviorChangeOutcome::Applied, BehaviorChangeOutcome::Applied) => {}
-                        (expected, actual) => panic!("expected {expected:?}, got {actual:?}"),
-                    }
-                }
-
-                let events = actor.chat_state_handle.timeline_events().await.unwrap();
-                let persisted =
-                    crate::session::control::SessionControlSnapshot::latest_from_timeline(&events)
-                        .unwrap()
-                        .unwrap()
-                        .behavior;
-                assert_eq!(actor.behavior.lock().snapshot(), persisted);
-                assert_eq!(persisted.behavior(), tool_types::BehaviorId::Normal);
-                assert_eq!(persisted.last_plan_submission_id, 1);
-                assert_eq!(
-                    persisted.retained_plan.as_ref().unwrap().status,
-                    RetainedPlanStatus::Deferred
-                );
-            })
-            .await;
-    }
-
-    #[tokio::test]
-    async fn picker_projection_and_admission_share_the_host_foreground_rejection() {
-        tokio::task::LocalSet::new()
-            .run_until(async {
-                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
-                *actor.agent.borrow_mut() =
-                    super::super::tests::support::test_agent_with_plan_tools().await;
-                let mut task = super::super::tests::support::running_task_stub("host-command");
-                task.origin = crate::session::PromptOrigin::HostCommand;
-                task.turn_kind = crate::session::TurnKind::Internal;
-                actor.state.lock().await.foreground = ForegroundState::RegularTurn(task);
-
-                let projection = actor.behavior_availability_projection().await;
-                let choice = projection
-                    .choice(tool_types::BehaviorId::Plan)
-                    .cloned()
-                    .expect("Plan projection");
-                assert_eq!(
-                    choice.disposition,
-                    tool_types::BehaviorAvailabilityDisposition::Unavailable
-                );
-                let projected_reason = choice.reason.expect("busy reason");
-
-                let application = actor
-                    .apply_behavior_change_with_admission(
-                        acp::SessionModeId::new("plan"),
-                        crate::session::behavior::BehaviorRequestAuthority::Picker,
-                        None,
-                        Some("client-a:1"),
-                        None,
-                    )
-                    .await;
-                assert_eq!(
-                    application.disposition.unwrap(),
-                    BehaviorChangeOutcome::Rejected {
-                        message: projected_reason
-                    },
-                    "a Picker cannot borrow an unrelated HostCommand foreground exception"
-                );
-                assert!(actor.behavior.lock().pending_switch().is_none());
-
-                assert!(matches!(
-                    actor
-                        .request_behavior_change(acp::SessionModeId::new("plan"))
-                        .await,
-                    Ok(BehaviorChangeOutcome::Applied)
-                ));
-            })
-            .await;
-    }
-}
 impl SessionActor {
     pub(super) fn workflow_behavior_context(&self) -> Result<String, acp::Error> {
         crate::session::workflow::workspace::WorkflowWorkspace::compact_context_in_session_observational(
@@ -937,7 +539,7 @@ impl SessionActor {
                         }
                         admission.behavior_control_foreground_claimed = false;
                     }
-                    admission.pending_behavior_control.take().map(|pending| {
+                    admission.pending_behavior_control.take().inspect(|pending| {
                         admission.mark_control_intent_terminal(
                             crate::extensions::notification::ControlDomain::Behavior,
                             pending.intent.as_ref(),
@@ -953,7 +555,6 @@ impl SessionActor {
                                 ui_terminal_durable: false,
                             },
                         );
-                        pending
                     })
                 };
                 if let Some(pending) = pending {
@@ -1409,8 +1010,8 @@ impl SessionActor {
                     let source_owns_foreground =
                         self.state.lock().await.foreground.regular().is_some()
                             && *self.turn_behavior.lock() == source;
-                    if source_owns_foreground {
-                        if let Err(error) = self
+                    if source_owns_foreground
+                        && let Err(error) = self
                             .cancel_running_task(
                                 true,
                                 false,
@@ -1418,10 +1019,9 @@ impl SessionActor {
                                 Some("behavior_switch".to_string()),
                             )
                             .await
-                        {
-                            post_commit_fatal = Some(error);
-                            break;
-                        }
+                    {
+                        post_commit_fatal = Some(error);
+                        break;
                     }
                 }
                 BehaviorEffect::Select(_) => {}
@@ -1521,5 +1121,403 @@ impl SessionActor {
             return Err(format!("Behavior control state was not persisted: {error}"));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod desired_state_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn behavior_admission_keeps_only_the_latest_target() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
+
+                let (first_tx, first_rx) = tokio::sync::oneshot::channel();
+                assert!(
+                    actor
+                        .admit_behavior_selection(
+                            acp::SessionModeId::new("clarify"),
+                            None,
+                            first_tx,
+                        )
+                        .await,
+                    "the first desired target owns worker startup"
+                );
+
+                let (final_tx, mut final_rx) = tokio::sync::oneshot::channel();
+                assert!(
+                    !actor
+                        .admit_behavior_selection(acp::SessionModeId::new("plan"), None, final_tx)
+                        .await,
+                    "a later target reuses the active worker"
+                );
+
+                assert_eq!(
+                    first_rx.await.unwrap().unwrap(),
+                    BehaviorChangeOutcome::Superseded
+                );
+                assert!(matches!(
+                    final_rx.try_recv(),
+                    Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+                ));
+
+                let admission = actor.state.lock().await;
+                let pending = admission
+                    .pending_behavior_control
+                    .as_ref()
+                    .expect("latest behavior target");
+                assert_eq!(pending.session_mode.0.as_ref(), "plan");
+                assert_eq!(pending.revision, admission.behavior_control_revision);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn claimed_behavior_control_cancelled_by_shutdown_is_not_fatal() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
+                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                assert!(
+                    actor
+                        .admit_behavior_selection(
+                            acp::SessionModeId::new("clarify"),
+                            None,
+                            response_tx,
+                        )
+                        .await
+                );
+                actor
+                    .state
+                    .lock()
+                    .await
+                    .termination
+                    .request(TerminationState::Graceful);
+                let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+
+                assert!(
+                    actor
+                        .clone()
+                        .drain_behavior_selections(completion_tx)
+                        .await
+                        .is_ok(),
+                    "a control claimed before the shutdown latch is a cancellation, not a fatal worker failure"
+                );
+                let error = response_rx
+                    .await
+                    .expect("control response")
+                    .expect_err("shutdown cancels the claimed control");
+                assert!(error.to_string().contains("shutting down"));
+                let state = actor.state.lock().await;
+                assert_eq!(state.termination, TerminationState::Graceful);
+                assert!(!state.behavior_control_worker_active);
+                assert!(state.applying_behavior_control.is_none());
+                assert!(state.foreground.is_idle());
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn behavior_admission_does_not_mutate_confirmation_before_commit_boundary() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
+                actor
+                    .behavior
+                    .lock()
+                    .select_behavior(tools::types::BehaviorId::Plan);
+                let decision = actor.behavior.lock().decide_switch(
+                    tools::types::BehaviorId::Normal,
+                    crate::session::behavior::BehaviorSwitchFacts {
+                        source_owned_work_active: true,
+                        ..Default::default()
+                    },
+                    std::time::Duration::from_secs(8),
+                );
+                assert!(matches!(
+                    decision.outcome,
+                    BehaviorChangeOutcome::ConfirmationRequired { .. }
+                ));
+
+                let commit_boundary = actor.state.lock().await;
+                let replacement_actor = std::sync::Arc::clone(&actor);
+                let (responds_to, _response) = tokio::sync::oneshot::channel();
+                let replacement = tokio::task::spawn_local(async move {
+                    replacement_actor
+                        .admit_behavior_selection(
+                            acp::SessionModeId::new("clarify"),
+                            None,
+                            responds_to,
+                        )
+                        .await
+                });
+                tokio::task::yield_now().await;
+                assert!(
+                    actor.behavior.lock().pending_switch().is_some(),
+                    "a request waiting outside the commit boundary must not clear its latch"
+                );
+
+                drop(commit_boundary);
+                assert!(replacement.await.expect("replacement task"));
+                assert!(
+                    actor.behavior.lock().pending_switch().is_none(),
+                    "the replacement clears the old latch once its revision is admitted"
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn picker_can_enter_plan_from_a_regular_normal_foreground() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
+                *actor.agent.borrow_mut() =
+                    super::super::tests::support::test_agent_with_plan_tools().await;
+                actor.state.lock().await.foreground = ForegroundState::RegularTurn(
+                    super::super::tests::support::running_task_stub("normal-turn"),
+                );
+
+                let projection = actor.behavior_availability_projection().await;
+                assert_eq!(
+                    projection
+                        .choice(tool_types::BehaviorId::Plan)
+                        .expect("Plan projection")
+                        .disposition,
+                    tool_types::BehaviorAvailabilityDisposition::Available,
+                );
+
+                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                assert!(
+                    actor
+                        .admit_behavior_selection(
+                            acp::SessionModeId::new("plan"),
+                            None,
+                            response_tx,
+                        )
+                        .await
+                );
+                let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+                actor
+                    .clone()
+                    .drain_behavior_selections(completion_tx)
+                    .await
+                    .unwrap();
+
+                assert_eq!(
+                    response_rx.await.unwrap().unwrap(),
+                    BehaviorChangeOutcome::Applied,
+                );
+                assert_eq!(
+                    actor.behavior.lock().behavior(),
+                    tool_types::BehaviorId::Plan,
+                );
+                assert_eq!(
+                    *actor.turn_behavior.lock(),
+                    tool_types::BehaviorId::Normal,
+                    "the already-admitted turn keeps its captured Behavior",
+                );
+                let state = actor.state.lock().await;
+                assert!(state.foreground.regular().is_some());
+                assert!(state.terminal_preemption_pending);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn picker_can_enter_workflow_from_a_regular_normal_foreground() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (mut actor, _gateway_rx) = super::super::tests::support::build_actor().await;
+                Arc::get_mut(&mut actor)
+                    .expect("test actor must be uniquely owned")
+                    .background_workflows_enabled = true;
+                actor.state.lock().await.foreground = ForegroundState::RegularTurn(
+                    super::super::tests::support::running_task_stub("normal-turn"),
+                );
+
+                let projection = actor.behavior_availability_projection().await;
+                assert_eq!(
+                    projection
+                        .choice(tool_types::BehaviorId::Workflow)
+                        .expect("Workflow projection")
+                        .disposition,
+                    tool_types::BehaviorAvailabilityDisposition::Available,
+                );
+
+                let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                assert!(
+                    actor
+                        .admit_behavior_selection(
+                            acp::SessionModeId::new("workflow"),
+                            None,
+                            response_tx,
+                        )
+                        .await
+                );
+                let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+                actor
+                    .clone()
+                    .drain_behavior_selections(completion_tx)
+                    .await
+                    .unwrap();
+
+                assert_eq!(
+                    response_rx.await.unwrap().unwrap(),
+                    BehaviorChangeOutcome::Applied,
+                );
+                assert_eq!(
+                    actor.behavior.lock().behavior(),
+                    tool_types::BehaviorId::Workflow,
+                );
+                assert_eq!(
+                    *actor.turn_behavior.lock(),
+                    tool_types::BehaviorId::Normal,
+                    "the already-admitted turn keeps its captured Behavior",
+                );
+                let state = actor.state.lock().await;
+                assert!(state.foreground.regular().is_some());
+                assert!(state.terminal_preemption_pending);
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn successful_control_intent_switch_persists_retained_plan_and_submission_counter() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                use crate::session::behavior::{
+                    RetainedPlanAction, RetainedPlanDecisionOutcome, RetainedPlanStatus,
+                };
+
+                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
+                {
+                    let mut behavior = actor.behavior.lock();
+                    behavior.select_behavior(tool_types::BehaviorId::Plan);
+                    behavior.record_plan_artifact("# Deferred candidate");
+                    assert!(behavior.submit_initial_plan());
+                    let snapshot = behavior.snapshot();
+                    assert_eq!(
+                        behavior.decide_submitted_plan_if(
+                            &snapshot,
+                            snapshot.plan_submission_id.unwrap(),
+                            "control-intent-deferred-switch",
+                            RetainedPlanAction::Defer,
+                            None,
+                        ),
+                        RetainedPlanDecisionOutcome::Applied(RetainedPlanStatus::Deferred)
+                    );
+                }
+
+                let intent = |sequence| crate::session::ControlIntent {
+                    client_id: "plan-switch-test".into(),
+                    generation: 7,
+                    sequence,
+                };
+                for (sequence, expected) in [
+                    (
+                        1,
+                        BehaviorChangeOutcome::ConfirmationRequired {
+                            message: String::new(),
+                            remaining_ms: 0,
+                        },
+                    ),
+                    (2, BehaviorChangeOutcome::Applied),
+                ] {
+                    let (response_tx, response_rx) = tokio::sync::oneshot::channel();
+                    assert!(
+                        actor
+                            .admit_behavior_selection(
+                                acp::SessionModeId::new("normal"),
+                                Some(intent(sequence)),
+                                response_tx,
+                            )
+                            .await
+                    );
+                    let (completion_tx, _completion_rx) = tokio::sync::mpsc::unbounded_channel();
+                    actor
+                        .clone()
+                        .drain_behavior_selections(completion_tx)
+                        .await
+                        .unwrap();
+                    let actual = response_rx.await.unwrap().unwrap();
+                    match (expected, actual) {
+                        (
+                            BehaviorChangeOutcome::ConfirmationRequired { .. },
+                            BehaviorChangeOutcome::ConfirmationRequired { .. },
+                        )
+                        | (BehaviorChangeOutcome::Applied, BehaviorChangeOutcome::Applied) => {}
+                        (expected, actual) => panic!("expected {expected:?}, got {actual:?}"),
+                    }
+                }
+
+                let events = actor.chat_state_handle.timeline_events().await.unwrap();
+                let persisted =
+                    crate::session::control::SessionControlSnapshot::latest_from_timeline(&events)
+                        .unwrap()
+                        .unwrap()
+                        .behavior;
+                assert_eq!(actor.behavior.lock().snapshot(), persisted);
+                assert_eq!(persisted.behavior(), tool_types::BehaviorId::Normal);
+                assert_eq!(persisted.last_plan_submission_id, 1);
+                assert_eq!(
+                    persisted.retained_plan.as_ref().unwrap().status,
+                    RetainedPlanStatus::Deferred
+                );
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn picker_projection_and_admission_share_the_host_foreground_rejection() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (actor, _gateway_rx) = super::super::tests::support::build_actor().await;
+                *actor.agent.borrow_mut() =
+                    super::super::tests::support::test_agent_with_plan_tools().await;
+                let mut task = super::super::tests::support::running_task_stub("host-command");
+                task.origin = crate::session::PromptOrigin::HostCommand;
+                task.turn_kind = crate::session::TurnKind::Internal;
+                actor.state.lock().await.foreground = ForegroundState::RegularTurn(task);
+
+                let projection = actor.behavior_availability_projection().await;
+                let choice = projection
+                    .choice(tool_types::BehaviorId::Plan)
+                    .cloned()
+                    .expect("Plan projection");
+                assert_eq!(
+                    choice.disposition,
+                    tool_types::BehaviorAvailabilityDisposition::Unavailable
+                );
+                let projected_reason = choice.reason.expect("busy reason");
+
+                let application = actor
+                    .apply_behavior_change_with_admission(
+                        acp::SessionModeId::new("plan"),
+                        crate::session::behavior::BehaviorRequestAuthority::Picker,
+                        None,
+                        Some("client-a:1"),
+                        None,
+                    )
+                    .await;
+                assert_eq!(
+                    application.disposition.unwrap(),
+                    BehaviorChangeOutcome::Rejected {
+                        message: projected_reason
+                    },
+                    "a Picker cannot borrow an unrelated HostCommand foreground exception"
+                );
+                assert!(actor.behavior.lock().pending_switch().is_none());
+
+                assert!(matches!(
+                    actor
+                        .request_behavior_change(acp::SessionModeId::new("plan"))
+                        .await,
+                    Ok(BehaviorChangeOutcome::Applied)
+                ));
+            })
+            .await;
     }
 }

@@ -1111,8 +1111,6 @@ impl PromptWidget {
         self.slash_controller.set_auto_mode_available(available);
     }
 
-    /// Replace the restricted slash-command deny list (see
-
     /// Access the current slash snapshot (for dropdown rendering).
     pub fn slash_snapshot(&self) -> crate::slash::SlashSnapshot {
         self.slash_state.snapshot()

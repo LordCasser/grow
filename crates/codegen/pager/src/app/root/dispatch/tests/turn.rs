@@ -803,11 +803,10 @@ fn stalled_unacknowledged_submission_queries_exact_prompt_status() {
             ..
         }] if *agent_id == id && prompt_id.as_deref() == Some("pid-submitting")
     ));
-    assert_eq!(
+    assert!(
         app.agents[&id]
             .session
-            .prompt_status_query_matches("pid-submitting"),
-        true
+            .prompt_status_query_matches("pid-submitting")
     );
 }
 
@@ -1199,11 +1198,10 @@ fn running_turn_stalled_without_activity_queries_prompt_status() {
             ..
         }] if *agent_id == id && prompt_id.as_deref() == Some("pid-running")
     ));
-    assert_eq!(
+    assert!(
         app.agents[&id]
             .session
-            .prompt_status_query_matches("pid-running"),
-        true
+            .prompt_status_query_matches("pid-running")
     );
     assert!(
         app.agents[&id].session.state.is_turn_running(),

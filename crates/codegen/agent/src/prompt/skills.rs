@@ -2669,7 +2669,7 @@ mod tests {
             &[],
         );
         let git_root = dunce::canonicalize(&repo).unwrap();
-        assert_eq!(dirs, [aliased_user_root.clone()]);
+        assert_eq!(dirs.as_slice(), std::slice::from_ref(&aliased_user_root));
         assert_eq!(
             scope_for_config_dir(
                 &dirs[0],

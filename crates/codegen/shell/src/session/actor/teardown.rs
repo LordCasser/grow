@@ -35,60 +35,6 @@ pub(super) async fn shutdown_sampler(session: &SessionActor) -> Result<(), Strin
     }
 }
 
-#[cfg(test)]
-mod sampler_shutdown_tests {
-    use super::*;
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn shutdown_sampler_joins_drainer_and_breaks_session_cycle() {
-        tokio::task::LocalSet::new()
-            .run_until(async {
-                let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
-                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
-                let mut actor = crate::session::actor::tests::support::create_test_actor(
-                    0,
-                    100_000,
-                    85,
-                    gateway_tx,
-                    persistence_tx,
-                )
-                .await;
-                let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
-                let owner = sampler::SamplerActor::spawn_owned(
-                    sampler::SamplerConfig::default(),
-                    sampler::RetryPolicy::default(),
-                    event_tx,
-                );
-                actor.sampler_handle = owner.handle();
-                *actor.sampler_owner.borrow_mut() = Some(owner);
-                let actor = std::sync::Arc::new(actor);
-                let weak_actor = std::sync::Arc::downgrade(&actor);
-                let drainer_actor = actor.clone();
-                actor
-                    .sampler_event_drainer
-                    .arm(tokio::task::spawn_local(async move {
-                        while let Some(event) = event_rx.recv().await {
-                            drainer_actor.handle_sampling_event(event).await;
-                        }
-                    }));
-                assert_eq!(std::sync::Arc::strong_count(&actor), 2);
-
-                shutdown_sampler(&actor)
-                    .await
-                    .expect("sampler teardown barrier");
-
-                assert_eq!(std::sync::Arc::strong_count(&actor), 1);
-                assert!(!actor.sampler_event_drainer.is_running());
-                drop(actor);
-                assert!(
-                    weak_actor.upgrade().is_none(),
-                    "sampler drainer must not retain the Session after teardown"
-                );
-            })
-            .await;
-    }
-}
-
 /// Close long-lived session service ingress and join their LocalSet owners.
 /// Every owner is attempted even when an earlier one fails. The caller must
 /// treat an error as a failed persistence barrier rather than logging and
@@ -536,4 +482,58 @@ pub(super) async fn terminate_failed_timeline_writer(
     }
     session.signals_handle.shutdown();
     cleanup_session_scratch(session);
+}
+
+#[cfg(test)]
+mod sampler_shutdown_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_sampler_joins_drainer_and_breaks_session_cycle() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (gateway_tx, _gateway_rx) = tokio::sync::mpsc::unbounded_channel();
+                let (persistence_tx, _persistence_rx) = tokio::sync::mpsc::unbounded_channel();
+                let mut actor = crate::session::actor::tests::support::create_test_actor(
+                    0,
+                    100_000,
+                    85,
+                    gateway_tx,
+                    persistence_tx,
+                )
+                .await;
+                let (event_tx, mut event_rx) = tokio::sync::mpsc::unbounded_channel();
+                let owner = sampler::SamplerActor::spawn_owned(
+                    sampler::SamplerConfig::default(),
+                    sampler::RetryPolicy::default(),
+                    event_tx,
+                );
+                actor.sampler_handle = owner.handle();
+                *actor.sampler_owner.borrow_mut() = Some(owner);
+                let actor = std::sync::Arc::new(actor);
+                let weak_actor = std::sync::Arc::downgrade(&actor);
+                let drainer_actor = actor.clone();
+                actor
+                    .sampler_event_drainer
+                    .arm(tokio::task::spawn_local(async move {
+                        while let Some(event) = event_rx.recv().await {
+                            drainer_actor.handle_sampling_event(event).await;
+                        }
+                    }));
+                assert_eq!(std::sync::Arc::strong_count(&actor), 2);
+
+                shutdown_sampler(&actor)
+                    .await
+                    .expect("sampler teardown barrier");
+
+                assert_eq!(std::sync::Arc::strong_count(&actor), 1);
+                assert!(!actor.sampler_event_drainer.is_running());
+                drop(actor);
+                assert!(
+                    weak_actor.upgrade().is_none(),
+                    "sampler drainer must not retain the Session after teardown"
+                );
+            })
+            .await;
+    }
 }

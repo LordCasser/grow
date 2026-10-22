@@ -423,7 +423,7 @@ pub(crate) fn start_test_planning_driver(
         tools::implementations::grow_build::todo::runtime::PlanningCommand,
     >,
 ) {
-    let weak_actor = std::sync::Arc::downgrade(&actor);
+    let weak_actor = std::sync::Arc::downgrade(actor);
     tokio::task::spawn_local(async move {
         while let Some(command) = planning_rx.recv().await {
             let Some(actor) = weak_actor.upgrade() else {
@@ -768,13 +768,13 @@ impl chat_state::TimelinePersistence for AdmissionAckPersistence {
                         event: event.clone(),
                         respond_to,
                     };
-                    if let Err(error) = self.persistence_tx.send(message) {
-                        if let PersistenceMsg::TimelineDurablyAndAck { respond_to, .. } = error.0 {
-                            let _ = respond_to.send(Err(std::io::Error::new(
-                                std::io::ErrorKind::BrokenPipe,
-                                "test persistence observation channel closed",
-                            )));
-                        }
+                    if let Err(error) = self.persistence_tx.send(message)
+                        && let PersistenceMsg::TimelineDurablyAndAck { respond_to, .. } = error.0
+                    {
+                        let _ = respond_to.send(Err(std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "test persistence observation channel closed",
+                        )));
                     }
                 }
             }
@@ -1066,7 +1066,7 @@ async fn create_test_actor_ex_inner(
     let chat_state_cancellation_token = skill_commit_ack
         .as_ref()
         .map(|(_, _, _, cancellation_token)| cancellation_token.clone())
-        .unwrap_or_else(tokio_util::sync::CancellationToken::new);
+        .unwrap_or_default();
     let timeline_persistence: Box<dyn chat_state::TimelinePersistence> =
         match image_projection_persistence {
             Some(persistence) => Box::new(persistence),

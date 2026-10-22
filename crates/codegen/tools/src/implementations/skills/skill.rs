@@ -957,7 +957,7 @@ mod tests {
                 path: "/skills/\"<&/SKILL.md",
             },
         ];
-        let info = build_skill_information(&[block.clone()], &refs);
+        let info = build_skill_information(std::slice::from_ref(&block), &refs);
         let reference =
             "<skill name=\"review&quot;&lt;&amp;\" path=\"/skills/&quot;&lt;&amp;/SKILL.md\"/>";
         assert_eq!(info.matches(reference).count(), 1, "{info}");

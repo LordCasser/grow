@@ -187,15 +187,14 @@ mod sync_rewind_anchor_to_picker_tests {
         let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
         AgentView::new(
             {
-                let session = AgentSession::new(
+                AgentSession::new(
                     AgentId(0),
                     tx,
                     None,
                     ModelState::default(),
                     std::path::PathBuf::from("/tmp"),
                     shell::util::config::PermissionMode::Ask,
-                );
-                session
+                )
             },
             ScrollbackState::new(),
         )

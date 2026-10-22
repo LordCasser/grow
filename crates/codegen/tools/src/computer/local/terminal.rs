@@ -2233,10 +2233,10 @@ impl LocalTerminalActor {
             let Some(process) = self.processes.get_mut(&id) else {
                 continue;
             };
-            if process.suspension_requested {
-                if let Some(handle) = process.state_dump_handle.take() {
-                    handle.abort();
-                }
+            if process.suspension_requested
+                && let Some(handle) = process.state_dump_handle.take()
+            {
+                handle.abort();
             }
 
             // A reaped child is the completion guarantee. Output draining is

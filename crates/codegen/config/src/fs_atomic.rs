@@ -48,7 +48,7 @@ fn write_using_temp(
     drop(file);
     let result = written.and_then(|()| std::fs::rename(tmp, final_path));
     if result.is_err() {
-        let _ = std::fs::remove_file(&tmp);
+        let _ = std::fs::remove_file(tmp);
     }
     result
 }

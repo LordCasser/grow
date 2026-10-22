@@ -127,18 +127,16 @@ impl TranscriptProjection {
             .collect::<Vec<_>>()
         {
             let mut settled = false;
-            if let Some(entry) = self.scrollback.get_by_id_mut(id) {
-                if let Some(block) = entry.block.as_image_recovery_mut() {
-                    if block.running
-                        && prompt_id.is_none_or(|prompt| block.prompt_id.as_deref() == Some(prompt))
-                    {
-                        block.message = message.to_owned();
-                        block.running = false;
-                        block.failed = true;
-                        entry.invalidate_cache();
-                        settled = true;
-                    }
-                }
+            if let Some(entry) = self.scrollback.get_by_id_mut(id)
+                && let Some(block) = entry.block.as_image_recovery_mut()
+                && block.running
+                && prompt_id.is_none_or(|prompt| block.prompt_id.as_deref() == Some(prompt))
+            {
+                block.message = message.to_owned();
+                block.running = false;
+                block.failed = true;
+                entry.invalidate_cache();
+                settled = true;
             }
             if settled {
                 self.scrollback.set_entry_running(id, false);
@@ -316,18 +314,17 @@ impl TranscriptProjection {
                     acp_transport::protocol::SessionUpdate::UserMessageChunk(_)
                         | acp_transport::protocol::SessionUpdate::AgentMessageChunk(_)
                         | acp_transport::protocol::SessionUpdate::AgentThoughtChunk(_)
-                ) {
-                    if let Some(prompt) = prompt {
-                        if self
-                            .current_prompt
-                            .as_ref()
-                            .is_some_and(|current| *current != prompt)
-                        {
-                            self.tracker.finish_transcript_turn(&mut self.scrollback);
-                            self.scrollback.seal_subagent_permission_group();
-                        }
-                        self.current_prompt = Some(prompt);
+                ) && let Some(prompt) = prompt
+                {
+                    if self
+                        .current_prompt
+                        .as_ref()
+                        .is_some_and(|current| *current != prompt)
+                    {
+                        self.tracker.finish_transcript_turn(&mut self.scrollback);
+                        self.scrollback.seal_subagent_permission_group();
                     }
+                    self.current_prompt = Some(prompt);
                 }
                 self.tracker.handle_transcript_update(
                     notification.update,
@@ -376,12 +373,12 @@ impl TranscriptProjection {
                 status,
                 ..
             } => {
-                !self.workflow_revisions.get(run_id).is_some_and(|last| {
+                !(self.workflow_revisions.get(run_id).is_some_and(|last| {
                     (*revision > 0 && revision <= last)
                         || (status != "cleared" && *revision == 0 && *last > 0)
-                }) && !(status != "cleared"
+                }) || (status != "cleared"
                     && *revision == 0
-                    && self.cleared_workflows.contains(run_id))
+                    && self.cleared_workflows.contains(run_id)))
             }
             GrowUpdate::GoalUpdated {
                 goal_id, status, ..

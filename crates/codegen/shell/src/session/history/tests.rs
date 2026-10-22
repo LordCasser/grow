@@ -794,13 +794,15 @@ fn unknown_record_version_is_rejected() {
 
 #[test]
 fn writer_counter_floor_covers_derived_receipts_and_hidden_physical_positions() {
-    let mut history = HistorySnapshot::default();
-    history.sources = (0..8)
-        .map(|event| HistorySource::Domain {
-            event,
-            response_anchor: None,
-        })
-        .collect();
+    let mut history = HistorySnapshot {
+        sources: (0..8)
+            .map(|event| HistorySource::Domain {
+                event,
+                response_anchor: None,
+            })
+            .collect(),
+        ..HistorySnapshot::default()
+    };
     assert_eq!(
         history.event_counter_floor(),
         8,

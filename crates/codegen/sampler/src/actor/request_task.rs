@@ -1309,11 +1309,10 @@ async fn drive_l2(
                     } else {
                         None
                     };
-                    if event_tx.send(outbound).is_ok() {
-                        if let Some(permit) = permit {
+                    if event_tx.send(outbound).is_ok()
+                        && let Some(permit) = permit {
                             permit.forget();
                         }
-                    }
                     // Give a buffered terminal priority over cancellation so
                     // its provider-reported usage is never discarded.  For a
                     // non-terminal backlog, however, observe cancellation

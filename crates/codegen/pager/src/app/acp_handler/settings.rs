@@ -306,10 +306,9 @@ pub(super) fn handle_announcements_update(notif: &acp::ExtNotification, app: &mu
     if announcements::prune_hidden_announcement_ids(
         &mut app.hidden_announcement_ids,
         &app.active_announcements,
-    ) {
-        if let Some(effect) = app.request_announcement_persistence() {
-            app.pending_effects.push(effect);
-        }
+    ) && let Some(effect) = app.request_announcement_persistence()
+    {
+        app.pending_effects.push(effect);
     }
     app.sync_session_announcement_slash_gate();
     true

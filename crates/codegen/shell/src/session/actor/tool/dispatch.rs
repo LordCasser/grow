@@ -135,160 +135,6 @@ async fn validate_tool_call_permit(
     Ok(())
 }
 
-#[cfg(test)]
-mod permit_tests {
-    use super::*;
-
-    fn prepared() -> PreparedToolCall {
-        let args = serde_json::json!({"path": "README.md"});
-        PreparedToolCall {
-            skill_selection: None,
-            call_id: "call-1".to_owned(),
-            tool_call_id: acp::ToolCallId::new("call-1"),
-            tool_name: "fixture".to_owned(),
-            raw_arguments: args.to_string(),
-            parsed_args: args.clone(),
-            model_id: "fixture-model".to_owned(),
-            concatenated_json_count: 0,
-            dispatch_target_name: None,
-            required_access: tool_protocol::ToolAccess::All,
-            permit: ToolCallPermit {
-                call_id: "call-1".to_owned(),
-                tool_name: "fixture".to_owned(),
-                dispatch_target_name: None,
-                canonical_args_hash: super::hash_canonical_json(&args),
-                cwd: PathBuf::from("/workspace"),
-                descriptor_max: tool_protocol::ToolAccess::All,
-                required_access: tool_protocol::ToolAccess::All,
-                actor_source: "primary:normal".to_owned(),
-                actor_epoch: None,
-                mcp: None,
-                consumed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            },
-            workflow_draft_write: false,
-            success_control: None,
-            plan_exit_on_success: None,
-        }
-    }
-
-    fn authority() -> ToolDispatchAuthority {
-        ToolDispatchAuthority {
-            bridge: Arc::new(tools::bridge::ToolBridge::for_test()),
-            subagent: None,
-            mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
-            runtime_suspend: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            cwd: PathBuf::from("/workspace"),
-            actor_source: "primary:normal".to_owned(),
-        }
-    }
-
-    fn assert_stale(error: tool_runtime::ToolError, reason: &str) {
-        assert_eq!(
-            error.details,
-            Some(serde_json::json!({"code": "stale_tool_permit"}))
-        );
-        assert!(
-            error.detail.contains(reason),
-            "unexpected stale-permit detail: {}",
-            error.detail
-        );
-    }
-
-    #[tokio::test]
-    async fn permit_is_consumed_exactly_once() {
-        let prepared = prepared();
-        let authority = authority();
-        validate_tool_call_permit(&authority, &prepared)
-            .await
-            .expect("first dispatch must consume the permit");
-        assert_stale(
-            validate_tool_call_permit(&authority, &prepared)
-                .await
-                .expect_err("a replay must fail before execution"),
-            "already consumed",
-        );
-    }
-
-    #[tokio::test]
-    async fn suspended_runtime_rejects_dispatch_before_consuming_the_permit() {
-        use std::sync::atomic::Ordering;
-
-        let prepared = prepared();
-        let authority = authority();
-        authority.runtime_suspend.store(true, Ordering::Release);
-
-        assert_stale(
-            validate_tool_call_permit(&authority, &prepared)
-                .await
-                .expect_err("a suspended session must reject pending dispatch"),
-            "session runtime is suspended",
-        );
-        assert!(!prepared.permit.consumed.load(Ordering::Acquire));
-    }
-
-    #[tokio::test]
-    async fn frozen_arguments_and_authority_are_revalidated() {
-        let mut changed_args = prepared();
-        changed_args.parsed_args = serde_json::json!({"path": "different"});
-        assert_stale(
-            validate_tool_call_permit(&authority(), &changed_args)
-                .await
-                .expect_err("argument mutation must invalidate the permit"),
-            "canonical arguments changed",
-        );
-
-        let changed_cwd = prepared();
-        let mut moved = authority();
-        moved.cwd = PathBuf::from("/other-workspace");
-        assert_stale(
-            validate_tool_call_permit(&moved, &changed_cwd)
-                .await
-                .expect_err("cwd mutation must invalidate the permit"),
-            "execution cwd changed",
-        );
-
-        let changed_actor = prepared();
-        let mut switched = authority();
-        switched.actor_source = "primary:goal".to_owned();
-        assert_stale(
-            validate_tool_call_permit(&switched, &changed_actor)
-                .await
-                .expect_err("actor mutation must invalidate the permit"),
-            "actor source changed",
-        );
-    }
-
-    #[tokio::test]
-    async fn child_authorization_epoch_change_invalidates_permit() {
-        let bridge = tools::bridge::ToolBridge::for_test();
-        let child = crate::session::subagent_capability::SubagentCapabilityState::from_bridge(
-            &bridge,
-            &tools::registry::types::ToolServerConfig { tools: vec![] },
-            tool_types::SubagentCapabilityMode::ReadOnly,
-            None,
-            Default::default(),
-        )
-        .await;
-        let mut prepared = prepared();
-        prepared.permit.actor_epoch = Some(child.authorization_epoch());
-        let authority = ToolDispatchAuthority {
-            bridge: Arc::new(bridge),
-            subagent: Some(child.clone()),
-            ..authority()
-        };
-        child.replace_bound_mcp_client_ids(std::collections::HashMap::from([(
-            "reconnected".to_owned(),
-            7,
-        )]));
-        assert_stale(
-            validate_tool_call_permit(&authority, &prepared)
-                .await
-                .expect_err("a changed child authority must invalidate the permit"),
-            "authorization epoch changed",
-        );
-    }
-}
-
 /// First string-valued argument among `keys`, in priority order.
 fn str_arg<'a>(args: &'a serde_json::Value, keys: &[&str]) -> Option<&'a str> {
     keys.iter().find_map(|k| args.get(*k)?.as_str())
@@ -678,4 +524,158 @@ pub(in crate::session::actor) fn build_tool_parse_error_message(
     }
 
     msg
+}
+
+#[cfg(test)]
+mod permit_tests {
+    use super::*;
+
+    fn prepared() -> PreparedToolCall {
+        let args = serde_json::json!({"path": "README.md"});
+        PreparedToolCall {
+            skill_selection: None,
+            call_id: "call-1".to_owned(),
+            tool_call_id: acp::ToolCallId::new("call-1"),
+            tool_name: "fixture".to_owned(),
+            raw_arguments: args.to_string(),
+            parsed_args: args.clone(),
+            model_id: "fixture-model".to_owned(),
+            concatenated_json_count: 0,
+            dispatch_target_name: None,
+            required_access: tool_protocol::ToolAccess::All,
+            permit: ToolCallPermit {
+                call_id: "call-1".to_owned(),
+                tool_name: "fixture".to_owned(),
+                dispatch_target_name: None,
+                canonical_args_hash: super::hash_canonical_json(&args),
+                cwd: PathBuf::from("/workspace"),
+                descriptor_max: tool_protocol::ToolAccess::All,
+                required_access: tool_protocol::ToolAccess::All,
+                actor_source: "primary:normal".to_owned(),
+                actor_epoch: None,
+                mcp: None,
+                consumed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            },
+            workflow_draft_write: false,
+            success_control: None,
+            plan_exit_on_success: None,
+        }
+    }
+
+    fn authority() -> ToolDispatchAuthority {
+        ToolDispatchAuthority {
+            bridge: Arc::new(tools::bridge::ToolBridge::for_test()),
+            subagent: None,
+            mcp_state: Arc::new(TokioMutex::new(McpState::new(vec![]))),
+            runtime_suspend: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cwd: PathBuf::from("/workspace"),
+            actor_source: "primary:normal".to_owned(),
+        }
+    }
+
+    fn assert_stale(error: tool_runtime::ToolError, reason: &str) {
+        assert_eq!(
+            error.details,
+            Some(serde_json::json!({"code": "stale_tool_permit"}))
+        );
+        assert!(
+            error.detail.contains(reason),
+            "unexpected stale-permit detail: {}",
+            error.detail
+        );
+    }
+
+    #[tokio::test]
+    async fn permit_is_consumed_exactly_once() {
+        let prepared = prepared();
+        let authority = authority();
+        validate_tool_call_permit(&authority, &prepared)
+            .await
+            .expect("first dispatch must consume the permit");
+        assert_stale(
+            validate_tool_call_permit(&authority, &prepared)
+                .await
+                .expect_err("a replay must fail before execution"),
+            "already consumed",
+        );
+    }
+
+    #[tokio::test]
+    async fn suspended_runtime_rejects_dispatch_before_consuming_the_permit() {
+        use std::sync::atomic::Ordering;
+
+        let prepared = prepared();
+        let authority = authority();
+        authority.runtime_suspend.store(true, Ordering::Release);
+
+        assert_stale(
+            validate_tool_call_permit(&authority, &prepared)
+                .await
+                .expect_err("a suspended session must reject pending dispatch"),
+            "session runtime is suspended",
+        );
+        assert!(!prepared.permit.consumed.load(Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn frozen_arguments_and_authority_are_revalidated() {
+        let mut changed_args = prepared();
+        changed_args.parsed_args = serde_json::json!({"path": "different"});
+        assert_stale(
+            validate_tool_call_permit(&authority(), &changed_args)
+                .await
+                .expect_err("argument mutation must invalidate the permit"),
+            "canonical arguments changed",
+        );
+
+        let changed_cwd = prepared();
+        let mut moved = authority();
+        moved.cwd = PathBuf::from("/other-workspace");
+        assert_stale(
+            validate_tool_call_permit(&moved, &changed_cwd)
+                .await
+                .expect_err("cwd mutation must invalidate the permit"),
+            "execution cwd changed",
+        );
+
+        let changed_actor = prepared();
+        let mut switched = authority();
+        switched.actor_source = "primary:goal".to_owned();
+        assert_stale(
+            validate_tool_call_permit(&switched, &changed_actor)
+                .await
+                .expect_err("actor mutation must invalidate the permit"),
+            "actor source changed",
+        );
+    }
+
+    #[tokio::test]
+    async fn child_authorization_epoch_change_invalidates_permit() {
+        let bridge = tools::bridge::ToolBridge::for_test();
+        let child = crate::session::subagent_capability::SubagentCapabilityState::from_bridge(
+            &bridge,
+            &tools::registry::types::ToolServerConfig { tools: vec![] },
+            tool_types::SubagentCapabilityMode::ReadOnly,
+            None,
+            Default::default(),
+        )
+        .await;
+        let mut prepared = prepared();
+        prepared.permit.actor_epoch = Some(child.authorization_epoch());
+        let authority = ToolDispatchAuthority {
+            bridge: Arc::new(bridge),
+            subagent: Some(child.clone()),
+            ..authority()
+        };
+        child.replace_bound_mcp_client_ids(std::collections::HashMap::from([(
+            "reconnected".to_owned(),
+            7,
+        )]));
+        assert_stale(
+            validate_tool_call_permit(&authority, &prepared)
+                .await
+                .expect_err("a changed child authority must invalidate the permit"),
+            "authorization epoch changed",
+        );
+    }
 }

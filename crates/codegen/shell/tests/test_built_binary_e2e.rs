@@ -291,8 +291,7 @@ async fn test_headless_sampling_attempt_peak_rss() {
 
     let delta = "x".repeat(SSE_DELTA_BYTES);
     let delta_count = BIG_RESPONSE_BYTES.div_ceil(SSE_DELTA_BYTES);
-    let large_response = std::iter::repeat(delta.as_str())
-        .take(delta_count)
+    let large_response = std::iter::repeat_n(delta.as_str(), delta_count)
         .collect::<Vec<_>>()
         .join(" ");
     assert!(

@@ -54,9 +54,11 @@ fn tag_suffix(row: &SuggestionRow) -> Option<String> {
 /// without allocating: space + `[` + tag + `]` = tag width + 3. The tag shares
 /// the label column so descriptions stay aligned across tagged/untagged rows.
 fn tag_suffix_width(row: &SuggestionRow, content_w: usize) -> usize {
-    (content_w >= 52)
-        .then(|| row.tag.as_ref().map(|t| t.width() + 3).unwrap_or(0))
-        .unwrap_or(0)
+    if content_w >= 52 {
+        row.tag.as_ref().map(|t| t.width() + 3).unwrap_or(0)
+    } else {
+        0
+    }
 }
 
 /// Purpose labels are secondary to the command trigger. At very narrow

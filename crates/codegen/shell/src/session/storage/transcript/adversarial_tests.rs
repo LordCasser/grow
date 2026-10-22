@@ -254,8 +254,8 @@ fn write_updates(home: &Path, id: &str, updates: &[SessionUpdate]) {
     for update in &updates {
         match update {
             SessionUpdate::Acp(notification) => {
-                if let acp::SessionUpdate::UserMessageChunk(chunk) = &notification.update {
-                    if let Some(message_id) = chunk
+                if let acp::SessionUpdate::UserMessageChunk(chunk) = &notification.update
+                    && let Some(message_id) = chunk
                         .meta
                         .as_ref()
                         .and_then(|meta| meta.get("messageId"))
@@ -263,7 +263,6 @@ fn write_updates(home: &Path, id: &str, updates: &[SessionUpdate]) {
                     {
                         prompt_ids.insert(message_id.to_owned());
                     }
-                }
             }
             SessionUpdate::Grow(notification) => {
                 if let GrowUpdate::TurnCompleted { prompt_id, .. } = &notification.update {
@@ -373,7 +372,7 @@ fn rewrite_journal_history(home: &Path, id: &str, updates: &[SessionUpdate]) {
 
 fn append_updates(home: &Path, id: &str, updates: &[SessionUpdate]) {
     let (_, records, _) = journal_data(home, id);
-    let mut seq = records as u64;
+    let mut seq = records;
     let mut bytes = Vec::new();
     for update in updates {
         let Some(fact) = HistoryFact::from_update(update).unwrap() else {
@@ -664,7 +663,7 @@ fn invalid_typed_fact_fails_even_when_rewind_would_drop_it() {
     )
     .unwrap();
     let (_, records, _) = journal_data(home.path(), "root");
-    let bytes = crate::session::history::encode_presentation(records as u64, 0, &bad).unwrap();
+    let bytes = crate::session::history::encode_presentation(records, 0, &bad).unwrap();
     append_bytes(home.path(), "root", &bytes);
     let error = capture_tree_at("root", home.path()).err().unwrap();
     assert!(error.to_string().contains("unknown variant `future_fact`"));
@@ -763,7 +762,7 @@ fn captured_root_and_child_topology_does_not_gain_later_root_spawn() {
     let late_event = expanded_timeline.events().last().unwrap();
     let (_, records, _) = journal_data(home.path(), "root");
     let raw = serde_json::value::to_raw_value(late_event).unwrap();
-    let appended = crate::session::history::encode_domain(records as u64, &raw, None).unwrap();
+    let appended = crate::session::history::encode_domain(records, &raw, None).unwrap();
     append_bytes(home.path(), "root", &appended);
 
     assert_eq!(root_snapshot.nodes.len(), 2);

@@ -145,9 +145,9 @@ impl RecoveryBudget {
         let state = self.0.lock().expect("recovery budget poisoned");
         state.replay_safe
             && state.attempts < state.max_attempts.unwrap_or(1)
-            && !state
+            && state
                 .deadline
-                .is_some_and(|deadline| tokio::time::Instant::now() >= deadline)
+                .is_none_or(|deadline| tokio::time::Instant::now() < deadline)
     }
 
     pub(crate) fn prohibit_replay(&self) {

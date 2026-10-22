@@ -31,13 +31,13 @@ pub(crate) fn ui_notice_block(
     if matches!(category, NoticeCategory::Coordination) && !communication_notice {
         metadata.push(format!("Inquiry ID: {}", notice.correlation_id));
     }
-    if let Some(subject) = notice.subject {
-        if !communication_notice {
-            metadata.push(match category {
-                NoticeCategory::Command => format!("Command: {subject}"),
-                _ => format!("Subject: {subject}"),
-            });
-        }
+    if let Some(subject) = notice.subject
+        && !communication_notice
+    {
+        metadata.push(match category {
+            NoticeCategory::Command => format!("Command: {subject}"),
+            _ => format!("Subject: {subject}"),
+        });
     }
     if !communication_notice && let Some(description) = notice.description {
         metadata.push(description);
@@ -1217,10 +1217,10 @@ fn handle_session_notification_inner(
                         }
                     }
                 }
-            } else if let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id) {
-                if !meta.is_replay {
-                    info.is_background = is_background;
-                }
+            } else if let Some(info) = agent.session.subagent_sessions.get_mut(&child_session_id)
+                && !meta.is_replay
+            {
+                info.is_background = is_background;
             }
             true
         }
@@ -1621,15 +1621,14 @@ fn handle_session_notification_inner(
             if let Some(parent_view) = agent
                 .subagent_views
                 .get_mut(session_notif.session_id.0.as_ref())
+                && !late_lifecycle
             {
-                if !late_lifecycle {
-                    if let Some(seq) = meta.event_seq {
-                        parent_view.session.last_applied_grow_event_seq = Some(seq);
-                    }
-                    parent_view.note_history_applied(meta.history_cursor.as_deref());
-                    if let Some(id) = meta.history_cursor.or(meta.event_id) {
-                        parent_view.advance_reconnect_cursor(id, meta.is_replay);
-                    }
+                if let Some(seq) = meta.event_seq {
+                    parent_view.session.last_applied_grow_event_seq = Some(seq);
+                }
+                parent_view.note_history_applied(meta.history_cursor.as_deref());
+                if let Some(id) = meta.history_cursor.or(meta.event_id) {
+                    parent_view.advance_reconnect_cursor(id, meta.is_replay);
                 }
             }
         } else {
@@ -1771,13 +1770,13 @@ fn settle_image_recovery_matching(
         })
         .collect::<Vec<_>>();
     for id in ids {
-        if let Some(entry) = scrollback.get_by_id_mut(id) {
-            if let Some(block) = entry.block.as_image_recovery_mut() {
-                block.message = message.to_owned();
-                block.running = false;
-                block.failed = true;
-                entry.invalidate_cache();
-            }
+        if let Some(entry) = scrollback.get_by_id_mut(id)
+            && let Some(block) = entry.block.as_image_recovery_mut()
+        {
+            block.message = message.to_owned();
+            block.running = false;
+            block.failed = true;
+            entry.invalidate_cache();
         }
         scrollback.set_entry_running(id, false);
     }
@@ -2090,21 +2089,20 @@ fn apply_model_changed(
     let effort = reasoning_effort
         .as_deref()
         .and_then(|value| value.parse::<ReasoningEffort>().ok());
-    if agent.session.sampling_control_pending() {
-        if !agent
+    if agent.session.sampling_control_pending()
+        && !agent
             .session
             .resolve_sampling_control(&new_model_id, effort)
-        {
-            tracing::debug!(
-                session_id,
-                model_id = %model_id,
-                "deferring non-matching ModelChanged behind local Sampling intent"
-            );
-            agent
-                .session
-                .defer_authoritative_model_change(model_id, reasoning_effort);
-            return Some(false);
-        }
+    {
+        tracing::debug!(
+            session_id,
+            model_id = %model_id,
+            "deferring non-matching ModelChanged behind local Sampling intent"
+        );
+        agent
+            .session
+            .defer_authoritative_model_change(model_id, reasoning_effort);
+        return Some(false);
     }
     if !agent.session.models.available.contains_key(&new_model_id) {
         tracing::warn!(
@@ -2503,9 +2501,7 @@ pub(crate) fn behavior_mode_update_resolution(
     let acp::SessionUpdate::CurrentModeUpdate(cmu) = update else {
         return None;
     };
-    let Some(mode) = tools::types::BehaviorId::try_from_id(cmu.current_mode_id.0.as_ref()) else {
-        return None;
-    };
+    let mode = tools::types::BehaviorId::try_from_id(cmu.current_mode_id.0.as_ref())?;
     if !matches!(
         mode,
         tools::types::BehaviorId::Normal

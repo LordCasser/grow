@@ -1269,8 +1269,8 @@ pub fn render_doc_picker_overlay(
         .enumerate()
         .map(|(i, (orig_idx, e))| {
             PickerEntry::Row(PickerRow {
-                label: &e.title,
-                right_label: if narrow { "" } else { &e.description },
+                label: e.title,
+                right_label: if narrow { "" } else { e.description },
                 selected: *orig_idx == selected_orig,
                 expanded: narrow,
                 fields: &[],

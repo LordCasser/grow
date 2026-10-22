@@ -115,10 +115,9 @@ pub fn extract_styled_line(
 
         // Determine the character to emit.
         let is_cursor = cursor.row == line_number && cursor.col == col_idx + 1;
-        let ch = if is_cursor && opts.cursor_char.is_some() {
-            opts.cursor_char.unwrap()
-        } else {
-            cell.c
+        let ch = match (is_cursor, opts.cursor_char) {
+            (true, Some(cursor_char)) => cursor_char,
+            _ => cell.c,
         };
 
         // If style changed, flush the current run.

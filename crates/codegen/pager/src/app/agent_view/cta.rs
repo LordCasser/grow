@@ -559,9 +559,7 @@ impl AgentView {
             plugin_name: name.clone(),
             is_retry,
         });
-        let Some(session_id) = self.session.session_id.clone() else {
-            return None;
-        };
+        let session_id = self.session.session_id.clone()?;
         // Probe when the canonical inventory declares MCP servers. Remote
         // entries without a SHA-verified inventory remain unknown, so probe
         // them after installation instead of inventing a second capability bit.

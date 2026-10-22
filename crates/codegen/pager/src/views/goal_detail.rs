@@ -195,7 +195,11 @@ pub(crate) fn render_goal_detail(
                 theme.gray
             })
             .bg(theme.bg_base)
-            .add_modifier(close_hovered.then_some(Modifier::BOLD).unwrap_or_default()),
+            .add_modifier(if close_hovered {
+                Modifier::BOLD
+            } else {
+                Default::default()
+            }),
     )
     .render(close, buf);
 

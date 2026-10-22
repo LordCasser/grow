@@ -60,7 +60,6 @@ impl AuthCredentialProvider for StaticAuthCredentialProvider {
     fn snapshot(&self) -> CredentialSnapshot {
         CredentialSnapshot {
             token: self.bearer.clone(),
-            ..Default::default()
         }
     }
 }

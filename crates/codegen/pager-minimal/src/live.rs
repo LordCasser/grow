@@ -145,7 +145,7 @@ pub fn draw_live(
             if area.width < 4 {
                 return (None, None);
             }
-            let Some(agent) = agent.as_deref_mut() else {
+            let Some(agent) = agent else {
                 crate::startup::render_startup(frame.buffer_mut(), area, &theme, &auth_hint);
                 return (None, None);
             };

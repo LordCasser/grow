@@ -792,7 +792,7 @@ mod restored_stop_gate_tests {
 
     #[test]
     fn accepted_response_without_started_stop_gate_runs_normal_gate() {
-        assert!(matches!(
+        assert!(
             restored_stop_gate_decision(
                 &[],
                 chat_state::EventSeq::new(1),
@@ -800,8 +800,8 @@ mod restored_stop_gate_tests {
                 chat_state::HookEventType::Stop,
                 None,
             )
-            .unwrap(),
-            None
-        ));
+            .unwrap()
+            .is_none()
+        );
     }
 }

@@ -474,10 +474,11 @@ fn render_welcome_done(
         "ctrl+s",
         if in_vscode_family { "ctrl+d" } else { "ctrl+q" },
     );
-    let mut menu_items: Vec<(&str, &str)> = Vec::with_capacity(3);
-    menu_items.push((key_w, "New worktree"));
-    menu_items.push((key_s, "Resume session"));
-    menu_items.push((key_q, "Quit"));
+    let menu_items = [
+        (key_w, "New worktree"),
+        (key_s, "Resume session"),
+        (key_q, "Quit"),
+    ];
     let menu_height = if show_picker {
         0
     } else {

@@ -740,8 +740,10 @@ impl Replay {
                         }
                         MouseEventKind::Up(MouseButton::Left) => {
                             let pressed = node.task_press.take();
-                            if pressed.is_some() && pressed == hit {
-                                let action = self.task_action(index, pressed.unwrap());
+                            if let (Some(pressed), Some(hit)) = (pressed, hit)
+                                && pressed == hit
+                            {
+                                let action = self.task_action(index, pressed);
                                 return self.browse_action(index, action);
                             }
                         }
@@ -805,13 +807,13 @@ impl Replay {
                         return false;
                     }
                     Event::Key(key) => {
-                        if let Some(group) = self.nodes[index].tasks.selected_header_group() {
-                            if matches!(key.code, KeyCode::Left | KeyCode::Right) {
-                                self.nodes[index]
-                                    .tasks
-                                    .set_group_collapsed(group, key.code == KeyCode::Left);
-                                return false;
-                            }
+                        if let Some(group) = self.nodes[index].tasks.selected_header_group()
+                            && matches!(key.code, KeyCode::Left | KeyCode::Right)
+                        {
+                            self.nodes[index]
+                                .tasks
+                                .set_group_collapsed(group, key.code == KeyCode::Left);
+                            return false;
                         }
                         self.nodes[index].tasks.handle_key(key);
                         return false;
@@ -824,19 +826,19 @@ impl Replay {
                 }
             }
         }
-        if !self.nodes[index].browser.owns_input() {
-            if let Event::Key(key) = &event {
-                match key.code {
-                    KeyCode::Char(' ') => {
-                        self.clock.pause_or_resume(now);
-                        return false;
-                    }
-                    KeyCode::Char(']') if !self.nodes[index].browser.has_search_or_help() => {
-                        self.next_record(now);
-                        return false;
-                    }
-                    _ => {}
+        if !self.nodes[index].browser.owns_input()
+            && let Event::Key(key) = &event
+        {
+            match key.code {
+                KeyCode::Char(' ') => {
+                    self.clock.pause_or_resume(now);
+                    return false;
                 }
+                KeyCode::Char(']') if !self.nodes[index].browser.has_search_or_help() => {
+                    self.next_record(now);
+                    return false;
+                }
+                _ => {}
             }
         }
         let node = &mut self.nodes[index];
@@ -956,10 +958,7 @@ impl Replay {
         if let Some(tokens) = surfaces.total_tokens {
             header.push(
                 "context",
-                Line::styled(
-                    format!("⇣{}", tokens.to_string()),
-                    Style::default().fg(theme.gray),
-                ),
+                Line::styled(format!("⇣{}", tokens), Style::default().fg(theme.gray)),
             );
         }
         let total = surfaces.bg_tasks.len()

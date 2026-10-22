@@ -620,22 +620,21 @@ impl tool_runtime::Tool for TaskTool {
             forwarder.abort();
         }
         let result = result?;
-        if result.not_dispatched {
-            if let Some(sender) = planning_sender {
-                let reason = result
-                    .error
-                    .clone()
-                    .unwrap_or_else(|| "coordinator rejected task admission".into());
-                if let Err(error) =
-                    record_undispatched_planning_link(&sender, id.clone(), reason).await
-                {
-                    return Err(tool_runtime::ToolError::custom(
-                        "planning_unconfirmed",
-                        format!(
-                            "Task {id} was not dispatched; its planning link remains pending: {error}"
-                        ),
-                    ));
-                }
+        if result.not_dispatched
+            && let Some(sender) = planning_sender
+        {
+            let reason = result
+                .error
+                .clone()
+                .unwrap_or_else(|| "coordinator rejected task admission".into());
+            if let Err(error) = record_undispatched_planning_link(&sender, id.clone(), reason).await
+            {
+                return Err(tool_runtime::ToolError::custom(
+                    "planning_unconfirmed",
+                    format!(
+                        "Task {id} was not dispatched; its planning link remains pending: {error}"
+                    ),
+                ));
             }
         }
         if result.finalization_pending {

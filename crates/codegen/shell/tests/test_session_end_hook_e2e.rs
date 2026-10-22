@@ -100,7 +100,7 @@ async fn session_end_hook_fires_on_headless_exit() {
         .as_str()
         .unwrap_or_else(|| panic!("hookEventName missing: {envelope}"));
     assert!(
-        event == "session_end" || event == "session_end",
+        event == "session_end",
         "expected SessionEnd event name, got {event:?}"
     );
 

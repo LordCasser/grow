@@ -2346,17 +2346,16 @@ fn emit_subagent_notification(
         update,
         meta: None,
     };
-    if let Some(cmd_tx) = parent_cmd_tx {
-        if cmd_tx
+    if let Some(cmd_tx) = parent_cmd_tx
+        && cmd_tx
             .send(SessionCommand::GrowSessionNotification {
                 notification: notification.clone(),
                 forward_to_gateway: true,
                 restored,
             })
             .is_ok()
-        {
-            return;
-        }
+    {
+        return;
     }
     let mut meta = None;
     crate::util::event_id::ensure_event_id_meta(parent_session_id, &mut meta);
@@ -2610,7 +2609,6 @@ fn read_subagent_output_from_directory(
     let file: OutputFile = serde_json::from_slice(&data).ok()?;
     (file.schema_version == SUBAGENT_OUTPUT_SCHEMA_VERSION).then_some(file.output)
 }
-#[must_use]
 fn persist_subagent_output(
     session: &crate::session::storage::ContainedDirectory,
     result: &SubagentResult,
@@ -3902,14 +3900,12 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
             ),
         }
     }
-    if cold_recovery {
-        if let Err(error) = parent_chat_state.recover_interrupted_durably().await {
-            tracing::error!(
-                %error,
-                "failed to close local recovery scopes after subagent reconciliation"
-            );
-            return;
-        }
+    if cold_recovery && let Err(error) = parent_chat_state.recover_interrupted_durably().await {
+        tracing::error!(
+            %error,
+            "failed to close local recovery scopes after subagent reconciliation"
+        );
+        return;
     }
 
     // Only now may the current owner receive projections or receipts. Reuse

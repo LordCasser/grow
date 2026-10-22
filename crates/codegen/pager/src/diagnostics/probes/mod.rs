@@ -102,8 +102,7 @@ pub fn collect_startup_tui<'a>(
     tmux: &dyn TmuxOptionQuery,
 ) -> ProbeSnapshot<'a> {
     let is_wayland = crate::host::DisplayServer::current() == crate::host::DisplayServer::Wayland;
-    let native_tool =
-        startup_native_tool(is_wayland, || shell::util::clipboard::native_tool_name());
+    let native_tool = startup_native_tool(is_wayland, shell::util::clipboard::native_tool_name);
     collect_common(
         terminal,
         runtime,

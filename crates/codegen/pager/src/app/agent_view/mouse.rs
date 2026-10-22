@@ -449,13 +449,12 @@ impl AgentView {
                             }
                             return InputOutcome::Changed;
                         }
-                        if let Some(id) = self.queue.send_now_click(mouse.column, mouse.row) {
-                            if self.session.state.is_turn_running()
-                                && let InputOutcome::Action(action) =
-                                    self.force_interject_queue_row(id, effects)
-                            {
-                                return InputOutcome::Action(action);
-                            }
+                        if let Some(id) = self.queue.send_now_click(mouse.column, mouse.row)
+                            && self.session.state.is_turn_running()
+                            && let InputOutcome::Action(action) =
+                                self.force_interject_queue_row(id, effects)
+                        {
+                            return InputOutcome::Action(action);
                         }
                         if let Some(id) = self.queue.edit_click(mouse.column, mouse.row)
                             && self.set_active_pane(AgentPane::Queue, effects)

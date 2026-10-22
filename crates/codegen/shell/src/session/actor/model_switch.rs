@@ -98,7 +98,7 @@ impl PendingControlSettlement {
                     Err(error)
                 } else {
                     result
-                        .map(|model_id| crate::session::DesiredStateOutcome::Applied(model_id))
+                        .map(crate::session::DesiredStateOutcome::Applied)
                         .map_err(crate::session::mark_control_terminal_published)
                 };
                 let _ = respond_to.send(response);
@@ -438,8 +438,10 @@ impl SessionActor {
                 crate::agent::config::ModelEntry::baseline(auxiliary_id),
             );
         }
-        let mut config = crate::agent::config::Config::default();
-        config.image_description_model = image_description_model;
+        let config = crate::agent::config::Config {
+            image_description_model,
+            ..crate::agent::config::Config::default()
+        };
         let manager = crate::agent::models::ModelsManager::new(models, model_id, config);
         std::sync::Arc::new(manager.published_catalog())
     }
@@ -3114,16 +3116,17 @@ mod tests {
                     description: None,
                     default: true,
                 }];
-                let mut catalog_config = crate::agent::config::Config::default();
-                catalog_config.image_description_model = None;
+                let catalog_config = crate::agent::config::Config::default();
                 let manager = crate::agent::models::ModelsManager::new(
                     indexmap::IndexMap::from([("provider/new".to_owned(), selected)]),
                     crate::agent::models::ModelId::new("provider/new"),
                     catalog_config,
                 );
                 let catalog = std::sync::Arc::new(manager.published_catalog());
-                let mut selected_config = sampler::SamplerConfig::default();
-                selected_config.model = "new-wire-model".to_owned();
+                let selected_config = sampler::SamplerConfig {
+                    model: "new-wire-model".to_owned(),
+                    ..sampler::SamplerConfig::default()
+                };
                 let selected_route = SessionActor::selection_route_for_test(
                     crate::agent::models::ModelId::new("provider/new"),
                     selected_config,
@@ -3808,10 +3811,12 @@ mod tests {
                 );
                 actor.state.lock().await.foreground = ForegroundState::Compaction;
 
-                let mut first = sampler::SamplerConfig::default();
-                first.model = "first-wire".into();
-                first.base_url = "https://first.example/v1".into();
-                first.context_window = 32_000;
+                let first = sampler::SamplerConfig {
+                    model: "first-wire".into(),
+                    base_url: "https://first.example/v1".into(),
+                    context_window: 32_000,
+                    ..sampler::SamplerConfig::default()
+                };
                 let first_catalog = SessionActor::published_catalog_for_test(
                     crate::agent::models::ModelId::new("first/catalog"),
                     first,
@@ -3825,10 +3830,12 @@ mod tests {
                     .admit_model_catalog_reload(first_catalog, first_tx)
                     .await;
 
-                let mut latest = sampler::SamplerConfig::default();
-                latest.model = "latest-wire".into();
-                latest.base_url = "https://latest.example/v1".into();
-                latest.context_window = 64_000;
+                let latest = sampler::SamplerConfig {
+                    model: "latest-wire".into(),
+                    base_url: "https://latest.example/v1".into(),
+                    context_window: 64_000,
+                    ..sampler::SamplerConfig::default()
+                };
                 let latest_catalog = SessionActor::published_catalog_for_test(
                     crate::agent::models::ModelId::new("latest/catalog"),
                     latest,
@@ -3885,9 +3892,11 @@ mod tests {
                 );
                 actor.state.lock().await.foreground = ForegroundState::Compaction;
 
-                let mut first_reload = sampler::SamplerConfig::default();
-                first_reload.model = "reload-one-wire".into();
-                first_reload.context_window = 32_000;
+                let first_reload = sampler::SamplerConfig {
+                    model: "reload-one-wire".into(),
+                    context_window: 32_000,
+                    ..sampler::SamplerConfig::default()
+                };
                 let first_catalog = SessionActor::published_catalog_for_test(
                     crate::agent::models::ModelId::new("reload/one"),
                     first_reload,
@@ -3901,9 +3910,11 @@ mod tests {
                     .admit_model_catalog_reload(first_catalog, first_tx)
                     .await;
 
-                let mut selected = sampler::SamplerConfig::default();
-                selected.model = "user-wire".into();
-                selected.context_window = 64_000;
+                let selected = sampler::SamplerConfig {
+                    model: "user-wire".into(),
+                    context_window: 64_000,
+                    ..sampler::SamplerConfig::default()
+                };
                 let (selection_tx, selection_rx) = tokio::sync::oneshot::channel();
                 let selection_catalog = SessionActor::published_catalog_for_test(
                     crate::agent::models::ModelId::new("user/selection"),
@@ -3926,9 +3937,11 @@ mod tests {
                     )
                     .await;
 
-                let mut second_reload = sampler::SamplerConfig::default();
-                second_reload.model = "user-wire-refreshed".into();
-                second_reload.context_window = 96_000;
+                let second_reload = sampler::SamplerConfig {
+                    model: "user-wire-refreshed".into(),
+                    context_window: 96_000,
+                    ..sampler::SamplerConfig::default()
+                };
                 let second_catalog = SessionActor::published_catalog_for_test(
                     crate::agent::models::ModelId::new("user/selection"),
                     second_reload,
@@ -4448,8 +4461,10 @@ mod tests {
                         default: true,
                     }];
                 let vision_entry = crate::agent::config::ModelEntry::baseline("vision-wire-model");
-                let mut config = crate::agent::config::Config::default();
-                config.image_description_model = Some("catalog/vision".to_owned());
+                let config = crate::agent::config::Config {
+                    image_description_model: Some("catalog/vision".to_owned()),
+                    ..crate::agent::config::Config::default()
+                };
                 let selected_manager = crate::agent::models::ModelsManager::new(
                     indexmap::IndexMap::from([
                         ("catalog/next".to_owned(), selected_entry),

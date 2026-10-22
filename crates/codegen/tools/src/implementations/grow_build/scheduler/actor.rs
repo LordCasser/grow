@@ -813,12 +813,10 @@ impl SchedulerActor {
             return;
         }
 
-        if should_remove {
-            if occurrence.is_none() {
-                let mut resources = self.resources.lock().await;
-                let state = resources.get_or_default::<State<SchedulerState>>();
-                state.tasks.retain(|task| task.id != task_id);
-            }
+        if should_remove && occurrence.is_none() {
+            let mut resources = self.resources.lock().await;
+            let state = resources.get_or_default::<State<SchedulerState>>();
+            state.tasks.retain(|task| task.id != task_id);
         }
 
         match outcome {

@@ -604,7 +604,6 @@ async fn subagent_lifecycle_soak_bounds_threads_fds_and_heap() {
             let (command_tx, command_rx) = tokio::sync::mpsc::unbounded_channel();
             let config = CoordinatorConfig {
                 foreground_budget: Duration::from_secs(600),
-                ..CoordinatorConfig::default()
             };
             let gate = Arc::new(tokio::sync::Semaphore::new(0));
             tokio::task::spawn_local(

@@ -1703,7 +1703,7 @@ pub(crate) async fn run(
             // starvation direction (streaming redraws starving behind held
             // keys), and cancel/quit must stay above the firehose regardless.
             msg = acp_rx.recv(), if input_rx.is_empty()
-                && !pending_paste_deadline(&pending_paste).is_some_and(|at| at <= Instant::now()) => {
+                && pending_paste_deadline(&pending_paste).is_none_or(|at| at > Instant::now()) => {
                 let Some(msg) = msg else { break };
                 let mut apply_timer = diagnostics::instrumentation::timer("pager.acp.apply_batch");
                 apply_timer.with_field("loading", app.active_agent().is_some_and(|agent| agent.session.loading_replay));
@@ -3677,7 +3677,7 @@ mod tests {
         );
 
         let mut tasks = JoinSet::new();
-        assert!(process_draw_effects(&mut tasks, &mut app) == false);
+        assert!(!process_draw_effects(&mut tasks, &mut app));
         let result = tasks.join_next().await.unwrap().unwrap();
         assert!(matches!(
             result,

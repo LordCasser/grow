@@ -665,9 +665,7 @@ pub fn take_minimal_transcript(app: &mut AppView) -> Option<TranscriptBuild> {
         .agents
         .get(&build.agent)
         .is_some_and(|root| root.session_reload.is_some());
-    let Some(agent) = transcript_owner_agent(app, &build) else {
-        return None;
-    };
+    let agent = transcript_owner_agent(app, &build)?;
     if root_reloading || agent.session_reload.is_some() {
         // Also cover requests created after the reconnect entry hook.
         build.restart_after_reload = true;

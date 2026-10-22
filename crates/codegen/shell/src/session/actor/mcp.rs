@@ -83,10 +83,10 @@ impl SessionActor {
             } {
                 continue;
             }
-            let eligible = !self
+            let eligible = self
                 .subagent_capabilities
                 .as_ref()
-                .is_some_and(|state| !state.mcp_server_eligible(&server));
+                .is_none_or(|state| state.mcp_server_eligible(&server));
             // Discovery failure is not an empty catalog. Retain the last
             // complete catalog unless the client retired or eligibility ended.
             if shared_clients.contains_key(&server)

@@ -1692,15 +1692,15 @@ pub async fn run_leader_server(
                             &mut retired_sessions,
                         );
                     }
-                    if let (Some(json), Some(client)) = (json.as_ref(), clients.get_mut(&id)) {
-                        if let Some(mode) = extract_permission_mode_change(json) {
-                            client.capabilities.permission_mode = mode;
-                            debug!(
-                                client_id = id.0,
-                                ?mode,
-                                "Updated client permission mode from notification"
-                            );
-                        }
+                    if let (Some(json), Some(client)) = (json.as_ref(), clients.get_mut(&id))
+                        && let Some(mode) = extract_permission_mode_change(json)
+                    {
+                        client.capabilities.permission_mode = mode;
+                        debug!(
+                            client_id = id.0,
+                            ?mode,
+                            "Updated client permission mode from notification"
+                        );
                     }
                     if let (Some(json), Some(client)) = (json.as_mut(), clients.get_mut(&id)) {
                         payload_mutated |= inject_queue_control_client_id(json, id);
@@ -1970,10 +1970,10 @@ pub async fn run_leader_server(
                                 candidate.failed = false;
                                 candidate.buffer_unknown = signal.output_delivery
                                     == Some(SamplingOutputDelivery::Retractable);
-                                if candidate.buffer_unknown {
-                                    if let Err(error) = candidate.payloads.push(&payload) {
-                                        candidate.fail(spool_directory, error);
-                                    }
+                                if candidate.buffer_unknown
+                                    && let Err(error) = candidate.payloads.push(&payload)
+                                {
+                                    candidate.fail(spool_directory, error);
                                 }
                             }
                         }
@@ -2021,8 +2021,8 @@ pub async fn run_leader_server(
                                 }
                                 candidate.terminal = Some(SamplingAttemptBoundary::Accepted);
                             }
-                            if let Some(mut payloads) = accepted_payloads {
-                                if let Err(error) = payloads.for_each(|payload| {
+                            if let Some(mut payloads) = accepted_payloads
+                                && let Err(error) = payloads.for_each(|payload| {
                                     fanout_sampling_payload(
                                         &signal.key,
                                         payload,
@@ -2031,10 +2031,10 @@ pub async fn run_leader_server(
                                         &child_sessions,
                                         &mut load_live_buffer,
                                     );
-                                }) {
-                                    error!(%error, "Accepted candidate spool read failed; requesting canonical resync");
-                                    needs_resync = true;
-                                }
+                                })
+                            {
+                                error!(%error, "Accepted candidate spool read failed; requesting canonical resync");
+                                needs_resync = true;
                             }
                             if needs_resync {
                                 resync_non_retracting_subscribers(
@@ -2057,10 +2057,11 @@ pub async fn run_leader_server(
                             if candidate.key.as_ref() == Some(&signal.key)
                                 && candidate.terminal.is_none()
                             {
-                                if candidate.buffer_unknown && !candidate.failed {
-                                    if let Err(error) = candidate.payloads.push(&payload) {
-                                        candidate.fail(spool_directory, error);
-                                    }
+                                if candidate.buffer_unknown
+                                    && !candidate.failed
+                                    && let Err(error) = candidate.payloads.push(&payload)
+                                {
+                                    candidate.fail(spool_directory, error);
                                 }
                             } else {
                                 // A preview arriving after its terminal
@@ -4374,19 +4375,19 @@ mod tests {
             .replace("retractable", "irreversible");
         let irreversible_preview = preview.replace("req-1", "req-3");
         let irreversible_accepted = accepted.replace("req-1", "req-3");
-        response_tx.send(irreversible_started.into()).unwrap();
+        response_tx.send(irreversible_started).unwrap();
         assert!(
             next_acp_payload(&mut buffered_reader)
                 .await
                 .is_some_and(|payload| payload.contains("started"))
         );
-        response_tx.send(irreversible_preview.into()).unwrap();
+        response_tx.send(irreversible_preview).unwrap();
         assert!(
             next_acp_payload(&mut buffered_reader)
                 .await
                 .is_some_and(|payload| payload.contains("preview-1"))
         );
-        response_tx.send(irreversible_accepted.into()).unwrap();
+        response_tx.send(irreversible_accepted).unwrap();
         assert!(
             next_acp_payload(&mut buffered_reader)
                 .await

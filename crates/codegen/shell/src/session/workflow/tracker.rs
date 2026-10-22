@@ -2228,8 +2228,10 @@ mod tests {
         let primary = workflow_model_entry("text-wire", 0.2);
         let mut vision = workflow_model_entry("vision-wire", 0.1);
         vision.info.user_selectable = false;
-        let mut cfg = crate::agent::config::Config::default();
-        cfg.image_description_model = Some("catalog/vision".to_owned());
+        let cfg = crate::agent::config::Config {
+            image_description_model: Some("catalog/vision".to_owned()),
+            ..crate::agent::config::Config::default()
+        };
         let manager = crate::agent::models::ModelsManager::new(
             indexmap::IndexMap::from([
                 ("catalog/text".to_owned(), primary.clone()),

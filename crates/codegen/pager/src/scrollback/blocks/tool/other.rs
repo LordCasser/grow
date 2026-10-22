@@ -447,15 +447,15 @@ impl BlockContent for OtherToolCallBlock {
                             .into(),
                     ]
                 };
-                if let Some(preview) = &self.communication_preview {
-                    if self.communication_body.is_none() {
-                        lines.extend(Self::communication_preview_lines(
-                            preview,
-                            content_width,
-                            theme.primary(),
-                            theme.muted(),
-                        ));
-                    }
+                if let Some(preview) = &self.communication_preview
+                    && self.communication_body.is_none()
+                {
+                    lines.extend(Self::communication_preview_lines(
+                        preview,
+                        content_width,
+                        theme.primary(),
+                        theme.muted(),
+                    ));
                 }
                 if let Some(body) = &self.communication_body {
                     lines.extend(body.preview(content_width).lines);

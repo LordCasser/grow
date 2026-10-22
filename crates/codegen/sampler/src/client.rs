@@ -1989,6 +1989,23 @@ impl SamplingClient {
     }
 }
 
+// Audit capture bounds error and non-streaming response reads as well as SSE.
+async fn read_response_bytes(response: reqwest::Response) -> Result<Vec<u8>> {
+    let Some(audit) = crate::audit::AttemptEvidence::current() else {
+        return Ok(response.bytes().await?.to_vec());
+    };
+    let mut bytes = Vec::new();
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk?;
+        audit
+            .response(&chunk)
+            .map_err(SamplingError::EventStreamError)?;
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3119,21 +3136,4 @@ mod tests {
             rs::ResponseStreamEvent::ResponseOutputTextDelta(_)
         ));
     }
-}
-
-// Audit capture bounds error and non-streaming response reads as well as SSE.
-async fn read_response_bytes(response: reqwest::Response) -> Result<Vec<u8>> {
-    let Some(audit) = crate::audit::AttemptEvidence::current() else {
-        return Ok(response.bytes().await?.to_vec());
-    };
-    let mut bytes = Vec::new();
-    let mut stream = response.bytes_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        audit
-            .response(&chunk)
-            .map_err(SamplingError::EventStreamError)?;
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes)
 }

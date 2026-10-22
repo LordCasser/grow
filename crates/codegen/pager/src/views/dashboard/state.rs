@@ -2272,10 +2272,8 @@ impl DashboardState {
         // from Finder, or Copy on a file). Resolve them synchronously and win —
         // before deferring the clipboard probe, so a path paste is not ALSO
         // attached as the clipboard raster (no double insert).
-        if !text.trim().is_empty() {
-            if self.insert_dropped_paths(text, peek, effects).is_some() {
-                return InputOutcome::Changed;
-            }
+        if !text.trim().is_empty() && self.insert_dropped_paths(text, peek, effects).is_some() {
+            return InputOutcome::Changed;
         }
 
         // Defer the clipboard image / file-url probe (osascript) off the event
@@ -2515,10 +2513,9 @@ impl DashboardState {
         // Cmd+C) — before deferring, so it is not double-attached.
         if let Some(text) = clipboard_text.as_deref()
             && !text.trim().is_empty()
+            && self.insert_dropped_paths(text, peek, effects).is_some()
         {
-            if self.insert_dropped_paths(text, peek, effects).is_some() {
-                return InputOutcome::Changed;
-            }
+            return InputOutcome::Changed;
         }
 
         // Image likely on the pasteboard → defer; the image wins over the

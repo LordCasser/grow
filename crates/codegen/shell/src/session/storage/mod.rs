@@ -105,8 +105,8 @@ fn contained_directory(
 ) -> io::Result<PathBuf> {
     #[cfg(any(unix, windows))]
     {
-        return ContainedDirectory::open(root, relative, description, create_missing)
-            .map(|directory| directory.path);
+        ContainedDirectory::open(root, relative, description, create_missing)
+            .map(|directory| directory.path)
     }
     #[cfg(not(any(unix, windows)))]
     {

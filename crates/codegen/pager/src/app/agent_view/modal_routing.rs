@@ -150,21 +150,21 @@ fn wrap_desc_lines(text: &str, width: usize, max_lines: usize) -> Vec<String> {
         while split > 0 && !rest.is_char_boundary(split) {
             split -= 1;
         }
-        if let Some(space) = rest[..split].rfind(char::is_whitespace) {
-            if space > 0 {
-                split = space;
-            }
+        if let Some(space) = rest[..split].rfind(char::is_whitespace)
+            && space > 0
+        {
+            split = space;
         }
         let (head, tail) = rest.split_at(split);
         lines.push(head.trim_end().to_string());
         rest = tail.trim_start();
         if lines.len() == max_lines && !rest.is_empty() {
             // Ellipsize the last line if more text remains.
-            if let Some(last) = lines.last_mut() {
-                if last.len() > 1 {
-                    last.pop();
-                    last.push('…');
-                }
+            if let Some(last) = lines.last_mut()
+                && last.len() > 1
+            {
+                last.pop();
+                last.push('…');
             }
             break;
         }
@@ -1368,8 +1368,8 @@ impl AgentView {
                 .iter()
                 .map(|(i, e)| {
                     PickerEntry::Row(PickerRow {
-                        label: &e.title,
-                        right_label: &e.description,
+                        label: e.title,
+                        right_label: e.description,
                         selected: filtered
                             .get(state.selected)
                             .map(|(o, _)| *o)

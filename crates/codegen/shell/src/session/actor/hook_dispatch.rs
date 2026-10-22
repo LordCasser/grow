@@ -539,7 +539,7 @@ impl SessionActor {
             })
             .collect::<Vec<_>>();
         let annotation_tool_name = tool_name
-            .or_else(|| match &projection.cause {
+            .or(match &projection.cause {
                 chat_state::HookCause::Tool { call_id } => Some(call_id.as_str()),
                 _ => None,
             })

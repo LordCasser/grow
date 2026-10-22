@@ -607,7 +607,7 @@ pub(super) fn start_user_question_worker(
     let session_id = session.session_info.id.clone();
     let behavior = session.behavior.clone();
     let pending_interactions = session.pending_interactions.clone();
-    let weak_session = Arc::downgrade(&session);
+    let weak_session = Arc::downgrade(session);
     let shutdown = session.background_service_shutdown.clone();
     let chat_state_handle = session.chat_state_handle.clone();
     let mut user_question_rx = user_question_rx;
@@ -939,7 +939,7 @@ pub(crate) async fn spawn_session_actor(
                         ui_terminal_durable: false,
                     },
                 )
-                .map_err(|error| agent::AgentBuildError::InvalidConfig(error))?;
+                .map_err(agent::AgentBuildError::InvalidConfig)?;
             }
             let surface = timeline.surface().to_vec();
             (Some(timeline), surface, None, receipts, history)
@@ -3052,17 +3052,16 @@ pub(crate) async fn spawn_session_actor(
                     break;
                 };
                 let audit_sequence = event.audit_sequence;
-                if let Some((durable, live)) = subagent_permission_updates(event) {
-                    if let Err(error) = session.send_grow_passive_notification(durable, live).await
-                    {
-                        tracing::error!(
-                            %error,
-                            "failed to durably append subagent permission audit event"
-                        );
-                        return Err(format!(
-                            "subagent permission audit event was not durable: {error}"
-                        ));
-                    }
+                if let Some((durable, live)) = subagent_permission_updates(event)
+                    && let Err(error) = session.send_grow_passive_notification(durable, live).await
+                {
+                    tracing::error!(
+                        %error,
+                        "failed to durably append subagent permission audit event"
+                    );
+                    return Err(format!(
+                        "subagent permission audit event was not durable: {error}"
+                    ));
                 }
                 session
                     .permissions

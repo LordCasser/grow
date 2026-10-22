@@ -58,15 +58,13 @@ pub(crate) struct FrozenSkillInvocation {
 /// resolved durable turn only after the Hook completes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "route", rename_all = "snake_case", deny_unknown_fields)]
+#[derive(Default)]
 pub(crate) enum InputRequestRoute {
+    #[default]
     Fifo,
-    Steer { expected_turn_id: String },
-}
-
-impl Default for InputRequestRoute {
-    fn default() -> Self {
-        Self::Fifo
-    }
+    Steer {
+        expected_turn_id: String,
+    },
 }
 
 pub(crate) fn input_id_for_prompt(session_id: &str, prompt_id: &str) -> String {
@@ -683,7 +681,7 @@ pub(crate) fn reconcile_image_blobs(
             && valid_hash(hash)
             && !retained.contains(hash)
         {
-            match directory.remove_file(&name, false) {
+            match directory.remove_file(name, false) {
                 Ok(()) => removed += 1,
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {}
                 Err(error) => return Err(error),

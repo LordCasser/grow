@@ -1875,7 +1875,7 @@ mod tests {
                 )
                 .await
         });
-        while receiver.len() == 0 {
+        while receiver.is_empty() {
             tokio::task::yield_now().await;
         }
 

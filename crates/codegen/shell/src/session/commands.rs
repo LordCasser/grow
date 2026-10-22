@@ -295,57 +295,6 @@ pub(crate) fn ok_end_turn(tokens: u64, snapshot: Option<TurnDeltaSnapshot>) -> P
         usage: None,
     })
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn turn_boundary_failure_is_a_typed_session_fatal_error() {
-        let error = fatal_turn_boundary_error("terminal", "disk rejected append");
-        assert!(is_fatal_turn_boundary_error(&error));
-        assert_eq!(
-            error
-                .data
-                .as_ref()
-                .and_then(|data| data.get("phase"))
-                .and_then(serde_json::Value::as_str),
-            Some("terminal")
-        );
-        assert!(!is_fatal_turn_boundary_error(
-            &acp::Error::internal_error().data("ordinary turn error")
-        ));
-    }
-
-    #[test]
-    fn response_projection_errors_use_the_fatal_boundary_marker() {
-        let error = response_projection_error("projection acknowledgement lost");
-        assert!(is_fatal_turn_boundary_error(&error));
-        assert_eq!(
-            error
-                .data
-                .as_ref()
-                .and_then(|data| data.get("phase"))
-                .and_then(serde_json::Value::as_str),
-            Some("response-projection")
-        );
-    }
-
-    #[test]
-    fn response_admission_errors_use_the_fatal_boundary_marker() {
-        for source in [
-            chat_state::TimelineWriteError::AcknowledgementLost,
-            chat_state::TimelineWriteError::ResponseAdmissionConflict,
-        ] {
-            let error = response_admission_error(source);
-            assert!(is_fatal_turn_boundary_error(&error));
-            assert_eq!(
-                error.data.as_ref().and_then(|data| data.get("phase")),
-                Some(&serde_json::json!("response-admission"))
-            );
-        }
-    }
-}
 pub enum SessionCommand {
     /// Hold a child initializer until this session's durable runtime checkpoint
     /// has a stable node identity.
@@ -1015,4 +964,55 @@ pub enum SessionCommand {
         commit: Option<String>,
         branch: Option<String>,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn turn_boundary_failure_is_a_typed_session_fatal_error() {
+        let error = fatal_turn_boundary_error("terminal", "disk rejected append");
+        assert!(is_fatal_turn_boundary_error(&error));
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("phase"))
+                .and_then(serde_json::Value::as_str),
+            Some("terminal")
+        );
+        assert!(!is_fatal_turn_boundary_error(
+            &acp::Error::internal_error().data("ordinary turn error")
+        ));
+    }
+
+    #[test]
+    fn response_projection_errors_use_the_fatal_boundary_marker() {
+        let error = response_projection_error("projection acknowledgement lost");
+        assert!(is_fatal_turn_boundary_error(&error));
+        assert_eq!(
+            error
+                .data
+                .as_ref()
+                .and_then(|data| data.get("phase"))
+                .and_then(serde_json::Value::as_str),
+            Some("response-projection")
+        );
+    }
+
+    #[test]
+    fn response_admission_errors_use_the_fatal_boundary_marker() {
+        for source in [
+            chat_state::TimelineWriteError::AcknowledgementLost,
+            chat_state::TimelineWriteError::ResponseAdmissionConflict,
+        ] {
+            let error = response_admission_error(source);
+            assert!(is_fatal_turn_boundary_error(&error));
+            assert_eq!(
+                error.data.as_ref().and_then(|data| data.get("phase")),
+                Some(&serde_json::json!("response-admission"))
+            );
+        }
+    }
 }

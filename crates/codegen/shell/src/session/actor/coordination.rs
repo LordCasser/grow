@@ -284,8 +284,8 @@ impl SessionActor {
                 }
             }
         }
-        if same_cwd || delegated {
-            if let Err(error) = self
+        if (same_cwd || delegated)
+            && let Err(error) = self
                 .record_coordination_approval_notice(
                     inquiry,
                     if delegated {
@@ -295,12 +295,11 @@ impl SessionActor {
                     },
                 )
                 .await
-            {
-                return failed(
-                    inquiry,
-                    format!("failed to persist coordination approval audit: {error}"),
-                );
-            }
+        {
+            return failed(
+                inquiry,
+                format!("failed to persist coordination approval audit: {error}"),
+            );
         }
         if inquiry.cancellation.is_cancelled() {
             return inquiry.cancellation.outcome(&inquiry.inquiry_id);

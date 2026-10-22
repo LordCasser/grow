@@ -586,10 +586,7 @@ enabled = false
             .into_iter()
             .filter(|server| mcp_server_name(server).starts_with("identity-"))
             .collect();
-        let mut names: Vec<_> = merged
-            .iter()
-            .map(|server| mcp_server_name(server))
-            .collect();
+        let mut names: Vec<_> = merged.iter().map(mcp_server_name).collect();
         names.sort_unstable();
         assert_eq!(names, ["identity-first", "identity-second"]);
     }

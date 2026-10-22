@@ -150,7 +150,6 @@ async fn provider_config_edit_invalidates_cached_token() {
             token_ttl_secs: Some(3600),
             timeout_secs: None,
             cwd: None,
-            ..Default::default()
         },
     );
     assert_eq!(
@@ -184,7 +183,6 @@ async fn provider_401_recovery_reminted_under_edited_config() {
             token_ttl_secs: Some(3600),
             timeout_secs: None,
             cwd: None,
-            ..Default::default()
         },
     );
     assert_eq!(
@@ -210,7 +208,6 @@ async fn provider_timeout_edit_does_not_invalidate_token() {
             token_ttl_secs: Some(3600),
             timeout_secs: Some(5),
             cwd: None,
-            ..Default::default()
         },
     );
     assert_eq!(
@@ -236,7 +233,6 @@ async fn provider_cwd_edit_invalidates_cached_token() {
             token_ttl_secs: Some(3600),
             timeout_secs: None,
             cwd: Some("/some/other/dir".to_owned()),
-            ..Default::default()
         },
     );
     assert_eq!(
@@ -329,7 +325,6 @@ async fn provider_refresh_sets_expired_env() {
             token_ttl_secs: Some(3600),
             timeout_secs: None,
             cwd: None,
-            ..Default::default()
         },
     );
     assert_eq!(
@@ -360,7 +355,6 @@ async fn provider_concurrent_mints_single_flight() {
             token_ttl_secs: Some(3600),
             timeout_secs: None,
             cwd: None,
-            ..Default::default()
         },
     );
     let (a, b) = tokio::join!(
@@ -409,7 +403,6 @@ async fn provider_expiry_source_precedence() {
                 token_ttl_secs,
                 timeout_secs: None,
                 cwd: None,
-                ..Default::default()
             },
         );
         let first = provider
@@ -468,7 +461,6 @@ async fn provider_unusable_expiry_still_mints() {
             token_ttl_secs: Some(u64::MAX),
             timeout_secs: None,
             cwd: None,
-            ..Default::default()
         },
     );
     assert_eq!(
@@ -494,7 +486,6 @@ async fn provider_args_run_without_a_shell() {
             token_ttl_secs: Some(3600),
             timeout_secs: None,
             cwd: None,
-            ..Default::default()
         },
     );
     assert_eq!(
@@ -513,7 +504,6 @@ async fn provider_command_times_out() {
             token_ttl_secs: None,
             timeout_secs: Some(1),
             cwd: None,
-            ..Default::default()
         },
     );
     let start = std::time::Instant::now();
@@ -591,7 +581,6 @@ async fn provider_zero_timeout_clamps_to_one_second() {
             token_ttl_secs: Some(3600),
             timeout_secs: Some(0),
             cwd: None,
-            ..Default::default()
         },
     );
     assert_eq!(
@@ -609,7 +598,6 @@ async fn provider_zero_timeout_clamps_to_one_second() {
             token_ttl_secs: Some(3600),
             timeout_secs: Some(0),
             cwd: None,
-            ..Default::default()
         },
     );
     assert!(
@@ -633,7 +621,6 @@ async fn mint_error_messages_distinguish_failure_modes() {
             token_ttl_secs: None,
             timeout_secs: Some(1),
             cwd: None,
-            ..Default::default()
         },
     );
     let err = mint_provider_token(&timed_out, false, None)
@@ -650,7 +637,6 @@ async fn mint_error_messages_distinguish_failure_modes() {
             token_ttl_secs: None,
             timeout_secs: Some(5),
             cwd: None,
-            ..Default::default()
         },
     );
     let err = mint_provider_token(&missing, false, None)
@@ -667,7 +653,6 @@ async fn mint_error_messages_distinguish_failure_modes() {
             token_ttl_secs: None,
             timeout_secs: Some(5),
             cwd: None,
-            ..Default::default()
         },
     );
     let err = mint_provider_token(&empty_output, false, None)
@@ -690,7 +675,6 @@ async fn re_mint_hands_the_prior_token_back_to_the_command() {
             token_ttl_secs: Some(3600),
             timeout_secs: None,
             cwd: None,
-            ..Default::default()
         },
     );
 
@@ -727,7 +711,6 @@ async fn failed_401_remint_invalidates_the_cached_token() {
             token_ttl_secs: Some(3600),
             timeout_secs: None,
             cwd: None,
-            ..Default::default()
         },
     );
 
@@ -767,7 +750,6 @@ async fn failed_pre_turn_mint_does_not_serve_the_stale_token() {
             token_ttl_secs: Some(3600),
             timeout_secs: None,
             cwd: None,
-            ..Default::default()
         },
     );
 
@@ -800,7 +782,6 @@ async fn provider_output_over_cap_fails_closed() {
             token_ttl_secs: None,
             timeout_secs: Some(5),
             cwd: None,
-            ..Default::default()
         },
     );
     let err = mint_provider_token(&provider, false, None)
@@ -920,7 +901,6 @@ async fn provider_resolves_relative_program_against_cwd() {
             token_ttl_secs: Some(3600),
             timeout_secs: None,
             cwd: Some(dir.path().to_string_lossy().into_owned()),
-            ..Default::default()
         },
     );
     assert_eq!(
@@ -945,7 +925,6 @@ async fn provider_command_runs_in_cwd() {
             token_ttl_secs: Some(3600),
             timeout_secs: None,
             cwd: Some(dir.path().to_string_lossy().into_owned()),
-            ..Default::default()
         },
     );
     assert_eq!(

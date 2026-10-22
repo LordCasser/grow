@@ -965,7 +965,7 @@ impl SlashController {
                     } else {
                         let new_exact = trigger.match_text == trimmed;
                         let current_exact = current_trigger.match_text == trimmed;
-                        new_exact > current_exact
+                        new_exact & !current_exact
                             || (new_exact == current_exact
                                 && trigger.alias.is_none()
                                 && current_trigger.alias.is_some())

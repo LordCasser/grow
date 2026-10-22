@@ -1862,8 +1862,8 @@ impl SessionActor {
 
         let workflow_runs = {
             let tracker = self.workflow_tracker().await;
-            let snapshot = tracker.lock().live_status_snapshot();
-            snapshot
+
+            tracker.lock().live_status_snapshot()
         };
         if !workflow_runs.is_empty() {
             let section = format!(

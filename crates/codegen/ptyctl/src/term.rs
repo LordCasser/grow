@@ -311,13 +311,14 @@ impl Terminal {
 
                 // Replace cursor position if requested.
                 let is_cursor = cursor.row == line_idx + 1 && cursor.col == col_idx + 1;
-                if is_cursor && opts.cursor_char.is_some() {
-                    text.push(opts.cursor_char.unwrap());
-                } else {
-                    text.push(cell.c);
-                    if let Some(zw) = cell.zerowidth() {
-                        for &c in zw {
-                            text.push(c);
+                match (is_cursor, opts.cursor_char) {
+                    (true, Some(cursor_char)) => text.push(cursor_char),
+                    _ => {
+                        text.push(cell.c);
+                        if let Some(zw) = cell.zerowidth() {
+                            for &c in zw {
+                                text.push(c);
+                            }
                         }
                     }
                 }

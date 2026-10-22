@@ -400,7 +400,7 @@ mod feedback_contract_tests {
                 let storage = memory::MemoryStorage::new_flat(temp.path(), temp.path());
                 let sessions = storage.sessions_dir();
                 std::fs::create_dir_all(&sessions).unwrap();
-                std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0)).unwrap();
+                std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o0)).unwrap();
                 if std::fs::read_dir(&sessions).is_ok() {
                     // Privileged test runners can bypass mode bits.
                     std::fs::set_permissions(&sessions, std::fs::Permissions::from_mode(0o700))

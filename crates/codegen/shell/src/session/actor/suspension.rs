@@ -230,8 +230,7 @@ impl SessionActor {
                         .map_err(|error| acp::Error::internal_error().data(error))?,
                         crate::agent::subagent::DurableChildOperation::Completed(_)
                     )
-                {
-                    if let Some(terminal) =
+                    && let Some(terminal) =
                         canonical_events.iter().find_map(|event| match &event.kind {
                             chat_state::TimelineEventKind::Subagent(
                                 chat_state::SubagentEvent::Ended(terminal),
@@ -242,13 +241,12 @@ impl SessionActor {
                             }
                             _ => None,
                         })
-                    {
-                        self.settle_restored_child_completion_receipt(
-                            &root_id, spawn_seq, &spawn, &terminal,
-                        )
-                        .await
-                        .map_err(|error| acp::Error::internal_error().data(error))?;
-                    }
+                {
+                    self.settle_restored_child_completion_receipt(
+                        &root_id, spawn_seq, &spawn, &terminal,
+                    )
+                    .await
+                    .map_err(|error| acp::Error::internal_error().data(error))?;
                 }
                 if result_already_present {
                     continue;
@@ -915,12 +913,12 @@ impl SessionActor {
                 return Err(reason);
             }
         }
-        if let Some(drainer) = self.sampler_event_drainer.take() {
-            if let Err(error) = drainer.await {
-                let reason = format!("sampler settlement drainer failed: {error}");
-                *self.runtime_suspension_fault.borrow_mut() = Some(reason.clone());
-                return Err(reason);
-            }
+        if let Some(drainer) = self.sampler_event_drainer.take()
+            && let Err(error) = drainer.await
+        {
+            let reason = format!("sampler settlement drainer failed: {error}");
+            *self.runtime_suspension_fault.borrow_mut() = Some(reason.clone());
+            return Err(reason);
         }
         self.events.settle_requests_for_suspension().await;
         tracing::info!(session_id = %self.session_info.id.0, %operation_id, phase = "sampler_settled", elapsed_ms = started.elapsed().as_millis() as u64, "session suspension progress");

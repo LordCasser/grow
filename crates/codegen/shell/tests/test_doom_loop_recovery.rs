@@ -56,7 +56,6 @@ fn spawn_actor(base_url: &str, doom_loop_enabled: bool) -> SamplerHandle {
         max_retries: 3,
         rate_limit_retry_threshold: 2,
         output_delivery: sampler::OutputDelivery::Retractable,
-        ..RetryPolicy::default()
     };
     let (event_tx, _event_rx) = tokio::sync::mpsc::unbounded_channel();
     SamplerActor::spawn(config, retry, event_tx)

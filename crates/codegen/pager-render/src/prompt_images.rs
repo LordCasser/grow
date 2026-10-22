@@ -1075,7 +1075,7 @@ fn try_read_dropped_paths_with_budget(text: &str, mut remaining: usize) -> Vec<D
         for token in tokens {
             // Preserve the whole paste if any token cannot be classified
             // or its image would exceed the retained payload budget.
-            let Some(entry) = try_read_dropped_path(&token) else {
+            let Some(entry) = try_read_dropped_path(token) else {
                 return Vec::new();
             };
             if let DroppedPath::Image(image) = &entry {

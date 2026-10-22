@@ -523,7 +523,7 @@ pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> 
                 libc::RENAME_EXCL,
             )
         };
-        return if result == -1 {
+        if result == -1 {
             let error = io::Error::last_os_error();
             if error.raw_os_error() == Some(libc::EEXIST) {
                 Err(io::Error::new(io::ErrorKind::AlreadyExists, error))
@@ -532,7 +532,7 @@ pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> 
             }
         } else {
             Ok(())
-        };
+        }
     }
     #[cfg(windows)]
     {
@@ -1670,9 +1670,8 @@ impl LocalDraftRuntime {
         let keys = self
             .tracked
             .iter()
-            .filter_map(|(key, tracked)| {
-                tracked.due.is_some_and(|at| at <= now).then(|| key.clone())
-            })
+            .filter(|&(_key, tracked)| tracked.due.is_some_and(|at| at <= now))
+            .map(|(key, _tracked)| key.clone())
             .collect::<Vec<_>>();
         for key in keys {
             self.flush_key(&key, now);
@@ -1908,14 +1907,12 @@ fn restore_agent(agent: &mut AgentView, record: &LocalDraftRecord) {
     // A staged prompt never crossed ACP. Put it back in the composer rather
     // than recreating the queue, so recovery cannot send by itself.
     let staged_prompt = record.staged_prompt.as_ref();
-    let prompt = staged_prompt
-        .or_else(|| record.composer.as_ref())
-        .or_else(|| {
-            record
-                .uncertain_submission
-                .as_ref()
-                .map(|submission| &submission.prompt)
-        });
+    let prompt = staged_prompt.or(record.composer.as_ref()).or_else(|| {
+        record
+            .uncertain_submission
+            .as_ref()
+            .map(|submission| &submission.prompt)
+    });
     if let Some(prompt) = prompt {
         agent.prompt.set_text(&prompt.text);
         agent.prompt.restore_chip_elements(&prompt.chip_elements());

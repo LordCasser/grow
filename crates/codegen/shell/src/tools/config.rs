@@ -164,6 +164,7 @@ impl WebFetchToolConfig {
 /// tool-implementation-level config (bash limits, web search mode).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct ShellToolsetConfig {
     pub bash: BashToolConfig,
     /// Web fetch tool parameters (`[toolset.web_fetch]`).
@@ -178,18 +179,6 @@ pub struct ShellToolsetConfig {
     /// Hashline scheme parameters. Only used when `file_toolset = "hashline"`.
     #[serde(default)]
     pub hashline: HashlineSchemeConfig,
-}
-
-impl Default for ShellToolsetConfig {
-    fn default() -> Self {
-        Self {
-            bash: BashToolConfig::default(),
-            web_fetch: WebFetchToolConfig::default(),
-            ask_user_question: AskUserQuestionToolConfig::default(),
-            file_toolset: FileToolset::default(),
-            hashline: HashlineSchemeConfig::default(),
-        }
-    }
 }
 
 impl ShellToolsetConfig {
@@ -386,7 +375,8 @@ mod tests {
             .tool_configs(&HashlineSchemeConfig::default())
             .unwrap();
 
-        for mut def in [agent::config::AgentDefinition::explore()] {
+        {
+            let mut def = agent::config::AgentDefinition::explore();
             let name = def.name.clone();
             assert!(
                 !def.tool_config

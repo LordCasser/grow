@@ -1,0 +1,446 @@
+[
+  {
+    "label": "clippy-mechanical-fix",
+    "command": [
+      "cargo",
+      "clippy",
+      "--fix",
+      "--allow-dirty",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 0,
+    "elapsed_s": 497.6154907080345,
+    "log": "clippy-mechanical-fix.log"
+  },
+  {
+    "label": "fmt-mechanical",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all"
+    ],
+    "exit": 0,
+    "elapsed_s": 7.023458750045393,
+    "log": "fmt-mechanical.log"
+  },
+  {
+    "label": "clippy-after-mechanical",
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 101,
+    "elapsed_s": 99.38009675004287,
+    "log": "clippy-after-mechanical.log"
+  },
+  {
+    "label": "clippy-mechanical-fix-retry",
+    "command": [
+      "cargo",
+      "clippy",
+      "--fix",
+      "--allow-dirty",
+      "--locked",
+      "-p",
+      "pager",
+      "-p",
+      "shell",
+      "-p",
+      "tools",
+      "-p",
+      "hooks",
+      "-p",
+      "agent",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 0,
+    "elapsed_s": 318.0452530410257,
+    "log": "clippy-mechanical-fix-retry.log"
+  },
+  {
+    "label": "clippy-mechanical-review",
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 101,
+    "elapsed_s": 91.00600141700124,
+    "log": "clippy-mechanical-review.log"
+  },
+  {
+    "label": "fmt-mechanical-final",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all"
+    ],
+    "exit": 0,
+    "elapsed_s": 7.172925250022672,
+    "log": "fmt-mechanical-final.log"
+  },
+  {
+    "label": "fmt-mechanical-check",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--",
+      "--check"
+    ],
+    "exit": 0,
+    "elapsed_s": 9.66644991596695,
+    "log": "fmt-mechanical-check.log"
+  },
+  {
+    "label": "clippy-mechanical-frozen",
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 101,
+    "elapsed_s": 70.58097820798866,
+    "log": "clippy-mechanical-frozen.log"
+  },
+  {
+    "label": "check-mechanical",
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 101,
+    "elapsed_s": 94.02493658300955,
+    "log": "check-mechanical.log"
+  },
+  {
+    "label": "mechanical-test-planning",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "tool-types",
+      "--lib",
+      "planning::tests",
+      "--",
+      "--test-threads=4"
+    ],
+    "exit": 0,
+    "elapsed_s": 43.77017450000858,
+    "log": "mechanical-test-planning.log"
+  },
+  {
+    "label": "fmt-mechanical-followup",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all"
+    ],
+    "exit": 0,
+    "elapsed_s": 6.967161041975487,
+    "log": "fmt-mechanical-followup.log"
+  },
+  {
+    "label": "cli-check-mechanical",
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "-p",
+      "cli",
+      "--bin",
+      "grow",
+      "--message-format=json"
+    ],
+    "exit": 0,
+    "elapsed_s": 72.40381083299872,
+    "log": "cli-check-mechanical.log"
+  },
+  {
+    "label": "mechanical-test-ptyctl",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "ptyctl",
+      "--lib",
+      "--",
+      "--test-threads=4"
+    ],
+    "exit": 0,
+    "elapsed_s": 57.377870208001696,
+    "log": "mechanical-test-ptyctl.log"
+  },
+  {
+    "label": "mechanical-test-web-fetch",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "tools",
+      "--lib",
+      "web_fetch::client::tests",
+      "--",
+      "--test-threads=4"
+    ],
+    "exit": 0,
+    "elapsed_s": 65.83736233401578,
+    "log": "mechanical-test-web-fetch.log"
+  },
+  {
+    "label": "mechanical-test-hooks-http",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "hooks",
+      "--lib",
+      "runner::http::tests",
+      "--",
+      "--test-threads=4"
+    ],
+    "exit": 0,
+    "elapsed_s": 12.946489375026431,
+    "log": "mechanical-test-hooks-http.log"
+  },
+  {
+    "label": "clippy-mechanical-verified",
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 0,
+    "elapsed_s": 70.28211045899661,
+    "log": "clippy-mechanical-verified.log"
+  },
+  {
+    "label": "check-mechanical-verified",
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 0,
+    "elapsed_s": 122.71096987498458,
+    "log": "check-mechanical-verified.log"
+  },
+  {
+    "label": "mechanical-test-projection",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "shell",
+      "--lib",
+      "response_projection::tests",
+      "--",
+      "--test-threads=4"
+    ],
+    "exit": 0,
+    "elapsed_s": 261.29437533399323,
+    "log": "mechanical-test-projection.log"
+  },
+  {
+    "label": "fmt-mechanical-complete",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all"
+    ],
+    "exit": 0,
+    "elapsed_s": 7.110167582985014,
+    "log": "fmt-mechanical-complete.log"
+  },
+  {
+    "label": "mechanical-test-pager-projection",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "pager",
+      "--lib",
+      "transcript_projection::tests",
+      "--",
+      "--test-threads=4"
+    ],
+    "exit": 0,
+    "elapsed_s": 133.10076683404623,
+    "log": "mechanical-test-pager-projection.log"
+  },
+  {
+    "label": "mechanical-test-messages",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "sampler",
+      "--lib",
+      "stream::messages_tests",
+      "--",
+      "--test-threads=4"
+    ],
+    "exit": 0,
+    "elapsed_s": 134.77577449998353,
+    "log": "mechanical-test-messages.log"
+  },
+  {
+    "label": "clippy-mechanical-complete",
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 0,
+    "elapsed_s": 79.89096516597783,
+    "log": "clippy-mechanical-complete.log"
+  },
+  {
+    "label": "check-mechanical-complete",
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 0,
+    "elapsed_s": 130.18293200002518,
+    "log": "check-mechanical-complete.log"
+  },
+  {
+    "label": "mechanical-test-messages-corrected",
+    "command": [
+      "/Users/lordcasser/workspace/projects/grow/target/rust-quality-2-5-0/debug/deps/sampler-48a2dc6f4e4c8473",
+      "stream::messages::tests",
+      "--test-threads=4"
+    ],
+    "exit": 0,
+    "elapsed_s": 0.03473920898977667,
+    "log": "mechanical-test-messages-corrected.log"
+  },
+  {
+    "label": "fmt-mechanical-verified",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--",
+      "--check"
+    ],
+    "exit": 0,
+    "elapsed_s": 7.494004625012167,
+    "log": "fmt-mechanical-verified.log"
+  },
+  {
+    "label": "mechanical-test-pager-sticky",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "pager",
+      "--lib",
+      "scrollback::sticky::tests",
+      "--",
+      "--test-threads=4"
+    ],
+    "exit": 0,
+    "elapsed_s": 207.48598779103486,
+    "log": "mechanical-test-pager-sticky.log"
+  },
+  {
+    "label": "mechanical-test-pager-replay-layout",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "pager",
+      "--lib",
+      "replay_tests",
+      "--",
+      "--test-threads=4"
+    ],
+    "exit": 0,
+    "elapsed_s": 37.42712308402406,
+    "log": "mechanical-test-pager-replay-layout.log"
+  },
+  {
+    "label": "cli-check-mechanical-complete",
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "-p",
+      "cli",
+      "--bin",
+      "grow",
+      "--message-format=json"
+    ],
+    "exit": 0,
+    "elapsed_s": 40.95210020797094,
+    "log": "cli-check-mechanical-complete.log"
+  },
+  {
+    "label": "openspec-mechanical-all",
+    "command": [
+      "openspec",
+      "validate",
+      "--all",
+      "--strict",
+      "--no-interactive"
+    ],
+    "exit": 0,
+    "elapsed_s": 1.264327291981317,
+    "log": "openspec-mechanical-all.log"
+  },
+  {
+    "label": "openspec-mechanical-archived",
+    "command": [
+      "openspec",
+      "validate",
+      "--archived",
+      "--strict",
+      "--no-interactive"
+    ],
+    "exit": 0,
+    "elapsed_s": 1.2647405830211937,
+    "log": "openspec-mechanical-archived.log"
+  }
+]

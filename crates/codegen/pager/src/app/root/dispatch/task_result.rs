@@ -93,65 +93,6 @@ fn is_runtime_suspended_prompt_response(result: &Result<acp::PromptResponse, Str
         })
 }
 
-#[cfg(test)]
-mod plan_decision_receipt_tests {
-    use super::plan_decision_receipt_matches;
-    use crate::views::plan_approval_view::{
-        PendingPlanApprovalDecision, PlanApprovalExtResponse, PlanApprovalOutcome,
-    };
-
-    fn pending() -> PendingPlanApprovalDecision {
-        PendingPlanApprovalDecision {
-            session_id: "session-1".into(),
-            binding_epoch: 3,
-            response: PlanApprovalExtResponse {
-                outcome: PlanApprovalOutcome::Cancelled,
-                feedback: Some("please revise".into()),
-                submission_id: 8,
-                decision_id: "decision-8".into(),
-            },
-            artifact_revision: 4,
-            artifact_hash: "a".repeat(64),
-            comments: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn only_exact_receipt_confirms_plan_decision() {
-        let pending = pending();
-        let receipt = serde_json::json!({
-            "status": "accepted",
-            "receipt": {
-                "decision_id": "decision-8",
-                "submission_id": 8,
-                "action": "revise",
-                "feedback": "please revise"
-            }
-        });
-        assert!(plan_decision_receipt_matches(&pending, &receipt));
-
-        let wrong_id = serde_json::json!({
-            "receipt": {
-                "decision_id": "decision-other",
-                "submission_id": 8,
-                "action": "revise",
-                "feedback": "please revise"
-            }
-        });
-        assert!(!plan_decision_receipt_matches(&pending, &wrong_id));
-
-        let wrong_payload = serde_json::json!({
-            "receipt": {
-                "decision_id": "decision-8",
-                "submission_id": 8,
-                "action": "approve",
-                "feedback": "please revise"
-            }
-        });
-        assert!(!plan_decision_receipt_matches(&pending, &wrong_payload));
-    }
-}
-
 fn plan_decision_receipt_matches(
     pending: &crate::views::plan_approval_view::PendingPlanApprovalDecision,
     value: &serde_json::Value,
@@ -1221,10 +1162,10 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
                 )
                 | Err(_) => None,
             };
-            if let Some(prompt) = agent.session.in_flight_prompt.as_mut() {
-                if prompt.prompt_id.as_deref() == Some(prompt_id.as_str()) {
-                    prompt.admission_resolved = disposition;
-                }
+            if let Some(prompt) = agent.session.in_flight_prompt.as_mut()
+                && prompt.prompt_id.as_deref() == Some(prompt_id.as_str())
+            {
+                prompt.admission_resolved = disposition;
             }
             if disposition == Some(true) {
                 // The validated durable input is already owned by Shell's
@@ -2504,5 +2445,64 @@ pub(super) fn dispatch_task_result(result: TaskResult, app: &mut AppView) -> Vec
             app.show_toast(&format!("\u{2717} Could not save {key}: {scrubbed}"));
             rollback_effects
         }
+    }
+}
+
+#[cfg(test)]
+mod plan_decision_receipt_tests {
+    use super::plan_decision_receipt_matches;
+    use crate::views::plan_approval_view::{
+        PendingPlanApprovalDecision, PlanApprovalExtResponse, PlanApprovalOutcome,
+    };
+
+    fn pending() -> PendingPlanApprovalDecision {
+        PendingPlanApprovalDecision {
+            session_id: "session-1".into(),
+            binding_epoch: 3,
+            response: PlanApprovalExtResponse {
+                outcome: PlanApprovalOutcome::Cancelled,
+                feedback: Some("please revise".into()),
+                submission_id: 8,
+                decision_id: "decision-8".into(),
+            },
+            artifact_revision: 4,
+            artifact_hash: "a".repeat(64),
+            comments: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn only_exact_receipt_confirms_plan_decision() {
+        let pending = pending();
+        let receipt = serde_json::json!({
+            "status": "accepted",
+            "receipt": {
+                "decision_id": "decision-8",
+                "submission_id": 8,
+                "action": "revise",
+                "feedback": "please revise"
+            }
+        });
+        assert!(plan_decision_receipt_matches(&pending, &receipt));
+
+        let wrong_id = serde_json::json!({
+            "receipt": {
+                "decision_id": "decision-other",
+                "submission_id": 8,
+                "action": "revise",
+                "feedback": "please revise"
+            }
+        });
+        assert!(!plan_decision_receipt_matches(&pending, &wrong_id));
+
+        let wrong_payload = serde_json::json!({
+            "receipt": {
+                "decision_id": "decision-8",
+                "submission_id": 8,
+                "action": "approve",
+                "feedback": "please revise"
+            }
+        });
+        assert!(!plan_decision_receipt_matches(&pending, &wrong_payload));
     }
 }

@@ -35,6 +35,90 @@ impl crate::types::tool_metadata::ToolMetadata for MemorySearchImpl {
     }
 }
 
+impl tool_runtime::Tool for MemorySearchImpl {
+    type Args = MemorySearchInput;
+    type Output = ToolOutput;
+
+    fn id(&self) -> tool_protocol::ToolId {
+        tool_protocol::ToolId::new("memory_search").expect("valid tool id")
+    }
+
+    fn description(&self, _ctx: &::tool_runtime::ListToolsContext) -> tool_types::ToolDescription {
+        tool_types::ToolDescription::new(
+            "memory_search",
+            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
+        )
+    }
+
+    fn capabilities(&self) -> tool_protocol::ToolCapabilities {
+        tool_protocol::ToolCapabilities {
+            max_access: tool_protocol::ToolAccess::Read,
+            ..Default::default()
+        }
+    }
+
+    async fn run(
+        &self,
+        ctx: tool_runtime::ToolCallContext,
+        input: MemorySearchInput,
+    ) -> Result<ToolOutput, tool_runtime::ToolError> {
+        use crate::types::tool_metadata::shared_resources;
+        let resources = shared_resources(&ctx)?;
+        let Some(memory) = resources
+            .lock()
+            .await
+            .get::<Arc<dyn MemoryBackend>>()
+            .cloned()
+        else {
+            return Ok(ToolOutput::Text(
+                "Memory is not enabled. Use --experimental-memory to enable.".into(),
+            ));
+        };
+        let max_results = input
+            .max_results
+            .unwrap_or_else(|| memory.default_search_max_results());
+        let min_score = input
+            .min_score
+            .unwrap_or_else(|| memory.default_search_min_score());
+        tracing::info!(target: crate::types::memory_backend::MEMORY_LOG_TARGET, max_results, "MEMORY_SEARCH: invoked");
+        let results = memory
+            .search(&input.query, max_results, min_score)
+            .await
+            .map_err(|e| {
+                tool_runtime::ToolError::execution(
+                    tool_protocol::ToolId::new("memory_search").expect("valid"),
+                    format!("memory search failed: {e}"),
+                )
+            })?;
+        tracing::info!(target: crate::types::memory_backend::MEMORY_LOG_TARGET, results = results.len(), "MEMORY_SEARCH: complete");
+        if results.is_empty() {
+            return Ok(ToolOutput::Text(
+                "No memory results found for query.".into(),
+            ));
+        }
+        let mut output = format!("Found {} memory result(s):\n", results.len());
+        for (i, r) in results.iter().enumerate() {
+            let staleness = format_staleness_note(&r.source, r.created_at);
+            // Backends use 0-based, end-exclusive ranges. Display the
+            // equivalent inclusive 1-based range so it can be passed to
+            // memory_get without an off-by-one correction.
+            let (display_start, display_end) = display_line_range(r.start_line, r.end_line);
+            output.push_str(&format!(
+                "\n### Result {} (score: {:.2}, source: {})\n**File:** {} (lines {}-{})\n{}```\n{}\n```\n",
+                i + 1,
+                r.score,
+                r.source,
+                r.path,
+                display_start,
+                display_end,
+                staleness,
+                r.snippet,
+            ));
+        }
+        Ok(ToolOutput::Text(output.into()))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,89 +236,5 @@ mod tests {
             "memory_get output: {}",
             get_text.text
         );
-    }
-}
-
-impl tool_runtime::Tool for MemorySearchImpl {
-    type Args = MemorySearchInput;
-    type Output = ToolOutput;
-
-    fn id(&self) -> tool_protocol::ToolId {
-        tool_protocol::ToolId::new("memory_search").expect("valid tool id")
-    }
-
-    fn description(&self, _ctx: &::tool_runtime::ListToolsContext) -> tool_types::ToolDescription {
-        tool_types::ToolDescription::new(
-            "memory_search",
-            crate::types::tool_metadata::ToolMetadata::sanitized_description_template(self),
-        )
-    }
-
-    fn capabilities(&self) -> tool_protocol::ToolCapabilities {
-        tool_protocol::ToolCapabilities {
-            max_access: tool_protocol::ToolAccess::Read,
-            ..Default::default()
-        }
-    }
-
-    async fn run(
-        &self,
-        ctx: tool_runtime::ToolCallContext,
-        input: MemorySearchInput,
-    ) -> Result<ToolOutput, tool_runtime::ToolError> {
-        use crate::types::tool_metadata::shared_resources;
-        let resources = shared_resources(&ctx)?;
-        let Some(memory) = resources
-            .lock()
-            .await
-            .get::<Arc<dyn MemoryBackend>>()
-            .cloned()
-        else {
-            return Ok(ToolOutput::Text(
-                "Memory is not enabled. Use --experimental-memory to enable.".into(),
-            ));
-        };
-        let max_results = input
-            .max_results
-            .unwrap_or_else(|| memory.default_search_max_results());
-        let min_score = input
-            .min_score
-            .unwrap_or_else(|| memory.default_search_min_score());
-        tracing::info!(target: crate::types::memory_backend::MEMORY_LOG_TARGET, max_results, "MEMORY_SEARCH: invoked");
-        let results = memory
-            .search(&input.query, max_results, min_score)
-            .await
-            .map_err(|e| {
-                tool_runtime::ToolError::execution(
-                    tool_protocol::ToolId::new("memory_search").expect("valid"),
-                    format!("memory search failed: {e}"),
-                )
-            })?;
-        tracing::info!(target: crate::types::memory_backend::MEMORY_LOG_TARGET, results = results.len(), "MEMORY_SEARCH: complete");
-        if results.is_empty() {
-            return Ok(ToolOutput::Text(
-                "No memory results found for query.".into(),
-            ));
-        }
-        let mut output = format!("Found {} memory result(s):\n", results.len());
-        for (i, r) in results.iter().enumerate() {
-            let staleness = format_staleness_note(&r.source, r.created_at);
-            // Backends use 0-based, end-exclusive ranges. Display the
-            // equivalent inclusive 1-based range so it can be passed to
-            // memory_get without an off-by-one correction.
-            let (display_start, display_end) = display_line_range(r.start_line, r.end_line);
-            output.push_str(&format!(
-                "\n### Result {} (score: {:.2}, source: {})\n**File:** {} (lines {}-{})\n{}```\n{}\n```\n",
-                i + 1,
-                r.score,
-                r.source,
-                r.path,
-                display_start,
-                display_end,
-                staleness,
-                r.snippet,
-            ));
-        }
-        Ok(ToolOutput::Text(output.into()))
     }
 }

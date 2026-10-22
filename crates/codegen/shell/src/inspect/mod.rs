@@ -1228,19 +1228,19 @@ mod tests {
                 "all inactive declarations must remain diagnostic, without shadowing the active source"
             );
             assert_eq!(shared[0]["command"], "active-command");
-            assert_eq!(shared[0]["disabled"].as_bool().unwrap_or(false), false);
+            assert!(!shared[0]["disabled"].as_bool().unwrap_or(false));
             let disabled = shared
                 .iter()
                 .find(|entry| entry["command"] == "disabled-command")
                 .unwrap();
             assert_eq!(disabled["disabled"], true);
-            assert_eq!(disabled["untrusted"].as_bool().unwrap_or(false), false);
+            assert!(!disabled["untrusted"].as_bool().unwrap_or(false));
             let untrusted = shared
                 .iter()
                 .find(|entry| entry["command"] == "untrusted-command")
                 .unwrap();
             assert_eq!(untrusted["untrusted"], true);
-            assert_eq!(untrusted["disabled"].as_bool().unwrap_or(false), false);
+            assert!(!untrusted["disabled"].as_bool().unwrap_or(false));
         }
     }
 

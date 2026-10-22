@@ -67,7 +67,7 @@ mod tests {
                 workflows_available: available,
                 screen_mode: crate::app::ScreenMode::Fullscreen,
             };
-            assert_eq!(WorkflowsCommand.visible(&ctx), false);
+            assert!(!WorkflowsCommand.visible(&ctx));
         }
     }
 

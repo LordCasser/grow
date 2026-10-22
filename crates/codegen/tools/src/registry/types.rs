@@ -3918,7 +3918,8 @@ mod tests {
             desc_of("run_terminal_cmd").contains("is_background"),
             "bash description must resolve params.execute.is_background"
         );
-        for name in ["get_task_output"] {
+        {
+            let name = "get_task_output";
             let desc = desc_of(name);
             assert!(
                 desc.contains("is_background"),

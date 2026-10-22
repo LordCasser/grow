@@ -1,0 +1,56 @@
+[
+  {
+    "label": "mechanical-test-planning",
+    "passed": 21,
+    "failed": 0,
+    "ignored": 0
+  },
+  {
+    "label": "mechanical-test-ptyctl",
+    "passed": 16,
+    "failed": 0,
+    "ignored": 0
+  },
+  {
+    "label": "mechanical-test-web-fetch",
+    "passed": 61,
+    "failed": 0,
+    "ignored": 0
+  },
+  {
+    "label": "mechanical-test-hooks-http",
+    "passed": 28,
+    "failed": 0,
+    "ignored": 0
+  },
+  {
+    "label": "mechanical-test-projection",
+    "passed": 19,
+    "failed": 0,
+    "ignored": 1
+  },
+  {
+    "label": "mechanical-test-pager-projection",
+    "passed": 20,
+    "failed": 0,
+    "ignored": 0
+  },
+  {
+    "label": "mechanical-test-pager-sticky",
+    "passed": 31,
+    "failed": 0,
+    "ignored": 0
+  },
+  {
+    "label": "mechanical-test-pager-replay-layout",
+    "passed": 11,
+    "failed": 0,
+    "ignored": 0
+  },
+  {
+    "label": "mechanical-test-messages-corrected",
+    "passed": 29,
+    "failed": 0,
+    "ignored": 0
+  }
+]

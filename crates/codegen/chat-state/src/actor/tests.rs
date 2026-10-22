@@ -1500,19 +1500,17 @@ async fn auxiliary_attempt_usage_is_durable_idempotent_and_separate_from_rounds(
         cache_read_known: true,
         ..Default::default()
     };
-    assert_eq!(
+    assert!(
         h.handle
             .begin_auxiliary_attempt_usage(sideband_id.clone(), 1, "aux-model".into(), Some(0))
             .await
-            .unwrap(),
-        true
+            .unwrap()
     );
-    assert_eq!(
-        h.handle
+    assert!(
+        !h.handle
             .begin_auxiliary_attempt_usage(sideband_id.clone(), 1, "aux-model".into(), Some(0))
             .await
-            .unwrap(),
-        false
+            .unwrap()
     );
     assert!(matches!(
         h.handle
@@ -1520,7 +1518,7 @@ async fn auxiliary_attempt_usage_is_durable_idempotent_and_separate_from_rounds(
             .await,
         Err(crate::TimelineWriteError::AttemptUsageConflict)
     ));
-    assert_eq!(
+    assert!(
         h.handle
             .settle_auxiliary_attempt_usage(
                 sideband_id.clone(),
@@ -1530,15 +1528,13 @@ async fn auxiliary_attempt_usage_is_durable_idempotent_and_separate_from_rounds(
                 Some(7)
             )
             .await
-            .unwrap(),
-        true
+            .unwrap()
     );
-    assert_eq!(
-        h.handle
+    assert!(
+        !h.handle
             .settle_auxiliary_attempt_usage(sideband_id.clone(), 1, Some(usage), Some(11), Some(7))
             .await
-            .unwrap(),
-        false
+            .unwrap()
     );
     assert!(matches!(
         h.handle

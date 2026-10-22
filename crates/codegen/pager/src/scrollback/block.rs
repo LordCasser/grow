@@ -19,6 +19,7 @@ use super::blocks::{
     SearchToolCallBlock, SessionEvent, SessionEventBlock, SubagentBlock, SubagentBlockKind,
     SubagentPermissionBlock, ThinkingBlock, ToolCallBlock, UserPromptBlock, WorkflowBlock,
 };
+use super::render::inline_image_reserved_rows;
 use super::types::{
     AccentStyle, BlockBackground, BlockContext, BlockOutput, DisplayMode, RenderedBlockOutput,
     Selectable, SelectionBoundaries, derive_selection_text,
@@ -219,8 +220,7 @@ pub trait BlockContent {
         // `EntryRenderer::inline_media_rows` reserves. The line count needs the
         // laid-out output; the generic wrapper can't know it otherwise.
         let content_lines = self.output(ctx).lines.len() as u16;
-        let (rows, _total_rows) =
-            crate::scrollback::render::inline_image_reserved_rows(&info, ctx.width);
+        let (rows, _total_rows) = inline_image_reserved_rows(&info, ctx.width);
         vec![AnchoredMedia {
             info,
             row_offset: content_lines + 1,

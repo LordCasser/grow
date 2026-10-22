@@ -207,7 +207,11 @@ mod tests {
             "https://a.test/a%2Cb%EF%BC%8Cc",
             "https://a.test/x(foo)",
         ] {
-            assert_eq!(plain_url_ranges(text), [0..text.len()], "{text}");
+            assert_eq!(
+                plain_url_ranges(text).as_slice(),
+                std::slice::from_ref(&(0..text.len())),
+                "{text}"
+            );
         }
     }
 

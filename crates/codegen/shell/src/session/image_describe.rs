@@ -411,10 +411,10 @@ fn persist_user_images_with(
     });
     // After publication this name is absent. Never remove the published batch:
     // it may already be referenced by a successful or unacknowledged commit.
-    if let Err(error) = assets_dir.remove_tree_child(std::ffi::OsStr::new(&staging_name)) {
-        if error.kind() != std::io::ErrorKind::NotFound {
-            tracing::warn!(%error, "failed to remove image asset staging directory");
-        }
+    if let Err(error) = assets_dir.remove_tree_child(std::ffi::OsStr::new(&staging_name))
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!(%error, "failed to remove image asset staging directory");
     }
     result
 }
@@ -1108,10 +1108,10 @@ mod local_ocr_tests {
         let task = tokio::spawn(async move { run_local_ocr(&path, vec![1]).await });
         let pid = tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                if let Ok(text) = tokio::fs::read_to_string(&pid_path).await {
-                    if let Ok(pid) = text.trim().parse::<u32>() {
-                        break pid;
-                    }
+                if let Ok(text) = tokio::fs::read_to_string(&pid_path).await
+                    && let Ok(pid) = text.trim().parse::<u32>()
+                {
+                    break pid;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }

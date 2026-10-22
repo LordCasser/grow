@@ -91,7 +91,7 @@
                     handle_total += elapsed;
                     handle_max = handle_max.max(elapsed);
                     notification_count += 1;
-                    if notification_count % FRAME_INTERVAL == 0 {
+                    if notification_count.is_multiple_of(FRAME_INTERVAL) {
                         let started = Instant::now();
                         app.agents.get_mut(&id).unwrap().scrollback.prepare_layout(120, 40);
                         let elapsed = started.elapsed();

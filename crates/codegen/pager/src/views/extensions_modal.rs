@@ -2386,7 +2386,6 @@ pub(crate) fn marketplace_components_summary(
 /// scrollable entry list inside.
 ///
 /// `full_area` is the total area available (everything above the shortcuts bar).
-
 pub fn render_extensions_modal(
     buf: &mut Buffer,
     full_area: Rect,

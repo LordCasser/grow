@@ -321,9 +321,7 @@ impl ChatStateActor {
 
     /// Push any conversation item (user, assistant, or tool result) and persist it.
     pub(super) async fn push_message(&mut self, item: ConversationItem) {
-        if !self.append_message_fact(item).await {
-            return;
-        }
+        let _ = self.append_message_fact(item).await;
     }
 
     pub(super) async fn push_tool_result_durably(
@@ -488,9 +486,7 @@ impl ChatStateActor {
         reason: DanglingToolCallReason,
     ) {
         self.ensure_conversation_integrity_with_reason(reason).await;
-        if !self.append_message_fact(item).await {
-            return;
-        }
+        let _ = self.append_message_fact(item).await;
     }
 
     /// Apply a [`compaction::PrunePlan`] to the stored conversation in one

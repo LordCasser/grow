@@ -2091,11 +2091,10 @@ async fn timeline_round_trip_folds_the_current_surface() {
 
     let mut forged_events = replayed.events().to_vec();
     for event in &mut forged_events {
-        if let chat_state::TimelineEventKind::Messages(messages) = &mut event.kind {
-            if messages.cause == chat_state::MessageCause::Compaction {
+        if let chat_state::TimelineEventKind::Messages(messages) = &mut event.kind
+            && messages.cause == chat_state::MessageCause::Compaction {
                 messages.items = vec![ConversationItem::user_meta("forged replacement")];
             }
-        }
     }
     let forged = chat_state::Timeline::from_events(forged_events).unwrap();
     assert!(crate::session::storage::validate_sideband_ledgers(
@@ -7972,7 +7971,7 @@ async fn operational_scan_errors_preserve_cleanup_candidates() {
             _ => unreachable!(),
         };
         let permissions = std::fs::metadata(&denied).unwrap().permissions();
-        std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0)).unwrap();
+        std::fs::set_permissions(&denied, std::fs::Permissions::from_mode(0o0)).unwrap();
         let probe = std::fs::File::open(&denied);
         let cleaner = JsonlStorageAdapter::with_root(root.path().to_path_buf());
         let listing = cleaner.list_sessions_sync(None);

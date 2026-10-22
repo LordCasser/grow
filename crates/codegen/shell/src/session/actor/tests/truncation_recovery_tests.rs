@@ -631,7 +631,7 @@ async fn run_user_turn_with_schema(
         std::time::Duration::from_secs(60),
         actor.handle_prompt(
             prompt_id,
-            crate::session::actor::tests::support::admit_test_human_input(&actor, prompt_id).await,
+            crate::session::actor::tests::support::admit_test_human_input(actor, prompt_id).await,
             crate::session::PromptOrigin::User,
             Vec::new(),
             crate::session::TurnKind::User,
@@ -2875,7 +2875,7 @@ fn malformed_tool_response_does_not_poison_the_next_turn() {
                 run_user_turn(&actor, "continue-after-repair").await.expect("same session must remain usable");
                 assert_eq!(chat_completions_request_count(&server), 2);
                 let requests = server.requests();
-                let last = requests.iter().filter(|request| request.path == "/v1/chat/completions").last().unwrap();
+                let last = requests.iter().rfind(|request| request.path == "/v1/chat/completions").unwrap();
                 let body = last.body.as_ref().unwrap();
                 let messages = body["messages"].as_array().unwrap();
                 assert!(messages.iter().all(|message| message.get("tool_calls").is_none() && message.get("tool_call_id").is_none()));

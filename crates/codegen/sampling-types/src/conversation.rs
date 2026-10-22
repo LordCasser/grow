@@ -558,7 +558,11 @@ impl BackendToolCallItem {
     pub fn code_interpreter(code: Option<&str>) -> Self {
         let code = code.unwrap_or_default();
         let preview: String = code.chars().take(100).collect();
-        let suffix = (preview.len() < code.len()).then_some("...").unwrap_or("");
+        let suffix = if preview.len() < code.len() {
+            "..."
+        } else {
+            ""
+        };
         Self {
             kind: BackendToolKind::CodeInterpreter,
             summary: Arc::from(format!("[backend code_interpreter] {preview}{suffix}")),
@@ -1901,7 +1905,7 @@ fn defer_agent_messages_after_tool_batch(items: Vec<ConversationItem>) -> Vec<Co
                         let deferred = std::mem::take(&mut deferred_messages);
                         projected.splice(start..start, deferred);
                     } else {
-                        projected.extend(deferred_messages.drain(..));
+                        projected.append(&mut deferred_messages);
                     }
                     pending_tool_ids.clear();
                 }
@@ -1919,7 +1923,7 @@ fn defer_agent_messages_after_tool_batch(items: Vec<ConversationItem>) -> Vec<Co
                 projected.push(ConversationItem::ToolResult(result));
                 if pending_tool_ids.is_empty() {
                     open_batch_start = None;
-                    projected.extend(deferred_messages.drain(..));
+                    projected.append(&mut deferred_messages);
                 }
             }
             ConversationItem::AgentMessage(batch) if !pending_tool_ids.is_empty() => {

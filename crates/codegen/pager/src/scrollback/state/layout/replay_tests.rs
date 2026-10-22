@@ -33,8 +33,10 @@ fn rich_deferred_history() -> ScrollbackState {
 
 fn rich_history(deferred: bool, sticky: bool) -> ScrollbackState {
     let mut state = ScrollbackState::new();
-    let mut appearance = crate::appearance::AppearanceConfig::default();
-    appearance.show_timestamps = false;
+    let mut appearance = crate::appearance::AppearanceConfig {
+        show_timestamps: false,
+        ..crate::appearance::AppearanceConfig::default()
+    };
     // Isolate the content anchor from a sticky prompt whose own row count
     // legitimately changes when its text re-wraps at the new width.
     appearance.scrollback.display.sticky_headers = sticky;

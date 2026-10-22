@@ -658,13 +658,13 @@ impl Browser {
                             },
                         ));
                         self.pressed = None;
-                    } else if let Some((id, drag)) = &mut self.drag {
-                        if state.index_of_id(*id).is_some() {
-                            drag.head = self
-                                .selection_model
-                                .hit_test_nearest_in_range(drag.anchor, mouse.column, mouse.row)
-                                .unwrap_or(drag.head);
-                        }
+                    } else if let Some((id, drag)) = &mut self.drag
+                        && state.index_of_id(*id).is_some()
+                    {
+                        drag.head = self
+                            .selection_model
+                            .hit_test_nearest_in_range(drag.anchor, mouse.column, mouse.row)
+                            .unwrap_or(drag.head);
                     }
                 }
                 MouseEventKind::Up(MouseButton::Left) => {
@@ -866,17 +866,19 @@ mod tests {
             block_line_idx: 0,
             col_within_range: 1,
         };
-        let mut browser = Browser::default();
-        browser.selected_text = Some((
-            id,
-            ActiveTextDrag {
-                anchor: hit,
-                head: hit,
-                kind: SelectionKind::Linear,
-                anchor_content_width: Some(40),
-            },
-        ));
-        browser.pressed = Some((id, 2, 3));
+        let mut browser = Browser {
+            selected_text: Some((
+                id,
+                ActiveTextDrag {
+                    anchor: hit,
+                    head: hit,
+                    kind: SelectionKind::Linear,
+                    anchor_content_width: Some(40),
+                },
+            )),
+            pressed: Some((id, 2, 3)),
+            ..Browser::default()
+        };
         browser.invalidate_geometry();
         assert!(browser.pressed.is_none());
         assert_eq!(browser.selected_text.map(|selection| selection.0), Some(id));
@@ -895,17 +897,19 @@ mod tests {
             block_line_idx: 0,
             col_within_range: 0,
         };
-        let mut browser = Browser::default();
-        browser.pressed = Some((id, 2, 3));
-        browser.pending_text = Some((
-            id,
-            PendingTextDrag {
-                anchor,
-                start_col: 2,
-                start_row: 3,
-                anchor_content_width: Some(40),
-            },
-        ));
+        let mut browser = Browser {
+            pressed: Some((id, 2, 3)),
+            pending_text: Some((
+                id,
+                PendingTextDrag {
+                    anchor,
+                    start_col: 2,
+                    start_row: 3,
+                    anchor_content_width: Some(40),
+                },
+            )),
+            ..Browser::default()
+        };
         browser.handle(
             Event::Mouse(crossterm::event::MouseEvent {
                 kind: MouseEventKind::Drag(MouseButton::Left),

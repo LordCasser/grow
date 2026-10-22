@@ -917,7 +917,7 @@ mod tests {
         let stale_alias = resolve_skill_path(alias.to_str().unwrap(), ".");
         assert_ne!(stale_alias, saved_path);
         assert!(!remove_skill_path(&mut config, &stale_alias));
-        assert_eq!(config.paths, [saved_path.clone()]);
+        assert_eq!(config.paths.as_slice(), std::slice::from_ref(&saved_path));
         assert!(remove_skill_path(&mut config, &saved_path));
         assert!(config.paths.is_empty());
     }

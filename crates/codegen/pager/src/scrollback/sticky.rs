@@ -1334,10 +1334,7 @@ mod tests {
         // Need to find scroll where both pushed and pinned exist
         for scroll in 0..20 {
             let layout = compute_sticky_layout(scroll, 20, &prompts);
-            if layout.pushed.is_some() && layout.pinned.is_some() {
-                let pushed = layout.pushed.unwrap();
-                let pinned = layout.pinned.unwrap();
-
+            if let (Some(pushed), Some(pinned)) = (layout.pushed, layout.pinned) {
                 // Pushed rows → entry 0
                 for row in 0..pushed.visible_height() {
                     assert_eq!(layout.entry_at_header_row(row), Some(0));

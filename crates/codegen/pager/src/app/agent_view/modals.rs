@@ -431,13 +431,12 @@ impl AgentView {
                         .get(sel)
                         .and_then(|k| k.as_ref())
                         .cloned()
+                        && self.extensions_modal_set_collapsed(sel, &gk, false)
                     {
-                        if self.extensions_modal_set_collapsed(sel, &gk, false) {
-                            self.log_extensions_modal_action(
-                                "expand",
-                                diagnostics::events::ExtensionsInputMethod::Keyboard,
-                            );
-                        }
+                        self.log_extensions_modal_action(
+                            "expand",
+                            diagnostics::events::ExtensionsInputMethod::Keyboard,
+                        );
                     }
                     return InputOutcome::Changed;
                 }
@@ -1281,15 +1280,13 @@ impl AgentView {
                     if let TabDataState::Loaded(ref servers) = state.mcps_data
                         && let Some(idx) = state.selected_data_index()
                         && let Some(server) = servers.get(idx)
+                        && server.setup_required
+                        && let Some(form) =
+                            crate::views::extensions_modal::McpSetupFormState::new(server)
                     {
-                        if server.setup_required
-                            && let Some(form) =
-                                crate::views::extensions_modal::McpSetupFormState::new(server)
-                        {
-                            state.mcp_setup = Some(form);
-                            state.picker_state.search_active = false;
-                            return InputOutcome::Changed;
-                        }
+                        state.mcp_setup = Some(form);
+                        state.picker_state.search_active = false;
+                        return InputOutcome::Changed;
                     }
                 }
                 InputOutcome::Changed

@@ -34,7 +34,7 @@ pub fn try_with_locked_stderr_for<T>(
 }
 
 fn duplicate_tui_stderr() -> std::fs::File {
-    let file = tty_utils::dup_tui_stderr().unwrap_or_else(|_| {
+    tty_utils::dup_tui_stderr().unwrap_or_else(|_| {
         // Fallback: try_clone stderr to get an independently-owned
         // File. This path is hit if redirect_native_stderr was never
         // called or fd dup fails.
@@ -59,6 +59,5 @@ fn duplicate_tui_stderr() -> std::fs::File {
             std::mem::forget(temp);
         }
         stderr_file
-    });
-    file
+    })
 }

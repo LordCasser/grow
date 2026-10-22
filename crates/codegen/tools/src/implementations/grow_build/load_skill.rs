@@ -159,12 +159,12 @@ impl tool_runtime::Tool for LoadSkillTool {
             _ = cancellation.cancelled() => return Err(tool_runtime::ToolError::custom("skill_load_failed", "Skill loading was cancelled")),
             result = resolve_skill_resource(&skill, input.resource.as_deref()) => result?,
         };
-        if let Some(selection) = &selection {
-            if selection.resource_path != resource_path {
-                return Err(tool_runtime::ToolError::invalid_arguments(
-                    "Skill resource identity changed after authorization",
-                ));
-            }
+        if let Some(selection) = &selection
+            && selection.resource_path != resource_path
+        {
+            return Err(tool_runtime::ToolError::invalid_arguments(
+                "Skill resource identity changed after authorization",
+            ));
         }
         let source = resource_path
             .as_deref()

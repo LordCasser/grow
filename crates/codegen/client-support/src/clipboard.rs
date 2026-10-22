@@ -1126,16 +1126,16 @@ mod platform {
             let _ = child.kill();
             let _ = child.wait();
         }
-        if let Err(error) = cleanup {
-            if error.raw_os_error() != Some(libc::ESRCH) {
-                return Err(match status {
-                    Err(primary) => Error::new(
-                        primary.kind(),
-                        format!("{primary}; process-group cleanup failed: {error}"),
-                    ),
-                    Ok(_) => error,
-                });
-            }
+        if let Err(error) = cleanup
+            && error.raw_os_error() != Some(libc::ESRCH)
+        {
+            return Err(match status {
+                Err(primary) => Error::new(
+                    primary.kind(),
+                    format!("{primary}; process-group cleanup failed: {error}"),
+                ),
+                Ok(_) => error,
+            });
         }
         let status = status?;
         let drain_deadline = Instant::now() + Duration::from_millis(300);
@@ -1415,7 +1415,7 @@ mod platform {
         path_tiff: &std::path::Path,
         path_jpg: &std::path::Path,
     ) -> anyhow::Result<String> {
-        remove_attachment_probe_temps(&path_png, &path_tiff, &path_jpg);
+        remove_attachment_probe_temps(path_png, path_tiff, path_jpg);
 
         let script = attachments_osascript();
 
@@ -1424,7 +1424,7 @@ mod platform {
             match checked_command_stdout("osascript", run_clipboard_script(cmd, SCRIPT_TIMEOUT)) {
                 Ok(stdout) => stdout,
                 Err(error) => {
-                    remove_attachment_probe_temps(&path_png, &path_tiff, &path_jpg);
+                    remove_attachment_probe_temps(path_png, path_tiff, path_jpg);
                     return Err(error);
                 }
             };

@@ -135,9 +135,7 @@ pub fn format_time_ago(d: Duration) -> String {
 /// Remaining wall-clock duration until [`format_time_ago`] changes bucket.
 pub fn time_until_time_ago_change(age: Duration) -> Duration {
     let secs = age.as_secs();
-    let unit_secs = if secs < 60 {
-        60
-    } else if secs < 3_600 {
+    let unit_secs = if secs < 3_600 {
         60
     } else if secs < 86_400 {
         3_600

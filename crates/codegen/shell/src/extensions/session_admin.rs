@@ -1060,7 +1060,7 @@ fn read_durable_prompt_status(
         match &event.kind {
             TimelineEventKind::Turn(TurnEvent::Started { id, input_ids, .. }) => {
                 active_turn = Some((
-                    id.clone(),
+                    *id,
                     prompt_id.is_some_and(|id| input_ids.iter().any(|input| input == id)),
                 ));
                 latest_terminal = None;
@@ -1818,14 +1818,14 @@ async fn handle_session_rename(agent: &MvpAgent, args: &acp::ExtRequest) -> ExtR
             })?
     } else {
         let storage = JsonlStorageAdapter::default();
-        let event = storage
+
+        storage
             .append_session_title_durable(&info, req.title.clone())
             .await
             .map_err(|error| {
                 acp::Error::internal_error()
                     .data(format!("failed to commit session/title event: {error}"))
-            })?;
-        event
+            })?
     };
 
     // Update session search index with new title

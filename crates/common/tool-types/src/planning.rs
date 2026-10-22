@@ -362,10 +362,10 @@ impl LocalPlan {
     ) -> Result<PlanUpdate, PlanUpdateError> {
         validate_incoming(&incoming)?;
         for step in &incoming {
-            if let Some(existing) = self.steps.iter().find(|old| old.id == step.id) {
-                if existing.removed {
-                    return Err(PlanUpdateError::TombstonedIdReuse(step.id.clone()));
-                }
+            if let Some(existing) = self.steps.iter().find(|old| old.id == step.id)
+                && existing.removed
+            {
+                return Err(PlanUpdateError::TombstonedIdReuse(step.id.clone()));
             }
         }
 
@@ -378,9 +378,9 @@ impl LocalPlan {
                     match self.steps.iter_mut().find(|old| old.id == step.id) {
                         Some(old) => {
                             let change = compare_step(old, &step);
-                            if change.is_some() {
+                            if let Some(change) = change {
                                 *old = step;
-                                changes.push(change.expect("change was checked"));
+                                changes.push(change);
                             }
                         }
                         None => {
@@ -402,9 +402,9 @@ impl LocalPlan {
                     match self.steps.iter_mut().find(|old| old.id == step.id) {
                         Some(old) => {
                             let change = compare_step(old, &step);
-                            if change.is_some() {
+                            if let Some(change) = change {
                                 *old = step;
-                                changes.push(change.expect("change was checked"));
+                                changes.push(change);
                             }
                         }
                         None => {
@@ -512,10 +512,9 @@ impl LocalPlan {
         if let ReplanProgress::Handled {
             outcome: ReplanOutcome::NoChange { reason },
         } = &next
+            && reason.trim().is_empty()
         {
-            if reason.trim().is_empty() {
-                return Err(ReplanError::EmptyNoChangeReason);
-            }
+            return Err(ReplanError::EmptyNoChangeReason);
         }
         let record = self
             .replans

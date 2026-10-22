@@ -930,7 +930,7 @@ mod tests {
             let server = tokio::spawn(async move {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = [0; 2048];
-                socket.read(&mut request).await.unwrap();
+                assert!(socket.read(&mut request).await.unwrap() > 0);
                 socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\n\r\n").await.unwrap();
                 if !body.is_empty() {
                     socket
@@ -1036,7 +1036,7 @@ mod tests {
             let server = tokio::spawn(async move {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut request = [0; 2048];
-                socket.read(&mut request).await.unwrap();
+                assert!(socket.read(&mut request).await.unwrap() > 0);
                 socket.write_all(format!("HTTP/1.1 302 Found\r\n{header}Content-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
             });
             let http = reqwest::Client::builder()

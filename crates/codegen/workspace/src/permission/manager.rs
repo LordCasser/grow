@@ -1817,7 +1817,7 @@ async fn handle_permission_request(
             bash_evaluation.as_ref(),
             request_state,
             *request_allow_edits_for_session,
-            &static_domain_matcher,
+            static_domain_matcher,
             !(effective_auto_mode && web_fetch_allowlist_is_default),
         )
     {
@@ -2655,10 +2655,11 @@ async fn handle_permission_request(
             }
             persist
         };
-        if persist && child_permission_key.is_none() {
-            if let Err(error) = environment.persist(&scope).await {
-                tracing::warn!(%error, "failed persisting remembered permission state");
-            }
+        if persist
+            && child_permission_key.is_none()
+            && let Err(error) = environment.persist(&scope).await
+        {
+            tracing::warn!(%error, "failed persisting remembered permission state");
         }
         emit_event(
             &decision,
@@ -4187,7 +4188,7 @@ mod tests {
                     "an exact locked call must honor the primary-context verdict, got {decision:?}"
                 );
                 let event = events.try_recv().expect("permission event");
-                assert_eq!(event.user_prompted, false);
+                assert!(!event.user_prompted);
                 assert_eq!(event.classifier_source.as_deref(), Some("llm"));
                 assert_eq!(event.classifier_verdict.as_deref(), Some("block"));
                 assert!(event.reject_reason.as_deref().is_some_and(|reason| {

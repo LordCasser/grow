@@ -364,24 +364,29 @@ async fn tool_json_validation_is_atomic_and_preserves_initial_objects() {
             Duration::from_secs(1),
         ))
         .await;
-        if expected_kind.is_none() {
-            let Some(SamplingEvent::Completed { response, .. }) = events.last() else {
-                panic!("{events:?}");
-            };
-            assert_eq!(response.tool_calls().len(), 2);
-            assert_eq!(
-                response.tool_calls()[1].arguments.as_ref(),
-                delta.map(str::to_owned).unwrap_or(input.to_string())
-            );
-        } else {
-            let error = match expected_kind.unwrap() {
-                crate::events::SamplingErrorKind::InvalidToolArguments => {
-                    assert_invalid_tool_arguments_failure(&events)
-                }
-                crate::events::SamplingErrorKind::Serialization => assert_protocol_failure(&events),
-                expected => panic!("unexpected expected kind {expected:?}"),
-            };
-            assert_eq!(error.usage.as_ref().unwrap().completion_tokens, 5);
+        match expected_kind {
+            None => {
+                let Some(SamplingEvent::Completed { response, .. }) = events.last() else {
+                    panic!("{events:?}");
+                };
+                assert_eq!(response.tool_calls().len(), 2);
+                assert_eq!(
+                    response.tool_calls()[1].arguments.as_ref(),
+                    delta.map(str::to_owned).unwrap_or(input.to_string())
+                );
+            }
+            Some(expected_kind) => {
+                let error = match expected_kind {
+                    crate::events::SamplingErrorKind::InvalidToolArguments => {
+                        assert_invalid_tool_arguments_failure(&events)
+                    }
+                    crate::events::SamplingErrorKind::Serialization => {
+                        assert_protocol_failure(&events)
+                    }
+                    expected => panic!("unexpected expected kind {expected:?}"),
+                };
+                assert_eq!(error.usage.as_ref().unwrap().completion_tokens, 5);
+            }
         }
     }
 }

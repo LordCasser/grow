@@ -2006,15 +2006,12 @@ impl SessionActor {
         // after the first read but before this waiter was stored.
         if let Ok(runtime) = self.chat_state_handle.runtime_state().await
             && runtime.phase == chat_state::session_runtime::RuntimePhase::Suspended
+            && let Some(checkpoint_seq) = runtime.checkpoint_seq
         {
-            if let Some(checkpoint_seq) = runtime.checkpoint_seq {
-                self.resolve_runtime_suspended_waiters(
-                    chat_state::session_runtime::RuntimeNodeRef {
-                        session_id: self.session_id_string(),
-                        checkpoint_seq,
-                    },
-                );
-            }
+            self.resolve_runtime_suspended_waiters(chat_state::session_runtime::RuntimeNodeRef {
+                session_id: self.session_id_string(),
+                checkpoint_seq,
+            });
         }
     }
 

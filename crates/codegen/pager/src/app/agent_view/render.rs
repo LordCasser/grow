@@ -4157,18 +4157,17 @@ impl AgentView {
         }
         if self.show_goal_detail
             && let Some(ref goal) = self.session.goal_state
-        {
-            if let Some(output) = crate::views::goal_detail::render_goal_detail(
+            && let Some(output) = crate::views::goal_detail::render_goal_detail(
                 buf,
                 area,
                 goal,
                 &mut self.goal_detail_renderer,
                 frame_stamp,
                 self.hit_goal_close.hovered,
-            ) {
-                self.hit_goal_close.rect = output.close;
-                self.frame_occluder_rects.push(output.area);
-            }
+            )
+        {
+            self.hit_goal_close.rect = output.close;
+            self.frame_occluder_rects.push(output.area);
         }
         if self.show_workflows {
             let runs = self.workflow_runs_newest_first();

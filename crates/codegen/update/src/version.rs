@@ -236,7 +236,7 @@ pub(crate) fn version_from_versioned_binary_name(name: &str, bin_prefix: &str) -
     let ver_str = PLATFORM_SUFFIXES
         .iter()
         .find_map(|platform| suffix.strip_suffix(platform))?;
-    semver::Version::parse(&ver_str).ok()?;
+    semver::Version::parse(ver_str).ok()?;
     Some(ver_str.to_owned())
 }
 

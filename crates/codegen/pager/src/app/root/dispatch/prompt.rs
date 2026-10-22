@@ -116,70 +116,6 @@ fn frozen_skill_retry(
     })
 }
 
-#[cfg(test)]
-mod frozen_skill_retry_tests {
-    use super::*;
-
-    #[test]
-    fn unchanged_retry_reuses_the_original_selected_source() {
-        let mut app = crate::app::root::tests::test_app_with_agent();
-        let agent = app.agents.values_mut().next().unwrap();
-        let text = "/local:review inspect";
-        let selection = crate::app::session::FrozenSkillSelection {
-            name: "local:review".into(),
-            path: "/repo/.grow/skills/review-v1/SKILL.md".into(),
-            plugin_name: None,
-        };
-        agent.prompt.set_text(text);
-        agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
-            prompt_id: Some("retry-original-id".into()),
-            admission_resolved: None,
-            expected_turn_id: None,
-            frozen_skill_selection: Some(selection.clone()),
-            text: text.into(),
-            images: Vec::new(),
-            scrollback_entry: crate::scrollback::EntryId::new(0),
-            combined_scrollback_entries: Vec::new(),
-            chip_elements: Vec::new(),
-        });
-
-        let Some(crate::slash::command::CommandResult::InjectSkill { prompt_blocks, .. }) =
-            frozen_skill_retry(agent, text)
-        else {
-            panic!("unchanged frozen skill input should bypass current catalog lookup");
-        };
-        let acp::ContentBlock::Text(block) = &prompt_blocks[0] else {
-            panic!("frozen selected source must remain on the text block");
-        };
-        assert_eq!(
-            block
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.get("grow/skillSelection")),
-            Some(&serde_json::json!({
-                "name": selection.name,
-                "path": selection.path,
-                "plugin_name": null
-            }))
-        );
-        assert_eq!(block.text, text);
-    }
-
-    #[test]
-    fn staged_selection_does_not_apply_after_command_name_changes() {
-        let mut app = crate::app::root::tests::test_app_with_agent();
-        let agent = app.agents.values_mut().next().unwrap();
-        agent.session.staged_skill_selection = Some(crate::app::session::FrozenSkillSelection {
-            name: "local:review".into(),
-            path: "/repo/.grow/skills/review/SKILL.md".into(),
-            plugin_name: None,
-        });
-
-        assert!(frozen_skill_retry(agent, "/local:review edited args").is_some());
-        assert!(frozen_skill_retry(agent, "/local:other edited args").is_none());
-    }
-}
-
 /// Enqueue a prompt and try to drain immediately.
 ///
 /// The prompt is always pushed to the queue first. If the agent is idle
@@ -1714,4 +1650,68 @@ pub(super) fn handle_suggestion_debounce_expired(
         // The as-you-type (ghost) surface keeps history/AI providers.
         token_only: false,
     }]
+}
+
+#[cfg(test)]
+mod frozen_skill_retry_tests {
+    use super::*;
+
+    #[test]
+    fn unchanged_retry_reuses_the_original_selected_source() {
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        let agent = app.agents.values_mut().next().unwrap();
+        let text = "/local:review inspect";
+        let selection = crate::app::session::FrozenSkillSelection {
+            name: "local:review".into(),
+            path: "/repo/.grow/skills/review-v1/SKILL.md".into(),
+            plugin_name: None,
+        };
+        agent.prompt.set_text(text);
+        agent.session.in_flight_prompt = Some(crate::app::session::InFlightPrompt {
+            prompt_id: Some("retry-original-id".into()),
+            admission_resolved: None,
+            expected_turn_id: None,
+            frozen_skill_selection: Some(selection.clone()),
+            text: text.into(),
+            images: Vec::new(),
+            scrollback_entry: crate::scrollback::EntryId::new(0),
+            combined_scrollback_entries: Vec::new(),
+            chip_elements: Vec::new(),
+        });
+
+        let Some(crate::slash::command::CommandResult::InjectSkill { prompt_blocks, .. }) =
+            frozen_skill_retry(agent, text)
+        else {
+            panic!("unchanged frozen skill input should bypass current catalog lookup");
+        };
+        let acp::ContentBlock::Text(block) = &prompt_blocks[0] else {
+            panic!("frozen selected source must remain on the text block");
+        };
+        assert_eq!(
+            block
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("grow/skillSelection")),
+            Some(&serde_json::json!({
+                "name": selection.name,
+                "path": selection.path,
+                "plugin_name": null
+            }))
+        );
+        assert_eq!(block.text, text);
+    }
+
+    #[test]
+    fn staged_selection_does_not_apply_after_command_name_changes() {
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        let agent = app.agents.values_mut().next().unwrap();
+        agent.session.staged_skill_selection = Some(crate::app::session::FrozenSkillSelection {
+            name: "local:review".into(),
+            path: "/repo/.grow/skills/review/SKILL.md".into(),
+            plugin_name: None,
+        });
+
+        assert!(frozen_skill_retry(agent, "/local:review edited args").is_some());
+        assert!(frozen_skill_retry(agent, "/local:other edited args").is_none());
+    }
 }

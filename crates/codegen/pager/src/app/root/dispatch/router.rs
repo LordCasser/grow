@@ -1420,10 +1420,10 @@ fn begin_exit_suspension(app: &mut AppView, restart_for_update: bool, retry: boo
         effects.push(Effect::Quit);
         return effects;
     }
-    if let Some(exit) = app.exit_suspension.as_ref() {
-        if !retry || matches!(&exit.phase, crate::app::root::ExitSuspensionPhase::Pending) {
-            return vec![];
-        }
+    if let Some(exit) = app.exit_suspension.as_ref()
+        && (!retry || matches!(&exit.phase, crate::app::root::ExitSuspensionPhase::Pending))
+    {
+        return vec![];
     }
     let exit_id = uuid::Uuid::now_v7().to_string();
     app.exit_suspension = Some(crate::app::root::ExitSuspension {

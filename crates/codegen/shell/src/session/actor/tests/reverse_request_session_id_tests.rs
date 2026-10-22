@@ -23,21 +23,20 @@ impl chat_state::TimelinePersistence for QuestionTestPersistence {
         &mut self,
         event: &chat_state::TimelineEvent,
     ) -> tokio::sync::oneshot::Receiver<std::io::Result<()>> {
-        let should_fail = match (&self.fail_at, &event.kind) {
+        let should_fail = matches!(
+            (&self.fail_at, &event.kind),
             (
                 Some(FailQuestionPersistenceAt::Opened),
-                chat_state::TimelineEventKind::Interaction(chat_state::InteractionEvent::Opened {
-                    ..
-                }),
-            ) => true,
-            (
+                chat_state::TimelineEventKind::Interaction(
+                    chat_state::InteractionEvent::Opened { .. }
+                ),
+            ) | (
                 Some(FailQuestionPersistenceAt::Resolved),
                 chat_state::TimelineEventKind::Interaction(
                     chat_state::InteractionEvent::Resolved { .. },
                 ),
-            ) => true,
-            _ => false,
-        };
+            )
+        );
         let (tx, rx) = tokio::sync::oneshot::channel();
         let result = if should_fail {
             Err(std::io::Error::new(

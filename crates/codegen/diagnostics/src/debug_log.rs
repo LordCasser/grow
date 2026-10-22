@@ -428,11 +428,11 @@ fn prune_old_logs(dir: &Path, max_age: std::time::Duration) {
                     continue;
                 };
                 if !metadata.is_file()
-                    || !metadata
+                    || metadata
                         .modified()
                         .ok()
                         .and_then(|modified| now.duration_since(modified).ok())
-                        .is_some_and(|age| age > max_age)
+                        .is_none_or(|age| age <= max_age)
                 {
                     continue;
                 }

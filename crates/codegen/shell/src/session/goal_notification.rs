@@ -34,51 +34,45 @@ impl GoalNotifySender {
         }
     }
 
-    pub(crate) fn emit_goal_updated(
-        &self,
-        goal: Option<(GoalState, u64)>,
-        tokens_used: i64,
-    ) -> impl std::future::Future<Output = ()> + '_ {
-        async move {
-            let Some((goal, elapsed_ms)) = goal else {
-                return;
-            };
-            let mut meta = None;
-            crate::util::event_id::ensure_event_id_meta(&self.session_id.0, &mut meta);
-            let source_id = format!(
-                "goal:{}:definition:{}",
-                goal.goal_id, goal.definition_revision
-            );
-            let mut meta = meta.unwrap_or_default();
-            meta.insert(
-                "grow/displayProjectionSource".to_owned(),
-                serde_json::Value::String(source_id),
-            );
-            meta.insert(
-                "grow/displayProjectionRevision".to_owned(),
-                serde_json::Value::from(self.source_revision),
-            );
-            let notification = GrowSessionNotification {
-                session_id: self.session_id.clone(),
-                update: build_goal_updated(&goal, tokens_used, elapsed_ms),
-                meta: Some(serde_json::Value::Object(meta)),
-            };
-            let Some(prepared) = crate::session::notifications::prepare_auxiliary_grow(
-                &self.persistence_tx,
-                &self.budget,
-                &self.preview,
-                notification.clone(),
-                true,
-            ) else {
-                return;
-            };
-            crate::session::notifications::publish_prepared_auxiliary_grow(
-                &self.gateway,
-                &self.persistence_tx,
-                "grow/session_notification",
-                prepared,
-            );
-        }
+    pub(crate) async fn emit_goal_updated(&self, goal: Option<(GoalState, u64)>, tokens_used: i64) {
+        let Some((goal, elapsed_ms)) = goal else {
+            return;
+        };
+        let mut meta = None;
+        crate::util::event_id::ensure_event_id_meta(&self.session_id.0, &mut meta);
+        let source_id = format!(
+            "goal:{}:definition:{}",
+            goal.goal_id, goal.definition_revision
+        );
+        let mut meta = meta.unwrap_or_default();
+        meta.insert(
+            "grow/displayProjectionSource".to_owned(),
+            serde_json::Value::String(source_id),
+        );
+        meta.insert(
+            "grow/displayProjectionRevision".to_owned(),
+            serde_json::Value::from(self.source_revision),
+        );
+        let notification = GrowSessionNotification {
+            session_id: self.session_id.clone(),
+            update: build_goal_updated(&goal, tokens_used, elapsed_ms),
+            meta: Some(serde_json::Value::Object(meta)),
+        };
+        let Some(prepared) = crate::session::notifications::prepare_auxiliary_grow(
+            &self.persistence_tx,
+            &self.budget,
+            &self.preview,
+            notification.clone(),
+            true,
+        ) else {
+            return;
+        };
+        crate::session::notifications::publish_prepared_auxiliary_grow(
+            &self.gateway,
+            &self.persistence_tx,
+            "grow/session_notification",
+            prepared,
+        );
     }
 
     pub(crate) fn snapshot_goal(tracker: &GoalTracker) -> Option<(GoalState, u64)> {

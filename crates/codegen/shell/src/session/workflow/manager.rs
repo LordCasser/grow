@@ -2634,8 +2634,7 @@ complete("restored after explicit resume");"#;
         let last = trajectory
             .rows
             .iter()
-            .filter(|row| row.actor == format!("workflow:{run_id}"))
-            .next_back()
+            .rfind(|row| row.actor == format!("workflow:{run_id}"))
             .unwrap();
         assert_eq!(last.state, "interrupted");
         assert!(!trajectory.open_workflows.contains(&run_id));
@@ -3155,8 +3154,7 @@ complete("restored after explicit resume");"#;
         let last = trajectory
             .rows
             .iter()
-            .filter(|row| row.actor == format!("workflow:{run_id}"))
-            .next_back()
+            .rfind(|row| row.actor == format!("workflow:{run_id}"))
             .unwrap();
         assert_eq!(last.state, "cancelled");
         assert!(!trajectory.open_workflows.contains(&run_id));

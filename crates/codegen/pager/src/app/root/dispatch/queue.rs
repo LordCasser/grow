@@ -705,65 +705,6 @@ fn frozen_skill_selection_from_blocks(
     })
 }
 
-#[cfg(test)]
-mod frozen_skill_queue_tests {
-    use super::*;
-
-    #[test]
-    fn selected_skill_drain_keeps_checkpoint_intent_and_source_identity() {
-        let mut app = crate::app::root::tests::test_app_with_agent();
-        let id = *app.agents.keys().next().expect("test agent");
-        let agent = app.agents.get_mut(&id).unwrap();
-        agent.session.session_id = Some(acp::SessionId::new("selected-skill-checkpoint"));
-        let mut block = acp::TextContent::new("/local:review inspect".to_owned());
-        block.meta = Some(
-            [(
-                "grow/skillSelection".into(),
-                serde_json::json!({
-                    "name": "local:review",
-                    "path": "/repo/.grow/skills/review/SKILL.md",
-                    "plugin_name": null
-                }),
-            )]
-            .into_iter()
-            .collect(),
-        );
-        agent
-            .session
-            .pending_prompts
-            .push_back(crate::app::session::QueuedPrompt {
-                wire_blocks: Some(vec![acp::ContentBlock::Text(block)]),
-                display_as_skill: true,
-                ..crate::app::session::QueuedPrompt::plain(
-                    1,
-                    "/local:review inspect",
-                    crate::app::session::QueueEntryKind::Prompt,
-                )
-            });
-
-        let drain = maybe_drain_queue(agent);
-
-        assert!(matches!(
-            drain.effects.as_slice(),
-            [Effect::SendPromptBlocks { .. }]
-        ));
-        let in_flight = agent
-            .session
-            .in_flight_prompt
-            .as_ref()
-            .expect("skill request must enter the durable input-intent checkpoint");
-        assert_eq!(in_flight.text, "/local:review inspect");
-        assert_eq!(
-            in_flight.frozen_skill_selection,
-            Some(crate::app::session::FrozenSkillSelection {
-                name: "local:review".into(),
-                path: "/repo/.grow/skills/review/SKILL.md".into(),
-                plugin_name: None,
-            })
-        );
-    }
-}
-
 /// Whether [`apply_turn_start_shim`] renders its own user block (i.e.
 /// `display_block` is `Some`). When true the pager owns the block and must
 /// correlate the leader's user echo by message id; when false (bash/internal
@@ -1080,5 +1021,64 @@ pub(super) fn dispatch_queue_interject_shared(
             }]
         }
         None => vec![],
+    }
+}
+
+#[cfg(test)]
+mod frozen_skill_queue_tests {
+    use super::*;
+
+    #[test]
+    fn selected_skill_drain_keeps_checkpoint_intent_and_source_identity() {
+        let mut app = crate::app::root::tests::test_app_with_agent();
+        let id = *app.agents.keys().next().expect("test agent");
+        let agent = app.agents.get_mut(&id).unwrap();
+        agent.session.session_id = Some(acp::SessionId::new("selected-skill-checkpoint"));
+        let mut block = acp::TextContent::new("/local:review inspect".to_owned());
+        block.meta = Some(
+            [(
+                "grow/skillSelection".into(),
+                serde_json::json!({
+                    "name": "local:review",
+                    "path": "/repo/.grow/skills/review/SKILL.md",
+                    "plugin_name": null
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        agent
+            .session
+            .pending_prompts
+            .push_back(crate::app::session::QueuedPrompt {
+                wire_blocks: Some(vec![acp::ContentBlock::Text(block)]),
+                display_as_skill: true,
+                ..crate::app::session::QueuedPrompt::plain(
+                    1,
+                    "/local:review inspect",
+                    crate::app::session::QueueEntryKind::Prompt,
+                )
+            });
+
+        let drain = maybe_drain_queue(agent);
+
+        assert!(matches!(
+            drain.effects.as_slice(),
+            [Effect::SendPromptBlocks { .. }]
+        ));
+        let in_flight = agent
+            .session
+            .in_flight_prompt
+            .as_ref()
+            .expect("skill request must enter the durable input-intent checkpoint");
+        assert_eq!(in_flight.text, "/local:review inspect");
+        assert_eq!(
+            in_flight.frozen_skill_selection,
+            Some(crate::app::session::FrozenSkillSelection {
+                name: "local:review".into(),
+                path: "/repo/.grow/skills/review/SKILL.md".into(),
+                plugin_name: None,
+            })
+        );
     }
 }

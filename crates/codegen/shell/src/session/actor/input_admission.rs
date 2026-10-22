@@ -55,6 +55,773 @@ fn explicit_selection_matches(
         && reference.plugin_name == selection.plugin_name
 }
 
+impl SessionActor {
+    pub(super) async fn admit_human_input(
+        &self,
+        intent: chat_state::InputIntent,
+        payload: crate::session::input_inbox::InputPayload,
+        prompt_id: Option<String>,
+        route: chat_state::InputRoute,
+        supersedes: Vec<String>,
+    ) -> Result<AdmittedInput, String> {
+        let _admission_guard = self.input_admission_gate.lock().await;
+        let attempt = self
+            .run_human_input_admission_hook(intent, payload, prompt_id.clone())
+            .await?;
+        let (input_id, decision) = match attempt {
+            InputAdmissionAttempt::New { input_id, decision } => (input_id, decision),
+            InputAdmissionAttempt::Existing { input_id, state } => {
+                return match state {
+                    ExistingInputState::Submitted => Err(format!(
+                        "input admission remains unresolved for prompt {prompt_id:?} (input {input_id})"
+                    )),
+                    ExistingInputState::Allowed => Ok(AdmittedInput {
+                        input_id,
+                        replayed: true,
+                    }),
+                    ExistingInputState::Blocked(reason) => Err(input_block_reason_message(reason)),
+                    ExistingInputState::Consumed => Err(format!(
+                        "input was already consumed for prompt {prompt_id:?} (input {input_id})"
+                    )),
+                    ExistingInputState::Handled => Err(format!(
+                        "input was already handled for prompt {prompt_id:?} (input {input_id})"
+                    )),
+                    ExistingInputState::Dismissed => Err(format!(
+                        "input was already dismissed for prompt {prompt_id:?} (input {input_id})"
+                    )),
+                };
+            }
+        };
+        let (route, supersedes) = if matches!(decision, chat_state::InputAdmissionDecision::Allow) {
+            (Some(route), supersedes)
+        } else {
+            (None, Vec::new())
+        };
+        let admitted = self
+            .resolve_human_input_admission(input_id, decision, route, supersedes)
+            .await?;
+        Ok(AdmittedInput {
+            replayed: false,
+            ..admitted
+        })
+    }
+
+    fn explicit_skill_selection(
+        prompt_blocks: &[acp::ContentBlock],
+    ) -> Result<Option<ExplicitSkillSelection>, String> {
+        let mut selected = None;
+        for block in prompt_blocks {
+            let acp::ContentBlock::Text(text) = block else {
+                continue;
+            };
+            let Some(value) = text
+                .meta
+                .as_ref()
+                .and_then(|meta| meta.get("grow/skillSelection"))
+            else {
+                continue;
+            };
+            if selected.is_some() {
+                return Err("input contains multiple explicit skill selections".into());
+            }
+            let selection: ExplicitSkillSelection = serde_json::from_value(value.clone())
+                .map_err(|_| "explicit skill selection metadata is malformed".to_string())?;
+            if selection.name.trim().is_empty() || selection.path.trim().is_empty() {
+                return Err("explicit skill selection identity is incomplete".into());
+            }
+            selected = Some(selection);
+        }
+        Ok(selected)
+    }
+
+    async fn freeze_skill_invocations(
+        &self,
+        prompt_blocks: &[acp::ContentBlock],
+    ) -> Vec<crate::session::input_inbox::FrozenSkillInvocation> {
+        use crate::session::input_inbox::FrozenSkillInvocation;
+        use crate::session::slash_commands::SlashCommandOutcome;
+        use tools::implementations::skills::skill::format_skill_name;
+
+        let selection = match Self::explicit_skill_selection(prompt_blocks) {
+            Ok(selection) => selection,
+            Err(error) => {
+                return vec![FrozenSkillInvocation {
+                    callable_name: String::new(),
+                    qualified_name: String::new(),
+                    args: String::new(),
+                    skill: None,
+                    selection_error: Some(error),
+                }];
+            }
+        };
+        let skills = self.slash_skills_for_resolve().await;
+        // Admission may already own the queue-edit control fence. Resolving
+        // immutable user intent must not reconcile Goal or mutate business state.
+        let tool_names = self.registered_tool_names().await;
+        let has_workflow_runs = !self.workflow_tracker().await.lock().list().is_empty();
+        let availability = self.build_command_availability(&tool_names, has_workflow_runs);
+        let (_, workflows, _) = self.named_workflow_snapshot();
+        let parsed = match crate::session::slash_commands::resolve(
+            prompt_blocks.to_vec(),
+            &skills,
+            availability,
+            &workflows,
+        ) {
+            Err(SlashCommandOutcome::InvokeSkill { skills, .. }) => skills,
+            Ok(_) | Err(SlashCommandOutcome::Builtin(_)) => Vec::new(),
+        };
+
+        if let Some(selection) = selection {
+            let selected = parsed
+                .first()
+                .filter(|reference| explicit_selection_matches(&selection, reference));
+            if selected.is_none() {
+                return vec![FrozenSkillInvocation {
+                    callable_name: selection.name.clone(),
+                    qualified_name: selection.name,
+                    args: parsed
+                        .first()
+                        .map_or_else(String::new, |reference| reference.args.clone()),
+                    skill: None,
+                    selection_error: Some(
+                        "selected skill source no longer matches this command; choose it again"
+                            .into(),
+                    ),
+                }];
+            }
+        }
+
+        parsed
+            .into_iter()
+            .map(|reference| {
+                let skill = skills.iter().find(|skill| {
+                    skill.path == reference.skill_path
+                        && skill.plugin_name == reference.plugin_name
+                        && format_skill_name(skill) == reference.qualified_name
+                });
+                match skill {
+                    Some(skill) => FrozenSkillInvocation {
+                        callable_name: reference.name,
+                        qualified_name: reference.qualified_name,
+                        args: reference.args,
+                        // Keep the exact in-memory list snapshot. Admission
+                        // does not reread SKILL.md or refresh its body.
+                        skill: Some(skill.clone()),
+                        selection_error: None,
+                    },
+                    None => FrozenSkillInvocation {
+                        callable_name: reference.name,
+                        qualified_name: reference.qualified_name,
+                        args: reference.args,
+                        skill: None,
+                        selection_error: Some(
+                            "resolved skill source disappeared before input admission".into(),
+                        ),
+                    },
+                }
+            })
+            .collect()
+    }
+
+    /// Publish a HumanIntent and run its one UserPromptSubmit Hook occurrence,
+    /// but leave the final admission decision to the caller. Direct steering
+    /// uses this split phase so target liveness is checked after a potentially
+    /// slow Hook without losing the submitted input fact.
+    pub(super) async fn run_human_input_admission_hook(
+        &self,
+        intent: chat_state::InputIntent,
+        mut payload: crate::session::input_inbox::InputPayload,
+        prompt_id: Option<String>,
+    ) -> Result<InputAdmissionAttempt, String> {
+        let payload_prompt_id = match &payload {
+            crate::session::input_inbox::InputPayload::Prompt { prompt_id, .. } => prompt_id,
+        };
+        if payload_prompt_id.is_empty() {
+            return Err("input prompt identity is empty".into());
+        }
+        let requested_route = match &payload {
+            crate::session::input_inbox::InputPayload::Prompt {
+                requested_route, ..
+            } => requested_route,
+        };
+        let route_matches_intent = matches!(
+            (intent, requested_route),
+            (
+                chat_state::InputIntent::Prompt | chat_state::InputIntent::Followup,
+                crate::session::input_inbox::InputRequestRoute::Fifo
+            ) | (
+                chat_state::InputIntent::Steer,
+                crate::session::input_inbox::InputRequestRoute::Steer { .. }
+            )
+        );
+        if !route_matches_intent {
+            return Err("input route does not match its immutable request intent".into());
+        }
+        if prompt_id
+            .as_deref()
+            .is_some_and(|id| id != payload_prompt_id)
+        {
+            return Err("input prompt identity does not match its immutable payload".into());
+        }
+        let prompt_id = payload_prompt_id.clone();
+        let input_id = crate::session::input_inbox::input_id_for_prompt(
+            self.session_info.id.0.as_ref(),
+            &prompt_id,
+        );
+        let events = self
+            .chat_state_handle
+            .timeline_events()
+            .await
+            .ok_or_else(|| "Timeline unavailable while reconciling input identity".to_string())?;
+        if let Some(existing_id) = self
+            .find_existing_prompt_input(&events, &prompt_id, intent, &payload)
+            .await?
+        {
+            return Ok(InputAdmissionAttempt::Existing {
+                state: existing_input_state(&events, &existing_id)?,
+                input_id: existing_id,
+            });
+        }
+
+        let crate::session::input_inbox::InputPayload::Prompt {
+            prompt_blocks,
+            skill_invocations,
+            ..
+        } = &mut payload;
+        *skill_invocations = self.freeze_skill_invocations(prompt_blocks).await;
+        let artifact_guard = self.input_artifact_gate.lock().await;
+        let directory = self
+            .session_directory
+            .try_clone()
+            .map_err(|error| format!("input artifact directory unavailable: {error}"))?;
+        let (payload_ref, hook_prompt) = tokio::task::spawn_blocking(move || {
+            let reference = crate::session::input_inbox::write_payload(&directory, &payload)?;
+            // Serialization/decoded-image budgets have now been checked. The
+            // Hook reviews this exact snapshot, never a mutable source path.
+            Ok::<_, std::io::Error>((reference, payload.hook_prompt()))
+        })
+        .await
+        .map_err(|error| format!("input artifact writer failed: {error}"))?
+        .map_err(|error| format!("input artifact write failed: {error}"))?;
+
+        let submitted = self
+            .chat_state_handle
+            .submit_input_durably(input_id.clone(), intent, payload_ref.clone())
+            .await
+            .map_err(|error| format!("input submission was not durable: {error}"))?;
+        if !submitted.created {
+            drop(artifact_guard);
+            let events = self
+                .chat_state_handle
+                .timeline_events()
+                .await
+                .ok_or_else(|| {
+                    "Timeline unavailable while reconciling input identity".to_string()
+                })?;
+            return Ok(InputAdmissionAttempt::Existing {
+                state: existing_input_state(&events, &input_id)?,
+                input_id,
+            });
+        }
+        // The blob is now reachable from Timeline, so maintenance can no longer
+        // classify it as an orphan. Do not serialize slow external Hook runs on
+        // the artifact-maintenance gate.
+        drop(artifact_guard);
+
+        let envelope = self.make_hook_envelope(
+            ::hooks::event::HookEventName::UserPromptSubmit,
+            Some(prompt_id),
+            ::hooks::event::HookPayload::UserPromptSubmit {
+                prompt: Some(hook_prompt),
+            },
+        );
+        let aggregate = self
+            .dispatch_prompt_hook(
+                chat_state::HookCause::Input {
+                    input_id: input_id.clone(),
+                },
+                envelope,
+                ::hooks::event::GateKind::Prompt,
+            )
+            .await
+            .map_err(|error| format!("input hook lifecycle was not durable: {error}"))?;
+        let decision = match aggregate {
+            HookAggregate::Prompt { decision, .. } => decision,
+            _ => unreachable!("Prompt gate returned a non-Prompt aggregate"),
+        };
+        let decision = match decision {
+            ::hooks::result::HookDecision::Allow => chat_state::InputAdmissionDecision::Allow,
+            ::hooks::result::HookDecision::Deny { reason, .. } => {
+                chat_state::InputAdmissionDecision::Block {
+                    reason: chat_state::InputBlockReason::Hook {
+                        reason: reason.clone(),
+                    },
+                }
+            }
+        };
+        Ok(InputAdmissionAttempt::New { input_id, decision })
+    }
+
+    async fn find_existing_prompt_input(
+        &self,
+        events: &[chat_state::TimelineEvent],
+        prompt_id: &str,
+        intent: chat_state::InputIntent,
+        requested: &crate::session::input_inbox::InputPayload,
+    ) -> Result<Option<String>, String> {
+        let mut matched = None;
+        for event in events {
+            let chat_state::TimelineEventKind::Input(chat_state::InputEvent::Submitted {
+                input_id,
+                intent: existing_intent,
+                payload_ref,
+            }) = &event.kind
+            else {
+                continue;
+            };
+            let existing_prompt_id =
+                crate::session::input_inbox::read_prompt_id(&self.session_directory, payload_ref)
+                    .map_err(|error| {
+                    format!("input identity evidence is unavailable for {input_id}: {error}")
+                })?;
+            if existing_prompt_id != prompt_id {
+                continue;
+            }
+            if matched.is_some() {
+                return Err(format!(
+                    "input identity evidence is ambiguous for prompt {prompt_id}"
+                ));
+            }
+            if existing_intent != &intent {
+                return Err(format!(
+                    "input identity conflict for prompt {prompt_id}: intent differs"
+                ));
+            }
+            let existing_payload =
+                crate::session::input_inbox::read_payload(&self.session_directory, payload_ref)
+                    .map_err(|error| {
+                        format!("input payload evidence is unavailable for {input_id}: {error}")
+                    })?;
+            let existing_value = comparable_input_payload(&existing_payload)?;
+            let requested_value = comparable_input_payload(requested)?;
+            if existing_value != requested_value {
+                return Err(format!(
+                    "input identity conflict for prompt {prompt_id}: immutable payload or route differs"
+                ));
+            }
+            matched = Some(input_id.clone());
+        }
+        Ok(matched)
+    }
+
+    pub(super) async fn resolve_human_input_admission(
+        &self,
+        input_id: String,
+        decision: chat_state::InputAdmissionDecision,
+        route: Option<chat_state::InputRoute>,
+        supersedes: Vec<String>,
+    ) -> Result<AdmittedInput, String> {
+        self.record_input_event(chat_state::InputEvent::AdmissionResolved {
+            input_id: input_id.clone(),
+            decision: decision.clone(),
+            route,
+            supersedes,
+        })
+        .await?;
+        if let chat_state::InputAdmissionDecision::Block { reason } = decision {
+            return Err(match reason {
+                chat_state::InputBlockReason::Hook { reason } => reason,
+                chat_state::InputBlockReason::StaleSteerTarget => {
+                    "the target turn is no longer running".to_string()
+                }
+                chat_state::InputBlockReason::ProcessInterrupted => {
+                    "input admission was interrupted".to_string()
+                }
+            });
+        }
+        Ok(AdmittedInput {
+            input_id,
+            replayed: false,
+        })
+    }
+
+    pub(super) async fn reroute_input(
+        &self,
+        input_id: String,
+        route: chat_state::InputRoute,
+    ) -> Result<(), String> {
+        self.reroute_input_ids(vec![input_id], route).await
+    }
+
+    pub(super) async fn reroute_input_ids(
+        &self,
+        input_ids: Vec<String>,
+        route: chat_state::InputRoute,
+    ) -> Result<(), String> {
+        self.record_input_event(chat_state::InputEvent::Rerouted { input_ids, route })
+            .await
+    }
+
+    pub(super) async fn consume_steer_inputs(
+        &self,
+        input_ids: Vec<String>,
+        turn: chat_state::TurnId,
+        item: sampling_types::ConversationItem,
+        display_echo: Option<chat_state::UserDisplayEcho>,
+    ) -> Result<(), String> {
+        self.record_input_event(chat_state::InputEvent::Consumed {
+            input_ids,
+            turn,
+            item,
+            display_echo,
+            skill_loads: Vec::new(),
+        })
+        .await
+    }
+
+    pub(super) async fn consume_fifo_inputs(
+        &self,
+        input_ids: Vec<String>,
+        turn: chat_state::TurnId,
+        item: sampling_types::ConversationItem,
+        display_echo: Option<chat_state::UserDisplayEcho>,
+    ) -> Result<(), String> {
+        self.record_input_event(chat_state::InputEvent::Consumed {
+            input_ids,
+            turn,
+            item,
+            display_echo,
+            skill_loads: Vec::new(),
+        })
+        .await
+    }
+
+    pub(super) async fn complete_unmodeled_fifo_inputs(
+        &self,
+        input_ids: Vec<String>,
+        turn: chat_state::TurnId,
+    ) -> Result<(), String> {
+        self.record_input_event(chat_state::InputEvent::Handled { input_ids, turn })
+            .await
+    }
+
+    pub(super) async fn dismiss_input_ids(
+        &self,
+        input_ids: impl IntoIterator<Item = String>,
+        reason: chat_state::InputDismissReason,
+    ) -> Result<(), String> {
+        let input_ids = input_ids.into_iter().collect::<Vec<_>>();
+        if input_ids.is_empty() {
+            return Ok(());
+        }
+        self.record_input_event(chat_state::InputEvent::Dismissed { input_ids, reason })
+            .await
+    }
+
+    async fn record_input_event(&self, event: chat_state::InputEvent) -> Result<(), String> {
+        self.chat_state_handle
+            .record_timeline_event_durably(chat_state::TimelineEventKind::Input(event))
+            .await
+            .map(|_| ())
+            .map_err(|error| format!("input lifecycle was not durable: {error}"))
+    }
+
+    pub(super) async fn restore_pending_human_inputs(&self) -> Result<(), String> {
+        let pending = self
+            .chat_state_handle
+            .get_pending_allowed_inputs()
+            .await
+            .ok_or_else(|| "Timeline unavailable while restoring pending inputs".to_string())?;
+        let directory = self
+            .session_directory
+            .try_clone()
+            .map_err(|error| format!("input artifact directory unavailable: {error}"))?;
+        for pending in pending {
+            let directory = directory
+                .try_clone()
+                .map_err(|error| format!("input artifact directory unavailable: {error}"))?;
+            let payload_ref = pending.payload_ref.clone();
+            let payload = tokio::task::spawn_blocking(move || {
+                crate::session::input_inbox::read_payload(&directory, &payload_ref)
+            })
+            .await
+            .map_err(|error| format!("input artifact reader failed: {error}"))?;
+            let payload = match payload {
+                Ok(payload) => payload,
+                Err(error) if crate::session::input_inbox::is_attachment_error(&error) => {
+                    // Keep Submitted and its references as audit evidence. An
+                    // allowed input whose snapshot cannot be restored must not
+                    // become a text-only turn or prevent unrelated history use.
+                    self.dismiss_input_ids(
+                        [pending.input_id.clone()],
+                        chat_state::InputDismissReason::Invalidated,
+                    )
+                    .await?;
+                    self.persist_ui_notice(crate::extensions::notification::UiNotice {
+                        correlation_id: pending.input_id,
+                        category: crate::extensions::notification::UiNoticeCategory::Lifecycle,
+                        subject: Some("input attachment".into()),
+                        description: None,
+                        message: "A pending input was stopped because an image attachment is unavailable. Reattach the image and submit a new prompt.".into(),
+                        tone: crate::extensions::notification::UiNoticeTone::Error,
+                        details: Some(error.to_string()),
+                    }).await?;
+                    continue;
+                }
+                Err(error) => return Err(format!("input payload is missing or corrupt: {error}")),
+            };
+            if !crate::session::input_inbox::payload_matches_intent(pending.intent, &payload) {
+                return Err("input intent does not match its payload artifact".into());
+            }
+            match (pending.intent, payload) {
+                (
+                    chat_state::InputIntent::Prompt
+                    | chat_state::InputIntent::Followup
+                    | chat_state::InputIntent::Steer,
+                    crate::session::input_inbox::InputPayload::Prompt {
+                        prompt_id,
+                        requested_route: _,
+                        prompt_blocks,
+                        skill_invocations: _,
+                        client_identifier,
+                        screen_mode,
+                        verbatim,
+                        json_schema,
+                        origin,
+                        turn_kind,
+                        queue,
+                    },
+                ) => {
+                    if origin != crate::session::PromptOrigin::User
+                        || turn_kind != crate::session::TurnKind::User
+                    {
+                        return Err("pending human input payload has a synthetic identity".into());
+                    }
+                    if matches!(pending.route, chat_state::InputRoute::Steer { .. }) {
+                        self.reroute_input(pending.input_id.clone(), chat_state::InputRoute::Fifo)
+                            .await?;
+                    } else if !matches!(pending.route, chat_state::InputRoute::Fifo) {
+                        return Err("pending prompt input has an incompatible route".into());
+                    }
+                    let queue_meta = queue.map(Into::into).unwrap_or_else(|| {
+                        crate::session::prompt_queue::QueueEntryMeta {
+                            id: prompt_id.clone(),
+                            version: 0,
+                            owner: client_identifier.clone(),
+                            last_editor: None,
+                            kind: "prompt".into(),
+                            text: Self::queue_text_from_blocks(&prompt_blocks),
+                            combined_texts: None,
+                        }
+                    });
+                    let (respond_to, _response) = tokio::sync::oneshot::channel();
+                    self.state.lock().await.pending_inputs.push_back(InputItem {
+                        input_ids: vec![pending.input_id],
+                        prompt_id,
+                        turn_kind,
+                        prompt_blocks,
+                        client_identifier,
+                        screen_mode,
+                        verbatim,
+                        json_schema,
+                        origin,
+                        host_command: None,
+                        notification_ids: Vec::new(),
+                        respond_to,
+                        persist_ack: None,
+                        queue_meta: Some(queue_meta),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn reconcile_input_payloads(
+        &self,
+        shutdown: &tokio_util::sync::CancellationToken,
+    ) {
+        let directory = match self.session_directory.try_clone() {
+            Ok(directory) => directory,
+            Err(error) => {
+                tracing::warn!(%error, "input payload reconciliation directory unavailable");
+                return;
+            }
+        };
+        let (batch_tx, mut batch_rx) = tokio::sync::mpsc::channel::<Vec<String>>(1);
+        let producer_shutdown = shutdown.clone();
+        let producer = tokio::task::spawn_blocking(move || {
+            crate::session::input_inbox::visit_payload_hash_batches(
+                &directory,
+                || batch_tx.is_closed() || producer_shutdown.is_cancelled(),
+                |batch| {
+                    batch_tx.blocking_send(batch).map_err(|_| {
+                        std::io::Error::new(
+                            std::io::ErrorKind::BrokenPipe,
+                            "input payload reconciler stopped",
+                        )
+                    })
+                },
+            )
+        });
+        while let Some(mut hashes) = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => None,
+            hashes = batch_rx.recv() => hashes,
+        } {
+            let _guard = self.input_artifact_gate.lock().await;
+            let Some(retained) = self
+                .chat_state_handle
+                .submitted_input_payload_hashes()
+                .await
+            else {
+                break;
+            };
+            // Submitted payloads remain part of the immutable audit record even
+            // after the input is blocked, consumed, or dismissed. Only blobs with
+            // no Timeline reference are orphans.
+            hashes.retain(|hash| !retained.contains(hash));
+            if hashes.is_empty() {
+                continue;
+            }
+            let Ok(directory) = self.session_directory.try_clone() else {
+                break;
+            };
+            match tokio::task::spawn_blocking(move || {
+                crate::session::input_inbox::remove_payload_hashes(&directory, &hashes)
+            })
+            .await
+            {
+                Ok(Ok(_)) => {}
+                error => {
+                    tracing::warn!(?error, "input manifest reconciliation failed");
+                    break;
+                }
+            }
+        }
+        drop(batch_rx);
+        let _ = producer.await;
+        if shutdown.is_cancelled() {
+            return;
+        }
+        // Includes crashes after image writes but before the manifest exists.
+        // Hold the same gate across the root snapshot and the attachment sweep.
+        let _guard = self.input_artifact_gate.lock().await;
+        let Some(retained) = self
+            .chat_state_handle
+            .submitted_input_payload_hashes()
+            .await
+        else {
+            return;
+        };
+        let Ok(directory) = self.session_directory.try_clone() else {
+            return;
+        };
+        let shutdown = shutdown.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::session::input_inbox::reconcile_image_blobs(&directory, &retained, || {
+                shutdown.is_cancelled()
+            })
+        })
+        .await
+        {
+            Ok(Ok(_)) => {}
+            error => tracing::warn!(?error, "input image reconciliation failed"),
+        }
+    }
+
+    pub(super) async fn reconcile_user_image_assets(
+        &self,
+        shutdown: &tokio_util::sync::CancellationToken,
+    ) {
+        if shutdown.is_cancelled() {
+            return;
+        }
+        let _guard = self.input_artifact_gate.lock().await;
+        if shutdown.is_cancelled() {
+            return;
+        }
+        let Ok(directory) = self.session_directory.try_clone() else {
+            return;
+        };
+        match tokio::task::spawn_blocking(move || {
+            crate::session::image_describe::reconcile_user_image_assets(&directory)
+        })
+        .await
+        {
+            Ok(Ok(_)) => {}
+            error => tracing::warn!(?error, "user image asset reconciliation failed"),
+        }
+    }
+}
+
+fn existing_input_state(
+    events: &[chat_state::TimelineEvent],
+    input_id: &str,
+) -> Result<ExistingInputState, String> {
+    let mut found = false;
+    let mut state = ExistingInputState::Submitted;
+    for event in events {
+        let chat_state::TimelineEventKind::Input(input) = &event.kind else {
+            continue;
+        };
+        match input {
+            chat_state::InputEvent::Submitted {
+                input_id: submitted_id,
+                ..
+            } if submitted_id == input_id => {
+                if found {
+                    return Err(format!("duplicate Submitted evidence for input {input_id}"));
+                }
+                found = true;
+            }
+            chat_state::InputEvent::AdmissionResolved {
+                input_id: resolved_id,
+                decision,
+                ..
+            } if resolved_id == input_id => {
+                state = match decision {
+                    chat_state::InputAdmissionDecision::Allow => ExistingInputState::Allowed,
+                    chat_state::InputAdmissionDecision::Block { reason } => {
+                        ExistingInputState::Blocked(reason.clone())
+                    }
+                };
+            }
+            chat_state::InputEvent::Consumed { input_ids, .. }
+                if input_ids.iter().any(|id| id == input_id) =>
+            {
+                state = ExistingInputState::Consumed;
+            }
+            chat_state::InputEvent::Handled { input_ids, .. }
+                if input_ids.iter().any(|id| id == input_id) =>
+            {
+                state = ExistingInputState::Handled;
+            }
+            chat_state::InputEvent::Dismissed { input_ids, .. }
+                if input_ids.iter().any(|id| id == input_id) =>
+            {
+                state = ExistingInputState::Dismissed;
+            }
+            _ => {}
+        }
+    }
+    found
+        .then_some(state)
+        .ok_or_else(|| format!("Submitted evidence is missing for input {input_id}"))
+}
+
+pub(super) fn input_block_reason_message(reason: chat_state::InputBlockReason) -> String {
+    match reason {
+        chat_state::InputBlockReason::Hook { reason } => reason,
+        chat_state::InputBlockReason::StaleSteerTarget => {
+            "the target turn is no longer running".into()
+        }
+        chat_state::InputBlockReason::ProcessInterrupted => {
+            "input admission was interrupted".into()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1375,772 +2142,5 @@ mod tests {
                 );
             })
             .await;
-    }
-}
-
-impl SessionActor {
-    pub(super) async fn admit_human_input(
-        &self,
-        intent: chat_state::InputIntent,
-        payload: crate::session::input_inbox::InputPayload,
-        prompt_id: Option<String>,
-        route: chat_state::InputRoute,
-        supersedes: Vec<String>,
-    ) -> Result<AdmittedInput, String> {
-        let _admission_guard = self.input_admission_gate.lock().await;
-        let attempt = self
-            .run_human_input_admission_hook(intent, payload, prompt_id.clone())
-            .await?;
-        let (input_id, decision) = match attempt {
-            InputAdmissionAttempt::New { input_id, decision } => (input_id, decision),
-            InputAdmissionAttempt::Existing { input_id, state } => {
-                return match state {
-                    ExistingInputState::Submitted => Err(format!(
-                        "input admission remains unresolved for prompt {prompt_id:?} (input {input_id})"
-                    )),
-                    ExistingInputState::Allowed => Ok(AdmittedInput {
-                        input_id,
-                        replayed: true,
-                    }),
-                    ExistingInputState::Blocked(reason) => Err(input_block_reason_message(reason)),
-                    ExistingInputState::Consumed => Err(format!(
-                        "input was already consumed for prompt {prompt_id:?} (input {input_id})"
-                    )),
-                    ExistingInputState::Handled => Err(format!(
-                        "input was already handled for prompt {prompt_id:?} (input {input_id})"
-                    )),
-                    ExistingInputState::Dismissed => Err(format!(
-                        "input was already dismissed for prompt {prompt_id:?} (input {input_id})"
-                    )),
-                };
-            }
-        };
-        let (route, supersedes) = if matches!(decision, chat_state::InputAdmissionDecision::Allow) {
-            (Some(route), supersedes)
-        } else {
-            (None, Vec::new())
-        };
-        let admitted = self
-            .resolve_human_input_admission(input_id, decision, route, supersedes)
-            .await?;
-        Ok(AdmittedInput {
-            replayed: false,
-            ..admitted
-        })
-    }
-
-    fn explicit_skill_selection(
-        prompt_blocks: &[acp::ContentBlock],
-    ) -> Result<Option<ExplicitSkillSelection>, String> {
-        let mut selected = None;
-        for block in prompt_blocks {
-            let acp::ContentBlock::Text(text) = block else {
-                continue;
-            };
-            let Some(value) = text
-                .meta
-                .as_ref()
-                .and_then(|meta| meta.get("grow/skillSelection"))
-            else {
-                continue;
-            };
-            if selected.is_some() {
-                return Err("input contains multiple explicit skill selections".into());
-            }
-            let selection: ExplicitSkillSelection = serde_json::from_value(value.clone())
-                .map_err(|_| "explicit skill selection metadata is malformed".to_string())?;
-            if selection.name.trim().is_empty() || selection.path.trim().is_empty() {
-                return Err("explicit skill selection identity is incomplete".into());
-            }
-            selected = Some(selection);
-        }
-        Ok(selected)
-    }
-
-    async fn freeze_skill_invocations(
-        &self,
-        prompt_blocks: &[acp::ContentBlock],
-    ) -> Vec<crate::session::input_inbox::FrozenSkillInvocation> {
-        use crate::session::input_inbox::FrozenSkillInvocation;
-        use crate::session::slash_commands::SlashCommandOutcome;
-        use tools::implementations::skills::skill::format_skill_name;
-
-        let selection = match Self::explicit_skill_selection(prompt_blocks) {
-            Ok(selection) => selection,
-            Err(error) => {
-                return vec![FrozenSkillInvocation {
-                    callable_name: String::new(),
-                    qualified_name: String::new(),
-                    args: String::new(),
-                    skill: None,
-                    selection_error: Some(error),
-                }];
-            }
-        };
-        let skills = self.slash_skills_for_resolve().await;
-        // Admission may already own the queue-edit control fence. Resolving
-        // immutable user intent must not reconcile Goal or mutate business state.
-        let tool_names = self.registered_tool_names().await;
-        let has_workflow_runs = !self.workflow_tracker().await.lock().list().is_empty();
-        let availability = self.build_command_availability(&tool_names, has_workflow_runs);
-        let (_, workflows, _) = self.named_workflow_snapshot();
-        let parsed = match crate::session::slash_commands::resolve(
-            prompt_blocks.to_vec(),
-            &skills,
-            availability,
-            &workflows,
-        ) {
-            Err(SlashCommandOutcome::InvokeSkill { skills, .. }) => skills,
-            Ok(_) | Err(SlashCommandOutcome::Builtin(_)) => Vec::new(),
-        };
-
-        if let Some(selection) = selection {
-            let selected = parsed
-                .first()
-                .filter(|reference| explicit_selection_matches(&selection, reference));
-            if selected.is_none() {
-                return vec![FrozenSkillInvocation {
-                    callable_name: selection.name.clone(),
-                    qualified_name: selection.name,
-                    args: parsed
-                        .first()
-                        .map_or_else(String::new, |reference| reference.args.clone()),
-                    skill: None,
-                    selection_error: Some(
-                        "selected skill source no longer matches this command; choose it again"
-                            .into(),
-                    ),
-                }];
-            }
-        }
-
-        parsed
-            .into_iter()
-            .map(|reference| {
-                let skill = skills.iter().find(|skill| {
-                    skill.path == reference.skill_path
-                        && skill.plugin_name == reference.plugin_name
-                        && format_skill_name(skill) == reference.qualified_name
-                });
-                match skill {
-                    Some(skill) => FrozenSkillInvocation {
-                        callable_name: reference.name,
-                        qualified_name: reference.qualified_name,
-                        args: reference.args,
-                        // Keep the exact in-memory list snapshot. Admission
-                        // does not reread SKILL.md or refresh its body.
-                        skill: Some(skill.clone()),
-                        selection_error: None,
-                    },
-                    None => FrozenSkillInvocation {
-                        callable_name: reference.name,
-                        qualified_name: reference.qualified_name,
-                        args: reference.args,
-                        skill: None,
-                        selection_error: Some(
-                            "resolved skill source disappeared before input admission".into(),
-                        ),
-                    },
-                }
-            })
-            .collect()
-    }
-
-    /// Publish a HumanIntent and run its one UserPromptSubmit Hook occurrence,
-    /// but leave the final admission decision to the caller. Direct steering
-    /// uses this split phase so target liveness is checked after a potentially
-    /// slow Hook without losing the submitted input fact.
-    pub(super) async fn run_human_input_admission_hook(
-        &self,
-        intent: chat_state::InputIntent,
-        mut payload: crate::session::input_inbox::InputPayload,
-        prompt_id: Option<String>,
-    ) -> Result<InputAdmissionAttempt, String> {
-        let payload_prompt_id = match &payload {
-            crate::session::input_inbox::InputPayload::Prompt { prompt_id, .. } => prompt_id,
-        };
-        if payload_prompt_id.is_empty() {
-            return Err("input prompt identity is empty".into());
-        }
-        let requested_route = match &payload {
-            crate::session::input_inbox::InputPayload::Prompt {
-                requested_route, ..
-            } => requested_route,
-        };
-        let route_matches_intent = matches!(
-            (intent, requested_route),
-            (
-                chat_state::InputIntent::Prompt | chat_state::InputIntent::Followup,
-                crate::session::input_inbox::InputRequestRoute::Fifo
-            ) | (
-                chat_state::InputIntent::Steer,
-                crate::session::input_inbox::InputRequestRoute::Steer { .. }
-            )
-        );
-        if !route_matches_intent {
-            return Err("input route does not match its immutable request intent".into());
-        }
-        if prompt_id
-            .as_deref()
-            .is_some_and(|id| id != payload_prompt_id)
-        {
-            return Err("input prompt identity does not match its immutable payload".into());
-        }
-        let prompt_id = payload_prompt_id.clone();
-        let input_id = crate::session::input_inbox::input_id_for_prompt(
-            self.session_info.id.0.as_ref(),
-            &prompt_id,
-        );
-        let events = self
-            .chat_state_handle
-            .timeline_events()
-            .await
-            .ok_or_else(|| "Timeline unavailable while reconciling input identity".to_string())?;
-        if let Some(existing_id) = self
-            .find_existing_prompt_input(&events, &prompt_id, intent, &payload)
-            .await?
-        {
-            return Ok(InputAdmissionAttempt::Existing {
-                state: existing_input_state(&events, &existing_id)?,
-                input_id: existing_id,
-            });
-        }
-
-        let crate::session::input_inbox::InputPayload::Prompt {
-            prompt_blocks,
-            skill_invocations,
-            ..
-        } = &mut payload;
-        *skill_invocations = self.freeze_skill_invocations(prompt_blocks).await;
-        let artifact_guard = self.input_artifact_gate.lock().await;
-        let directory = self
-            .session_directory
-            .try_clone()
-            .map_err(|error| format!("input artifact directory unavailable: {error}"))?;
-        let (payload_ref, hook_prompt) = tokio::task::spawn_blocking(move || {
-            let reference = crate::session::input_inbox::write_payload(&directory, &payload)?;
-            // Serialization/decoded-image budgets have now been checked. The
-            // Hook reviews this exact snapshot, never a mutable source path.
-            Ok::<_, std::io::Error>((reference, payload.hook_prompt()))
-        })
-        .await
-        .map_err(|error| format!("input artifact writer failed: {error}"))?
-        .map_err(|error| format!("input artifact write failed: {error}"))?;
-
-        let submitted = self
-            .chat_state_handle
-            .submit_input_durably(input_id.clone(), intent, payload_ref.clone())
-            .await
-            .map_err(|error| format!("input submission was not durable: {error}"))?;
-        if !submitted.created {
-            drop(artifact_guard);
-            let events = self
-                .chat_state_handle
-                .timeline_events()
-                .await
-                .ok_or_else(|| {
-                    "Timeline unavailable while reconciling input identity".to_string()
-                })?;
-            return Ok(InputAdmissionAttempt::Existing {
-                state: existing_input_state(&events, &input_id)?,
-                input_id,
-            });
-        }
-        // The blob is now reachable from Timeline, so maintenance can no longer
-        // classify it as an orphan. Do not serialize slow external Hook runs on
-        // the artifact-maintenance gate.
-        drop(artifact_guard);
-
-        let envelope = self.make_hook_envelope(
-            ::hooks::event::HookEventName::UserPromptSubmit,
-            Some(prompt_id),
-            ::hooks::event::HookPayload::UserPromptSubmit {
-                prompt: Some(hook_prompt),
-            },
-        );
-        let aggregate = self
-            .dispatch_prompt_hook(
-                chat_state::HookCause::Input {
-                    input_id: input_id.clone(),
-                },
-                envelope,
-                ::hooks::event::GateKind::Prompt,
-            )
-            .await
-            .map_err(|error| format!("input hook lifecycle was not durable: {error}"))?;
-        let decision = match aggregate {
-            HookAggregate::Prompt { decision, .. } => decision,
-            _ => unreachable!("Prompt gate returned a non-Prompt aggregate"),
-        };
-        let decision = match decision {
-            ::hooks::result::HookDecision::Allow => chat_state::InputAdmissionDecision::Allow,
-            ::hooks::result::HookDecision::Deny { reason, .. } => {
-                chat_state::InputAdmissionDecision::Block {
-                    reason: chat_state::InputBlockReason::Hook {
-                        reason: reason.clone(),
-                    },
-                }
-            }
-        };
-        Ok(InputAdmissionAttempt::New { input_id, decision })
-    }
-
-    async fn find_existing_prompt_input(
-        &self,
-        events: &[chat_state::TimelineEvent],
-        prompt_id: &str,
-        intent: chat_state::InputIntent,
-        requested: &crate::session::input_inbox::InputPayload,
-    ) -> Result<Option<String>, String> {
-        let mut matched = None;
-        for event in events {
-            let chat_state::TimelineEventKind::Input(chat_state::InputEvent::Submitted {
-                input_id,
-                intent: existing_intent,
-                payload_ref,
-            }) = &event.kind
-            else {
-                continue;
-            };
-            let existing_prompt_id =
-                crate::session::input_inbox::read_prompt_id(&self.session_directory, payload_ref)
-                    .map_err(|error| {
-                    format!("input identity evidence is unavailable for {input_id}: {error}")
-                })?;
-            if existing_prompt_id != prompt_id {
-                continue;
-            }
-            if matched.is_some() {
-                return Err(format!(
-                    "input identity evidence is ambiguous for prompt {prompt_id}"
-                ));
-            }
-            if existing_intent != &intent {
-                return Err(format!(
-                    "input identity conflict for prompt {prompt_id}: intent differs"
-                ));
-            }
-            let existing_payload =
-                crate::session::input_inbox::read_payload(&self.session_directory, payload_ref)
-                    .map_err(|error| {
-                        format!("input payload evidence is unavailable for {input_id}: {error}")
-                    })?;
-            let existing_value = comparable_input_payload(&existing_payload)?;
-            let requested_value = comparable_input_payload(requested)?;
-            if existing_value != requested_value {
-                return Err(format!(
-                    "input identity conflict for prompt {prompt_id}: immutable payload or route differs"
-                ));
-            }
-            matched = Some(input_id.clone());
-        }
-        Ok(matched)
-    }
-
-    pub(super) async fn resolve_human_input_admission(
-        &self,
-        input_id: String,
-        decision: chat_state::InputAdmissionDecision,
-        route: Option<chat_state::InputRoute>,
-        supersedes: Vec<String>,
-    ) -> Result<AdmittedInput, String> {
-        self.record_input_event(chat_state::InputEvent::AdmissionResolved {
-            input_id: input_id.clone(),
-            decision: decision.clone(),
-            route,
-            supersedes,
-        })
-        .await?;
-        if let chat_state::InputAdmissionDecision::Block { reason } = decision {
-            return Err(match reason {
-                chat_state::InputBlockReason::Hook { reason } => reason,
-                chat_state::InputBlockReason::StaleSteerTarget => {
-                    "the target turn is no longer running".to_string()
-                }
-                chat_state::InputBlockReason::ProcessInterrupted => {
-                    "input admission was interrupted".to_string()
-                }
-            });
-        }
-        Ok(AdmittedInput {
-            input_id,
-            replayed: false,
-        })
-    }
-
-    pub(super) async fn reroute_input(
-        &self,
-        input_id: String,
-        route: chat_state::InputRoute,
-    ) -> Result<(), String> {
-        self.reroute_input_ids(vec![input_id], route).await
-    }
-
-    pub(super) async fn reroute_input_ids(
-        &self,
-        input_ids: Vec<String>,
-        route: chat_state::InputRoute,
-    ) -> Result<(), String> {
-        self.record_input_event(chat_state::InputEvent::Rerouted { input_ids, route })
-            .await
-    }
-
-    pub(super) async fn consume_steer_inputs(
-        &self,
-        input_ids: Vec<String>,
-        turn: chat_state::TurnId,
-        item: sampling_types::ConversationItem,
-        display_echo: Option<chat_state::UserDisplayEcho>,
-    ) -> Result<(), String> {
-        self.record_input_event(chat_state::InputEvent::Consumed {
-            input_ids,
-            turn,
-            item,
-            display_echo,
-            skill_loads: Vec::new(),
-        })
-        .await
-    }
-
-    pub(super) async fn consume_fifo_inputs(
-        &self,
-        input_ids: Vec<String>,
-        turn: chat_state::TurnId,
-        item: sampling_types::ConversationItem,
-        display_echo: Option<chat_state::UserDisplayEcho>,
-    ) -> Result<(), String> {
-        self.record_input_event(chat_state::InputEvent::Consumed {
-            input_ids,
-            turn,
-            item,
-            display_echo,
-            skill_loads: Vec::new(),
-        })
-        .await
-    }
-
-    pub(super) async fn complete_unmodeled_fifo_inputs(
-        &self,
-        input_ids: Vec<String>,
-        turn: chat_state::TurnId,
-    ) -> Result<(), String> {
-        self.record_input_event(chat_state::InputEvent::Handled { input_ids, turn })
-            .await
-    }
-
-    pub(super) async fn dismiss_input_ids(
-        &self,
-        input_ids: impl IntoIterator<Item = String>,
-        reason: chat_state::InputDismissReason,
-    ) -> Result<(), String> {
-        let input_ids = input_ids.into_iter().collect::<Vec<_>>();
-        if input_ids.is_empty() {
-            return Ok(());
-        }
-        self.record_input_event(chat_state::InputEvent::Dismissed { input_ids, reason })
-            .await
-    }
-
-    async fn record_input_event(&self, event: chat_state::InputEvent) -> Result<(), String> {
-        self.chat_state_handle
-            .record_timeline_event_durably(chat_state::TimelineEventKind::Input(event))
-            .await
-            .map(|_| ())
-            .map_err(|error| format!("input lifecycle was not durable: {error}"))
-    }
-
-    pub(super) async fn restore_pending_human_inputs(&self) -> Result<(), String> {
-        let pending = self
-            .chat_state_handle
-            .get_pending_allowed_inputs()
-            .await
-            .ok_or_else(|| "Timeline unavailable while restoring pending inputs".to_string())?;
-        let directory = self
-            .session_directory
-            .try_clone()
-            .map_err(|error| format!("input artifact directory unavailable: {error}"))?;
-        for pending in pending {
-            let directory = directory
-                .try_clone()
-                .map_err(|error| format!("input artifact directory unavailable: {error}"))?;
-            let payload_ref = pending.payload_ref.clone();
-            let payload = tokio::task::spawn_blocking(move || {
-                crate::session::input_inbox::read_payload(&directory, &payload_ref)
-            })
-            .await
-            .map_err(|error| format!("input artifact reader failed: {error}"))?;
-            let payload = match payload {
-                Ok(payload) => payload,
-                Err(error) if crate::session::input_inbox::is_attachment_error(&error) => {
-                    // Keep Submitted and its references as audit evidence. An
-                    // allowed input whose snapshot cannot be restored must not
-                    // become a text-only turn or prevent unrelated history use.
-                    self.dismiss_input_ids(
-                        [pending.input_id.clone()],
-                        chat_state::InputDismissReason::Invalidated,
-                    )
-                    .await?;
-                    self.persist_ui_notice(crate::extensions::notification::UiNotice {
-                        correlation_id: pending.input_id,
-                        category: crate::extensions::notification::UiNoticeCategory::Lifecycle,
-                        subject: Some("input attachment".into()),
-                        description: None,
-                        message: "A pending input was stopped because an image attachment is unavailable. Reattach the image and submit a new prompt.".into(),
-                        tone: crate::extensions::notification::UiNoticeTone::Error,
-                        details: Some(error.to_string()),
-                    }).await?;
-                    continue;
-                }
-                Err(error) => return Err(format!("input payload is missing or corrupt: {error}")),
-            };
-            if !crate::session::input_inbox::payload_matches_intent(pending.intent, &payload) {
-                return Err("input intent does not match its payload artifact".into());
-            }
-            match (pending.intent, payload) {
-                (
-                    chat_state::InputIntent::Prompt
-                    | chat_state::InputIntent::Followup
-                    | chat_state::InputIntent::Steer,
-                    crate::session::input_inbox::InputPayload::Prompt {
-                        prompt_id,
-                        requested_route: _,
-                        prompt_blocks,
-                        skill_invocations: _,
-                        client_identifier,
-                        screen_mode,
-                        verbatim,
-                        json_schema,
-                        origin,
-                        turn_kind,
-                        queue,
-                    },
-                ) => {
-                    if origin != crate::session::PromptOrigin::User
-                        || turn_kind != crate::session::TurnKind::User
-                    {
-                        return Err("pending human input payload has a synthetic identity".into());
-                    }
-                    if matches!(pending.route, chat_state::InputRoute::Steer { .. }) {
-                        self.reroute_input(pending.input_id.clone(), chat_state::InputRoute::Fifo)
-                            .await?;
-                    } else if !matches!(pending.route, chat_state::InputRoute::Fifo) {
-                        return Err("pending prompt input has an incompatible route".into());
-                    }
-                    let queue_meta = queue.map(Into::into).unwrap_or_else(|| {
-                        crate::session::prompt_queue::QueueEntryMeta {
-                            id: prompt_id.clone(),
-                            version: 0,
-                            owner: client_identifier.clone(),
-                            last_editor: None,
-                            kind: "prompt".into(),
-                            text: Self::queue_text_from_blocks(&prompt_blocks),
-                            combined_texts: None,
-                        }
-                    });
-                    let (respond_to, _response) = tokio::sync::oneshot::channel();
-                    self.state.lock().await.pending_inputs.push_back(InputItem {
-                        input_ids: vec![pending.input_id],
-                        prompt_id,
-                        turn_kind,
-                        prompt_blocks,
-                        client_identifier,
-                        screen_mode,
-                        verbatim,
-                        json_schema,
-                        origin,
-                        host_command: None,
-                        notification_ids: Vec::new(),
-                        respond_to,
-                        persist_ack: None,
-                        queue_meta: Some(queue_meta),
-                    });
-                }
-            }
-        }
-        Ok(())
-    }
-
-    pub(super) async fn reconcile_input_payloads(
-        &self,
-        shutdown: &tokio_util::sync::CancellationToken,
-    ) {
-        let directory = match self.session_directory.try_clone() {
-            Ok(directory) => directory,
-            Err(error) => {
-                tracing::warn!(%error, "input payload reconciliation directory unavailable");
-                return;
-            }
-        };
-        let (batch_tx, mut batch_rx) = tokio::sync::mpsc::channel::<Vec<String>>(1);
-        let producer_shutdown = shutdown.clone();
-        let producer = tokio::task::spawn_blocking(move || {
-            crate::session::input_inbox::visit_payload_hash_batches(
-                &directory,
-                || batch_tx.is_closed() || producer_shutdown.is_cancelled(),
-                |batch| {
-                    batch_tx.blocking_send(batch).map_err(|_| {
-                        std::io::Error::new(
-                            std::io::ErrorKind::BrokenPipe,
-                            "input payload reconciler stopped",
-                        )
-                    })
-                },
-            )
-        });
-        while let Some(mut hashes) = tokio::select! {
-            biased;
-            _ = shutdown.cancelled() => None,
-            hashes = batch_rx.recv() => hashes,
-        } {
-            let _guard = self.input_artifact_gate.lock().await;
-            let Some(retained) = self
-                .chat_state_handle
-                .submitted_input_payload_hashes()
-                .await
-            else {
-                break;
-            };
-            // Submitted payloads remain part of the immutable audit record even
-            // after the input is blocked, consumed, or dismissed. Only blobs with
-            // no Timeline reference are orphans.
-            hashes.retain(|hash| !retained.contains(hash));
-            if hashes.is_empty() {
-                continue;
-            }
-            let Ok(directory) = self.session_directory.try_clone() else {
-                break;
-            };
-            match tokio::task::spawn_blocking(move || {
-                crate::session::input_inbox::remove_payload_hashes(&directory, &hashes)
-            })
-            .await
-            {
-                Ok(Ok(_)) => {}
-                error => {
-                    tracing::warn!(?error, "input manifest reconciliation failed");
-                    break;
-                }
-            }
-        }
-        drop(batch_rx);
-        let _ = producer.await;
-        if shutdown.is_cancelled() {
-            return;
-        }
-        // Includes crashes after image writes but before the manifest exists.
-        // Hold the same gate across the root snapshot and the attachment sweep.
-        let _guard = self.input_artifact_gate.lock().await;
-        let Some(retained) = self
-            .chat_state_handle
-            .submitted_input_payload_hashes()
-            .await
-        else {
-            return;
-        };
-        let Ok(directory) = self.session_directory.try_clone() else {
-            return;
-        };
-        let shutdown = shutdown.clone();
-        match tokio::task::spawn_blocking(move || {
-            crate::session::input_inbox::reconcile_image_blobs(&directory, &retained, || {
-                shutdown.is_cancelled()
-            })
-        })
-        .await
-        {
-            Ok(Ok(_)) => {}
-            error => tracing::warn!(?error, "input image reconciliation failed"),
-        }
-    }
-
-    pub(super) async fn reconcile_user_image_assets(
-        &self,
-        shutdown: &tokio_util::sync::CancellationToken,
-    ) {
-        if shutdown.is_cancelled() {
-            return;
-        }
-        let _guard = self.input_artifact_gate.lock().await;
-        if shutdown.is_cancelled() {
-            return;
-        }
-        let Ok(directory) = self.session_directory.try_clone() else {
-            return;
-        };
-        match tokio::task::spawn_blocking(move || {
-            crate::session::image_describe::reconcile_user_image_assets(&directory)
-        })
-        .await
-        {
-            Ok(Ok(_)) => {}
-            error => tracing::warn!(?error, "user image asset reconciliation failed"),
-        }
-    }
-}
-
-fn existing_input_state(
-    events: &[chat_state::TimelineEvent],
-    input_id: &str,
-) -> Result<ExistingInputState, String> {
-    let mut found = false;
-    let mut state = ExistingInputState::Submitted;
-    for event in events {
-        let chat_state::TimelineEventKind::Input(input) = &event.kind else {
-            continue;
-        };
-        match input {
-            chat_state::InputEvent::Submitted {
-                input_id: submitted_id,
-                ..
-            } if submitted_id == input_id => {
-                if found {
-                    return Err(format!("duplicate Submitted evidence for input {input_id}"));
-                }
-                found = true;
-            }
-            chat_state::InputEvent::AdmissionResolved {
-                input_id: resolved_id,
-                decision,
-                ..
-            } if resolved_id == input_id => {
-                state = match decision {
-                    chat_state::InputAdmissionDecision::Allow => ExistingInputState::Allowed,
-                    chat_state::InputAdmissionDecision::Block { reason } => {
-                        ExistingInputState::Blocked(reason.clone())
-                    }
-                };
-            }
-            chat_state::InputEvent::Consumed { input_ids, .. }
-                if input_ids.iter().any(|id| id == input_id) =>
-            {
-                state = ExistingInputState::Consumed;
-            }
-            chat_state::InputEvent::Handled { input_ids, .. }
-                if input_ids.iter().any(|id| id == input_id) =>
-            {
-                state = ExistingInputState::Handled;
-            }
-            chat_state::InputEvent::Dismissed { input_ids, .. }
-                if input_ids.iter().any(|id| id == input_id) =>
-            {
-                state = ExistingInputState::Dismissed;
-            }
-            _ => {}
-        }
-    }
-    found
-        .then_some(state)
-        .ok_or_else(|| format!("Submitted evidence is missing for input {input_id}"))
-}
-
-pub(super) fn input_block_reason_message(reason: chat_state::InputBlockReason) -> String {
-    match reason {
-        chat_state::InputBlockReason::Hook { reason } => reason,
-        chat_state::InputBlockReason::StaleSteerTarget => {
-            "the target turn is no longer running".into()
-        }
-        chat_state::InputBlockReason::ProcessInterrupted => {
-            "input admission was interrupted".into()
-        }
     }
 }

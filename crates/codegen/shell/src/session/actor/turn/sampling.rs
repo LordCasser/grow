@@ -380,7 +380,7 @@ impl SessionActor {
                     last_seq: source.event.get(),
                 };
                 let request = crate::session::image_describe::build_describe_request(
-                    &model,
+                    model,
                     &group.image_urls,
                 );
                 let mut sideband = match self

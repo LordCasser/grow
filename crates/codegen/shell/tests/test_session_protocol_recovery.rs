@@ -384,7 +384,8 @@ fn settled_attempts(
     cwd: &std::path::Path,
 ) -> usize {
     let mut keys = std::collections::HashSet::new();
-    let count = timeline(client, session, cwd)
+
+    timeline(client, session, cwd)
         .iter()
         .filter(|event| {
             if let chat_state::TimelineEventKind::Observation(observation) = &event.kind
@@ -405,8 +406,7 @@ fn settled_attempts(
                 false
             }
         })
-        .count();
-    count
+        .count()
 }
 
 fn failed_turns(

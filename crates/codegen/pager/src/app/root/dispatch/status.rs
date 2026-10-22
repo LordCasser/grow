@@ -330,10 +330,10 @@ pub(super) fn handle_session_info_failed(
         agent.scrollback.push_block(RenderBlock::notice(format!(
             "Couldn't load session info: {error}"
         )));
-    } else if usage_modal_matches(agent, nonce) {
-        if let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut() {
-            state.session_info = UsageTabData::Failed(error);
-        }
+    } else if usage_modal_matches(agent, nonce)
+        && let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut()
+    {
+        state.session_info = UsageTabData::Failed(error);
     }
     vec![]
 }
@@ -367,13 +367,9 @@ pub(super) fn handle_context_info_complete(
         agent
             .scrollback
             .push_block(RenderBlock::context_info(snapshot, model));
-    } else {
-        if let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut() {
-            state.context = UsageTabData::Loaded(crate::views::usage_modal::ContextSnapshot {
-                snapshot,
-                model,
-            });
-        }
+    } else if let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut() {
+        state.context =
+            UsageTabData::Loaded(crate::views::usage_modal::ContextSnapshot { snapshot, model });
     }
     vec![]
 }
@@ -400,10 +396,8 @@ pub(super) fn handle_context_info_failed(
         agent.scrollback.push_block(RenderBlock::notice(format!(
             "Couldn't load context info: {error}"
         )));
-    } else {
-        if let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut() {
-            state.context = UsageTabData::Failed(error);
-        }
+    } else if let Some(ActiveModal::Usage { state }) = agent.active_modal.as_mut() {
+        state.context = UsageTabData::Failed(error);
     }
     vec![]
 }
@@ -478,23 +472,19 @@ pub(super) fn dispatch_show_release_notes(
     title: String,
     content: String,
 ) -> Vec<Effect> {
-    match app.active_view {
-        ActiveView::Agent(id) => {
-            if let Some(agent) = app.agents.get_mut(&id) {
-                agent.active_modal = Some(crate::views::modal::ActiveModal::DocViewer {
-                    title,
-                    content,
-                    scroll: 0,
-                    window: crate::views::modal_window::ModalWindowState::new(),
-                    cached_lines: None,
-                    previous_palette: None,
-                    standalone: true,
-                });
-            }
-        }
-        // The welcome screen no longer hosts a doc viewer (release notes open
-        // inside a session via `/release-notes`).
-        _ => {}
+    // The welcome screen does not host a doc viewer; release notes open in a session.
+    if let ActiveView::Agent(id) = app.active_view
+        && let Some(agent) = app.agents.get_mut(&id)
+    {
+        agent.active_modal = Some(crate::views::modal::ActiveModal::DocViewer {
+            title,
+            content,
+            scroll: 0,
+            window: crate::views::modal_window::ModalWindowState::new(),
+            cached_lines: None,
+            previous_palette: None,
+            standalone: true,
+        });
     }
     vec![]
 }

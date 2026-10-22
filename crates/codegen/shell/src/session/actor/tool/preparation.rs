@@ -919,7 +919,7 @@ impl SessionActor {
         let display_cwd = self.display_cwd.get().map(std::path::Path::new);
         let saved_workflow_write = saved_workflow_definition_write(&access_kind, cwd, display_cwd);
         let workflow_draft_write =
-            session_workflow_definition_write(&access_kind, &session_dir, cwd, display_cwd);
+            session_workflow_definition_write(&access_kind, session_dir, cwd, display_cwd);
         let current_behavior = self.behavior.lock().behavior();
         if let Some(conflict) = matches!(tool_input, ToolInput::Workflow(_))
             .then(|| public_workflow_conflict(admitted_behavior, current_behavior))
@@ -950,7 +950,7 @@ impl SessionActor {
                 .await?;
             return Ok(ToolPreflight::resolved(ToolLoop::Continue));
         }
-        if workflow_run_snapshot_write(&access_kind, &session_dir, cwd, display_cwd) {
+        if workflow_run_snapshot_write(&access_kind, session_dir, cwd, display_cwd) {
             let message = "Rejected: Workflow Run scripts, args, and journals are immutable snapshots. Modify or derive the Definition and start a new Run instead."
                 .to_string();
             self.handle_tool_not_executed(&call.id, &tool_call_id, message)

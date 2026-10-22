@@ -204,7 +204,7 @@ pub(crate) fn apply_patch_locked_in_directory(
         lock.lock_exclusive().map_err(|error| {
             io::Error::new(error.kind(), format!("acquire summary lock: {error}"))
         })?;
-        let result = read_modify_write(&directory, summary_name, patch);
+        let result = read_modify_write(directory, summary_name, patch);
         let _ = lock.unlock();
         result
     }

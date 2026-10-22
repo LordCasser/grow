@@ -337,8 +337,7 @@ impl SidebandRun {
         &self,
         response: &ConversationResponse,
     ) -> chat_state::SidebandUsage {
-        let usage = sideband_usage(response);
-        usage
+        sideband_usage(response)
     }
 
     /// Settle the current provider attempt without transferring its ownership
@@ -921,8 +920,8 @@ impl Drop for SidebandRun {
                     }
                 }
             }
-            if let Some(evidence) = evidence {
-                if let Err(error) = evidence
+            if let Some(evidence) = evidence
+                && let Err(error) = evidence
                     .finish(serde_json::json!({"cancelled": true}))
                     .await
                 {
@@ -930,7 +929,6 @@ impl Drop for SidebandRun {
                     tracing::error!(%error, "failed to persist interrupted Sideband evidence");
                     return;
                 }
-            }
             // The foreground future may have been aborted after enqueueing an
             // immutable event but before receiving its acknowledgement. Replay
             // that exact event first; persistence deduplicates it by identity.
@@ -1044,7 +1042,7 @@ async fn append_sideband_exact(
             Ok(()) => return Ok(()),
             Err(error) if error.retry_exact() => {
                 attempts = attempts.saturating_add(1);
-                if attempts == 1 || attempts % 10 == 0 {
+                if attempts == 1 || attempts.is_multiple_of(10) {
                     tracing::warn!(
                         sideband_id = %event.sideband_id,
                         seq = event.seq,

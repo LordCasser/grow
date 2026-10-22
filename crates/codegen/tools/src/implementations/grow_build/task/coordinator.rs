@@ -1523,15 +1523,16 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                         })
                 });
                 let restore_started = admitted && (restore.is_none() || restore_tree_matches);
-                if restore_started && restore.is_some() {
-                    if let Some(suspended) = self.suspended.remove(&subagent_id) {
-                        self.waiters
-                            .entry(subagent_id.clone())
-                            .or_default()
-                            .extend(suspended.waiters);
-                        active.spawn_reply = suspended.spawn_reply;
-                        active.handle_only = suspended.handle_only;
-                    }
+                if restore_started
+                    && restore.is_some()
+                    && let Some(suspended) = self.suspended.remove(&subagent_id)
+                {
+                    self.waiters
+                        .entry(subagent_id.clone())
+                        .or_default()
+                        .extend(suspended.waiters);
+                    active.spawn_reply = suspended.spawn_reply;
+                    active.handle_only = suspended.handle_only;
                 }
                 self.active.insert(subagent_id.clone(), active);
                 if let Some(checkpoint) = restore {

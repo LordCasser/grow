@@ -72,12 +72,11 @@ impl MemoryConfig {
             .get("memory")
             .and_then(|v| v.clone().try_into().ok())
             .unwrap_or_default();
-        if let Some(compaction) = config.get("compaction") {
-            if let Some(flush) = compaction.get("memory_flush")
-                && let Ok(f) = flush.clone().try_into()
-            {
-                result.flush = f;
-            }
+        if let Some(compaction) = config.get("compaction")
+            && let Some(flush) = compaction.get("memory_flush")
+            && let Ok(f) = flush.clone().try_into()
+        {
+            result.flush = f;
         }
         if let Some(remote) = remote {
             let has_local_search = config.get("memory").and_then(|m| m.get("search")).is_some();

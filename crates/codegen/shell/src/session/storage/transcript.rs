@@ -496,7 +496,7 @@ fn selected_spawns(events: &[chat_state::TimelineEvent]) -> BTreeSet<String> {
                         sampling_types::ConversationItem::User(user) => user.prompt_index,
                         _ => None,
                     })
-                    .last()
+                    .next_back()
                 {
                     current_prompt = Some(index);
                 }
@@ -614,16 +614,14 @@ fn visit(
             };
             if spawn.security_parent_session_id == session_id
                 && owner.selected_spawns.contains(&spawn.child_session_id)
-            {
-                if children
+                && children
                     .insert(spawn.child_session_id.clone(), owner_id.clone())
                     .is_some()
-                {
-                    return Err(invalid(format!(
-                        "child '{}' is spawned more than once",
-                        spawn.child_session_id
-                    )));
-                }
+            {
+                return Err(invalid(format!(
+                    "child '{}' is spawned more than once",
+                    spawn.child_session_id
+                )));
             }
         }
     }
@@ -819,17 +817,16 @@ fn validate_ended_user_turns(timeline: &Timeline, updates: &[SessionUpdate]) -> 
         })
         .collect::<BTreeMap<_, _>>();
     for event in timeline.events() {
-        if let TimelineEventKind::Turn(TurnEvent::Ended { id, terminal, .. }) = &event.kind {
-            if committed.contains(id)
-                && terminal.source != TurnTerminalSource::Recovery
-                && !started
-                    .get(id)
-                    .is_some_and(|prompt| published.contains(prompt))
-            {
-                return Err(invalid(
-                    "ended committed user turn has no matching TurnCompleted history fact",
-                ));
-            }
+        if let TimelineEventKind::Turn(TurnEvent::Ended { id, terminal, .. }) = &event.kind
+            && committed.contains(id)
+            && terminal.source != TurnTerminalSource::Recovery
+            && !started
+                .get(id)
+                .is_some_and(|prompt| published.contains(prompt))
+        {
+            return Err(invalid(
+                "ended committed user turn has no matching TurnCompleted history fact",
+            ));
         }
     }
     Ok(())

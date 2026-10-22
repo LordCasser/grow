@@ -167,8 +167,8 @@ impl SessionActor {
                 }
                 return Err(acp::Error::internal_error().data(reason));
             }
-            if recovered_hook_decision.is_none() {
-                if let Err(error) = self
+            if recovered_hook_decision.is_none()
+                && let Err(error) = self
                     .events
                     .tool_started(
                         call.function.name.clone(),
@@ -176,11 +176,10 @@ impl SessionActor {
                         Some(frozen_input),
                     )
                     .await
-                {
-                    self.events.cancel_active_tool();
-                    return Err(acp::Error::internal_error()
-                        .data(format!("tool call was not durably recorded: {error}")));
-                }
+            {
+                self.events.cancel_active_tool();
+                return Err(acp::Error::internal_error()
+                    .data(format!("tool call was not durably recorded: {error}")));
             }
             if final_result.is_some() {
                 let message = match &*final_result {

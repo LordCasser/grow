@@ -110,7 +110,7 @@ pub(crate) fn build_session_title_request(
     model: &str,
     backend: sampling_types::ApiBackend,
 ) -> ConversationRequest {
-    let clean_message = title_source_text(&user_message);
+    let clean_message = title_source_text(user_message);
     let mut request = ConversationRequest::from_items(vec![
         ConversationItem::system(SESSION_TITLE_PROMPT),
         ConversationItem::user(format!(

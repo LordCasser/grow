@@ -287,7 +287,7 @@ fn drive_inline_submit_to_execute(app: &mut AppView) -> Vec<Effect> {
         matches!(&effects[0], Effect::FetchRewindPoints { .. }),
         "got {effects:?}"
     );
-    dispatch(points_loaded(&app, id, false), app);
+    dispatch(points_loaded(app, id, false), app);
     // Target 0 is the newest prompt: conversation-only inserts its
     // last-prompt confirm popup before executing, exactly like /rewind.
     dispatch(
@@ -1426,7 +1426,7 @@ fn preselected_rewind_includes_later_file_changes() {
             assert!(
                 matches!(app.agents[&id].rewind_state.as_ref().unwrap().phase,
                     RewindPhase::ModeSelect { target_prompt_index, has_file_changes, offer_files_only, .. }
-                    if target_prompt_index == resolved && has_file_changes == expected && offer_files_only == !inline
+                    if target_prompt_index == resolved && has_file_changes == expected && offer_files_only != inline
                 ),
                 "inline={inline}, expected={expected}"
             );
@@ -1561,7 +1561,7 @@ fn obsolete_rewind_reads_preserve_current_interaction() {
                 );
                 let before_points = format!("{:?}", app.agents[&id].rewind_points);
                 let before_draft = app.agents[&id].prompt.text().to_owned();
-                let before_request = app.agents[&id].rewind_read.clone();
+                let before_request = app.agents[&id].rewind_read;
                 app.agents.get_mut(&id).unwrap().toast = None;
                 assert!(
                     dispatch(test_rewind_read_result(old, preview, failure), &mut app).is_empty()

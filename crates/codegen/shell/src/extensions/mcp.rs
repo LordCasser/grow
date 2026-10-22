@@ -638,22 +638,22 @@ pub async fn call_mcp_tool(
                 server_name, tool_name
             ));
         }
-        if let Some(url) = server_url {
-            if !state.configs.iter().any(|config| {
+        if let Some(url) = server_url
+            && !state.configs.iter().any(|config| {
                 crate::session::mcp_servers::mcp_server_name(config) == server_name
                     && mcp_server_url(config) == Some(url)
-            }) {
-                return Err(format!(
-                    "server '{}' endpoint no longer configured",
-                    server_name
-                ));
-            }
+            })
+        {
+            return Err(format!(
+                "server '{}' endpoint no longer configured",
+                server_name
+            ));
         }
         let target = server_name;
 
         Arc::clone(
             state
-                .get_client(&target)
+                .get_client(target)
                 .ok_or_else(|| format!("server '{}' not found", target))?,
         )
     };

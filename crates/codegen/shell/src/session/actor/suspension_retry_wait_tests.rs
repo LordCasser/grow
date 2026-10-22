@@ -573,10 +573,9 @@ async fn resuspend_released_wait(
                 operation_id,
                 checkpoint,
             }) = &mut event.kind
+                && operation_id == "suspension-retry-op"
             {
-                if operation_id == "suspension-retry-op" {
-                    checkpoint.turn.as_mut().unwrap().operations.clear();
-                }
+                checkpoint.turn.as_mut().unwrap().operations.clear();
             }
         }
         assert!(

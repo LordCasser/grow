@@ -54,20 +54,20 @@ pub(crate) fn reconcile_controls_after_reconnect(
                 true,
             ));
         }
-        if let Some(mode) = view.session.deferred_session_mode {
-            if !view.session.has_pending_behavior_control(mode) {
-                // A matching loaded mode does not prove that the Shell's
-                // interrupt-confirmation latch is clear. Keep the prompt
-                // parked and reissue the exact Behavior selection; only its
-                // authoritative applied update may release admission.
-                effects.extend(enqueue_behavior_control(
-                    agent_id,
-                    session_id.clone(),
-                    &mut view.session,
-                    mode,
-                    true,
-                ));
-            }
+        if let Some(mode) = view.session.deferred_session_mode
+            && !view.session.has_pending_behavior_control(mode)
+        {
+            // A matching loaded mode does not prove that the Shell's
+            // interrupt-confirmation latch is clear. Keep the prompt
+            // parked and reissue the exact Behavior selection; only its
+            // authoritative applied update may release admission.
+            effects.extend(enqueue_behavior_control(
+                agent_id,
+                session_id.clone(),
+                &mut view.session,
+                mode,
+                true,
+            ));
         }
         effects.extend(pending_control_effects(
             agent_id,

@@ -557,16 +557,16 @@ async fn run_shell_child_inner(
             return child_run_output(failure_result(&request, &message), completion_data);
         }
     }
-    if !request.owner.is_workflow() {
-        if let Some(error) = task_model_override_error(
+    if !request.owner.is_workflow()
+        && let Some(error) = task_model_override_error(
             request.runtime_overrides.model.as_deref(),
             request.runtime_overrides.model_override_provenance,
             resume_source.is_some(),
             &ctx.available_models,
             false,
-        ) {
-            return child_run_output(failure_result(&request, &error), completion_data);
-        }
+        )
+    {
+        return child_run_output(failure_result(&request, &error), completion_data);
     }
     let (worktree_path, worktree_materialization) = if let Some(source) = restored_spawn.as_ref() {
         let chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn)) =
@@ -2050,16 +2050,15 @@ async fn run_shell_child_inner(
             completion_data,
         };
     }
-    if let Some(checkpoint) = restore.clone() {
-        if !matches!(child_handle.chat_state_handle.runtime_state().await, Ok(runtime) if runtime.phase == chat_state::session_runtime::RuntimePhase::Running)
-        {
-            active_child_registration.retain_route();
-            return ChildRunOutcome::RestoreBlocked {
-                checkpoint,
-                error: "original child closed before execution release was confirmed".into(),
-                completion_data,
-            };
-        }
+    if let Some(checkpoint) = restore.clone()
+        && !matches!(child_handle.chat_state_handle.runtime_state().await, Ok(runtime) if runtime.phase == chat_state::session_runtime::RuntimePhase::Running)
+    {
+        active_child_registration.retain_route();
+        return ChildRunOutcome::RestoreBlocked {
+            checkpoint,
+            error: "original child closed before execution release was confirmed".into(),
+            completion_data,
+        };
     }
     let duration_ms = start.elapsed().as_millis() as u64;
     let mut cancellation_may_hide_usage = false;

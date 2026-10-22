@@ -156,16 +156,15 @@ impl InquiryEvent {
             .clone()
             .ok_or("inquiry fact has no payload")?;
         let fact: Self = serde_json::from_value(value).map_err(|error| error.to_string())?;
-        if let Self::Incoming { inquiry_id, audit } = &fact {
-            if audit.source_peer_id.is_empty()
+        if let Self::Incoming { inquiry_id, audit } = &fact
+            && (audit.source_peer_id.is_empty()
                 || audit.source_session_id.is_empty()
                 || audit
                     .outcome
                     .as_ref()
-                    .is_some_and(|outcome| &outcome.inquiry_id != inquiry_id)
-            {
-                return Err("inquiry fact has inconsistent source or outcome identity".into());
-            }
+                    .is_some_and(|outcome| &outcome.inquiry_id != inquiry_id))
+        {
+            return Err("inquiry fact has inconsistent source or outcome identity".into());
         }
         Ok(Some(fact))
     }

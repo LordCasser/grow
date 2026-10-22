@@ -643,14 +643,13 @@ pub fn fit_compaction_range_to_budget(
                 if !pending_calls.is_empty() {
                     break;
                 }
-                if let ConversationItem::Assistant(assistant) = item {
-                    if !assistant
+                if let ConversationItem::Assistant(assistant) = item
+                    && !assistant
                         .tool_calls
                         .iter()
                         .all(|call| pending_calls.insert(call.id.as_ref()))
-                    {
-                        break;
-                    }
+                {
+                    break;
                 }
             }
         }
@@ -1261,7 +1260,7 @@ mod tests {
         first.set_prompt_index(4);
         let mut second = agent_message("receipt-2", "message-2", "second");
         second.set_prompt_index(4);
-        let items = vec![
+        let items = [
             user,
             ConversationItem::assistant("response one"),
             first,
@@ -1275,7 +1274,7 @@ mod tests {
         pending_user.set_prompt_index(4);
         let mut pending_message = agent_message("receipt-3", "message-3", "during tool");
         pending_message.set_prompt_index(4);
-        let pending_tool_items = vec![
+        let pending_tool_items = [
             pending_user,
             ConversationItem::assistant_tool_calls(vec![tool_call("call-1", "inspect", "{}")]),
             pending_message,
@@ -1292,7 +1291,7 @@ mod tests {
         distinct_first.set_prompt_index(4);
         let mut next_turn = agent_message("receipt-4", "message-4", "next turn");
         next_turn.set_prompt_index(5);
-        let distinct_prompt_items = vec![
+        let distinct_prompt_items = [
             distinct_user,
             distinct_first,
             ConversationItem::assistant("response"),
@@ -1374,7 +1373,7 @@ mod tests {
 
     #[test]
     fn read_only_identity_probe_matches_quarantine_across_surface_boundary() {
-        let existing = vec![ConversationItem::assistant_tool_calls(vec![tool_call(
+        let existing = [ConversationItem::assistant_tool_calls(vec![tool_call(
             "earlier",
             "read_file",
             "{}",

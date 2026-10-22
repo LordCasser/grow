@@ -1324,9 +1324,8 @@ fn tmux_automatic_target_requires_unique_safe_server_evidence() {
         Some("/"),
     ] {
         report.facts.tmux.config_files = raw.map(str::to_owned);
-        let error = plan_fix(request.clone(), &report, &terminal)
-            .err()
-            .expect("ambiguous target rejected");
+        let error =
+            plan_fix(request.clone(), &report, &terminal).expect_err("ambiguous target rejected");
         assert!(
             matches!(error, FixError::TmuxConfigUnavailable),
             "{raw:?}: {error}"

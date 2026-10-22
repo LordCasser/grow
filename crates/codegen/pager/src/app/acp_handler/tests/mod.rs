@@ -13,15 +13,15 @@ use shell::extensions::notification::SessionUpdate as GrowSessionUpdate;
 pub(super) fn make_session(session_id: Option<&str>) -> AgentSession {
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     {
-        let session = AgentSession::new(
+
+        AgentSession::new(
             AgentId(0),
             tx,
             session_id.map(acp::SessionId::new),
             ModelState::default(),
             PathBuf::from("/tmp"),
             shell::util::config::PermissionMode::Ask,
-        );
-        session
+        )
     }
 }
 pub(super) fn make_agent(session_id: Option<&str>) -> AgentView {

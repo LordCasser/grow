@@ -289,13 +289,17 @@ fn plan_response_projections_for_admitted(
     }
 
     let mut entries = Vec::with_capacity(observations.len() + canonicals.len());
-    for physical_index in 0..=observations.len() {
+    for (physical_index, is_suppressed) in suppressed.iter().enumerate() {
         if let Some(items) = insertions.get(&physical_index) {
             entries.extend(items.iter().copied());
         }
-        if physical_index < observations.len() && !suppressed[physical_index] {
+        if !is_suppressed {
             entries.push(PlannedProjection::Existing(physical_index));
         }
+    }
+    // Tail projections follow every physical observation, including an empty history.
+    if let Some(items) = insertions.get(&observations.len()) {
+        entries.extend(items.iter().copied());
     }
     let canonical_appends = entries
         .iter()

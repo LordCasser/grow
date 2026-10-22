@@ -38,10 +38,10 @@ impl PlanControlInput {
     pub fn validate(&self) -> Result<(), &'static str> {
         match self.action {
             PlanControlAction::Submit | PlanControlAction::Amend => {
-                if !self
+                if self
                     .plan
                     .as_deref()
-                    .is_some_and(|plan| !plan.trim().is_empty())
+                    .is_none_or(|plan| plan.trim().is_empty())
                 {
                     return Err("`plan` is required for submit/amend");
                 }
@@ -53,10 +53,10 @@ impl PlanControlInput {
                 if self.plan.is_some() {
                     return Err("`plan` is forbidden for complete");
                 }
-                if !self
+                if self
                     .report
                     .as_deref()
-                    .is_some_and(|report| !report.trim().is_empty())
+                    .is_none_or(|report| report.trim().is_empty())
                 {
                     return Err("a non-empty `report` is required for complete");
                 }

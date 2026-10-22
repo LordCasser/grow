@@ -1611,9 +1611,8 @@ impl SessionActor {
             .goal_turn_task_ids
             .lock()
             .iter()
-            .filter_map(|(task_id, owner)| {
-                (owner == &(goal_id.to_owned(), definition_revision)).then(|| task_id.clone())
-            })
+            .filter(|&(_, owner)| owner == &(goal_id.to_owned(), definition_revision))
+            .map(|(task_id, _)| task_id.clone())
             .collect::<std::collections::HashSet<_>>();
         let bridge = self.agent.borrow().tool_bridge().clone();
         let goal_id = goal_id.to_owned();

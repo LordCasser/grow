@@ -59,10 +59,10 @@ pub(crate) fn sink(
         let directory = directory.clone();
         let state = state.clone();
         let mut owner = owner.clone();
-        if evidence.kind != "request" {
-            if let Some(owner) = owner.as_object_mut() {
-                owner.remove("source_projection");
-            }
+        if evidence.kind != "request"
+            && let Some(owner) = owner.as_object_mut()
+        {
+            owner.remove("source_projection");
         }
         let request_id = request_id.clone();
         Box::pin(async move {

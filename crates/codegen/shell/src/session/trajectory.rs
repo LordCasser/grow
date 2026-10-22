@@ -3465,7 +3465,7 @@ fn ledger_requires_rebuild(
     let Some(expected) = prefix_hasher.map(|hasher| *hasher.finalize().as_bytes()) else {
         return Ok(true);
     };
-    Ok(!hash_ledger_prefix(offset, file)?.is_some_and(|actual| actual == expected))
+    Ok(hash_ledger_prefix(offset, file)?.is_none_or(|actual| actual != expected))
 }
 
 fn ledger_tail_matches(

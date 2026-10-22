@@ -2305,12 +2305,11 @@ impl SessionPersistence {
                         Ok(()) => self.write_update(&update).await,
                         Err(error) => Err(error),
                     };
-                    if let Err(error) = &result {
-                        if let Some(window) = &mut self.sampling_anchor
-                            && preview.as_ref() == Some(&window.key)
-                        {
-                            window.write_error.get_or_insert_with(|| error.to_string());
-                        }
+                    if let Err(error) = &result
+                        && let Some(window) = &mut self.sampling_anchor
+                        && preview.as_ref() == Some(&window.key)
+                    {
+                        window.write_error.get_or_insert_with(|| error.to_string());
                     }
                     let _ = respond_to.send(result);
                 }
@@ -2504,12 +2503,11 @@ impl SessionPersistence {
                             }
                         },
                     };
-                    if let Err(error) = &result {
-                        if let Some(window) = &mut self.sampling_anchor
-                            && window.key == key
-                        {
-                            window.write_error.get_or_insert_with(|| error.to_string());
-                        }
+                    if let Err(error) = &result
+                        && let Some(window) = &mut self.sampling_anchor
+                        && window.key == key
+                    {
+                        window.write_error.get_or_insert_with(|| error.to_string());
                     }
                     let _ = respond_to.send(result);
                 }

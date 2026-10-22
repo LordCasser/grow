@@ -240,7 +240,8 @@ pub(crate) fn execute(
                     Err(_) => Err("Plan preview query timed out".to_string()),
                     Ok(Err(error)) => Err(error.to_string()),
                     Ok(Ok(response)) => {
-                        let parsed = serde_json::from_str::<serde_json::Value>(response.0.get())
+
+                        serde_json::from_str::<serde_json::Value>(response.0.get())
                             .map_err(|error| error.to_string())
                             .and_then(|wrapper| {
                                 if let Some(error) = wrapper.get("error") {
@@ -250,8 +251,7 @@ pub(crate) fn execute(
                                     wrapper.get("result").cloned().unwrap_or(wrapper),
                                 )
                                 .map_err(|error| error.to_string())
-                            });
-                        parsed
+                            })
                     }
                 };
                 TaskResult::PlanArtifactResolved {

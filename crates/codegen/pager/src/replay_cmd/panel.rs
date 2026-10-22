@@ -133,7 +133,7 @@ impl Panel {
         );
         self.draw_controls(middle, buf, info, &theme);
 
-        let timestamp = info.notice.unwrap_or_else(|| info.time);
+        let timestamp = info.notice.unwrap_or(info.time);
         let timestamp_label = if info.notice.is_some() {
             timestamp.to_owned()
         } else {
@@ -410,7 +410,7 @@ fn clock(seconds: f64) -> String {
 }
 
 fn speed(value: f64) -> String {
-    if value >= 1_000_000.0 || value < 0.01 {
+    if !(0.01..1_000_000.0).contains(&value) {
         return format!("{value:.1e}");
     }
     let formatted = format!("{value:.2}");

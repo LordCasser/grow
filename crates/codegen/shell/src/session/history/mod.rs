@@ -426,13 +426,12 @@ impl AppendState {
     pub(crate) fn bind_presentation(&self, fact: &mut HistoryFact) -> io::Result<()> {
         if let HistoryContent::Grow(value) = &fact.content
             && let GrowHistoryFact::UiNotice(notice) = value.as_ref()
+            && let Some(source) = self.receipt_for_notice(notice)?
         {
-            if let Some(source) = self.receipt_for_notice(notice)? {
-                source.validate_notice(notice)?;
-                fact.content = HistoryContent::Notice {
-                    event: source.event,
-                };
-            }
+            source.validate_notice(notice)?;
+            fact.content = HistoryContent::Notice {
+                event: source.event,
+            };
         }
         Ok(())
     }
@@ -471,17 +470,16 @@ impl AppendState {
             JournalFact::Presentation { event, .. } => {
                 if let HistoryContent::Grow(value) = &event.content
                     && let GrowHistoryFact::UiNotice(notice) = value.as_ref()
+                    && self.receipt_for_notice(notice)?.is_some()
                 {
-                    if self.receipt_for_notice(notice)?.is_some() {
-                        return Err(invalid(
-                            "canonical receipt must use its validated history reference",
-                        ));
-                    }
+                    return Err(invalid(
+                        "canonical receipt must use its validated history reference",
+                    ));
                 }
-                if let HistoryContent::Notice { event } = &event.content {
-                    if *event >= self.events {
-                        return Err(invalid("notice references an absent communication receipt"));
-                    }
+                if let HistoryContent::Notice { event } = &event.content
+                    && *event >= self.events
+                {
+                    return Err(invalid("notice references an absent communication receipt"));
                 }
                 if let Some(id) = event.event_id() {
                     if id.is_empty() || id.len() > 512 || id.chars().any(char::is_control) {
@@ -491,13 +489,12 @@ impl AppendState {
                         return Err(invalid("duplicate presentation identity"));
                     }
                 }
-                if let HistoryContent::Candidate(key) = &event.content {
-                    if key.request_id.is_empty()
+                if let HistoryContent::Candidate(key) = &event.content
+                    && (key.request_id.is_empty()
                         || key.attempt == 0
-                        || self.anchors.contains_key(key)
-                    {
-                        return Err(invalid("invalid or duplicate candidate anchor"));
-                    }
+                        || self.anchors.contains_key(key))
+                {
+                    return Err(invalid("invalid or duplicate candidate anchor"));
                 }
             }
         }
@@ -586,10 +583,9 @@ impl HistorySnapshot {
                     owner_session_id, ..
                 },
             ) = &event.kind
+                && owner_session_id != session
             {
-                if owner_session_id != session {
-                    return Err(invalid("foreign communication receipt in session history"));
-                }
+                return Err(invalid("foreign communication receipt in session history"));
             }
         }
         Ok(())

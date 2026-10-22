@@ -445,10 +445,6 @@ pub(crate) fn neutralize_transcript_user_text(s: &str) -> String {
     out
 }
 
-/// Recency window (conversation-item count) for the auto-mode classifier
-/// transcript SEED at session spawn. Smaller than the per-permission refresh:
-/// the spawn seed only primes the first classify, before any tool has run.
-
 /// Recency window (conversation-item count) for the per-permission classifier
 /// transcript REFRESH. Larger than the spawn seed so a mid-session classify sees
 /// enough recent turns to interpret a terse final action in context.

@@ -191,7 +191,7 @@ fn every_writable_setting_dispatch_failure_retry_reset_and_rollback_lifecycle() 
             );
             assert_eq!(setting_value(&app, meta.key), Some(first_target.clone()));
 
-            let next = complete_setting_request(&mut app, &first_write, false);
+            let next = complete_setting_request(&mut app, first_write, false);
             assert!(
                 next.is_empty(),
                 "uncontended failure should not schedule another write"
@@ -267,7 +267,7 @@ fn every_writable_setting_dispatch_failure_retry_reset_and_rollback_lifecycle() 
                 "retry must persist the same value for `{}`",
                 meta.key
             );
-            assert!(complete_setting_request(&mut app, &retry_write, true).is_empty());
+            assert!(complete_setting_request(&mut app, retry_write, true).is_empty());
             assert_eq!(setting_value(&app, meta.key), Some(first_target.clone()));
 
             let _ = open_reset_for_setting(&mut app, meta.key);
@@ -282,7 +282,7 @@ fn every_writable_setting_dispatch_failure_retry_reset_and_rollback_lifecycle() 
                 "reset must dispatch the registered default for `{}`",
                 meta.key,
             );
-            assert!(complete_setting_request(&mut app, &reset_write, false).is_empty());
+            assert!(complete_setting_request(&mut app, reset_write, false).is_empty());
             assert_eq!(
                 setting_value(&app, meta.key),
                 Some(first_target.clone()),
@@ -297,7 +297,7 @@ fn every_writable_setting_dispatch_failure_retry_reset_and_rollback_lifecycle() 
                 dispatch_settings_key(&mut app, 'y')
             };
             let reset_retry_write = setting_write(&reset_retry, meta.key);
-            assert!(complete_setting_request(&mut app, &reset_retry_write, true).is_empty());
+            assert!(complete_setting_request(&mut app, reset_retry_write, true).is_empty());
             assert_eq!(
                 setting_value(&app, meta.key),
                 Some(crate::settings::default_value_for(meta))
@@ -344,7 +344,7 @@ fn queued_reset_failure_returns_to_last_confirmed_value_across_setting_kinds() {
                     .any(|effect| matches!(effect, Effect::PersistSetting { .. }))
             );
 
-            let queued = complete_setting_request(&mut app, &first_write, first_succeeds);
+            let queued = complete_setting_request(&mut app, first_write, first_succeeds);
             assert!(
                 matches!(queued.as_slice(), [Effect::PersistSetting { key: queued_key, .. }] if *queued_key == key)
             );
@@ -1867,211 +1867,143 @@ fn move_setting_away_from_default(
     key: crate::settings::SettingKey,
 ) -> Vec<Effect> {
     match key {
-        "compact_mode" => {
-            return dispatch(Action::SetCompactMode(true), app);
-        }
-        "show_timestamps" => {
-            return dispatch(Action::SetTimestamps(false), app);
-        }
+        "compact_mode" => dispatch(Action::SetCompactMode(true), app),
+        "show_timestamps" => dispatch(Action::SetTimestamps(false), app),
         "show_timeline" => {
             let away = !app.current_ui.show_timeline_enabled();
-            return dispatch(Action::SetTimeline(away), app);
+            dispatch(Action::SetTimeline(away), app)
         }
         "page_flip_on_send" => {
             let away = !crate::appearance::cache::load_page_flip_on_send();
-            return dispatch(Action::SetPageFlipOnSend(away), app);
+            dispatch(Action::SetPageFlipOnSend(away), app)
         }
         "combine_queued_prompts" => {
             let away = !crate::appearance::cache::load_combine_queued_prompts();
-            return dispatch(Action::SetCombineQueuedPrompts(away), app);
+            dispatch(Action::SetCombineQueuedPrompts(away), app)
         }
-        "simple_mode" => {
-            return dispatch(Action::SetSimpleMode(false), app);
-        }
-        "contextual_hints.undo" => {
-            return dispatch(Action::SetContextualHintUndo(false), app);
-        }
-        "contextual_hints.plan_mode" => {
-            return dispatch(Action::SetContextualHintPlanMode(false), app);
-        }
-        "contextual_hints.image_input" => {
-            return dispatch(Action::SetContextualHintImageInput(false), app);
-        }
-        "contextual_hints.send_now" => {
-            return dispatch(Action::SetContextualHintSendNow(false), app);
-        }
+        "simple_mode" => dispatch(Action::SetSimpleMode(false), app),
+        "contextual_hints.undo" => dispatch(Action::SetContextualHintUndo(false), app),
+        "contextual_hints.plan_mode" => dispatch(Action::SetContextualHintPlanMode(false), app),
+        "contextual_hints.image_input" => dispatch(Action::SetContextualHintImageInput(false), app),
+        "contextual_hints.send_now" => dispatch(Action::SetContextualHintSendNow(false), app),
         "contextual_hints.small_screen" => {
-            return dispatch(Action::SetContextualHintSmallScreen(false), app);
+            dispatch(Action::SetContextualHintSmallScreen(false), app)
         }
-        "contextual_hints.word_select" => {
-            return dispatch(Action::SetContextualHintWordSelect(false), app);
-        }
-        "contextual_hints.ssh_wrap" => {
-            return dispatch(Action::SetContextualHintSshWrap(false), app);
-        }
-        "multiline_mode" => {
-            return dispatch(Action::SetMultilineMode(true), app);
-        }
-        "subagents.permission_mode" => {
-            return dispatch(
-                Action::SetSubagentPermissionMode(
-                    workspace::permission::types::RequestPermissionMode::Ask,
-                ),
-                app,
-            );
-        }
-        "render_mermaid" => {
-            return dispatch(
-                Action::SetRenderMermaid(
-                    if crate::appearance::cache::load_render_mermaid()
-                        == crate::appearance::RenderMermaid::Off
-                    {
-                        crate::appearance::RenderMermaid::On
-                    } else {
-                        crate::appearance::RenderMermaid::Off
-                    },
-                ),
-                app,
-            );
-        }
-        "theme" => {
-            return dispatch(Action::SetTheme("tokyonight".to_owned()), app);
-        }
-        "auto_dark_theme" => {
-            return dispatch(Action::SetAutoDarkTheme("tokyonight".to_owned()), app);
-        }
-        "auto_light_theme" => {
-            return dispatch(Action::SetAutoLightTheme("tokyonight".to_owned()), app);
-        }
-        "permission_mode" => {
-            return dispatch(
-                Action::SetDefaultPermissionMode(PermissionModeKind::AlwaysApprove),
-                app,
-            );
-        }
+        "contextual_hints.word_select" => dispatch(Action::SetContextualHintWordSelect(false), app),
+        "contextual_hints.ssh_wrap" => dispatch(Action::SetContextualHintSshWrap(false), app),
+        "multiline_mode" => dispatch(Action::SetMultilineMode(true), app),
+        "subagents.permission_mode" => dispatch(
+            Action::SetSubagentPermissionMode(
+                workspace::permission::types::RequestPermissionMode::Ask,
+            ),
+            app,
+        ),
+        "render_mermaid" => dispatch(
+            Action::SetRenderMermaid(
+                if crate::appearance::cache::load_render_mermaid()
+                    == crate::appearance::RenderMermaid::Off
+                {
+                    crate::appearance::RenderMermaid::On
+                } else {
+                    crate::appearance::RenderMermaid::Off
+                },
+            ),
+            app,
+        ),
+        "theme" => dispatch(Action::SetTheme("tokyonight".to_owned()), app),
+        "auto_dark_theme" => dispatch(Action::SetAutoDarkTheme("tokyonight".to_owned()), app),
+        "auto_light_theme" => dispatch(Action::SetAutoLightTheme("tokyonight".to_owned()), app),
+        "permission_mode" => dispatch(
+            Action::SetDefaultPermissionMode(PermissionModeKind::AlwaysApprove),
+            app,
+        ),
         "default_model" => {
             use std::sync::Arc;
             let id = shell::agent::models::ModelId::new(Arc::from("test-model-move"));
             let info =
                 shell::agent::models::ModelInfo::new(id.clone(), "Test Model Move".to_string());
             app.models.available.insert(id.clone(), info);
-            return dispatch(Action::SetDefaultModel(id), app);
+            dispatch(Action::SetDefaultModel(id), app)
         }
-        "max_thoughts_width" => {
-            return dispatch(Action::SetMaxThoughtsWidth(200), app);
-        }
-        "behavior" => {
-            return dispatch(Action::SetBehaviorMode(tools::types::BehaviorId::Plan), app);
-        }
-        "show_tips" => {
-            return dispatch(Action::SetShowTips(true), app);
-        }
-        "auto_update" => {
-            return dispatch(Action::SetAutoUpdate(false), app);
-        }
-        "vim_mode" => {
-            return dispatch(
-                Action::SetVimMode(!crate::appearance::cache::load_vim_mode()),
-                app,
-            );
-        }
-        "remember_tool_approvals" => {
-            return dispatch(Action::SetRememberToolApprovals(true), app);
-        }
+        "max_thoughts_width" => dispatch(Action::SetMaxThoughtsWidth(200), app),
+        "behavior" => dispatch(Action::SetBehaviorMode(tools::types::BehaviorId::Plan), app),
+        "show_tips" => dispatch(Action::SetShowTips(true), app),
+        "auto_update" => dispatch(Action::SetAutoUpdate(false), app),
+        "vim_mode" => dispatch(
+            Action::SetVimMode(!crate::appearance::cache::load_vim_mode()),
+            app,
+        ),
+        "remember_tool_approvals" => dispatch(Action::SetRememberToolApprovals(true), app),
         "toolset.ask_user_question.timeout_enabled" => {
-            return dispatch(Action::SetAskUserQuestionTimeoutEnabled(false), app);
+            dispatch(Action::SetAskUserQuestionTimeoutEnabled(false), app)
         }
-        "keep_text_selection" => {
-            return dispatch(
-                Action::SetKeepTextSelection(
-                    if crate::appearance::cache::load_keep_text_selection()
-                        == crate::appearance::TextSelection::Hold
-                    {
-                        crate::appearance::TextSelection::Flash
-                    } else {
-                        crate::appearance::TextSelection::Hold
-                    },
-                ),
-                app,
-            );
-        }
+        "keep_text_selection" => dispatch(
+            Action::SetKeepTextSelection(
+                if crate::appearance::cache::load_keep_text_selection()
+                    == crate::appearance::TextSelection::Hold
+                {
+                    crate::appearance::TextSelection::Flash
+                } else {
+                    crate::appearance::TextSelection::Hold
+                },
+            ),
+            app,
+        ),
         "scroll_speed" => {
             let current = crate::appearance::cache::load_scroll_speed();
-            return dispatch(
+            dispatch(
                 Action::SetScrollSpeed(if current == 75 { 76 } else { 75 }),
                 app,
-            );
+            )
         }
-        "scroll_mode" => {
-            return dispatch(
-                Action::SetScrollMode(
-                    if crate::appearance::cache::load_scroll_mode()
-                        == crate::appearance::ScrollMode::Wheel
-                    {
-                        crate::appearance::ScrollMode::Trackpad
-                    } else {
-                        crate::appearance::ScrollMode::Wheel
-                    },
-                ),
-                app,
-            );
-        }
-        "invert_scroll" => {
-            return dispatch(
-                Action::SetInvertScroll(!crate::appearance::cache::load_invert_scroll()),
-                app,
-            );
-        }
-        "display_refresh_auto_cadence" => {
-            return dispatch(Action::SetDisplayRefreshAutoCadence(true), app);
-        }
+        "scroll_mode" => dispatch(
+            Action::SetScrollMode(
+                if crate::appearance::cache::load_scroll_mode()
+                    == crate::appearance::ScrollMode::Wheel
+                {
+                    crate::appearance::ScrollMode::Trackpad
+                } else {
+                    crate::appearance::ScrollMode::Wheel
+                },
+            ),
+            app,
+        ),
+        "invert_scroll" => dispatch(
+            Action::SetInvertScroll(!crate::appearance::cache::load_invert_scroll()),
+            app,
+        ),
+        "display_refresh_auto_cadence" => dispatch(Action::SetDisplayRefreshAutoCadence(true), app),
         "scroll_lines" => {
             let current = crate::appearance::cache::load_scroll_lines().unwrap_or(3);
-            return dispatch(
+            dispatch(
                 Action::SetScrollLines(if current == 5 { 6 } else { 5 }),
                 app,
-            );
+            )
         }
-        "show_thinking_blocks" => {
-            return dispatch(
-                Action::SetShowThinkingBlocks(
-                    !crate::appearance::cache::load_show_thinking_blocks(),
-                ),
-                app,
-            );
-        }
-        "group_tool_verbs" => {
-            return dispatch(
-                Action::SetGroupToolVerbs(!crate::appearance::cache::load_group_tool_verbs()),
-                app,
-            );
-        }
-        "prompt_suggestions" => {
-            return dispatch(
-                Action::SetPromptSuggestions(!crate::appearance::cache::load_prompt_suggestions()),
-                app,
-            );
-        }
-        "show_model_provider" => {
-            return dispatch(
-                Action::SetShowModelProvider(!crate::appearance::cache::load_show_model_provider()),
-                app,
-            );
-        }
-        "respect_manual_folds" => {
-            return dispatch(
-                Action::SetRespectManualFolds(
-                    !crate::appearance::ScrollConfig::default().respect_manual_folds,
-                ),
-                app,
-            );
-        }
-        "hunk_tracker_mode" => {
-            return dispatch(Action::SetHunkTrackerMode("all_dirty".to_string()), app);
-        }
-        "screen_mode" => {
-            return dispatch(Action::SetScreenMode("minimal".to_string()), app);
-        }
+        "show_thinking_blocks" => dispatch(
+            Action::SetShowThinkingBlocks(!crate::appearance::cache::load_show_thinking_blocks()),
+            app,
+        ),
+        "group_tool_verbs" => dispatch(
+            Action::SetGroupToolVerbs(!crate::appearance::cache::load_group_tool_verbs()),
+            app,
+        ),
+        "prompt_suggestions" => dispatch(
+            Action::SetPromptSuggestions(!crate::appearance::cache::load_prompt_suggestions()),
+            app,
+        ),
+        "show_model_provider" => dispatch(
+            Action::SetShowModelProvider(!crate::appearance::cache::load_show_model_provider()),
+            app,
+        ),
+        "respect_manual_folds" => dispatch(
+            Action::SetRespectManualFolds(
+                !crate::appearance::ScrollConfig::default().respect_manual_folds,
+            ),
+            app,
+        ),
+        "hunk_tracker_mode" => dispatch(Action::SetHunkTrackerMode("all_dirty".to_string()), app),
+        "screen_mode" => dispatch(Action::SetScreenMode("minimal".to_string()), app),
         "fork_secondary_model" => {
             use std::sync::Arc;
             if let ActiveView::Agent(aid) = app.active_view
@@ -2083,14 +2015,12 @@ fn move_setting_away_from_default(
                 agent.session.models.available.insert(id.clone(), info);
                 return dispatch(Action::SetForkSecondaryModel(id), app);
             }
-            return vec![];
+            vec![]
         }
-        "default_selected_permission" => {
-            return dispatch(
-                Action::SetDefaultSelectedPermission("allow_once".to_string()),
-                app,
-            );
-        }
+        "default_selected_permission" => dispatch(
+            Action::SetDefaultSelectedPermission("allow_once".to_string()),
+            app,
+        ),
         other => {
             panic!(
                 "move_setting_away_from_default: no arm for `{other}`. \
@@ -2198,15 +2128,14 @@ fn set_simple_mode_propagates_to_every_agent() {
     let id_b = AgentId(1);
     let mut agent_b = AgentView::new(
         {
-            let session = AgentSession::new(
+            AgentSession::new(
                 id_b,
                 app.acp_tx.clone(),
                 Some("test-session-b".into()),
                 ModelState::default(),
                 PathBuf::from("/tmp"),
                 shell::util::config::PermissionMode::Ask,
-            );
-            session
+            )
         },
         ScrollbackState::new(),
     );

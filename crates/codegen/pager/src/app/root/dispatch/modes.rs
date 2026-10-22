@@ -93,11 +93,11 @@ pub(super) fn dispatch_review_retained_plan(app: &mut AppView) -> Vec<Effect> {
     let Some(session_id) = agent.session.session_id.clone() else {
         return vec![];
     };
-    if let Some((pending, _)) = agent.plan_review_pending.as_ref() {
-        if *pending != preview.submission_id {
-            agent.show_toast("Resolve the pending Plan review before replacing it.");
-            return vec![];
-        }
+    if let Some((pending, _)) = agent.plan_review_pending.as_ref()
+        && *pending != preview.submission_id
+    {
+        agent.show_toast("Resolve the pending Plan review before replacing it.");
+        return vec![];
     }
     let submission_id = preview.submission_id;
     let (_, decision_id) = agent

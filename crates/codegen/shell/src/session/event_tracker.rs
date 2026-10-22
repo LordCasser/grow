@@ -908,8 +908,8 @@ mod tests {
                         && event["event"]["reason"] == "session_suspended"
                 }));
                 assert!(serialized.iter().all(|event| {
-                    !((event["type"] == "turn" && event["event"]["state"] == "ended")
-                        || (event["type"] == "step" && event["event"]["state"] == "ended")
+                    !(((event["type"] == "turn" || event["type"] == "step")
+                        && event["event"]["state"] == "ended")
                         || (event["type"] == "tool" && event["event"]["state"] == "completed"))
                 }));
                 assert!(tracker.active_requests.borrow().is_empty());

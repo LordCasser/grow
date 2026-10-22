@@ -145,39 +145,38 @@ pub(super) fn validate_committed_user_echoes(
             display_echo,
             ..
         }) = &event.kind
+            && let Some(prompt_index) = user.prompt_index
         {
-            if let Some(prompt_index) = user.prompt_index {
-                expected_prompt_indices.insert(prompt_index);
-                let Some(display_echo) = display_echo else {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "session '{session_id}' has committed user input promptIndex {prompt_index} without a durable display fingerprint"
-                        ),
-                    ));
-                };
-                if display_echo.prompt_index != prompt_index
-                    || display_echo.message_id.is_empty()
-                    || display_echo.block_count == 0
-                {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "session '{session_id}' has an invalid durable display fingerprint for promptIndex {prompt_index}"
-                        ),
-                    ));
-                }
-                if expected_echoes
-                    .insert(display_echo.message_id.clone(), display_echo)
-                    .is_some()
-                {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "session '{session_id}' has duplicate committed user display message identities"
-                        ),
-                    ));
-                }
+            expected_prompt_indices.insert(prompt_index);
+            let Some(display_echo) = display_echo else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "session '{session_id}' has committed user input promptIndex {prompt_index} without a durable display fingerprint"
+                    ),
+                ));
+            };
+            if display_echo.prompt_index != prompt_index
+                || display_echo.message_id.is_empty()
+                || display_echo.block_count == 0
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "session '{session_id}' has an invalid durable display fingerprint for promptIndex {prompt_index}"
+                    ),
+                ));
+            }
+            if expected_echoes
+                .insert(display_echo.message_id.clone(), display_echo)
+                .is_some()
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "session '{session_id}' has duplicate committed user display message identities"
+                    ),
+                ));
             }
         }
     }

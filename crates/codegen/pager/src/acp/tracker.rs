@@ -1967,9 +1967,7 @@ fn communication_tool(tc: &acp::ToolCall) -> Option<CommunicationTool> {
     // fixtures and third-party tools may use the same human label. Production
     // Grow calls carry either the typed variant or the verified identity
     // envelope, so do not infer protocol semantics from title prose.
-    let Some(name) = canonical_tool_name(tc) else {
-        return None;
-    };
+    let name = canonical_tool_name(tc)?;
     match name {
         "ask_parent" => Some(CommunicationTool::AskParent),
         "ask_subagent" => Some(CommunicationTool::AskSubagent),
@@ -2661,7 +2659,7 @@ fn skill_call_to_block(tc: &acp::ToolCall) -> RenderBlock {
         .as_ref()
         .filter(|value| value.get("type").and_then(serde_json::Value::as_str) == Some("Dynamic"))
         .and_then(|value| value.get("value"));
-    let raw_status = serde_json::to_value(&tc.status)
+    let raw_status = serde_json::to_value(tc.status)
         .ok()
         .and_then(|value| value.as_str().map(str::to_owned));
     let status = match raw_status.as_deref() {

@@ -1772,15 +1772,14 @@ mod tests {
             );
         }
         let session = {
-            let session = AgentSession::new(
+            AgentSession::new(
                 AgentId(0),
                 tx,
                 Some(acp::SessionId::new("test-session")),
                 models,
                 PathBuf::from("/tmp"),
                 shell::util::config::PermissionMode::Ask,
-            );
-            session
+            )
         };
         AgentView::new(session, ScrollbackState::new())
     }

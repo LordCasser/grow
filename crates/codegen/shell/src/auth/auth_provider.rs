@@ -544,7 +544,7 @@ impl AuthProviderRef {
             .as_ref()
             .filter(|m| {
                 token_identity(&m.minted_with) == token_identity(&self.config)
-                    && !m.expires_at.is_some_and(|at| chrono::Utc::now() >= at)
+                    && m.expires_at.is_none_or(|at| chrono::Utc::now() < at)
             })
             .map(|m| m.token.clone())
     }
@@ -683,7 +683,6 @@ pub(crate) fn test_counting_provider(name: &str, dir: &std::path::Path) -> AuthP
             token_ttl_secs: Some(3600),
             timeout_secs: None,
             cwd: None,
-            ..Default::default()
         },
     )
 }

@@ -3690,7 +3690,7 @@ impl JsonlStorageAdapter {
             .into_iter()
             .filter(|summary| {
                 !summary.is_hidden()
-                    && !skip_session_dir.is_some_and(|skip| self.session_dir(&summary.info) == skip)
+                    && skip_session_dir.is_none_or(|skip| self.session_dir(&summary.info) != skip)
                     && summary.last_active_at.unwrap_or(summary.updated_at) < cutoff
             })
             .collect();
@@ -4496,7 +4496,7 @@ impl JsonlStorageAdapter {
                 }
             };
             let resolution = crate::session::workflow::store::resolve_workflow_restore_manifest(
-                &run_id, &lifecycle, sidecar,
+                run_id, &lifecycle, sidecar,
             )?;
             if resolution.used_timeline_seed {
                 tracing::warn!(path = %manifest_path.display(), "using the Timeline seed instead of Workflow sidecar progress");
@@ -5060,8 +5060,8 @@ impl JsonlStorageAdapter {
                     source
                 } else { None };
                 if let Some(mut fact) = crate::session::history::HistoryFact::from_update(&update)? {
-                    if let Some((event, ordinal)) = source {
-                        if let Some(index) = inherited_positions.get(&(event, ordinal as usize)) {
+                    if let Some((event, ordinal)) = source
+                        && let Some(index) = inherited_positions.get(&(event, ordinal as usize)) {
                             let reference = match &fact.content {
                                 crate::session::history::HistoryContent::Assistant(chunk) => Some((crate::session::history::TextChannel::Assistant, chunk.meta.clone())),
                                 crate::session::history::HistoryContent::Reasoning(chunk) if !options.strip_reasoning => Some((crate::session::history::TextChannel::Reasoning, chunk.meta.clone())),
@@ -5070,7 +5070,6 @@ impl JsonlStorageAdapter {
                             if let Some((channel, chunk_meta)) = reference { let source = fork_timeline.surface_ids().get(*index).ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "fork seed source is absent"))?;
                                 fact.content = crate::session::history::HistoryContent::Message { event: source.event.get(), item: source.item as usize, channel, chunk_meta }; }
                         }
-                    }
                     // Forks own display identities and no parent source authority.
                     if let Some(meta) = fact.meta.as_mut() {
                         for key in ["grow/historyCursor", "samplingRequestId", "samplingAttempt", "responseProjection"] { meta.remove(key); }

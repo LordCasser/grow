@@ -1358,10 +1358,10 @@ impl SessionActor {
         let mut structured_output_reminder_installed = false;
         loop {
             self.park_during_runtime_handoff().await;
-            if self.restored_response.borrow().is_none() {
-                if let Some(cursor) = self.turn_continuation.borrow_mut().as_mut() {
-                    cursor.accepted_response = None;
-                }
+            if self.restored_response.borrow().is_none()
+                && let Some(cursor) = self.turn_continuation.borrow_mut().as_mut()
+            {
+                cursor.accepted_response = None;
             }
             if let Some(cursor) = self.turn_continuation.borrow_mut().as_mut() {
                 cursor.tool_turns_used = tool_turn_count;
@@ -1482,14 +1482,14 @@ impl SessionActor {
                         image_projection_retries = 0;
                         model_fingerprint = None;
                     }
-                    if let Some(trigger_info) = pending_forced_compaction.take() {
-                        if let Err(e) = self.run_compact_only(trigger_info).await {
-                            tracing::error!(error = %e, "Between-step compaction failed");
-                            if Self::is_auth_compact_error(&e) {
-                                return Err(self.surface_compact_auth_failure(e).await);
-                            }
-                            return Err(e);
+                    if let Some(trigger_info) = pending_forced_compaction.take()
+                        && let Err(e) = self.run_compact_only(trigger_info).await
+                    {
+                        tracing::error!(error = %e, "Between-step compaction failed");
+                        if Self::is_auth_compact_error(&e) {
+                            return Err(self.surface_compact_auth_failure(e).await);
                         }
+                        return Err(e);
                     }
                     let async_compaction_applied = self.background_compaction_boundary().await?;
                     tools_changed_for_step = async_compaction_applied;
@@ -2467,10 +2467,10 @@ impl SessionActor {
             }
             if already_admitted && tool_calls.is_empty() && response_had_tool_calls {
                 tool_turn_count = tool_turn_count.saturating_add(1);
-                if let Some(limit) = self.max_turns {
-                    if tool_turn_count > limit {
-                        return Ok(TurnOutcome::MaxTurnsReached { limit });
-                    }
+                if let Some(limit) = self.max_turns
+                    && tool_turn_count > limit
+                {
+                    return Ok(TurnOutcome::MaxTurnsReached { limit });
                 }
                 continue;
             }

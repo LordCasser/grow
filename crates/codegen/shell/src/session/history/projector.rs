@@ -263,20 +263,18 @@ impl HistorySnapshot {
             let HistorySource::Presentation { fact, .. } = source else {
                 continue;
             };
-            if let HistoryContent::User(chunk) = &fact.content {
-                if let Some(meta) = &chunk.meta {
-                    if meta
-                        .get("grow/consumedInputEcho")
-                        .and_then(serde_json::Value::as_bool)
-                        == Some(true)
-                        && !meta
-                            .get("messageId")
-                            .and_then(serde_json::Value::as_str)
-                            .is_some_and(|id| consumed_echoes.contains(id))
-                    {
-                        continue;
-                    }
-                }
+            if let HistoryContent::User(chunk) = &fact.content
+                && let Some(meta) = &chunk.meta
+                && meta
+                    .get("grow/consumedInputEcho")
+                    .and_then(serde_json::Value::as_bool)
+                    == Some(true)
+                && !meta
+                    .get("messageId")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|id| consumed_echoes.contains(id))
+            {
+                continue;
             }
             let mut update = match &fact.content {
                 HistoryContent::Notice { event } => {
@@ -374,26 +372,24 @@ impl HistorySnapshot {
                 && cursor.cut == cut
                 && cursor.hash == self.prefix_hash
                 && cursor.complete
+        }) && let Some(index) = updates.iter().position(|update| {
+            let meta = match update {
+                SessionUpdate::Acp(value) => value.meta.as_ref(),
+                SessionUpdate::Grow(value) => {
+                    value.meta.as_ref().and_then(serde_json::Value::as_object)
+                }
+                #[cfg(any(test, feature = "test-support"))]
+                SessionUpdate::ResponseReplayProjection(_) => None,
+            };
+            meta.and_then(|meta| meta.get(HISTORY_CURSOR_KEY))
+                .and_then(serde_json::Value::as_str)
+                .and_then(|raw| serde_json::from_str::<Cursor>(raw).ok())
+                .is_some_and(|row| {
+                    row.complete && row.record == cursor.record && row.part == cursor.part
+                })
         }) {
-            if let Some(index) = updates.iter().position(|update| {
-                let meta = match update {
-                    SessionUpdate::Acp(value) => value.meta.as_ref(),
-                    SessionUpdate::Grow(value) => {
-                        value.meta.as_ref().and_then(serde_json::Value::as_object)
-                    }
-                    #[cfg(any(test, feature = "test-support"))]
-                    SessionUpdate::ResponseReplayProjection(_) => None,
-                };
-                meta.and_then(|meta| meta.get(HISTORY_CURSOR_KEY))
-                    .and_then(serde_json::Value::as_str)
-                    .and_then(|raw| serde_json::from_str::<Cursor>(raw).ok())
-                    .is_some_and(|row| {
-                        row.complete && row.record == cursor.record && row.part == cursor.part
-                    })
-            }) {
-                updates.drain(..=index);
-                mark_replay = false;
-            }
+            updates.drain(..=index);
+            mark_replay = false;
         }
         Ok(PreparedHistory {
             updates,

@@ -1868,6 +1868,151 @@ impl BlockViewerPane {
     }
 }
 
+/// Display width of a `Line` in terminal columns, clamped to `u16::MAX`.
+fn line_display_width_u16(line: &Line<'_>) -> u16 {
+    use unicode_width::UnicodeWidthStr;
+    let w: usize = line.spans.iter().map(|s| s.content.as_ref().width()).sum();
+    w.min(u16::MAX as usize) as u16
+}
+
+impl BlockViewerPane {
+    // -- Rendering -----------------------------------------------------------
+
+    /// Render the viewer content into the given area (provided by modal chrome).
+    ///
+    /// `content_area` is the inner content rect returned by `render_modal_window`.
+    /// `entry` is the scrollback entry being viewed (for theme rebuild).
+    /// `prepend_lines` are pre-wrapped header lines to render at the top of
+    /// the scrollable content (preamble + a blank separator). They get their
+    /// own stable IDs in the high half of the u64 space so they don't
+    /// conflict with content item IDs.
+    pub fn render_content(
+        &mut self,
+        content_area: Rect,
+        buf: &mut Buffer,
+        entry: &ScrollbackEntry,
+        focused: bool,
+        prepend_lines: &[Line<'static>],
+    ) {
+        let theme = Theme::current();
+        let communication_width_changed = self.last_content_area.width != content_area.width;
+        let mut communication_theme_changed = false;
+
+        // Detect theme switch and rebuild items + list style.
+        let current_theme = Theme::current_kind();
+        if current_theme != self.last_theme {
+            self.last_theme = current_theme;
+            communication_theme_changed = self.kind == ViewerKind::Communication;
+            self.list_style = match self.kind {
+                ViewerKind::BgTask | ViewerKind::Execute => ListPaneStyle {
+                    selection_bg: theme.bg_highlight,
+                    visual_select_bg: theme.bg_visual,
+                    uniform_visual_bg: true,
+                    ..ListPaneStyle::default()
+                },
+                _ => ListPaneStyle {
+                    uniform_visual_bg: true,
+                    ..ListPaneStyle::default()
+                },
+            };
+            match self.kind {
+                ViewerKind::Execute => {
+                    let output = entry.block.copy_text(entry.raw);
+                    self.items = Self::build_execute_items(
+                        output.as_deref().filter(|s| !s.is_empty()),
+                        &theme,
+                    );
+                    self.list_state.invalidate_layout();
+                }
+                ViewerKind::BgTask => {
+                    self.last_generation = u64::MAX;
+                }
+                _ => {}
+            }
+        }
+
+        let communication_generation = (self.kind == ViewerKind::Communication)
+            .then(|| Self::extract_generation(&entry.block).unwrap_or(0));
+        let communication_generation_changed =
+            communication_generation.is_some_and(|generation| generation != self.last_generation);
+        let communication_update_deferred = self.communication_update_deferred();
+        let communication_generation_applied =
+            communication_generation_changed && !communication_update_deferred;
+        if communication_generation_applied {
+            self.last_generation = communication_generation.unwrap_or(0);
+        }
+        self.last_content_area = content_area;
+
+        // Communication sections are width-budgeted Markdown; refresh their
+        // pre-wrap lines when the modal is resized or its data/raw tab flips.
+        if self.kind == ViewerKind::Communication
+            && (communication_width_changed
+                || communication_theme_changed
+                || communication_generation_applied)
+        {
+            self.rebuild_items(entry);
+        }
+
+        // Cache prepend lines as ContentLines on self so the input handlers
+        // (scroll / mouse / key) can rebuild the same unified vec the
+        // ListPane saw — otherwise they index a smaller `items` vec and
+        // panic when the cursor / scroll math points past its end.
+        // Header IDs are placed in the high u64 range so they never collide
+        // with content IDs (which start at 0 and grow upward).
+        self.prepend_items = prepend_lines
+            .iter()
+            .enumerate()
+            .map(|(i, line)| {
+                let plain: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+                ContentLine {
+                    content: line.clone(),
+                    plain_text: plain,
+                    id: u64::MAX - i as u64,
+                    bg: line.style.bg,
+                }
+            })
+            .collect();
+        self.rebuild_unified_cache();
+
+        if content_area.height > 0 && content_area.width > 0 && !self.cached_unified.is_empty() {
+            let likely_scrollbar = self.cached_unified.len() > content_area.height as usize;
+            let render_area = if likely_scrollbar {
+                Rect {
+                    width: content_area.width + SCROLLBAR_TOTAL_COLS.min(2),
+                    ..content_area
+                }
+            } else {
+                content_area
+            };
+
+            self.list_state.prepare_layout(
+                &self.cached_unified,
+                render_area.width,
+                render_area.height,
+            );
+
+            let render_area = if !likely_scrollbar
+                && self.list_state.total_height() > render_area.height as usize
+            {
+                let wider = Rect {
+                    width: content_area.width + SCROLLBAR_TOTAL_COLS.min(2),
+                    ..content_area
+                };
+                self.list_state
+                    .prepare_layout(&self.cached_unified, wider.width, wider.height);
+                wider
+            } else {
+                render_area
+            };
+
+            ListPane::new(&self.cached_unified)
+                .focused(focused)
+                .style(self.list_style)
+                .render(render_area, buf, &mut self.list_state);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2076,150 +2221,5 @@ mod tests {
         assert!(viewer.tick(&finished));
         assert_eq!(viewer.list_state.selected_id(), Some(0));
         assert_eq!(viewer.list_state.scroll_offset(), 2);
-    }
-}
-
-/// Display width of a `Line` in terminal columns, clamped to `u16::MAX`.
-fn line_display_width_u16(line: &Line<'_>) -> u16 {
-    use unicode_width::UnicodeWidthStr;
-    let w: usize = line.spans.iter().map(|s| s.content.as_ref().width()).sum();
-    w.min(u16::MAX as usize) as u16
-}
-
-impl BlockViewerPane {
-    // -- Rendering -----------------------------------------------------------
-
-    /// Render the viewer content into the given area (provided by modal chrome).
-    ///
-    /// `content_area` is the inner content rect returned by `render_modal_window`.
-    /// `entry` is the scrollback entry being viewed (for theme rebuild).
-    /// `prepend_lines` are pre-wrapped header lines to render at the top of
-    /// the scrollable content (preamble + a blank separator). They get their
-    /// own stable IDs in the high half of the u64 space so they don't
-    /// conflict with content item IDs.
-    pub fn render_content(
-        &mut self,
-        content_area: Rect,
-        buf: &mut Buffer,
-        entry: &ScrollbackEntry,
-        focused: bool,
-        prepend_lines: &[Line<'static>],
-    ) {
-        let theme = Theme::current();
-        let communication_width_changed = self.last_content_area.width != content_area.width;
-        let mut communication_theme_changed = false;
-
-        // Detect theme switch and rebuild items + list style.
-        let current_theme = Theme::current_kind();
-        if current_theme != self.last_theme {
-            self.last_theme = current_theme;
-            communication_theme_changed = self.kind == ViewerKind::Communication;
-            self.list_style = match self.kind {
-                ViewerKind::BgTask | ViewerKind::Execute => ListPaneStyle {
-                    selection_bg: theme.bg_highlight,
-                    visual_select_bg: theme.bg_visual,
-                    uniform_visual_bg: true,
-                    ..ListPaneStyle::default()
-                },
-                _ => ListPaneStyle {
-                    uniform_visual_bg: true,
-                    ..ListPaneStyle::default()
-                },
-            };
-            match self.kind {
-                ViewerKind::Execute => {
-                    let output = entry.block.copy_text(entry.raw);
-                    self.items = Self::build_execute_items(
-                        output.as_deref().filter(|s| !s.is_empty()),
-                        &theme,
-                    );
-                    self.list_state.invalidate_layout();
-                }
-                ViewerKind::BgTask => {
-                    self.last_generation = u64::MAX;
-                }
-                _ => {}
-            }
-        }
-
-        let communication_generation = (self.kind == ViewerKind::Communication)
-            .then(|| Self::extract_generation(&entry.block).unwrap_or(0));
-        let communication_generation_changed =
-            communication_generation.is_some_and(|generation| generation != self.last_generation);
-        let communication_update_deferred = self.communication_update_deferred();
-        let communication_generation_applied =
-            communication_generation_changed && !communication_update_deferred;
-        if communication_generation_applied {
-            self.last_generation = communication_generation.unwrap_or(0);
-        }
-        self.last_content_area = content_area;
-
-        // Communication sections are width-budgeted Markdown; refresh their
-        // pre-wrap lines when the modal is resized or its data/raw tab flips.
-        if self.kind == ViewerKind::Communication
-            && (communication_width_changed
-                || communication_theme_changed
-                || communication_generation_applied)
-        {
-            self.rebuild_items(entry);
-        }
-
-        // Cache prepend lines as ContentLines on self so the input handlers
-        // (scroll / mouse / key) can rebuild the same unified vec the
-        // ListPane saw — otherwise they index a smaller `items` vec and
-        // panic when the cursor / scroll math points past its end.
-        // Header IDs are placed in the high u64 range so they never collide
-        // with content IDs (which start at 0 and grow upward).
-        self.prepend_items = prepend_lines
-            .iter()
-            .enumerate()
-            .map(|(i, line)| {
-                let plain: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
-                ContentLine {
-                    content: line.clone(),
-                    plain_text: plain,
-                    id: u64::MAX - i as u64,
-                    bg: line.style.bg,
-                }
-            })
-            .collect();
-        self.rebuild_unified_cache();
-
-        if content_area.height > 0 && content_area.width > 0 && !self.cached_unified.is_empty() {
-            let likely_scrollbar = self.cached_unified.len() > content_area.height as usize;
-            let render_area = if likely_scrollbar {
-                Rect {
-                    width: content_area.width + SCROLLBAR_TOTAL_COLS.min(2),
-                    ..content_area
-                }
-            } else {
-                content_area
-            };
-
-            self.list_state.prepare_layout(
-                &self.cached_unified,
-                render_area.width,
-                render_area.height,
-            );
-
-            let render_area = if !likely_scrollbar
-                && self.list_state.total_height() > render_area.height as usize
-            {
-                let wider = Rect {
-                    width: content_area.width + SCROLLBAR_TOTAL_COLS.min(2),
-                    ..content_area
-                };
-                self.list_state
-                    .prepare_layout(&self.cached_unified, wider.width, wider.height);
-                wider
-            } else {
-                render_area
-            };
-
-            ListPane::new(&self.cached_unified)
-                .focused(focused)
-                .style(self.list_style)
-                .render(render_area, buf, &mut self.list_state);
-        }
     }
 }

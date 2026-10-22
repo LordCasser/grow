@@ -522,11 +522,11 @@ impl AgentView {
                         })
                 })
             });
-            if let Some(tab) = tab {
-                if self.is_completed_plan_viewer() {
-                    self.switch_completed_plan_tab(tab);
-                    return InputOutcome::Changed;
-                }
+            if let Some(tab) = tab
+                && self.is_completed_plan_viewer()
+            {
+                self.switch_completed_plan_tab(tab);
+                return InputOutcome::Changed;
             }
         }
 
