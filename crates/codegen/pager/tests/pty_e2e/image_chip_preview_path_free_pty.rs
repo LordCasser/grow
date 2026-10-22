@@ -6,6 +6,9 @@ use super::common::*;
 #[ignore]
 async fn image_chip_preview_path_free_pty() {
     let content = ContentController::start().await.expect("start content");
+    content
+        .seed_llm_config()
+        .expect("seed isolated mock provider");
     content.set_response(format!("{MOCK_RESPONSE_SENTINEL} image preview turn."));
 
     let png_name = "preview-fixture.png";

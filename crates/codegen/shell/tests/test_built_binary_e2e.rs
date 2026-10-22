@@ -1456,6 +1456,7 @@ async fn test_stdio_prompt_then_immediate_load_session() {
             reader.captured_text(),
             stderr_tail(&reader.stderr(), 1200)
         );
+        assert_eq!(reader.captured_text(), "Echo: say hello", "replay must not duplicate the accepted response");
     })
     .await;
 }
