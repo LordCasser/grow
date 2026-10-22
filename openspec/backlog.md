@@ -1,5 +1,9 @@
 # 未解决边界
 
+- **LSP mock diagnostics 的限时回归稳定性（独立测试债务）**：2.5.0 发布 run `39770985598` 的 Core 首次执行中，`a_refresh_we_cannot_act_on_does_not_discard_what_we_know` 在约 8 秒内未收到 mock 的 `a real problem` summary；同一提交的 push Core library suite 已通过该测试，且 LSP 目录相对 2.4.3 未修改。疑似调度相关超时，根因尚未证实；后续独立核对 mock 启动与通知同步，不通过放宽断言或绕过发布门禁处理。本次发布只允许原提交重试并记录结果。
+
+- **Plan resume PTY 的就绪判据**：夹具已独立修正，改等本恢复进程的真实 finalize 后输入，原审批和恰好一次实施断言不变；两种跨进程 Plan 恢复本机通过。Linux 托管 CI 仍待包含修正的新提交重新验证，未将本机通过当作原 tag 已可发布。见 [修正与验证](changes/archive/2026-10-22-synchronize-plan-resume-pty-readiness/verification.md)。
+
 截至 2026-10-20，此前 backlog 缺陷的完成记录见下表。退出挂起节点修复之后的扩散审计又确认三个待修边界，保留用户此前明确暂缓的 Remote Control，以及依赖真实路由与负载证据的 Provider/Recap 缓存优化。MCP 不在本轮修改范围。
 
 
