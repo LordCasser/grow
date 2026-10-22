@@ -75,3 +75,5 @@
 原审计证据见 [v2.4.0 后续审计](changes/archive/2026-10-19-audit-post-v2-4-0-boundaries/audit.md)。
 
 本轮后续维护不修改已经发布的 v2.4.1 tag 或产物；历史 release 验证记录保持原样。
+
+- Pager build identity: `crates/codegen/pager/build.rs` watches crate-relative `.git/HEAD`, which is absent in this checkout; consecutive exact tests on clean source repeatedly rebuild Pager (~25s each). Confirm Cargo fingerprint diagnostics and reuse the existing release identity approach with correct worktree/ref tracking in a separate change. This release preparation only reuses verified test executables locally; no build-script change.

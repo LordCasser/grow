@@ -468,7 +468,14 @@ pub struct RawStdioClient {
 
 impl RawStdioClient {
     pub async fn spawn(server: &MockInferenceServer, cwd: &Path) -> Self {
-        let mut sandbox = TestSandbox::new();
+        Self::spawn_with_sandbox(server, cwd, TestSandbox::new()).await
+    }
+
+    pub async fn spawn_with_sandbox(
+        server: &MockInferenceServer,
+        cwd: &Path,
+        mut sandbox: TestSandbox,
+    ) -> Self {
         let mut process = spawn_agent_process(&mut sandbox, server, cwd, &[], &[]);
 
         let stdin = process.take_stdin().expect("child stdin missing");

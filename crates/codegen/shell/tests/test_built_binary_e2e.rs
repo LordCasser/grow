@@ -1250,6 +1250,19 @@ async fn invalid_json_schema_disables_structured_output_and_surfaces_error() {
     );
 }
 
+/// Runtime catalogs are configured locally; the mock models endpoint is not
+/// a source of provider definitions.
+fn configure_lifecycle_model(server: &MockInferenceServer, sandbox: &TestSandbox) {
+    std::fs::write(
+        sandbox.grow_home().join("config.toml"),
+        format!(
+            "[models]\ndefault = \"mock/test-model\"\n\n[provider.mock.options]\nbase_url = {:?}\nenv_key = \"GROW_API_KEY\"\n\n[provider.mock.models.test-model]\nmodel = \"test-model\"\napi_backend = \"chat_completions\"\ncontext_window = 200000\nagent_type = \"grow-build\"\n",
+            server.url(),
+        ),
+    )
+    .unwrap();
+}
+
 // ============================================================================
 // ACP stdio tests (grow agent stdio)
 //
@@ -1266,7 +1279,9 @@ async fn test_stdio_full_session_lifecycle() {
     with_local_set(|| async {
         let server = MockInferenceServer::start().await.expect("start mock server");
         let workdir = git_workdir();
-        let client = GrowStdioClient::spawn(&server, workdir.workspace()).await;
+        let sandbox = TestSandbox::new();
+        configure_lifecycle_model(&server, &sandbox);
+        let client = GrowStdioClient::spawn_with_sandbox(&server, workdir.workspace(), sandbox).await;
 
         // Initialize and authenticate
         let init_resp = client.initialize_with_timeout().await;
@@ -1313,7 +1328,10 @@ async fn test_stdio_session_close() {
             .await
             .expect("start mock server");
         let workdir = git_workdir();
-        let client = GrowStdioClient::spawn(&server, workdir.workspace()).await;
+        let sandbox = TestSandbox::new();
+        configure_lifecycle_model(&server, &sandbox);
+        let client =
+            GrowStdioClient::spawn_with_sandbox(&server, workdir.workspace(), sandbox).await;
 
         client.initialize_with_timeout().await;
         let session_id = client
@@ -1377,7 +1395,9 @@ async fn test_stdio_prompt_then_immediate_load_session() {
     with_local_set(|| async {
         let server = MockInferenceServer::start().await.expect("start mock server");
         let workdir = git_workdir();
-        let mut writer = GrowStdioClient::spawn(&server, workdir.workspace()).await;
+        let sandbox = TestSandbox::new();
+        configure_lifecycle_model(&server, &sandbox);
+        let mut writer = GrowStdioClient::spawn_with_sandbox(&server, workdir.workspace(), sandbox).await;
 
         let init_resp = writer.initialize_with_timeout().await;
         assert!(
@@ -1460,7 +1480,9 @@ async fn test_stdio_xcode_escaped_slash_methods_get_responses() {
         .await
         .expect("start mock server");
     let workdir = git_workdir();
-    let mut agent = RawStdioClient::spawn(&server, workdir.workspace()).await;
+    let sandbox = TestSandbox::new();
+    configure_lifecycle_model(&server, &sandbox);
+    let mut agent = RawStdioClient::spawn_with_sandbox(&server, workdir.workspace(), sandbox).await;
 
     // initialize/authenticate carry no slash (they work from Xcode too), but
     // ride string UUID ids and minimal capabilities like Xcode's client.
@@ -1573,6 +1595,7 @@ async fn test_stdio_agent_exits_on_stdin_eof() {
         .expect("start mock server");
     let mut sandbox = TestSandbox::builder().git().build();
     sandbox.set_mock_url(server.url());
+    configure_lifecycle_model(&server, &sandbox);
 
     let mut cmd = tokio::process::Command::new(grow_binary());
     cmd.args(["agent", "stdio"])
@@ -1731,6 +1754,19 @@ fn enqueue_background_task_turn(server: &MockInferenceServer, pid_file: &std::pa
     server.set_response("done");
 }
 
+#[cfg(unix)]
+async fn run_lifecycle_headless(
+    server: &MockInferenceServer,
+    args: &[&str],
+    cwd: &std::path::Path,
+) -> HeadlessResult {
+    let sandbox = TestSandbox::builder().mock_url(server.url()).build();
+    configure_lifecycle_model(server, &sandbox);
+    let mut command = tokio::process::Command::new(grow_binary());
+    command.args(args).current_dir(cwd);
+    run_headless_in_sandbox(command, sandbox).await
+}
+
 /// Timeout path: a background task outlives `--background-wait-timeout`, so
 /// headless exits via the timeout valve — and must kill the task instead of
 /// orphaning it.
@@ -1745,7 +1781,7 @@ async fn test_headless_timeout_exit_kills_pending_background_task() {
     let pid_file = workdir.workspace().join("task_pid.txt");
     enqueue_background_task_turn(&server, &pid_file);
 
-    let result = run_headless(
+    let result = run_lifecycle_headless(
         &server,
         &[
             "-p",
@@ -1787,7 +1823,7 @@ async fn test_headless_no_wait_exit_kills_background_task() {
     let pid_file = workdir.workspace().join("task_pid.txt");
     enqueue_background_task_turn(&server, &pid_file);
 
-    let result = run_headless(
+    let result = run_lifecycle_headless(
         &server,
         &[
             "-p",
@@ -1852,7 +1888,7 @@ async fn test_headless_waits_for_short_background_task_and_exits_clean() {
     );
     server.set_response("done");
 
-    let result = run_headless(
+    let result = run_lifecycle_headless(
         &server,
         &[
             "-p",
