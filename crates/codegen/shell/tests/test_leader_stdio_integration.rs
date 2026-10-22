@@ -1793,15 +1793,28 @@ async fn test_detached_session_notifications_do_not_fallback() {
         client.cancel();
     }
 
-    // Give server time to process disconnect
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
-    // The server sends an eviction notification for "sess-temp" when client1
-    // disconnects. Drain it before client2's initialize to keep the channel
-    // in sync. Also verifies the eviction was actually sent.
-    let eviction = acp_rx.recv().await.unwrap();
+    // Disconnect first notifies the queue owner, then evicts the detached
+    // session. Observe both before client2's initialize without a timing sleep.
+    let disconnected = tokio::time::timeout(Duration::from_secs(2), acp_rx.recv())
+        .await
+        .expect("disconnect notification timed out")
+        .expect("agent channel closed");
+    let disconnected_json: serde_json::Value = serde_json::from_str(&disconnected).unwrap();
+    assert_eq!(
+        disconnected_json["method"],
+        "grow/internal/queue_client_disconnected"
+    );
+    assert!(disconnected_json["params"]["leaderClientId"].is_u64());
+    let eviction = tokio::time::timeout(Duration::from_secs(2), acp_rx.recv())
+        .await
+        .expect("session eviction timed out")
+        .expect("agent channel closed");
     let eviction_json: serde_json::Value = serde_json::from_str(&eviction).unwrap();
     assert_eq!(eviction_json["method"], "grow/internal/evict_sessions");
+    assert_eq!(
+        eviction_json["params"]["sessionIds"],
+        serde_json::json!(["sess-temp"])
+    );
 
     // Connect a NEW client — server should still be running
     let mut client2 = LeaderClient::connect(
