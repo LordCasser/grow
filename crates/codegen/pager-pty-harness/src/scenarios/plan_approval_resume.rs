@@ -178,15 +178,29 @@ async fn assert_plan_resume(defer_before_exit: bool) -> Result<()> {
     }
     drop(first);
 
-    let mut resumed = PtyHarness::spawn_with_content_in_dir(
+    let replay_log = content.home().join("plan-resume-phases.jsonl");
+    let mut resumed = PtyHarness::spawn_with_content_env_in_dir(
         &binary,
         DEFAULT_ROWS,
         DEFAULT_COLS,
         &content,
         &["--continue"],
+        &[
+            ("GROW_INSTRUMENTATION", "log"),
+            (
+                "GROW_INSTRUMENTATION_LOG",
+                replay_log.to_str().context("UTF-8 replay log path")?,
+            ),
+        ],
         Some(project.path()),
     )
     .context("spawn resumed pager")?;
+
+    // History is visible before ordinary input is enabled. This log belongs
+    // only to the resumed process; do not send commands into its replay window.
+    resumed.wait_until("completed session replay", WELCOME_TIMEOUT, |_| {
+        std::fs::read_to_string(&replay_log).is_ok_and(|log| log.contains("pager.replay.finalize"))
+    })?;
 
     if defer_before_exit {
         resumed
