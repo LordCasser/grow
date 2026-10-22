@@ -444,7 +444,7 @@ mod tests {
         };
         parent
             .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
-                spawn.clone(),
+                Box::new(spawn.clone()),
             )))
             .unwrap();
         let spawn_seq = parent.events().last().unwrap().seq.get();

@@ -234,10 +234,9 @@ impl ToolSearchIndex for Bm25ToolSearchIndex {
             (tools, srvs)
         };
 
-        let mut map: std::collections::BTreeMap<
-            String,
-            (usize, Option<String>, Vec<String>, Vec<(String, String)>),
-        > = std::collections::BTreeMap::new();
+        type ServerToolSummary = (usize, Option<String>, Vec<String>, Vec<(String, String)>);
+        let mut map: std::collections::BTreeMap<String, ServerToolSummary> =
+            std::collections::BTreeMap::new();
         for (server, tool, tool_description) in tools_snapshot {
             let (count, _desc, names, descriptions) =
                 map.entry(server)

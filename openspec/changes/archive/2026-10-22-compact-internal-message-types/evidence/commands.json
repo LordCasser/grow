@@ -1,0 +1,273 @@
+[
+  {
+    "label": "mechanical-test-pager-replay-layout",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "pager",
+      "--lib",
+      "replay_tests",
+      "--",
+      "--test-threads=4"
+    ],
+    "exit": 0,
+    "elapsed_s": 37.42712308402406,
+    "log": "mechanical-test-pager-replay-layout.log"
+  },
+  {
+    "label": "check-layout-first",
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 101,
+    "elapsed_s": 10.455713334027678,
+    "log": "check-layout-first.log"
+  },
+  {
+    "label": "check-layout-second",
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 101,
+    "elapsed_s": 15.815791749977507,
+    "log": "check-layout-second.log"
+  },
+  {
+    "label": "check-layout-third",
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 101,
+    "elapsed_s": 15.705316582985688,
+    "log": "check-layout-third.log"
+  },
+  {
+    "label": "check-layout-fourth",
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 101,
+    "elapsed_s": 59.39077895798255,
+    "log": "check-layout-fourth.log"
+  },
+  {
+    "label": "check-layout-fifth",
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 101,
+    "elapsed_s": 56.87875166599406,
+    "log": "check-layout-fifth.log"
+  },
+  {
+    "label": "check-layout-sixth",
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 101,
+    "elapsed_s": 53.386631416971795,
+    "log": "check-layout-sixth.log"
+  },
+  {
+    "label": "clippy-layout-first",
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 0,
+    "elapsed_s": 93.7640142919845,
+    "log": "clippy-layout-first.log"
+  },
+  {
+    "label": "fmt-layout",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all"
+    ],
+    "exit": 0,
+    "elapsed_s": 7.1012080410146154,
+    "log": "fmt-layout.log"
+  },
+  {
+    "label": "fmt-layout-check",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--",
+      "--check"
+    ],
+    "exit": 0,
+    "elapsed_s": 8.217471125011798,
+    "log": "fmt-layout-check.log"
+  },
+  {
+    "label": "validate-layout-pre",
+    "command": [
+      "openspec",
+      "validate",
+      "--all",
+      "--strict",
+      "--no-interactive"
+    ],
+    "exit": 0,
+    "elapsed_s": 1.5468974169925787,
+    "log": "validate-layout-pre.log"
+  },
+  {
+    "label": "clippy-layout-final",
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 0,
+    "elapsed_s": 151.77573366696015,
+    "log": "clippy-layout-final.log"
+  },
+  {
+    "label": "check-layout-workspace",
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 0,
+    "elapsed_s": 156.942032166,
+    "log": "check-layout-workspace.log"
+  },
+  {
+    "label": "check-layout-cli",
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "-p",
+      "pager",
+      "--message-format=json"
+    ],
+    "exit": 0,
+    "elapsed_s": 213.52882395801134,
+    "log": "check-layout-cli.log"
+  },
+  {
+    "label": "test-layout-libs",
+    "command": [
+      "cargo",
+      "test",
+      "--locked",
+      "-p",
+      "chat-state",
+      "-p",
+      "tools",
+      "-p",
+      "shell",
+      "-p",
+      "acp-transport",
+      "-p",
+      "workspace-types",
+      "-p",
+      "pager",
+      "--lib",
+      "--",
+      "--test-threads=4"
+    ],
+    "exit": 101,
+    "elapsed_s": 414.8883919159998,
+    "log": "test-layout-libs.log"
+  },
+  {
+    "label": "validate-layout-ready",
+    "command": [
+      "openspec",
+      "validate",
+      "--all",
+      "--strict",
+      "--no-interactive"
+    ],
+    "exit": 0,
+    "elapsed_s": 1.0510764580103569,
+    "log": "validate-layout-ready.log"
+  },
+  {
+    "label": "archive-layout",
+    "command": [
+      "openspec",
+      "archive",
+      "compact-internal-message-types",
+      "--yes"
+    ],
+    "exit": 0,
+    "elapsed_s": 0.9153694999986328,
+    "log": "archive-layout.log"
+  },
+  {
+    "label": "validate-layout-post",
+    "command": [
+      "openspec",
+      "validate",
+      "--all",
+      "--strict",
+      "--no-interactive"
+    ],
+    "exit": 0,
+    "elapsed_s": 1.2009193749981932,
+    "log": "validate-layout-post.log"
+  },
+  {
+    "label": "validate-layout-archives",
+    "command": [
+      "openspec",
+      "validate",
+      "--archived",
+      "--strict",
+      "--no-interactive"
+    ],
+    "exit": 0,
+    "elapsed_s": 1.2040705840336159,
+    "log": "validate-layout-archives.log"
+  }
+]

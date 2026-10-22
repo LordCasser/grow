@@ -19,14 +19,16 @@ impl SessionTitleRoute {
 
 /// The empty slot while a worker owns the route must not erase revocation.
 pub(crate) enum SessionTitleRouteState {
-    Ready(SessionTitleRoute),
+    Ready(Box<SessionTitleRoute>),
     Claimed,
     Closed,
 }
 
 impl From<Option<SessionTitleRoute>> for SessionTitleRouteState {
     fn from(route: Option<SessionTitleRoute>) -> Self {
-        route.map(Self::Ready).unwrap_or(Self::Closed)
+        route
+            .map(|route| Self::Ready(Box::new(route)))
+            .unwrap_or(Self::Closed)
     }
 }
 
@@ -40,14 +42,14 @@ impl SessionTitleRouteState {
             return None;
         }
         match std::mem::replace(self, Self::Claimed) {
-            Self::Ready(route) => Some(route),
+            Self::Ready(route) => Some(*route),
             _ => unreachable!("readiness checked without yielding"),
         }
     }
 
     fn restore(&mut self, route: SessionTitleRoute) {
         if matches!(self, Self::Claimed) {
-            *self = Self::Ready(route);
+            *self = Self::Ready(Box::new(route));
         }
     }
 

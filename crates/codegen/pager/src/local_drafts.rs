@@ -551,6 +551,10 @@ pub(crate) fn rename_no_replace(source: &Path, target: &Path) -> io::Result<()> 
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[expect(
+    clippy::large_enum_variant,
+    reason = "Successful draft captures dominate typing snapshots and clones; keep their record inline instead of adding an allocation to each capture"
+)]
 enum DraftCapture {
     Record(LocalDraftRecord),
     Error(String),
@@ -698,6 +702,8 @@ fn draft_key_transition(before: &DraftSnapshotSet, after: &DraftSnapshotSet) -> 
     }) || after.keys().any(|id| !before.contains_key(id))
 }
 
+type RequiredInputCheckpoint = (AgentId, String, Option<String>, Option<(String, bool)>);
+
 enum DraftIoCommand {
     Sync {
         generation: u64,
@@ -722,7 +728,7 @@ enum DraftIoCommand {
     Checkpoint {
         agents: DraftSnapshotSet,
         active: Option<AgentId>,
-        required_input: Option<(AgentId, String, Option<String>, Option<(String, bool)>)>,
+        required_input: Option<RequiredInputCheckpoint>,
         ack: tokio::sync::oneshot::Sender<io::Result<()>>,
     },
 }

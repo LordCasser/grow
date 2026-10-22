@@ -595,7 +595,7 @@ pub struct MvpAgent {
     supervisor_started: std::cell::Cell<bool>,
     /// Local tasks holding a raw reference to this agent. Aborted before any
     /// agent fields are dropped, including on an abrupt leader generation exit.
-    exit_suspend: RefCell<Option<(String, futures::future::Shared<oneshot::Receiver<Result<(), String>>>)>>,
+    exit_suspend: RefCell<Option<PendingSuspendExit>>,
     owned_local_tasks: RefCell<Vec<tokio::task::JoinHandle<()>>>,
     /// Test-only spy recording every terminal roster delta `(session_id,
     /// final_state)` emitted by `record_roster_delta` (reap → `DeadFailed`,
@@ -609,6 +609,11 @@ pub struct MvpAgent {
     #[cfg(test)]
     supervisor_spawn_count: std::cell::Cell<usize>,
 }
+type PendingSuspendExit = (
+    String,
+    futures::future::Shared<oneshot::Receiver<Result<(), String>>>,
+);
+
 impl MvpAgent {
     fn spawn_owned_local(&self, future: impl std::future::Future<Output = ()> + 'static) {
         let mut tasks = self.owned_local_tasks.borrow_mut();

@@ -213,9 +213,9 @@ impl SubagentSpawnRequest {
     pub fn respond_with(
         self,
         build: impl FnOnce(&SubagentRequest) -> SubagentResult,
-    ) -> Result<(), SubagentResult> {
+    ) -> Result<(), Box<SubagentResult>> {
         let result = build(&self.request);
-        self.result_tx.send(result)
+        self.result_tx.send(result).map_err(Box::new)
     }
 }
 

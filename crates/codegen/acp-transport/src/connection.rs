@@ -16,7 +16,7 @@ type SpawnLocal = Rc<dyn Fn(Pin<Box<dyn Future<Output = ()>>>)>;
 
 enum AgentInbound {
     Request {
-        request: acp::ClientRequest,
+        request: Box<acp::ClientRequest>,
         responder: acp::Responder<serde_json::Value>,
         cancellation: acp::RequestCancellation,
     },
@@ -53,7 +53,7 @@ pub fn connect_agent_v1(
                     cancellation,
                 } => inbound_spawn(Box::pin(async move {
                     let result =
-                        dispatch_agent_request(agent.as_ref(), request, cancellation).await;
+                        dispatch_agent_request(agent.as_ref(), *request, cancellation).await;
                     let _ = match result {
                         Ok(value) => responder.respond(value),
                         Err(error) => responder.respond_with_error(error),
@@ -86,7 +86,7 @@ pub fn connect_agent_v1(
                     let cancellation = responder.cancellation();
                     request_sender
                         .send(AgentInbound::Request {
-                            request,
+                            request: Box::new(request),
                             responder,
                             cancellation,
                         })

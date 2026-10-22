@@ -810,7 +810,7 @@ pub struct SubagentTerminalEvent {
     deny_unknown_fields
 )]
 pub enum SubagentEvent {
-    Spawned(SubagentSpawnEvent),
+    Spawned(Box<SubagentSpawnEvent>),
     Ended(SubagentTerminalEvent),
 }
 
@@ -9264,7 +9264,7 @@ mod tests {
                 let mut timeline = Timeline::default();
                 timeline
                     .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
-                        subagent_spawn("subagent-matrix", "child-matrix"),
+                        Box::new(subagent_spawn("subagent-matrix", "child-matrix")),
                     )))
                     .unwrap();
                 (
@@ -11818,7 +11818,7 @@ mod tests {
         let mut timeline = Timeline::default();
         timeline
             .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
-                subagent_spawn("sa-recover", "child-recover"),
+                Box::new(subagent_spawn("sa-recover", "child-recover")),
             )))
             .unwrap();
 
@@ -11897,7 +11897,7 @@ mod tests {
         let mut timeline = Timeline::default();
         assert!(matches!(
             timeline.record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
-                spawn.clone()
+                Box::new(spawn.clone())
             ))),
             Err(TimelineError::WorkflowNotFound(_))
         ));
@@ -11913,7 +11913,9 @@ mod tests {
             }))
             .unwrap();
         timeline
-            .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(spawn)))
+            .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+                Box::new(spawn),
+            )))
             .unwrap();
     }
 
@@ -11934,7 +11936,9 @@ mod tests {
         let mut spawn = subagent_spawn("sa-child", "child-session");
         spawn.workflow_run_id = Some("wf_children".into());
         timeline
-            .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(spawn)))
+            .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+                Box::new(spawn),
+            )))
             .unwrap();
         assert!(matches!(
             timeline.record(TimelineEventKind::Workflow(WorkflowEvent::Ended {
@@ -14786,7 +14790,9 @@ mod tests {
         let mut spawn = subagent_spawn("sa-1", "child-1");
         spawn.security_parent_session_id = "  ".into();
         assert!(matches!(
-            parent.record(TimelineEventKind::Subagent(SubagentEvent::Spawned(spawn))),
+            parent.record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+                Box::new(spawn)
+            ))),
             Err(TimelineError::InvalidSubagent)
         ));
 
@@ -14810,7 +14816,7 @@ mod tests {
         let mut parent = Timeline::default();
         let spawn = parent
             .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
-                subagent_spawn("sa-1", "child-1"),
+                Box::new(subagent_spawn("sa-1", "child-1")),
             )))
             .unwrap();
         let mut child = Timeline::default();
@@ -14876,7 +14882,7 @@ mod tests {
         let mut parent = Timeline::default();
         let spawn = parent
             .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
-                spawn_fact.clone(),
+                Box::new(spawn_fact.clone()),
             )))
             .unwrap();
         assert!(matches!(
@@ -14967,13 +14973,13 @@ mod tests {
         let mut parent = Timeline::default();
         parent
             .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
-                subagent_spawn("sa-1", "child-1"),
+                Box::new(subagent_spawn("sa-1", "child-1")),
             )))
             .unwrap();
 
         assert!(matches!(
             parent.record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
-                subagent_spawn("sa-2", "child-1"),
+                Box::new(subagent_spawn("sa-2", "child-1")),
             ))),
             Err(TimelineError::DuplicateSubagentChild(child)) if child == "child-1"
         ));
@@ -15180,7 +15186,7 @@ mod tests {
         let mut parent = Timeline::default();
         parent
             .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
-                subagent_spawn("sa-1", "child-1"),
+                Box::new(subagent_spawn("sa-1", "child-1")),
             )))
             .unwrap();
         assert!(matches!(
@@ -17337,12 +17343,12 @@ mod runtime_checkpoint_prompt_identity_tests {
             .record(TimelineEventKind::Runtime(
                 SessionRuntimeEvent::Checkpoint {
                     operation_id: "suspend-1".into(),
-                    checkpoint: RuntimeCheckpoint {
+                    checkpoint: Box::new(RuntimeCheckpoint {
                         frontier,
                         runtime_source_hash: "a".repeat(64),
                         turn: Some(continuation),
                         step: None,
-                    },
+                    }),
                 },
             ))
             .unwrap_err();

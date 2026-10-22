@@ -1,0 +1,240 @@
+[
+  {
+    "path": "crates/codegen/chat-state/src/actor/tests.rs",
+    "before": "ae8a97b6cc953ef75298dd0eab003257c43b8d6fa7c0f56b5bc48c4db6c55b88",
+    "after": "a59197a6dd5a64610fad098b66d98e7e74ff7dd7e1b119092f32b1c6cf0c1c32",
+    "edits": [
+      {
+        "range": [
+          40039,
+          40039
+        ],
+        "replacement": "*"
+      },
+      {
+        "range": [
+          124580,
+          124580
+        ],
+        "replacement": "*"
+      },
+      {
+        "range": [
+          126480,
+          126480
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          127774,
+          127774
+        ],
+        "replacement": ")"
+      },
+      {
+        "range": [
+          227070,
+          227070
+        ],
+        "replacement": "*"
+      }
+    ]
+  },
+  {
+    "path": "crates/codegen/chat-state/src/session_runtime.rs",
+    "before": "998113c81e8ade7b0d95e709432d8efbb7e49d6ef66eab7ac2d2055b4e74f9a5",
+    "after": "fe293f5cfc4fbfe1c20ce61daaff44ad1fc0373f0ea42096b0dd6ae449d96311",
+    "edits": [
+      {
+        "range": [
+          15249,
+          15249
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          15435,
+          15435
+        ],
+        "replacement": ")"
+      }
+    ]
+  },
+  {
+    "path": "crates/codegen/chat-state/src/timeline.rs",
+    "before": "17abbc1862704cbe336556918663cf3e30fdc9c69a1d260b83c2fb57fc80ba8a",
+    "after": "180dee544f81055b398f43e0bb8a430e2d41211eed0ad63dca8f16ab3ec454a4",
+    "edits": [
+      {
+        "range": [
+          367651,
+          367651
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          367700,
+          367700
+        ],
+        "replacement": ")"
+      },
+      {
+        "range": [
+          465625,
+          465625
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          465670,
+          465670
+        ],
+        "replacement": ")"
+      },
+      {
+        "range": [
+          468732,
+          468732
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          468745,
+          468745
+        ],
+        "replacement": ")"
+      },
+      {
+        "range": [
+          469359,
+          469359
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          469364,
+          469364
+        ],
+        "replacement": ")"
+      },
+      {
+        "range": [
+          470175,
+          470175
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          470180,
+          470180
+        ],
+        "replacement": ")"
+      },
+      {
+        "range": [
+          583998,
+          583998
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          584003,
+          584003
+        ],
+        "replacement": ")"
+      },
+      {
+        "range": [
+          584874,
+          584874
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          584907,
+          584907
+        ],
+        "replacement": ")"
+      },
+      {
+        "range": [
+          587285,
+          587285
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          587303,
+          587303
+        ],
+        "replacement": ")"
+      },
+      {
+        "range": [
+          590349,
+          590349
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          590382,
+          590382
+        ],
+        "replacement": ")"
+      },
+      {
+        "range": [
+          590544,
+          590544
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          590577,
+          590577
+        ],
+        "replacement": ")"
+      },
+      {
+        "range": [
+          598565,
+          598565
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          598598,
+          598598
+        ],
+        "replacement": ")"
+      },
+      {
+        "range": [
+          681562,
+          681562
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          681784,
+          681784
+        ],
+        "replacement": ")"
+      }
+    ]
+  }
+]

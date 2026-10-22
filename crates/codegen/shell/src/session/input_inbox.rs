@@ -82,7 +82,7 @@ pub(crate) fn input_id_for_prompt(session_id: &str, prompt_id: &str) -> String {
 #[serde(untagged)]
 enum StoredBlock {
     Image(ImageReference),
-    Inline(ContentBlock),
+    Inline(Box<ContentBlock>),
 }
 
 impl<'de> Deserialize<'de> for StoredBlock {
@@ -407,7 +407,7 @@ pub(crate) fn write_payload(
                 },
             }))
         }
-        block => Ok(StoredBlock::Inline(block)),
+        block => Ok(StoredBlock::Inline(Box::new(block))),
     })?;
     let bytes = bounded_json(&stored, chat_state::MAX_INPUT_PAYLOAD_BYTES)?;
     let hash = blake3::hash(&bytes).to_hex().to_string();
@@ -428,7 +428,7 @@ pub(crate) fn read_payload(
 ) -> io::Result<InputPayload> {
     let stored = read_manifest(session, payload)?;
     stored.try_map_blocks(|block| match block {
-        StoredBlock::Inline(block) => Ok(block),
+        StoredBlock::Inline(block) => Ok(*block),
         StoredBlock::Image(reference) => {
             let reference = reference.input_image;
             read_image(session, &reference)

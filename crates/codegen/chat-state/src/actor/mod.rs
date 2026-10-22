@@ -383,12 +383,12 @@ impl ChatStateActor {
                         let kind = TimelineEventKind::Runtime(
                             crate::session_runtime::SessionRuntimeEvent::Checkpoint {
                                 operation_id,
-                                checkpoint: crate::session_runtime::RuntimeCheckpoint {
+                                checkpoint: Box::new(crate::session_runtime::RuntimeCheckpoint {
                                     frontier,
                                     runtime_source_hash,
                                     turn,
                                     step,
-                                },
+                                }),
                             },
                         );
                         match self.state.timeline.prepare(kind) {

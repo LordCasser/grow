@@ -1671,7 +1671,8 @@ mod tests {
         const CHILD_MODE: &str = "GROW_KITTY_PANIC_HOOK_TEST_CHILD_MODE";
         const TEST_NAME: &str = "app::tests::panic_hook_is_bounded_and_skips_da1";
 
-        struct RestoreHook(Option<Box<dyn Fn(&panic::PanicHookInfo<'_>) + Send + Sync + 'static>>);
+        type PanicHook = Box<dyn for<'a> Fn(&panic::PanicHookInfo<'a>) + Send + Sync + 'static>;
+        struct RestoreHook(Option<PanicHook>);
         impl Drop for RestoreHook {
             fn drop(&mut self) {
                 if let Some(hook) = self.0.take() {

@@ -486,7 +486,7 @@ impl SessionActor {
                                     )
                                 })?;
                             Err(crate::session::image_describe::DescribeError::Sampling(
-                                info,
+                                Box::new(info),
                             ))
                         }
                         Ok(Err(error)) => {

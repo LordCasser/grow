@@ -2806,7 +2806,7 @@ use crate::session::SessionCommand as TestSessionCommand;
 
 enum FakeActorEvent {
     IdleUnloadCommitted,
-    Command(TestSessionCommand),
+    Command(Box<TestSessionCommand>),
 }
 /// Build a session handle wired to a *live* command channel. Returns the
 /// handle (move into `sessions`) plus a probe `cmd_tx`/`cmd_rx` so a test
@@ -2852,7 +2852,7 @@ fn spawn_fake_actor(
                     }
                 }
                 other => {
-                    let _ = observed_tx.send(FakeActorEvent::Command(other));
+                    let _ = observed_tx.send(FakeActorEvent::Command(Box::new(other)));
                 }
             }
         }
@@ -2877,7 +2877,7 @@ fn spawn_slow_teardown_actor(
                     break;
                 }
                 other => {
-                    let _ = observed_tx.send(FakeActorEvent::Command(other));
+                    let _ = observed_tx.send(FakeActorEvent::Command(Box::new(other)));
                 }
             }
         }
@@ -2962,9 +2962,8 @@ fn disconnect_keeps_live_session_resident_without_finalize() {
         assert!(
             matches!(
                 observed.try_recv(),
-                Ok(FakeActorEvent::Command(
-                    TestSessionCommand::ResetPermissionState
-                ))
+                Ok(FakeActorEvent::Command(command))
+                    if matches!(command.as_ref(), TestSessionCommand::ResetPermissionState)
             ),
             "the resident session's receiver must observe the delivered command"
         );

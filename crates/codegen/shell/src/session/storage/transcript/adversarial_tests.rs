@@ -710,7 +710,7 @@ fn captured_root_and_child_topology_does_not_gain_later_root_spawn() {
     let first_spawn = spawn("child", "root");
     root_timeline
         .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
-            first_spawn.clone(),
+            Box::new(first_spawn.clone()),
         )))
         .unwrap();
     let first_spawn_seq = root_timeline.events().last().unwrap().seq.get();
@@ -754,10 +754,10 @@ fn captured_root_and_child_topology_does_not_gain_later_root_spawn() {
 
     let mut expanded_timeline = Timeline::from_events(root_timeline.events().to_vec()).unwrap();
     expanded_timeline
-        .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(spawn(
+        .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(Box::new(spawn(
             "later-child",
             "root",
-        ))))
+        )))))
         .unwrap();
     let late_event = expanded_timeline.events().last().unwrap();
     let (_, records, _) = journal_data(home.path(), "root");
@@ -792,9 +792,9 @@ fn captured_timeline_fails_when_the_source_is_truncated() {
     let home = tempfile::tempdir().unwrap();
     let mut timeline = Timeline::default();
     timeline
-        .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(spawn(
+        .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(Box::new(spawn(
             "child", "root",
-        ))))
+        )))))
         .unwrap();
     write_session(home.path(), "root", "/project", &timeline, false);
 

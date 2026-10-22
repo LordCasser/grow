@@ -652,7 +652,7 @@ impl Drop for AgentPreparation {
 /// A concrete control claimed for application at a causal boundary.
 enum PendingStepControl {
     ModelReload(PendingModelReload),
-    ModelSelection(PendingModelSelection),
+    ModelSelection(Box<PendingModelSelection>),
     AgentSelection(PendingAgentSelection),
     GoalDefinition(PendingGoalDefinitionControl),
 }
@@ -1030,9 +1030,9 @@ impl PendingStepControls {
                 .as_ref()
                 .is_some_and(|pending| pending.sequence == sequence && pending.revision == revision)
                 .then(|| {
-                    PendingStepControl::ModelSelection(
+                    PendingStepControl::ModelSelection(Box::new(
                         self.sampling.take().expect("checked above").value,
-                    )
+                    ))
                 }),
             PendingStepControlKey::Agent { sequence, revision } => self
                 .agent
@@ -1383,14 +1383,14 @@ pub(crate) struct PreparedToolCall {
 /// has already emitted its user-visible outcome and must never be dispatched.
 #[derive(Debug)]
 pub(crate) enum ToolPreflight {
-    Dispatch(PreparedToolCall),
+    Dispatch(Box<PreparedToolCall>),
     Resolved {
         loop_result: ToolLoop,
         /// Observe-only lifecycle that is causally downstream of the
         /// undispatched tool's durable terminal fact.  PermissionDenied is
         /// the current producer: emitting it during preflight would point at
         /// an open Tool and violate the Timeline's post-tool contract.
-        post_terminal_hook: Option<DeferredObserveHook>,
+        post_terminal_hook: Option<Box<DeferredObserveHook>>,
     },
 }
 
@@ -1408,7 +1408,7 @@ impl ToolPreflight {
     ) -> Self {
         Self::Resolved {
             loop_result,
-            post_terminal_hook: Some(post_terminal_hook),
+            post_terminal_hook: Some(Box::new(post_terminal_hook)),
         }
     }
 }
@@ -1509,6 +1509,8 @@ struct HookSessionState {
     vcs_kind: workspace::session::git::VcsKind,
     load_errors: std::cell::RefCell<Vec<String>>,
 }
+
+type RuntimeReleaseWaiter = (String, oneshot::Sender<Result<(), String>>);
 
 /// Phase 3: Post-flight handling after dispatch (inline in execute_tool_calls for now).
 pub(crate) struct SessionActor {
@@ -1811,7 +1813,7 @@ pub(crate) struct SessionActor {
         >,
     >,
     planning_delivery_dirty: std::cell::Cell<bool>,
-    runtime_release_waiters: std::cell::RefCell<Vec<(String, oneshot::Sender<Result<(), String>>)>>,
+    runtime_release_waiters: std::cell::RefCell<Vec<RuntimeReleaseWaiter>>,
     restoration_release: std::cell::RefCell<Option<oneshot::Sender<()>>>,
     runtime_completion_watchers: std::cell::RefCell<Vec<oneshot::Sender<PromptTurnResult>>>,
     restored_response:

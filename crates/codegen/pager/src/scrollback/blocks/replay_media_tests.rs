@@ -16,9 +16,10 @@ fn context(width: u16, raw: bool) -> BlockContext {
     }
 }
 
-fn output_signature(
-    output: &BlockOutput,
-) -> Vec<(String, String, Option<u16>, Option<String>, Option<String>)> {
+type OutputSignature = (String, String, Option<u16>, Option<String>, Option<String>);
+type ImageSnapshot = (PathBuf, Option<(u32, u32)>, String);
+
+fn output_signature(output: &BlockOutput) -> Vec<OutputSignature> {
     output
         .lines
         .iter()
@@ -38,7 +39,7 @@ fn output_signature(
         .collect()
 }
 
-fn image_snapshot(block: &AgentMessageBlock) -> Vec<(PathBuf, Option<(u32, u32)>, String)> {
+fn image_snapshot(block: &AgentMessageBlock) -> Vec<ImageSnapshot> {
     block
         .image_references()
         .iter()

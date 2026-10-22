@@ -10,6 +10,10 @@ pub(crate) struct JournalData {
     pub state: history::AppendState,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "A journal fact is a transient decode/append value, not a retained history slot; keep presentation payloads inline to avoid an allocation per record"
+)]
 pub(super) enum AppendFact {
     Domain(chat_state::TimelineEvent),
     Presentation(HistoryFact),

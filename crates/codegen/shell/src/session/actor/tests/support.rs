@@ -909,6 +909,14 @@ pub(crate) async fn create_test_actor_ex_with_skill_commit_ack_fault(
 }
 
 #[cfg(test)]
+type SkillCommitAckFaultConfig = (
+    SkillCommitAckFault,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    std::sync::Arc<std::sync::Mutex<Vec<chat_state::TimelineEvent>>>,
+    tokio_util::sync::CancellationToken,
+);
+
+#[cfg(test)]
 async fn create_test_actor_ex_inner(
     total_tokens: u64,
     context_window: u64,
@@ -918,12 +926,7 @@ async fn create_test_actor_ex_inner(
     bridge_projection_events: bool,
     projection_barrier: ProjectionBarrier,
     image_projection_persistence: Option<ImageProjectionPersistence>,
-    skill_commit_ack: Option<(
-        SkillCommitAckFault,
-        std::sync::Arc<std::sync::atomic::AtomicUsize>,
-        std::sync::Arc<std::sync::Mutex<Vec<chat_state::TimelineEvent>>>,
-        tokio_util::sync::CancellationToken,
-    )>,
+    skill_commit_ack: Option<SkillCommitAckFaultConfig>,
 ) -> (
     SessionActor,
     tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,

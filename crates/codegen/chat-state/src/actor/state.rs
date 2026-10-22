@@ -321,6 +321,9 @@ pub(crate) struct ChatState {
     pub(super) turn_capture: Option<TurnCaptureState>,
 }
 
+type ImagePartIdentity = (SurfaceId, usize);
+type ReplacedImageSource = (std::sync::Weak<str>, Option<std::sync::Weak<str>>);
+
 #[derive(Clone)]
 pub(crate) struct ImageBudgetSelection {
     pub route: ModelImageInputKey,
@@ -329,8 +332,7 @@ pub(crate) struct ImageBudgetSelection {
     pub surface_ids: Vec<SurfaceId>,
     /// Source identity and part position, checked against the original Arc
     /// allocation without retaining or rescanning its base64 payload.
-    pub replaced:
-        BTreeMap<(SurfaceId, usize), (std::sync::Weak<str>, Option<std::sync::Weak<str>>)>,
+    pub replaced: BTreeMap<ImagePartIdentity, ReplacedImageSource>,
 }
 
 /// The immutable payload recorded for one model-attempt settlement.
@@ -482,18 +484,17 @@ fn token_usage_matches(left: Option<&TokenUsage>, right: Option<&TokenUsage>) ->
     }
 }
 
+type TimelineUsageProjection = (
+    BTreeMap<String, AttemptUsageSettlement>,
+    BTreeMap<AuxiliaryAttemptKey, (AuxiliaryAttemptStart, usize)>,
+    BTreeMap<AuxiliaryAttemptKey, AuxiliaryAttemptSettlement>,
+    BTreeMap<String, SubagentUsageSettlement>,
+    UsageLedger,
+);
+
 fn usage_from_timeline(
     timeline: &Timeline,
-) -> Result<
-    (
-        BTreeMap<String, AttemptUsageSettlement>,
-        BTreeMap<AuxiliaryAttemptKey, (AuxiliaryAttemptStart, usize)>,
-        BTreeMap<AuxiliaryAttemptKey, AuxiliaryAttemptSettlement>,
-        BTreeMap<String, SubagentUsageSettlement>,
-        UsageLedger,
-    ),
-    crate::TimelineWriteError,
-> {
+) -> Result<TimelineUsageProjection, crate::TimelineWriteError> {
     let mut attempts = BTreeMap::new();
     let mut auxiliary_attempts: BTreeMap<_, (AuxiliaryAttemptStart, usize)> = BTreeMap::new();
     let mut settled_auxiliary_attempts: BTreeMap<_, AuxiliaryAttemptSettlement> = BTreeMap::new();

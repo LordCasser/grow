@@ -130,7 +130,7 @@ impl tools::implementations::grow_build::task::coordinator::ChildRunner for Shel
         deadline: tokio::time::Instant,
     ) -> Result<
         Self::RunFuture,
-        tools::implementations::grow_build::task::coordinator::ChildRunOutput<Self::CompletionData>,
+        Box<tools::implementations::grow_build::task::coordinator::ChildRunOutput<Self::CompletionData>>,
     > {
         let agent_ref = self.agent_ref.clone();
         Ok(Box::pin(async move {

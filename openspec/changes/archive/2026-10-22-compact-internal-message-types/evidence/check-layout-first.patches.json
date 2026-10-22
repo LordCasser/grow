@@ -1,0 +1,142 @@
+[
+  {
+    "path": "crates/codegen/chat-state/src/actor/mod.rs",
+    "before": "c7a76067706fc1324c423a927970deba56592c98dde37f0007a3645528598d4a",
+    "after": "51ac25d435ae281435e38c863483be0e411ec4aa135c47256b381b04151b61d1",
+    "edits": [
+      {
+        "range": [
+          15907,
+          15907
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          16171,
+          16171
+        ],
+        "replacement": ")"
+      }
+    ]
+  },
+  {
+    "path": "crates/codegen/chat-state/src/actor/mutations.rs",
+    "before": "4cf56cd64014c8c4f593012299d2276fdcd32fc77b31ce861155d572d859f870",
+    "after": "d4c2807a651f01e554cf4abe60a7cd6692fbb5ac3450bd94417c01300000244e",
+    "edits": [
+      {
+        "range": [
+          41744,
+          41744
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          41776,
+          41776
+        ],
+        "replacement": ")"
+      }
+    ]
+  },
+  {
+    "path": "crates/codegen/chat-state/src/persistence.rs",
+    "before": "d79f996cac440564ef25faa60aea2f2d97dd3d6dd180e8abda14055be4d5ee11",
+    "after": "df592ceceda6d0a944673755d16bcfbb081c5aa809815159f7a785f12e5a75d7",
+    "edits": [
+      {
+        "range": [
+          5725,
+          5725
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          5738,
+          5738
+        ],
+        "replacement": ")"
+      }
+    ]
+  },
+  {
+    "path": "crates/codegen/chat-state/src/session_runtime.rs",
+    "before": "c8c1f11f6275d635ad8e2989b968c8e3fe74965f622c0d982317ef2c6e86504e",
+    "after": "998113c81e8ade7b0d95e709432d8efbb7e49d6ef66eab7ac2d2055b4e74f9a5",
+    "edits": [
+      {
+        "range": [
+          9710,
+          9710
+        ],
+        "replacement": "*"
+      }
+    ]
+  },
+  {
+    "path": "crates/codegen/tools/src/implementations/grow_build/workflow/mod.rs",
+    "before": "2695c8567d13198ebd8def8eaebb7531db3d2a804d9c7133550186e616339287",
+    "after": "6b1f0c2a0c44cd57e4fec580ba16782f8cd9b37c4c2090730d5135fbc2e48781",
+    "edits": [
+      {
+        "range": [
+          16948,
+          16948
+        ],
+        "replacement": "*"
+      }
+    ]
+  },
+  {
+    "path": "crates/codegen/tools/src/registry/types.rs",
+    "before": "478765fb0faefed00dd19aca14196360b2044d368b554a024d88326902d8c4a3",
+    "after": "c8e839a2187ab91985133fda01a08ed764acdfbe22c38b857b6ee6366aad8997",
+    "edits": [
+      {
+        "range": [
+          95923,
+          95923
+        ],
+        "replacement": "*"
+      }
+    ]
+  },
+  {
+    "path": "crates/codegen/tools/src/types/params_validation.rs",
+    "before": "3ac20b64362ec11ae04904b1772bbff5f68bb2d9b5340e98a06f5b8294e861e6",
+    "after": "27b6c160513494a97b7e537b6fcdc39dfbc56a0d8cb97f3a6a07c8ee4bd8541c",
+    "edits": [
+      {
+        "range": [
+          1239,
+          1239
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          1248,
+          1248
+        ],
+        "replacement": ")"
+      },
+      {
+        "range": [
+          2337,
+          2337
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          2350,
+          2350
+        ],
+        "replacement": ")"
+      }
+    ]
+  }
+]

@@ -270,7 +270,7 @@ impl SessionActor {
                 }
             };
             match prepared {
-                ToolPreflight::Dispatch(prepared) => approved.push(prepared),
+                ToolPreflight::Dispatch(prepared) => approved.push(*prepared),
                 ToolPreflight::Resolved {
                     loop_result,
                     post_terminal_hook,

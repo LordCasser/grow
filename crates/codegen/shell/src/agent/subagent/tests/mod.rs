@@ -223,7 +223,7 @@ fn cancelled_canonical_link_remains_resume_eligible() {
     let mut parent = chat_state::Timeline::default();
     let spawn = parent
         .record(chat_state::TimelineEventKind::Subagent(
-            chat_state::SubagentEvent::Spawned(spawn_fact.clone()),
+            chat_state::SubagentEvent::Spawned(Box::new(spawn_fact.clone())),
         ))
         .expect("parent spawn");
     let mut child = chat_state::Timeline::default();
@@ -316,7 +316,7 @@ fn planning_result_reference_requires_the_exact_child_terminal_and_result_event(
     let mut root = chat_state::Timeline::default();
     let spawn_event = root
         .record(chat_state::TimelineEventKind::Subagent(
-            chat_state::SubagentEvent::Spawned(spawn_fact.clone()),
+            chat_state::SubagentEvent::Spawned(Box::new(spawn_fact.clone())),
         ))
         .expect("parent spawn");
 
@@ -1426,7 +1426,7 @@ async fn recovery_parent(
     let mut timeline = chat_state::Timeline::default();
     timeline
         .record(chat_state::TimelineEventKind::Subagent(
-            chat_state::SubagentEvent::Spawned(spawn.clone()),
+            chat_state::SubagentEvent::Spawned(Box::new(spawn.clone())),
         ))
         .unwrap();
     let journal = crate::session::storage::JsonlStorageAdapter::encode_journal(
@@ -1663,7 +1663,7 @@ async fn nested_planning_result_and_summary_follow_direct_parent_edges() {
                 &storage,
                 &root_info,
                 chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
-                    root_spawn_child.clone(),
+                    Box::new(root_spawn_child.clone()),
                 )),
             )
             .await;
@@ -1676,7 +1676,7 @@ async fn nested_planning_result_and_summary_follow_direct_parent_edges() {
                 &storage,
                 &root_info,
                 chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
-                    root_spawn_grandchild.clone(),
+                    Box::new(root_spawn_grandchild.clone()),
                 )),
             )
             .await;
@@ -2257,12 +2257,13 @@ async fn backend_running_inspection_keeps_parent_spawn_open() {
     assert!(
         persistence.drain().iter().all(|record| !matches!(
             record,
-            chat_state::PersistenceRecord::Timeline(chat_state::TimelineEvent {
-                kind: chat_state::TimelineEventKind::Subagent(
-                    chat_state::SubagentEvent::Ended(_)
-                ),
-                ..
-            })
+            chat_state::PersistenceRecord::Timeline(event)
+                if matches!(
+                    &event.kind,
+                    chat_state::TimelineEventKind::Subagent(
+                        chat_state::SubagentEvent::Ended(_)
+                    )
+                )
         )),
         "a live backend child must remain reconnectable"
     );
@@ -2336,12 +2337,13 @@ async fn foreign_backend_inspection_cannot_close_or_fill_a_parent_spawn() {
     assert!(
         persistence.drain().iter().all(|record| !matches!(
             record,
-            chat_state::PersistenceRecord::Timeline(chat_state::TimelineEvent {
-                kind: chat_state::TimelineEventKind::Subagent(
-                    chat_state::SubagentEvent::Ended(_)
-                ),
-                ..
-            })
+            chat_state::PersistenceRecord::Timeline(event)
+                if matches!(
+                    &event.kind,
+                    chat_state::TimelineEventKind::Subagent(
+                        chat_state::SubagentEvent::Ended(_)
+                    )
+                )
         )),
         "a foreign inspection must leave the local spawn open"
     );
@@ -2411,12 +2413,13 @@ async fn unavailable_completed_output_keeps_parent_spawn_open() {
     assert!(
         persistence.drain().iter().all(|record| !matches!(
             record,
-            chat_state::PersistenceRecord::Timeline(chat_state::TimelineEvent {
-                kind: chat_state::TimelineEventKind::Subagent(
-                    chat_state::SubagentEvent::Ended(_)
-                ),
-                ..
-            })
+            chat_state::PersistenceRecord::Timeline(event)
+                if matches!(
+                    &event.kind,
+                    chat_state::TimelineEventKind::Subagent(
+                        chat_state::SubagentEvent::Ended(_)
+                    )
+                )
         )),
         "unverifiable completed output must not be laundered into a parent terminal"
     );
@@ -2463,12 +2466,12 @@ async fn missing_unpublished_child_preserves_spawn_without_forging_terminal() {
         .drain()
         .into_iter()
         .find_map(|record| match record {
-            chat_state::PersistenceRecord::Timeline(chat_state::TimelineEvent {
-                kind: chat_state::TimelineEventKind::Subagent(
+            chat_state::PersistenceRecord::Timeline(event) => match event.kind {
+                chat_state::TimelineEventKind::Subagent(
                     chat_state::SubagentEvent::Ended(terminal),
-                ),
-                ..
-            }) => Some(terminal),
+                ) => Some(terminal),
+                _ => None,
+            },
             _ => None,
         });
     assert!(terminal.is_none(), "a missing child entity cannot prove a cancelled execution or supply its result identity");

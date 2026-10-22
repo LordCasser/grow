@@ -251,6 +251,10 @@ struct FactHeader<'a> {
     at_ms: Option<i64>,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "A journal fact is a transient decode/append value, not a retained history slot; keep presentation payloads inline to avoid an allocation per record"
+)]
 #[derive(Debug, Clone)]
 pub(crate) enum JournalFact {
     Domain {

@@ -250,18 +250,20 @@ impl PeekPanelState {
 /// subagent answers only inside its child fullscreen view (`Subagent`
 /// rows pass `questions_enabled = false` so the peek degrades to the
 /// plain reply box).
-fn pending_interaction_peek(
-    agent: &AgentView,
-    session_id: &str,
-    include_local_question: bool,
-    questions_enabled: bool,
-) -> (
+type PendingInteractionPeek = (
     Option<String>,
     Vec<(String, String)>,
     Option<usize>,
     Option<String>,
     Option<usize>,
-) {
+);
+
+fn pending_interaction_peek(
+    agent: &AgentView,
+    session_id: &str,
+    include_local_question: bool,
+    questions_enabled: bool,
+) -> PendingInteractionPeek {
     use crate::views::session_title::sanitize_display_text;
 
     if let Some(p) = agent

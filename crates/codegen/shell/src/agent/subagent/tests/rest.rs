@@ -590,7 +590,7 @@ fn durable_resume_projection_requires_parent_terminal_fact() {
     let mut timeline = chat_state::Timeline::default();
     timeline
         .record(chat_state::TimelineEventKind::Subagent(
-            chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
+            chat_state::SubagentEvent::Spawned(Box::new(chat_state::SubagentSpawnEvent {
                 goal_definition_revision: None,
                 subagent_id: "sa-resume".into(),
                 child_session_id: "child-resume".into(),
@@ -621,7 +621,7 @@ fn durable_resume_projection_requires_parent_terminal_fact() {
                     "test-endpoint",
                 ),
                 reasoning_effort: Some(sampling_types::ReasoningEffort::High),
-            }),
+            })),
         ))
         .unwrap();
     assert!(resume_source_from_timeline(&timeline, "sa-resume").is_none());

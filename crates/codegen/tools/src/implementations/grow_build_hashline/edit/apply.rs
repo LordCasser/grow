@@ -298,7 +298,7 @@ pub(crate) fn apply_edits(
                     );
                 }
                 return ApplyResult {
-                    output: HashlineEditOutput::Error(e),
+                    output: HashlineEditOutput::Error(*e),
                     new_content: None,
                     edit_details: vec![],
                 };
@@ -512,7 +512,7 @@ fn resolve_op(
     original_idx: usize,
     lines: &[&str],
     scheme: &dyn AnchorScheme,
-) -> Result<ResolvedOp, HashlineEditError> {
+) -> Result<ResolvedOp, Box<HashlineEditError>> {
     match op {
         HashlineOp::Replace {
             anchor,
@@ -524,7 +524,7 @@ fn resolve_op(
                 Some(ea) => {
                     let e = validate_anchor(ea, lines, scheme)?;
                     if e < start {
-                        return Err(HashlineEditError {
+                        return Err(Box::new(HashlineEditError {
                             error: HashlineEditErrorKind::InvalidInput,
                             message: format!(
                                 "end_anchor line {} is before start anchor line {}.",
@@ -538,7 +538,7 @@ fn resolve_op(
                             shifted_to: None,
                             shifted_anchor: None,
                             ambiguous_candidates: vec![],
-                        });
+                        }));
                     }
                     e + 1 // exclusive end
                 }
@@ -546,7 +546,7 @@ fn resolve_op(
             };
 
             if let Some(line_num) = detect_anchor_prefix_in_content(content, scheme) {
-                return Err(anchor_content_error("replace", content, line_num));
+                return Err(Box::new(anchor_content_error("replace", content, line_num)));
             }
             let new_lines: Vec<String> = if content.is_empty() {
                 vec![] // delete
@@ -581,7 +581,11 @@ fn resolve_op(
             };
 
             if let Some(line_num) = detect_anchor_prefix_in_content(content, scheme) {
-                return Err(anchor_content_error("insert_after", content, line_num));
+                return Err(Box::new(anchor_content_error(
+                    "insert_after",
+                    content,
+                    line_num,
+                )));
             }
             let new_lines: Vec<String> = if content.is_empty() {
                 vec![String::new()] // blank line
@@ -599,7 +603,7 @@ fn resolve_op(
 
         HashlineOp::Write { .. } => {
             // Write ops should be handled before reaching here.
-            Err(HashlineEditError {
+            Err(Box::new(HashlineEditError {
                 error: HashlineEditErrorKind::InvalidInput,
                 message: "Write op must be the only operation in a batch. \
                          Either use write alone (to replace the entire file) or use \
@@ -612,7 +616,7 @@ fn resolve_op(
                 shifted_to: None,
                 shifted_anchor: None,
                 ambiguous_candidates: vec![],
-            })
+            }))
         }
     }
 }
@@ -652,7 +656,7 @@ fn validate_anchor(
     anchor_str: &str,
     lines: &[&str],
     scheme: &dyn AnchorScheme,
-) -> Result<usize, HashlineEditError> {
+) -> Result<usize, Box<HashlineEditError>> {
     // Strip trailing arrow + content that the model copies from hashline_read
     // output (e.g. `22:abc:rst→code` or `22:abc:rst->code`).
     let anchor_str = anchor_str
@@ -675,7 +679,7 @@ fn validate_anchor(
                 recovered
             } else {
                 let (fmt, ex) = anchor_format_hint(scheme);
-                return Err(HashlineEditError {
+                return Err(Box::new(HashlineEditError {
                     error: HashlineEditErrorKind::InvalidInput,
                     message: format!(
                         "Malformed anchor: \"{anchor_str}\". Expected format: \"{fmt}\" (e.g. \"{ex}\")."
@@ -687,7 +691,7 @@ fn validate_anchor(
                     shifted_to: None,
                     shifted_anchor: None,
                     ambiguous_candidates: vec![],
-                });
+                }));
             }
         }
     };
@@ -697,7 +701,7 @@ fn validate_anchor(
     match result {
         ValidationResult::Valid => Ok(parsed.line - 1), // 0-based
 
-        ValidationResult::OutOfRange => Err(HashlineEditError {
+        ValidationResult::OutOfRange => Err(Box::new(HashlineEditError {
             error: HashlineEditErrorKind::AnchorNotFound,
             message: format!(
                 "Line {} is out of range (file has {} lines).",
@@ -711,7 +715,7 @@ fn validate_anchor(
             shifted_to: None,
             shifted_anchor: None,
             ambiguous_candidates: vec![],
-        }),
+        })),
 
         ValidationResult::Stale => {
             let shift = scheme.find_shifted(&parsed, lines, DEFAULT_SEARCH_RADIUS);
@@ -772,7 +776,7 @@ fn validate_anchor(
                     }
                 };
 
-            Err(HashlineEditError {
+            Err(Box::new(HashlineEditError {
                 error: error_kind,
                 message,
                 requested_anchor: Some(anchor_str.to_owned()),
@@ -782,7 +786,7 @@ fn validate_anchor(
                 shifted_to,
                 shifted_anchor,
                 ambiguous_candidates,
-            })
+            }))
         }
     }
 }

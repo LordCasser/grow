@@ -3387,12 +3387,12 @@ async fn fork_does_not_inherit_a_suspended_runtime_checkpoint() {
         .record(chat_state::TimelineEventKind::Runtime(
             chat_state::session_runtime::SessionRuntimeEvent::Checkpoint {
                 operation_id: "fork-source-op".into(),
-                checkpoint: chat_state::session_runtime::RuntimeCheckpoint {
+                checkpoint: Box::new(chat_state::session_runtime::RuntimeCheckpoint {
                     frontier: settled.seq,
                     runtime_source_hash: "d".repeat(64),
                     turn: None,
                     step: None,
-                },
+                }),
             },
         ))
         .unwrap();
@@ -3460,12 +3460,12 @@ async fn explicit_delete_preserves_unfinished_runtime_handoff_but_allows_consume
             chat_state::TimelineEventKind::Runtime(
                 chat_state::session_runtime::SessionRuntimeEvent::Checkpoint {
                     operation_id: "delete-op".into(),
-                    checkpoint: chat_state::session_runtime::RuntimeCheckpoint {
+                    checkpoint: Box::new(chat_state::session_runtime::RuntimeCheckpoint {
                         frontier: settled.seq,
                         runtime_source_hash: "b".repeat(64),
                         turn: None,
                         step: None,
-                    },
+                    }),
                 },
             ),
         )
@@ -6695,12 +6695,12 @@ async fn cleanup_ttl_preserves_runtime_checkpoints_and_local_planning_obligation
                     .record(chat_state::TimelineEventKind::Runtime(
                         chat_state::session_runtime::SessionRuntimeEvent::Checkpoint {
                             operation_id: "suspend-op".into(),
-                            checkpoint: chat_state::session_runtime::RuntimeCheckpoint {
+                            checkpoint: Box::new(chat_state::session_runtime::RuntimeCheckpoint {
                                 frontier: commands_settled.seq,
                                 runtime_source_hash: "a".repeat(64),
                                 turn: None,
                                 step: None,
-                            },
+                            }),
                         },
                     ))
                     .unwrap();
@@ -6985,7 +6985,7 @@ async fn cleanup_child_seed_requires_exact_parent_terminal_result_chain() {
         let mut parent = chat_state::Timeline::default();
         let spawn = parent
             .record(chat_state::TimelineEventKind::Subagent(
-                chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
+                chat_state::SubagentEvent::Spawned(Box::new(chat_state::SubagentSpawnEvent {
                     subagent_id: "cleanup-agent".into(),
                     child_session_id: child_info.id.0.to_string(),
                     origin_tool_call_id: None,
@@ -7016,7 +7016,7 @@ async fn cleanup_child_seed_requires_exact_parent_terminal_result_chain() {
                         "test",
                     ),
                     reasoning_effort: None,
-                }),
+                })),
             ))
             .unwrap();
 
@@ -7259,7 +7259,7 @@ async fn cleanup_retains_spawn_when_child_source_is_missing() {
     let mut timeline = chat_state::Timeline::default();
     timeline
         .record(chat_state::TimelineEventKind::Subagent(
-            chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
+            chat_state::SubagentEvent::Spawned(Box::new(chat_state::SubagentSpawnEvent {
                 subagent_id: "missing-child".into(),
                 child_session_id: "cleanup-missing-child".into(),
                 origin_tool_call_id: None,
@@ -7290,7 +7290,7 @@ async fn cleanup_retains_spawn_when_child_source_is_missing() {
                     "test",
                 ),
                 reasoning_effort: None,
-            }),
+            })),
         ))
         .unwrap();
     for event in timeline.events() {
@@ -7390,11 +7390,11 @@ async fn cleanup_reclaims_three_level_chain_with_root_summary_and_direct_seed() 
     let mut root_timeline = chat_state::Timeline::default();
     let root_spawn = root_timeline
         .record(chat_state::TimelineEventKind::Subagent(
-            chat_state::SubagentEvent::Spawned(spawn(
+            chat_state::SubagentEvent::Spawned(Box::new(spawn(
                 "root-child",
                 &child_info,
                 &root_info,
-            )),
+            ))),
         ))
         .unwrap();
 
@@ -7408,11 +7408,11 @@ async fn cleanup_reclaims_three_level_chain_with_root_summary_and_direct_seed() 
         .unwrap();
     let child_spawn = child_timeline
         .record(chat_state::TimelineEventKind::Subagent(
-            chat_state::SubagentEvent::Spawned(spawn(
+            chat_state::SubagentEvent::Spawned(Box::new(spawn(
                 "nested-child",
                 &grandchild_info,
                 &child_info,
-            )),
+            ))),
         ))
         .unwrap();
 

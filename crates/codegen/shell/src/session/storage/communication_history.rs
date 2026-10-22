@@ -100,9 +100,9 @@ impl ReceiptSource {
     }
 }
 
-pub(crate) fn receipt_identity(
-    event: &TimelineEvent,
-) -> io::Result<Option<(String, Option<String>, Option<String>)>> {
+type ReceiptIdentity = (String, Option<String>, Option<String>);
+
+pub(crate) fn receipt_identity(event: &TimelineEvent) -> io::Result<Option<ReceiptIdentity>> {
     match &event.kind {
         TimelineEventKind::Notification(chat_state::NotificationEvent::Received {
             id,

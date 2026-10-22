@@ -274,7 +274,7 @@ pub struct WorkflowRequest {
 
 #[derive(Debug)]
 pub enum WorkflowAck {
-    Completed(WorkflowToolOutput),
+    Completed(Box<WorkflowToolOutput>),
     Rejected { code: &'static str, detail: String },
 }
 
@@ -488,7 +488,7 @@ impl tool_runtime::Tool for WorkflowTool {
                 )
             })?;
         match ack_rx.await {
-            Ok(WorkflowAck::Completed(output)) => Ok(output),
+            Ok(WorkflowAck::Completed(output)) => Ok(*output),
             Ok(WorkflowAck::Rejected { code, detail }) => {
                 Err(tool_runtime::ToolError::custom(code, detail))
             }

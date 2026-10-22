@@ -1572,10 +1572,11 @@ impl WorkflowManager {
             run.cancel.cancel();
             let _ = self.cancel_children_for_run(run_id);
         }
-        let mut pending: Vec<(
+        type PendingWorkflowDrain = (
             Option<String>,
             oneshot::Receiver<Result<WorkflowRunState, String>>,
-        )> = active
+        );
+        let mut pending: Vec<PendingWorkflowDrain> = active
             .into_iter()
             .map(|(run_id, run)| (Some(run_id), run.done))
             .collect();
@@ -1744,7 +1745,7 @@ async fn deliver_workflow_handoff_acknowledged(
         if session_cmd_tx
             .send(
                 crate::session::commands::SessionCommand::WorkflowHandoffReady {
-                    state: state.clone(),
+                    state: Box::new(state.clone()),
                     respond_to,
                 },
             )
@@ -2607,7 +2608,7 @@ complete("restored after explicit resume");"#;
                 .join("cleared")
                 .exists()
         );
-        let replayed = chat_state::Timeline::from_events(vec![spawn]).unwrap();
+        let replayed = chat_state::Timeline::from_events(vec![*spawn]).unwrap();
         assert!(replayed.workflow_lifecycle(&run_id).is_some());
     }
 

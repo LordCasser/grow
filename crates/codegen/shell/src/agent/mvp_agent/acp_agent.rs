@@ -1182,7 +1182,7 @@ impl acp_transport::AcpAgentHandler for MvpAgent {
                         mcp_meta_config_map,
                         persistence,
                         session_title_route,
-                        timeline_bootstrap: crate::session::TimelineBootstrap::Existing { timeline, history },
+                        timeline_bootstrap: crate::session::TimelineBootstrap::Existing { timeline: Box::new(timeline), history },
                         rewind_points_source,
                         origin_client: origin_client.clone(),
                         client_code_nav_enabled,

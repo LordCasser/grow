@@ -3165,6 +3165,10 @@ fn http_error(status: StatusCode, message: impl Into<String>) -> HttpError {
     (status, response_security_headers(), message.into())
 }
 
+#[expect(
+    clippy::result_large_err,
+    reason = "Axum response tuples include security headers; preserve the response type without allocating merely to reject a Host header"
+)]
 fn require_local_host(headers: &HeaderMap) -> Result<(), HttpError> {
     let host = headers
         .get(header::HOST)
@@ -4456,7 +4460,7 @@ mod tests {
         child_spawn.workflow_run_id = Some("wf_debug".into());
         timeline
             .record(chat_state::TimelineEventKind::Subagent(
-                chat_state::SubagentEvent::Spawned(child_spawn),
+                chat_state::SubagentEvent::Spawned(Box::new(child_spawn)),
             ))
             .unwrap();
         timeline
@@ -5691,7 +5695,7 @@ mod tests {
         child_spawn_fact.security_parent_session_id = "root-session".into();
         let child_spawn = root
             .record(chat_state::TimelineEventKind::Subagent(
-                chat_state::SubagentEvent::Spawned(child_spawn_fact),
+                chat_state::SubagentEvent::Spawned(Box::new(child_spawn_fact)),
             ))
             .unwrap();
         root.append(
@@ -5724,7 +5728,7 @@ mod tests {
         grandchild_spawn_fact.security_parent_session_id = "child-session".into();
         let grandchild_spawn = child
             .record(chat_state::TimelineEventKind::Subagent(
-                chat_state::SubagentEvent::Spawned(grandchild_spawn_fact),
+                chat_state::SubagentEvent::Spawned(Box::new(grandchild_spawn_fact)),
             ))
             .unwrap();
         child
@@ -5885,7 +5889,11 @@ mod tests {
         std::fs::create_dir_all(&root_dir).unwrap();
         let mut root = chat_state::Timeline::default();
         root.record(chat_state::TimelineEventKind::Subagent(
-            chat_state::SubagentEvent::Spawned(subagent_spawn("worker", "child-session", "/child")),
+            chat_state::SubagentEvent::Spawned(Box::new(subagent_spawn(
+                "worker",
+                "child-session",
+                "/child",
+            ))),
         ))
         .unwrap();
         write_timeline(&root_dir.join(super::super::storage::TIMELINE_FILE), &root);
@@ -5924,11 +5932,11 @@ mod tests {
         let mut failed = chat_state::Timeline::default();
         failed
             .record(chat_state::TimelineEventKind::Subagent(
-                chat_state::SubagentEvent::Spawned(subagent_spawn(
+                chat_state::SubagentEvent::Spawned(Box::new(subagent_spawn(
                     "worker",
                     "missing-child",
                     "/child",
-                )),
+                ))),
             ))
             .unwrap();
         failed
@@ -5969,11 +5977,11 @@ mod tests {
         let mut completed = chat_state::Timeline::default();
         completed
             .record(chat_state::TimelineEventKind::Subagent(
-                chat_state::SubagentEvent::Spawned(subagent_spawn(
+                chat_state::SubagentEvent::Spawned(Box::new(subagent_spawn(
                     "worker",
                     "missing-child",
                     "/child",
-                )),
+                ))),
             ))
             .unwrap();
         completed

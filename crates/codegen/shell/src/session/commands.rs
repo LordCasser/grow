@@ -68,7 +68,7 @@ pub enum SessionEffortAuthority {
         origin_client: Option<crate::http::OriginClientInfo>,
     },
     Workflow {
-        route: crate::session::workflow::tracker::WorkflowRuntimeRoute,
+        route: Box<crate::session::workflow::tracker::WorkflowRuntimeRoute>,
         models_manager: crate::agent::models::ModelsManager,
     },
 }
@@ -942,7 +942,7 @@ pub enum SessionCommand {
     /// snapshot whose revision ended the execution, so a queued command can
     /// never render a later retry as this handoff.
     WorkflowHandoffReady {
-        state: crate::session::workflow::tracker::WorkflowRunState,
+        state: Box<crate::session::workflow::tracker::WorkflowRunState>,
         respond_to: oneshot::Sender<Result<(), String>>,
     },
     /// A Workflow owner failed to commit its terminal Timeline boundary.

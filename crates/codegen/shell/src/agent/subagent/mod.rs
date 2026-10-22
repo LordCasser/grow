@@ -2730,7 +2730,7 @@ fn finish_from_durable_facts(
 pub(crate) enum DurableChildOperation {
     Missing,
     Open,
-    Completed(SubagentResult),
+    Completed(Box<SubagentResult>),
 }
 
 /// Verify that a planning receipt names the canonical result of the exact
@@ -3012,7 +3012,7 @@ pub(crate) fn durable_child_operation_in_events(
                 None,
             )
         };
-    Ok(DurableChildOperation::Completed(SubagentResult {
+    Ok(DurableChildOperation::Completed(Box::new(SubagentResult {
         output_unavailable,
         success: outcome == chat_state::SubagentOutcome::Completed,
         output: std::sync::Arc::from(output),
@@ -3027,7 +3027,7 @@ pub(crate) fn durable_child_operation_in_events(
         total_tokens_used: terminal.tokens_used,
         planning_summary,
         ..Default::default()
-    }))
+    })))
 }
 
 #[cfg(test)]
@@ -3748,7 +3748,7 @@ pub(crate) async fn reconcile_orphaned_subagents_with_backend(
             chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(spawn)) => {
                 spawns.insert(
                     spawn.subagent_id.clone(),
-                    (event.seq, event.at_ms, spawn.clone()),
+                    (event.seq, event.at_ms, spawn.as_ref().clone()),
                 );
             }
             chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Ended(terminal)) => {

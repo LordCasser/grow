@@ -1190,7 +1190,7 @@ async fn failed_response_repair_can_recover_from_only_the_durable_raw_prefix() {
     let PersistenceRecord::Timeline(raw) = &records[0] else {
         panic!("missing raw response")
     };
-    let mut replayed = crate::Timeline::from_events(vec![raw.clone()]).unwrap();
+    let mut replayed = crate::Timeline::from_events(vec![raw.as_ref().clone()]).unwrap();
     assert_eq!(replayed.recover_surface_integrity().unwrap().len(), 2);
     assert!(replayed.recover_surface_integrity().unwrap().is_empty());
     assert!(matches!(replayed.surface(), [ConversationItem::User(_)]));
@@ -2952,17 +2952,14 @@ async fn image_projection_pairs_descriptions_and_selects_images_per_request() {
     let records = h.drain_persistence();
     assert!(records.iter().any(|record| matches!(
         record,
-        PersistenceRecord::Timeline(crate::TimelineEvent {
-            kind: crate::TimelineEventKind::ImageProjection(_),
-            ..
-        })
+        PersistenceRecord::Timeline(event)
+            if matches!(&event.kind, crate::TimelineEventKind::ImageProjection(_))
     )));
     assert!(records.iter().any(|record| matches!(
         record,
-        PersistenceRecord::Timeline(crate::TimelineEvent {
-            kind: crate::TimelineEventKind::Messages(crate::MessageEvent { items, .. }),
-            ..
-        }) if !conversation_image_groups(items).is_empty()
+        PersistenceRecord::Timeline(event)
+            if matches!(&event.kind, crate::TimelineEventKind::Messages(crate::MessageEvent { items, .. })
+                if !conversation_image_groups(items).is_empty())
     )));
 }
 
@@ -3050,7 +3047,7 @@ async fn image_removal_projection_replaces_user_images_and_replays_identically()
         .drain_persistence()
         .into_iter()
         .filter_map(|record| match record {
-            PersistenceRecord::Timeline(event) => Some(event),
+            PersistenceRecord::Timeline(event) => Some(*event),
             PersistenceRecord::Flush => None,
         })
         .collect::<Vec<_>>();
@@ -3815,7 +3812,7 @@ async fn commit_finalization_fact_after_lost_ack(
         serde_json::to_vec(&committed).unwrap(),
         serde_json::to_vec(&first_event).unwrap()
     );
-    first_event
+    *first_event
 }
 
 #[tokio::test]
@@ -3870,7 +3867,7 @@ async fn child_result_and_parent_ended_retries_keep_their_canonical_event_once()
     let mut parent = TestHarness::with_manual_timeline_ack(vec![]);
     let spawn = commit_finalization_fact_after_lost_ack(
         &mut parent,
-        crate::TimelineEventKind::Subagent(crate::SubagentEvent::Spawned(
+        crate::TimelineEventKind::Subagent(crate::SubagentEvent::Spawned(Box::new(
             crate::SubagentSpawnEvent {
                 subagent_id: "parent-ended-retry".into(),
                 child_session_id: "child-session".into(),
@@ -3899,7 +3896,7 @@ async fn child_result_and_parent_ended_retries_keep_their_canonical_event_once()
                 model_transport_key: sampling_types::model_image_input_key(&test_config()),
                 reasoning_effort: None,
             },
-        )),
+        ))),
     )
     .await;
     let parent_terminal = commit_finalization_fact_after_lost_ack(
@@ -6813,7 +6810,7 @@ async fn resumed_multi_context_control_accepts_durable_initial_context() {
         panic!("expected durable context");
     };
     assert_eq!(event.seq, timeline.next_seq());
-    timeline.accept(event.clone()).unwrap();
+    timeline.accept(event.as_ref().clone()).unwrap();
     let replay = crate::Timeline::from_events(timeline.events().to_vec()).unwrap();
     assert_eq!(
         serde_json::to_value(replay.surface()).unwrap(),

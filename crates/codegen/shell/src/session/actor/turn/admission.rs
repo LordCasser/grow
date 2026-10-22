@@ -10,7 +10,7 @@ use crate::session::behavior::BehaviorChangeOutcome;
 /// complete.  Both variants deliberately share the same outer Timeline
 /// terminal owner in `handle_prompt`.
 enum AdmittedTurnSuccess {
-    Host(crate::session::commands::PromptTurnOk),
+    Host(Box<crate::session::commands::PromptTurnOk>),
     Model(TurnOutcome),
 }
 
@@ -558,7 +558,7 @@ impl SessionActor {
             if let Some(cursor) = &restored_turn {
                 if cursor.resume_point == chat_state::session_runtime::TurnResumePoint::Host {
                     self.send_host_turn_slash_command_output("The original host operation was interrupted during session suspension. Its recorded command/control facts were preserved; it was not replayed.").await;
-                    return ok_end_turn(0, None).map(AdmittedTurnSuccess::Host);
+                    return ok_end_turn(0, None).map(|outcome| AdmittedTurnSuccess::Host(Box::new(outcome)));
                 }
                 if cursor.resume_point == chat_state::session_runtime::TurnResumePoint::Model {
                 turn_input_settled = true;
@@ -587,14 +587,14 @@ impl SessionActor {
                 {
                     self.send_host_turn_slash_command_output(&message).await;
                 }
-                return ok_end_turn(0, None).map(AdmittedTurnSuccess::Host);
+                return ok_end_turn(0, None).map(|outcome| AdmittedTurnSuccess::Host(Box::new(outcome)));
             }
             if let Some(bash_command) = Self::extract_bash_command(&prompt_blocks) {
                 if let Some(cursor) = self.turn_continuation.borrow_mut().as_mut() { cursor.resume_point = chat_state::session_runtime::TurnResumePoint::Host; }
                 return self
                     .handle_direct_bash_command(prompt_id, bash_command, &prompt_blocks)
                     .await
-                    .map(AdmittedTurnSuccess::Host);
+                    .map(|outcome| AdmittedTurnSuccess::Host(Box::new(outcome)));
             }
             let user_skill_group = self.prepare_user_skill_loads(&turn_input_ids, current_prompt_index).await?;
             let slash_skills = self.slash_skills_for_resolve().await;
@@ -636,20 +636,20 @@ impl SessionActor {
                             return self
                                 .execute_builtin_slash_command(action)
                                 .await
-                                .map(AdmittedTurnSuccess::Host);
+                                .map(|outcome| AdmittedTurnSuccess::Host(Box::new(outcome)));
                         }
                         BuiltinAction::WorkflowLaunch { name, input } => {
                             self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
                             let msg = self.launch_named_workflow(&name, &input).await;
                             self.send_host_turn_slash_command_output(&msg).await;
-                            return ok_end_turn(0, None).map(AdmittedTurnSuccess::Host);
+                            return ok_end_turn(0, None).map(|outcome| AdmittedTurnSuccess::Host(Box::new(outcome)));
                         }
                         _ => {
                             self.persist_host_turn_user_echo(&original_prompt_text, prompt_id);
                             return self
                                 .execute_builtin_slash_command(action)
                                 .await
-                                .map(AdmittedTurnSuccess::Host);
+                                .map(|outcome| AdmittedTurnSuccess::Host(Box::new(outcome)));
                         }
                     }
                 }
@@ -1293,7 +1293,7 @@ impl SessionActor {
                 if let Some(extension) = &self.idle_prompt_extension {
                     extension.on_turn_failed();
                 }
-                return Ok(ok);
+                return Ok(*ok);
             }
             Ok(AdmittedTurnSuccess::Model(outcome)) => Ok(outcome),
             Err(error) if !model_path_started => return Err(error),

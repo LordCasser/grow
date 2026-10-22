@@ -209,8 +209,8 @@ pub trait ChildRunner: 'static {
         _request: SubagentRequest,
         output: ChildRunOutput<Self::CompletionData>,
         _deadline: tokio::time::Instant,
-    ) -> Result<Self::RunFuture, ChildRunOutput<Self::CompletionData>> {
-        Err(output)
+    ) -> Result<Self::RunFuture, Box<ChildRunOutput<Self::CompletionData>>> {
+        Err(Box::new(output))
     }
 
     fn load_persisted_output_async(

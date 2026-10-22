@@ -645,7 +645,7 @@ impl HostService {
                         }
                     };
                     self.active_agents.fetch_sub(1, Ordering::Relaxed);
-                    match result {
+                    Box::new(match result {
                         Ok(result) => result,
                         Err(error) => {
                             row.finish("failed", total_tokens, total_duration);
@@ -653,7 +653,7 @@ impl HostService {
                                 "subagent coordinator failed before completion: {error}"
                             )));
                         }
-                    }
+                    })
                 }
             };
             if result.finalization_pending || result.output_unavailable {

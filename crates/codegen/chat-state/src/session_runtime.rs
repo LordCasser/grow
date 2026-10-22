@@ -133,7 +133,7 @@ pub enum SessionRuntimeEvent {
     },
     Checkpoint {
         operation_id: String,
-        checkpoint: RuntimeCheckpoint,
+        checkpoint: Box<RuntimeCheckpoint>,
     },
     CommandsSettled {
         operation_id: String,
@@ -265,7 +265,7 @@ impl RuntimeLifecycle {
                     return Err("checkpoint exceeds the continuation budget".into());
                 }
                 next.phase = RuntimePhase::Suspended;
-                next.checkpoint = Some(checkpoint.clone());
+                next.checkpoint = Some(checkpoint.as_ref().clone());
                 next.checkpoint_seq = Some(seq);
             }
             SessionRuntimeEvent::CommandsSettled {
@@ -391,12 +391,12 @@ mod tests {
     fn checkpoint() -> SessionRuntimeEvent {
         SessionRuntimeEvent::Checkpoint {
             operation_id: "op".into(),
-            checkpoint: RuntimeCheckpoint {
+            checkpoint: Box::new(RuntimeCheckpoint {
                 frontier: EventSeq::new(1),
                 runtime_source_hash: "a".repeat(64),
                 turn: None,
                 step: None,
-            },
+            }),
         }
     }
 

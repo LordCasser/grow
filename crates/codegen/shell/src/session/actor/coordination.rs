@@ -1413,7 +1413,7 @@ mod tests {
             crate::session::actor::tests::support::begin_test_active_causal_turn(&actor).await;
             actor.chat_state_handle.record_timeline_event_durably(
                 chat_state::TimelineEventKind::Subagent(chat_state::SubagentEvent::Spawned(
-                    chat_state::SubagentSpawnEvent {
+                    Box::new(chat_state::SubagentSpawnEvent {
                         subagent_id: "active-child".into(),
                         child_session_id: "child-session".into(),
                         origin_tool_call_id: None,
@@ -1444,7 +1444,7 @@ mod tests {
                             "test-endpoint",
                         ),
                         reasoning_effort: None,
-                    },
+                    }),
                 )),
             ).await.unwrap();
             actor.notifications.gateway_enabled.store(false, std::sync::atomic::Ordering::Release);

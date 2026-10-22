@@ -459,7 +459,7 @@ pub(crate) enum TimelineBootstrap {
         session_rules: Option<String>,
     },
     Existing {
-        timeline: chat_state::Timeline,
+        timeline: Box<chat_state::Timeline>,
         history: crate::session::history::HistorySnapshot,
     },
 }
@@ -969,7 +969,7 @@ pub(crate) async fn spawn_session_actor(
         })
         .collect::<std::collections::HashMap<_, _>>();
     let initial_hook_config_generation = super::hooks::next_hook_config_generation(
-        validated_timeline.as_ref(),
+        validated_timeline.as_deref(),
     )
     .ok_or_else(|| {
         agent::AgentBuildError::InvalidConfig(
@@ -1174,7 +1174,7 @@ pub(crate) async fn spawn_session_actor(
     );
     let chat_state_handle = if let Some(timeline) = validated_timeline {
         chat_state::ChatStateActor::spawn_from_validated_timeline(
-            timeline,
+            *timeline,
             chat_state_sampling_config,
             timeline_persistence,
             chat_state_event_tx,
@@ -2463,7 +2463,7 @@ pub(crate) async fn spawn_session_actor(
                     Ok(output) => {
                         let _ = workflow_cmd_tx
                             .send(crate::session::commands::SessionCommand::AdvertiseCommands);
-                        ack.send(WorkflowAck::Completed(output))
+                        ack.send(WorkflowAck::Completed(Box::new(output)))
                     }
                     Err((code, detail)) => ack.send(WorkflowAck::Rejected { code, detail }),
                 };

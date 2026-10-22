@@ -1186,7 +1186,7 @@ pub(super) fn write_subagent_spawn_timeline(
     let mut timeline = chat_state::Timeline::default();
     timeline
         .record(chat_state::TimelineEventKind::Subagent(
-            chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
+            chat_state::SubagentEvent::Spawned(Box::new(chat_state::SubagentSpawnEvent {
                 subagent_id: subagent_id.into(),
                 child_session_id: subagent_id.into(),
                 origin_tool_call_id: None,
@@ -1217,7 +1217,7 @@ pub(super) fn write_subagent_spawn_timeline(
                     "test-endpoint",
                 ),
                 reasoning_effort: None,
-            }),
+            })),
         ))
         .unwrap();
     shell::session::testkit::write_timeline_history_fixture(

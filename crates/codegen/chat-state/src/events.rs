@@ -15,7 +15,9 @@ pub enum ChatStateEvent {
 
     /// Cumulative process-local billing changed. A replace-only UI projection,
     /// independent of prompt completion and projected context pressure.
-    SessionUsageUpdated { usage: crate::usage::UsageLedger },
+    SessionUsageUpdated {
+        usage: Box<crate::usage::UsageLedger>,
+    },
 
     /// Conversation was replaced (compaction/rewind) — session may need to
     /// reset idle-flush counters, memory injection flags, etc.

@@ -30,7 +30,7 @@ impl CanonicalChildFacts {
                 )) => {
                     if facts
                         .spawned
-                        .insert(spawn.subagent_id.clone(), spawn.clone())
+                        .insert(spawn.subagent_id.clone(), spawn.as_ref().clone())
                         .is_some()
                     {
                         return Err(format!(
@@ -1438,11 +1438,11 @@ mod tests {
         }
         timeline
             .record(chat_state::TimelineEventKind::Subagent(
-                chat_state::SubagentEvent::Spawned(spawn(
+                chat_state::SubagentEvent::Spawned(Box::new(spawn(
                     "measurement-task",
                     "measurement-child",
                     "root",
-                )),
+                ))),
             ))
             .unwrap();
         timeline
@@ -1490,7 +1490,7 @@ mod tests {
         let mut timeline = chat_state::Timeline::default();
         timeline
             .record(chat_state::TimelineEventKind::Subagent(
-                chat_state::SubagentEvent::Spawned(spawn("task", "child", "root")),
+                chat_state::SubagentEvent::Spawned(Box::new(spawn("task", "child", "root"))),
             ))
             .unwrap();
         let mut events = timeline.events().to_vec();
@@ -1506,7 +1506,7 @@ mod tests {
         let mut timeline = chat_state::Timeline::default();
         timeline
             .record(chat_state::TimelineEventKind::Subagent(
-                chat_state::SubagentEvent::Spawned(spawn("task", "child", "root")),
+                chat_state::SubagentEvent::Spawned(Box::new(spawn("task", "child", "root"))),
             ))
             .unwrap();
         let mut events = timeline.events().to_vec();

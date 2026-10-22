@@ -126,20 +126,20 @@ pub(crate) fn model_change_event(
     })
 }
 
+type PersistedModelSelection = (
+    crate::agent::models::ModelId,
+    Option<ReasoningEffort>,
+    String,
+    sampling_types::ModelImageInputKey,
+);
+
 /// Fold model selection facts into the latest durable selection.
 ///
 /// Matching observations are a closed contract: malformed or discontinuous
 /// facts fail session load instead of silently trusting a stale summary.
 pub(crate) fn latest_model_selection(
     events: &[chat_state::TimelineEvent],
-) -> io::Result<
-    Option<(
-        crate::agent::models::ModelId,
-        Option<ReasoningEffort>,
-        String,
-        sampling_types::ModelImageInputKey,
-    )>,
-> {
+) -> io::Result<Option<PersistedModelSelection>> {
     let mut latest: Option<(
         String,
         Option<ReasoningEffort>,

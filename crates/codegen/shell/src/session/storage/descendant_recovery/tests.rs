@@ -69,7 +69,7 @@ async fn add_canonical_spawn(
     let mut timeline = chat_state::Timeline::default();
     let event = timeline
         .record(chat_state::TimelineEventKind::Subagent(
-            chat_state::SubagentEvent::Spawned(spawn.clone()),
+            chat_state::SubagentEvent::Spawned(Box::new(spawn.clone())),
         ))
         .unwrap();
     adapter

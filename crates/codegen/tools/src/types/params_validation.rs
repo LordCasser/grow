@@ -10,7 +10,7 @@ pub struct ParamValidationError {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bad_value: Option<serde_json::Value>,
+    pub bad_value: Option<Box<serde_json::Value>>,
     pub category: String,
 }
 
@@ -36,7 +36,7 @@ impl ParamValidationError {
     }
 
     pub fn with_bad_value(mut self, bad_value: serde_json::Value) -> Self {
-        self.bad_value = Some(bad_value);
+        self.bad_value = Some(Box::new(bad_value));
         self
     }
 }
@@ -66,7 +66,7 @@ where
             && let Some(path) = err.field_path.as_deref()
             && let Some(value) = value_at_path(json, path)
         {
-            err.bad_value = Some(value.clone());
+            err.bad_value = Some(Box::new(value.clone()));
         }
         err
     })

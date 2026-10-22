@@ -72,14 +72,13 @@ pub struct SubagentCoordinator<R: ChildRunner> {
         TaggedFuture<futures::future::CatchUnwind<std::panic::AssertUnwindSafe<R::RunFuture>>>,
     >,
     validations: FuturesUnordered<ReplyFuture<R::ValidateFuture, SubagentValidateTypeOutcome>>,
-    output_reads: FuturesUnordered<
-        TaggedFuture<
-            SendBoxFuture<Result<Option<Arc<str>>, super::types::SubagentObservationError>>,
-        >,
-    >,
+    output_reads: FuturesUnordered<OutputReadFuture>,
     output_read_requests: HashMap<String, OutputReadRequest>,
     output_read_permits: Arc<tokio::sync::Semaphore>,
 }
+
+type OutputReadFuture =
+    TaggedFuture<SendBoxFuture<Result<Option<Arc<str>>, super::types::SubagentObservationError>>>;
 
 struct SuspendedChild<D> {
     request: SubagentRequest,
@@ -1776,7 +1775,7 @@ impl<R: ChildRunner> SubagentCoordinator<R> {
                     });
                 }
                 Err(output) => {
-                    pending.output = output;
+                    pending.output = *output;
                     pending.attempts = 3;
                 }
             }

@@ -1145,12 +1145,12 @@ mod tests {
             .record(TimelineEventKind::Runtime(
                 SessionRuntimeEvent::Checkpoint {
                     operation_id: "op-1".into(),
-                    checkpoint: RuntimeCheckpoint {
+                    checkpoint: Box::new(RuntimeCheckpoint {
                         frontier: settled.seq,
                         runtime_source_hash: "a".repeat(64),
                         turn: None,
                         step: None,
-                    },
+                    }),
                 },
             ))
             .unwrap();
@@ -1241,9 +1241,9 @@ mod tests {
         };
         let kinds = vec![
             message(MessageCause::User, vec![first_prompt.clone()]),
-            TimelineEventKind::Subagent(SubagentEvent::Spawned(spawn("kept", "root"))),
+            TimelineEventKind::Subagent(SubagentEvent::Spawned(Box::new(spawn("kept", "root")))),
             message(MessageCause::User, vec![second_prompt]),
-            TimelineEventKind::Subagent(SubagentEvent::Spawned(spawn("rewound", "root"))),
+            TimelineEventKind::Subagent(SubagentEvent::Spawned(Box::new(spawn("rewound", "root")))),
         ];
         let mut events = kinds
             .into_iter()
@@ -1277,13 +1277,13 @@ mod tests {
         let mut root = Timeline::default();
         let first = spawn("child", "root");
         root.record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
-            first.clone(),
+            Box::new(first.clone()),
         )))
         .unwrap();
         let first_seq = root.events().last().unwrap().seq.get();
         let grandchild = spawn("grandchild", "child");
         root.record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
-            grandchild.clone(),
+            Box::new(grandchild.clone()),
         )))
         .unwrap();
         let grandchild_seq = root.events().last().unwrap().seq.get();
@@ -1344,7 +1344,7 @@ mod tests {
         let child_spawn = spawn("child", "root");
         let child_spawn_seq = root
             .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
-                child_spawn.clone(),
+                Box::new(child_spawn.clone()),
             )))
             .unwrap()
             .seq
@@ -1362,7 +1362,7 @@ mod tests {
         let grandchild_spawn = spawn("grandchild", "child");
         let grandchild_spawn_seq = child
             .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
-                grandchild_spawn.clone(),
+                Box::new(grandchild_spawn.clone()),
             )))
             .unwrap()
             .seq
@@ -1442,7 +1442,7 @@ mod tests {
         let mut root = Timeline::default();
         let child = spawn("child", "root");
         root.record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
-            child.clone(),
+            Box::new(child.clone()),
         )))
         .unwrap();
         let child_seq = root.events().last().unwrap().seq.get();
@@ -1481,9 +1481,9 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let mut timeline = Timeline::default();
         timeline
-            .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(spawn(
-                "child", "root",
-            ))))
+            .record(TimelineEventKind::Subagent(SubagentEvent::Spawned(
+                Box::new(spawn("child", "root")),
+            )))
             .unwrap();
         write_session(home.path(), "root", "/project", &timeline, false);
         let timeline_path = home

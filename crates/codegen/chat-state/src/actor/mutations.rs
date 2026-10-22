@@ -999,7 +999,7 @@ impl ChatStateActor {
 
     fn publish_session_usage(&self) {
         self.send_event(ChatStateEvent::SessionUsageUpdated {
-            usage: self.state.session_usage.clone(),
+            usage: Box::new(self.state.session_usage.clone()),
         });
     }
 

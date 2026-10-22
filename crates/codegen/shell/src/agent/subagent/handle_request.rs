@@ -221,17 +221,16 @@ fn model_state_for_catalog(
     crate::agent::models::SessionModelState::new(model_id.clone(), available_models)
 }
 
+type FrozenWorkflowAgent = (
+    agent::config::AgentDefinition,
+    Vec<tools::implementations::skills::types::SkillInfo>,
+    Vec<String>,
+);
+
 fn frozen_workflow_agent_definition(
     request: &SubagentRequest,
     ctx: &SubagentSpawnContext,
-) -> Result<
-    Option<(
-        agent::config::AgentDefinition,
-        Vec<tools::implementations::skills::types::SkillInfo>,
-        Vec<String>,
-    )>,
-    String,
-> {
+) -> Result<Option<FrozenWorkflowAgent>, String> {
     let Some(run_id) = request.owner.workflow_run_id() else {
         return Ok(None);
     };
@@ -1038,7 +1037,7 @@ async fn run_shell_child_inner(
     } else {
         match parent_chat_state
             .record_timeline_event_durably(chat_state::TimelineEventKind::Subagent(
-                chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
+                chat_state::SubagentEvent::Spawned(Box::new(chat_state::SubagentSpawnEvent {
                     subagent_id: subagent_id.clone(),
                     child_session_id: child_session_id.0.to_string(),
                     origin_tool_call_id: request.origin_tool_call_id.clone(),
@@ -1067,7 +1066,7 @@ async fn run_shell_child_inner(
                     effective_model_id: effective_model_id.0.to_string(),
                     model_transport_key: model_transport_key.clone(),
                     reasoning_effort: effective_sampling_config.reasoning_effort,
-                }),
+                })),
             ))
             .await
         {
@@ -1506,7 +1505,7 @@ async fn run_shell_child_inner(
         persistence,
         None,
         crate::session::TimelineBootstrap::Existing {
-            timeline: child_timeline,
+            timeline: Box::new(child_timeline),
             history: child_history,
         },
         None,

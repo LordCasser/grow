@@ -1822,7 +1822,7 @@ impl SessionActor {
             success_control,
             plan_exit_on_success,
         };
-        Ok(ToolPreflight::Dispatch(prepared))
+        Ok(ToolPreflight::Dispatch(Box::new(prepared)))
     }
 }
 

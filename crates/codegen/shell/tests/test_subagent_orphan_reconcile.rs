@@ -139,7 +139,7 @@ agent_type = "grow-build"
                 .expect("parent session exists");
         let spawn = timeline
             .record(chat_state::TimelineEventKind::Subagent(
-                chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
+                chat_state::SubagentEvent::Spawned(Box::new(chat_state::SubagentSpawnEvent {
                     subagent_id: sub_id.into(),
                     child_session_id: child_session_id.0.to_string(),
                     origin_tool_call_id: None,
@@ -170,7 +170,7 @@ agent_type = "grow-build"
                         "test-endpoint",
                     ),
                     reasoning_effort: None,
-                }),
+                })),
             ))
             .expect("record orphan spawn");
         shell::session::testkit::append_timeline_domain_fixture(

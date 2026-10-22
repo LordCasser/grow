@@ -167,7 +167,7 @@ async fn append_spawn(
     let spawn = spawn_fact(parent, child, worktree);
     let event = timeline
         .record(chat_state::TimelineEventKind::Subagent(
-            chat_state::SubagentEvent::Spawned(spawn.clone()),
+            chat_state::SubagentEvent::Spawned(Box::new(spawn.clone())),
         ))
         .expect("append valid parent Spawned event");
     let spawn_seq = event.seq.get();

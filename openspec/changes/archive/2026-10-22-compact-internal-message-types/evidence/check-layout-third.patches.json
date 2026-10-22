@@ -1,0 +1,107 @@
+[
+  {
+    "path": "crates/codegen/tools/src/implementations/grow_build_hashline/edit/apply.rs",
+    "before": "12106fa7f6fe3a13aefe3ee5f4b85885a1ab7b31109d4e223777cdbe2470ab17",
+    "after": "b45f171783daf104ff3835066f9cd80885afaa3ef67cef39e7bf9f2638b956db",
+    "edits": [
+      {
+        "range": [
+          18526,
+          18526
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          19245,
+          19245
+        ],
+        "replacement": ")"
+      },
+      {
+        "range": [
+          19511,
+          19511
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          19561,
+          19561
+        ],
+        "replacement": ")"
+      },
+      {
+        "range": [
+          20754,
+          20754
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          20809,
+          20809
+        ],
+        "replacement": ")"
+      },
+      {
+        "range": [
+          21365,
+          21365
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          21981,
+          21981
+        ],
+        "replacement": ")"
+      },
+      {
+        "range": [
+          24269,
+          24269
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          24850,
+          24850
+        ],
+        "replacement": ")"
+      },
+      {
+        "range": [
+          25067,
+          25067
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          25577,
+          25577
+        ],
+        "replacement": ")"
+      },
+      {
+        "range": [
+          28337,
+          28337
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          28713,
+          28713
+        ],
+        "replacement": ")"
+      }
+    ]
+  }
+]

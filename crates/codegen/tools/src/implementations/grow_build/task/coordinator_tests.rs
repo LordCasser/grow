@@ -697,10 +697,10 @@ impl ChildRunner for TestRunner {
         _request: SubagentRequest,
         output: ChildRunOutput<Self::CompletionData>,
         _deadline: tokio::time::Instant,
-    ) -> Result<Self::RunFuture, ChildRunOutput<Self::CompletionData>> {
+    ) -> Result<Self::RunFuture, Box<ChildRunOutput<Self::CompletionData>>> {
         self.reconcile_calls.fetch_add(1, Ordering::SeqCst);
         match self.reconcile_mode.load(Ordering::SeqCst) {
-            0 => Err(output),
+            0 => Err(Box::new(output)),
             1 => {
                 let release = self.reconcile_release.clone();
                 Ok(Box::pin(async move {

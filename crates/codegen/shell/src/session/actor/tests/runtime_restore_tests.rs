@@ -241,7 +241,7 @@ complete(child.output);"#;
                 actor
                     .chat_state_handle
                     .record_timeline_event_durably(K::Subagent(
-                        chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
+                        chat_state::SubagentEvent::Spawned(Box::new(chat_state::SubagentSpawnEvent {
                             subagent_id: child_id.clone(),
                             child_session_id: child_id.clone(),
                             origin_tool_call_id: child_request.origin_tool_call_id.clone(),
@@ -287,7 +287,7 @@ complete(child.output);"#;
                                     )
                                 }),
                             reasoning_effort: None,
-                        }),
+                        })),
                     ))
                     .await
                     .unwrap();

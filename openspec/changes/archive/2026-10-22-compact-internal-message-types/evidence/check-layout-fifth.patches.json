@@ -1,0 +1,149 @@
+[
+  {
+    "path": "crates/codegen/pager/src/local_drafts.rs",
+    "before": "1afb52965d4fc28d940739d2ff815175747d2d67bbaf8ce6d40f8041e75e289c",
+    "after": "4e199f1bd43b77e2a166b25dbeceecf20adf9e9ee13a2c17d2843ca5aaa69265",
+    "edits": [
+      {
+        "range": [
+          19516,
+          19516
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          19522,
+          19522
+        ],
+        "replacement": ")"
+      },
+      {
+        "range": [
+          20539,
+          20539
+        ],
+        "replacement": "*"
+      },
+      {
+        "range": [
+          20797,
+          20797
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          20811,
+          20811
+        ],
+        "replacement": ")"
+      }
+    ]
+  },
+  {
+    "path": "crates/codegen/pager/src/app/acp_handler/tests/descendant_recovery_bench.rs",
+    "before": "bba0d3bdcf6ed3de3164b3887a08cbb264f797c02f65391ad0e808c3ab71abf9",
+    "after": "c1e9ad61c66eb0c374a42c7a1455e0daf5a0b2d273e5ab9f449ab786005fa042",
+    "edits": [
+      {
+        "range": [
+          6079,
+          6079
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          6092,
+          6092
+        ],
+        "replacement": ")"
+      }
+    ]
+  },
+  {
+    "path": "crates/codegen/pager/src/app/acp_handler/tests/mod.rs",
+    "before": "feb0fc4231df2033fed5ece24078319a85bd5eea0e0b8accfd66654f25294453",
+    "after": "a6d0fa1908d094c24ae9485291ffae7b76e381d5d9e858f6e31cde15ad736cf7",
+    "edits": [
+      {
+        "range": [
+          42631,
+          42631
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          44011,
+          44011
+        ],
+        "replacement": ")"
+      }
+    ]
+  },
+  {
+    "path": "crates/codegen/pager/src/app/subagent.rs",
+    "before": "1332f99c88976d69d492385286553ca83eed8b7898571faa75b069018a824c01",
+    "after": "0a63fbb6e3494b2799fcb025bbdb66f5a0812abb806f32eb6b92d06c8ee5f384",
+    "edits": [
+      {
+        "range": [
+          48983,
+          48983
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          50529,
+          50529
+        ],
+        "replacement": ")"
+      }
+    ]
+  },
+  {
+    "path": "crates/codegen/pager/src/export_cmd.rs",
+    "before": "762b53ee70446e9fcda55f50e3fed10c3f7123203da0b945cbb8b4497bdfaef9",
+    "after": "7a143f178deb36757dccd1c90ec51f498ce22b6e7003c85e88c73405606f3480",
+    "edits": [
+      {
+        "range": [
+          16085,
+          16085
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          16098,
+          16098
+        ],
+        "replacement": ")"
+      }
+    ]
+  },
+  {
+    "path": "crates/codegen/pager/src/trajectory_cmd.rs",
+    "before": "d762418a5a1d73c7d2c59ecc16e970b74f4f7f9c1978ecc8896cec97d99b0a00",
+    "after": "85da98c4dd551b756ed3a9e2930af0744cbe745952f15d8722ab5a1923bba5cd",
+    "edits": [
+      {
+        "range": [
+          5984,
+          5984
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          5997,
+          5997
+        ],
+        "replacement": ")"
+      }
+    ]
+  }
+]

@@ -804,7 +804,7 @@ mod tests {
             .record(chat_state::TimelineEventKind::Runtime(
                 chat_state::session_runtime::SessionRuntimeEvent::Checkpoint {
                     operation_id: "import-suspend-op".into(),
-                    checkpoint: chat_state::session_runtime::RuntimeCheckpoint {
+                    checkpoint: Box::new(chat_state::session_runtime::RuntimeCheckpoint {
                         frontier: settled.seq,
                         runtime_source_hash: "c".repeat(64),
                         turn: turn_id.map(|turn_id| {
@@ -830,7 +830,7 @@ mod tests {
                             }
                         }),
                         step: None,
-                    },
+                    }),
                 },
             ))
             .unwrap();

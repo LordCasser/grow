@@ -48,6 +48,10 @@ pub(crate) enum AppendDurability {
     Buffered,
     Durable,
 }
+type TimelinePrefix = std::sync::Arc<std::sync::Mutex<Option<LedgerPrefix>>>;
+type TimelinePrefixCache =
+    std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, TimelinePrefix>>>;
+
 /// JSONL storage under `{root}/sessions/{encoded_cwd}/{session_id}/`.
 /// Long CWDs use the shared bounded slug/hash encoding.
 #[derive(Clone)]
@@ -61,14 +65,7 @@ pub struct JsonlStorageAdapter {
     >,
     writer_leases:
         std::sync::Arc<std::sync::Mutex<std::collections::BTreeMap<String, std::fs::File>>>,
-    timeline_prefixes: std::sync::Arc<
-        std::sync::Mutex<
-            std::collections::BTreeMap<
-                String,
-                std::sync::Arc<std::sync::Mutex<Option<LedgerPrefix>>>,
-            >,
-        >,
-    >,
+    timeline_prefixes: TimelinePrefixCache,
     #[cfg(test)]
     update_append_probe: Option<std::sync::Arc<AppendProbe>>,
     #[cfg(test)]

@@ -1,0 +1,17 @@
+{
+  "root": "/Users/lordcasser/workspace/projects/grow",
+  "run": "/private/tmp/grow-quality-rdjj59je",
+  "baseline_commit": "bfd5001bd2b74e4fbc8ff7863b00e88e0445cbda",
+  "environment": {
+    "HOME": "/private/tmp/grow-quality-rdjj59je/home",
+    "GROW_HOME": "/private/tmp/grow-quality-rdjj59je/grow",
+    "CARGO_TARGET_DIR": "/Users/lordcasser/workspace/projects/grow/target/rust-quality-2-5-0",
+    "CARGO_HOME": "/Users/lordcasser/.cargo",
+    "RUSTUP_HOME": "/Users/lordcasser/.rustup",
+    "RUSTUP_TOOLCHAIN": "1.93.1",
+    "CARGO_BUILD_JOBS": "4",
+    "CARGO_INCREMENTAL": "0",
+    "RUST_MIN_STACK": "16777216"
+  },
+  "change_baseline": "1a7dcd77aeda777e8db12f97eea9697182916e0a"
+}

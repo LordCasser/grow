@@ -89,7 +89,7 @@ pub(crate) fn enqueue(
         })?;
         let authority = if let Some(route) = workflow_route {
             SessionEffortAuthority::Workflow {
-                route,
+                route: Box::new(route),
                 models_manager: agent.models_manager.clone(),
             }
         } else {

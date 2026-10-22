@@ -293,7 +293,7 @@ async fn child_finalization_canonical_boundaries_retry_after_file_and_directory_
     let mut parent = chat_state::Timeline::default();
     let spawn = parent
         .record(chat_state::TimelineEventKind::Subagent(
-            chat_state::SubagentEvent::Spawned(chat_state::SubagentSpawnEvent {
+            chat_state::SubagentEvent::Spawned(Box::new(chat_state::SubagentSpawnEvent {
                 subagent_id: subagent_id.into(),
                 child_session_id: child_info.id.0.to_string(),
                 origin_tool_call_id: None,
@@ -324,7 +324,7 @@ async fn child_finalization_canonical_boundaries_retry_after_file_and_directory_
                     "test",
                 ),
                 reasoning_effort: None,
-            }),
+            })),
         ))
         .unwrap();
 

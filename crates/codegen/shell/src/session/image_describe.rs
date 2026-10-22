@@ -446,7 +446,7 @@ pub enum DescribeError {
     /// The describe sampling call itself failed. Structured classification is
     /// retained so an explicit image HTTP 400 can teach the auxiliary
     /// runtime's independent negative capability entry.
-    Sampling(sampler::SamplingErrorInfo),
+    Sampling(Box<sampler::SamplingErrorInfo>),
     /// The entire auxiliary request exceeded its local bound.
     Timeout(std::time::Duration),
     /// The vision model returned blank text after `trim()`. This is a

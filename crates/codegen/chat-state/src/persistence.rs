@@ -62,7 +62,7 @@ pub trait TimelinePersistence: Send + 'static {
 #[derive(Debug, Clone)]
 pub enum PersistenceRecord {
     /// An immutable timeline event was appended.
-    Timeline(TimelineEvent),
+    Timeline(Box<TimelineEvent>),
     /// A flush was requested.
     Flush,
 }
@@ -156,7 +156,7 @@ impl TimelinePersistence for MockTimelinePersistence {
         let (reply, receiver) = oneshot::channel();
         let result = self
             .tx
-            .send(PersistenceRecord::Timeline(event.clone()))
+            .send(PersistenceRecord::Timeline(Box::new(event.clone())))
             .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "mock persistence closed"));
         if let Err(error) = result {
             let _ = reply.send(Err(error));

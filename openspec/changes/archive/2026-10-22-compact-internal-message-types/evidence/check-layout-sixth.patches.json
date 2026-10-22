@@ -1,0 +1,23 @@
+[
+  {
+    "path": "crates/codegen/shell/tests/test_subagent_orphan_reconcile.rs",
+    "before": "30c9cf606db0f6bd2c85fc5fddbfe858d711ee309b0447f783aaadac829ebc51",
+    "after": "8c2dd35a754ac8b52ec1353e0c4f646908ae161fe3a4d239c8be0eb23d30d410",
+    "edits": [
+      {
+        "range": [
+          5687,
+          5687
+        ],
+        "replacement": "Box::new("
+      },
+      {
+        "range": [
+          7248,
+          7248
+        ],
+        "replacement": ")"
+      }
+    ]
+  }
+]

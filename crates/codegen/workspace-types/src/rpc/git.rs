@@ -526,14 +526,16 @@ pub struct GitStatusData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "format", rename_all = "lowercase", deny_unknown_fields)]
 pub enum GitStatusExtResponse {
-    Structured { data: GitStatusData },
+    Structured { data: Box<GitStatusData> },
     Prompt { prompt: String },
 }
 
 impl GitStatusExtResponse {
     /// Create a structured response.
     pub fn structured(data: GitStatusData) -> Self {
-        Self::Structured { data }
+        Self::Structured {
+            data: Box::new(data),
+        }
     }
 
     /// Create a prompt-formatted response.
@@ -543,7 +545,7 @@ impl GitStatusExtResponse {
 
     pub fn into_structured(self) -> Option<GitStatusData> {
         match self {
-            Self::Structured { data } => Some(data),
+            Self::Structured { data } => Some(*data),
             Self::Prompt { .. } => None,
         }
     }

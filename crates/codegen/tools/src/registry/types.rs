@@ -2248,7 +2248,7 @@ fn requirement_error_from_param_error(
         out = out.with_expected(expected);
     }
     if let Some(bad_value) = err.bad_value {
-        out = out.with_bad_value(bad_value);
+        out = out.with_bad_value(*bad_value);
     }
     out
 }
