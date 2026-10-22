@@ -9,3 +9,5 @@
 已独立修正并归档 [Plan resume PTY 就绪同步](../archive/2026-10-22-synchronize-plan-resume-pty-readiness/verification.md)，提交 `e2e6ee7d`。使用该发布 run 的 macOS ARM64 archive，来源证明绑定 build-one.yml 与 source digest ac4ebb7630cf3c9b623af9d40678021c23faf1e4、codesign、隔离环境版本校验通过；修正后的两种 Plan 跨进程恢复均通过。此仅核对原产品和新夹具，不代表已完成十个平台公开下载、SHA256SUMS 或最终发行提交的回归。
 
 后续：需明确未公开 tag 的处理，再以包含修正的精确提交重新通过官方流程。不得复用旧 source 的编译包冒充新 source 的产物，不移动已公开 release，不提前开放恢复输入，不做就绪与历史分页分离。发布 change 保持未完成，不归档成成功发布。
+
+用户已明确批准重建未发布的 v2.5.0，将 e2e6ee7d 夹具修正纳入新提交后重新跑完整官方发布流程。旧 run 与旧 artifact 仅作失败追溯，不复用为新提交的发行包。
