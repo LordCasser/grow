@@ -17,9 +17,17 @@ async fn image_chip_preview_path_free_pty() {
     let path_str = png_path.display().to_string();
 
     let binary = pager_binary().expect("resolve pager binary");
-    let mut harness =
-        PtyHarness::spawn_with_content(&binary, DEFAULT_ROWS, DEFAULT_COLS, &content, &[])
-            .expect("spawn pager");
+    let project = tempfile::tempdir().expect("create project directory");
+    std::fs::create_dir(project.path().join(".git")).expect("mark project directory");
+    let mut harness = PtyHarness::spawn_with_content_in_dir(
+        &binary,
+        DEFAULT_ROWS,
+        DEFAULT_COLS,
+        &content,
+        &[],
+        Some(project.path()),
+    )
+    .expect("spawn pager");
 
     harness
         .wait_for_text(WELCOME_SCREEN_SENTINEL, WELCOME_TIMEOUT)
