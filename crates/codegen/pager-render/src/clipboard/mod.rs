@@ -582,7 +582,7 @@ fn write_owner_only_with(
 ) -> std::io::Result<()> {
     use std::io::{Error, ErrorKind};
     let target = match std::fs::symlink_metadata(path) {
-        Ok(metadata) if metadata.file_type().is_symlink() => path.canonicalize()?,
+        Ok(metadata) if metadata.file_type().is_symlink() => dunce::canonicalize(path)?,
         Ok(_) => path.to_path_buf(),
         Err(error) if error.kind() == ErrorKind::NotFound => path.to_path_buf(),
         Err(error) => return Err(error),

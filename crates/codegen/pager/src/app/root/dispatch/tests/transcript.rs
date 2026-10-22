@@ -712,9 +712,7 @@ fn export_file_uses_session_cwd_and_preserves_absolute_targets() {
         "## User\n\nExport this conversation"
     );
 
-    let absolute = process_relative
-        .path()
-        .canonicalize()
+    let absolute = dunce::canonicalize(process_relative.path())
         .unwrap()
         .join("absolute.md");
     dispatch_file_action(

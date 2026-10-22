@@ -964,7 +964,7 @@ mod late_config_directory_tests {
     #[test]
     fn queued_project_paths_are_rechecked_after_unregistration() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         let home = root.join("home");
         let project = root.join("project");
         let grow = project.join(".grow");
@@ -991,7 +991,7 @@ mod late_config_directory_tests {
     async fn explicit_and_global_config_watches_outlive_project_registration() {
         for global_shares_project in [false, true] {
             let temp = tempfile::tempdir().unwrap();
-            let root = temp.path().canonicalize().unwrap();
+            let root = dunce::canonicalize(temp.path()).unwrap();
             let home = root.join("home");
             let project = if global_shares_project {
                 home.clone()
@@ -1024,7 +1024,7 @@ mod late_config_directory_tests {
     #[tokio::test]
     async fn ancestor_config_watch_survives_other_cwd_unregistration() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         let home = root.join("home");
         let repo = root.join("repo");
         let a = repo.join("a");
@@ -1060,7 +1060,7 @@ mod late_config_directory_tests {
     #[tokio::test]
     async fn config_watch_alias_attaches_late_directory_and_unwatches() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         let home = root.join("home");
         let project = root.join("project");
         let alias = root.join("alias");
@@ -1111,7 +1111,7 @@ mod late_config_directory_tests {
     #[tokio::test]
     async fn config_watch_late_directory_and_recreation() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         let home = root.join("home");
         let project = root.join("project");
         std::fs::create_dir(&home).unwrap();
@@ -1161,7 +1161,7 @@ mod replacement_discovery_tests {
     #[test]
     fn refresh_detects_atomic_directory_replacement() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         let grow = root.join(".grow");
         std::fs::create_dir_all(grow.join("skills")).unwrap();
         let (mut watcher, _rx) =
@@ -1186,7 +1186,7 @@ mod replacement_discovery_tests {
     #[tokio::test]
     async fn skills_discovery_observes_recreated_root() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         let grow = root.join(".grow");
         std::fs::create_dir_all(grow.join("skills")).unwrap();
         let (mut watcher, mut rx) =
@@ -1209,7 +1209,7 @@ mod replacement_discovery_tests {
     #[tokio::test]
     async fn project_discovery_observes_recreated_root() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         let grow = root.join(".grow");
         std::fs::create_dir_all(grow.join("workflows")).unwrap();
         let (mut watcher, mut rx) = ProjectDiscoveryWatcher::start(&root).unwrap();
@@ -1247,7 +1247,7 @@ mod session_watch_tests {
     #[test]
     fn resident_config_watch_shares_replaces_and_releases_acquired_paths() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         let home = root.join("home");
         let repo = root.join("repo");
         let a = repo.join("a");
@@ -1285,7 +1285,7 @@ mod session_watch_tests {
     #[test]
     fn resident_config_watch_retains_bootstrap_and_independent_sources() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         let home = root.join("home");
         let bootstrap = root.join("bootstrap");
         let project = root.join("project");
@@ -1321,7 +1321,7 @@ mod session_watch_tests {
     #[test]
     fn resident_config_watch_releases_old_alias_after_retarget() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         let home = root.join("home");
         let a = root.join("a");
         let b = root.join("b");

@@ -1705,6 +1705,10 @@ mod tests {
         }
 
         for mode in ["available", "blocked"] {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "This subprocess fixture owns a kill/wait guard or bounded poll/wait loop; it is independent of session processes"
+            )]
             let mut child = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     TEST_NAME,

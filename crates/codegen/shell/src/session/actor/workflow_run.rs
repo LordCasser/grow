@@ -791,28 +791,29 @@ mod run_match_tests {
                 assert!(!usage.contains("/workflow <name>"), "{usage}");
 
                 let tracker = actor.workflow_tracker().await;
-                let mut tracker = tracker.lock();
-                for (run_id, name) in [("wf-a", "alpha"), ("wf-b", "beta")] {
-                    tracker.start_run(
-                        run_id.into(),
-                        name.into(),
-                        "verify command help".into(),
-                        Vec::new(),
-                        None,
-                        None,
-                        crate::session::workflow::tracker::WorkflowRuntimeRoute::for_test(
-                            "test-model",
+                {
+                    let mut tracker = tracker.lock();
+                    for (run_id, name) in [("wf-a", "alpha"), ("wf-b", "beta")] {
+                        tracker.start_run(
+                            run_id.into(),
+                            name.into(),
+                            "verify command help".into(),
+                            Vec::new(),
                             None,
-                            sampling_types::ModelImageInputKey::new(
+                            None,
+                            crate::session::workflow::tracker::WorkflowRuntimeRoute::for_test(
                                 "test-model",
-                                "responses",
-                                "test-endpoint",
-                            ),
-                        )
-                        .unwrap(),
-                    );
+                                None,
+                                sampling_types::ModelImageInputKey::new(
+                                    "test-model",
+                                    "responses",
+                                    "test-endpoint",
+                                ),
+                            )
+                            .unwrap(),
+                        );
+                    }
                 }
-                drop(tracker);
 
                 let ambiguity = actor.manage_workflow_run("", "stop").await;
                 assert!(

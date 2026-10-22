@@ -3565,6 +3565,10 @@ mod tests {
 
         #[cfg(any(target_os = "linux", target_os = "macos"))]
         #[test]
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "This concurrent subprocess fixture owns the child and explicitly waits or kills/reaps it; it is not owned by a session ProcessScope"
+        )]
         fn gc_cwd_guard_skips_then_reclaims_expired_worktree() {
             let _cwd_lock = crate::api::cwd_test_guard();
             let tmp = tempfile::TempDir::new().unwrap();

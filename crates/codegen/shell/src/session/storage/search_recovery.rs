@@ -31,7 +31,7 @@ pub(super) fn cache_identity(db_path: &Path) -> PathBuf {
             .map(|cwd| cwd.join(parent))
             .unwrap_or_else(|_| parent.to_path_buf())
     };
-    let canonical_parent = std::fs::canonicalize(&absolute_parent).unwrap_or(absolute_parent);
+    let canonical_parent = dunce::canonicalize(&absolute_parent).unwrap_or(absolute_parent);
     canonical_parent.join(file_name)
 }
 

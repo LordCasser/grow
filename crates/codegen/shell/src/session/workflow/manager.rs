@@ -914,9 +914,8 @@ impl WorkflowManager {
             return Err(LaunchError::Store(error.to_string()));
         }
         self.check_admission(admission_generation)?;
-        self.notify
-            .emit(&state, self.tracker.lock().elapsed_ms(&run_id), 0)
-            .await;
+        let elapsed_ms = self.tracker.lock().elapsed_ms(&run_id);
+        self.notify.emit(&state, elapsed_ms, 0).await;
 
         let (host_tx, host_rx) = mpsc::unbounded_channel();
         let cancel = CancellationToken::new();

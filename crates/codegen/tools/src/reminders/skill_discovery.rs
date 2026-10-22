@@ -210,7 +210,7 @@ mod tests {
     #[tokio::test]
     async fn direct_skill_read_preserves_disabled_baseline() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         let dir = root.join(".grow/skills/known");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("SKILL.md");

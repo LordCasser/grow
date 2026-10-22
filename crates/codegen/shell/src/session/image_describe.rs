@@ -1023,6 +1023,10 @@ async fn run_local_ocr(program: &Path, bytes: Vec<u8>) -> Result<String, String>
     use std::process::Stdio;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     const OUTPUT_LIMIT: u64 = 64 * 1024;
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "Bounded foreground OCR owns and waits the child; kill_on_drop terminates it on timeout or cancellation"
+    )]
     let mut child = tokio::process::Command::new(program)
         .args(["stdin", "stdout"])
         .stdin(Stdio::piped())

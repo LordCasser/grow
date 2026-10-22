@@ -1604,7 +1604,6 @@ impl AgentSession {
                 },
             );
         }
-        drop(install);
         self.controls.next_sequence = max_sequence;
     }
 

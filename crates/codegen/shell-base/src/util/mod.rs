@@ -389,6 +389,10 @@ mod tests {
     }
     #[cfg(unix)]
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "This concurrent subprocess fixture owns the child and explicitly waits or kills/reaps it; it is not owned by a session ProcessScope"
+    )]
     fn is_grow_process_strict_matches_grow_named_process() {
         // Strict detection matches the process name (`ps -o comm=` on
         // macOS/BSD); the test binary itself is `shell_base-*`, so probe with

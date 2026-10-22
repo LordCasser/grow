@@ -92,9 +92,7 @@ impl GrowHomeFixture {
     /// through the explicit `*_for_cwd` seams; the process cwd is never
     /// mutated.
     pub fn cwd_str(&self) -> String {
-        self.cwd
-            .path()
-            .canonicalize()
+        dunce::canonicalize(self.cwd.path())
             .expect("canonicalize cwd")
             .to_string_lossy()
             .to_string()

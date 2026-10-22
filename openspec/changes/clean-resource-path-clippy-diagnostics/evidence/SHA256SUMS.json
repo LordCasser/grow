@@ -1,0 +1,20 @@
+{
+  "build-resource-cli.log.gz": "c32b16f75c1dc4192b83fb1fb6d2e581cecc54a9aff922303d693270283dceed",
+  "check-resource-cli.log.gz": "f2a96f9f19aece48967dd8026dcdc71cf206cc7387dab2e068016d3072cc87a5",
+  "clippy-resource-cli.log.gz": "6046d25e019a151f54d2dda27b7311dd7bec5e91dbda222f8e6f8b5309a595b3",
+  "clippy-resource-final.log.gz": "8b1c5a4e0809063d6372d71d30a78dfd1cdfc4061e8d7f64b50b3a2c169b73de",
+  "clippy-resource-first.log.gz": "6f17f575dcfe207d0e9d3d39f1004aee08f96dfa34119c535cc638010cf520af",
+  "commands.json": "450a9a851cb648cb4e48212216dbd779747788d4c059a618e524f244c6f314ea",
+  "fmt-resource-check.log.gz": "ac73670af3abed54ac6fb4695131f4099be9fbe39d6076c5d0264a6bbdae9d83",
+  "fmt-resource-final-check.log.gz": "ac73670af3abed54ac6fb4695131f4099be9fbe39d6076c5d0264a6bbdae9d83",
+  "fmt-resource-final.log.gz": "ac73670af3abed54ac6fb4695131f4099be9fbe39d6076c5d0264a6bbdae9d83",
+  "fmt-resource.log.gz": "ac73670af3abed54ac6fb4695131f4099be9fbe39d6076c5d0264a6bbdae9d83",
+  "identity.json": "e1f6a5e48b5fbbd59c63342cce29879f21599c18584926a236ec04afb80dcb21",
+  "prepare-resource-rg.log.gz": "781644f0760f0827e4d3044fa7ee7630297f51d3063b2590ef50f26c0d3f0036",
+  "probe-resource-policy.log.gz": "40955513e52d39edb09b11590c74a86cce2add5afb9701dd84ff3882189f3226",
+  "source-hashes.json": "1d6805f7c5c47d69d2d1ea3d52bbcf49ab0a5fb72a8463eedec1b257c969b0b0",
+  "test-resource-libs.log.gz": "f2799b2ddd60f9b5d533d82d6e0bd2e6823d5bd6a2e49fc0356188fb2c7f5b5b",
+  "test-resource-workspace-home.log.gz": "9df20f8255c578333371ff480203a589e6da63ea9979cc8f530299a0bc4cd339",
+  "test-resource-workspace-types.log.gz": "74f9576b827b21f3a60484c28f99fff8592499d34da5b282431692d997de6940",
+  "validate-resource-pre.log.gz": "7b6b626d0a970ac38e5dd55c22a39ddc45279e2dcf53d1dd4e8f616422f3320f"
+}

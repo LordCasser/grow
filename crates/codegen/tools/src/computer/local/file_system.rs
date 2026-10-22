@@ -416,6 +416,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "This concurrent subprocess fixture owns the child and explicitly waits or kills/reaps it; it is not owned by a session ProcessScope"
+    )]
     fn cooperating_processes_allow_one_commit_per_source_version() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("file.txt");

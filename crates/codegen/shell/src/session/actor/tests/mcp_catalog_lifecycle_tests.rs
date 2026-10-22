@@ -174,22 +174,23 @@ async fn mcp_catalog_recovery_replaces_tools_and_empty_catalog_removes_them() {
                 .parameters;
             assert_eq!(replacement_bridge_schema, catalog_schema("replacement"));
             assert_ne!(replacement_bridge_schema, old_schema);
-            let snapshot = actor.mcp.tool_metadata_snapshot.lock().unwrap();
-            let replacement_snapshot = snapshot
-                .tools
-                .iter()
-                .find(|entry| entry.server_name == "demo" && entry.tool_name == "replacement")
-                .unwrap();
-            assert_eq!(
-                replacement_snapshot.input_schema,
-                catalog_schema("replacement")
-            );
-            assert!(!snapshot.tools.iter().any(|entry| {
-                entry.server_name == "demo"
-                    && entry.tool_name == "old"
-                    && entry.input_schema == old_schema
-            }));
-            drop(snapshot);
+            {
+                let snapshot = actor.mcp.tool_metadata_snapshot.lock().unwrap();
+                let replacement_snapshot = snapshot
+                    .tools
+                    .iter()
+                    .find(|entry| entry.server_name == "demo" && entry.tool_name == "replacement")
+                    .unwrap();
+                assert_eq!(
+                    replacement_snapshot.input_schema,
+                    catalog_schema("replacement")
+                );
+                assert!(!snapshot.tools.iter().any(|entry| {
+                    entry.server_name == "demo"
+                        && entry.tool_name == "old"
+                        && entry.input_schema == old_schema
+                }));
+            }
             let bridge = actor.agent.borrow().tool_bridge().clone();
             assert!(
                 bridge

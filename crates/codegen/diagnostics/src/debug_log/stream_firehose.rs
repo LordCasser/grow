@@ -136,6 +136,7 @@ impl LogFile {
         }
         let file = OpenOptions::new()
             .create(true)
+            .truncate(false)
             .read(true)
             .write(true)
             .open(&path)?;
@@ -296,6 +297,10 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "This concurrent subprocess fixture owns the child and explicitly waits or kills/reaps it; it is not owned by a session ProcessScope"
+    )]
     fn concurrent_processes_keep_shared_file_bounded() {
         const CHILD_PATH: &str = "GROW_DEBUG_SHARED_FILE_TEST_PATH";
         let (path, _dir) = if let Some(path) = std::env::var_os(CHILD_PATH) {

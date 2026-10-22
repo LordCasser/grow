@@ -413,6 +413,7 @@ pub(crate) fn execute(
                         .stderr(std::process::Stdio::piped());
                     command.kill_on_drop(true);
                     tty_utils::detach_command(&mut command);
+                    #[expect(clippy::disallowed_methods, reason = "The detached debugger has its own readiness/runtime supervisor, wait path and kill_on_drop owner rather than a session owner")]
                     let mut child = command.spawn().map_err(|error| {
                         format!("couldn't start Trajectory debugger: {error}")
                     })?;

@@ -1087,7 +1087,7 @@ mod tests {
     #[test]
     fn refreshed_baseline_rehides_newly_conditional_discovery() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         let skill_path = root.join("SKILL.md");
         std::fs::write(&skill_path, "skill").unwrap();
         let mut tracker = SkillManager::new();
@@ -1123,7 +1123,7 @@ mod tests {
     #[test]
     fn rediscovery_cannot_bypass_known_conditional_skill() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         let raw = make_skill("gated", root.join("SKILL.md").to_str().unwrap());
         let mut configured = raw.clone();
         configured.paths = Some(vec!["src/**".into()]);

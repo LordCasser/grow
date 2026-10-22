@@ -317,7 +317,8 @@ impl AgentRebuildSpec {
             .tool_bridge()
             .update_resource(context_recall_backend.clone())
             .await;
-        if let Some(coordination_backend) = coordination_backend.read().clone() {
+        let coordination_backend_snapshot = coordination_backend.read().clone();
+        if let Some(coordination_backend) = coordination_backend_snapshot {
             agent
                 .tool_bridge()
                 .update_resource(coordination_backend)

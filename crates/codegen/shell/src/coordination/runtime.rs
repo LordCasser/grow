@@ -2017,6 +2017,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "This concurrent subprocess fixture owns the child and explicitly waits or kills/reaps it; it is not owned by a session ProcessScope"
+    )]
     async fn independent_processes_discover_and_answer_over_local_ipc() {
         const CHILD_HOME: &str = "GROW_COORDINATION_PROCESS_TEST_HOME";
         const CHILD_READY: &str = "GROW_COORDINATION_PROCESS_TEST_READY";

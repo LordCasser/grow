@@ -1945,22 +1945,23 @@ mod tests {
                         .await
                         .unwrap()
                 );
-                let goal = actor.goal_tracker.lock();
-                assert_eq!(
-                    goal.tokens_used(),
-                    16,
-                    "both confirmed charges remain counted"
-                );
-                assert_eq!(
-                    goal.snapshot().unwrap().usage_breakdown,
-                    Some(crate::session::goal_tracker::GoalTokenUsage::new(14, 5, 2))
-                );
-                assert_eq!(
-                    goal.status(),
-                    Some(crate::session::goal_tracker::GoalStatus::Active),
-                    "budget exhaustion closes admission without discarding this active step"
-                );
-                drop(goal);
+                {
+                    let goal = actor.goal_tracker.lock();
+                    assert_eq!(
+                        goal.tokens_used(),
+                        16,
+                        "both confirmed charges remain counted"
+                    );
+                    assert_eq!(
+                        goal.snapshot().unwrap().usage_breakdown,
+                        Some(crate::session::goal_tracker::GoalTokenUsage::new(14, 5, 2))
+                    );
+                    assert_eq!(
+                        goal.status(),
+                        Some(crate::session::goal_tracker::GoalStatus::Active),
+                        "budget exhaustion closes admission without discarding this active step"
+                    );
+                }
                 assert_eq!(actor.goal_usage_window.active_goal_id(), None);
 
                 assert!(

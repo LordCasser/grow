@@ -3844,11 +3844,12 @@ mod tests {
                     .await;
 
                 assert!(matches!(decision, Decision::Allow));
-                let seen = seen.lock().unwrap();
-                assert_eq!(seen.len(), 1);
-                assert_eq!(seen[0].0, "write");
-                assert_eq!(seen[0].1.call_evidence.as_ref(), Some(&evidence));
-                drop(seen);
+                {
+                    let seen = seen.lock().unwrap();
+                    assert_eq!(seen.len(), 1);
+                    assert_eq!(seen[0].0, "write");
+                    assert_eq!(seen[0].1.call_evidence.as_ref(), Some(&evidence));
+                }
                 let event = events.recv().await.expect("permission audit event");
                 assert_eq!(event.tool_name, "write");
                 assert_eq!(event.access_kind, "edit");

@@ -315,10 +315,10 @@ pub async fn resolve_skill_resource(
     let root = std::path::Path::new(&skill.path)
         .parent()
         .ok_or_else(|| invalid("missing skill root"))?;
-    let root = tokio::fs::canonicalize(root)
+    let root = crate::util::fs::try_canonicalize(root)
         .await
         .map_err(|error| invalid(&error.to_string()))?;
-    let target = tokio::fs::canonicalize(root.join(resource))
+    let target = crate::util::fs::try_canonicalize(&root.join(resource))
         .await
         .map_err(|error| invalid(&error.to_string()))?;
     if !target.starts_with(&root) || target == root {
@@ -396,7 +396,7 @@ mod tests {
         assert!(!loaded.prepared_body.contains("MAIN ONLY"));
         assert_eq!(
             std::path::Path::new(&loaded.source),
-            std::fs::canonicalize(reference).unwrap()
+            dunce::canonicalize(reference).unwrap()
         );
     }
 

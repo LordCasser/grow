@@ -413,6 +413,7 @@ fn open_writer_at(path: PathBuf) -> Option<LogWriter> {
     // held. Appends explicitly seek to EOF under that lock.
     match OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
         .write(true)
         .open(&path)

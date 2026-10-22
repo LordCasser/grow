@@ -1876,7 +1876,7 @@ Review code.
     #[test]
     fn internal_link_title_matching_destination_stays_literal() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         std::fs::write(root.join("guide.md"), "guide").unwrap();
         for (body, expected) in [
             (
@@ -1898,7 +1898,7 @@ Review code.
     #[test]
     fn internal_link_resolution_preserves_labels_code_and_nested_images() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = dunce::canonicalize(temp.path()).unwrap();
         std::fs::write(root.join("guide.md"), "guide").unwrap();
         let target = root.join("guide.md").display().to_string();
         for (body, expected) in [
@@ -1935,7 +1935,7 @@ Review code.
     #[test]
     fn internal_link_resolution_keeps_escaped_destinations_parseable() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap().join("skill root");
+        let root = dunce::canonicalize(temp.path()).unwrap().join("skill root");
         std::fs::create_dir(&root).unwrap();
         for (file, body) in [
             ("guide(1).md", r"[guide](guide\(1\).md)"),

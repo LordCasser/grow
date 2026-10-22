@@ -1323,16 +1323,15 @@ pub async fn remove_subagent_worktree(worktree_path: &Path) -> Result<()> {
 /// `git status` hides. Any repository/status/ownership uncertainty is an error
 /// so callers can preserve the worktree.
 pub fn is_worktree_pristine(worktree_path: &Path) -> Result<bool> {
-    let path = worktree_path
-        .canonicalize()
+    let path = dunce::canonicalize(worktree_path)
         .with_context(|| format!("resolve worktree path {}", worktree_path.display()))?;
     let repo = Repository::discover(&path)
         .with_context(|| format!("discover Git worktree at {}", path.display()))?;
-    let repo_workdir = repo
-        .workdir()
-        .context("Git repository has no worktree directory")?
-        .canonicalize()
-        .context("resolve Git worktree root")?;
+    let repo_workdir = dunce::canonicalize(
+        repo.workdir()
+            .context("Git repository has no worktree directory")?,
+    )
+    .context("resolve Git worktree root")?;
     anyhow::ensure!(
         repo_workdir == path,
         "discovered Git worktree root does not match requested path"

@@ -1128,7 +1128,7 @@ async fn create_test_actor_ex_inner(
     // capabilities intentionally reject symlink authorities, so pin the test
     // fixture through the resolved root while preserving `/tmp` as the model
     // workspace path.
-    let session_root = std::fs::canonicalize(cwd.as_path()).expect("resolve test session root");
+    let session_root = dunce::canonicalize(cwd.as_path()).expect("resolve test session root");
     let control_epoch = uuid::Uuid::now_v7().to_string();
     let runtime_observation = Arc::new(parking_lot::RwLock::new(
         crate::session::actor::RuntimeObservationSnapshot::new(

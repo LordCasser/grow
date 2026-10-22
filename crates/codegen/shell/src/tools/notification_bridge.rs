@@ -511,36 +511,38 @@ async fn handle_notification_with_ack(
                     })?
                     .get()
                     .len();
-                let owner_guard = config.sampling_preview.lock();
-                let owner = owner_guard
-                    .as_ref()
-                    .map(|(request_id, attempt, _)| (request_id.clone(), *attempt));
-                let permit = match config.preview_gateway_budget.try_acquire_bytes(bytes) {
-                    Ok(permit) => permit,
-                    Err(error) => {
-                        if let Some((request_id, attempt)) = owner {
-                            let _ = config.persistence.tx.send(
-                                PersistenceMsg::AuxiliaryPreviewFailure {
-                                    request_id,
-                                    attempt,
-                                    reason: error.to_string(),
-                                },
-                            );
+                let (sent, response) = {
+                    let owner_guard = config.sampling_preview.lock();
+                    let owner = owner_guard
+                        .as_ref()
+                        .map(|(request_id, attempt, _)| (request_id.clone(), *attempt));
+                    let permit = match config.preview_gateway_budget.try_acquire_bytes(bytes) {
+                        Ok(permit) => permit,
+                        Err(error) => {
+                            if let Some((request_id, attempt)) = owner {
+                                let _ = config.persistence.tx.send(
+                                    PersistenceMsg::AuxiliaryPreviewFailure {
+                                        request_id,
+                                        attempt,
+                                        reason: error.to_string(),
+                                    },
+                                );
+                            }
+                            return Err(format!(
+                                "task completion UI projection was not budgeted: {error}"
+                            ));
                         }
-                        return Err(format!(
-                            "task completion UI projection was not budgeted: {error}"
-                        ));
-                    }
+                    };
+                    let (respond_to, response) = tokio::sync::oneshot::channel();
+                    let sent = config.persistence.tx.send(PersistenceMsg::AuxiliaryGrow {
+                        delivery: None,
+                        notification: notification.clone(),
+                        permit,
+                        preview: owner,
+                        respond_to: Some(respond_to),
+                    });
+                    (sent, response)
                 };
-                let (respond_to, response) = tokio::sync::oneshot::channel();
-                let sent = config.persistence.tx.send(PersistenceMsg::AuxiliaryGrow {
-                    delivery: None,
-                    notification: notification.clone(),
-                    permit,
-                    preview: owner,
-                    respond_to: Some(respond_to),
-                });
-                drop(owner_guard);
                 sent.map_err(|_| {
                     "session persistence stopped before task completion UI projection".to_owned()
                 })?;

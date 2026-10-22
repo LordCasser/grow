@@ -79,3 +79,5 @@
 - Pager build identity: `crates/codegen/pager/build.rs` watches crate-relative `.git/HEAD`, which is absent in this checkout; consecutive exact tests on clean source repeatedly rebuild Pager (~25s each). Confirm Cargo fingerprint diagnostics and reuse the existing release identity approach with correct worktree/ref tracking in a separate change. This release preparation only reuses verified test executables locally; no build-script change.
 
 - PTY 测试的独立 Leader 清理所有者：本机发布验证发现五个带 `--no-exit-on-disconnect` 的专用测试 Leader 在 sandbox 删除后仍驻留。后续单独补齐测试 harness 的独立 daemon shutdown/owner，不改变产品的常驻语义；本轮已按 candidate 路径、隔离 GROW_HOME 和启动时间确认并终止，无用户实例被清理。
+
+- 局部辅助进程与测试的后代清理边界：质量清理逐处核对发现，本地 OCR 的现有 kill_on_drop/timeout/wait 只保证直接子进程，部分同步并发 fixture 只在正常断言路径显式 wait/kill，未统一证明 panic 或任意后代回收。后续按真实失败证据独立验证现有 ProcessScope 能否复用；不在 lint 清理中新增进程管理层或改独立 helper 所有者。见 [资源与路径复核](changes/clean-resource-path-clippy-diagnostics/review.md)。

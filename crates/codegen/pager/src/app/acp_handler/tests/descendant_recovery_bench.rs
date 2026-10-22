@@ -49,7 +49,7 @@ fn history_spec(turns: usize) -> SessionSpec {
 
 async fn make_node(grow_home: &Path, turns: usize) -> NodeFixture {
     let cwd = tempfile::tempdir().expect("create session cwd");
-    let cwd_path = std::fs::canonicalize(cwd.path()).expect("canonicalize session cwd");
+    let cwd_path = dunce::canonicalize(cwd.path()).expect("canonicalize session cwd");
     let spec = history_spec(turns);
     let (info, directory) = replay::prepare_legacy_session(grow_home, &cwd_path, &spec).await;
     shell::session::testkit::synth::write_admitted_history(

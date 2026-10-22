@@ -7759,6 +7759,7 @@ async fn cleanup_live_process_lease_survives_durable_append_until_process_exit()
     let temp = TempDir::new().unwrap();
     let root = temp.path().join("isolated-session-root");
     let ready = temp.path().join("child-ready");
+    #[expect(clippy::disallowed_methods, reason = "This subprocess fixture owns a kill/wait guard or bounded poll/wait loop; it is independent of session processes")]
     let child = std::process::Command::new(std::env::current_exe().unwrap())
         .args(["--exact", TEST, "--nocapture"])
         .env(CHILD_MODE, &root)

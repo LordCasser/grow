@@ -1070,6 +1070,10 @@ mod tests {
         let temp = tempfile::TempDir::new().expect("isolated writer root");
         let root = temp.path().join("session-storage");
         let ready = temp.path().join("child-ready");
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "This subprocess fixture owns a kill/wait guard or bounded poll/wait loop; it is independent of session processes"
+        )]
         let child = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", TEST, "--nocapture"])
             .env(ROOT_ENV, &root)

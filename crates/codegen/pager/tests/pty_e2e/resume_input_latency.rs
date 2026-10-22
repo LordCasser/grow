@@ -504,7 +504,7 @@ async fn measure_resume(
         .expect("seed mock provider config");
     let project = tempfile::tempdir().expect("create project");
     std::fs::create_dir_all(project.path().join(".git")).expect("create repository marker");
-    let project_cwd = std::fs::canonicalize(project.path()).expect("canonical project cwd");
+    let project_cwd = dunce::canonicalize(project.path()).expect("canonical project cwd");
     let grow_home = content.home().join(".grow");
     let spec = SessionSpec {
         turns,

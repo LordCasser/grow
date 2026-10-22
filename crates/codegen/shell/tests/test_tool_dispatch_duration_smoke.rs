@@ -451,8 +451,8 @@ agent_type = "grow-build"
     .expect("decode root summary");
     let workspace = std::path::PathBuf::from(summary.info.cwd);
     assert_eq!(
-        std::fs::canonicalize(&workspace).unwrap(),
-        std::fs::canonicalize(sandbox.workspace()).unwrap(),
+        dunce::canonicalize(&workspace).unwrap(),
+        dunce::canonicalize(sandbox.workspace()).unwrap(),
         "the saved cwd must name the same isolated test workspace"
     );
     tokio::task::LocalSet::new()

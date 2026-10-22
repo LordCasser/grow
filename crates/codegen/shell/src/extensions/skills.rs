@@ -273,16 +273,22 @@ fn resolve_skill_path(raw: &str, cwd: &str) -> String {
 }
 
 async fn validate_skill_request_cwd(cwd: &str) -> Result<(), acp::Error> {
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "The canonical path is immediately dunce-simplified, preserving async I/O errors and Windows path identity"
+    )]
     let path = tokio::fs::canonicalize(cwd).await.map_err(|error| {
         acp::Error::invalid_params().data(format!(
             "skill cwd {cwd:?} is not an accessible directory: {error}"
         ))
     })?;
-    let mut entries = tokio::fs::read_dir(path).await.map_err(|error| {
-        acp::Error::invalid_params().data(format!(
-            "skill cwd {cwd:?} is not a readable directory: {error}"
-        ))
-    })?;
+    let mut entries = tokio::fs::read_dir(dunce::simplified(&path))
+        .await
+        .map_err(|error| {
+            acp::Error::invalid_params().data(format!(
+                "skill cwd {cwd:?} is not a readable directory: {error}"
+            ))
+        })?;
     entries.next_entry().await.map_err(|error| {
         acp::Error::invalid_params().data(format!("skill cwd {cwd:?} cannot be read: {error}"))
     })?;
