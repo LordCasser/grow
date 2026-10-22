@@ -242,7 +242,22 @@ mod feedback_contract_tests {
                     )
                     .await
                     .unwrap();
-                let output = notices(&mut rx);
+                let notice = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    loop {
+                        let message = rx.recv().await.expect("gateway open");
+                        if let Some(SessionNotification {
+                            update: SessionUpdate::UiNotice(notice),
+                            ..
+                        }) = update(message)
+                        {
+                            break notice;
+                        }
+                    }
+                })
+                .await
+                .expect("committed Goal lifecycle delivery");
+                let mut output = vec![notice];
+                output.extend(notices(&mut rx));
                 assert_eq!(output.len(), 1);
                 assert_eq!(output[0].category, UiNoticeCategory::Lifecycle);
                 assert!(output[0].message.contains("/goal budget"));
@@ -1952,21 +1967,27 @@ mod out_of_band_goal_control_tests {
                     actor.update_goal_token_budget(None).await,
                     Some("User set current Goal budget to unlimited.".to_string())
                 );
-                let mut projected = false;
-                while let Ok(message) = gateway_rx.try_recv() {
-                    let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
-                        continue;
-                    };
-                    if args.request.method.as_ref() != "grow/session_notification" {
-                        continue;
+                let projected = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    while let Some(message) = gateway_rx.recv().await {
+                        let acp_transport::AcpClientMessage::ExtNotification(args) = message else {
+                            continue;
+                        };
+                        if args.request.method.as_ref() != "grow/session_notification" {
+                            continue;
+                        }
+                        let notification: crate::extensions::notification::SessionNotification =
+                            serde_json::from_str(args.request.params.get()).unwrap();
+                        if matches!(
+                            notification.update,
+                            crate::extensions::notification::SessionUpdate::GoalUpdated { .. }
+                        ) {
+                            return true;
+                        }
                     }
-                    let notification: crate::extensions::notification::SessionNotification =
-                        serde_json::from_str(args.request.params.get()).unwrap();
-                    projected |= matches!(
-                        notification.update,
-                        crate::extensions::notification::SessionUpdate::GoalUpdated { .. }
-                    );
-                }
+                    false
+                })
+                .await
+                .expect("committed Goal snapshot delivery");
                 assert!(
                     projected,
                     "a durable budget mutation must refresh GoalUpdated"

@@ -21,6 +21,8 @@
 
 - **子树展示恢复的跨实体校验与无身份重入（独立债务）**：`restore_descendant_state` 是 best-effort 展示路径，canonical parent spawn 授予遍历，但不等同执行/导出的严格 Seed/Result 交叉链接校验；是否加强该策略须独立明确，不能复用展示 payload 获得执行权威。其 forced replay 对缺少 `eventId` 的合法 lifecycle presentation 无 source-local numeric highwater，重复恢复可重复添加后代任务行；现代 producer 有稳定身份，本轮现代基准保留该身份和重入断言。失败证据见 [P2对抗审查](changes/archive/2026-10-22-reuse-validated-descendant-recovery/adversarial-review.md) 与 [原始失败](changes/archive/2026-10-22-reuse-validated-descendant-recovery/descendant-before-corrected.log)，不在重复读取优化中改身份/显示策略。
 
+- **tmux 清理期限的确定性判别（测试债务）**：近期限成功回归保持 1.5s 主期限、1.2s 模拟 leader 和持 pipe 子孙，但名义 300ms 余量大于 TERM 等待的 100ms，不能严格区分共用期限与独立 post-exit 期限。2.5.0 准备仅改用显式 shell 消除临时脚本启动成本，不扩大超时或修改生产清理；未来独立以可控同步验证该差异，不引入通用时钟框架。
+
 ## 算法优化候选与进度（2026-10-21）
 
 用户要求保存 resume 优化分析并扩展审计主要子系统。完整证据、复杂度、边界、覆盖范围和验证方案见 [算法审计](changes/archive/2026-10-21-audit-grow-algorithmic-hotspots/audit.md)。审计后用户明确授权优先实施 R1、R2、U1/R4、S1，四项已分别归档并保留前后基准；其余候选仍待独立启动，不构成批量实施授权。

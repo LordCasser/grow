@@ -1497,6 +1497,29 @@ pub(crate) async fn install_test_foreground(actor: &SessionActor, prompt_id: &st
     );
     state.foreground = ForegroundState::RegularTurn(running_task_stub(prompt_id));
 }
+/// The direct-actor fixture simulates successful presentation commits. Model
+/// the persistence owner's post-commit delivery instead of dropping its queue.
+#[cfg(test)]
+async fn drain_successful_test_persistence(
+    mut receiver: tokio::sync::mpsc::UnboundedReceiver<PersistenceMsg>,
+) {
+    while let Some(message) = receiver.recv().await {
+        if let PersistenceMsg::AuxiliaryGrow {
+            delivery,
+            respond_to,
+            ..
+        } = message
+        {
+            if let Some(delivery) = delivery {
+                delivery.publish();
+            }
+            if let Some(respond_to) = respond_to {
+                let _ = respond_to.send(Ok(()));
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 pub(crate) async fn build_actor() -> (
     std::sync::Arc<SessionActor>,
@@ -1504,9 +1527,8 @@ pub(crate) async fn build_actor() -> (
 ) {
     let (gateway_tx, gateway_rx) =
         tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-    let (persistence_tx, mut persistence_rx) =
-        tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-    tokio::spawn(async move { while persistence_rx.recv().await.is_some() {} });
+    let (persistence_tx, persistence_rx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+    tokio::spawn(drain_successful_test_persistence(persistence_rx));
     let (actor, _) = create_test_actor_ex(0, 256_000, 85, gateway_tx, persistence_tx).await;
     (std::sync::Arc::new(actor), gateway_rx)
 }
@@ -1518,9 +1540,8 @@ pub(crate) async fn build_actor_with_planning_driver() -> (
 ) {
     let (gateway_tx, gateway_rx) =
         tokio::sync::mpsc::unbounded_channel::<acp_transport::AcpClientMessage>();
-    let (persistence_tx, mut persistence_rx) =
-        tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
-    tokio::spawn(async move { while persistence_rx.recv().await.is_some() {} });
+    let (persistence_tx, persistence_rx) = tokio::sync::mpsc::unbounded_channel::<PersistenceMsg>();
+    tokio::spawn(drain_successful_test_persistence(persistence_rx));
     let actor =
         create_test_actor_with_planning_driver(0, 256_000, 85, gateway_tx, persistence_tx).await;
     (actor, gateway_rx)

@@ -401,13 +401,15 @@ mod tests {
             files_per_rewind: 0,
             file_content_len: 0,
         };
-        let (info, directory) = crate::session::testkit::synth::replay::prepare_legacy_session(
-            root.path(),
-            cwd.path(),
-            &spec,
-        )
-        .await;
-        let legacy = replay_updates(info.id.0.as_ref(), root.path());
+        let (info, directory) = prepare_legacy_session(root.path(), cwd.path(), &spec).await;
+        let contents = std::fs::read_to_string(directory.join("updates.jsonl")).unwrap();
+        let prepared = crate::session::storage::prepare_replay_lines(&contents, None);
+        let legacy = prepared.lines.into_iter().filter_map(|line| {
+            match serde_json::from_str::<SessionUpdate>(line).unwrap() {
+                SessionUpdate::Acp(notification) => Some(notification.update),
+                _ => None,
+            }
+        });
         let mut expected = Vec::with_capacity(spec.turns * 2);
         let mut pending_answer = String::new();
         for update in legacy {

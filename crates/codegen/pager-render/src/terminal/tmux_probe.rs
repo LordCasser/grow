@@ -533,64 +533,30 @@ mod tests {
         );
     }
 
-    /// A leader that exits successfully just under the process deadline must
-    /// still return captured output: post-exit TERM grace + pipe drain use a
-    /// separate bound and must not turn success into a drain timeout.
-    ///
-    /// A background descendant keeps the captured pipes open until process-group
-    /// teardown so the drain cannot finish during the wait loop. That makes the
-    /// post-exit cleanup window load-bearing once the main deadline is nearly
-    /// exhausted.
+    /// A leader near the process deadline must still return captured output
+    /// when its descendant holds the pipes until process-group cleanup.
     #[cfg(unix)]
     #[test]
-    #[serial_test::serial(tmux_probe_path)]
     fn successful_near_deadline_exit_still_returns_captured_output() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let temp = tempfile::tempdir().unwrap();
-        let bin = temp.path().join("bin");
-        std::fs::create_dir_all(&bin).unwrap();
-        let tmux = bin.join("tmux");
-        // Burn most of the process budget, then exit successfully while a
-        // descendant still holds the pipes. Remaining main-deadline time is
-        // intentionally below the fixed TERM grace sleep so a shared deadline
-        // would fail the drain; the separate post-exit cleanup grace must keep
-        // this a success. Perl select is used for subsecond precision.
+        // An explicit interpreter keeps first execution of a temporary script
+        // out of the simulated leader's time budget on macOS. Exercise the
+        // same bounded runner, pipes, environment and detached process group.
         let timeout = Duration::from_millis(1500);
-        std::fs::write(
-            &tmux,
-            "#!/bin/sh\n\
-             /usr/bin/perl -e 'select(undef, undef, undef, 1.2)'\n\
-             ( exec sleep 30 ) &\n\
-             printf 'tmux 3.4\\n'\n\
-             exit 0\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&tmux, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let previous_path = std::env::var_os("PATH");
-        let mut path = OsString::from(bin.as_os_str());
-        path.push(":");
-        if let Some(existing) = &previous_path {
-            path.push(existing);
-        }
-        // SAFETY: serialized on `tmux_probe_path`; restored before return.
-        unsafe {
-            std::env::set_var("PATH", &path);
-        }
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            run_tmux_bounded(TmuxCommand::Version, timeout)
-        }));
-        match previous_path {
-            Some(value) => unsafe {
-                std::env::set_var("PATH", value);
-            },
-            None => unsafe {
-                std::env::remove_var("PATH");
-            },
-        }
-        let output = result
-            .expect("near-deadline probe must not panic")
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "/usr/bin/perl -e 'select(undef, undef, undef, 1.2)'\n\
+                 ( exec sleep 30 ) &\n\
+                 printf 'tmux 3.4\\n'\n\
+                 exit 0\n",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .envs(tty_utils::pager_env());
+        tty_utils::detach_std_command(&mut command);
+        let output = run_command_bounded(command, timeout)
             .expect("near-deadline success must not become a drain error");
         assert!(output.status_success, "expected successful status");
         assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "tmux 3.4");
