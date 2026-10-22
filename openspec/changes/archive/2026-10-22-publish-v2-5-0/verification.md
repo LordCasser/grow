@@ -1,6 +1,6 @@
 # Grow 2.5.0 发布验证
 
-[公开 release](https://github.com/LordCasser/grow/releases/tag/v2.5.0) 已发布且为 latest，非 draft / prerelease。release id 为 `420909068`，发布时间为 2026-10-22 23:49:01（Asia/Shanghai）。notes 与标签内 `crates/codegen/shell/changelogs/2.5.0.md` 一致，包含 Timeline v27 不迁移旧会话的升级边界。
+[公开 release](https://github.com/LordCasser/grow/releases/tag/v2.5.0) 已发布且为 latest，非 draft / prerelease。release id 为 `420909068`，发布时间为 2026-10-22 23:49:01（Asia/Shanghai）。发布时 notes 与标签内 `crates/codegen/shell/changelogs/2.5.0.md` 一致，包含 Timeline v27 不迁移旧会话的升级边界。
 
 最终 source 为 `8443a4d1648d17b10f993c845cb68d949c55235e`；annotated tag 对象为 `f1e99dff7af3b499f8c8d432ba7e9d745b7c8829`。本机预检通过后，以 expected old tag object 的 force-with-lease 原子推送 main 与用户授权重建的未发布标签；之后未移动。使用现有 release.yml，四个平台组全部开启、publish=true，全部资产重新构建，未把旧 source 的包冒充新提交。
 
