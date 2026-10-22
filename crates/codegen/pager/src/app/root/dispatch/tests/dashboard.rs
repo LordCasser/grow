@@ -2077,7 +2077,6 @@ fn dashboard_attach_subagent_lazily_replays_deferred_transcript() {
         .join(shell::util::grow_home::encode_cwd_dirname("/tmp"))
         .join(&child_sid);
     std::fs::create_dir_all(&session_dir).unwrap();
-    std::fs::write(session_dir.join("timeline.jsonl"), "").unwrap();
     let info = shell::session::info::Info {
         id: acp::SessionId::new(child_sid.clone()),
         cwd: "/tmp".into(),
@@ -2096,7 +2095,9 @@ fn dashboard_attach_subagent_lazily_replays_deferred_transcript() {
     let tool_line = format!(
         r#"{{"method":"session/update","params":{{"sessionId":"{child_sid}","update":{{"sessionUpdate":"tool_call","toolCallId":"tc1","title":"Read foo","kind":"read","locations":[{{"path":"/tmp/foo"}}]}}}}}}"#
     );
-    std::fs::write(session_dir.join("updates.jsonl"), tool_line + "\n").unwrap();
+    let update: shell::session::storage::SessionUpdate = serde_json::from_str(&tool_line).unwrap();
+    shell::session::testkit::write_timeline_history_fixture(&session_dir, &[], &[update]).unwrap();
+    assert!(!session_dir.join("updates.jsonl").exists());
     crate::app::subagent::set_replay_grow_home_for_tests(Some(home.path().to_path_buf()));
     let mut app = test_app_with_agent();
     open_dashboard(&mut app);
