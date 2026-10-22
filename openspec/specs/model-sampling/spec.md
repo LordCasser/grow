@@ -1130,20 +1130,28 @@ A failure returned by the tool execution pipeline SHALL stop the admitted model 
 - **THEN** 内容按原有语义保留，不执行通用子串过滤或修改原始持久记录。
 
 ### Requirement: Side questions reuse durable image fallback
-/btw SHALL use its prepared transport identity for negative image capability. An unknown transport SHALL first receive original images; an explicit unconditional image rejection SHALL settle the failed Sideband, persist the negative capability and use the existing visual auxiliary/OCR/durable ImageProjection flow before at most one rebuilt side-question request. A known text-only transport SHALL perform that preparation before sending. The rebuilt request SHALL freeze the acknowledged Surface again and select textual image descriptions before portable history projection. Question and answer SHALL remain Sideband-only; shared image projections SHALL retain existing original-media and unresolved-removal semantics. Ordinary request failures SHALL NOT trigger image conversion. All attempts SHALL retain the prepared client/model route.
-
-#### Scenario: Historical images rejected by side question
-- **WHEN** /btw with user or completed-tool images receives the explicit text-only content type rejection
-- **THEN** the failed Sideband closes, shared image recovery is acknowledged and a new frozen Sideband sends textual context to the same prepared transport
+/btw SHALL be a read-only consumer of the primary session's image projection and SHALL use its prepared primary LLM route. Before freezing Sideband context it SHALL wait for any in-progress primary image conversion, including its durable ImageProjection acknowledgement. It SHALL select every available image description from that acknowledged Surface on the request copy, independently of the negative-capability cache. It SHALL NOT start vision/OCR/conversion work, write negative image capability or retry an image rejection by mutating the primary Surface. The question and answer SHALL remain Sideband-only. Waiting SHALL observe session Sideband cancellation and SHALL NOT hold the image projection gate during its provider request or overload retries. An unsupported transport with unresolved images SHALL fail without issuing an image-bearing request; unconverted media for an unknown transport retains existing optimistic semantics.
 
 #### Scenario: Known text-only route
-- **WHEN** /btw uses a transport already marked text-only
-- **THEN** it selects acknowledged descriptions without sending raw images or repeating auxiliary work for described groups
+- **WHEN** main context retains original images paired with acknowledged descriptions and /btw is requested
+- **THEN** its frozen portable context uses the existing descriptions without raw media or another auxiliary request, including when negative capability is absent
+
+#### Scenario: Primary conversion has not finished
+- **WHEN** main vision/OCR recovery or its ImageProjection acknowledgement is pending and /btw is requested
+- **THEN** /btw waits without starting a provider or conversion request, then freezes and uses the acknowledged text branch once main conversion completes
 
 #### Scenario: Unrelated failure or failed projection
-- **WHEN** /btw receives an ordinary 400 or its image projection cannot be acknowledged
-- **THEN** it returns failure without an unacknowledged rebuilt provider request, and ordinary errors do not mark negative capability
+- **WHEN** main conversion cannot commit a usable text branch or the waiting SideQuestion is cancelled
+- **THEN** /btw returns failure without independently converting images or emitting an unacknowledged textual provider request
+
+#### Scenario: No main conversion owns unresolved images
+- **WHEN** the prepared transport is known text-only but main context has unresolved images and no conversion is in progress
+- **THEN** /btw fails as context not ready without triggering recovery or modifying image capability
+
+#### Scenario: Historical images rejected by side question
+- **WHEN** its frozen request receives an image rejection or ordinary 400
+- **THEN** it records the Sideband failure and returns it without starting shared image recovery or writing negative capability
 
 #### Scenario: Foreground context advances during the failed request
-- **WHEN** the frozen side-question request rejects images but the Surface revision has advanced before recovery
-- **THEN** /btw returns failure without projecting images from the newer revision
+- **WHEN** /btw's frozen provider request fails while main context advances
+- **THEN** /btw returns the failure without projecting either its frozen images or images from the newer Surface

@@ -2767,6 +2767,7 @@ pub(crate) async fn spawn_session_actor(
         rebuild_spec: rebuild_spec.clone(),
         image_description_model: parking_lot::RwLock::new(image_description_model),
         session_title_route: std::cell::RefCell::new(session_title_route.into()),
+        image_projection_gate: tokio::sync::RwLock::new(()),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         workspace_ops: workspace_ops.clone(),
     });

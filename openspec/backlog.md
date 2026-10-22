@@ -4,7 +4,7 @@
 
 
 
-- **SideQuestion 接收端生命周期（独立跟踪）**：`actor/run_loop.rs` 的 SideQuestion 使用独立 `spawn_local`，不监听 `respond_to.closed()`；请求接收端退出后任务仍可能继续，新增图片预恢复也沿用该 owner。需另项明确接收端关闭、session cancellation 与共享 ImageProjection 的边界，再验证辅助请求/OCR/ACK 是否停止。本次仅修复图片回退，不扩展取消协议；见图片回退 change 的审查记录。
+- **SideQuestion 接收端生命周期（独立跟踪）**：`actor/run_loop.rs` 的 SideQuestion 使用独立 `spawn_local`，不监听 `respond_to.closed()`；请求接收端退出后任务仍可能继续。/btw 已改为只读复用主图片分支，等待主转换时响应 session Sideband cancellation；接收端关闭与请求任务生命周期仍需另项明确及验证，不混入图片分支复用修复。
 
 - **Runtime native 分段与收件消息交错（待证实生产可达性）**：此前审计的真实结果保全、Responses AgentMessage 和 Chat Runtime reasoning 三项已由 [修复记录](changes/archive/2026-10-21-fix-runtime-projection-integrity/verification.md) 处理。剩余 native assistant 分段后插入 AgentMessage 的 adapter 排序反例见 [定向审计](changes/archive/2026-10-21-audit-runtime-thinking-projections/audit.md)；常规通知/用户插话受整批边界保护，生产可达性尚未证实，独立跟踪，不作为线上已复现。
 

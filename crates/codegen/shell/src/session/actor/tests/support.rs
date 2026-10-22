@@ -1368,6 +1368,7 @@ async fn create_test_actor_ex_inner(
         rebuild_spec,
         image_description_model: parking_lot::RwLock::new(None),
         session_title_route: std::cell::RefCell::new(None.into()),
+        image_projection_gate: tokio::sync::RwLock::new(()),
         image_describe_cache: Arc::new(crate::session::image_describe::ImageDescribeCache::new()),
         workspace_ops: workspace::WorkspaceOps::for_test(),
     };

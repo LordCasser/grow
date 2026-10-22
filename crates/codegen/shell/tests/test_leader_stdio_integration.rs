@@ -70,7 +70,7 @@ const ID_NAMESPACE_SEP: char = '|';
 async fn wait_for_socket(sock_path: &std::path::Path) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     while tokio::time::Instant::now() < deadline {
-        if sock_path.exists() {
+        if shell::leader::listener_is_ready(sock_path) {
             return;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -79,7 +79,7 @@ async fn wait_for_socket(sock_path: &std::path::Path) {
 }
 
 /// Helper to set up a test server and return its socket path and handle.
-/// Waits for the socket to be connectable rather than using a fixed sleep.
+/// Waits for the bound listener rather than using a fixed sleep.
 async fn setup_test_server(
     temp: &TempDir,
 ) -> (

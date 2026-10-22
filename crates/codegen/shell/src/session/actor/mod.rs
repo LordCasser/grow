@@ -1931,6 +1931,9 @@ pub(crate) struct SessionActor {
     /// while a background worker holds the provider route.
     pub(crate) session_title_route:
         std::cell::RefCell<crate::session::actor::summary::SessionTitleRouteState>,
+    /// Main conversion owns the write side through durable ACK; SideQuestions
+    /// only read the resulting context and release before provider work.
+    pub(crate) image_projection_gate: tokio::sync::RwLock<()>,
     /// Cache auxiliary image outputs by content and prompt fingerprint.
     pub(crate) image_describe_cache: Arc<crate::session::image_describe::ImageDescribeCache>,
     pub(crate) workspace_ops: workspace::WorkspaceOps,
