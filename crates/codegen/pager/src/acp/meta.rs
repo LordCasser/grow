@@ -33,7 +33,9 @@ pub(crate) fn session_load_descendant_ownership(
     let value = response_meta?.get(shell::session::storage::DESCENDANT_OWNERSHIP_META_KEY)?;
     let ownership: shell::session::storage::DescendantOwnership =
         serde_json::from_value(value.clone()).ok()?;
-    ownership.belongs_to(session_id.0.as_ref()).then_some(ownership)
+    ownership
+        .belongs_to(session_id.0.as_ref())
+        .then_some(ownership)
 }
 
 /// Parsed fields from `SessionNotification._meta`.
@@ -222,8 +224,10 @@ mod tests {
         assert!(session_load_descendant_ownership(meta.as_object(), &requested).is_none());
         assert!(session_load_descendant_ownership(None, &canonical).is_none());
         for (field, value) in [
-            ("version", json!(2)), ("hash", json!("invalid")),
-            ("session_id", json!("foreign")), ("unexpected", json!(true)),
+            ("version", json!(2)),
+            ("hash", json!("invalid")),
+            ("session_id", json!("foreign")),
+            ("unexpected", json!(true)),
         ] {
             let mut invalid = meta.clone();
             invalid["grow/descendantOwnership"][field] = value;

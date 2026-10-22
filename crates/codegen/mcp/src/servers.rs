@@ -2534,9 +2534,7 @@ pub async fn list_all_tools(
 
     loop {
         let result = peer
-            .list_tools(Some(
-                PaginatedRequestParams::default().with_cursor(cursor),
-            ))
+            .list_tools(Some(PaginatedRequestParams::default().with_cursor(cursor)))
             .await?;
         let next_cursor = result.next_cursor;
         if let Some(next) = next_cursor.as_ref()

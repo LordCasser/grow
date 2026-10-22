@@ -1,0 +1,379 @@
+/Users/lordcasser/workspace/projects/grow/clippy.toml:26 None `tokio::process::Command::spawn` does not refer to a reachable function
+/rustc/01f6ddf7588f42ae2d7eb0a2f21d44e8e96674cf/library/core/src/macros/mod.rs:44 clippy::cloned_ref_to_slice_refs this call to `clone` can be replaced with `std::slice::from_ref`
+crates/codegen/acp-transport/src/connection.rs:17 clippy::large_enum_variant large size difference between variants
+crates/codegen/auth/src/auth_provider.rs:63 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/chat-state/src/actor/mutations.rs:325 clippy::needless_return unneeded `return` statement
+crates/codegen/chat-state/src/actor/mutations.rs:492 clippy::needless_return unneeded `return` statement
+crates/codegen/chat-state/src/actor/request_builder.rs:115 clippy::for_kv_map you seem to want to iterate on a map's keys
+crates/codegen/chat-state/src/actor/state.rs:333 clippy::type_complexity very complex type used. Consider factoring parts into `type` definitions
+crates/codegen/chat-state/src/actor/state.rs:487 clippy::type_complexity very complex type used. Consider factoring parts into `type` definitions
+crates/codegen/chat-state/src/compaction_utils.rs:646 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/chat-state/src/events.rs:8 clippy::large_enum_variant large size difference between variants
+crates/codegen/chat-state/src/persistence.rs:63 clippy::large_enum_variant large size difference between variants
+crates/codegen/chat-state/src/session_runtime.rs:129 clippy::large_enum_variant large size difference between variants
+crates/codegen/chat-state/src/timeline.rs:1590 clippy::large_enum_variant large size difference between variants
+crates/codegen/chat-state/src/timeline.rs:5072 clippy::unnecessary_filter_map this `.filter_map(..)` can be written more simply using `.filter(..)`
+crates/codegen/chat-state/src/timeline.rs:5132 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/chat-state/src/timeline.rs:812 clippy::large_enum_variant large size difference between variants
+crates/codegen/client-support/src/clipboard.rs:1129 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/client-support/src/clipboard.rs:1418 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/client-support/src/clipboard.rs:1427 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/client-support/src/stderr.rs:63 clippy::let_and_return returning the result of a `let` binding from a block
+crates/codegen/config/src/fs_atomic.rs:51 clippy::needless_borrows_for_generic_args the borrowed expression implements the required traits
+crates/codegen/diagnostics/src/debug_log.rs:431 clippy::nonminimal_bool this boolean expression can be simplified
+crates/codegen/diagnostics/src/debug_log/stream_firehose.rs:138 clippy::suspicious_open_options file opened with `create`, but `truncate` behavior not defined
+crates/codegen/diagnostics/src/unified_log.rs:415 clippy::suspicious_open_options file opened with `create`, but `truncate` behavior not defined
+crates/codegen/markdown/src/url_scan.rs:210 clippy::single_range_in_vec_init an array of `Range` that is only one element
+crates/codegen/pager-render/src/clipboard/mod.rs:585 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/codegen/pager-render/src/prompt_images.rs:1078 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/pager-render/src/util.rs:138 clippy::if_same_then_else this `if` has identical blocks
+crates/codegen/pager/src/acp/tracker.rs:1970 clippy::question_mark this `let...else` may be rewritten with the `?` operator
+crates/codegen/pager/src/acp/tracker.rs:2664 clippy::needless_borrows_for_generic_args the borrowed expression implements the required traits
+crates/codegen/pager/src/app/acp_handler/session_notification.rs:1220 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/app/acp_handler/session_notification.rs:1621 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/app/acp_handler/session_notification.rs:1774 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/app/acp_handler/session_notification.rs:2093 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/app/acp_handler/session_notification.rs:2506 clippy::question_mark this `let...else` may be rewritten with the `?` operator
+crates/codegen/pager/src/app/acp_handler/session_notification.rs:34 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/app/acp_handler/settings.rs:306 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/app/agent_view/cta.rs:562 clippy::question_mark this `let...else` may be rewritten with the `?` operator
+crates/codegen/pager/src/app/agent_view/modal_routing.rs:1371 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/pager/src/app/agent_view/modal_routing.rs:1372 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/pager/src/app/agent_view/modal_routing.rs:153 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/app/agent_view/modal_routing.rs:163 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/app/agent_view/modals.rs:1281 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/app/agent_view/modals.rs:429 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/app/agent_view/mouse.rs:452 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/app/agent_view/render.rs:4158 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/app/agent_view/viewer.rs:525 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/app/mod.rs:1231 clippy::collapsible_else_if this `else { if .. }` block can be collapsed
+crates/codegen/pager/src/app/mod.rs:466 clippy::needless_borrows_for_generic_args the borrowed expression implements the required traits
+crates/codegen/pager/src/app/root/dispatch/modes.rs:96 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/app/root/dispatch/router.rs:1423 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/app/root/dispatch/session/load.rs:57 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/app/root/dispatch/status.rs:333 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/app/root/dispatch/status.rs:370 clippy::collapsible_else_if this `else { if .. }` block can be collapsed
+crates/codegen/pager/src/app/root/dispatch/status.rs:403 clippy::collapsible_else_if this `else { if .. }` block can be collapsed
+crates/codegen/pager/src/app/root/dispatch/status.rs:481 clippy::single_match you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`
+crates/codegen/pager/src/app/root/dispatch/task_result.rs:1224 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/app/root/effects/mod.rs:254 clippy::let_and_return returning the result of a `let` binding from a block
+crates/codegen/pager/src/app/root/effects/mod.rs:416 clippy::disallowed_methods use of a disallowed method `tokio::process::Command::spawn`
+crates/codegen/pager/src/app/root/event_loop.rs:1706 clippy::nonminimal_bool this boolean expression can be simplified
+crates/codegen/pager/src/app/root/mod.rs:2490 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/app/root/mod.rs:941 clippy::manual_range_contains manual `Range::contains` implementation
+crates/codegen/pager/src/app/session/mod.rs:1607 clippy::drop_non_drop call to `std::mem::drop` with a value that does not implement `Drop`. Dropping such a type only extends its contained lifetimes
+crates/codegen/pager/src/diagnostics/probes/mod.rs:106 clippy::redundant_closure redundant closure
+crates/codegen/pager/src/export_cmd.rs:252 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/codegen/pager/src/local_drafts.rs:1673 clippy::filter_map_bool_then usage of `bool::then` in `filter_map`
+crates/codegen/pager/src/local_drafts.rs:1911 clippy::unnecessary_lazy_evaluations unnecessary closure used to substitute value for `Option::None`
+crates/codegen/pager/src/local_drafts.rs:526 clippy::needless_return unneeded `return` statement
+crates/codegen/pager/src/local_drafts.rs:554 clippy::large_enum_variant large size difference between variants
+crates/codegen/pager/src/local_drafts.rs:725 clippy::type_complexity very complex type used. Consider factoring parts into `type` definitions
+crates/codegen/pager/src/minimal/api.rs:668 clippy::question_mark this `let...else` may be rewritten with the `?` operator
+crates/codegen/pager/src/replay_cmd/browser.rs:661 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/replay_cmd/panel.rs:136 clippy::unnecessary_lazy_evaluations unnecessary closure used to substitute value for `Option::None`
+crates/codegen/pager/src/replay_cmd/panel.rs:413 clippy::manual_range_contains manual `!Range::contains` implementation
+crates/codegen/pager/src/replay_cmd/tree.rs:744 clippy::unnecessary_unwrap called `unwrap` on `pressed` after checking its variant with `is_some`
+crates/codegen/pager/src/replay_cmd/tree.rs:808 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/replay_cmd/tree.rs:827 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/replay_cmd/tree.rs:960 clippy::to_string_in_format_args `to_string` applied to a type that implements `Display` in `format!` args
+crates/codegen/pager/src/scrollback/block.rs:223 clippy::crate_in_macro_def `crate` references the macro call's crate
+crates/codegen/pager/src/scrollback/blocks/tool/other.rs:450 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/scrollback/wrappers/entry_renderer.rs:27 clippy::nonminimal_bool this boolean expression can be simplified
+crates/codegen/pager/src/slash/mod.rs:968 clippy::bool_comparison order comparisons between booleans can be simplified
+crates/codegen/pager/src/transcript_projection.rs:130 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/transcript_projection.rs:131 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/transcript_projection.rs:314 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/transcript_projection.rs:379 clippy::nonminimal_bool this boolean expression can be simplified
+crates/codegen/pager/src/views/dashboard/peek.rs:258 clippy::type_complexity very complex type used. Consider factoring parts into `type` definitions
+crates/codegen/pager/src/views/dashboard/state.rs:2275 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/views/dashboard/state.rs:2516 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/pager/src/views/extensions_modal.rs:2388 clippy::empty_line_after_doc_comments empty line after doc comment
+crates/codegen/pager/src/views/goal_detail.rs:198 clippy::obfuscated_if_else this method chain can be written more clearly with `if .. else ..`
+crates/codegen/pager/src/views/modal.rs:1272 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/pager/src/views/modal.rs:1273 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/pager/src/views/prompt_widget/mod.rs:1114 clippy::empty_line_after_doc_comments empty line after doc comment
+crates/codegen/pager/src/views/slash_dropdown.rs:57 clippy::obfuscated_if_else this method chain can be written more clearly with `if .. else ..`
+crates/codegen/pager/src/views/welcome/mod.rs:477 clippy::vec_init_then_push calls to `push` immediately after creation
+crates/codegen/ptyctl/src/styled.rs:119 clippy::unnecessary_unwrap called `unwrap` on `opts.cursor_char` after checking its variant with `is_some`
+crates/codegen/ptyctl/src/term.rs:315 clippy::unnecessary_unwrap called `unwrap` on `opts.cursor_char` after checking its variant with `is_some`
+crates/codegen/sampler/src/actor/request_task.rs:1312 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/sampler/src/recovery.rs:148 clippy::nonminimal_bool this boolean expression can be simplified
+crates/codegen/sampling-types/src/conversation.rs:1904 clippy::extend_with_drain use of `extend` instead of `append` for adding the full range of a second vector
+crates/codegen/sampling-types/src/conversation.rs:1922 clippy::extend_with_drain use of `extend` instead of `append` for adding the full range of a second vector
+crates/codegen/sampling-types/src/conversation.rs:561 clippy::obfuscated_if_else this method chain can be written more clearly with `if .. else ..`
+crates/codegen/shell-base/src/util/mod.rs:402 clippy::disallowed_methods use of a disallowed method `std::process::Command::spawn`
+crates/codegen/shell/src/agent/config.rs:2890 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/agent/config.rs:3243 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/agent/config.rs:3270 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/agent/mvp_agent/acp_agent.rs:1458 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/agent/mvp_agent/acp_agent.rs:537 clippy::manual_map manual implementation of `Option::map`
+crates/codegen/shell/src/agent/mvp_agent/mod.rs:598 clippy::type_complexity very complex type used. Consider factoring parts into `type` definitions
+crates/codegen/shell/src/agent/mvp_agent/tests.rs:2807 clippy::large_enum_variant large size difference between variants
+crates/codegen/shell/src/agent/subagent/handle_request.rs:2053 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/agent/subagent/handle_request.rs:227 clippy::type_complexity very complex type used. Consider factoring parts into `type` definitions
+crates/codegen/shell/src/agent/subagent/handle_request.rs:560 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/agent/subagent/mod.rs:2349 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/agent/subagent/mod.rs:2614 clippy::double_must_use this function has a `#[must_use]` attribute with no message, but returns a type already marked as `#[must_use]`
+crates/codegen/shell/src/agent/subagent/mod.rs:2732 clippy::large_enum_variant large size difference between variants
+crates/codegen/shell/src/agent/subagent/mod.rs:3905 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/auth/auth_provider.rs:547 clippy::nonminimal_bool this boolean expression can be simplified
+crates/codegen/shell/src/auth/auth_provider.rs:686 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:153 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:187 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:213 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:239 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:332 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:363 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:412 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:471 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:497 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:516 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:594 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:612 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:636 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:653 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:670 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:693 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:730 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:770 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:803 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:923 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/auth/auth_provider_tests.rs:948 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/shell/src/config/mod.rs:75 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/config/watcher.rs:1008 clippy::cloned_ref_to_slice_refs this call to `clone` can be replaced with `std::slice::from_ref`
+crates/codegen/shell/src/config/watcher.rs:1028 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/codegen/shell/src/config/watcher.rs:1064 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/codegen/shell/src/config/watcher.rs:1115 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/codegen/shell/src/config/watcher.rs:1165 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/codegen/shell/src/config/watcher.rs:1169 clippy::cloned_ref_to_slice_refs this call to `clone` can be replaced with `std::slice::from_ref`
+crates/codegen/shell/src/config/watcher.rs:1189 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/codegen/shell/src/config/watcher.rs:1193 clippy::cloned_ref_to_slice_refs this call to `clone` can be replaced with `std::slice::from_ref`
+crates/codegen/shell/src/config/watcher.rs:1211 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/codegen/shell/src/config/watcher.rs:1249 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/codegen/shell/src/config/watcher.rs:1287 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/codegen/shell/src/config/watcher.rs:1323 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/codegen/shell/src/config/watcher.rs:164 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/config/watcher.rs:968 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/codegen/shell/src/config/watcher.rs:995 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/codegen/shell/src/coordination/inquiry.rs:159 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/coordination/runtime.rs:1180 clippy::needless_as_bytes needless call to `as_bytes`
+crates/codegen/shell/src/coordination/runtime.rs:2058 clippy::disallowed_methods use of a disallowed method `std::process::Command::spawn`
+crates/codegen/shell/src/coordination/runtime.rs:264 clippy::manual_inspect using `map_err` over `inspect_err`
+crates/codegen/shell/src/extensions/mcp.rs:641 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/extensions/mcp.rs:656 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/shell/src/extensions/session_admin.rs:1063 clippy::clone_on_copy using `clone` on type `TurnId` which implements the `Copy` trait
+crates/codegen/shell/src/extensions/session_admin.rs:1828 clippy::let_and_return returning the result of a `let` binding from a block
+crates/codegen/shell/src/extensions/skills.rs:276 clippy::disallowed_methods use of a disallowed method `tokio::fs::canonicalize`
+crates/codegen/shell/src/inspect/mod.rs:1231 clippy::bool_assert_comparison used `assert_eq!` with a literal bool
+crates/codegen/shell/src/inspect/mod.rs:1237 clippy::bool_assert_comparison used `assert_eq!` with a literal bool
+crates/codegen/shell/src/inspect/mod.rs:1243 clippy::bool_assert_comparison used `assert_eq!` with a literal bool
+crates/codegen/shell/src/leader/lock.rs:105 clippy::new_without_default you should consider adding a `Default` implementation for `LeaderLock`
+crates/codegen/shell/src/leader/server.rs:1695 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/leader/server.rs:1973 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/leader/server.rs:2024 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/leader/server.rs:2060 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/leader/server.rs:4377 clippy::useless_conversion useless conversion to the same type: `std::string::String`
+crates/codegen/shell/src/leader/server.rs:4383 clippy::useless_conversion useless conversion to the same type: `std::string::String`
+crates/codegen/shell/src/leader/server.rs:4389 clippy::useless_conversion useless conversion to the same type: `std::string::String`
+crates/codegen/shell/src/session/actor/compaction.rs:1866 clippy::let_and_return returning the result of a `let` binding from a block
+crates/codegen/shell/src/session/actor/completion_delivery.rs:245 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/shell/src/session/actor/completion_delivery.rs:248 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/shell/src/session/actor/context_recall.rs:1878 clippy::len_zero length comparison to zero
+crates/codegen/shell/src/session/actor/coordination.rs:287 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/actor/goal.rs:1974 clippy::needless_return unneeded `return` statement
+crates/codegen/shell/src/session/actor/goal.rs:1990 clippy::needless_return unneeded `return` statement
+crates/codegen/shell/src/session/actor/goal.rs:41 clippy::items_after_test_module items after a test module
+crates/codegen/shell/src/session/actor/goal_support.rs:1614 clippy::filter_map_bool_then usage of `bool::then` in `filter_map`
+crates/codegen/shell/src/session/actor/goal_support.rs:1949 clippy::await_holding_lock this `MutexGuard` is held across an await point
+crates/codegen/shell/src/session/actor/hook_dispatch.rs:541 clippy::unnecessary_lazy_evaluations unnecessary closure used to substitute value for `Option::None`
+crates/codegen/shell/src/session/actor/input_admission.rs:310 clippy::disallowed_methods use of a disallowed method `std::process::Command::spawn`
+crates/codegen/shell/src/session/actor/input_admission.rs:59 clippy::items_after_test_module items after a test module
+crates/codegen/shell/src/session/actor/interjection.rs:240 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/actor/interjection.rs:615 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/actor/laziness_classifier.rs:450 clippy::empty_line_after_doc_comments empty line after doc comment
+crates/codegen/shell/src/session/actor/mcp.rs:86 clippy::nonminimal_bool this boolean expression can be simplified
+crates/codegen/shell/src/session/actor/mod.rs:1385 clippy::large_enum_variant large size difference between variants
+crates/codegen/shell/src/session/actor/mod.rs:1814 clippy::type_complexity very complex type used. Consider factoring parts into `type` definitions
+crates/codegen/shell/src/session/actor/mod.rs:2007 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/actor/mod.rs:653 clippy::large_enum_variant large size difference between variants
+crates/codegen/shell/src/session/actor/model_switch.rs:101 clippy::redundant_closure redundant closure
+crates/codegen/shell/src/session/actor/model_switch.rs:3118 clippy::field_reassign_with_default field assignment outside of initializer for an instance created with Default::default()
+crates/codegen/shell/src/session/actor/model_switch.rs:3126 clippy::field_reassign_with_default field assignment outside of initializer for an instance created with Default::default()
+crates/codegen/shell/src/session/actor/model_switch.rs:3812 clippy::field_reassign_with_default field assignment outside of initializer for an instance created with Default::default()
+crates/codegen/shell/src/session/actor/model_switch.rs:3829 clippy::field_reassign_with_default field assignment outside of initializer for an instance created with Default::default()
+crates/codegen/shell/src/session/actor/model_switch.rs:3889 clippy::field_reassign_with_default field assignment outside of initializer for an instance created with Default::default()
+crates/codegen/shell/src/session/actor/model_switch.rs:3905 clippy::field_reassign_with_default field assignment outside of initializer for an instance created with Default::default()
+crates/codegen/shell/src/session/actor/model_switch.rs:3930 clippy::field_reassign_with_default field assignment outside of initializer for an instance created with Default::default()
+crates/codegen/shell/src/session/actor/model_switch.rs:442 clippy::field_reassign_with_default field assignment outside of initializer for an instance created with Default::default()
+crates/codegen/shell/src/session/actor/model_switch.rs:4452 clippy::field_reassign_with_default field assignment outside of initializer for an instance created with Default::default()
+crates/codegen/shell/src/session/actor/session_mode.rs:1412 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/actor/session_mode.rs:51 clippy::items_after_test_module items after a test module
+crates/codegen/shell/src/session/actor/session_mode.rs:940 clippy::manual_inspect using `map` over `inspect`
+crates/codegen/shell/src/session/actor/sideband.rs:1047 clippy::manual_is_multiple_of manual implementation of `.is_multiple_of()`
+crates/codegen/shell/src/session/actor/sideband.rs:341 clippy::let_and_return returning the result of a `let` binding from a block
+crates/codegen/shell/src/session/actor/sideband.rs:924 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/actor/slash_exec.rs:403 clippy::non_octal_unix_permissions using a non-octal value to set unix file permissions
+crates/codegen/shell/src/session/actor/spawn.rs:3055 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/actor/spawn.rs:457 clippy::large_enum_variant large size difference between variants
+crates/codegen/shell/src/session/actor/spawn.rs:610 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/shell/src/session/actor/spawn.rs:942 clippy::redundant_closure redundant closure
+crates/codegen/shell/src/session/actor/stop_gate.rs:795 clippy::redundant_pattern_matching redundant pattern matching, consider using `is_none()`
+crates/codegen/shell/src/session/actor/summary.rs:21 clippy::large_enum_variant large size difference between variants
+crates/codegen/shell/src/session/actor/suspension.rs:223 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/actor/suspension.rs:918 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/actor/suspension_retry_wait_tests.rs:572 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/actor/teardown.rs:39 clippy::items_after_test_module items after a test module
+crates/codegen/shell/src/session/actor/tests/compaction_pre_prune_tests.rs:889 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/shell/src/session/actor/tests/mcp_catalog_lifecycle_tests.rs:177 clippy::await_holding_lock this `MutexGuard` is held across an await point
+crates/codegen/shell/src/session/actor/tests/read_file_image_description_tests.rs:434 clippy::field_reassign_with_default field assignment outside of initializer for an instance created with Default::default()
+crates/codegen/shell/src/session/actor/tests/read_file_image_description_tests.rs:488 clippy::field_reassign_with_default field assignment outside of initializer for an instance created with Default::default()
+crates/codegen/shell/src/session/actor/tests/reverse_request_session_id_tests.rs:26 clippy::match_like_matches_macro match expression looks like `matches!` macro
+crates/codegen/shell/src/session/actor/tests/runtime_suspended_waiter_tests.rs:73 clippy::unnecessary_filter_map this `.filter_map(..)` can be written more simply using `.filter(..)`
+crates/codegen/shell/src/session/actor/tests/skill_loading_tests.rs:1078 clippy::cloned_ref_to_slice_refs this call to `clone` can be replaced with `std::slice::from_ref`
+crates/codegen/shell/src/session/actor/tests/skill_loading_tests.rs:1312 clippy::cloned_ref_to_slice_refs this call to `clone` can be replaced with `std::slice::from_ref`
+crates/codegen/shell/src/session/actor/tests/skill_loading_tests.rs:546 clippy::cloned_ref_to_slice_refs this call to `clone` can be replaced with `std::slice::from_ref`
+crates/codegen/shell/src/session/actor/tests/skill_loading_tests.rs:669 clippy::cloned_ref_to_slice_refs this call to `clone` can be replaced with `std::slice::from_ref`
+crates/codegen/shell/src/session/actor/tests/skill_loading_tests.rs:976 clippy::cloned_ref_to_slice_refs this call to `clone` can be replaced with `std::slice::from_ref`
+crates/codegen/shell/src/session/actor/tests/stop_cancelled_tests.rs:157 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/shell/src/session/actor/tests/support.rs:1069 clippy::unwrap_or_default use of `unwrap_or_else` to construct default value
+crates/codegen/shell/src/session/actor/tests/support.rs:1128 clippy::disallowed_methods use of a disallowed method `std::fs::canonicalize`
+crates/codegen/shell/src/session/actor/tests/support.rs:426 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/shell/src/session/actor/tests/support.rs:771 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/actor/tests/support.rs:921 clippy::type_complexity very complex type used. Consider factoring parts into `type` definitions
+crates/codegen/shell/src/session/actor/tests/truncation_recovery_tests.rs:2878 clippy::double_ended_iterator_last called `Iterator::last` on a `DoubleEndedIterator`; this will needlessly iterate the entire iterator
+crates/codegen/shell/src/session/actor/tests/truncation_recovery_tests.rs:634 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/shell/src/session/actor/tool/dispatch.rs:139 clippy::items_after_test_module items after a test module
+crates/codegen/shell/src/session/actor/tool/mod.rs:170 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/actor/tool/preparation.rs:922 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/shell/src/session/actor/tool/preparation.rs:953 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/shell/src/session/actor/turn/admission.rs:12 clippy::large_enum_variant large size difference between variants
+crates/codegen/shell/src/session/actor/turn/admission.rs:68 clippy::items_after_test_module items after a test module
+crates/codegen/shell/src/session/actor/turn/admission.rs:961 clippy::collapsible_else_if this `else { if .. }` block can be collapsed
+crates/codegen/shell/src/session/actor/turn/mod.rs:1361 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/actor/turn/mod.rs:1485 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/actor/turn/mod.rs:2470 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/actor/turn/sampling.rs:383 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/shell/src/session/actor/updates.rs:1125 clippy::manual_is_multiple_of manual implementation of `.is_multiple_of()`
+crates/codegen/shell/src/session/actor/updates.rs:1264 clippy::collapsible_else_if this `else { if .. }` block can be collapsed
+crates/codegen/shell/src/session/actor/updates.rs:583 clippy::collapsible_else_if this `else { if .. }` block can be collapsed
+crates/codegen/shell/src/session/actor/updates.rs:787 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/actor/workflow_run.rs:794 clippy::await_holding_lock this `MutexGuard` is held across an await point
+crates/codegen/shell/src/session/agent_rebuild.rs:320 clippy::await_holding_lock this `MutexGuard` is held across an await point
+crates/codegen/shell/src/session/behavior.rs:1012 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/behavior.rs:454 clippy::new_without_default you should consider adding a `Default` implementation for `BehaviorCoordinator`
+crates/codegen/shell/src/session/behavior.rs:986 clippy::nonminimal_bool this boolean expression can be simplified
+crates/codegen/shell/src/session/commands.rs:300 clippy::items_after_test_module items after a test module
+crates/codegen/shell/src/session/commands.rs:349 clippy::large_enum_variant large size difference between variants
+crates/codegen/shell/src/session/commands.rs:65 clippy::large_enum_variant large size difference between variants
+crates/codegen/shell/src/session/event_tracker.rs:911 clippy::nonminimal_bool this boolean expression can be simplified
+crates/codegen/shell/src/session/goal_notification.rs:37 clippy::manual_async_fn this function can be simplified using the `async fn` syntax
+crates/codegen/shell/src/session/helpers/session_title.rs:113 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/shell/src/session/history/mod.rs:427 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/history/mod.rs:472 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/history/mod.rs:481 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/history/mod.rs:494 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/history/mod.rs:584 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/history/projector.rs:266 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/history/projector.rs:267 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/history/projector.rs:371 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/history/tests.rs:798 clippy::field_reassign_with_default field assignment outside of initializer for an instance created with Default::default()
+crates/codegen/shell/src/session/image_describe.rs:1032 clippy::disallowed_methods use of a disallowed method `tokio::process::Command::spawn`
+crates/codegen/shell/src/session/image_describe.rs:1111 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/image_describe.rs:414 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/image_describe.rs:445 clippy::large_enum_variant large size difference between variants
+crates/codegen/shell/src/session/input_inbox.rs:66 clippy::derivable_impls this `impl` can be derived
+crates/codegen/shell/src/session/input_inbox.rs:686 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/shell/src/session/input_inbox.rs:85 clippy::large_enum_variant large size difference between variants
+crates/codegen/shell/src/session/mcp_catalog.rs:591 clippy::redundant_closure redundant closure
+crates/codegen/shell/src/session/pending_interaction.rs:280 clippy::nonminimal_bool this boolean expression can be simplified
+crates/codegen/shell/src/session/persistence.rs:135 clippy::type_complexity very complex type used. Consider factoring parts into `type` definitions
+crates/codegen/shell/src/session/persistence.rs:2308 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/persistence.rs:2507 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/response_projection.rs:292 clippy::needless_range_loop the loop variable `physical_index` is used to index `suppressed`
+crates/codegen/shell/src/session/sampling_evidence.rs:62 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/storage/communication_history.rs:105 clippy::type_complexity very complex type used. Consider factoring parts into `type` definitions
+crates/codegen/shell/src/session/storage/communication_history/tests.rs:380 clippy::useless_vec useless use of `vec!`
+crates/codegen/shell/src/session/storage/jsonl/ledger.rs:236 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/storage/jsonl/mod.rs:3693 clippy::nonminimal_bool this boolean expression can be simplified
+crates/codegen/shell/src/session/storage/jsonl/mod.rs:4499 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/shell/src/session/storage/jsonl/mod.rs:5063 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/storage/jsonl/mod.rs:64 clippy::type_complexity very complex type used. Consider factoring parts into `type` definitions
+crates/codegen/shell/src/session/storage/jsonl/tests.rs:2094 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/storage/jsonl/tests.rs:7767 clippy::disallowed_methods use of a disallowed method `std::process::Command::spawn`
+crates/codegen/shell/src/session/storage/jsonl/tests.rs:7975 clippy::non_octal_unix_permissions using a non-octal value to set unix file permissions
+crates/codegen/shell/src/session/storage/mod.rs:108 clippy::needless_return unneeded `return` statement
+crates/codegen/shell/src/session/storage/search.rs:144 clippy::let_and_return returning the result of a `let` binding from a block
+crates/codegen/shell/src/session/storage/search_recovery.rs:34 clippy::disallowed_methods use of a disallowed method `std::fs::canonicalize`
+crates/codegen/shell/src/session/storage/summary_write.rs:207 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/shell/src/session/storage/transcript.rs:492 clippy::double_ended_iterator_last called `Iterator::last` on a `DoubleEndedIterator`; this will needlessly iterate the entire iterator
+crates/codegen/shell/src/session/storage/transcript.rs:615 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/storage/transcript.rs:822 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/storage/transcript/adversarial_tests.rs:257 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/storage/transcript/adversarial_tests.rs:376 clippy::unnecessary_cast casting to the same type is unnecessary (`u64` -> `u64`)
+crates/codegen/shell/src/session/storage/transcript/adversarial_tests.rs:667 clippy::unnecessary_cast casting to the same type is unnecessary (`u64` -> `u64`)
+crates/codegen/shell/src/session/storage/transcript/adversarial_tests.rs:766 clippy::unnecessary_cast casting to the same type is unnecessary (`u64` -> `u64`)
+crates/codegen/shell/src/session/storage/transcript/cache_completeness.rs:143 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/shell/src/session/tool_index.rs:237 clippy::type_complexity very complex type used. Consider factoring parts into `type` definitions
+crates/codegen/shell/src/session/trajectory.rs:3168 clippy::result_large_err the `Err`-variant returned from this function is very large
+crates/codegen/shell/src/session/trajectory.rs:3468 clippy::nonminimal_bool this boolean expression can be simplified
+crates/codegen/shell/src/session/workflow/manager.rs:1575 clippy::type_complexity very complex type used. Consider factoring parts into `type` definitions
+crates/codegen/shell/src/session/workflow/manager.rs:2634 clippy::filter_next called `filter(..).next_back()` on an `DoubleEndedIterator`. This is more succinctly expressed by calling `.rfind(..)` instead
+crates/codegen/shell/src/session/workflow/manager.rs:3155 clippy::filter_next called `filter(..).next_back()` on an `DoubleEndedIterator`. This is more succinctly expressed by calling `.rfind(..)` instead
+crates/codegen/shell/src/session/workflow/manager.rs:918 clippy::await_holding_lock this `MutexGuard` is held across an await point
+crates/codegen/shell/src/session/workflow/tracker.rs:2232 clippy::field_reassign_with_default field assignment outside of initializer for an instance created with Default::default()
+crates/codegen/shell/src/tools/config.rs:183 clippy::derivable_impls this `impl` can be derived
+crates/codegen/shell/src/tools/config.rs:389 clippy::single_element_loop for loop over a single element
+crates/codegen/shell/src/tools/notification_bridge.rs:514 clippy::await_holding_lock this `MutexGuard` is held across an await point
+crates/codegen/tools/src/computer/local/file_system.rs:430 clippy::disallowed_methods use of a disallowed method `std::process::Command::spawn`
+crates/codegen/tools/src/computer/local/terminal.rs:2236 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/tools/src/implementations/grow_build/load_skill.rs:162 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/tools/src/implementations/grow_build/load_skill.rs:318 clippy::disallowed_methods use of a disallowed method `tokio::fs::canonicalize`
+crates/codegen/tools/src/implementations/grow_build/load_skill.rs:321 clippy::disallowed_methods use of a disallowed method `tokio::fs::canonicalize`
+crates/codegen/tools/src/implementations/grow_build/load_skill.rs:399 clippy::disallowed_methods use of a disallowed method `std::fs::canonicalize`
+crates/codegen/tools/src/implementations/grow_build/plan_control/mod.rs:41 clippy::nonminimal_bool this boolean expression can be simplified
+crates/codegen/tools/src/implementations/grow_build/plan_control/mod.rs:56 clippy::nonminimal_bool this boolean expression can be simplified
+crates/codegen/tools/src/implementations/grow_build/read_file/mod.rs:1544 clippy::single_match you seem to be trying to use `match` for destructuring a single pattern. Consider using `if let`
+crates/codegen/tools/src/implementations/grow_build/scheduler/actor.rs:816 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/tools/src/implementations/grow_build/task/coordinator.rs:1526 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/tools/src/implementations/grow_build/task/coordinator.rs:75 clippy::type_complexity very complex type used. Consider factoring parts into `type` definitions
+crates/codegen/tools/src/implementations/grow_build/task/coordinator/query.rs:221 clippy::collapsible_else_if this `else { if .. }` block can be collapsed
+crates/codegen/tools/src/implementations/grow_build/task/coordinator_state.rs:212 clippy::result_large_err the `Err`-variant returned from this function is very large
+crates/codegen/tools/src/implementations/grow_build/task/coordinator_tests.rs:106 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/tools/src/implementations/grow_build/task/coordinator_tests.rs:2353 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/tools/src/implementations/grow_build/task/coordinator_tests.rs:3222 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/tools/src/implementations/grow_build/task/coordinator_tests.rs:835 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/tools/src/implementations/grow_build/task/mod.rs:623 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/tools/src/implementations/grow_build/task/types.rs:216 clippy::result_large_err the `Err`-variant returned from this function is very large
+crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs:1039 clippy::unused_io_amount read amount is not handled
+crates/codegen/tools/src/implementations/grow_build/web_fetch/client.rs:933 clippy::unused_io_amount read amount is not handled
+crates/codegen/tools/src/implementations/grow_build/workflow/mod.rs:276 clippy::large_enum_variant large size difference between variants
+crates/codegen/tools/src/implementations/grow_build_hashline/edit/apply.rs:515 clippy::result_large_err the `Err`-variant returned from this function is very large
+crates/codegen/tools/src/implementations/grow_build_hashline/edit/apply.rs:655 clippy::result_large_err the `Err`-variant returned from this function is very large
+crates/codegen/tools/src/implementations/memory/search_tool.rs:39 clippy::items_after_test_module items after a test module
+crates/codegen/tools/src/implementations/skills/skill.rs:1879 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/codegen/tools/src/implementations/skills/skill.rs:1901 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/codegen/tools/src/implementations/skills/skill.rs:1938 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/codegen/tools/src/implementations/skills/skill.rs:960 clippy::cloned_ref_to_slice_refs this call to `clone` can be replaced with `std::slice::from_ref`
+crates/codegen/tools/src/registry/types.rs:2228 clippy::result_large_err the `Err`-variant returned from this function is very large
+crates/codegen/tools/src/registry/types.rs:3921 clippy::single_element_loop for loop over a single element
+crates/codegen/tools/src/reminders/skill_discovery.rs:213 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/codegen/tools/src/types/params_validation.rs:44 clippy::result_large_err the `Err`-variant returned from this function is very large
+crates/codegen/tools/src/types/resources.rs:38 clippy::result_large_err the `Err`-variant returned from this function is very large
+crates/codegen/tools/src/types/skill_discovery_tracker/listing.rs:329 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/tools/src/types/skill_discovery_tracker/mod.rs:1090 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/codegen/tools/src/types/skill_discovery_tracker/mod.rs:1126 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/codegen/tools/tests/test_subagent_soak.rs:607 clippy::needless_update struct update has no effect, all the fields in the struct have already been specified
+crates/codegen/update/src/version.rs:239 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/workspace-types/src/rpc/git.rs:528 clippy::large_enum_variant large size difference between variants
+crates/codegen/workspace/src/permission/manager.rs:1820 clippy::needless_borrow this expression creates a reference which is immediately dereferenced by the compiler
+crates/codegen/workspace/src/permission/manager.rs:2658 clippy::collapsible_if this `if` statement can be collapsed
+crates/codegen/workspace/src/permission/manager.rs:3846 clippy::await_holding_lock this `MutexGuard` is held across an await point
+crates/codegen/workspace/src/permission/manager.rs:4190 clippy::bool_assert_comparison used `assert_eq!` with a literal bool
+crates/codegen/workspace/src/permission/manager/concurrency_tests.rs:862 clippy::let_and_return returning the result of a `let` binding from a block
+crates/codegen/workspace/src/worktree/mod.rs:1327 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/codegen/workspace/src/worktree/mod.rs:1334 clippy::disallowed_methods use of a disallowed method `std::path::Path::canonicalize`
+crates/common/tool-types/src/planning.rs:365 clippy::collapsible_if this `if` statement can be collapsed
+crates/common/tool-types/src/planning.rs:383 clippy::unnecessary_unwrap called `expect` on `change` after checking its variant with `is_some`
+crates/common/tool-types/src/planning.rs:407 clippy::unnecessary_unwrap called `expect` on `change` after checking its variant with `is_some`
+crates/common/tool-types/src/planning.rs:512 clippy::collapsible_if this `if` statement can be collapsed

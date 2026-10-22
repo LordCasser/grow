@@ -37,7 +37,7 @@ pub use legacy_replay_oracle::{PreparedReplay, prepare_replay_lines};
 
 mod descendant_recovery;
 pub use descendant_recovery::{
-    ChildReplaySpawn, DescendantOwnership, DESCENDANT_OWNERSHIP_META_KEY,
+    ChildReplaySpawn, DESCENDANT_OWNERSHIP_META_KEY, DescendantOwnership,
     load_descendant_ownership_at, load_descendant_replay_at,
 };
 

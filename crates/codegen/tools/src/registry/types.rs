@@ -1431,7 +1431,9 @@ impl FinalizedToolset {
         let tid = tool_protocol::ToolId::new(tool_name)
             .unwrap_or_else(|_| tool_protocol::ToolId::new("unknown").expect("valid"));
         let detail = if tool_name.contains("__") {
-            format!("MCP tool is not registered in this session: {tool_name}. Refresh search_tool to check the current catalog; this error does not establish whether the remote tool exists or the server is connected.")
+            format!(
+                "MCP tool is not registered in this session: {tool_name}. Refresh search_tool to check the current catalog; this error does not establish whether the remote tool exists or the server is connected."
+            )
         } else {
             format!("Tool not found: {tool_name}")
         };
@@ -2288,11 +2290,17 @@ mod tests {
         let toolset = ToolRegistryBuilder::new()
             .finalize(ToolServerConfig::default(), test_session_context(&tmp))
             .unwrap();
-        let error = toolset.try_parse("demo__missing", &serde_json::json!({})).await.unwrap_err();
+        let error = toolset
+            .try_parse("demo__missing", &serde_json::json!({}))
+            .await
+            .unwrap_err();
         assert!(error.detail.contains("not registered in this session"));
         assert!(error.detail.contains("Refresh search_tool"));
         assert!(matches!(error.kind, tool_runtime::ToolErrorKind::NotFound));
-        let native = toolset.try_parse("missing", &serde_json::json!({})).await.unwrap_err();
+        let native = toolset
+            .try_parse("missing", &serde_json::json!({}))
+            .await
+            .unwrap_err();
         assert_eq!(native.detail, "Tool not found: missing");
     }
 

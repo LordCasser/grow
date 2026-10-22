@@ -858,23 +858,24 @@ impl ChatStateActor {
                     sampling_types::ApiBackend::Responses => portable
                         .iter()
                         .any(|item| matches!(item, ConversationItem::Reasoning(_))),
-                    sampling_types::ApiBackend::ChatCompletions => portable
-                        .iter()
-                        .any(|item| matches!(item, ConversationItem::Assistant(_)))
-                        || surface.iter().any(|item| match item {
-                            ConversationItem::AgentMessage(batch) => !batch.messages.is_empty(),
-                            ConversationItem::SkillLoad(skill) => {
-                                skill.source == sampling_types::SkillLoadSource::User
-                            }
-                            _ => false,
-                        })
-                        || projection.spans.iter().any(|span| {
+                    sampling_types::ApiBackend::ChatCompletions => {
+                        portable
+                            .iter()
+                            .any(|item| matches!(item, ConversationItem::Assistant(_)))
+                            || surface.iter().any(|item| match item {
+                                ConversationItem::AgentMessage(batch) => !batch.messages.is_empty(),
+                                ConversationItem::SkillLoad(skill) => {
+                                    skill.source == sampling_types::SkillLoadSource::User
+                                }
+                                _ => false,
+                            }) || projection.spans.iter().any(|span| {
                             matches!(
                                 &span.fragment,
                                 sampling_types::NativeContinuationFragment::ChatCompletions(message)
                                     if message.reasoning_content.is_none()
                             )
-                        }),
+                        })
+                    }
                     sampling_types::ApiBackend::Messages => false,
                 };
                 let changed = self

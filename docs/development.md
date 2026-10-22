@@ -157,6 +157,7 @@ Plan 完成时先保全原始报告，再将完成引用与退出 Normal 一起�
 先核对 `cargo --version` 和 `rustc --version` 与 `rust-toolchain.toml` 一致。该文件由 rustup 代理读取；若 Homebrew 的 Cargo/Rust 位于 PATH 前面，需要把 rustup 代理目录（通常是 `~/.cargo/bin`）置于前面并重新核对版本，避免本地验证与发布工具链不同。
 
 ```sh
+cargo fmt --all -- --check
 cargo check --locked -p cli
 cargo test --locked --lib -p chat-state -p sampling-types -p sampler -p memory -p workflow -p shell -p pager -p pager-minimal -- --test-threads=4
 cargo build --locked -p cli --bin grow

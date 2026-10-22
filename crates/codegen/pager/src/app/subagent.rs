@@ -5,7 +5,9 @@
 //! permission view (provenance labels).
 #[cfg(test)]
 use shell::session::storage::stream_replay_updates_at;
-use shell::session::storage::{ChildReplaySpawn, DescendantOwnership, ReplayEmission, stream_session_history_at};
+use shell::session::storage::{
+    ChildReplaySpawn, DescendantOwnership, ReplayEmission, stream_session_history_at,
+};
 use std::sync::Arc;
 use std::time::Instant;
 /// Enriched subagent tracking info.
@@ -186,11 +188,7 @@ fn enrich_projected_subagent(
     child_session_id: &str,
     spawn: &ChildReplaySpawn,
 ) {
-    let Some(info) = root
-        .session
-        .subagent_sessions
-        .get_mut(child_session_id)
-    else {
+    let Some(info) = root.session.subagent_sessions.get_mut(child_session_id) else {
         return;
     };
     if info.subagent_id.as_ref() != spawn.subagent_id {
@@ -310,13 +308,20 @@ pub(crate) fn restore_descendant_state(
     // evidence of an empty tree. Keep the independent validated fallback.
     let root_spawns = ownership
         .filter(|ownership| ownership.belongs_to(&root_session_id))
-        .or_else(|| match shell::session::storage::load_descendant_ownership_at(
-            &root_session_id, &grow_home,
-        ) {
-            Ok(ownership) => ownership,
-            Err(error) => {
-                tracing::debug!(session_id = root_session_id, ?error, "failed to read root ownership");
-                None
+        .or_else(|| {
+            match shell::session::storage::load_descendant_ownership_at(
+                &root_session_id,
+                &grow_home,
+            ) {
+                Ok(ownership) => ownership,
+                Err(error) => {
+                    tracing::debug!(
+                        session_id = root_session_id,
+                        ?error,
+                        "failed to read root ownership"
+                    );
+                    None
+                }
             }
         })
         .map(DescendantOwnership::into_spawns)
@@ -344,7 +349,8 @@ pub(crate) fn restore_descendant_state(
             continue;
         }
         let (ownership, lifecycle) = match shell::session::storage::load_descendant_replay_at(
-            &parent_session_id, &grow_home,
+            &parent_session_id,
+            &grow_home,
         ) {
             Ok(Some(snapshot)) => snapshot,
             Ok(None) => continue,

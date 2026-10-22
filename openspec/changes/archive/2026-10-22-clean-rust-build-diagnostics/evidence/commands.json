@@ -1,0 +1,113 @@
+[
+  {
+    "label": "fmt-before",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--",
+      "--check"
+    ],
+    "exit": 1,
+    "elapsed_s": 8.67223283299245,
+    "log": "fmt-before.log"
+  },
+  {
+    "label": "fmt-apply",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all"
+    ],
+    "exit": 0,
+    "elapsed_s": 8.793818875041325,
+    "log": "fmt-apply.log"
+  },
+  {
+    "label": "check-pinned-before",
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 0,
+    "elapsed_s": 275.51005808397895,
+    "log": "check-pinned-before.log"
+  },
+  {
+    "label": "clippy-before",
+    "command": [
+      "cargo",
+      "clippy",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 101,
+    "elapsed_s": 123.23080987500725,
+    "log": "clippy-before.log"
+  },
+  {
+    "label": "fmt-after",
+    "command": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--",
+      "--check"
+    ],
+    "exit": 0,
+    "elapsed_s": 7.616113041993231,
+    "log": "fmt-after.log"
+  },
+  {
+    "label": "cli-build",
+    "command": [
+      "cargo",
+      "build",
+      "--locked",
+      "-p",
+      "cli",
+      "--bin",
+      "grow",
+      "--message-format=json"
+    ],
+    "exit": 0,
+    "elapsed_s": 145.7801703750156,
+    "log": "cli-build.log"
+  },
+  {
+    "label": "cli-check",
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "-p",
+      "cli",
+      "--bin",
+      "grow",
+      "--message-format=json"
+    ],
+    "exit": 0,
+    "elapsed_s": 59.91980929102283,
+    "log": "cli-check.log"
+  },
+  {
+    "label": "check-pinned-after",
+    "command": [
+      "cargo",
+      "check",
+      "--locked",
+      "--workspace",
+      "--all-targets",
+      "--message-format=json"
+    ],
+    "exit": 0,
+    "elapsed_s": 93.29989883402595,
+    "log": "check-pinned-after.log"
+  }
+]
