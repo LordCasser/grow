@@ -6531,6 +6531,7 @@ dependencies = [
  "portable-pty",
  "ptyctl",
  "reqwest",
+ "sampling-types",
  "serde",
  "serde_json",
  "serde_yaml",

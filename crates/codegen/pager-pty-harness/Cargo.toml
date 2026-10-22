@@ -57,6 +57,7 @@ tty-utils = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
+sampling-types = { path = "../sampling-types" }
 reqwest = { workspace = true }
 tracing-subscriber = { workspace = true }
 tracing = { workspace = true }
